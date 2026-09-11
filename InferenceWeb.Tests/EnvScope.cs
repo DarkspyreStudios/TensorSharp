@@ -49,6 +49,13 @@ internal sealed class EnvScope : IDisposable
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyDraft,
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyPMin,
                      TensorSharp.Runtime.Speculative.SpeculationEnvVars.LegacyDraftModel,
+                     // --draft-model also publishes architecture-specific loader
+                     // fallbacks. Restore these with the generic variables so a
+                     // CLI test cannot leave the next model load a stale drafter.
+                     "TS_DSV4_DSPARK",
+                     "TS_QWEN35_DFLASH",
+                     "TS_MUSE_GLIMMER_DFLASH",
+                     "TS_NEMOTRON_DFLASH",
                  })
         {
             Set(name, null);

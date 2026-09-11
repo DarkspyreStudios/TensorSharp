@@ -1072,17 +1072,20 @@ public class PrefillOptimizationBenchmark
         const int warmup = 3, iters = 30;
 
         using var alpha = RandTensor(hiddenDim);
+        // Measure normalization, not fixture creation. Filling millions of
+        // random floats in each timed iteration hides the saved normalization
+        // work and makes this assertion depend on GC and scheduling noise.
+        // Both paths copy their outputs, so they can share an unchanged input.
+        using var input = RandTensor(seqLen, hiddenDim);
 
         // Warm up
         for (int w = 0; w < warmup; w++)
         {
-            using var h = RandTensor(seqLen, hiddenDim);
-            using var n = Ops.RMSNorm(null, h, alpha, null, 1e-6f);
+            using var n = Ops.RMSNorm(null, input, alpha, null, 1e-6f);
             using var lr = n.Narrow(0, seqLen - 1, 1);
             using var lc = Ops.NewContiguous(lr);
 
-            using var h2 = RandTensor(seqLen, hiddenDim);
-            using var lr2 = h2.Narrow(0, seqLen - 1, 1);
+            using var lr2 = input.Narrow(0, seqLen - 1, 1);
             using var lc2 = Ops.NewContiguous(lr2);
             Ops.RMSNorm(lc2, lc2, alpha, null, 1e-6f);
         }
@@ -1091,8 +1094,7 @@ public class PrefillOptimizationBenchmark
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < iters; i++)
         {
-            using var h = RandTensor(seqLen, hiddenDim);
-            using var normed = Ops.RMSNorm(null, h, alpha, null, 1e-6f);
+            using var normed = Ops.RMSNorm(null, input, alpha, null, 1e-6f);
             using var lr = normed.Narrow(0, seqLen - 1, 1);
             using var lastHidden = Ops.NewContiguous(lr);
         }
@@ -1102,8 +1104,7 @@ public class PrefillOptimizationBenchmark
         sw.Restart();
         for (int i = 0; i < iters; i++)
         {
-            using var h = RandTensor(seqLen, hiddenDim);
-            using var lr = h.Narrow(0, seqLen - 1, 1);
+            using var lr = input.Narrow(0, seqLen - 1, 1);
             using var lastHidden = Ops.NewContiguous(lr);
             Ops.RMSNorm(lastHidden, lastHidden, alpha, null, 1e-6f);
         }

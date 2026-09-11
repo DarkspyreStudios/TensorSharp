@@ -1746,6 +1746,11 @@ namespace tsg
         return moe_cpu_thread_count();
     }
 
+    int host_moe_explicit_thread_count()
+    {
+        return g_moe_cpu_threads_override.load(std::memory_order_relaxed);
+    }
+
     void moe_set_host_thread_count(int threads)
     {
         g_moe_cpu_threads_override.store(threads > 0 ? threads : 0, std::memory_order_relaxed);

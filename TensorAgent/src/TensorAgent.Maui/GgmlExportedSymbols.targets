@@ -54,6 +54,12 @@
     <ReferenceNativeSymbol Include="TSGgml_DiffusionLmHead" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_DiffusionLmHeadSample" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_DiffusionModelDecode" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv41AttachVision" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv41ForwardVision" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionEncode" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionFree" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionInfo" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionLoad" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4CtxSize" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4DsparkBlockSize" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4DsparkDraft" SymbolType="Function" />

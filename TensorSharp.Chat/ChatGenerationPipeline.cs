@@ -276,6 +276,12 @@ namespace TensorSharp.Server
             var model = _lifecycle.Model
                 ?? throw new InvalidOperationException("No model is loaded.");
 
+            // Validate the original history before compaction or media preparation
+            // can remove an attachment and accidentally turn it into text-only input.
+            string audioError = UnsupportedAudioInputError(model.Config.Architecture, history);
+            if (audioError != null)
+                throw new InvalidOperationException(audioError);
+
             // DiffusionGemma does not use the autoregressive continuous-batching engine; it generates a
             // whole block via iterative denoising. Drive it here and surface only the final answer to the
             // append-only protocols (OpenAI/Ollama/non-streaming). The Web UI uses DiffusionChatStreamAsync
@@ -553,6 +559,8 @@ namespace TensorSharp.Server
 
             int promptTokenCount = inputTokens.Count;
             var cfg = samplingConfig ?? SamplingConfig.Default;
+            int thinkingBudget = ThinkingBudgetFor(effectiveMaxTokens, enableThinking);
+            cfg = WithThinkingBudget(cfg, model.Tokenizer, arch, thinkingBudget, out bool samplingEndsThinking);
 
             // Fingerprint the media (images/audio/video) folded into this prompt.
             // The image/placeholder token IDs are identical across requests, so the
@@ -601,16 +609,16 @@ namespace TensorSharp.Server
             // on the algorithmic-art skill, where 8000 tokens — 100% of them thinking —
             // produced an empty response after 888 seconds, reported to the caller as a
             // bare `truncated: true` with nothing to read. Capping thinking turns that
-            // silent write-off into a fast, explained stop, and leaves the rest of the
-            // allowance for an answer.
+            // silent write-off into a fast, explained stop. Families declaring a
+            // trained budget-end token close reasoning in the sampler instead,
+            // leaving the remaining allowance available for an answer.
             //
             // Detected from the decoded text rather than the parser, because the parser
             // runs a layer above this loop: while thinking is open the close marker has
             // not appeared, and every reasoning family this host serves closes with
             // </think>. A family that does not is simply never capped, which is the
             // safe direction to be wrong in.
-            int thinkingBudget = ThinkingBudgetFor(effectiveMaxTokens, enableThinking);
-            StringBuilder thinkingScan = thinkingBudget > 0 ? new StringBuilder() : null;
+            StringBuilder thinkingScan = thinkingBudget > 0 && !samplingEndsThinking ? new StringBuilder() : null;
             bool thinkingClosed = false;
             int thinkingTokens = 0;
             bool wasCancelled = false;
@@ -1581,6 +1589,19 @@ namespace TensorSharp.Server
             return false;
         }
 
+        internal const string DeepSeek41AudioInputError =
+            "DeepSeek V4.1 Flash does not support audio input. Remove audio attachments or use a model with an audio encoder.";
+
+        internal static string UnsupportedAudioInputError(string architecture, List<ChatMessage> history)
+        {
+            if (!string.Equals(architecture, "deepseek41", StringComparison.OrdinalIgnoreCase) || history == null)
+                return null;
+            foreach (ChatMessage message in history)
+                if (message?.AudioPaths is { Count: > 0 })
+                    return DeepSeek41AudioInputError;
+            return null;
+        }
+
         private static bool RequiresMultimodalPreparation(List<ChatMessage> history)
         {
             if (history == null) return false;
@@ -1693,8 +1714,10 @@ namespace TensorSharp.Server
         /// no cap.
         ///
         /// <para>
-        /// Default: three quarters of the turn's allowance, which leaves a quarter for an
-        /// answer. The shape of the failure this prevents is not "the model thought a bit
+        /// Default: three quarters of the turn's allowance. Families supporting a
+        /// trained budget-end token continue with the remaining answer allowance;
+        /// other families retain the existing explained hard stop.
+        /// The shape of the failure this prevents is not "the model thought a bit
         /// too long" — it is "the model thought until there was nothing left and returned
         /// an empty string", which reads to a user as the server being broken. A model
         /// that closes its thinking before the cap never notices this exists.
@@ -1722,6 +1745,27 @@ namespace TensorSharp.Server
                 return 0;
 
             return (int)(maxTokens * 0.75);
+        }
+
+        internal static SamplingConfig WithThinkingBudget(SamplingConfig config, ITokenizer tokenizer,
+            string architecture, int tokenBudget, out bool installed)
+        {
+            installed = false;
+            string end = ChatProtocolRegistry.For(architecture)?.ThinkingBudgetEndToken;
+            if (tokenBudget <= 0 || end == null || tokenizer == null || config.Grammar?.IsActive == true)
+                return config;
+            int id = tokenizer.LookupToken(end);
+            if (id < 0 || id >= tokenizer.VocabSize || tokenizer.Vocab[id] != end || tokenizer.IsEos(id))
+                return config;
+            // The caller's config can be shared by requests. Only this request
+            // gets the immutable budget policy and an independent grammar position.
+            // OpenAI creates a fresh constraint, but direct ModelService callers
+            // may reuse one delayed-grammar config across concurrent requests.
+            SamplingConfig result = config.Clone();
+            result.Grammar = config.Grammar?.Fork();
+            result.ThinkingBudget = new ThinkingTokenBudget(tokenBudget, id, closeOnRepetition: true);
+            installed = true;
+            return result;
         }
 
         private static int FindValidUtf8Length(List<byte> bytes)

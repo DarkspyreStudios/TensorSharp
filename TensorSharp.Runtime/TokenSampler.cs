@@ -29,6 +29,10 @@ namespace TensorSharp.Runtime
         private readonly Dictionary<int, int> _penaltyCounts = new();
         private int[]? _penaltyTokenBuffer;
         private float[]? _penaltyOriginalBuffer;
+        private int _thinkingScanned;
+        private int _thinkingLastScannedToken = -1;
+        private int _thinkingClosedAt = -1;
+        private int _thinkingCloseRequestedAt = -1;
 
         public TokenSampler(SamplingConfig config)
         {
@@ -44,15 +48,23 @@ namespace TensorSharp.Runtime
         /// <returns>Selected token id.</returns>
         /// <summary>True when, for any step that already has at least one
         /// generated token, <see cref="Sample"/> reduces to a plain first-max
-        /// argmax over the raw logits: greedy temperature, no grammar, no
-        /// penalties, no logit rewriting. The engine then takes the token from
-        /// a device-side argmax and never materializes host logits.</summary>
+        /// argmax over the raw logits after checking TryGetForcedThinkingToken:
+        /// greedy temperature, no grammar, no penalties. The engine checks that
+        /// forced-token override before consuming a device-side argmax, so
+        /// ordinary greedy decoding need not materialize host logits.</summary>
         internal bool IsPlainGreedyArgmax =>
             _config.Temperature <= 0f && _config.Grammar == null && !HasPenalties();
 
         public int Sample(float[] logits, IList<int>? generatedTokenIds = null)
         {
             int vocabSize = logits.Length;
+
+            if (TryGetForcedThinkingToken(generatedTokenIds, out int thinkingEnd))
+            {
+                if (thinkingEnd >= vocabSize)
+                    throw new InvalidOperationException("Thinking end token is outside the model vocabulary.");
+                return thinkingEnd;
+            }
 
             // Grammar-constrained decoding. Applied FIRST and by rewriting the
             // logits themselves, so every downstream stage — penalties, top-k,
@@ -119,6 +131,59 @@ namespace TensorSharp.Runtime
             ApplyTemperature(scores, candidates, _config.Temperature);
 
             return SampleFromCandidates(scores, candidates);
+        }
+
+        /// <summary>
+        /// Apply the same decision to host sampling and pending device argmax
+        /// tokens. Peeking never commits a token: only committed output history
+        /// advances this scan, and a rollback causes it to be reconstructed.
+        /// </summary>
+        internal bool TryGetForcedThinkingToken(IList<int>? tokens, out int token)
+        {
+            token = -1;
+            var budget = _config.ThinkingBudget;
+            if (budget == null) return false;
+            int count = tokens?.Count ?? 0;
+            ScanThinkingHistory(tokens, count, budget);
+
+            // An active answer grammar must never be bypassed. A thinking
+            // request installs its grammar with delayed activation instead.
+            if (_thinkingClosedAt >= 0 ||
+                (count < budget.TokenLimit && _thinkingCloseRequestedAt < 0) || _config.Grammar?.IsActive == true)
+                return false;
+            token = budget.EndTokenId;
+            return true;
+        }
+
+        /// <summary>Request a normal sampled closing token after a detected
+        /// reasoning loop. The caller must supply only committed output history;
+        /// this neither appends a token nor advances a grammar or model cache.</summary>
+        internal bool TryRequestThinkingClosure(IList<int> tokens)
+        {
+            var budget = _config.ThinkingBudget;
+            if (budget?.CloseOnRepetition != true || _config.Grammar?.IsActive == true)
+                return false;
+            ScanThinkingHistory(tokens, tokens.Count, budget);
+            if (_thinkingClosedAt >= 0) return false;
+            _thinkingCloseRequestedAt = tokens.Count;
+            return true;
+        }
+
+        private void ScanThinkingHistory(IList<int>? tokens, int count, ThinkingTokenBudget budget)
+        {
+            if (_thinkingScanned > count ||
+                (_thinkingScanned > 0 && tokens![_thinkingScanned - 1] != _thinkingLastScannedToken) ||
+                (_thinkingClosedAt >= 0 && (_thinkingClosedAt >= count || tokens![_thinkingClosedAt] != budget.EndTokenId)))
+            {
+                _thinkingScanned = 0;
+                _thinkingClosedAt = -1;
+                _thinkingCloseRequestedAt = -1;
+            }
+            for (int i = _thinkingScanned; i < count; i++)
+                if (tokens![i] == budget.EndTokenId && _thinkingClosedAt < 0)
+                    _thinkingClosedAt = i;
+            _thinkingScanned = count;
+            _thinkingLastScannedToken = count > 0 ? tokens![count - 1] : -1;
         }
 
         /// <summary>

@@ -517,12 +517,12 @@ public class WebUiChatServiceTests : IDisposable
 
     private sealed class ContextReportingModel : ModelBase
     {
-        public ContextReportingModel(string path, int declaredContext, int activeContext)
+        public ContextReportingModel(string path, int declaredContext, int activeContext, string architecture = "qwen35")
             : base(path, BackendType.Cpu)
         {
             Config = new ModelConfig
             {
-                Architecture = "qwen35",
+                Architecture = architecture,
                 DeclaredContextLength = declaredContext,
             };
             _maxContextLength = activeContext;
@@ -530,6 +530,37 @@ public class WebUiChatServiceTests : IDisposable
 
         protected override float[] ForwardCore(int[] tokens) => Array.Empty<float>();
         protected override void ResetKVCacheCore() { }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DeepSeek41Audio_IsRejectedBeforeStreamOrGenerationHook(bool withImage)
+    {
+        string modelPath = WriteMinimalGguf("audio-refusal.gguf");
+        using var model = new ModelService(NullLogger<ModelService>.Instance,
+            (path, _, _, _) => new ContextReportingModel(path, 8192, 8192, "deepseek41"));
+        model.LoadModel(modelPath, null, "cpu");
+        Fixture f = Build(model: model);
+        bool accepted = false;
+        f.Service.OnChatRequest = (_, _) => accepted = true;
+        string image = withImage ? ",\"imagePaths\":[\"photo.png\"]" : "";
+        var error = await RejectionOf(f.Service.ChatStreamAsync(Json(
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"Describe this\",\"audioPaths\":[\"clip.wav\"]" + image + "}]}"),
+            CancellationToken.None));
+        Assert.Equal(400, error.StatusCode);
+        Assert.Contains("does not support audio input", Field(error.Payload, "error"));
+        Assert.False(accepted);
+
+        // Direct service callers bypass HTTP validation but must still fail
+        // before the fake model's unavailable engine or any prompt rendering.
+        var history = new List<ChatMessage> { new() { Role = "user", Content = "Describe this",
+            AudioPaths = new() { "clip.wav" }, ImagePaths = withImage ? new() { "photo.png" } : null } };
+        var pipelineError = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var _ in model.ChatStreamWithMetricsAsync(history, 10, CancellationToken.None)) { }
+        });
+        Assert.Contains("does not support audio input", pipelineError.Message);
     }
 
     [Fact]

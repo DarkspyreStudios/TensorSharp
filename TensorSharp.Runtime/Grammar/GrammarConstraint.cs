@@ -13,6 +13,63 @@ using System.Collections.Generic;
 
 namespace TensorSharp.Runtime.Grammar
 {
+    /// <summary>Immutable UTF-8 marker matcher; requests own only the matched-prefix index.</summary>
+    internal sealed class GrammarByteTrigger
+    {
+        internal readonly string Text;
+        internal readonly byte[] Bytes;
+        private readonly int[] _failure;
+
+        internal GrammarByteTrigger(string text)
+        {
+            Text = text;
+            Bytes = System.Text.Encoding.UTF8.GetBytes(text);
+            _failure = new int[Bytes.Length];
+            for (int i = 1, matched = 0; i < Bytes.Length; i++)
+            {
+                while (matched > 0 && Bytes[i] != Bytes[matched]) matched = _failure[matched - 1];
+                if (Bytes[i] == Bytes[matched]) matched++;
+                _failure[i] = matched;
+            }
+        }
+
+        internal int Advance(int matched, byte value)
+        {
+            while (matched > 0 && value != Bytes[matched]) matched = _failure[matched - 1];
+            return value == Bytes[matched] ? matched + 1 : matched;
+        }
+    }
+
+    /// <summary>Immutable ordered gates; text between gates is unconstrained.</summary>
+    internal sealed class GrammarByteTriggers
+    {
+        internal readonly GrammarByteTrigger[] Items;
+        internal readonly string CacheKey;
+
+        internal GrammarByteTriggers(string[] text)
+        {
+            Items = new GrammarByteTrigger[text.Length];
+            var key = new System.Text.StringBuilder();
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (string.IsNullOrEmpty(text[i]))
+                    throw new ArgumentException("Grammar activation markers must be nonempty.", nameof(text));
+                Items[i] = new GrammarByteTrigger(text[i]);
+                key.Append(text[i].Length).Append(':').Append(text[i]);
+            }
+            CacheKey = key.ToString();
+        }
+
+        internal bool Advance(ref int stage, ref int matched, byte value)
+        {
+            GrammarByteTrigger marker = Items[stage];
+            matched = marker.Advance(matched, value);
+            if (matched != marker.Bytes.Length) return false;
+            matched = 0;
+            return ++stage == Items.Length;
+        }
+    }
+
     /// <summary>
     /// Per-(grammar, vocabulary) cache of everything that does not depend on a
     /// particular request: interned parser states, character transitions between
@@ -45,6 +102,8 @@ namespace TensorSharp.Runtime.Grammar
         private readonly Dictionary<GrammarState, GrammarState> _interned = new();
         private readonly Dictionary<TransitionKey, GrammarState> _transitions = new();
         private readonly Dictionary<GrammarState, ulong[]> _masks = new();
+        private readonly Dictionary<(GrammarState, PartialUtf8), ulong[]> _partialMasks = new();
+        private readonly Dictionary<(GrammarState, PartialUtf8, string, int, int), ulong[]> _delayedMasks = new();
         private readonly object _lock = new();
 
         /// <summary>
@@ -146,6 +205,98 @@ namespace TensorSharp.Runtime.Grammar
             }
         }
 
+        internal ulong[] GetMask(GrammarState state, PartialUtf8 partial)
+        {
+            if (partial.Remaining == 0) return GetMask(state);
+            lock (_lock)
+            {
+                var key = (state, partial);
+                if (_partialMasks.TryGetValue(key, out ulong[]? cached)) return cached;
+                var mask = new ulong[_vocab.MaskWords];
+                Descend(0, state, partial, mask);
+                if (_partialMasks.Count >= MaxCachedMasks) _partialMasks.Clear();
+                return _partialMasks[key] = mask;
+            }
+        }
+
+        // Before activation only tokens completing the marker with an invalid
+        // grammar suffix are forbidden. Traverse shared byte prefixes once per
+        // marker-prefix state, then reuse the mask across tokens and requests.
+        internal ulong[] GetDelayedMask(GrammarState state, PartialUtf8 partial,
+            GrammarByteTriggers trigger, int stage, int matched, ITokenizer tokenizer)
+        {
+            lock (_lock)
+            {
+                var key = (state, partial, trigger.CacheKey, stage, matched);
+                if (_delayedMasks.TryGetValue(key, out ulong[]? cached)) return cached;
+                var mask = new ulong[_vocab.MaskWords];
+                Array.Fill(mask, ulong.MaxValue);
+                DescendDelayed(0, state, partial, trigger, stage, matched, false, mask);
+                // Control tokens are absent from the grammar trie. They remain
+                // free before activation, but their bytes can also complete a
+                // marker and contain a suffix that must be checked.
+                var bytes = new List<byte>(64);
+                foreach (int id in _vocab.SpecialTokenIds)
+                {
+                    if ((uint)id >= (uint)_vocab.VocabSize || tokenizer.IsEos(id)) continue;
+                    bytes.Clear();
+                    try { tokenizer.AppendTokenBytes(id, bytes); }
+                    catch { continue; }
+                    int prefix = matched, nextStage = stage;
+                    bool active = false, allowed = true;
+                    GrammarState next = state;
+                    PartialUtf8 utf8 = partial;
+                    foreach (byte value in bytes)
+                    {
+                        if (!active) active = trigger.Advance(ref nextStage, ref prefix, value);
+                        else if (!AdvanceByte(ref next, ref utf8, value)) { allowed = false; break; }
+                    }
+                    if (!allowed) mask[id >> 6] &= ~(1UL << (id & 63));
+                }
+                if (_delayedMasks.Count >= MaxCachedMasks) _delayedMasks.Clear();
+                return _delayedMasks[key] = mask;
+            }
+        }
+
+        private bool AdvanceByte(ref GrammarState state, ref PartialUtf8 partial, byte value)
+        {
+            if (!GrammarMatcher.TryFeedByte(ref partial, value, out uint codePoint, out bool complete)) return false;
+            if (complete)
+            {
+                state = AdvanceLocked(state, codePoint);
+                return !state.IsDead;
+            }
+            return _matcher.AcceptsPartial(state, partial);
+        }
+
+        private void ClearSubtree(int node, ulong[] mask)
+        {
+            foreach (int token in _vocab.TokensAt(node))
+                mask[token >> 6] &= ~(1UL << (token & 63));
+            for (int edge = _vocab.ChildStart(node); edge < _vocab.ChildEnd(node); edge++)
+                ClearSubtree(_vocab.EdgeNode(edge), mask);
+        }
+
+        private void DescendDelayed(int node, GrammarState state, PartialUtf8 partial,
+            GrammarByteTriggers trigger, int stage, int matched, bool active, ulong[] mask)
+        {
+            for (int edge = _vocab.ChildStart(node); edge < _vocab.ChildEnd(node); edge++)
+            {
+                int child = _vocab.EdgeNode(edge), prefix = matched, nextStage = stage;
+                byte value = _vocab.EdgeByte(edge);
+                GrammarState next = state;
+                PartialUtf8 utf8 = partial;
+                bool nextActive = active;
+                if (!active) nextActive = trigger.Advance(ref nextStage, ref prefix, value);
+                else if (!AdvanceByte(ref next, ref utf8, value))
+                {
+                    ClearSubtree(child, mask);
+                    continue;
+                }
+                DescendDelayed(child, next, utf8, trigger, nextStage, prefix, nextActive, mask);
+            }
+        }
+
         private void Descend(int node, GrammarState state, PartialUtf8 partial, ulong[] mask)
         {
             int end = _vocab.ChildEnd(node);
@@ -172,10 +323,9 @@ namespace TensorSharp.Runtime.Grammar
                 }
 
                 int child = _vocab.EdgeNode(edge);
-                int tokenId = _vocab.TokenAt(child);
-                // A token is legal only if it ends on a complete character; one
-                // that stops mid-character leaves the matcher unable to commit.
-                if (tokenId >= 0 && nextPartial.Remaining == 0)
+                // Byte-fallback tokens can end mid-character. Accept preserves
+                // that UTF-8 prefix, and the next mask checks its continuation.
+                foreach (int tokenId in _vocab.TokensAt(child))
                     mask[tokenId >> 6] |= 1UL << (tokenId & 63);
 
                 Descend(child, nextState, nextPartial, mask);
@@ -197,8 +347,9 @@ namespace TensorSharp.Runtime.Grammar
         private readonly ITokenizer _tokenizer;
 
         // --- lazy activation (see ActivateAfter) ---
-        private string? _triggerText;
-        private System.Text.StringBuilder? _preludeTail;
+        private GrammarByteTriggers? _trigger;
+        private int _triggerStage;
+        private int _triggerMatched;
         private bool _active = true;
 
         public GrammarConstraint(Grammar grammar, ITokenizer tokenizer)
@@ -215,6 +366,22 @@ namespace TensorSharp.Runtime.Grammar
         }
 
         /// <summary>
+        /// Copy the current parser and delayed-trigger position for an independent
+        /// request. Interned grammar states and synchronized mask caches are shared;
+        /// mutable UTF-8, trigger-tail and token scratch state are request-owned.
+        /// The source must not be mutated concurrently while taking the copy.
+        /// </summary>
+        public GrammarConstraint Fork() => new GrammarConstraint(_cache, _tokenizer)
+        {
+            _state = _state,
+            _partial = _partial,
+            _trigger = _trigger,
+            _triggerStage = _triggerStage,
+            _triggerMatched = _triggerMatched,
+            _active = _active,
+        };
+
+        /// <summary>
         /// Hold the constraint dormant until <paramref name="triggerText"/> has
         /// been generated, then enforce the grammar over everything after it.
         ///
@@ -228,14 +395,28 @@ namespace TensorSharp.Runtime.Grammar
         /// header instead lets the analysis channel run free and constrains only
         /// the answer. Mirrors llama.cpp's lazy grammar triggers.
         ///
-        /// While dormant the constraint masks nothing and feeds the grammar
-        /// nothing: the prelude is not part of the structured output.
+        /// The prelude is not part of the structured output. While dormant,
+        /// only a token that completes the marker with an invalid grammar
+        /// suffix is masked; ordinary prelude tokens remain unrestricted.
         /// </summary>
         public void ActivateAfter(string triggerText)
         {
             if (string.IsNullOrEmpty(triggerText)) return;
-            _triggerText = triggerText;
-            _preludeTail = new System.Text.StringBuilder();
+            ActivateAfterTriggers(triggerText);
+        }
+
+        /// <summary>
+        /// Activate after all markers appear in order. Each marker is matched
+        /// against exact token bytes; text before and between markers is free.
+        /// For example, a tool marker quoted in reasoning must not activate a
+        /// tool grammar that first requires the trained reasoning-end marker.
+        /// </summary>
+        public void ActivateAfterTriggers(params string[] triggerTexts)
+        {
+            if (triggerTexts == null) throw new ArgumentNullException(nameof(triggerTexts));
+            if (triggerTexts.Length == 0) throw new ArgumentException("At least one activation marker is required.", nameof(triggerTexts));
+            _trigger = new GrammarByteTriggers(triggerTexts);
+            _triggerStage = _triggerMatched = 0;
             _active = false;
         }
 
@@ -252,7 +433,8 @@ namespace TensorSharp.Runtime.Grammar
         public bool IsDead => _state.IsDead;
 
         /// <summary>Current mask; bit <c>i</c> set means token <c>i</c> is legal.</summary>
-        public ulong[] CurrentMask() => _cache.GetMask(_state);
+        public ulong[] CurrentMask() => _active ? _cache.GetMask(_state, _partial)
+            : _cache.GetDelayedMask(_state, _partial, _trigger!, _triggerStage, _triggerMatched, _tokenizer);
 
         /// <summary>Opaque snapshot for rollback (speculative decoding).</summary>
         public (GrammarState State, PartialUtf8 Partial) Snapshot() => (_state, _partial);
@@ -275,15 +457,29 @@ namespace TensorSharp.Runtime.Grammar
         {
             foreach (byte b in bytes)
             {
-                if (!GrammarMatcher.TryFeedByte(ref _partial, b, out uint cp, out bool complete))
-                {
-                    _state = new GrammarState(Array.Empty<int[]>());
-                    return;
-                }
-                if (!complete) continue;
-                _state = _cache.Advance(_state, cp);
-                if (_state.IsDead) return;
+                if (!AcceptByte(b)) return;
             }
+        }
+
+        private bool AcceptByte(byte value)
+        {
+            if (!_active)
+            {
+                if (_trigger!.Advance(ref _triggerStage, ref _triggerMatched, value))
+                {
+                    _active = true;
+                    _trigger = null;
+                    _triggerMatched = 0;
+                }
+                return true;
+            }
+            if (!GrammarMatcher.TryFeedByte(ref _partial, value, out uint cp, out bool complete))
+            {
+                _state = new GrammarState(Array.Empty<int[]>());
+                return false;
+            }
+            if (complete) _state = _cache.Advance(_state, cp);
+            return !_state.IsDead;
         }
 
         // Latched once a token's bytes could not be decoded in Accept(): the
@@ -318,22 +514,9 @@ namespace TensorSharp.Runtime.Grammar
             }
             if (_tokenBytes.Count == 0) return;
 
-            if (!_active)
-            {
-                ScanForTrigger();
-                return;
-            }
-
             for (int i = 0; i < _tokenBytes.Count; i++)
             {
-                if (!GrammarMatcher.TryFeedByte(ref _partial, _tokenBytes[i], out uint cp, out bool complete))
-                {
-                    _state = new GrammarState(Array.Empty<int[]>());
-                    return;
-                }
-                if (!complete) continue;
-                _state = _cache.Advance(_state, cp);
-                if (_state.IsDead) return;
+                if (!AcceptByte(_tokenBytes[i])) return;
             }
         }
 
@@ -345,35 +528,8 @@ namespace TensorSharp.Runtime.Grammar
         /// <param name="allowEos">
         /// Whether EOS ids may survive; callers pass <see cref="IsComplete"/>.
         /// </param>
-        /// <summary>
-        /// Consume the just-accepted token's text while dormant, looking for the
-        /// activation trigger. Only the trigger's own length (plus one token's
-        /// worth of slack) is retained, so a long reasoning channel costs a fixed
-        /// few bytes.
-        /// </summary>
-        private void ScanForTrigger()
-        {
-            string trigger = _triggerText!;
-            var tail = _preludeTail!;
-            for (int i = 0; i < _tokenBytes.Count; i++)
-                tail.Append((char)_tokenBytes[i]);   // trigger markers are ASCII
-
-            int hit = tail.ToString().IndexOf(trigger, StringComparison.Ordinal);
-            if (hit >= 0)
-            {
-                _active = true;
-                _triggerText = null;
-                _preludeTail = null;
-                return;
-            }
-            int keep = trigger.Length + 8;
-            if (tail.Length > keep)
-                tail.Remove(0, tail.Length - keep);
-        }
-
         public void ApplyMask(float[] logits, bool allowEos)
         {
-            if (!_active) return;
             if (logits == null) throw new ArgumentNullException(nameof(logits));
             ulong[] mask = CurrentMask();
             int vocab = Math.Min(logits.Length, _cache.Vocabulary.VocabSize);

@@ -394,6 +394,7 @@ namespace TensorSharp.Server
                         Role = src.Role,
                         Content = src.Content,
                         ImagePaths = src.ImagePaths,
+                        ImageTimestamps = src.ImageTimestamps,
                         AudioPaths = src.AudioPaths,
                         TextFilePaths = src.TextFilePaths,
                         TextFileNames = src.TextFileNames,
@@ -619,9 +620,8 @@ namespace TensorSharp.Server
             if (!capsFrames || maxVideoFrames <= 0 || !msg.IsVideo || msg.ImagePaths == null || msg.ImagePaths.Count <= maxVideoFrames)
                 return msg;
 
-            var sampled = MediaHelper.SelectEvenlySpacedIndices(msg.ImagePaths.Count, maxVideoFrames)
-                .Select(i => msg.ImagePaths[i])
-                .ToList();
+            var sampledIndices = MediaHelper.SelectEvenlySpacedIndices(msg.ImagePaths.Count, maxVideoFrames);
+            var sampled = sampledIndices.Select(i => msg.ImagePaths[i]).ToList();
 
             // A Warning, not an Information: frames the user sent are being thrown away,
             // and the answer may miss what happened between the kept ones.
@@ -636,6 +636,8 @@ namespace TensorSharp.Server
                 Role = msg.Role,
                 Content = msg.Content,
                 ImagePaths = sampled,
+                ImageTimestamps = msg.ImageTimestamps?.Count == msg.ImagePaths.Count
+                    ? sampledIndices.Select(i => msg.ImageTimestamps[i]).ToList() : null,
                 AudioPaths = msg.AudioPaths != null ? new List<string>(msg.AudioPaths) : null,
                 TextFilePaths = msg.TextFilePaths != null ? new List<string>(msg.TextFilePaths) : null,
                 TextFileNames = msg.TextFileNames != null ? new List<string>(msg.TextFileNames) : null,
@@ -661,6 +663,7 @@ namespace TensorSharp.Server
                 Role = src.Role,
                 Content = src.Content,
                 ImagePaths = src.ImagePaths,
+                ImageTimestamps = src.ImageTimestamps,
                 AudioPaths = src.AudioPaths,
                 TextFilePaths = src.TextFilePaths,
                 TextFileNames = src.TextFileNames,

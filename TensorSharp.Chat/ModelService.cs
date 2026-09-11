@@ -363,9 +363,23 @@ namespace TensorSharp.Server
                 skills,
                 enableThinking,
                 (turnMessages, turnTools, ct) => _generation.ChatStreamWithMetricsAsync(
-                    session, turnMessages, maxTokens, ct, turnSampling, turnTools, enableThinking),
+                    session, turnMessages, maxTokens, ct,
+                    SamplingForDeepSeek41SkillRound(Architecture, turnSampling, samplingConfig), turnTools, enableThinking),
                 logger,
                 cancellationToken);
+        }
+
+        internal static SamplingConfig SamplingForDeepSeek41SkillRound(string architecture,
+            SamplingConfig turnSampling, SamplingConfig sourceSampling)
+        {
+            if (ChatProtocolRegistry.For(architecture)?.Id != "deepseek41" || sourceSampling?.Grammar == null)
+                return turnSampling;
+            // Coding defaults may clone sampling settings, deliberately dropping
+            // a live grammar. Each internal tool round must begin with its own
+            // untouched protocol constraint, just like an external HTTP round.
+            var result = (turnSampling ?? sourceSampling).Clone();
+            result.Grammar = sourceSampling.Grammar.Fork();
+            return result;
         }
 
         /// <summary>

@@ -31,14 +31,27 @@ namespace TensorSharp.Models
         private DeepSeek4CpuExecutor _cpuExec;
         private DeepSeek4CudaExecutor _cudaExec;
         private readonly object _sync = new object();
+        protected IntPtr NativeHandle => _handle;
+        protected object NativeSync => _sync;
 
         public DeepSeek4Model(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null,
             string draftModelPath = null)
             : base(ggufPath, NormalizeBackend(backend), 1, null)
         {
             string arch = _gguf.GetString("general.architecture") ?? "deepseek4";
+            bool isV41 = string.Equals(arch, "deepseek41", StringComparison.Ordinal);
+            if (isV41)
+                DeepSeek41Architecture.ValidateLoad(ggufPath, backend, ResolveDsparkPath(draftModelPath), tpDegree, tpGroup);
             Config = new ModelConfig { Architecture = arch };
             ParseBaseConfig();
+            if (isV41)
+            {
+                Config.NumExperts = (int)_gguf.GetUint32($"{arch}.expert_count");
+                Config.NumExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count");
+                Config.IntermediateSize = (int)_gguf.GetUint32($"{arch}.expert_feed_forward_length");
+                Config.SlidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window");
+                Config.OriginalContextLength = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length");
+            }
             ParseTokenizer();
 
             int maxContext = ResolveConfiguredContextLength();
@@ -55,7 +68,7 @@ namespace TensorSharp.Models
             // prefill than 512 and also halves what a non-multiple tail chunk
             // costs relative to the whole prompt. The CPU executor stays at 512
             // (activation memory bound, no tile padding to amortize).
-            int nUbatch = ParseEnvInt("TS_DSV4_UBATCH", backend == BackendType.Cpu ? 512 : 1024);
+            int nUbatch = ParseEnvInt("TS_DSV4_UBATCH", isV41 ? 256 : backend == BackendType.Cpu ? 512 : 1024);
 
             if (backend == BackendType.Cuda)
             {
@@ -104,7 +117,7 @@ namespace TensorSharp.Models
                 _nativeDsparkBlock = _handle != IntPtr.Zero && dspark != null
                     ? GgmlDeepSeek4Native.DsparkBlockSize(_handle) : 0;
                 if (_handle == IntPtr.Zero)
-                    throw new InvalidOperationException($"Failed to load DeepSeek V4 model from {ggufPath} (see stderr for details).");
+                    throw new InvalidOperationException($"Failed to load {arch} model from {ggufPath} (see stderr for details).");
             }
         }
 

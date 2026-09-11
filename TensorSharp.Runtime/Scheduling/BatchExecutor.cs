@@ -3314,6 +3314,11 @@ namespace TensorSharp.Runtime.Scheduling
         /// preemption, recompute, rollback — invalidates the stash.</summary>
         private static int TakePendingOrSample(SequenceState seq)
         {
+            if (seq.GetOrCreateSampler().TryGetForcedThinkingToken(seq.OutputTokens, out int thinkingEnd))
+            {
+                seq.PendingDeviceToken = null;
+                return thinkingEnd;
+            }
             if (seq.PendingDeviceToken.HasValue)
             {
                 int t = seq.PendingDeviceToken.Value;
@@ -3330,6 +3335,8 @@ namespace TensorSharp.Runtime.Scheduling
         /// leaves the fallback loop a token source.</summary>
         private static int PeekPendingOrSample(SequenceState seq)
         {
+            if (seq.GetOrCreateSampler().TryGetForcedThinkingToken(seq.OutputTokens, out int thinkingEnd))
+                return thinkingEnd;
             if (seq.PendingDeviceToken.HasValue)
             {
                 if (seq.PendingDevicePosition == seq.NumComputedTokens)

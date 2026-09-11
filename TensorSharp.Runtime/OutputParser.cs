@@ -26,6 +26,9 @@ namespace TensorSharp.Runtime
         public Dictionary<string, ToolParameter> Parameters { get; set; } = new();
         public List<string> Required { get; set; } = new();
         public CacheControlMarker? CacheControl { get; set; }
+        /// <summary>Original parameter schema for protocols that enforce it during decoding.</summary>
+        [System.Text.Json.Serialization.JsonIgnore]
+        public string? ParametersSchemaJson { get; set; }
 
         /// <summary>
         /// Parse a list of tool definitions from JSON, accepting every shape a
@@ -111,6 +114,7 @@ namespace TensorSharp.Runtime
             if (parameters.TryGetProperty("properties", out JsonElement properties)
                 && properties.ValueKind == JsonValueKind.Object)
             {
+                fn.ParametersSchemaJson = parameters.GetRawText();
                 propertyBag = properties;
                 CollectRequired(parameters, fn.Required);
             }
@@ -203,6 +207,8 @@ namespace TensorSharp.Runtime
     /// </summary>
     public class ToolCall
     {
+        /// <summary>Source protocol call id, used to associate parallel tool results.</summary>
+        public string? Id { get; set; }
         public string Name { get; set; } = string.Empty;
         public Dictionary<string, object> Arguments { get; set; } = new();
         public int Index { get; set; }
@@ -1349,8 +1355,28 @@ namespace TensorSharp.Runtime
         private const string ThinkOpen = "<think>";
         private const string ThinkClose = "</think>";
         private const string Dsml = "｜DSML｜";
-        private const string CallsOpen = "<" + Dsml + "tool_calls>";
-        private const string CallsClose = "</" + Dsml + "tool_calls>";
+        private readonly string CallsOpen;
+        private readonly string CallsClose;
+        private readonly string _invokeOpen;
+        private readonly string _invokeClose;
+        private readonly string _paramOpen;
+        private readonly string _paramClose;
+        private readonly bool _deepSeek41;
+
+        public DeepSeek4OutputParser() : this(false) { }
+
+        protected DeepSeek4OutputParser(bool deepSeek41)
+        {
+            _deepSeek41 = deepSeek41;
+            string space = deepSeek41 ? " " : "";
+            string calls = deepSeek41 ? " calls" : "tool_calls";
+            CallsOpen = "<" + Dsml + calls + ">";
+            CallsClose = "</" + Dsml + calls + ">";
+            _invokeOpen = "<" + Dsml + space + "invoke name=\"";
+            _invokeClose = "</" + Dsml + space + "invoke>";
+            _paramOpen = "<" + Dsml + space + "parameter name=\"";
+            _paramClose = "</" + Dsml + space + "parameter>";
+        }
 
         private State _state;
         private readonly StringBuilder _buffer = new();
@@ -1499,10 +1525,10 @@ namespace TensorSharp.Runtime
         /// <summary>Parse every complete `&lt;invoke&gt;` block in the body.</summary>
         private void ParseInvokes(string body, List<ToolCall> toolCalls)
         {
-            const string invokeOpen = "<" + Dsml + "invoke name=\"";
-            const string invokeClose = "</" + Dsml + "invoke>";
-            const string paramOpen = "<" + Dsml + "parameter name=\"";
-            const string paramClose = "</" + Dsml + "parameter>";
+            string invokeOpen = _invokeOpen;
+            string invokeClose = _invokeClose;
+            string paramOpen = _paramOpen;
+            string paramClose = _paramClose;
 
             int pos = 0;
             while (true)
@@ -1516,6 +1542,19 @@ namespace TensorSharp.Runtime
                 string name = body.Substring(start + invokeOpen.Length, nameEnd - start - invokeOpen.Length);
 
                 int end = body.IndexOf(invokeClose, nameEnd, StringComparison.Ordinal);
+                if (_deepSeek41)
+                {
+                    if (end < 0)
+                        break;
+                    int headerEnd = body.IndexOf('>', nameEnd + 1);
+                    if (name.Length > 0 && headerEnd >= 0 && headerEnd < end &&
+                        string.IsNullOrWhiteSpace(body.Substring(nameEnd + 1, headerEnd - nameEnd - 1)) &&
+                        DeepSeek41OutputParser.TryParseParameters(
+                            body.Substring(headerEnd + 1, end - headerEnd - 1), out var v41Args))
+                        toolCalls.Add(new ToolCall { Name = name, Arguments = v41Args, Index = _callIndex++ });
+                    pos = end + invokeClose.Length;
+                    continue;
+                }
                 string inner = end < 0 ? body.Substring(nameEnd) : body.Substring(nameEnd, end - nameEnd);
 
                 var args = new Dictionary<string, object>();
@@ -2245,8 +2284,13 @@ namespace TensorSharp.Runtime
         /// Text after which a structured-output grammar may start enforcing, or null
         /// when the model's very first token is already part of the answer.
         /// </summary>
-        public static string? GrammarActivationTrigger(string architecture)
-            => ChatProtocolRegistry.For(architecture)?.GrammarActivationTrigger;
+        public static string? GrammarActivationTrigger(string architecture, bool enableThinking = false)
+        {
+            var protocol = ChatProtocolRegistry.For(architecture);
+            return enableThinking
+                ? protocol?.ThinkingGrammarActivationTrigger ?? protocol?.GrammarActivationTrigger
+                : protocol?.GrammarActivationTrigger;
+        }
 
         /// <summary>
         /// True when the reply is unreadable without its parser: the framing tokens and

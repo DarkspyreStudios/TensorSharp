@@ -813,15 +813,33 @@ public class RetainedFusedCacheTests
         try
         {
             var model = new FusedStubModel();
-            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+            var gate = new ComputeGate();
+            gate.Close();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance) { ComputeGate = gate };
+
+            // Both rounds must enter the per-sequence fused path. Otherwise the
+            // first request can run alone and populate legitimate pooled prefix
+            // blocks, which makes the later zero-reuse assertion test a different
+            // path. Wait for the worker to park before submitting the partner and
+            // reopening: merely queuing two requests does not guarantee admission
+            // together if the worker has already drained the first command.
+            async Task WaitForParkedWorker(long previousHolds)
+            {
+                using var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                while (engine.StepsHeldByGate <= previousHolds)
+                    await Task.Delay(1, timeout.Token);
+            }
 
             const string reusedId = "reused-request-id";
             var oldPrompt = Enumerable.Repeat(1, PromptLen).ToList();
             var oldPartnerPrompt = Enumerable.Repeat(2, PromptLen).ToList();
+            long holds = engine.StepsHeldByGate;
             var oldHandle = engine.SubmitRequest(new SequenceState(
                 reusedId, oldPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            await WaitForParkedWorker(holds);
             var oldPartnerHandle = engine.SubmitRequest(new SequenceState(
                 "old-partner", oldPartnerPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            gate.Open();
             var oldResult = DrainAsync(oldHandle);
             var oldPartnerResult = DrainAsync(oldPartnerHandle);
             await Task.WhenAll(oldResult, oldPartnerResult);
@@ -832,10 +850,14 @@ public class RetainedFusedCacheTests
             // before this new holder is stored under the same key.
             var newPrompt = Enumerable.Repeat(5, PromptLen).ToList();
             var newPartnerPrompt = Enumerable.Repeat(6, PromptLen).ToList();
+            gate.Close();
+            holds = engine.StepsHeldByGate;
             var newHandle = engine.SubmitRequest(new SequenceState(
                 reusedId, newPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            await WaitForParkedWorker(holds);
             var newPartnerHandle = engine.SubmitRequest(new SequenceState(
                 "new-partner", newPartnerPrompt, 4, BlockSize, SamplingConfig.Greedy));
+            gate.Open();
             var newResult = DrainAsync(newHandle);
             var newPartnerResult = DrainAsync(newPartnerHandle);
             await Task.WhenAll(newResult, newPartnerResult);

@@ -1119,6 +1119,11 @@ namespace TensorSharp.Models
                 bosId,
                 gguf.GetString("tokenizer.chat_template"),
                 tokenizerModel);
+            // The V4.1 reference renderer emits BOS itself. Its published GGUF
+            // correctly disables automatic insertion, although the inherited V4
+            // Jinja template contains bos_token and triggers the generic override.
+            if (gguf.GetString("general.architecture") == "deepseek41")
+                addBos = false;
             if (addBos && !addBosMetadata)
             {
                 Console.WriteLine(
@@ -2670,18 +2675,17 @@ namespace TensorSharp.Models
                     "desynchronising the others, so this run is refused. Start the node without --tp-node-id/--tp-peers.");
             }
 
-            // No sharding, but the architecture can still spread its LAYERS across the
-            // GPUs. That is what an operator asking for N GPUs wants, and it is the same
-            // mode llama.cpp uses for these models, so honour --tp N as a layer split
-            // rather than throwing the second GPU away.
+            // Native executors own their placement and any optional reductions;
+            // pass the device count without creating the shared TP group.
             if (architecture.MultiGpu == MultiGpuMode.LayerSplit
                 && ModelArchitectureDescriptor.BackendHasSeveralDevices(backend))
             {
                 layerSplitDegree = tpDegree;
                 Console.WriteLine(
-                    $"  Multi-GPU: {tpDegree} GPUs by LAYER SPLIT (each GPU holds a contiguous run of whole " +
+                    architecture.DescribeMultiGpuPlacement?.Invoke(tpDegree) ??
+                    ($"  Multi-GPU: {tpDegree} GPUs by LAYER SPLIT (each GPU holds a contiguous run of whole " +
                     "layers), not tensor parallelism - this architecture shards no weights. Same mode " +
-                    "llama.cpp uses for it. This raises capacity; it is not expected to raise decode speed.");
+                    "llama.cpp uses for it. This raises capacity; it is not expected to raise decode speed."));
                 return 1;
             }
 

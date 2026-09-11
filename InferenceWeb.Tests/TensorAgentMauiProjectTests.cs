@@ -210,6 +210,7 @@ public class TensorAgentMauiProjectTests
         string[] nativeExports = Directory.EnumerateFiles(nativeDir, "*.*", SearchOption.TopDirectoryOnly)
             .Where(path => path.EndsWith(".cpp", StringComparison.Ordinal) ||
                            path.EndsWith(".c", StringComparison.Ordinal) ||
+                           path.EndsWith(".inc", StringComparison.Ordinal) ||
                            path.EndsWith(".h", StringComparison.Ordinal))
             .SelectMany(path => exportPattern.Matches(File.ReadAllText(path))
                 .Select(match => match.Groups[1].Value))

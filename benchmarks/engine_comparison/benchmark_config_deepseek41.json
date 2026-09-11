@@ -1,0 +1,225 @@
+{
+  "_comment": "DeepSeek V4.1 Flash Q2_K conservative validation matrix, using seven pinned GGUF shards. Default execution uses layer split. Routed-MoE tensor parallelism has 2/4/8-rank fixture coverage; the first full-checkpoint TP run completed and was slower than layer split. This matrix retains ubatch256, prefill-chunk256, solo-chunk8192 and the disabled-by-default compact gather; optimized measured profiles are recorded separately. Set launch-time TS_CPU_MOE_THREADS explicitly and TS_DSV41_COMPACT_RAW_GATHER=0 to avoid inherited settings changing this baseline. The first TP profile requested CLI48, which did not reach the native pool; default32 is inferred from source and the VM override probe, not a direct pool-width measurement on that host. Later explicit-thread experiments are separate. A compatible llama.cpp V4.1 runtime is unavailable: this blocks a same-model parity claim. Run validate_inference.py against each running endpoint for strict quality checks and repeated timing.",
+  "paths": {
+    "model_root": "/workspace/models",
+    "results_dir": "${here}/results_deepseek41",
+    "tensorsharp_server_dll": null,
+    "tensorsharp_port": 5000,
+    "llama_server_exe": "${repo_root}/../llama.cpp/build/bin/llama-server",
+    "llama_port": 5001
+  },
+  "models": {
+    "deepseek41-flash-q2k": {
+      "display": "DeepSeek V4.1 Flash Q2_K",
+      "family": "deepseek41",
+      "source": {
+        "hf_repo": "vcruz305/DeepSeek-V4.1-Flash-GGUF",
+        "revision": "8e0c4de3cb6519bfc11ed69dc87184b457a57bb5"
+      },
+      "gguf": {
+        "path": "${model_root}/DeepSeek-V4.1-Flash-Q2_K/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf",
+        "env": "BENCH_DSV41_GGUF"
+      },
+      "modalities": [
+        "text"
+      ],
+      "size_class": "large",
+      "mtp_supported": false,
+      "_modalities_note": "This matrix exercises text. Image/video use the separately prepared deepseek41.vision.gguf from the pinned official weights and explicit --mmproj; their native/managed fixtures are validated separately. No audio decoder is provided."
+    }
+  },
+  "scenarios": {
+    "text_short": {
+      "kind": "text",
+      "description": "Short single-turn text prompt (~2k-token context preamble)",
+      "max_tokens": 512
+    },
+    "text_long": {
+      "kind": "text",
+      "description": "Long-context single-turn text prompt (~2k-token context preamble + passage)",
+      "max_tokens": 512
+    },
+    "multi_turn": {
+      "kind": "multi_turn",
+      "description": "3-turn conversation (~2k-token context preamble), timed on the final turn",
+      "max_tokens": 512
+    },
+    "function_call": {
+      "kind": "function_call",
+      "description": "Tool/function-calling (get_weather) with ~2k-token context preamble",
+      "max_tokens": 512
+    },
+    "json_mode": {
+      "kind": "json_mode",
+      "description": "Structured output (response_format json_object) with ~2k-token context preamble",
+      "max_tokens": 512
+    }
+  },
+  "engines": {
+    "tensorsharp": {
+      "display": "TensorSharp",
+      "transport": "server",
+      "backends": [
+        "gpu",
+        "cpu"
+      ]
+    },
+    "llamacpp": {
+      "display": "llama.cpp",
+      "transport": "server",
+      "backends": [
+        "gpu",
+        "cpu"
+      ]
+    }
+  },
+  "backends": {
+    "ggml_cuda_layer": {
+      "display": "CUDA layer split",
+      "kind": "gpu",
+      "tensorsharp": {
+        "backend": "ggml_cuda",
+        "tp": true,
+        "env": {
+          "MAX_CONTEXT": "65536",
+          "TS_DSV4_UBATCH": "256",
+          "TS_DSV41_TP": "0",
+          "TS_DSV41_ENGRAM_WARM": "1",
+          "TS_DSV41_SPARSE_FA": "1",
+          "TS_SCHED_MAX_RUNNING_SEQS": "4",
+          "TS_SCHED_MAX_BATCHED_TOKENS": "4096",
+          "TS_SCHED_PREFILL_CHUNK": "256",
+          "TS_SCHED_SOLO_PREFILL_CHUNK": "8192",
+          "KV_CACHE_DTYPE": "f16"
+        }
+      },
+      "llamacpp": {
+        "ngl": 999,
+        "tp": true,
+        "tp_extra_args": [
+          "--split-mode",
+          "layer"
+        ]
+      }
+    },
+    "ggml_cuda_layer_cpu_moe4": {
+      "display": "CUDA layer split + 4 CPU MoE layers",
+      "kind": "gpu",
+      "tensorsharp": {
+        "backend": "ggml_cuda",
+        "tp": true,
+        "extra_args": [
+          "--n-cpu-moe",
+          "4"
+        ],
+        "env": {
+          "MAX_CONTEXT": "65536",
+          "TS_DSV4_UBATCH": "256",
+          "TS_DSV41_TP": "0",
+          "TS_DSV41_ENGRAM_WARM": "1",
+          "TS_DSV41_SPARSE_FA": "1",
+          "TS_SCHED_MAX_RUNNING_SEQS": "4",
+          "TS_SCHED_MAX_BATCHED_TOKENS": "4096",
+          "TS_SCHED_PREFILL_CHUNK": "256",
+          "TS_SCHED_SOLO_PREFILL_CHUNK": "8192",
+          "KV_CACHE_DTYPE": "f16"
+        }
+      },
+      "llamacpp": {
+        "ngl": 999,
+        "tp": true,
+        "extra_args": [
+          "--n-cpu-moe",
+          "4"
+        ],
+        "tp_extra_args": [
+          "--split-mode",
+          "layer"
+        ]
+      }
+    },
+    "ggml_cuda_true_tp": {
+      "display": "CUDA routed-MoE tensor shards; layer attention; host reduction",
+      "kind": "gpu",
+      "tensorsharp": {
+        "backend": "ggml_cuda",
+        "tp": true,
+        "env": {
+          "MAX_CONTEXT": "65536",
+          "TS_DSV4_UBATCH": "256",
+          "TS_DSV41_TP": "{tp}",
+          "TS_DSV41_ENGRAM_WARM": "1",
+          "TS_DSV41_SPARSE_FA": "1",
+          "TS_SCHED_MAX_RUNNING_SEQS": "4",
+          "TS_SCHED_MAX_BATCHED_TOKENS": "4096",
+          "TS_SCHED_PREFILL_CHUNK": "256",
+          "TS_SCHED_SOLO_PREFILL_CHUNK": "8192",
+          "KV_CACHE_DTYPE": "f16"
+        }
+      },
+      "_reference_note": "No llama.cpp mapping until a compatible V4.1 runtime and equivalent execution profile are available. Do not compare different placement modes as an equivalent-profile speedup."
+    }
+  },
+  "llama": {
+    "context_size": 262144,
+    "extra_args": [
+      "--jinja",
+      "--parallel",
+      "4",
+      "--batch-size",
+      "1024",
+      "--ubatch-size",
+      "256"
+    ]
+  },
+  "ready_timeout_s": {
+    "small": 600,
+    "medium": 900,
+    "large": 1200
+  },
+  "defaults": {
+    "engines": [
+      "tensorsharp",
+      "llamacpp"
+    ],
+    "models": [
+      "deepseek41-flash-q2k"
+    ],
+    "scenarios": [
+      "text_short",
+      "text_long",
+      "multi_turn",
+      "function_call",
+      "json_mode",
+      "prefill_8k",
+      "prefill_32k"
+    ],
+    "backends": [
+      "ggml_cuda_layer"
+    ],
+    "thinking": false,
+    "mtp_modes": [
+      false
+    ],
+    "tp_degrees": [
+      8
+    ],
+    "tp_devices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "concurrency": [
+      1,
+      4
+    ],
+    "max_tokens": 512,
+    "warmup": 1,
+    "server_max_tokens": 1024
+  }
+}

@@ -243,6 +243,33 @@ namespace TensorSharp.Runtime
 
             Register(new ChatProtocol
             {
+                Id = "deepseek41",
+                Architectures = new[] { "deepseek41", "deepseek_v41" },
+                CapsVideoFrames = true,
+                AppendMediaPlaceholders = (msg, sb) =>
+                {
+                    if (msg.ImagePaths != null)
+                        for (int i = 0; i < msg.ImagePaths.Count; i++)
+                        {
+                            if (msg.ImageTimestamps?.Count == msg.ImagePaths.Count && msg.ImageTimestamps[i] is double time)
+                                sb.Append("Frame at ").Append(time.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture))
+                                    .Append(" seconds: ");
+                            sb.Append(ChatTemplate.DeepSeek41ImagePlaceholder);
+                            if (msg.ImageTimestamps?.Count == msg.ImagePaths.Count && msg.ImageTimestamps[i].HasValue)
+                                sb.Append('\n');
+                        }
+                },
+                Render = r => ChatTemplate.RenderDeepSeek41(r.Messages, r.AddGenerationPrompt, r.EnableThinking, r.Tools),
+                PreferOwnRenderer = _ => true,
+                CreateOutputParser = () => new DeepSeek41OutputParser(),
+                OutputParserAlwaysRequired = true,
+                ThinkingGrammarActivationTrigger = "</think>",
+                ThinkingBudgetEndToken = "</think>",
+                AllowRawAssistantTokenSplicing = false,
+            });
+
+            Register(new ChatProtocol
+            {
                 Id = "deepseek4",
                 Architectures = new[] { "deepseek4" },
                 Render = r => ChatTemplate.RenderDeepSeek4(r.Messages, r.AddGenerationPrompt, r.EnableThinking, r.Tools),

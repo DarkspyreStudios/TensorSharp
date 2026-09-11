@@ -10,6 +10,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace TensorSharp.Runtime.Grammar
@@ -45,8 +46,13 @@ namespace TensorSharp.Runtime.Grammar
 
         /// <summary>Token that ends at each node, or -1.</summary>
         private readonly int[] _nodeToken;
+        private readonly Dictionary<int, int[]> _tokenAliases;
 
-        private static readonly ConditionalWeakTable<ITokenizer, GrammarTokenVocabulary> Cache = new();
+        private sealed class PerTokenizer
+        {
+            public readonly Dictionary<string, GrammarTokenVocabulary> ByAllowedControls = new(StringComparer.Ordinal);
+        }
+        private static readonly ConditionalWeakTable<ITokenizer, PerTokenizer> Cache = new();
 
         public int VocabSize { get; }
         public int NodeCount => _nodeToken.Length;
@@ -59,7 +65,7 @@ namespace TensorSharp.Runtime.Grammar
 
         private GrammarTokenVocabulary(
             int[] childStart, byte[] childByte, int[] childNode, int[] nodeToken,
-            int vocabSize, IReadOnlyCollection<int> special)
+            int vocabSize, IReadOnlyCollection<int> special, Dictionary<int, int[]> tokenAliases)
         {
             _childStart = childStart;
             _childByte = childByte;
@@ -67,6 +73,7 @@ namespace TensorSharp.Runtime.Grammar
             _nodeToken = nodeToken;
             VocabSize = vocabSize;
             SpecialTokenIds = special;
+            _tokenAliases = tokenAliases;
         }
 
         /// <summary>
@@ -74,13 +81,25 @@ namespace TensorSharp.Runtime.Grammar
         /// Cached weakly against the tokenizer, so it is built once per model and
         /// released with it.
         /// </summary>
-        public static GrammarTokenVocabulary ForTokenizer(ITokenizer tokenizer)
+        public static GrammarTokenVocabulary ForTokenizer(ITokenizer tokenizer,
+            IReadOnlyCollection<int>? allowedControlTokens = null)
         {
             if (tokenizer == null) throw new ArgumentNullException(nameof(tokenizer));
-            return Cache.GetValue(tokenizer, Build);
+            int[] allowed = allowedControlTokens?.Distinct().OrderBy(i => i).ToArray() ?? Array.Empty<int>();
+            foreach (int id in allowed)
+                if (id < 0 || id >= tokenizer.VocabSize || tokenizer.IsEos(id))
+                    throw new ArgumentException("Grammar control-token allowlist contains an invalid or EOS token.", nameof(allowedControlTokens));
+            string key = string.Join(",", allowed);
+            var per = Cache.GetValue(tokenizer, _ => new PerTokenizer());
+            lock (per)
+            {
+                if (!per.ByAllowedControls.TryGetValue(key, out var vocabulary))
+                    per.ByAllowedControls[key] = vocabulary = Build(tokenizer, allowed);
+                return vocabulary;
+            }
         }
 
-        private static GrammarTokenVocabulary Build(ITokenizer tokenizer)
+        private static GrammarTokenVocabulary Build(ITokenizer tokenizer, IReadOnlyCollection<int> allowedControlTokens)
         {
             int vocabSize = tokenizer.VocabSize;
 
@@ -93,10 +112,15 @@ namespace TensorSharp.Runtime.Grammar
             {
                 foreach (int id in tokenizer.EosTokenIds) special.Add(id);
             }
+            // A protocol grammar may deliberately consume a printable control
+            // marker. This vocabulary is cached separately: JSON and other
+            // grammars must continue to exclude it and every other control ID.
+            special.ExceptWith(allowedControlTokens);
 
             // Mutable build representation; flattened below.
             var childMaps = new List<Dictionary<byte, int>> { new() };
             var tokenAt = new List<int> { -1 };
+            var aliases = new Dictionary<int, List<int>>();
 
             var buffer = new List<byte>(64);
             for (int id = 0; id < vocabSize; id++)
@@ -130,9 +154,15 @@ namespace TensorSharp.Runtime.Grammar
                     }
                     node = next;
                 }
-                // Two ids with identical bytes: keep the first. Either is a
-                // correct decode and the grammar cannot tell them apart.
+                // Keep every ID with identical bytes. In particular a dormant
+                // grammar must mask every alias of an invalid trigger suffix.
                 if (tokenAt[node] < 0) tokenAt[node] = id;
+                else
+                {
+                    if (!aliases.TryGetValue(node, out var ids))
+                        aliases[node] = ids = new List<int> { tokenAt[node] };
+                    ids.Add(id);
+                }
             }
 
             int nodeCount = childMaps.Count;
@@ -163,8 +193,13 @@ namespace TensorSharp.Runtime.Grammar
             }
 
             return new GrammarTokenVocabulary(
-                childStart, childByte, childNode, tokenAt.ToArray(), vocabSize, special);
+                childStart, childByte, childNode, tokenAt.ToArray(), vocabSize, special,
+                aliases.ToDictionary(p => p.Key, p => p.Value.ToArray()));
         }
+
+        internal ReadOnlySpan<int> TokensAt(int node)
+            => _tokenAliases.TryGetValue(node, out var ids) ? ids
+                : _nodeToken[node] < 0 ? ReadOnlySpan<int>.Empty : _nodeToken.AsSpan(node, 1);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal int ChildStart(int node) => _childStart[node];

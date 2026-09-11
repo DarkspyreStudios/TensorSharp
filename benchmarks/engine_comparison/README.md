@@ -586,3 +586,69 @@ To run it as a CI job instead, add a second job on the old
 - **MTP** (`--mtp on`) only applies to TensorSharp on models that ship a draft
   head (Qwen 3.6 embedded NextN; Gemma 4 with its paired `--draft-model`);
   every other engine/model `on` cell is recorded as skipped.
+
+## DeepSeek V4.1 Flash strict validation
+
+Use `benchmark_config_deepseek41.json` for the pinned seven-shard Q2_K model and
+explicit layer-placement/CPU-MoE profiles. `validate_inference.py` validates
+running endpoints with actual short prompts, long-context recall, strict JSON,
+generated conversation history, tool-result round trips, a two-tool agent
+workflow, repeated measurements and per-request concurrent correctness. It
+retains full request/response artifacts and refuses to establish parity when
+the reference is missing or invalid. See the
+[validation protocol](../../docs/deepseek41_validation.md) for commands,
+comparison requirements and uncovered capabilities.
+
+For dependent tool workflows, the optional `--serial-tool-workflows` flag sends
+`parallel_tool_calls: false` on their tool-bearing turns. It retains the exact
+call order, argument and final-answer checks. The policy is recorded in report
+metadata and affected request hashes; default requests remain unchanged. Record
+this follow-up separately from the original quality run:
+
+```bash
+python validate_inference.py \
+  --url http://127.0.0.1:5000 --engine tensorsharp --model deepseek-v4.1-flash \
+  --weights-id 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5-Q2_K \
+  --profile layer8-ctx65536-ubatch1024-cpumoe0-compact1 \
+  --scenarios tool_round_trip,agentic --concurrency 1,4 --repeats 1 \
+  --structured-tool-results --serial-tool-workflows \
+  --output results/deepseek41-serial-tools.json
+```
+
+These ten cases check a client serialization constraint. A successful follow-up
+does not erase a default-policy failure or establish a numerical inference fix.
+
+`validate_deepseek41_tools.py` separately exercises tool policy through actual
+HTTP/SSE. Its default plan has 30 cases: `required`, a named weather function
+among two declarations, `none` after a generated weather call and fixed result,
+serial one-call output, and explicit parallel two-call output at concurrency
+1/4; required/named thinking requests and three HTTP400 validation cases run at
+concurrency 1. The history case makes two requests, for 35 requests in total.
+Tools return fixed fixture data; the harness never executes external tools.
+
+```bash
+python validate_deepseek41_tools.py \
+  --url http://127.0.0.1:5000 --model deepseek-v4.1-flash \
+  --weights-id 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5-Q2_K \
+  --profile layer8-ctx65536-ubatch1024-cpumoe0-compact1 \
+  --server-build server-v41-tools --output results/deepseek41-tool-policies.json
+```
+
+Set `--native-sha256` to the loaded library hash when recording a measured run.
+`--scenarios`, `--concurrency`, and `--repetitions` can select a narrower rerun;
+thinking calls use `--thinking-max-tokens` (default 2,048), while ordinary calls
+use `--max-tokens` (default 512). The report records the exact execution plan,
+model/profile, source and fixture hashes, every request and its hash, raw SSE
+lines (including partial parser failures), metrics, and untruncated HTTP error
+bodies. `run_complete` stays false until every planned case finishes. Exit
+status is nonzero for any failed case, including an explicit two-call request
+that returns only one call. Reasoning text cannot substitute for a final answer
+or structured tool call; malformed/duplicate call IDs, malformed arguments,
+wrong cities, missing usage, and unrelated HTTP400 errors fail validation.
+
+Run the local harness checks with the same `requests` dependency as the engine
+matrix:
+
+```bash
+python -m unittest test_validate_deepseek41_tools test_validate_inference test_backend_launch
+```

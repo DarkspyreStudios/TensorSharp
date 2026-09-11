@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 
 #include "ggml_ops_dsv4_fused.h"
+#include "dsv41_quant.h"
 
 #include <algorithm>
 #include <cmath>
@@ -419,13 +420,85 @@ static void tsg_dsv4_cpu_kgather(ggml_tensor * dst, const tsg_dsv4_fused_desc * 
     }
 }
 
+static void tsg_dsv41_cpu_quant(ggml_tensor * dst, const tsg_dsv4_fused_desc * d, int ith, int nth)
+{
+    const ggml_tensor * src = dst->src[0];
+    const int block = d->i0 == 2 ? 16 : 32;
+    GGML_ASSERT(d->i0 >= 0 && d->i0 <= 2);
+    GGML_ASSERT(src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(dst));
+    GGML_ASSERT(src->ne[0] % block == 0 && ggml_nelements(src) == ggml_nelements(dst));
+    const float * input = (const float *) src->data;
+    float * output = (float *) dst->data;
+    const int64_t groups = ggml_nelements(src) / block;
+    for (int64_t group = ith; group < groups; group += nth)
+    {
+        float values[32], amax = 0.0f;
+        for (int lane = 0; lane < block; ++lane)
+        {
+            values[lane] = tsg_dsv41_bf16(input[group * block + lane]);
+            amax = fmaxf(amax, fabsf(values[lane]));
+        }
+        const float scale = tsg_dsv41_quant_scale(amax, d->i0);
+        for (int lane = 0; lane < block; ++lane)
+            output[group * block + lane] = tsg_dsv41_quant_value(values[lane], scale, d->i0);
+    }
+}
+
+static void tsg_dsv41_cpu_candidate_scores(ggml_tensor * dst, const tsg_dsv4_fused_desc * d, int ith, int nth)
+{
+    const ggml_tensor * src = dst->src[0];
+    const int32_t * pos = (const int32_t *) dst->src[1]->data;
+    const int64_t width = src->ne[0], blocks = dst->ne[0];
+    GGML_ASSERT(d->i0 > 0 && blocks == (width + d->i0 - 1) / d->i0);
+    GGML_ASSERT(src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(dst));
+    const float * scores = (const float *) src->data;
+    float * out = (float *) dst->data;
+    for (int64_t index = ith; index < ggml_nelements(dst); index += nth)
+    {
+        const int64_t query = index / blocks, block = index % blocks;
+        float best = -INFINITY;
+        for (int64_t key = block * d->i0; key < std::min(width, (block + 1) * d->i0); ++key)
+            best = fmaxf(best, scores[query * width + key]);
+        out[index] = pos[query] >= 0 && block == pos[query] / d->i0 ? INFINITY : best;
+    }
+}
+
+static void tsg_dsv41_cpu_candidate_mask(ggml_tensor * dst, const tsg_dsv4_fused_desc * d, int ith, int nth)
+{
+    const ggml_tensor * scores = dst->src[0], * selected = dst->src[1];
+    const float * pooled = (const float *) scores->data;
+    const int32_t * topk = (const int32_t *) selected->data;
+    const int64_t width = dst->ne[0], blocks = scores->ne[0], k = selected->ne[0];
+    GGML_ASSERT(d->i0 > 0 && dst->type == GGML_TYPE_F16);
+    GGML_ASSERT(scores->type == GGML_TYPE_F32 && selected->type == GGML_TYPE_I32);
+    GGML_ASSERT(ggml_is_contiguous(scores) && ggml_is_contiguous(selected) && ggml_is_contiguous(dst));
+    auto * out = (ggml_fp16_t *) dst->data;
+    const ggml_fp16_t zero = ggml_fp32_to_fp16(0), masked = ggml_fp32_to_fp16(-INFINITY);
+    for (int64_t query = ith; query < dst->ne[1]; query += nth)
+    {
+        std::fill(out + query * width, out + (query + 1) * width, masked);
+        for (int64_t i = 0; i < k; ++i)
+        {
+            const int64_t block = topk[query * k + i];
+            if (block < 0 || block >= blocks || !(pooled[query * blocks + block] > -INFINITY)) continue;
+            for (int64_t key = block * d->i0; key < std::min(width, (block + 1) * d->i0); ++key)
+                out[query * width + key] = zero;
+        }
+    }
+}
+
 void tsg_dsv4_fused_cpu(ggml_tensor * dst, int ith, int nth, void * userdata)
 {
-    GGML_UNUSED(nth);
-    if (ith != 0) return;
-
     const auto * d = (const tsg_dsv4_fused_desc *) userdata;
     GGML_ASSERT(d && d->magic == TSG_DSV4_FUSED_MAGIC);
+    // These independent rows/groups use all ggml CPU workers. Keep existing
+    // V4 kernels' single-worker behavior unchanged.
+    if (d->kind == TSG_DSV41_FUSED_QUANT) { tsg_dsv41_cpu_quant(dst, d, ith, nth); return; }
+    if (d->kind == TSG_DSV41_CANDIDATE_SCORES) { tsg_dsv41_cpu_candidate_scores(dst, d, ith, nth); return; }
+    if (d->kind == TSG_DSV41_CANDIDATE_MASK) { tsg_dsv41_cpu_candidate_mask(dst, d, ith, nth); return; }
+    if (ith != 0) return;
 
     switch (d->kind)
     {

@@ -97,6 +97,36 @@ for truthy in 1 ON true; do
         || fail "no-update ${truthy}: origin was rewritten"
 done
 
+# A model-validation VM may receive exact sources without .git. NO_UPDATE must
+# preserve those bytes and never try the deliberately unavailable origin.
+SOURCE_WORKSPACE="${TEST_ROOT}/source copy"
+SOURCE_DIR="${SOURCE_WORKSPACE}/ExternalProjects/ggml"
+mkdir -p "${SOURCE_WORKSPACE}/eng" "${SOURCE_DIR}/src" "${SOURCE_DIR}/include"
+cp "${FETCH_SCRIPT}" "${SOURCE_WORKSPACE}/eng/${FETCH_NAME}"
+printf 'pinned build source\n' > "${SOURCE_DIR}/CMakeLists.txt"
+printf 'pinned targets\n' > "${SOURCE_DIR}/src/CMakeLists.txt"
+printf 'pinned header\n' > "${SOURCE_DIR}/include/ggml.h"
+cp -R "${SOURCE_DIR}" "${TEST_ROOT}/expected-source-copy"
+for truthy in 1 ON true; do
+    run_fetch "${SOURCE_WORKSPACE}" master "${truthy}" "${TEST_ROOT}/missing-origin"
+    diff -r "${TEST_ROOT}/expected-source-copy" "${SOURCE_DIR}" \
+        || fail "no-update ${truthy}: source copy changed"
+    [[ ! -e "${SOURCE_DIR}/.git" ]] || fail 'source copy was replaced by a checkout'
+    echo "PASS: no-update ${truthy} preserves complete source copy without Git metadata"
+done
+
+# Merely having a directory (or only some build inputs) must not masquerade as
+# a complete source copy. Every required marker is checked independently.
+for missing in CMakeLists.txt src/CMakeLists.txt include/ggml.h; do
+    INCOMPLETE_WORKSPACE="${TEST_ROOT}/incomplete-${missing//\//-}"
+    mkdir -p "${INCOMPLETE_WORKSPACE}/eng" "${INCOMPLETE_WORKSPACE}/ExternalProjects"
+    cp "${FETCH_SCRIPT}" "${INCOMPLETE_WORKSPACE}/eng/${FETCH_NAME}"
+    cp -R "${TEST_ROOT}/expected-source-copy" "${INCOMPLETE_WORKSPACE}/ExternalProjects/ggml"
+    rm "${INCOMPLETE_WORKSPACE}/ExternalProjects/ggml/${missing}"
+    run_fetch "${INCOMPLETE_WORKSPACE}" master true
+    assert_clean_checkout "${INCOMPLETE_WORKSPACE}" "${SECOND_COMMIT}" "incomplete source copy missing ${missing} fetches normally"
+done
+
 # Offline fallback must preserve the existing checkout, then recover normally
 # when the upstream URL becomes available again.
 run_fetch "${WORKSPACE}" master '' "${TEST_ROOT}/missing-origin"

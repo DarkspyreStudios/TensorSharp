@@ -6854,6 +6854,11 @@ internal enum GgmlIndexReductionOp
         /// <summary>What ggml logged about the failure, or an empty string.</summary>
         public static string BackendFailureText()
         {
+            // Availability probing can log an unavailable optional backend
+            // (for example CUDA hidden from a CPU-only process). The retained
+            // log is diagnostic history, not a latched compute failure.
+            if (!HasBackendFailure())
+                return string.Empty;
             IntPtr ptr = TSGgml_GetBackendFailureText();
             return ptr == IntPtr.Zero ? string.Empty : (Marshal.PtrToStringAnsi(ptr) ?? string.Empty);
         }

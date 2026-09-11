@@ -24,6 +24,8 @@ namespace TensorSharp.Runtime
         /// Optional list of image file paths for multimodal messages.
         /// </summary>
         public List<string>? ImagePaths { get; set; }
+        /// <summary>Optional source times for sampled video images, aligned with ImagePaths; ordinary images use null.</summary>
+        public List<double?>? ImageTimestamps { get; set; }
         /// <summary>
         /// Optional list of audio file paths for multimodal messages.
         /// </summary>
@@ -88,9 +90,9 @@ namespace TensorSharp.Runtime
         /// result answers.
         ///
         /// <para>
-        /// No chat template in this repository renders it — every one of them frames a
-        /// tool result positionally, right after the call it answers. It exists for the
-        /// OpenAI WIRE format, which does not: a <c>tool</c> message there is rejected
+        /// DeepSeek V4.1 uses this id to put parallel results back into call order
+        /// before rendering them positionally. It is also required by the
+        /// OpenAI wire format: a <c>tool</c> message there is rejected
         /// outright without <c>tool_call_id</c>, so anything that speaks to a real
         /// OpenAI-compatible endpoint (see <c>SkillsChatClient</c> under
         /// <c>SkillDelivery.Local</c>) has to carry the id through the conversation
@@ -187,7 +189,7 @@ namespace TensorSharp.Runtime
         }
     }
 
-    public static class ChatTemplate
+    public static partial class ChatTemplate
     {
         /// <summary>Render the generic ChatML conversation and optional tool declarations.</summary>
         public static string RenderChatMl(List<ChatMessage> messages, bool addGenerationPrompt = true,
@@ -1493,6 +1495,7 @@ namespace TensorSharp.Runtime
                     Role = msg.Role,
                     Content = sb.ToString(),
                     ImagePaths = msg.ImagePaths,
+                    ImageTimestamps = msg.ImageTimestamps,
                     AudioPaths = msg.AudioPaths,
                     TextFilePaths = msg.TextFilePaths,
                     TextFileNames = msg.TextFileNames,

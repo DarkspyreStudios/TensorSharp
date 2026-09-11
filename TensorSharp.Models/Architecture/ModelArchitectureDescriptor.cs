@@ -19,11 +19,10 @@ namespace TensorSharp.Models.Architecture
         /// (<c>--tp N</c> in its literal sense).</summary>
         TensorParallel,
 
-        /// <summary>Each GPU owns a contiguous run of whole layers; nothing is sharded
-        /// and no collective is issued. This is what llama.cpp does by default
-        /// (<c>--split-mode layer</c>) and, for these architectures, the only multi-GPU
-        /// mode it offers. <c>--tp N</c> is honoured as "use N GPUs", because that is
-        /// what an operator asking for N GPUs means - it raises capacity, not speed.</summary>
+        /// <summary>The shared loader passes the device count to the architecture's
+        /// own executor without creating a tensor-parallel group. The default is
+        /// whole-layer placement. Executors with an additional native sharding mode
+        /// describe it through <see cref="ModelArchitectureDescriptor.DescribeMultiGpuPlacement"/>.</summary>
         LayerSplit,
 
         /// <summary>The architecture cannot use a second GPU through the shared
@@ -84,6 +83,12 @@ namespace TensorSharp.Models.Architecture
         /// operator why the extra GPU is idle, or why it holds layers rather than shards.
         /// </summary>
         public string MultiGpuLimitation { get; init; }
+
+        /// <summary>Optional startup description for an executor that owns device
+        /// placement and reductions itself. Receives the requested GPU count; may
+        /// describe or validate native environment overrides. The shared loader still
+        /// creates no tensor-parallel group. Null uses the standard layer-split message.</summary>
+        public Func<int, string> DescribeMultiGpuPlacement { get; init; }
 
         /// <summary>
         /// Process-wide native tuning this architecture needs applied BEFORE its

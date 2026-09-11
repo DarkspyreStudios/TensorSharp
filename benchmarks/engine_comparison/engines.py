@@ -152,6 +152,8 @@ def _run_blocking(url: str, body: dict, timeout_s: float) -> dict:
     wall = (t_end - t0)
     resp.raise_for_status()
     data = resp.json()
+    if data.get("error"):
+        raise RuntimeError(f"completion error: {data['error']}")
     choice = (data.get("choices") or [{}])[0]
     msg = choice.get("message", {}) or {}
     usage = data.get("usage", {}) or {}
@@ -168,6 +170,11 @@ def _run_blocking(url: str, body: dict, timeout_s: float) -> dict:
         "total_wall_ms": wall * 1000.0,
         "finish_reason": choice.get("finish_reason", "") or "",
         "tool_calls": [_tc_name(t) for t in tool_calls],
+        "tool_call_details": tool_calls,
+        "assistant_message": msg,
+        "usage_present": "prompt_tokens" in usage and "completion_tokens" in usage,
+        "decode_timing_source": "request_wall",
+        "reasoning_text": msg.get("reasoning_content") or "",
         "output_text": text,
         # Absolute monotonic timestamps (shared process clock) so a parallel
         # runner can stitch a system-wide throughput window. No token stream
@@ -179,22 +186,37 @@ def _run_blocking(url: str, body: dict, timeout_s: float) -> dict:
     }
 
 
-def _run_streaming(url: str, body: dict, timeout_s: float) -> dict:
+def _run_streaming(url: str, body: dict, timeout_s: float,
+                   response_log: Optional[dict] = None) -> dict:
     t_start = time.monotonic()
     t_first = None
     t_last = None
     content_chunks = 0
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
-    tool_names: list[str] = []
+    tool_fragments: dict[int, dict] = {}
     finish_reason = ""
     usage = {}
     srv_timings: dict = {}        # engine-reported generation timer (burst-immune)
 
     with requests.post(url, json=body, stream=True,
                        timeout=(30, timeout_s)) as resp:
+        if response_log is not None:
+            response_log["http_status"] = resp.status_code
+            response_log["content_type"] = resp.headers.get("Content-Type")
+            response_log["sse_lines"] = []
+            if resp.status_code >= 400:
+                response_log["body"] = resp.text
         resp.raise_for_status()
+        # SSE is UTF-8. requests otherwise defaults text/event-stream without
+        # an explicit charset to Latin-1, corrupting multilingual content and
+        # tool arguments before the JSON parser receives them.
+        resp.encoding = "utf-8"
         for raw in resp.iter_lines(decode_unicode=True):
+            if response_log is not None:
+                # Keep the wire output even if parsing or validation later
+                # fails. The default benchmark path allocates no capture list.
+                response_log["sse_lines"].append(raw)
             if not raw:
                 continue
             if not raw.startswith("data:"):
@@ -205,7 +227,9 @@ def _run_streaming(url: str, body: dict, timeout_s: float) -> dict:
             try:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
-                continue
+                raise RuntimeError(f"invalid completion SSE JSON: {payload[:200]}")
+            if chunk.get("error"):
+                raise RuntimeError(f"completion stream error: {chunk['error']}")
             if chunk.get("usage"):
                 usage = chunk["usage"]
             if chunk.get("timings"):
@@ -238,9 +262,18 @@ def _run_streaming(url: str, body: dict, timeout_s: float) -> dict:
                 if t_first is None:
                     t_first = now
                 t_last = now
-                name = _tc_name(tc)
-                if name and name not in tool_names:
-                    tool_names.append(name)
+                index = int(tc.get("index", 0))
+                target = tool_fragments.setdefault(index, {
+                    "id": "", "type": "function",
+                    "function": {"name": "", "arguments": ""}})
+                if tc.get("id"):
+                    target["id"] += tc["id"]
+                if tc.get("type") is not None:
+                    target["type"] = tc["type"]
+                for key in ("name", "arguments"):
+                    fragment = (tc.get("function") or {}).get(key)
+                    if fragment:
+                        target["function"][key] += fragment
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
 
@@ -261,6 +294,12 @@ def _run_streaming(url: str, body: dict, timeout_s: float) -> dict:
     pps = srv_timings.get("predicted_per_second") if srv_timings else None
     if pps and pps > 0:
         decode_tps = float(pps)
+    tool_calls = [tool_fragments[i] for i in sorted(tool_fragments)]
+    assistant_message = {"role": "assistant", "content": "".join(text_parts) or None}
+    if reasoning_parts:
+        assistant_message["reasoning_content"] = "".join(reasoning_parts)
+    if tool_calls:
+        assistant_message["tool_calls"] = tool_calls
     return {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
@@ -269,7 +308,13 @@ def _run_streaming(url: str, body: dict, timeout_s: float) -> dict:
         "decode_tps": decode_tps,
         "total_wall_ms": (t_end - t_start) * 1000.0,
         "finish_reason": finish_reason,
-        "tool_calls": tool_names,
+        "tool_calls": [_tc_name(tc) for tc in tool_calls],
+        "tool_call_details": tool_calls,
+        "assistant_message": assistant_message,
+        "usage_present": "prompt_tokens" in usage and "completion_tokens" in usage,
+        "decode_timing_source": "server" if pps and pps > 0 else "stream_window",
+        "server_timings": srv_timings,
+        "reasoning_text": "".join(reasoning_parts),
         "output_text": "".join(text_parts) or "".join(reasoning_parts),
         # Absolute monotonic timestamps (shared process clock) for parallel
         # aggregation: t_first_abs..t_last_abs is this request's decode window.
@@ -579,7 +624,10 @@ class TensorSharpServer(ServerHandle):
         if self.tp > 1:
             cmd += [spec.ts_tp_arg, str(self.tp)]
         env = os.environ.copy()
-        env.update(spec.ts_env)
+        # Some native architectures expose explicit tensor-shard activation
+        # separately from the GPU-count CLI argument. Keep it tied to this
+        # matrix cell instead of accidentally benchmarking a fixed rank count.
+        env.update({key: value.replace("{tp}", str(self.tp)) for key, value in spec.ts_env.items()})
         env.update(config.tp_device_env(self.backend, self.tp))
         if self.model.is_diffusion:
             env["DIFFUSION_STEPS"] = str(self.model.diffusion_steps)

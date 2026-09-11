@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 
 #include "ggml_ops_dsv4_fused.h"
+#include "dsv41_quant.h"
 
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
@@ -33,6 +34,13 @@
 #include "ggml-cuda/common.cuh"   // ggml_backend_cuda_context (stream access)
 
 #include <cstring>
+
+bool tsg_dsv4_cuda_supports_native_bf16(ggml_backend_t backend) {
+    if (!ggml_backend_is_cuda(backend)) return false;
+    const auto * context = static_cast<const ggml_backend_cuda_context *>(backend->context);
+    const int cc = ggml_cuda_info().devices[context->device].cc;
+    return GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_AMPERE;
+}
 
 // ---------------------------------------------------------------------------
 // Kernels
@@ -506,10 +514,91 @@ static __global__ void tsg_dsv4_kgather_f16(
 // Launcher
 // ---------------------------------------------------------------------------
 
+// One warp owns a block of 32 (MX) or 16 (NV) activations. Four groups per
+// CTA amortize launch overhead while keeping maxima entirely in registers.
+static __global__ void tsg_dsv41_quant_f32(const float * input, float * output,
+                                         int64_t groups, int mode)
+{
+    const int lane = threadIdx.x & 31;
+    const int block = mode == 2 ? 16 : 32;
+    const int64_t group = (int64_t) blockIdx.x * 4 + threadIdx.x / 32;
+    if (group >= groups) return;
+    const float value = lane < block ? tsg_dsv41_bf16(input[group * block + lane]) : 0.0f;
+    float amax = fabsf(value);
+    for (int delta = 16; delta > 0; delta /= 2)
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, delta));
+    const float scale = tsg_dsv41_quant_scale(amax, mode);
+    if (lane < block)
+        output[group * block + lane] = tsg_dsv41_quant_value(value, scale, mode);
+}
+
+static __global__ void tsg_dsv41_candidate_scores_f32(const float * scores, const int32_t * pos,
+        float * output, int64_t count, int width, int blocks, int block_size)
+{
+    const int64_t index = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const int64_t query = index / blocks;
+    const int block = int(index % blocks);
+    float best = -INFINITY;
+    for (int key = block * block_size; key < min(width, (block + 1) * block_size); ++key)
+        best = fmaxf(best, scores[query * width + key]);
+    output[index] = pos[query] >= 0 && block == pos[query] / block_size ? INFINITY : best;
+}
+
+static __global__ void tsg_dsv41_candidate_mask_f16(const float * pooled, const int32_t * topk,
+        half * output, int width, int blocks, int k, int block_size)
+{
+    const int query = blockIdx.x;
+    half * out = output + (int64_t) query * width;
+    for (int key = threadIdx.x; key < width; key += blockDim.x)
+        out[key] = __float2half(-INFINITY);
+    __syncthreads();
+    for (int i = threadIdx.x; i < k; i += blockDim.x)
+    {
+        const int block = topk[(int64_t) query * k + i];
+        if (block < 0 || block >= blocks || !(pooled[(int64_t) query * blocks + block] > -INFINITY)) continue;
+        for (int key = block * block_size; key < min(width, (block + 1) * block_size); ++key)
+            out[key] = __float2half(0.0f);
+    }
+}
+
 static void tsg_dsv4_fused_launch(const tsg_dsv4_fused_desc * d, ggml_tensor * dst, cudaStream_t stream)
 {
     switch (d->kind)
     {
+        case TSG_DSV41_FUSED_QUANT:
+        {
+            const ggml_tensor * src = dst->src[0];
+            const int block = d->i0 == 2 ? 16 : 32;
+            GGML_ASSERT(d->i0 >= 0 && d->i0 <= 2);
+            GGML_ASSERT(src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+            GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(dst));
+            GGML_ASSERT(src->ne[0] % block == 0 && ggml_nelements(src) == ggml_nelements(dst));
+            const int64_t groups = ggml_nelements(src) / block;
+            tsg_dsv41_quant_f32<<<(unsigned) ((groups + 3) / 4), 128, 0, stream>>>(
+                (const float *) src->data, (float *) dst->data, groups, d->i0);
+        } break;
+        case TSG_DSV41_CANDIDATE_SCORES:
+        {
+            const ggml_tensor * src = dst->src[0];
+            const int64_t count = ggml_nelements(dst);
+            GGML_ASSERT(d->i0 > 0 && dst->ne[0] == (src->ne[0] + d->i0 - 1) / d->i0);
+            GGML_ASSERT(src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+            GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(dst));
+            tsg_dsv41_candidate_scores_f32<<<(unsigned) ((count + 255) / 256), 256, 0, stream>>>(
+                (const float *) src->data, (const int32_t *) dst->src[1]->data,
+                (float *) dst->data, count, (int) src->ne[0], (int) dst->ne[0], d->i0);
+        } break;
+        case TSG_DSV41_CANDIDATE_MASK:
+        {
+            const ggml_tensor * scores = dst->src[0], * topk = dst->src[1];
+            GGML_ASSERT(d->i0 > 0 && dst->type == GGML_TYPE_F16);
+            GGML_ASSERT(scores->type == GGML_TYPE_F32 && topk->type == GGML_TYPE_I32);
+            GGML_ASSERT(ggml_is_contiguous(scores) && ggml_is_contiguous(topk) && ggml_is_contiguous(dst));
+            tsg_dsv41_candidate_mask_f16<<<(unsigned) dst->ne[1], 256, 0, stream>>>(
+                (const float *) scores->data, (const int32_t *) topk->data, (half *) dst->data,
+                (int) dst->ne[0], (int) scores->ne[0], (int) topk->ne[0], d->i0);
+        } break;
         case TSG_DSV4_FUSED_COMPRESS:
         {
             const ggml_tensor * st_kv        = dst->src[0];

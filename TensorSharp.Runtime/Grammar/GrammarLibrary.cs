@@ -10,6 +10,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 namespace TensorSharp.Runtime.Grammar
@@ -40,19 +41,22 @@ namespace TensorSharp.Runtime.Grammar
         /// Get the shared mask cache for <paramref name="gbnf"/> under
         /// <paramref name="tokenizer"/>, compiling and caching on first use.
         /// </summary>
-        public static GrammarMaskCache ForGbnf(string gbnf, ITokenizer tokenizer)
+        public static GrammarMaskCache ForGbnf(string gbnf, ITokenizer tokenizer,
+            IReadOnlyCollection<int>? allowedControlTokens = null)
         {
             if (gbnf == null) throw new ArgumentNullException(nameof(gbnf));
             if (tokenizer == null) throw new ArgumentNullException(nameof(tokenizer));
 
             PerTokenizer per = Cache.GetValue(tokenizer, _ => new PerTokenizer());
+            string cacheKey = allowedControlTokens is { Count: > 0 }
+                ? string.Join(",", allowedControlTokens.Distinct().OrderBy(i => i)) + "\n" + gbnf : gbnf;
             lock (per)
             {
-                if (per.ByGrammarSource.TryGetValue(gbnf, out GrammarMaskCache? hit))
+                if (per.ByGrammarSource.TryGetValue(cacheKey, out GrammarMaskCache? hit))
                     return hit;
                 var grammar = Grammar.Parse(gbnf);
-                var built = new GrammarMaskCache(grammar, GrammarTokenVocabulary.ForTokenizer(tokenizer));
-                per.ByGrammarSource[gbnf] = built;
+                var built = new GrammarMaskCache(grammar, GrammarTokenVocabulary.ForTokenizer(tokenizer, allowedControlTokens));
+                per.ByGrammarSource[cacheKey] = built;
                 return built;
             }
         }
