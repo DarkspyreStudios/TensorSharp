@@ -973,7 +973,9 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
     bool contiguous = true;
     if (const char * e = getenv("TS_DSV4_LOAD_CONTIGUOUS")) contiguous = atoi(e) != 0;
 
-    struct range { std::atomic<size_t> next; size_t end; };
+    // `end` is atomic because a stealer shrinks another range's end while that
+    // range's owner is reading it to decide whether its own claim is in bounds.
+    struct range { std::atomic<size_t> next; std::atomic<size_t> end; };
     std::vector<range> ranges((size_t) n_threads);
     {
         size_t total = 0;
@@ -990,10 +992,10 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
                 if (k == n_threads - 1 ? at == jobs.size() : acc >= target) break;
             }
             ranges[(size_t) k].next.store(begin, std::memory_order_relaxed);
-            ranges[(size_t) k].end = at;
+            ranges[(size_t) k].end.store(at, std::memory_order_relaxed);
         }
         // Any tail left by rounding belongs to the last range.
-        ranges[(size_t) n_threads - 1].end = jobs.size();
+        ranges[(size_t) n_threads - 1].end.store(jobs.size(), std::memory_order_relaxed);
     }
     std::atomic<size_t> cursor(0);
 
@@ -1005,7 +1007,7 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
     auto claim = [&](int k, size_t & out) -> bool
     {
         const size_t own = ranges[(size_t) k].next.fetch_add(1, std::memory_order_relaxed);
-        if (own < ranges[(size_t) k].end) { out = own; return true; }
+        if (own < ranges[(size_t) k].end.load(std::memory_order_acquire)) { out = own; return true; }
 
         std::lock_guard<std::mutex> lock(steal_mu);
         int victim = -1;
@@ -1013,14 +1015,17 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
         for (int v = 0; v < n_threads; v++)
         {
             const size_t next = ranges[(size_t) v].next.load(std::memory_order_relaxed);
-            const size_t left = ranges[(size_t) v].end > next ? ranges[(size_t) v].end - next : 0;
+            const size_t end = ranges[(size_t) v].end.load(std::memory_order_relaxed);
+            const size_t left = end > next ? end - next : 0;
             if (left > most) { most = left; victim = v; }
         }
-        // Leave the last job of a range to its owner: stealing it would race the
-        // owner's own fetch_add for the same index.
+        // Require at least TWO jobs left, so the index taken here (end-1) is always
+        // strictly ahead of the index the owner will claim next. That is what makes
+        // a steal and an owner's fetch_add unable to name the same job.
         if (victim < 0 || most < 2) return false;
-        ranges[(size_t) victim].end--;
-        out = ranges[(size_t) victim].end;
+        const size_t take = ranges[(size_t) victim].end.load(std::memory_order_relaxed) - 1;
+        ranges[(size_t) victim].end.store(take, std::memory_order_release);
+        out = take;
         return true;
     };
     // Where a slow load actually goes. Summed over threads, so the totals exceed
@@ -2797,14 +2802,9 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                         const size_t i = r_cursor.fetch_add(1, std::memory_order_relaxed);
                         if (i >= spans.size()) break;
                         const volatile char * p = spans[i].first;
-#if !defined(_WIN32)
-                        // Ask for the whole span at once before walking it. Touching one
-                        // byte per page faults 4 KiB at a time, and on a FUSE mount each
-                        // fault is a round trip; MADV_WILLNEED lets the filesystem read
-                        // the span in its own units. The touch loop below still runs, so
-                        // the pages are guaranteed resident either way.
-                        (void) madvise((void *) (uintptr_t) p, spans[i].second, MADV_WILLNEED);
-#endif
+                        // MADV_WILLNEED here was measured and did NOT help on the MooseFS
+                        // mount (29.7 s against 27.7 s for the plain walk, i.e. inside the
+                        // run-to-run spread), so this stays a plain fault-in walk.
                         for (size_t off = 0; off < spans[i].second; off += 4096)
                             (void) p[off];
                     }
