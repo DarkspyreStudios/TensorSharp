@@ -4,7 +4,7 @@
 > [TensorSharp](README_zh-cn.md) 文档的一部分。
 
 
-- **多架构支持** —— DeepSeek V4 Flash、DeepSeek V4.1 Flash（`deepseek41`，服务后端为 `ggml_cuda`）、GLM 5.x（GLM-5.2 `glm-dsa` 与 GLM-5.3-Flash `glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H、Mistral 3、Hunyuan Dense（`hunyuan-dense`）、Muse-Glimmer、Qwen-Image-Edit（图像编辑）、MiniMax-H3（视频 + 原生 32 kHz 立体声音频），以及 Wan 2.1/2.2（仅视频）
+- **多架构支持** —— DeepSeek V4 Flash、DeepSeek V4.1 Flash（`deepseek41`，服务后端为 `ggml_cuda`；也可运行于 `cpu`、`cuda` 与 `ggml_cpu`）、GLM 5.x（GLM-5.2 `glm-dsa` 与 GLM-5.3-Flash `glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H、Mistral 3、Hunyuan Dense（`hunyuan-dense`）、Muse-Glimmer、Qwen-Image-Edit（图像编辑）、MiniMax-H3（视频 + 原生 32 kHz 立体声音频），以及 Wan 2.1/2.2（仅视频）
 - **多模态推理** —— 图像、视频和音频输入（Gemma 4）；图像输入（Qwen 3.5/3.6-family / Qwen 3.8 Flash Next / GLM-5.3-Flash / Mistral 3 / Muse-Glimmer / Nemotron-H Omni，各自通过自己的 `mmproj` 视觉塔）。音频输入仅 Gemma 4 支持。`--pdf` 与架构无关：原生数字 PDF 的文本层会被内联进任意模型的提示词，只有扫描件才回退为页面图像（此时需要视觉模型）。生成的媒体是另一条轴：Qwen-Image-Edit 输出图像，Wan 2.1/2.2 输出 H.264 MP4，而 MiniMax-H3 是唯一**连音频一起输出**的家族——32 kHz 立体声音轨与画面联合去噪，并作为旁挂 `.wav` 写在 MP4 旁边
 - **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、DeepSeek V4.1、GLM 5.x）
 - **工具调用 / 函数调用** —— 模型可调用用户定义的工具；所有三种 API 风格均支持多轮工具调用对话

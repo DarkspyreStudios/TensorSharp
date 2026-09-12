@@ -77,4 +77,17 @@ bool tsg_dsv4_cuda_supports_native_bf16(ggml_backend_t cuda_backend);
 // directly, all asynchronously on that backend's stream.
 // The cuda_backend must outlive the returned backend.
 ggml_backend_t tsg_dsv4_fused_backend_init(ggml_backend_t cuda_backend);
+
+// Diagnostics for TS_DSV4_PERF>=3: how the device subgraph was submitted.
+// `views` counts the forwarded runs of ordinary nodes (each one a separate
+// ggml-cuda submission, and therefore a separate CUDA-graph launch or capture),
+// `fused` the custom kernels launched between them, and `nodes` every node the
+// scheduler handed this backend. Reset before a forward, read after it.
+struct tsg_dsv4_fused_counters
+{
+    unsigned long long calls = 0, views = 0, fused = 0, nodes = 0;
+    double submit_ms = 0.0;
+};
+void tsg_dsv4_fused_counters_reset();
+tsg_dsv4_fused_counters tsg_dsv4_fused_counters_read();
 #endif

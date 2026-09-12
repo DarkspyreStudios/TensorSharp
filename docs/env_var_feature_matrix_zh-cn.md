@@ -43,7 +43,7 @@ DiffusionGemma 当前不属于已注册的 TestMatrix 功能目录：还没有 d
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Nemotron-H | 原生批处理 Mamba2 step | 关闭 | `0`, `1` | 否 |
 | `TS_BATCHED_N1_FAST_PATH` | 全部 | solo 序列走融合 N=1 快速路径 decode；`0` 强制这些步骤走完全批处理路径 | 启用 | `0`, `1` | 是 |
 | `TS_PER_SEQ_FUSED` | fused 能力模型（Gemma 4、Qwen 3.5/3.6、DeepSeek V4、GLM 5.x） | 并发（N>=2）序列走 per-request 融合 Forward；`0` 强制逐算子批处理分页路径 | 启用 | `0`, `1` | 否 |
-| `TS_BATCHED_FUSED_DECODE` | fused 能力模型 | per-seq fused 路径内的真正 token 批量融合 decode（一张图跑全部 N 个序列）。在 GLM 5.x 上 4 个并发请求可得合计 1.81× decode。批处理会改变 GEMM 形状，2 bit MoE 可能把这点差别放大成不同的专家选择；设为 `0` 可做串行路径 A/B。 | 开启 | `0`, `1` | 否 |
+| `TS_BATCHED_FUSED_DECODE` | fused 能力模型 | per-seq fused 路径内的真正 token 批量融合 decode（一张图跑全部 N 个序列）。在 GLM 5.x 上 4 个并发请求可得合计 1.81× decode；在 DeepSeek V4.1 Flash 的 Q4_K_M 上为 2.0×（24.3 → 48.9 tok/s），上限来自路由——每个 token 各自从 384 个专家里挑 6 个。批处理会改变 GEMM 形状，2 bit MoE 可能把这点差别放大成不同的专家选择；设为 `0` 可做串行路径 A/B。 | 开启 | `0`, `1` | 否 |
 | `TS_RETAINED_FUSED_CACHE` | 具有可保留 request-owned fused holder 的模型（Gemma 4、Qwen 3.5/3.6） | 保留已完成请求的 holder，用于精确前缀续接；Qwen holder 同时包含 attention K/V 与匹配的 GatedDeltaNet 递归状态 | 启用 | `0`, `1` | 否 |
 | `TS_RETAINED_FUSED_CACHE_MAX` | 具有可保留 request-owned fused holder 的模型 | 保留 holder 的 LRU 预算（限制 VRAM；适用时包含递归状态） | `4` | 不适用 | 否 |
 | `TS_PREFIX_CHECKPOINTS` | Gemma 4；Qwen 3.5/3.6（GGML 后端） | 在每个会话共享的提示前缀（系统提示、工具、技能）结束处对模型完整状态做检查点，新会话从其副本继续，只需重新预填自己的消息 | 开 | `0`、`1` | 否 |
@@ -195,6 +195,8 @@ Muse-Glimmer 的融合整模型内核与它的 DFlash 块级草稿模型各有�
 | `TS_Q35_VERIFY_SNAPSHOTS` | Qwen 3.5 / 3.8 投机验证 | `0` 回退为先保存验证前的递归状态副本、再对已接受前缀重新前向，而不是每行保留一份快照 | 开 | 未注册 | 否 |
 | `TS_Q35_VERIFY_DEFER_STATE` | Qwen 3.5 / 3.8 投机验证 | `0` 在每次持久化调用后都把窗口末尾的递归状态下载回主机，而不是留在设备上等待 slot 提交；它与快照可以分开测，因为它同样覆盖投机会话中穿插的单行步骤 | 开 | 未注册 | 否 |
 | `TS_Q35_VERIFY_STRIDED_VIEWS` | Qwen 3.5 / 3.8 投机验证 | `0` 关闭 CUDA 与 Metal 上连续跨步的 KV view，回退为按 head 的 `set_rows` 写入 | 开 | 未注册 | 否 |
+| `TS_QWEN35_SPEC_DEVICE_STATE` | Qwen 3.5 / 3.8 投机解码，Metal 与 CUDA | `0` 让 gated-delta-net 的递归状态在每个投机步前后都排空到主机镜像再上传，而不是留在设备上。在 `ggml_cuda` 的 n-gram 场景中它本身值 1.67x，因此这是应急开关而非调优旋钮 | 开 | 未注册 | 否 |
+| `TS_QWEN35_VERIFY_RESIDENT` | Qwen 3.5 / 3.8 投机验证 | `1` 让 conv 与 delta 状态在验证期间常驻设备，省去每次调用约 60 MB 的搬运。**目前会产生错误的输出流**——常驻调用会就地更新状态，被拒绝的草稿无处回滚。仅供测量时显式开启，见[投机解码](speculative_decoding.md) | 关 | 未注册 | 否 |
 | `TS_Q35_MTP_DRAFT_PERSIST` | Qwen 3.5 / 3.8 MTP 草稿图 | `1` 允许单层 MTP 草稿图使用持久化 / 重放缓存。默认关闭：这张图曾在 CUDA graph 捕获重放时死锁，保留这个开关是为了在新版 ggml 上重新验证。收益约 1% | 关 | 未注册 | 否 |
 | `TS_MTP_FOLD_CATCHUP` | Qwen 3.5 / 3.6 NextN/MTP 投机 | `0` 把草稿头的 catch-up 与第一个草稿步拆成两次调用，而不是折叠成对 `n_accepted + 1` 行的一次前向（llama.cpp draft-mtp 的形状）。收益约 4-5% | 开 | 未注册 | 否 |
 | `TS_SPEC_ADAPTIVE` | 投机解码（所有草稿器） | `0` 关闭成本调节器，于是起草不再与普通 baseline 做对比、也永远不会被暂停。用于 A/B 测量：调节器每一轮的 baseline 步骤都是普通 decode，它们并不免费 | 开 | 未注册 | 否 |
@@ -203,7 +205,8 @@ Muse-Glimmer 的融合整模型内核与它的 DFlash 块级草稿模型各有�
 ## 矩阵外的 DeepSeek V4 / V4.1 开关
 
 这些变量配置 DeepSeek 的整模型执行器。V4 有三套（Direct CUDA、原生 ggml、纯 C#）；
-V4.1 只有一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` 作为标量正确性通道。它们都没有
+V4.1 的服务路径是一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` 作为标量正确性通道，
+以及自己的纯 C# 与 Direct CUDA 执行器作为可移植性通道。它们都没有
 注册进 `EnvVarMatrix.All`，因此默认的 TestMatrix 扫描不会覆盖。完整背景见
 [V4 卡片](models/deepseek4_zh-cn.md)与 [V4.1 卡片](models/deepseek41_zh-cn.md)。
 
@@ -217,7 +220,8 @@ V4.1 只有一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` 作为标量�
 | `TS_DSV4_DSPARK` | 仅 V4 | DSpark 草稿 GGUF，等价于 `--draft-model`。V4.1 会拒绝 V4 的草稿模型——它没有 DSpark 路径 | 未设置 | 否 |
 | `TS_DSV41_TP` | V4.1 | `0` 关闭；`2`–`8` 打开**实验性 routed-MoE 张量并行**，且必须与 `--tp` / `TS_DSV4_NGPU` 选中的 GPU 数一致。gate/up 沿 FFN 中间维切分，down 沿输入维切分，partial 经主机中转的 F32 缓冲归约。首次完整 Q2_K 实测比按层切分更慢 | `0` | 否 |
 | `TS_DSV41_ENGRAM_DEVICE` | V4.1 | `1` 要求 Engram 表驻留 GPU，放不下就失败；`0` 强制主机映射，需要与 CPU oracle 逐位一致时也用它。不设置则自动且保守：只要不会因此逼出路由专家的 CPU 卸载，就放在 GPU 上 | 自动（放得下就驻留 GPU） | 否 |
-| `TS_DSV41_ENGRAM_WARM` | V4.1，仅主机映射 | `1` 在加载时读入 Engram 表页。表在主机上时，八卡 A40 的 prefill 从 207–221 提升到 506–528 tok/s；在默认的 GPU 驻留路径上无意义。代价是约 60 GiB 主机页缓存与约 130 秒启动时间 | 关 | 否 |
+| `TS_DSV41_ENGRAM_WARM` | V4.1，仅主机映射 | 读入 Engram 表页，使查表变成一次内存读取而不是一次存储往返。未设置时在模型开始服务后于**后台**预热（默认）；`1` 与此前一致在加载期间同步预热；`0` 从不预热。八卡 A40、Q4_K_M 上 prefill 从 200–252 提升到 452–492 tok/s，decode 从 23–26 提升到 31–33 tok/s；在默认的 GPU 驻留路径上无意义。代价是表本身的主机页缓存（Q2_K 60 GiB，Q4_K_M 103 GiB） | 后台预热 | 否 |
+| `TS_DSV4_GRAPH_CACHE_HEADROOM_MB` | V4 与 V4.1 | 图缓存必须为下一张图留出的设备内存，叠加在它持有的最大条目之上。会逐个释放最久未使用的条目直到满足。`0` 回到纯条目数上限，而四个并发的 10.8k token prefill 曾因此耗尽显存 | `1024` | 否 |
 | `TS_DSV41_ENGRAM_THREADS` | V4.1，仅主机映射 | 常驻查表工作线程数，`1`–`32`。单个 token 在每张表上要取 24 行互不相关的数据，串行读意味着串行缺页 | min(16, 硬件线程数) | 否 |
 | `TS_DSV41_ENGRAM_RANDOM` | V4.1，Linux 上的主机映射 | 对映射的 Engram 区间给出随机访问建议。`0` 关闭，`1` 强制 | 自动 | 否 |
 | `TS_DSV41_ENGRAM_SIDECAR` | V4.1 | 显式指定已准备好的 `deepseek41.engram.bin`，而不是使用分片旁边那个 | 与 GGUF 同目录 | 否 |
@@ -226,6 +230,7 @@ V4.1 只有一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` 作为标量�
 | `TS_DSV41_ALLOW_NON_CUDA_GPU` | V4.1 | `1` 允许 `ggml_vulkan` / `ggml_metal`：普通计算图跑在 GPU 上，只有架构专属算子回退到 CPU 后端，每次都要一次主机往返。之所以需要显式开启，是因为它解除的那道拒绝原本挡住的是*静默*回退 | 关 | 否 |
 | `TS_DSV41_VISION_FA` / `TS_DSV41_VISION_BF16_GEMM` | V4.1 视觉伴随文件 | `TS_DSV41_VISION_FA=1` 让图像编码器使用 F16 中间量的 flash attention（真实图像上的特征差异更大）；`TS_DSV41_VISION_BF16_GEMM=0` 选择诊断用的 F32 提升矩阵路径 | 稠密 F32 注意力，BF16 GEMM + F32 累加 | 否 |
 | `TS_DSV41_TRACE_DIR` / `TS_DSV41_VISION_TRACE_DIR` | V4.1（诊断） | 文本计算图与视觉编码器的张量转储目录。两者都会保留中间张量并增加设备传输——跑基准时保持不设置 | 未设置 | 否 |
+| `TS_DSV4_CPU_TRACE_DIR` / `TS_DSV4_CUDA_TRACE_DIR` | V4.1（诊断） | 纯 C# 与 Direct CUDA V4.1 执行器的同类逐张量转储，文件命名与 `TS_DSV41_TRACE_DIR` 一致，因此可以在两个后端之间逐张量比对，定位第一个发散的张量 | 未设置 | 否 |
 
 ## 矩阵外的 GLM 5.x（`glm-dsa`）开关
 
@@ -315,6 +320,7 @@ TestMatrix 配置中 sweep。
 | 环境变量 | 适用范围 | 功能影响 | 运行时 baseline | Sweep 值 | 默认 sweep |
 |---|---|---|---|---|---|
 | `TS_PDF_MAX_PAGES` | PDF 文档输入（CLI `--pdf`、服务端 `/api/upload`） | 文本提取与页面图像渲染读取的 PDF 页数上限 | `0`（全部页面） | 未注册 | 否 |
+| `TS_GGUF_PREFAULT` / `TS_GGUF_PREFAULT_THREADS` | 模型加载，所有走 `GgufReader` 的架构 | `0` 跳过加载器读文件之前的并行页缓存预热；threads 变量设定它的并发流数。加载路径本身只用一到两条流读文件，因此冷加载被单流带宽卡住——在 MooseFS 卷上单流约 440 MB/s，8-16 流约 1.8 GB/s。该预热在 iOS 上、以及文件大于可用内存一半时会自行跳过，文件已在页缓存中时则是空操作 | 开，`min(16, 核心数)` | 未注册 | 否 |
 | `TS_DIRECT_QUANT_WEIGHTS` | `cpu` 后端上的 direct 视频网络（Wan、MiniMax-H3） | `0` 改回在加载时把每个量化权重一次性展开成 F32 再走普通 GEMM，而不是保持 GGUF 存储类型直接参与乘法。展开会占用 4 倍权重内存，每次前向也要多读 4 倍字节；保留该开关是为了在同一个二进制里 A/B 比较两者的数值漂移 | 启用（权重保持量化） | 未注册 | 否 |
 | `TS_DUMP_LOGITS` | 所有模型、所有后端 | 把**第一次真实前向**的 logits 以原始 float32 一次性写入该路径。它会刻意**跳过预热前向**：`WarmUpKernels` 在真实提示词之前会自己跑一次丢弃用的 decode 和 prefill，导出那几次等于在一个无意义的 token 上比较两个执行器，而不是在比较模型。这样就能用 logit 向量而不是生成文本来比较两个后端——贪心解码会把一次几乎打平的比分变成一句明显不同的话 | 未设置（不导出） | 未注册 | 否 |
 | `TS_FUSED_QKNORM_ROPE` | 直连 `cuda` 后端上的 Qwen 3.5 / 3.6 纯文本 prefill | 融合 QK-Norm + NeoX-RoPE CUDA 内核；`0` 回退到分离的 norm + RoPE 算子（多模态 MRoPE 与其他后端始终走分离路径） | 启用 | 未注册 | 否 |

@@ -29,6 +29,13 @@ uses Q2_K. The seven files total 264,514,761,248 bytes (246.35 GiB). Their
 [complete-file SHA-256 verification record](../validation/deepseek41/checkpoint-sha256.json)
 lists every filename, expected size, and matching digest.
 
+The same repository's eleven-part Q4_K_M release (415 GiB) is tested too, and
+the [quantization report](../validation/deepseek41-quants/README.md) records
+what changes with it: the two Engram tables grow to 51.5 GiB each, so they stay
+host mappings instead of going GPU-resident, and the routed experts need CPU
+offload on eight 46 GB cards. Everything below applies to either release, the
+Engram sidecar included.
+
 V4.1 also needs a small tokenizer-derived Engram sidecar. The published GGUF
 does not contain all of the causal encoder-decoder and Engram configuration.
 Some Engram keys use the older `deepseek4` prefix, and the tokenizer padding
@@ -343,13 +350,35 @@ bit.
 These options apply only when the tables stay on the host, which happens when
 the GPUs cannot hold them or `TS_DSV41_ENGRAM_DEVICE=0` is set.
 
-On network-backed storage, first access to sparse Engram rows can dominate
-prefill and decode latency. `TS_DSV41_ENGRAM_WARM=1` optionally reads the Engram table
-pages at model load. It reads only those tables, creates no private copy or
-pinned allocation, and leaves the pages evictable by the operating system.
-Warming is skipped with a diagnostic unless the mapped host weights plus
-8 GiB fit the detected host/cgroup memory allowance. Measure cold startup and
-warm inference separately.
+On network-backed storage, first access to sparse Engram rows dominates prefill
+and decode latency. Each token hashes 24 row ids per table, and a row that is
+not already page cache is one storage round trip: on the eight-A40 VM's
+network-mounted Q4_K_M checkpoint that is **1,435-2,565 ms of input preparation
+per 1024-token prefill chunk**, against 56-81 ms once the pages are resident.
+Decode input preparation is 5-15 ms a token cold and 0.9 ms warm.
+
+So **warming is the default** whenever the tables are host-mapped and the pages
+can stay resident. It runs on its own thread after the model is serving, not
+during load, so startup is unchanged and requests work (more slowly) while it
+proceeds; startup prints how much it is warming and prints again when it
+finishes. A model load reads the whole checkpoint through the page cache and
+evicts the previous run's Engram pages, which is why this has to happen after
+every load rather than once per machine.
+
+Warming reads only those tables, creates no private copy or pinned allocation,
+and leaves the pages evictable. It is skipped with a diagnostic when the mapped
+host weights plus 8 GiB do not fit the detected host/cgroup memory allowance, or
+when `MemAvailable` could not keep the tables cached anyway.
+
+| `TS_DSV41_ENGRAM_WARM` | behaviour |
+|---|---|
+| unset (default) | warm in the background once the model is serving |
+| `1` | warm synchronously during load, as before; startup takes ~110-210 s longer |
+| `0` | never warm |
+
+Sparse-read mapping advice (`MADV_RANDOM`) is applied only after warming
+finishes, whichever form it took: the advice turns off the readahead the warm
+pass depends on.
 
 `TS_DSV41_ENGRAM_THREADS=1..32` controls the persistent lookup workers;
 the default is the smaller of 16 and the hardware thread count. Both prefill
@@ -446,6 +475,61 @@ The default context allocation is capped at 65,536 tokens unless `MAX_CONTEXT`
 is supplied. `TS_DSV4_UBATCH` controls the forward microbatch, defaulting to 256
 for V4.1. A larger advertised model window does not establish that a particular
 GPU configuration can allocate or efficiently serve it.
+
+### Token-batched decode
+
+When several sequences decode at once, all of their tokens run in **one graph**
+instead of one graph each. A decode step is dominated by reading the weights
+(~9.8 GiB a token at Q4_K_M) and by the ~2,200 small kernels that read them, and
+batching pays both once: only the parts that touch a sequence's own state fork
+per slot, which for V4.1 means the sliding-window ring, the compressor state,
+the lightning indexer's selection and the attention itself. The Engram lookup
+needs no fork at all -- its staged rows are already one column per token, so a
+slot is just a column, hashed against that slot's own history.
+
+The saving is bounded by routing: each token picks its own 6 of 384 experts, so
+the routed-expert reads do not overlap between slots and only the dense
+projections, the shared expert and the output head are shared. Measured on eight
+A40s at Q4_K_M, aggregate decode throughput:
+
+| concurrent requests | serial decode | token-batched decode |
+|---:|---:|---:|
+| 1 | 22.8 | 28.9 |
+| 2 | 24.8 | 39.3 |
+| 4 | 24.3 | 48.9 |
+| 8 | 26.5 | 48.5 |
+
+Batching changes GEMM shapes, so a batched step and a solo step are not
+bit-identical and a near-tie in the logits can pick a different token. Solo
+decode repeated its own output on 6 of 6 greedy prompts; a batched step matched
+the solo text on 2-3 of 6. The same prompt run at batch width 2 and at batch
+width 4 — the same code path, only wider GEMMs — disagrees at the same rate, so
+what changes the output is which requests share a step, not the per-slot wiring.
+Set `TS_BATCHED_FUSED_DECODE=0` for a serial path and its determinism.
+
+Four concurrent 10,836-token documents, each hiding a different secret, were
+answered with 4/4 correct secrets and no answer containing another slot's
+secret, which is the check that the per-slot rings, compressed caches and sparse
+selections really are separate.
+
+### Device memory held back for the graph
+
+`TS_DSV4_VRAM_RESERVE_MB` overrides the per-device headroom the layer-split
+packer leaves unspent. The default prices the indexer's top-k transients, one
+microbatch of activations and a 2 GiB floor. Holding back too much is not free:
+on the eight-A40 VM at Q4_K_M, 5,240 MiB forced three layers of routed experts
+onto the host and 3,174 MiB needs one, worth 350 -> 480 prefill tok/s.
+
+The graph cache is bounded by bytes as well as by entry count. An entry's
+compute buffers scale with its shape, and concurrent sequences at different
+positions produce many distinct shapes: four concurrent 10.8k-token prefills
+used to fill all twelve entries and run a device out of memory, which is not a
+survivable error -- ggml's allocator frees a buffer before reallocating it, so a
+failed reserve leaves a null buffer behind and the process dies rather than the
+request failing. Least-recently-used entries are now freed before a new one is
+built, until every device has room for another entry as large as the largest one
+cached plus a floor. `TS_DSV4_GRAPH_CACHE_HEADROOM_MB` sets that floor (default
+1024); `0` restores the pure count cap.
 
 ### Load time
 
@@ -688,9 +772,19 @@ with a hardcoded `CUDA` until this path existed, which would have pulled a GPU
 into an explicitly CPU-only run; a backend with no ggml registry name is now
 refused by name instead of attempted.
 
-`--backend cpu` remains a different thing and stays refused: that is the pure
-C# executor (`DeepSeek4CpuExecutor`), which implements V4's graph, not V4.1's.
-`--backend cuda`, the direct-CUDA V4 engine, is refused for the same reason.
+`--backend cpu` is the pure C# executor (`DeepSeek4CpuExecutor`), which now
+implements V4.1's graph as well as V4's: the compressors at ratios 1 and 2, the
+shared compressed and indexer caches, candidate pruning, the Engram tables, the
+delayed hyper-connection gates and the trained cache quantization. It is held to
+`eng/dsv41-reference.py` at atol=rtol=2e-5 by
+`InferenceWeb.Tests.Dsv41CpuExecutorTests`, across one-shot prefill, chunk sizes
+1/3/5/8 and reset. Like `--backend ggml_cpu` it is a correctness and portability
+path, not a serving one.
+
+`--backend cuda`, the direct-CUDA engine, also runs V4.1 with its own kernels and
+no ggml. It is not yet held to a numerical gate — see
+[the CUDA backend notes](../validation/deepseek41-cuda-backend/README.md) for what
+has been verified and what blocks the rest. `--backend mlx` remains refused.
 
 ## Forward graph and state
 
@@ -812,13 +906,15 @@ original output limit retain precedence.
 
 ## Current limits and tensor-parallel work
 
-- `ggml_cuda` is the only backend for serving V4.1. `ggml_cpu` loads the same
+- `ggml_cuda` is the serving backend for V4.1. `ggml_cpu` loads the same
   native graph on its scalar CPU implementations, as a correctness and
   portability path with no measured throughput; see
-  [Running on the ggml CPU backend](#running-on-the-ggml-cpu-backend). Every
-  other backend — including `cpu` and `cuda`, whose executors implement V4 —
-  fails before the weights are read, rather than loading V4.1 weights into a
-  V4 graph.
+  [Running on the ggml CPU backend](#running-on-the-ggml-cpu-backend). `cpu`
+  runs a pure-C# V4.1 executor checked against the PyTorch reference at
+  2e-5, and `cuda` runs V4.1 through the direct-CUDA engine's own kernels,
+  which has no numerical gate yet; both are correctness and portability paths
+  rather than serving ones. `mlx` fails before the weights are read, rather
+  than loading V4.1 weights into a graph that does not implement it.
 - Multi-GPU execution defaults to whole-layer placement. `TS_DSV41_TP` enables
   experimental routed-MoE tensor parallelism with host-staged reduction.
   Attention tensor parallelism and distributed groups are not implemented.

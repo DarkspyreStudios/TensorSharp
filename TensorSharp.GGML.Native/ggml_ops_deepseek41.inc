@@ -247,3 +247,205 @@ ggml_tensor * build_attention_v41(int il, ggml_tensor * cur, ggml_tensor * pos)
     trace_v41(result, il, "attn_output");
     return result;
 }
+
+// ---------------------------------------------------------------------------
+// Token-batched multi-slot decode (V4.1)
+//
+// One decode token for each of N sequence slots in a single graph. The weights
+// are what makes a decode step expensive -- ~9.8 GiB is read per token at
+// Q4_K_M, and the step is also dominated by ~2,200 small kernels -- and both
+// costs are paid ONCE here instead of once per sequence. Only the parts that
+// touch a sequence's own state fork per slot: the sliding-window ring, the
+// compressor state, the indexer selection and the attention itself.
+//
+// Everything a slot forks reads the SHARED batched projections, so the
+// compressor index inputs address this step's column for their slot; the host
+// fill offsets them (see dsv4_forward_batched_decode).
+// ---------------------------------------------------------------------------
+
+// Published per slot by the index-source layer and consumed by the layers that
+// share its cache, exactly as v41_shared_top/mask/candidates do for one slot.
+ggml_tensor * v41_bd_shared_mask[DSV4_MAX_BATCHED_SLOTS] = {};
+ggml_tensor * v41_bd_shared_top[DSV4_MAX_BATCHED_SLOTS] = {};
+ggml_tensor * v41_bd_candidates[DSV4_MAX_BATCHED_SLOTS] = {};
+
+ggml_tensor * build_attention_v41_batched(int il, ggml_tensor * cur, ggml_tensor * inp_pos)
+{
+    const auto & L = m.layers[il];
+    const int dev = L.device, ratio = hp.compress_ratios[il];
+    const int64_t head = hp.n_embd_head;
+    const int64_t N = nt;
+
+    // ---- dense prologue, batched over the N slots' tokens ----
+    ggml_tensor * qr = rms(ggml_mul_mat(ctx, L.wq_a, cur), L.attn_q_a_norm);
+    ggml_tensor * q_all = v41_rope(
+        ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wq_b, qr), head, hp.n_head, N), inp_pos, il);
+    ggml_tensor * kv_all = rms(ggml_mul_mat(ctx, L.wkv, cur), L.attn_kv_norm);
+    kv_all = v41_quant(v41_rope(ggml_reshape_3d(ctx, kv_all, head, 1, N), inp_pos, il), 0, dev);
+    ggml_tensor * kv_flat = ggml_reshape_2d(ctx, kv_all, head, N);
+
+    // Compressor and indexer-query projections are weight-heavy too, so they
+    // are shared as well; only their state reads/writes fork below.
+    ggml_tensor * comp_kv = nullptr, * comp_score = nullptr, * comp_latent = nullptr;
+    if (ratio && L.kv_source == il)
+    {
+        comp_kv = ggml_mul_mat(ctx, L.attn_comp_wkv, cur);
+        if (ratio == 1) comp_latent = rms(comp_kv, L.attn_comp_norm);
+        else comp_score = ggml_mul_mat(ctx, L.attn_comp_wgate, cur);
+    }
+    ggml_tensor * iq_all = nullptr, * iw_all = nullptr;
+    const bool index_here = ratio && L.index_source == il;
+    if (index_here)
+    {
+        iq_all = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.indexer_attn_q_b, qr),
+            hp.indexer_head_size, hp.indexer_n_head, N);
+        iq_all = v41_quant(v41_rope(iq_all, inp_pos, il), 1, dev);
+        iw_all = ggml_scale(ctx, ggml_mul_mat(ctx, L.indexer_proj, cur),
+            1.0f / sqrtf((float) (hp.indexer_head_size * hp.indexer_n_head)));
+    }
+
+    ggml_tensor * attn_cat = nullptr;
+    for (int64_t i = 0; i < N; i++)
+    {
+        bd_slot_state & B = res.bd[i];
+        const dsv4_slot_layer & C = m.slots.at(B.slot_id)->layers[il];
+        ggml_tensor * pos_i = ggml_view_1d(ctx, inp_pos, 1, i * sizeof(int32_t));
+        const plan_inputs & pi = ratio == 1 ? B.v41_hca[dev] : B.v41_csa[dev];
+        const comp_plan & plan = ratio == 1 ? B.plan_hca : B.plan_csa;
+
+        // sliding-window ring write for this slot's single token. A single
+        // column of a contiguous [head, N] tensor is itself contiguous, so
+        // this is a relabelling, not a copy.
+        ggml_tensor * kv_i = ggml_view_2d(ctx, kv_flat, head, 1, kv_flat->nb[1], i * kv_flat->nb[1]);
+        ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.raw_k, kv_i, B.raw_idxs[dev]));
+        ggml_tensor * k = ggml_reshape_3d(ctx, C.raw_k, head, 1, m.ring_raw);
+        ggml_tensor * mask = B.raw_mask[dev];
+
+        if (ratio)
+        {
+            const dsv4_slot_layer & source = m.slots.at(B.slot_id)->layers[L.kv_source];
+            if (L.kv_source == il)
+            {
+                ggml_tensor * latent = nullptr;
+                if (ratio == 1)
+                {
+                    latent = ggml_cont(ctx, ggml_view_2d(ctx, comp_latent, head, 1,
+                        comp_latent->nb[1], i * comp_latent->nb[1]));
+                }
+                else
+                {
+                    // The same pooled-compression arithmetic v41_compress runs
+                    // for one sequence. Narrowing the shared projections to this
+                    // slot's single column first keeps the plan's index space
+                    // identical to the single-sequence one: the concatenated row
+                    // space is still [state ring | zero row | one ubatch column].
+                    ggml_tensor * kv_col = ggml_cont(ctx,
+                        ggml_view_2d(ctx, comp_kv, head, 1, comp_kv->nb[1], i * comp_kv->nb[1]));
+                    ggml_tensor * score_col = ggml_cont(ctx,
+                        ggml_view_2d(ctx, comp_score, head, 1, comp_score->nb[1], i * comp_score->nb[1]));
+                    if (pi.write_idxs)
+                    {
+                        const int64_t n = plan.state_write_idxs.size();
+                        ggml_tensor * all_kv = ggml_concat(ctx, C.comp_state_kv, kv_col, 1);
+                        ggml_tensor * all_score = ggml_concat(ctx, C.comp_state_score, score_col, 1);
+                        ggml_tensor * values = ggml_reshape_3d(ctx, ggml_get_rows(ctx, all_kv, pi.read_idxs), head, ratio, n);
+                        ggml_tensor * scores = ggml_reshape_3d(ctx, ggml_get_rows(ctx, all_score, pi.read_idxs), head, ratio, n);
+                        values = ggml_cont(ctx, ggml_permute(ctx, values, 1, 0, 2, 3));
+                        scores = ggml_cont(ctx, ggml_permute(ctx, scores, 1, 0, 2, 3));
+                        latent = ggml_sum_rows(ctx, ggml_mul(ctx, values, ggml_soft_max(ctx, scores)));
+                        latent = ggml_cont(ctx, ggml_permute(ctx, latent, 1, 0, 2, 3));
+                        latent = rms(ggml_reshape_2d(ctx, latent, head, n), L.attn_comp_norm);
+                        // Read the old tail before overwriting it below.
+                        ggml_build_forward_expand(gf, latent);
+                    }
+                    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.comp_state_kv,
+                        ggml_get_rows(ctx, kv_col, pi.persist_src), pi.persist_dst));
+                    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.comp_state_score,
+                        ggml_get_rows(ctx, score_col, pi.persist_src), pi.persist_dst));
+                }
+                if (latent)
+                {
+                    const int64_t n = latent->ne[1];
+                    ggml_tensor * ik = rms(ggml_mul_mat(ctx, L.indexer_k, latent), L.indexer_k_norm);
+                    ik = v41_quant(v41_rope(ggml_reshape_3d(ctx, ik, hp.indexer_head_size, 1, n), pi.write_pos, il), 1, dev);
+                    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.lid_k,
+                        ggml_reshape_2d(ctx, ik, hp.indexer_head_size, n), pi.write_idxs));
+                    ggml_tensor * ck = v41_quant(v41_rope(ggml_reshape_3d(ctx, latent, head, 1, n), pi.write_pos, il), 2, dev);
+                    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.csa_k,
+                        ggml_reshape_2d(ctx, ck, head, n), pi.write_idxs));
+                }
+            }
+
+            if (index_here && plan.n_kv <= hp.indexer_top_k)
+            {
+                v41_bd_shared_mask[i] = pi.kq_mask;
+                v41_bd_shared_top[i] = nullptr;
+            }
+            else if (index_here)
+            {
+                ggml_tensor * iq = ggml_view_3d(ctx, iq_all, hp.indexer_head_size, hp.indexer_n_head, 1,
+                    iq_all->nb[1], iq_all->nb[2], i * iq_all->nb[2]);
+                ggml_tensor * iw = ggml_view_2d(ctx, iw_all, iw_all->ne[0], 1, iw_all->nb[1], i * iw_all->nb[1]);
+                ggml_tensor * ik = ggml_view_2d(ctx, source.lid_k, hp.indexer_head_size, plan.n_kv, source.lid_k->nb[1], 0);
+                ik = ggml_reshape_3d(ctx, ik, hp.indexer_head_size, 1, plan.n_kv);
+                ggml_tensor * imask = pi.kq_mask;
+                if (v41_bd_candidates[i] && il > hp.candidate_source)
+                    imask = ggml_add(ctx, imask, v41_bd_candidates[i]);
+                ggml_tensor * scores = ggml_lightning_indexer(ctx, iq, ik, iw, imask);
+                if (il == hp.candidate_source && plan.n_kv > (int64_t) hp.candidate_topk * hp.candidate_block)
+                {
+                    ggml_tensor * blocks = fused_node(TSG_DSV41_CANDIDATE_SCORES, GGML_TYPE_F32,
+                        (plan.n_kv + hp.candidate_block - 1) / hp.candidate_block, 1, 1, 1,
+                        { scores, pos_i }, dev, hp.candidate_block);
+                    ggml_tensor * chosen = ggml_cont(ctx, ggml_top_k(ctx, blocks, std::min<int64_t>(hp.candidate_topk, blocks->ne[0])));
+                    v41_bd_candidates[i] = fused_node(TSG_DSV41_CANDIDATE_MASK, GGML_TYPE_F16,
+                        plan.n_kv, 1, 1, 1, { blocks, chosen }, dev, hp.candidate_block);
+                }
+                ggml_tensor * top = ggml_cont(ctx, ggml_top_k(ctx, scores, std::min<int64_t>(hp.indexer_top_k, plan.n_kv)));
+                v41_bd_shared_top[i] = top;
+                v41_bd_shared_mask[i] = B.gather_mask[dev] ? nullptr : build_top_k_mask(pi.kq_mask, top);
+            }
+
+            if (B.gather_mask[dev])
+            {
+                if (!v41_bd_shared_top[i] || v41_bd_shared_top[i]->ne[0] != hp.indexer_top_k)
+                    throw std::runtime_error("V4.1 index source has not published a complete sparse selection");
+                const int source_dev = m.layers[L.kv_source].device;
+                ggml_tensor * raw = C.raw_k;
+                int64_t raw_rows = m.ring_raw;
+                if (B.raw_read_idxs[dev])
+                {
+                    raw_rows = B.raw_read_idxs[dev]->ne[0];
+                    raw = fused_node(TSG_DSV4_FUSED_KGATHER, GGML_TYPE_F16,
+                        head, 1, raw_rows, 1,
+                        { C.raw_k, C.raw_k, B.raw_read_idxs[dev] }, dev, 0);
+                }
+                k = fused_node(TSG_DSV4_FUSED_KGATHER, GGML_TYPE_F16,
+                    head, 1, raw_rows + hp.indexer_top_k, 1,
+                    { raw, source.csa_k, v41_bd_shared_top[i] }, source_dev, (int) raw_rows);
+                mask = B.gather_mask[dev];
+            }
+            else
+            {
+                if (!v41_bd_shared_mask[i]) throw std::runtime_error("V4.1 index source has not published its selection");
+                ggml_tensor * compressed = ggml_view_2d(ctx, source.csa_k, head, plan.n_kv, source.csa_k->nb[1], 0);
+                compressed = ggml_reshape_3d(ctx, compressed, head, 1, plan.n_kv);
+                k = ggml_concat(ctx, k, compressed, 2);
+                mask = ggml_concat(ctx, mask, v41_bd_shared_mask[i], 0);
+            }
+        }
+
+        ggml_tensor * q = ggml_view_3d(ctx, q_all, head, hp.n_head, 1, q_all->nb[1], q_all->nb[2], i * q_all->nb[2]);
+        if (ggml_backend_is_cpu(m.backends[dev])) k = ggml_cast(ctx, k, GGML_TYPE_F32);
+        ggml_tensor * out = attn_mha(q, k, mask, L.attn_sinks, 1.0f / sqrtf((float) head), dev);
+        attn_cat = attn_cat ? ggml_concat(ctx, attn_cat, out, 1) : out;   // [head*n_head, N]
+    }
+
+    // ---- batched epilogue: inverse rope + grouped LoRA out (weights once) ----
+    ggml_tensor * out = v41_rope(ggml_reshape_3d(ctx, attn_cat, head, hp.n_head, N), inp_pos, il, true);
+    const int64_t group_dim = hp.n_head / hp.o_groups * head;
+    ggml_tensor * grouped = ggml_permute(ctx, ggml_reshape_3d(ctx, out, group_dim, hp.o_groups, N), 0, 2, 1, 3);
+    ggml_tensor * oa = ggml_mul_mat(ctx, ggml_reshape_3d(ctx, L.wo_a, L.wo_a->ne[0], hp.o_lora_rank, hp.o_groups), grouped);
+    oa = ggml_cont_2d(ctx, ggml_permute(ctx, oa, 0, 2, 1, 3), hp.o_lora_rank * hp.o_groups, N);
+    return ggml_mul_mat(ctx, L.wo_b, oa);
+}

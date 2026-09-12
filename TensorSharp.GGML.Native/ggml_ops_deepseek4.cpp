@@ -73,6 +73,9 @@
 namespace tsg_dsv4
 {
 
+// The token-batched decode entry point caps a step at this many sequences; the
+// per-slot attention forks are its only O(n) graph cost.
+static constexpr int DSV4_MAX_BATCHED_SLOTS = 16;
 static constexpr int64_t CSA_RATIO = 4;
 static constexpr int64_t HCA_RATIO = 128;
 static constexpr int     MAX_GPUS  = 8;
@@ -297,6 +300,20 @@ struct dsv41_slot_write_guard
     ~dsv41_slot_write_guard() { if (slot && started && !complete) slot->v41_failed = true; }
 };
 
+// The token-batched decode path mutates every participating slot's Engram
+// history before the graph runs, so a failure anywhere latches all of them:
+// their histories have advanced past caches that were never written.
+struct dsv41_batched_write_guard
+{
+    std::vector<dsv4_slot *> slots;
+    bool complete = false;
+    ~dsv41_batched_write_guard()
+    {
+        if (complete) return;
+        for (auto * slot : slots) if (slot) slot->v41_failed = true;
+    }
+};
+
 #if defined(TSG_GGML_TEST_HOOKS)
 // Faults occur after real mutation, so regression tests exercise recovery from
 // partial history/cache updates. Release builds do not contain these hooks.
@@ -400,6 +417,17 @@ struct bd_slot_state
     ggml_tensor * csa_meta[MAX_GPUS + 1] = {};    // I32 comp meta
     ggml_tensor * lid_meta[MAX_GPUS + 1] = {};
     ggml_tensor * hca_meta[MAX_GPUS + 1] = {};
+    // V4.1 batched decode: this slot's compressor index inputs. V4.1 keeps the
+    // unfused compressor (explicit get_rows/set_rows), so each slot needs its
+    // own index tensors rather than the packed meta the V4 fused path uses.
+    // Their read/persist indices address the SHARED batched projection, so the
+    // fill offsets every current-ubatch index by this slot's column.
+    plan_inputs v41_csa[MAX_GPUS + 1];
+    plan_inputs v41_hca[MAX_GPUS + 1];
+    plan_inputs v41_lid[MAX_GPUS + 1];
+    ggml_tensor * raw_read_idxs[MAX_GPUS + 1] = {};  // I32 [padded SWA] compact raw gather
+    bool use_gather = false;         // this slot's sparse-selection decision
+    bool compact_raw = false;        // ... and whether its raw prefix is compacted
 };
 
 struct graph_build_result
@@ -432,6 +460,9 @@ struct graph_build_result
     // per-device completion events of this entry's last pipelined use; input
     // refills wait on these instead of a full pipeline drain
     ggml_backend_event_t use_events[MAX_GPUS] = {};
+    // this entry's own compute buffers, per device, recorded once it is
+    // allocated. The cache is trimmed against these, not against a count.
+    size_t buffer_bytes[MAX_GPUS] = {};
 
     ~graph_build_result()
     {
@@ -467,6 +498,13 @@ struct dsv4_model
     // ggml get_rows, instead of being read and dequantized on the host. Set at
     // load once the placement is known to fit; see dsv4_load.
     bool engram_on_device = false;
+    // Host-resident tables are read a few scattered rows per token, so every
+    // row that is not already page cache is a storage round trip. Warming the
+    // mapping turns that into a RAM read. It costs minutes on a network
+    // filesystem, so the automatic form runs AFTER load on its own thread and
+    // the model stays usable (slower) while it proceeds.
+    std::thread engram_warm_thread;
+    std::atomic<bool> engram_warm_stop{false};
     std::unique_ptr<tsg_dsv41_tp::executor> moe_tp;
     std::unique_ptr<dsv41_vision_attachment> vision;
 
@@ -595,6 +633,8 @@ struct dsv4_model
 
     ~dsv4_model()
     {
+        engram_warm_stop.store(true, std::memory_order_relaxed);
+        if (engram_warm_thread.joinable()) engram_warm_thread.join();
         graph_cache.clear();
         engram_io.reset();
         moe_tp.reset();
@@ -844,6 +884,32 @@ static size_t dsv4_host_mem_allowance()
     return limit;
 }
 
+// How much memory the host can still hand out without evicting something it is
+// using, in the same units as dsv4_host_mem_allowance(). Reclaimable page cache
+// counts, which is what makes this the right test for "can this mapping stay
+// resident": the Engram pages a warm pass faults in ARE page cache. Returns 0
+// when the platform does not report it, meaning "unknown, do not block on it".
+static size_t dsv4_host_mem_available()
+{
+#ifdef __linux__
+    if (FILE * f = fopen("/proc/meminfo", "r"))
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), f))
+        {
+            long long kb = 0;
+            if (sscanf(line, "MemAvailable: %lld kB", &kb) == 1 && kb > 0)
+            {
+                fclose(f);
+                return (size_t) kb * 1024ull;
+            }
+        }
+        fclose(f);
+    }
+#endif
+    return 0;
+}
+
 // Map shard `si` read-only and wrap the mapping in a CPU-backend buffer so
 // host-resident weights can point straight into the file. Returns the buffer
 // (cached in m.mmap_bufs) or null; every failure is non-fatal — the caller
@@ -1083,11 +1149,28 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
                 break;
             }
             ggml_backend_tensor_set(j.t, staging.data(), j.tensor_off, j.len);
-#if !defined(_WIN32)
             // After the device has it, this range is dead weight in the page
             // cache. Dropping it keeps the reader threads out of reclaim.
-            if (drop_cache) posix_fadvise(fileno(f), (off_t) j.file_off, (off_t) j.len, POSIX_FADV_DONTNEED);
+            // Only Linux can drop one range: macOS has no POSIX_FADV_DONTNEED
+            // (the header does not even declare it, so the old !_WIN32 guard
+            // did not compile there) and offers whole-descriptor F_NOCACHE
+            // instead. Anywhere else the request has no effect and says so.
+            if (drop_cache)
+            {
+#if defined(__linux__)
+                posix_fadvise(fileno(f), (off_t) j.file_off, (off_t) j.len, POSIX_FADV_DONTNEED);
+#elif defined(__APPLE__)
+                // Idempotent and per-descriptor: from here this handle's reads
+                // bypass the page cache entirely.
+                fcntl(fileno(f), F_NOCACHE, 1);
+#else
+                static std::once_flag warned;
+                std::call_once(warned, []() {
+                    fprintf(stderr, "[dsv4] TS_DSV4_LOAD_DROP_CACHE has no effect on this platform; "
+                                    "the checkpoint's pages stay in the page cache\n");
+                });
 #endif
+            }
             if (perf)
             {
                 auto t_set1 = std::chrono::steady_clock::now();
@@ -1995,18 +2078,27 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         // workspace, and the hidden activations of one ubatch across the streams.
         // TS_DSV4_VRAM_RESERVE_MB still overrides, including downward.
         const int64_t comp_rows = m->n_ctx / (hp.v41 ? 1 : CSA_RATIO) + 1;
-        // The factor on the indexer term is deliberately generous. CUB's segmented
-        // argsort workspace is not a published function of the input, the graph
-        // has other transients that scale with the ubatch (the MoE staging for
-        // 384 experts, the attention over 512-wide heads), and holding back too
-        // much VRAM costs a --n-cpu-moe suggestion the loader prints by name --
-        // while holding back too little costs an abort in the middle of a
-        // request, after the model has loaded and answered.
+        // The factor on the indexer term used to be 4, because the reserve also
+        // had to cover a graph cache capped by ENTRY COUNT: twelve prefill
+        // graphs of a few hundred MiB each is more than any headroom.
+        // dsv4_trim_graph_cache now bounds that cache by bytes, so the reserve
+        // covers one graph's compute buffers plus the run-time transients that
+        // never pass through a graph buffer (ggml-cuda takes CUB's segmented
+        // argsort workspace straight from the VMM pool).
+        //
+        // Measured on the eight-A40 VM, Q4_K_M, ubatch 1024, 64k context: the
+        // largest graph's compute buffers were 1,336 MiB on a device (1.7x the
+        // indexer term), and a 57,424-token prefill peaked with 1,522 MiB still
+        // free on the tightest device against a 3,072 MiB reserve. 1.25 lands
+        // just above that, and holding back more costs routed-expert offload --
+        // 5,240 MiB forced three CPU-MoE layers where 3,174 MiB needs one, worth
+        // 350 -> 480 prefill tok/s. TS_DSV4_VRAM_RESERVE_MB still overrides,
+        // including upward for a rig that wants more margin.
         const double idx_mb = (double) m->n_ubatch * comp_rows * 4.0 * 3.0 / (1024.0 * 1024.0);
         const double act_mb = (double) m->n_ubatch * hp.n_embd * 4.0 * (hp.hc_mult + 2) / (1024.0 * 1024.0);
-        size_t reserve_mb = (size_t) std::max(2048.0, 4.0 * idx_mb + act_mb + 2048.0);
+        size_t reserve_mb = (size_t) std::max(2048.0, 1.25 * idx_mb + act_mb + 2048.0);
         if (const char * e = getenv("TS_DSV4_VRAM_RESERVE_MB")) { long v = atol(e); if (v >= 0) reserve_mb = (size_t) v; }
-        fprintf(stderr, "[dsv4] VRAM reserve: %zu MiB per device (indexer %.0f x4 + activations %.0f + 2048 headroom)\n",
+        fprintf(stderr, "[dsv4] VRAM reserve: %zu MiB per device (indexer %.0f x1.25 + activations %.0f + 2048 headroom)\n",
                 reserve_mb, idx_mb, act_mb);
         // Per-device residents the split does not attribute to any layer.
         size_t per_dev_fixed = 0;
@@ -2893,43 +2985,29 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 
     if (hp.v41)
     {
-        const char * warm = m->engram_on_device ? nullptr : getenv("TS_DSV41_ENGRAM_WARM");
-        if (warm && atoi(warm) != 0)
+        // Sparse-read advice turns off the kernel's readahead, which is exactly
+        // what a whole-table warm pass depends on, so this runs only once the
+        // warming (synchronous or background) is finished. Never alter another
+        // host tensor's entire shard, or an allocation that is not one of our
+        // mmaps.
+        dsv4_model * const model_ptr = m.get();
+        auto apply_engram_advice = [model_ptr, engram_random_advice, engram_random_override]()
         {
-            size_t bytes = 0;
-            for (const auto & layout : m->engram.layers) bytes += ggml_nbytes(m->layers[layout.id].engram_embd);
-            const size_t allowance = dsv4_host_mem_allowance();
-            const size_t resident = std::max(bytes, m->mmap_weight_bytes);
-            if (allowance && (resident > allowance || allowance - resident < (size_t) 8 * 1024 * 1024 * 1024))
-                fprintf(stderr, "[dsv41] Engram warming skipped: host allowance lacks 8 GiB headroom\n");
-            else
+            if (!engram_random_advice)
             {
-                const auto start = std::chrono::steady_clock::now();
-                fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages with %u I/O threads...\n",
-                    bytes / 1073741824.0, m->engram_io->threads());
-                for (const auto & layout : m->engram.layers)
-                {
-                    auto * table = m->layers[layout.id].engram_embd;
-                    m->engram_io->warm(table->data, ggml_nbytes(table));
-                }
-                fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (%u I/O threads)\n",
-                    bytes / 1073741824.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
-                    m->engram_io->threads());
+                if (!model_ptr->engram_on_device)
+                    fprintf(stderr, "[dsv41] Engram mmap advice: default (%s)\n",
+                        engram_random_override ? "override=0" : "automatic: one I/O thread");
+                return;
             }
-        }
-        // Apply sparse-read advice only after optional whole-table warming,
-        // which benefits from sequential readahead. Never alter another host
-        // tensor's entire shard, or an allocation that is not one of our mmaps.
-        if (engram_random_advice)
-        {
             size_t accepted = 0, unsupported = 0, skipped = 0, failed = 0;
-            for (const auto & layout : m->engram.layers)
+            for (const auto & layout : model_ptr->engram.layers)
             {
-                const auto * table = m->layers[layout.id].engram_embd;
-                const auto found = std::find(m->mmap_bufs.begin(), m->mmap_bufs.end(), table->buffer);
-                if (!table->buffer || found == m->mmap_bufs.end()) { ++skipped; continue; }
-                const size_t index = size_t(found - m->mmap_bufs.begin());
-                const auto result = tsg_dsv41::advise_engram_random(m->mmap_addrs[index], m->mmap_sizes[index],
+                const auto * table = model_ptr->layers[layout.id].engram_embd;
+                const auto found = std::find(model_ptr->mmap_bufs.begin(), model_ptr->mmap_bufs.end(), table->buffer);
+                if (!table->buffer || found == model_ptr->mmap_bufs.end()) { ++skipped; continue; }
+                const size_t index = size_t(found - model_ptr->mmap_bufs.begin());
+                const auto result = tsg_dsv41::advise_engram_random(model_ptr->mmap_addrs[index], model_ptr->mmap_sizes[index],
                     table->data, ggml_nbytes(table));
                 if (result.status == tsg_dsv41::mapped_advice_status::applied) ++accepted;
                 else if (result.status == tsg_dsv41::mapped_advice_status::unsupported) ++unsupported;
@@ -2943,10 +3021,110 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             }
             fprintf(stderr, "[dsv41] Engram mmap advice: RANDOM (%s; accepted=%zu, unsupported=%zu, skipped=%zu, failed=%zu)\n",
                 engram_random_override ? "override=1" : "automatic: parallel I/O", accepted, unsupported, skipped, failed);
+        };
+        bool advice_deferred = false;
+
+        // A host-resident Engram table is read 24 scattered rows per token per
+        // table. Each row that is not page cache is one storage round trip, and
+        // on a network filesystem that is ~1 ms: input preparation for a
+        // 1024-token prefill chunk measured 1.44 s cold against 0.04-0.09 s
+        // warm on the eight-A40 VM's Q4_K_M checkpoint (prefill 201-255 ->
+        // 363-381 tok/s, decode 23-24 -> 29 tok/s).
+        //
+        // So warming is the default whenever the pages can actually STAY
+        // resident. It is minutes of I/O, so the automatic form runs on its own
+        // thread after the model is serving rather than holding up load;
+        // TS_DSV41_ENGRAM_WARM=1 keeps the documented synchronous behaviour and
+        // =0 turns warming off.
+        const char * warm_opt = m->engram_on_device ? nullptr : getenv("TS_DSV41_ENGRAM_WARM");
+        const int warm_mode = m->engram_on_device ? 0 : (warm_opt ? atoi(warm_opt) : -1);
+        if (warm_mode != 0)
+        {
+            size_t bytes = 0;
+            for (const auto & layout : m->engram.layers) bytes += ggml_nbytes(m->layers[layout.id].engram_embd);
+            const size_t headroom = (size_t) 8 * 1024 * 1024 * 1024;
+            const size_t allowance = dsv4_host_mem_allowance();
+            const size_t resident = std::max(bytes, m->mmap_weight_bytes);
+            const char * refused = nullptr;
+            if (allowance && (resident > allowance || allowance - resident < headroom))
+                refused = "host allowance lacks 8 GiB headroom";
+            else if (warm_mode < 0)
+            {
+                // Automatic only: an explicit =1 is the operator's call. Warming
+                // pages that the host will immediately evict costs the I/O and
+                // buys nothing, so require room for the whole table set now.
+                const size_t available = dsv4_host_mem_available();
+                if (available && available < bytes + headroom)
+                    refused = "free host memory would not keep the tables cached";
+            }
+
+            if (refused)
+            {
+                fprintf(stderr, "[dsv41] Engram warming skipped: %s\n", refused);
+            }
+            else if (warm_mode > 0)
+            {
+                const auto start = std::chrono::steady_clock::now();
+                fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages with %u I/O threads...\n",
+                    bytes / 1073741824.0, m->engram_io->threads());
+                for (const auto & layout : m->engram.layers)
+                {
+                    auto * table = m->layers[layout.id].engram_embd;
+                    m->engram_io->warm(table->data, ggml_nbytes(table));
+                }
+                fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (%u I/O threads)\n",
+                    bytes / 1073741824.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                    m->engram_io->threads());
+            }
+            else
+            {
+                // Its own pool, not m->engram_io: that one is what per-token
+                // lookups run on, and a warming submission holds it for the
+                // length of a slice.
+                std::vector<std::pair<void *, size_t>> ranges;
+                for (const auto & layout : m->engram.layers)
+                {
+                    auto * table = m->layers[layout.id].engram_embd;
+                    ranges.emplace_back(table->data, ggml_nbytes(table));
+                }
+                const unsigned warm_threads = std::min<unsigned>(16u, m->engram_io->threads());
+                fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages in the background with %u I/O threads; "
+                    "requests run at page-cache speed once it finishes (TS_DSV41_ENGRAM_WARM=0 disables)\n",
+                    bytes / 1073741824.0, warm_threads);
+                dsv4_model * model = model_ptr;
+                advice_deferred = true;
+                m->engram_warm_thread = std::thread([model, ranges, bytes, warm_threads, apply_engram_advice]() {
+                    try
+                    {
+                        const auto start = std::chrono::steady_clock::now();
+                        tsg_dsv41::engram_io_pool pool(warm_threads);
+                        // Slices keep the stop flag responsive: a model freed
+                        // mid-warm waits at most one slice, not one table.
+                        constexpr size_t slice = (size_t) 1024 * 1024 * 1024;
+                        for (const auto & range : ranges)
+                        {
+                            for (size_t off = 0; off < range.second; off += slice)
+                            {
+                                if (model->engram_warm_stop.load(std::memory_order_relaxed)) return;
+                                pool.warm((const char *) range.first + off, std::min(slice, range.second - off));
+                            }
+                        }
+                        fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (background, %u I/O threads)\n",
+                            bytes / 1073741824.0,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                            warm_threads);
+                    }
+                    catch (const std::exception & e)
+                    {
+                        fprintf(stderr, "[dsv41] background Engram warming stopped: %s\n", e.what());
+                    }
+                    // Readahead is no longer wanted: from here the table is read
+                    // a few scattered rows at a time.
+                    apply_engram_advice();
+                });
+            }
         }
-        else if (!m->engram_on_device)
-            fprintf(stderr, "[dsv41] Engram mmap advice: default (%s)\n",
-                engram_random_override ? "override=0" : "automatic: one I/O thread");
+        if (!advice_deferred) apply_engram_advice();
     }
 
     // primary sequence slot (slot 0) — the CLI / single-stream cache
@@ -3862,7 +4040,7 @@ struct graph_builder
             // Dense tiles reuse K/V across prefill queries more efficiently
             // at short contexts. Preserve that path below the measured
             // crossover; upstream also checks device/kernel eligibility.
-            if (sparse_fa && atoi(sparse_fa) != 0 && (nt == 1 || n_kv >= 16384))
+            if (sparse_fa && atoi(sparse_fa) != 0 && (q->ne[2] == 1 || n_kv >= 16384))
                 ggml_flash_attn_ext_set_n_kv_max(cur, hp.n_swa + hp.indexer_top_k);
             if (device >= 0) pin(cur, device);
             cur = ggml_reshape_2d(ctx, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
@@ -4600,6 +4778,157 @@ struct graph_builder
             + 2 * plan.state_persist_src_idxs.size();
     }
 
+    // V4.1 token-batched decode: the same layer stack as build(), with one
+    // decode token per sequence slot. Everything except the per-slot attention
+    // fork is shared, including the Engram lookup (its staged rows are already
+    // one column per token, so a slot is just a column) and the whole MoE.
+    void build_batched_v41()
+    {
+        graph_inputs & inp = res.inp;
+        const int64_t N = nt;
+
+        bool dev_used[MAX_GPUS + 1] = {};
+        for (int il = 0; il < hp.n_layer; il++) dev_used[m.layers[il].device] = true;
+        const int dev_last = m.layers[hp.n_layer - 1].device;
+
+        auto make_slot_plan_inputs = [&](plan_inputs & pi, const comp_plan & plan,
+                                         const char * tag, size_t slot, int d)
+        {
+            char nb[128];
+            pi.n_kv = plan.n_kv;
+            snprintf(nb, sizeof(nb), "bd%zu_%s_persist_src.%d", slot, tag, d);
+            pi.persist_src = new_input_i32(plan.state_persist_src_idxs.size(), nb, d);
+            snprintf(nb, sizeof(nb), "bd%zu_%s_persist_dst.%d", slot, tag, d);
+            pi.persist_dst = new_input_i64(plan.state_persist_dst_idxs.size(), nb, d);
+            if (!plan.state_write_idxs.empty())
+            {
+                snprintf(nb, sizeof(nb), "bd%zu_%s_read_idxs.%d", slot, tag, d);
+                pi.read_idxs = new_input_i32(plan.state_read_idxs.size(), nb, d);
+                snprintf(nb, sizeof(nb), "bd%zu_%s_write_idxs.%d", slot, tag, d);
+                pi.write_idxs = new_input_i64(plan.state_write_idxs.size(), nb, d);
+                snprintf(nb, sizeof(nb), "bd%zu_%s_write_pos.%d", slot, tag, d);
+                pi.write_pos = new_input_i32(plan.state_write_pos.size(), nb, d);
+            }
+            snprintf(nb, sizeof(nb), "bd%zu_%s_mask.%d", slot, tag, d);
+            pi.kq_mask = new_input_mask1(plan.n_kv, nb, d);
+        };
+
+        for (int d = 0; d <= m.n_gpu; d++)
+        {
+            if (!dev_used[d]) continue;
+            char nb[96];
+            snprintf(nb, sizeof(nb), "inp_tokens.%d", d);
+            inp.tokens[d] = new_input_i32(N, nb, d);
+            snprintf(nb, sizeof(nb), "inp_pos.%d", d);
+            inp.pos[d] = new_input_i32(N, nb, d);
+
+            for (size_t i = 0; i < res.bd.size(); i++)
+            {
+                bd_slot_state & B = res.bd[i];
+                snprintf(nb, sizeof(nb), "bd%zu_raw_idxs.%d", i, d);
+                B.raw_idxs[d] = new_input_i64(1, nb, d);
+                snprintf(nb, sizeof(nb), "bd%zu_raw_mask.%d", i, d);
+                B.raw_mask[d] = new_input_mask1(m.ring_raw, nb, d);
+                if (B.use_gather)
+                {
+                    snprintf(nb, sizeof(nb), "bd%zu_gather_mask.%d", i, d);
+                    B.gather_mask[d] = new_input_mask1(
+                        (B.compact_raw ? dsv41_compact_raw_rows(m) : m.ring_raw) + hp.indexer_top_k, nb, d);
+                    if (B.compact_raw)
+                    {
+                        snprintf(nb, sizeof(nb), "bd%zu_raw_read_idxs.%d", i, d);
+                        B.raw_read_idxs[d] = new_input_i32(dsv41_compact_raw_rows(m), nb, d);
+                    }
+                }
+                make_slot_plan_inputs(B.v41_csa[d], B.plan_csa, "csa", i, d);
+                make_slot_plan_inputs(B.v41_hca[d], B.plan_hca, "hca", i, d);
+                make_slot_plan_inputs(B.v41_lid[d], B.plan_lid, "lid", i, d);
+            }
+        }
+        inp.out_ids = new_input_i32(N, "inp_out_ids", dev_last);
+
+        inp.engram.resize(m.engram.layers.size());
+        inp.engram_ids.resize(m.engram.layers.size());
+        inp.engram_rows = new_input_i32(hp.hc_mult, "engram_stream_rows", m.layers[m.engram.layers[0].id].device);
+        for (size_t e = 0; e < m.engram.layers.size(); ++e)
+        {
+            const int dev = m.layers[m.engram.layers[e].id].device;
+            if (m.engram_on_device)
+            {
+                auto * ids = new_input_i32(m.engram.hash_columns() * N, "engram_ids", dev);
+                ggml_format_name(ids, "engram_ids.%d", (int) e);
+                inp.engram_ids[e] = ids;
+                continue;
+            }
+            auto * rows = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, m.engram.hash_columns() * m.engram.head_dim, N);
+            ggml_set_input(rows);
+            ggml_format_name(rows, "engram_lookup.%d", (int) e);
+            pin(rows, dev);
+            inp.engram[e] = rows;
+        }
+
+        const int64_t hc = hp.hc_mult;
+        ggml_tensor * delayed_pre = nullptr;
+        ggml_tensor * emb = ggml_get_rows(ctx, m.tok_embd, inp.tokens[m.layers[0].device]);
+        ggml_tensor * inpL = ggml_repeat_4d(ctx, ggml_reshape_3d(ctx, emb, hp.n_embd, 1, N), hp.n_embd, hc, N, 1);
+
+        for (int il = 0; il < hp.n_layer; il++)
+        {
+            const dsv4_layer & L = m.layers[il];
+            const int dev = L.device;
+
+            if (il > 0 && L.device != m.layers[il - 1].device)
+                pin(inpL, L.device);
+
+            inpL = build_engram(il, inpL);
+            ggml_tensor * residual = inpL;
+            ggml_tensor * post = nullptr;
+            ggml_tensor * comb = nullptr;
+
+            ggml_tensor * attn_pre = nullptr;
+            ggml_tensor * cur = build_hc_pre(inpL, L.hc_attn_fn, L.hc_attn_scale, L.hc_attn_base,
+                &post, &comb, dev, &attn_pre, delayed_pre);
+            cur = rms(cur, L.attn_norm);
+            cur = build_attention_v41_batched(il, cur, inp.pos[dev]);
+            inpL = build_hc_post(cur, residual, post, comb);
+
+            residual = inpL;
+            cur = build_hc_pre(inpL, L.hc_ffn_fn, L.hc_ffn_scale, L.hc_ffn_base,
+                &post, &comb, dev, &delayed_pre, attn_pre);
+            ggml_build_forward_expand(gf, residual);
+            ggml_build_forward_expand(gf, post);
+            ggml_build_forward_expand(gf, comb);
+
+            cur = rms(cur, L.ffn_norm);
+            ggml_tensor * shexp = build_shexp(il, cur);
+            cur = build_moe(il, cur, inp.tokens[dev], shexp);
+            inpL = build_hc_post(cur, residual, post, comb);
+        }
+
+        ggml_tensor * flat = ggml_get_rows(ctx, ggml_reshape_2d(ctx, inpL, hp.n_embd * hc, N), inp.out_ids);
+        inpL = ggml_reshape_3d(ctx, flat, hp.n_embd, hc, N);
+        ggml_tensor * cur = build_hc_pre_op(inpL, ggml_get_rows(ctx, ggml_cont(ctx, delayed_pre), inp.out_ids));
+        cur = rms(cur, m.output_norm);
+        cur = ggml_mul_mat(ctx, m.output, cur);
+        ggml_set_output(cur);
+        ggml_set_name(cur, "logits");
+        res.logits = cur;
+        ggml_build_forward_expand(gf, cur);
+
+        // Same F32 projection policy as build(): TF32 truncation can move cache
+        // quantization and sparse routing across bin boundaries.
+        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i)
+        {
+            ggml_tensor * node = ggml_graph_node(gf, i);
+            if ((node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) &&
+                node->src[0]->type == GGML_TYPE_F32)
+            {
+                ggml_prec_set_acc(node, GGML_PREC_F32);
+                ggml_prec_set_src(node, GGML_PREC_F32, 1);
+            }
+        }
+    }
+
     void build_batched()
     {
         graph_inputs & inp = res.inp;
@@ -5019,6 +5348,72 @@ namespace
     }
 }
 
+// Keep the graph cache inside the VRAM it is allowed to use.
+//
+// The cache is capped by entry COUNT, which is blind to what an entry costs:
+// a decode graph's compute buffers are small, a 1024-token prefill graph's are
+// hundreds of MiB per device, and concurrent sequences sitting at different
+// positions produce many distinct shapes. Four concurrent 10.8k-token prefills
+// on the eight-A40 box filled the twelve slots and ran device 1 out of memory.
+//
+// That is not a survivable error. ggml's allocator frees a buffer before
+// reallocating it, so a failed reserve leaves a null buffer behind and the
+// retry inside ggml_backend_sched_alloc_graph dereferences it -- the process
+// dies rather than the request failing. So the cache has to stay inside the
+// memory instead of discovering the limit.
+//
+// The rule: before building a new entry, free least-recently-used entries
+// until every device has room for another entry as large as the largest one
+// cached, plus a floor for the run-time transients that do not come out of a
+// graph buffer at all (ggml-cuda takes the indexer's CUB sort workspace
+// straight from the VMM pool). TS_DSV4_GRAPH_CACHE_HEADROOM_MB overrides the
+// floor; 0 restores the pure count cap.
+static void dsv4_trim_graph_cache(dsv4_model & m)
+{
+    static const size_t floor_bytes = []() -> size_t {
+        if (const char * e = getenv("TS_DSV4_GRAPH_CACHE_HEADROOM_MB"))
+        {
+            const long v = atol(e);
+            if (v >= 0) return (size_t) v * 1024 * 1024;
+        }
+        return (size_t) 1024 * 1024 * 1024;
+    }();
+    if (!floor_bytes || m.graph_cache.empty()) return;
+
+    size_t want[MAX_GPUS] = {};
+    for (int d = 0; d < m.n_gpu; d++)
+    {
+        size_t largest = 0;
+        for (const auto & entry : m.graph_cache) largest = std::max(largest, entry->buffer_bytes[d]);
+        want[d] = largest + floor_bytes;
+    }
+    auto tight = [&]() -> bool
+    {
+        for (int d = 0; d < m.n_gpu; d++)
+        {
+            size_t free_b = 0, total_b = 0;
+            ggml_backend_dev_memory(ggml_backend_get_device(m.backends[d]), &free_b, &total_b);
+            if (free_b < want[d]) return true;
+        }
+        return false;
+    };
+    if (!tight()) return;
+
+    // An entry's buffers may still be backing kernels this process launched
+    // (pipelined prefill submits without waiting), so drain before freeing.
+    for (int d = 0; d < m.n_gpu; d++) ggml_backend_synchronize(m.backends[d]);
+    int dropped = 0;
+    while (m.graph_cache.size() > 1 && tight())
+    {
+        m.graph_cache.pop_back();
+        dropped++;
+    }
+    if (dropped)
+        fprintf(stderr, "[dsv4] graph cache trimmed: freed %d least-recently-used entr%s to keep "
+                "device memory for the next graph (%zu cached)\n",
+                dropped, dropped == 1 ? "y" : "ies", m.graph_cache.size());
+}
+
 // Build (or fetch from the LRU cache) the graph entry for a (nt, p0,
 // pipeline-parity) shape. Each entry owns its scheduler/allocation, so
 // alternating shapes never rebuild, realloc, or thrash the per-split CUDA
@@ -5029,6 +5424,7 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
                                               bool all_logits = false, int image_tokens = 0)
 {
     const dsv4_hparams & hp = m.hp;
+    static const int perf_build = []() { const char * e = getenv("TS_DSV4_PERF"); return e ? atoi(e) : 0; }();
 
     // Uniform shape across a forward call: bucket by the call's final
     // position (capped so very long prefills don't over-pad early attention)
@@ -5087,6 +5483,7 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
         // the caller resets its sequence. Keep ownership local until complete.
         auto pending = std::make_unique<graph_build_result>();
         graph_build_result & r = *pending;
+        dsv4_trim_graph_cache(m);
         if (!hp.v41) m.graph_cache.emplace_front(std::move(pending));
         const size_t meta_size = (size_t) 96 * 1024 * 1024;
         ggml_init_params gp = { meta_size, nullptr, true };
@@ -5121,6 +5518,29 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
             return nullptr;
         }
         dsv4_node_dump_attach(r.sched);
+        if (perf_build >= 3)
+        {
+            // What the node count of a decode/prefill graph is actually made of.
+            // Views and reshapes cost nothing at run time; everything else is a
+            // kernel, and a kernel between two fused nodes also ends an ordinary
+            // run (see the submission counters).
+            std::map<std::string, int> hist;
+            int real = 0;
+            for (int i = 0; i < ggml_graph_n_nodes(r.gf); i++)
+            {
+                ggml_tensor * node = ggml_graph_node(r.gf, i);
+                const bool noop = node->op == GGML_OP_NONE || node->op == GGML_OP_VIEW ||
+                    node->op == GGML_OP_RESHAPE || node->op == GGML_OP_PERMUTE || node->op == GGML_OP_TRANSPOSE;
+                if (!noop) real++;
+                hist[ggml_op_name(node->op)]++;
+            }
+            fprintf(stderr, "[dsv4] graph nt=%" PRId64 " p0=%" PRId64 ": %d nodes, %d computing (%.1f per layer)\n",
+                nt, p0, ggml_graph_n_nodes(r.gf), real, (double) real / hp.n_layer);
+            std::string line;
+            for (const auto & entry : hist)
+                line += entry.first + "=" + std::to_string(entry.second) + " ";
+            fprintf(stderr, "[dsv4]   ops: %s\n", line.c_str());
+        }
         if (hp.v41 && getenv("TS_DSV41_TRACE_DIR"))
         {
             std::filesystem::create_directories(getenv("TS_DSV41_TRACE_DIR"));
@@ -5144,6 +5564,24 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
                     return true;
                 }, &r);
         }
+        for (int d = 0; d < m.n_gpu; d++)
+            r.buffer_bytes[d] = ggml_backend_sched_get_buffer_size(r.sched, m.dev_backends[d]);
+        if (perf_build >= 2)
+        {
+            // What this shape actually costs each device, against what the
+            // loader held back for it (TS_DSV4_VRAM_RESERVE_MB).
+            std::string line;
+            for (int d = 0; d < m.n_gpu; d++)
+            {
+                size_t free_b = 0, total_b = 0;
+                ggml_backend_dev_memory(ggml_backend_get_device(m.backends[d]), &free_b, &total_b);
+                char buf[96];
+                snprintf(buf, sizeof(buf), "%d:%.0f/%.0f ", d, r.buffer_bytes[d] / 1048576.0, free_b / 1048576.0);
+                line += buf;
+            }
+            fprintf(stderr, "[dsv4] graph nt=%" PRId64 " p0=%" PRId64 " compute buffer MiB / free MiB: %s\n",
+                nt, p0, line.c_str());
+        }
         res_p = &r;
         if (hp.v41) m.graph_cache.emplace_front(std::move(pending));
 
@@ -5157,6 +5595,83 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
     res_p->plan_lid = std::move(plan_lid);
     if (out_reuse) *out_reuse = reuse;
     return res_p;
+}
+
+// Stage the Engram rows for `nt` tokens whose hashes are already laid out
+// [table][token][hash column] -- the layout hash_tokens() produces, and the one
+// the token-batched path assembles from its per-slot calls. Shared by the
+// single-sequence and token-batched decode paths.
+static void dsv41_stage_engram(dsv4_model & m, graph_build_result & res, const int32_t * hashes,
+                               int64_t nt, const uint8_t * image_mask, int image_tokens)
+{
+    const dsv4_hparams & hp = m.hp;
+    std::vector<int32_t> streams(hp.hc_mult);
+    std::iota(streams.begin(), streams.end(), 0);
+    set_i32(res.inp.engram_rows, streams);
+    const size_t n_hash = m.engram.hash_columns();
+    if (nt <= 0 || n_hash == 0 || m.engram.head_dim == 0 ||
+        (size_t) nt > SIZE_MAX / n_hash || (size_t) nt * n_hash > SIZE_MAX / m.engram.head_dim / sizeof(float))
+        throw std::runtime_error("V4.1 Engram staging dimensions overflow");
+    const size_t n_rows = (size_t) nt * n_hash;
+    if (m.engram_on_device)
+    {
+        // Hand the validated row ids to the graph; the gather and the
+        // dequantize happen on the device that owns the table.
+        for (size_t e = 0; e < m.engram.layers.size(); ++e)
+        {
+            const auto * table = m.layers[m.engram.layers[e].id].engram_embd;
+            const int32_t * ids = hashes + e * n_rows;
+            for (size_t i = 0; i < n_rows; ++i)
+                if (ids[i] < 0 || (uint64_t) ids[i] >= (uint64_t) table->ne[1])
+                    throw std::runtime_error("DeepSeek V4.1 Engram lookup is out of bounds");
+            ggml_backend_tensor_set(res.inp.engram_ids[e], ids, 0, n_rows * sizeof(int32_t));
+        }
+        return;
+    }
+
+    const size_t row_values = n_rows * m.engram.head_dim;
+    const size_t table_bytes = row_values * sizeof(float);
+    // Stage both published Engram tables together, without amplifying
+    // large custom batches/configurations beyond 64 MiB. A single table
+    // larger than the budget retains the prior one-table memory bound.
+    constexpr size_t staging_budget = (size_t) 64 * 1024 * 1024;
+    const size_t group_size = std::max<size_t>(1, std::min(m.engram.layers.size(), staging_budget / table_bytes));
+    std::vector<std::vector<float>> rows;
+    rows.reserve(group_size);
+    for (size_t e = 0; e < group_size; ++e) rows.emplace_back(row_values);
+    std::vector<std::function<void(size_t)>> reads;
+    reads.reserve(m.engram.layers.size());
+    for (size_t e = 0; e < m.engram.layers.size(); ++e)
+    {
+        auto * table = m.layers[m.engram.layers[e].id].engram_embd;
+        if (!table->data || !ggml_backend_buffer_is_host(table->buffer))
+            throw std::runtime_error("V4.1 Engram lookup requires a host-resident table");
+        const auto * traits = ggml_get_type_traits(table->type);
+        reads.emplace_back(m.engram.prepare_lookup(e, table->data, table->ne[1], table->nb[1],
+            hashes + e * n_rows, nt, rows[e % group_size].data(),
+            [type = table->type, to_float = traits->to_float](const void * src, float * dst, size_t n) {
+                if (type == GGML_TYPE_F32) memcpy(dst, src, n * sizeof(float));
+                else if (to_float) to_float(src, dst, n);
+                else throw std::runtime_error("Unsupported V4.1 Engram quantization");
+            }));
+    }
+    // Every table/hash is validated before the first read. Interleave
+    // tables so a slow tail in layer 1 cannot hold up all layer 14 reads.
+    for (size_t first = 0; first < reads.size(); first += group_size)
+    {
+        const size_t count = std::min(group_size, reads.size() - first);
+        m.engram_io->run(count * n_rows, [&](size_t task) {
+            const size_t table = first + task % count, row = task / count;
+            // Visual positions break hashing history and never touch the
+            // table, including when a zero row occupies the shared group.
+            if (image_tokens && image_mask[row / n_hash])
+                std::fill_n(rows[table % group_size].data() + row * m.engram.head_dim, m.engram.head_dim, 0.0f);
+            else reads[table](row);
+        });
+        // run() drains all workers before uploads or staging-buffer reuse.
+        for (size_t e = first; e < first + count; ++e)
+            ggml_backend_tensor_set(res.inp.engram[e], rows[e % group_size].data(), 0, table_bytes);
+    }
 }
 
 static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t nt, int64_t p0, bool want_logits, float * logits_out,
@@ -5360,77 +5875,13 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
 #if defined(TSG_GGML_TEST_HOOKS)
         dsv41_test_fail("engram", p0);
 #endif
-        std::vector<int32_t> streams(hp.hc_mult);
-        std::iota(streams.begin(), streams.end(), 0);
-        set_i32(res.inp.engram_rows, streams);
-        const size_t n_hash = m.engram.hash_columns();
-        if (nt <= 0 || n_hash == 0 || m.engram.head_dim == 0 ||
-            (size_t) nt > SIZE_MAX / n_hash || (size_t) nt * n_hash > SIZE_MAX / m.engram.head_dim / sizeof(float))
-            throw std::runtime_error("V4.1 Engram staging dimensions overflow");
-        const size_t n_rows = (size_t) nt * n_hash;
-        if (m.engram_on_device)
-        {
-            // Hand the validated row ids to the graph; the gather and the
-            // dequantize happen on the device that owns the table.
-            for (size_t e = 0; e < m.engram.layers.size(); ++e)
-            {
-                const auto * table = m.layers[m.engram.layers[e].id].engram_embd;
-                const int32_t * ids = hashes.data() + e * n_rows;
-                for (size_t i = 0; i < n_rows; ++i)
-                    if (ids[i] < 0 || (uint64_t) ids[i] >= (uint64_t) table->ne[1])
-                        throw std::runtime_error("DeepSeek V4.1 Engram lookup is out of bounds");
-                ggml_backend_tensor_set(res.inp.engram_ids[e], ids, 0, n_rows * sizeof(int32_t));
-            }
-        }
-        else
-        {
-        const size_t row_values = n_rows * m.engram.head_dim;
-        const size_t table_bytes = row_values * sizeof(float);
-        // Stage both published Engram tables together, without amplifying
-        // large custom batches/configurations beyond 64 MiB. A single table
-        // larger than the budget retains the prior one-table memory bound.
-        constexpr size_t staging_budget = (size_t) 64 * 1024 * 1024;
-        const size_t group_size = std::max<size_t>(1, std::min(m.engram.layers.size(), staging_budget / table_bytes));
-        std::vector<std::vector<float>> rows;
-        rows.reserve(group_size);
-        for (size_t e = 0; e < group_size; ++e) rows.emplace_back(row_values);
-        std::vector<std::function<void(size_t)>> reads;
-        reads.reserve(m.engram.layers.size());
-        for (size_t e = 0; e < m.engram.layers.size(); ++e)
-        {
-            auto * table = m.layers[m.engram.layers[e].id].engram_embd;
-            if (!table->data || !ggml_backend_buffer_is_host(table->buffer))
-                throw std::runtime_error("V4.1 Engram lookup requires a host-resident table");
-            const auto * traits = ggml_get_type_traits(table->type);
-            reads.emplace_back(m.engram.prepare_lookup(e, table->data, table->ne[1], table->nb[1],
-                hashes.data() + e * n_rows, nt, rows[e % group_size].data(),
-                [type = table->type, to_float = traits->to_float](const void * src, float * dst, size_t n) {
-                    if (type == GGML_TYPE_F32) memcpy(dst, src, n * sizeof(float));
-                    else if (to_float) to_float(src, dst, n);
-                    else throw std::runtime_error("Unsupported V4.1 Engram quantization");
-                }));
-        }
-        // Every table/hash is validated before the first read. Interleave
-        // tables so a slow tail in layer 1 cannot hold up all layer 14 reads.
-        for (size_t first = 0; first < reads.size(); first += group_size)
-        {
-            const size_t count = std::min(group_size, reads.size() - first);
-            m.engram_io->run(count * n_rows, [&](size_t task) {
-                const size_t table = first + task % count, row = task / count;
-                // Visual positions break hashing history and never touch the
-                // table, including when a zero row occupies the shared group.
-                if (image_tokens && image_mask[row / n_hash])
-                    std::fill_n(rows[table % group_size].data() + row * m.engram.head_dim, m.engram.head_dim, 0.0f);
-                else reads[table](row);
-            });
-            // run() drains all workers before uploads or staging-buffer reuse.
-            for (size_t e = first; e < first + count; ++e)
-                ggml_backend_tensor_set(res.inp.engram[e], rows[e % group_size].data(), 0, table_bytes);
-        }
-        }
+        dsv41_stage_engram(m, res, hashes.data(), nt, image_mask, image_tokens);
     }
     auto t_inputs = now();
 
+#ifdef TSG_GGML_USE_CUDA
+    if (perf >= 3) tsg_dsv4_fused_counters_reset();
+#endif
     if (pipeline)
     {
         if (ggml_backend_sched_graph_compute_async(res.sched, res.gf) != GGML_STATUS_SUCCESS)
@@ -5476,6 +5927,15 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
                 nt, p0, ms(t0, t_build), ms(t_build, t_alloc), ms(t_alloc, t_inputs), ms(t_inputs, t_compute),
                 ggml_graph_n_nodes(res.gf), ggml_backend_sched_get_n_splits(res.sched), reuse ? ", reused" : "");
     }
+#ifdef TSG_GGML_USE_CUDA
+    if (perf >= 3)
+    {
+        const auto counters = tsg_dsv4_fused_counters_read();
+        fprintf(stderr, "[dsv4]   submission: %llu device subgraph(s), %llu node(s), %llu ordinary run(s), "
+                "%llu fused launch(es), %.2fms on the submitting thread\n",
+                counters.calls, counters.nodes, counters.views, counters.fused, counters.submit_ms);
+    }
+#endif
 
     if (perf >= 3)
     {
@@ -5508,6 +5968,10 @@ static graph_build_result * dsv4_acquire_batched_graph(
 {
     const dsv4_hparams & hp = m.hp;
 
+    // V4.1 keeps the unfused compressor and its own ratios; the plan sizes and
+    // the per-slot sparse-selection decisions are part of the graph shape, so
+    // they go in the signature alongside the slot ids.
+    const int64_t cr = hp.v41 ? 2 : CSA_RATIO, hr = hp.v41 ? 1 : HCA_RATIO;
     std::vector<bd_slot_state> bd((size_t) n);
     uint64_t sig = 0xBD5EEDB47C8ED0DEull ^ (uint64_t) n;
     for (int i = 0; i < n; i++)
@@ -5517,15 +5981,21 @@ static graph_build_result * dsv4_acquire_batched_graph(
         B.p0 = positions[i];
         const int64_t pos_end = B.p0 + 1;
         const int64_t hint = std::min<int64_t>(pos_end, 8192);
-        B.plan_csa = build_comp_plan(B.p0, 1, CSA_RATIO, true, 2 * CSA_RATIO + m.state_extra, m.n_csa_rows, hint / CSA_RATIO);
-        B.plan_hca = build_comp_plan(B.p0, 1, HCA_RATIO, false, HCA_RATIO + m.state_extra, m.n_hca_rows, hint / HCA_RATIO);
-        B.plan_lid = build_comp_plan(B.p0, 1, CSA_RATIO, true, 2 * CSA_RATIO + m.state_extra, m.n_csa_rows, hint / CSA_RATIO);
-        B.skip_topk = pos_end <= (int64_t) hp.indexer_top_k * CSA_RATIO;
+        B.plan_csa = build_comp_plan(B.p0, 1, cr, !hp.v41, (hp.v41 ? cr : 2 * cr) + m.state_extra, m.n_csa_rows, hint / cr);
+        B.plan_hca = build_comp_plan(B.p0, 1, hr, false, hr + m.state_extra, m.n_hca_rows, hint / hr);
+        B.plan_lid = B.plan_csa;
+        if (!hp.v41)
+            B.plan_lid = build_comp_plan(B.p0, 1, CSA_RATIO, true, 2 * CSA_RATIO + m.state_extra, m.n_csa_rows, hint / CSA_RATIO);
+        B.skip_topk = pos_end <= (int64_t) hp.indexer_top_k * (hp.v41 ? cr : CSA_RATIO);
+        B.use_gather = hp.v41 && dsv41_use_gather(m, 1, B.p0);
+        B.compact_raw = hp.v41 && dsv41_use_compact_raw_gather(m, 1, B.p0);
         sig = sig * 1099511628211ull ^ (uint64_t) (B.slot_id + 1);
         sig = sig * 1099511628211ull ^ dsv4_plan_sig(B.plan_csa);
         sig = sig * 1099511628211ull ^ dsv4_plan_sig(B.plan_hca);
         sig = sig * 1099511628211ull ^ dsv4_plan_sig(B.plan_lid);
         if (B.skip_topk) sig ^= 0x9e3779b97f4a7c15ull;
+        if (B.use_gather) sig = sig * 1099511628211ull ^ 0xbefca6a34d210597ull;
+        if (B.compact_raw) sig = sig * 1099511628211ull ^ 0x2545f4914f6cdd1dull;
     }
 
     graph_build_result * res_p = nullptr;
@@ -5544,6 +6014,7 @@ static graph_build_result * dsv4_acquire_batched_graph(
 
     if (!reuse)
     {
+        dsv4_trim_graph_cache(m);
         m.graph_cache.emplace_front(new graph_build_result());
         graph_build_result & r = *m.graph_cache.front();
         // The per-slot attention forks are the only O(n) node cost, roughly
@@ -5566,8 +6037,22 @@ static graph_build_result * dsv4_acquire_batched_graph(
             return nullptr;
         }
 
-        graph_builder gb(m, r, n, 0);
-        gb.build_batched();
+        // The V4.1 builder validates the shared sparse selection as it goes and
+        // throws if a layer publishes one its consumers cannot use. The entry is
+        // already in the cache under this signature, so a half-built graph left
+        // behind would be "reused" by the next call with the same shape. Drop it
+        // and let the caller fall back to per-slot forwards.
+        try
+        {
+            graph_builder gb(m, r, n, 0);
+            if (hp.v41) gb.build_batched_v41(); else gb.build_batched();
+        }
+        catch (const std::exception & error)
+        {
+            fprintf(stderr, "[dsv4] batched graph build failed (n=%d): %s\n", n, error.what());
+            m.graph_cache.pop_front();
+            return nullptr;
+        }
 
         if (!ggml_backend_sched_alloc_graph(r.sched, r.gf))
         {
@@ -5575,6 +6060,8 @@ static graph_build_result * dsv4_acquire_batched_graph(
             m.graph_cache.pop_front();
             return nullptr;
         }
+        for (int d = 0; d < m.n_gpu; d++)
+            r.buffer_bytes[d] = ggml_backend_sched_get_buffer_size(r.sched, m.dev_backends[d]);
         res_p = &r;
 
         while ((int) m.graph_cache.size() > m.graph_cache_cap)
@@ -5614,7 +6101,116 @@ static bool dsv4_forward_batched_decode(
     const ggml_fp16_t NEG_INF16 = ggml_fp32_to_fp16(-INFINITY);
     const ggml_fp16_t ZERO16 = ggml_fp32_to_fp16(0.0f);
 
+    // ---- V4.1: its own input layout (unfused compressor, per-slot sparse
+    // selection, and one Engram staging column per slot) ----
+    dsv41_batched_write_guard writes;
+    if (hp.v41)
+    {
+        auto set_f16 = [](ggml_tensor * t, const std::vector<ggml_fp16_t> & v)
+        {
+            if (!t || !t->buffer || v.empty()) return;
+            ggml_backend_tensor_set(t, v.data(), 0, v.size() * sizeof(ggml_fp16_t));
+        };
+        std::vector<int32_t> v32(n);
+        for (int d = 0; d <= m.n_gpu; d++)
+        {
+            if (!res.inp.pos[d]) continue;
+            for (int i = 0; i < n; i++) v32[i] = tokens[i];
+            set_i32(res.inp.tokens[d], v32);
+            for (int i = 0; i < n; i++) v32[i] = positions[i];
+            set_i32(res.inp.pos[d], v32);
+        }
+        {
+            std::vector<int32_t> out_ids(n);
+            for (int i = 0; i < n; i++) out_ids[i] = i;
+            set_i32(res.inp.out_ids, out_ids);
+        }
+
+        std::vector<int64_t> ridx(1);
+        std::vector<ggml_fp16_t> rmask, gmask, pmask;
+        std::vector<int32_t> raw_read_ids;
+        auto fill_slot_plan = [&](plan_inputs & pi, const comp_plan & plan)
+        {
+            set_i32(pi.persist_src, plan.state_persist_src_idxs);
+            set_i64(pi.persist_dst, plan.state_persist_dst_idxs);
+            if (pi.write_idxs)
+            {
+                set_i32(pi.read_idxs, plan.state_read_idxs);
+                set_i64(pi.write_idxs, plan.state_write_idxs);
+                set_i32(pi.write_pos, plan.state_write_pos);
+            }
+            pmask.assign((size_t) plan.n_kv, NEG_INF16);
+            for (int64_t r = 0; r < std::min<int64_t>(plan.n_visible[0], plan.n_kv); r++)
+                pmask[(size_t) r] = ZERO16;
+            set_f16(pi.kq_mask, pmask);
+        };
+
+        for (int i = 0; i < n; i++)
+        {
+            bd_slot_state & B = res.bd[i];
+            const int64_t p = B.p0;
+
+            rmask.assign((size_t) m.ring_raw, NEG_INF16);
+            for (int64_t s = 0; s < m.ring_raw; s++)
+            {
+                const int64_t t = p - ((p - s) % m.ring_raw + m.ring_raw) % m.ring_raw;
+                if (t < 0) continue;
+                if (t <= p && t > p - hp.n_swa) rmask[(size_t) s] = ZERO16;
+            }
+            gmask.clear();
+            raw_read_ids.clear();
+            if (B.use_gather)
+            {
+                if (B.compact_raw)
+                {
+                    const int64_t raw_rows = dsv41_compact_raw_rows(m);
+                    gmask.assign((size_t) (raw_rows + hp.indexer_top_k), ZERO16);
+                    std::fill(gmask.begin() + hp.n_swa, gmask.begin() + raw_rows, NEG_INF16);
+                    dsv41_raw_window_ids(p, m.ring_raw, hp.n_swa, raw_read_ids);
+                    raw_read_ids.resize((size_t) raw_rows, raw_read_ids.front());
+                }
+                else
+                {
+                    gmask.assign(rmask.begin(), rmask.end());
+                    gmask.resize((size_t) (m.ring_raw + hp.indexer_top_k), ZERO16);
+                }
+            }
+            ridx[0] = p % m.ring_raw;
+            for (int d = 0; d <= m.n_gpu; d++)
+            {
+                if (!res.inp.pos[d]) continue;
+                set_i64(B.raw_idxs[d], ridx);
+                set_f16(B.raw_mask[d], rmask);
+                set_f16(B.gather_mask[d], gmask);
+                set_i32(B.raw_read_idxs[d], raw_read_ids);
+                fill_slot_plan(B.v41_csa[d], B.plan_csa);
+                fill_slot_plan(B.v41_hca[d], B.plan_hca);
+                fill_slot_plan(B.v41_lid[d], B.plan_lid);
+            }
+        }
+
+        // Engram: hash each slot's token against ITS history, then lay the
+        // results out [table][slot column][hash column] -- the same layout one
+        // sequence's nt tokens produce, so the staging path is unchanged.
+        const size_t n_hash = m.engram.hash_columns();
+        const size_t tables = m.engram.layers.size();
+        std::vector<int32_t> hashes(tables * (size_t) n * n_hash);
+        for (int i = 0; i < n; i++)
+        {
+            dsv4_slot * slot = m.slots.at(slot_ids[i]).get();
+            // Each slot's history is mutated here; a failure after the first
+            // leaves those slots inconsistent, so they are all latched failed.
+            writes.slots.push_back(slot);
+            const auto one = m.engram.hash_tokens(&tokens[i], 1, (size_t) positions[i], slot->engram_history);
+            for (size_t e = 0; e < tables; ++e)
+                std::copy(one.begin() + e * n_hash, one.begin() + (e + 1) * n_hash,
+                          hashes.begin() + (e * (size_t) n + i) * n_hash);
+        }
+        dsv41_stage_engram(m, res, hashes.data(), n, nullptr, 0);
+    }
+
     // ---- shared batched inputs ----
+    if (!hp.v41)
     {
         std::vector<int32_t> v32(n);
         for (int d = 0; d <= m.n_gpu; d++)
@@ -5634,6 +6230,7 @@ static bool dsv4_forward_batched_decode(
     }
 
     // ---- per-slot inputs ----
+    if (!hp.v41)
     {
         std::vector<ggml_fp16_t> mask;
         std::vector<int32_t> meta;
@@ -5713,6 +6310,7 @@ static bool dsv4_forward_batched_decode(
     }
 
     ggml_backend_tensor_get(res.logits, logits_out, 0, (size_t) n * hp.n_vocab * sizeof(float));
+    writes.complete = true;
 
     if (perf >= 2)
     {
@@ -6097,13 +6695,12 @@ TSG_EXPORT int TSGgml_Dsv4ForwardBatchedDecode(
     void * handle, int n, const int32_t * slot_ids, const int32_t * tokens,
     const int32_t * positions, float * logits_out)
 {
-    if (!handle || n < 2 || n > 16 || !slot_ids || !tokens || !positions || !logits_out) return -1;
+    if (!handle || n < 2 || n > tsg_dsv4::DSV4_MAX_BATCHED_SLOTS ||
+        !slot_ids || !tokens || !positions || !logits_out) return -1;
     auto * m = (tsg_dsv4::dsv4_model *) handle;
-    // V4.1 has per-slot Engram history and shared-cache topology. Until its
-    // token-batched graph is implemented, use the caller's per-slot forward.
-    if (!m->fused || m->hp.v41) return -2;
+    if (!m->fused) return -2;
 
-    tsg_dsv4::dsv4_slot * slots[16];
+    tsg_dsv4::dsv4_slot * slots[tsg_dsv4::DSV4_MAX_BATCHED_SLOTS];
     for (int i = 0; i < n; i++)
     {
         auto it = m->slots.find(slot_ids[i]);
@@ -6111,6 +6708,9 @@ TSG_EXPORT int TSGgml_Dsv4ForwardBatchedDecode(
         slots[i] = it->second.get();
         if (slots[i]->n_past != positions[i]) return -2;
         if (positions[i] + 1 > m->n_ctx) return -2;
+        // A slot whose V4.1 caches are inconsistent must be reset before it
+        // can decode again; batching it would spread the failure.
+        if (m->hp.v41 && slots[i]->v41_failed) return -2;
         for (int j = 0; j < i; j++)
             if (slot_ids[j] == slot_ids[i]) return -2;
     }

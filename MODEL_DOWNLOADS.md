@@ -104,7 +104,7 @@ The `hf download` commands need the Hugging Face CLI (`pip install -U huggingfac
 echo "Give me three facts about the Moon." > prompt.txt
 ```
 
-**DeepSeek V4.1 Flash** — 384 routed experts, `ggml_cuda` only, needs a prepared Engram sidecar ([vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5))
+**DeepSeek V4.1 Flash** — 384 routed experts, served on `ggml_cuda`, needs a prepared Engram sidecar ([vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5))
 
 ```bash
 # 246 GiB of Q2_K weights across seven shards, plus ~60 GiB of host page cache for Engram warming
@@ -118,6 +118,13 @@ hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
     --repo deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+# Q4_K_M instead of Q2_K: 415 GiB across eleven shards. Its two Engram tables are
+# 51.5 GiB each, so they stay host mappings and the checkpoint needs routed-expert
+# CPU offload on 8x46 GB -- the loader prints the --n-cpu-moe N it wants.
+#   --include "DeepSeek-V4.1-Flash-Q4_K_M-*.gguf" --local-dir models/deepseek41-q4
+# The sidecar step below is the same and is REQUIRED for every quantization: no
+# community GGUF repository ships deepseek41.engram.bin.
 
 # Optional: the ~970 MB vision companion that --mmproj needs for images and video
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
