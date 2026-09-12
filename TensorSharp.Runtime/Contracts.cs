@@ -43,6 +43,37 @@ namespace TensorSharp.Runtime
         void TruncateKVCache(int tokenCount);
 
         /// <summary>
+        /// Truncate to <paramref name="tokenCount"/>, or report that this model cannot
+        /// reach that far back and leave its state untouched so the caller can reset and
+        /// re-prefill instead.
+        ///
+        /// <para>Why a model that says <see cref="SupportsKVCacheTruncation"/> may still
+        /// refuse: an architecture whose caches are addressed modularly (a sliding-window
+        /// ring, a compressor state ring) keeps only a bounded span of positions, so how
+        /// far a rewind can go depends on where the sequence currently is - it is not a
+        /// property of the architecture. DeepSeek V4.1 is the case in hand. A model with
+        /// no such bound never refuses, which is why the default is
+        /// "truncate and return true".</para>
+        ///
+        /// <para>Every caller with a reset-and-re-prefill fallback should prefer this over
+        /// <see cref="TruncateKVCache"/>; the void form throws on refusal rather than
+        /// continuing from a head that did not move.</para>
+        /// </summary>
+        bool TryTruncateKVCache(int tokenCount)
+        {
+            TruncateKVCache(tokenCount);
+            return true;
+        }
+
+        /// <summary>
+        /// The multiple a <see cref="TryTruncateKVCache"/> target must be. Callers align
+        /// a reusable prefix length DOWN to this before asking, so a model that can only
+        /// rewind to a block boundary keeps the reuse instead of refusing over one token.
+        /// 1 (the default) means any length.
+        /// </summary>
+        int KVCacheTruncationGranularity => 1;
+
+        /// <summary>
         /// Whether this architecture exposes block-level snapshot / restore of its KV
         /// state through <see cref="TryExtractKVBlock"/> and <see cref="TryInjectKVBlock"/>.
         /// Required for the paged KV cache. Models with recurrent state should return

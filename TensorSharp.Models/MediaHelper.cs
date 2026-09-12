@@ -131,6 +131,21 @@ namespace TensorSharp.Models
         public static List<string> ExtractVideoFrames(
             string videoPath, string outputDirectory, string namePrefix,
             int maxFrames = 0, double fps = 0.0)
+            => ExtractVideoFramesCore(videoPath, outputDirectory, namePrefix, maxFrames, fps, null);
+
+        /// <summary>Sample video images and retain frame index / probed FPS in seconds (approximate for variable-rate clips).</summary>
+        public static (List<string> Paths, List<double> Timestamps) ExtractVideoFramesWithTimestamps(
+            string videoPath, string outputDirectory, string namePrefix,
+            int maxFrames = 0, double fps = 0.0)
+        {
+            var timestamps = new List<double>();
+            var paths = ExtractVideoFramesCore(videoPath, outputDirectory, namePrefix, maxFrames, fps, timestamps);
+            return (paths, timestamps);
+        }
+
+        private static List<string> ExtractVideoFramesCore(
+            string videoPath, string outputDirectory, string namePrefix,
+            int maxFrames, double fps, List<double> timestamps)
         {
             if (string.IsNullOrWhiteSpace(videoPath))
                 throw new ArgumentNullException(nameof(videoPath));
@@ -178,7 +193,7 @@ namespace TensorSharp.Models
             foreach (int pos in selectedPositions)
                 wanted.Add(candidateFrames[pos]);
 
-            return DecodeAndEncodeFrames(decoder, videoPath, wanted, outputDirectory, prefix);
+            return DecodeAndEncodeFrames(decoder, videoPath, wanted, outputDirectory, prefix, timestamps, videoFps);
         }
 
         /// <summary>
@@ -191,7 +206,8 @@ namespace TensorSharp.Models
         /// the callback is the back-pressure: the decoder cannot run ahead of the encoders.
         /// </summary>
         private static List<string> DecodeAndEncodeFrames(
-            IVideoDecoder decoder, string videoPath, List<int> wantedFrames, string outputDirectory, string prefix)
+            IVideoDecoder decoder, string videoPath, List<int> wantedFrames, string outputDirectory, string prefix,
+            List<double> timestamps = null, double sourceFps = 0)
         {
             var encodes = new List<Task>();
             var frames = new List<string>();
@@ -212,6 +228,7 @@ namespace TensorSharp.Models
                     string framePath = Path.Combine(outputDirectory, $"{prefix}_{frames.Count + 1:D4}.png");
                     byte[] scanlines = BuildRgbaScanlines(pixels, width, height, stride, layout);
                     frames.Add(framePath);
+                    timestamps?.Add(index / sourceFps);
 
                     slots.Wait();
                     encodes.Add(Task.Run(() =>

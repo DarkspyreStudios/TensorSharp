@@ -1,0 +1,341 @@
+// Copyright (c) Zhongkai Fu. All rights reserved.
+// Licensed under the BSD-3-Clause license in the repository root.
+using TensorSharp.Models.Architecture;
+
+namespace InferenceWeb.Tests;
+
+public class DeepSeek41ArchitectureTests : IDisposable
+{
+    private readonly EnvScope _env = new();
+
+    public DeepSeek41ArchitectureTests()
+    {
+        _env.ClearSpeculationVars();
+        _env.Set("TS_DSV41_TP", null);
+        _env.Set("TS_DSV4_NGPU", null);
+        _env.Set("TS_DSV41_ENGRAM_DEVICE", null);
+        _env.Set("TS_DSV41_ALLOW_NON_CUDA_GPU", null);
+    }
+
+    public void Dispose() => _env.Dispose();
+
+    [Fact]
+    public void DescriptorIsIndependentAndDeclaresLayerSplit()
+    {
+        Assert.True(ModelArchitectureRegistry.TryGet("deepseek41", out var v41));
+        Assert.True(ModelArchitectureRegistry.TryGet("deepseek4", out var v4));
+        Assert.NotSame(v4, v41);
+        Assert.Equal(MultiGpuMode.LayerSplit, v41.MultiGpu);
+        Assert.Contains("not implemented", v41.MultiGpuLimitation);
+        TensorSharp.ITensorParallelGroup group = null;
+        Assert.Equal(1, ModelBase.ResolveTensorParallelSupport(v41, BackendType.GgmlCuda, 4, ref group, out int split));
+        Assert.Equal(4, split);
+        Assert.Contains("LAYER SPLIT", v41.DescribeMultiGpuPlacement(4));
+    }
+
+    /// <summary>
+    /// What is left without an implementation: MLX, and the ggml GPU backends
+    /// until the opt-in is set. BackendType.Cpu and BackendType.Cuda both run
+    /// V4.1 now -- the pure C# executor and the direct-CUDA engine respectively.
+    /// </summary>
+    [Theory]
+    [InlineData(BackendType.Mlx)]
+    [InlineData(BackendType.GgmlMetal)]
+    [InlineData(BackendType.GgmlVulkan)]
+    public void UnsupportedBackendsRefusedBeforeLoadingWeights(BackendType backend)
+    {
+        var error = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, null));
+        Assert.Contains("ggml_cuda", error.Message);
+        Assert.Contains("ggml_cpu", error.Message);
+    }
+
+    /// <summary>
+    /// A non-CUDA ggml GPU backend runs V4.1 with this architecture's ops on the
+    /// CPU backend: correct, but a host round trip per occurrence. It is opt-in
+    /// because what the refusal originally closed was a SILENT fallback onto
+    /// whichever GPU enumerated first, not an explicit request.
+    /// </summary>
+    [Theory]
+    [InlineData(BackendType.GgmlVulkan)]
+    [InlineData(BackendType.GgmlMetal)]
+    public void NonCudaGpuBackendsReachTheLoadOnlyWhenAskedFor(BackendType backend)
+    {
+        var refused = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, null));
+        Assert.Contains("TS_DSV41_ALLOW_NON_CUDA_GPU", refused.Message);
+
+        _env.Set("TS_DSV41_ALLOW_NON_CUDA_GPU", "1");
+        // Past the backend gate it fails on the missing Engram sidecar, which is
+        // how these tests observe "reached the load" without a checkpoint.
+        Assert.Throws<FileNotFoundException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, null));
+    }
+
+    /// <summary>The opt-in covers ggml GPU backends only; it does not open a
+    /// backend that has no V4.1 implementation at all.</summary>
+    [Theory]
+    [InlineData(BackendType.Mlx)]
+    public void TheNonCudaOptInDoesNotOpenABackendWithoutAnImplementation(BackendType backend)
+    {
+        _env.Set("TS_DSV41_ALLOW_NON_CUDA_GPU", "1");
+        var error = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, null));
+        Assert.Contains("ggml_cuda", error.Message);
+    }
+
+    /// <summary>
+    /// The direct-CUDA engine implements V4.1 with its own kernels, so it
+    /// reaches the load like the ggml one. It is a separate backend that shares
+    /// nothing with ggml_cuda.
+    /// </summary>
+    [Fact]
+    public void TheDirectCudaEngineReachesTheLoad()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
+            DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), BackendType.Cuda, null);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    /// <summary>
+    /// The pure C# executor implements V4.1's graph -- the compressors at
+    /// ratios 1 and 2, the shared compressed caches and sparse selection, the
+    /// Engram tables, the delayed hyper-connection gates and the trained cache
+    /// quantization -- and is checked against the PyTorch reference by
+    /// Dsv41CpuExecutorTests. It is a portability path, not a serving one, so
+    /// it reaches the load rather than being turned away.
+    /// </summary>
+    [Fact]
+    public void TheManagedCpuExecutorReachesTheLoad()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
+            DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), BackendType.Cpu, null);
+            Assert.Contains("--backend cpu", DeepSeek41Architecture.DescribeCpuBackendChoice(BackendType.Cpu));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    /// <summary>
+    /// ggml_cpu drives the native loader's cpu_only branch, where every V4.1
+    /// fused op runs its scalar CPU implementation. It has to reach the load,
+    /// not be turned away with the V4 executors.
+    /// </summary>
+    [Theory]
+    [InlineData(BackendType.GgmlCuda)]
+    [InlineData(BackendType.GgmlCpu)]
+    public void SupportedBackendsReachTheLoad(BackendType backend)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
+            DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), backend, null);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    /// <summary>
+    /// The server's default backend is ggml_cpu off macOS, so omitting
+    /// --backend on a GPU box used to be a refusal and now loads. It must not
+    /// load silently.
+    /// </summary>
+    [Fact]
+    public void CpuBackendSaysWhatItIsBeforeTheLoad()
+    {
+        string note = DeepSeek41Architecture.DescribeCpuBackendChoice(BackendType.GgmlCpu);
+        Assert.Contains("ONE CPU device", note);
+        Assert.Contains("not a serving path", note);
+        Assert.Contains("--backend ggml_cuda", note);
+        Assert.Contains("TS_DSV4_THREADS", note);
+        Assert.Null(DeepSeek41Architecture.DescribeCpuBackendChoice(BackendType.GgmlCuda));
+    }
+
+    /// <summary>
+    /// Routed-MoE tensor parallelism shards expert dimensions across GPUs, so
+    /// the native loader rejects it under cpu_only. Reject it here first, before
+    /// a 246 GiB checkpoint is opened.
+    /// </summary>
+    [Fact]
+    public void RoutedMoeTensorParallelIsRefusedOnTheCpuBackend()
+    {
+        _env.Set("TS_DSV41_TP", "4");
+        var error = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null, 4));
+        Assert.Contains("TS_DSV41_TP", error.Message);
+        Assert.Contains("ggml_cpu", error.Message);
+    }
+
+    /// <summary>
+    /// TS_DSV41_ENGRAM_DEVICE places the Engram tables in VRAM; the native
+    /// loader reads it only off its cpu_only branch. Accepting it here would
+    /// leave "=1" -- require GPU residency, fail if it does not fit -- silently
+    /// ignored, and would accept a value ggml_cuda rejects. "=0" asks for the
+    /// host mappings this backend always uses, so it stays legal.
+    /// </summary>
+    [Theory]
+    [InlineData("1")]
+    [InlineData("2")]
+    public void GpuResidentEngramTablesAreRefusedOnTheCpuBackend(string value)
+    {
+        _env.Set("TS_DSV41_ENGRAM_DEVICE", value);
+        var error = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null));
+        Assert.Contains("TS_DSV41_ENGRAM_DEVICE", error.Message);
+    }
+
+    [Fact]
+    public void HostMappedEngramTablesRemainSelectableOnTheCpuBackend()
+    {
+        _env.Set("TS_DSV41_ENGRAM_DEVICE", "0");
+        // Reaches the sidecar check, which is the last gate before the weights.
+        Assert.Throws<FileNotFoundException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null));
+    }
+
+    /// <summary>
+    /// Placement stays native's decision on ggml_cuda: mirroring its rule twice
+    /// is how the two spellings drift apart.
+    /// </summary>
+    [Theory]
+    [InlineData("1")]
+    [InlineData("0")]
+    public void EngramPlacementIsLeftToTheLoaderOnTheGpuBackend(string value)
+    {
+        _env.Set("TS_DSV41_ENGRAM_DEVICE", value);
+        Assert.Throws<FileNotFoundException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null));
+    }
+
+    /// <summary>
+    /// V4 reaches the same loader, and ggml_cpu used to run it on the GPUs
+    /// there. It is also the backend the server picks when --backend is
+    /// omitted off macOS, so the switch must announce itself.
+    /// </summary>
+    [Fact]
+    public void V4AlsoSaysWhenTheCpuBackendTakesItOffTheGpus()
+    {
+        string note = DeepSeek4Model.DescribeCpuBackendChoice(BackendType.GgmlCpu);
+        Assert.Contains("ONE CPU device", note);
+        Assert.Contains("not on any GPU", note);
+        Assert.Contains("--backend ggml_cuda", note);
+        Assert.Null(DeepSeek4Model.DescribeCpuBackendChoice(BackendType.GgmlCuda));
+        Assert.Null(DeepSeek4Model.DescribeCpuBackendChoice(BackendType.Cpu));
+    }
+
+    [Theory]
+    [InlineData(BackendType.GgmlCuda)]
+    [InlineData(BackendType.GgmlCpu)]
+    public void MissingEngramSidecarGivesPreparationInstructions(BackendType backend)
+    {
+        string model = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "model.gguf");
+        var error = Assert.Throws<FileNotFoundException>(() =>
+            DeepSeek41Architecture.ValidateLoad(model, backend, null));
+        Assert.EndsWith("deepseek41.engram.bin", error.FileName);
+        Assert.Contains("eng/dsv41-prepare.py", error.Message);
+    }
+
+    [Fact]
+    public void V4DraftCannotBeAppliedToV41()
+    {
+        var error = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, "v4-draft.gguf"));
+        Assert.Contains("DSpark", error.Message);
+    }
+
+    [Fact]
+    public void V4DraftEnvironmentCannotBeAppliedToV41()
+    {
+        _env.Set("TS_DSV4_DSPARK", "v4-draft.gguf");
+        var error = Assert.Throws<NotSupportedException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null));
+        Assert.Contains("DSpark", error.Message);
+    }
+
+    [Theory]
+    [InlineData(null, 4, 0)]
+    [InlineData("0", 4, 0)]
+    [InlineData("2", 2, 2)]
+    [InlineData("4", 4, 4)]
+    [InlineData("8", 8, 8)]
+    [InlineData("4", 0, 4)] // Automatic device enumeration is validated natively.
+    [InlineData(" +4", 4, 4)] // Native strtol accepts a leading sign/whitespace.
+    public void RoutedMoeTensorParallelRanksValidateKnownGpuCount(string value, int gpuCount, int expected)
+        => Assert.Equal(expected, DeepSeek41Architecture.ParseRoutedMoeTensorParallelRanks(value, gpuCount));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("1")]
+    [InlineData("-2")]
+    [InlineData("9")]
+    [InlineData("2.0")]
+    [InlineData("2x")]
+    [InlineData("2 ")]
+    [InlineData("999999999999999999999999")]
+    public void MalformedRoutedMoeTensorParallelSettingIsRejected(string value)
+    {
+        var error = Assert.Throws<ArgumentException>(() =>
+            DeepSeek41Architecture.ParseRoutedMoeTensorParallelRanks(value, 0));
+        Assert.Contains("TS_DSV41_TP", error.Message);
+    }
+
+    [Fact]
+    public void MismatchedRoutedMoeRanksAreRejectedBeforeSidecarOrWeights()
+    {
+        _env.Set("TS_DSV41_TP", "2");
+        var error = Assert.Throws<ArgumentException>(() =>
+            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null, 4));
+        Assert.Contains("selected GPU count (4)", error.Message);
+    }
+
+    [Fact]
+    public void NativeGpuCountOverrideDeterminesRankValidationAndPlacementMessage()
+    {
+        _env.Set("TS_DSV4_NGPU", "2");
+        _env.Set("TS_DSV41_TP", "2");
+        Assert.Equal(2, DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(4));
+        string message = DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(4);
+        Assert.Contains("across 2 GPUs", message);
+        Assert.Contains("gate/up/down", message);
+        Assert.Contains("host-staged F32", message);
+        Assert.Contains("CPU-offloaded layers", message);
+        Assert.Contains("Attention and shared experts retain layer placement", message);
+        Assert.DoesNotContain("shards no weights", message);
+
+        _env.Set("TS_DSV41_TP", "0");
+        Assert.Contains("2 GPUs by LAYER SPLIT", DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(4));
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    public void ExplicitAutomaticGpuOverrideDefersRankCountCheckToNative(string gpuOverride)
+    {
+        _env.Set("TS_DSV4_NGPU", gpuOverride);
+        _env.Set("TS_DSV41_TP", "8");
+        Assert.Equal(8, DeepSeek41Architecture.ResolveRoutedMoeTensorParallelRanks(2));
+        _env.Set("TS_DSV41_TP", "0");
+        Assert.Contains("automatically selected visible GPUs", DeepSeek41Architecture.Descriptor.DescribeMultiGpuPlacement(2));
+    }
+
+    [Fact]
+    public void NativeRoutedMoeShardingDoesNotCreateManagedCollectives()
+    {
+        _env.Set("TS_DSV41_TP", "4");
+        TensorSharp.ITensorParallelGroup group = null;
+        Assert.Equal(1, ModelBase.ResolveTensorParallelSupport(DeepSeek41Architecture.Descriptor,
+            BackendType.GgmlCuda, 4, ref group, out int split));
+        Assert.Equal(4, split);
+        Assert.Null(group);
+    }
+}

@@ -561,9 +561,12 @@ namespace TensorSharp.Cli
                 return;
             }
 
-            if (_model.SupportsKVCacheTruncation && _kvCache.Count >= _warmPrefixTokens)
+            // TryTruncate, not Truncate: a model whose rewind depth depends on where the
+            // conversation got to can decline this one, and then re-forwarding the prefix
+            // is the same fallback as for a model that cannot truncate at all.
+            if (_model.SupportsKVCacheTruncation && _kvCache.Count >= _warmPrefixTokens
+                && _model.TryTruncateKVCache(_warmPrefixTokens))
             {
-                _model.TruncateKVCache(_warmPrefixTokens);
                 _kvCache.TruncateTo(_warmPrefixTokens);
                 return;
             }
@@ -573,7 +576,8 @@ namespace TensorSharp.Cli
             int previous = _warmPrefixTokens;
             _warmPrefixTokens = 0;
             _warmPrefixReported = false;
-            Console.WriteLine($"[re-forwarding the shared prompt ({previous} tokens); this model cannot rewind its cache]");
+            Console.WriteLine($"[re-forwarding the shared prompt ({previous} tokens); "
+                + "this model cannot rewind its cache that far]");
             WarmSystemPrefix();
         }
 
@@ -2253,9 +2257,9 @@ namespace TensorSharp.Cli
 
         private float[] PlainPrefill(List<int> inputTokens, out ReusePlanKind kind)
         {
-            ReusePlan plan = _kvCache.PlanReuse(inputTokens, _model.SupportsKVCacheTruncation);
-            kind = plan.Kind;
-            return ApplyReusePlan(plan, inputTokens);
+            ReusePlan plan = _kvCache.PlanReuse(inputTokens, _model.SupportsKVCacheTruncation,
+                _model.KVCacheTruncationGranularity);
+            return ApplyReusePlan(plan, inputTokens, out kind);
         }
 
         /// <summary>
@@ -2320,39 +2324,59 @@ namespace TensorSharp.Cli
             return logits;
         }
 
-        private float[] ApplyReusePlan(ReusePlan plan, List<int> inputTokens)
+        /// <summary>
+        /// Carry out <paramref name="plan"/>. <paramref name="applied"/> reports what
+        /// actually happened, which is not always what was planned: a model whose rewind
+        /// depth depends on where the sequence is can decline the truncation a partial
+        /// reuse needs, and then the only correct answer is the full re-prefill. The
+        /// per-turn log line shows the applied kind, so a declined rewind is visible
+        /// rather than being reported as a reuse that did not happen.
+        /// </summary>
+        private float[] ApplyReusePlan(ReusePlan plan, List<int> inputTokens, out ReusePlanKind applied)
         {
-            switch (plan.Kind)
-            {
-                case ReusePlanKind.ExactMatch:
-                    return plan.CachedLogits;
+            applied = plan.Kind;
 
-                case ReusePlanKind.PartialReuse:
+            if (plan.Kind == ReusePlanKind.ExactMatch)
+                return plan.CachedLogits;
+
+            if (plan.Kind == ReusePlanKind.PartialReuse)
+            {
+                int reused = plan.ReusedPrefixLength;
+                // A reuse boundary inside an image or audio span would truncate half an
+                // injection, and the re-forward would queue that span's embeddings at the
+                // wrong offset; the injector pulls the boundary back to the span start.
+                // Realigning after it matters for a model whose head can only stop on a
+                // compression-block boundary - the clamp knows nothing about that.
+                reused = _model.MultimodalInjector.ClampReusablePrefix(reused);
+                int granularity = _model.KVCacheTruncationGranularity;
+                if (granularity > 1) reused -= reused % granularity;
+
+                if (reused > 0 && _model.TryTruncateKVCache(reused))
                 {
-                    int reused = plan.ReusedPrefixLength;
-                    int suffixLength = plan.TokensToForward;
-                    _model.TruncateKVCache(reused);
+                    int suffixLength = inputTokens.Count - reused;
                     _kvCache.TruncateTo(reused);
 
                     var suffix = new int[suffixLength];
                     for (int i = 0; i < suffixLength; i++)
                         suffix[i] = inputTokens[reused + i];
-                    float[] logits = ForwardRefillChunked(suffix, promptStartToken: reused);
-                    _kvCache.RecordAppend(suffix, logits);
-                    return logits;
+                    float[] suffixLogits = ForwardRefillChunked(suffix, promptStartToken: reused);
+                    _kvCache.RecordAppend(suffix, suffixLogits);
+                    return suffixLogits;
                 }
 
-                case ReusePlanKind.Reset:
-                default:
-                {
-                    _model.ResetKVCache();
-                    _kvCache.Reset();
-                    var allTokens = inputTokens.ToArray();
-                    float[] logits = ForwardRefillChunked(allTokens, promptStartToken: 0);
-                    _kvCache.RecordAppend(allTokens, logits);
-                    return logits;
-                }
+                _log.LogDebug(LogEventIds.KvCacheReusePlan,
+                    "partial reuse declined by the model at {Reused} of {Cached} cached token(s); "
+                    + "re-prefilling {PromptTokens} token(s)",
+                    reused, _kvCache.Count, inputTokens.Count);
+                applied = ReusePlanKind.Reset;
             }
+
+            _model.ResetKVCache();
+            _kvCache.Reset();
+            var allTokens = inputTokens.ToArray();
+            float[] logits = ForwardRefillChunked(allTokens, promptStartToken: 0);
+            _kvCache.RecordAppend(allTokens, logits);
+            return logits;
         }
 
         /// <summary>

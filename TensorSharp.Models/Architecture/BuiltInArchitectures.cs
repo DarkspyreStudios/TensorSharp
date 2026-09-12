@@ -38,6 +38,7 @@ namespace TensorSharp.Models.Architecture
             ModelArchitectureRegistry.Register(HunyuanDenseArchitecture.Descriptor);
             ModelArchitectureRegistry.Register(MuseGlimmerArchitecture.Descriptor);
             ModelArchitectureRegistry.Register(DeepSeek4Architecture.Descriptor);
+            ModelArchitectureRegistry.Register(DeepSeek41Architecture.Descriptor);
             ModelArchitectureRegistry.Register(GlmDsaArchitecture.Descriptor);
 
             // Generative media.

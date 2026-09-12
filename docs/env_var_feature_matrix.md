@@ -213,6 +213,38 @@ A/B switch, plus long-context sizing knobs. None are registered in
 | `TS_SPEC_ADAPTIVE` | Speculative decoding (all drafters) | `0` disables the cost governor, so drafting is never measured against a plain baseline and never parked. For A/B measurement: a governor round's baseline steps are plain decodes and they are not free | ON | not registered | no |
 | `TS_GGML_LOG_DEBUG` | GGML backends | `1` passes ggml's DEBUG log channel through instead of dropping it. Carries the CUDA backend's "CUDA graph warmup complete"/"reset" lines, which are the only way to see whether a graph is actually being CUDA-graph-captured | OFF | not registered | no |
 
+## Out-of-Matrix DeepSeek V4 / V4.1 Knobs
+
+These configure the DeepSeek whole-model executors. DeepSeek V4 has three of
+them (direct CUDA, native ggml, pure C#); DeepSeek V4.1 has one native
+`ggml_cuda` graph, with `ggml_cpu` as a scalar correctness path. None are
+registered in `EnvVarMatrix.All`, so the default TestMatrix sweep does not touch
+them. The full context is in the [V4 card](models/deepseek4.md) and the
+[V4.1 card](models/deepseek41.md).
+
+| Variable | Applies to | Effect | Baseline | In matrix |
+|---|---|---|---|---|
+| `TS_DSV4_NGPU` | V4 and V4.1 | How many GPUs the layer split spreads whole layers over — the same thing `--tp N` sets for these architectures. `0` selects every visible device | `0` (all visible) | no |
+| `TS_DSV4_UBATCH` | V4 and V4.1 | Prefill micro-batch width | `256` in the conservative profile; the measured eight-A40 V4.1 profile uses `1024` | no |
+| `TS_DSV4_THREADS` | V4 and V4.1 | Native thread pool for GPU-only loads. CPU expert offload uses the detected available parallelism instead, and `--cpu-moe-threads N` / `TS_CPU_MOE_THREADS` sets that | min(cores, 32) | no |
+| `TS_DSV4_PERF` | V4 and V4.1 | `1` prints per-stage timing | off | no |
+| `TS_DSV4_VRAM_RESERVE_MB` / `TS_DSV4_GRAPH_CACHE` / `TS_DSV4_LOAD_THREADS` / `TS_DSV4_LOAD_CHUNK_MB` / `TS_DSV4_MOE_MMAP` | V4 and V4.1 | Placement headroom, graph-cache depth, weight-load parallelism, and whether host-resident experts are multiplied in place out of the GGUF mapping | see the cards | no |
+| `TS_DSV4_DSPARK` | V4 only | DSpark drafter GGUF, equivalent to `--draft-model`. V4.1 rejects V4 drafters — it has no DSpark path | unset | no |
+| `TS_DSV41_TP` | V4.1 | `0` disables it; `2`-`8` enables **experimental routed-MoE tensor parallelism** over exactly that many GPUs, which must equal the count `--tp` / `TS_DSV4_NGPU` selected. Gate/up split along the FFN intermediate, down along its input, partials reduced through host-staged F32 buffers. Measured slower than the layer split on the first full Q2_K run | `0` | no |
+| `TS_DSV41_ENGRAM_DEVICE` | V4.1 | `1` requires GPU-resident Engram tables and fails if they do not fit; `0` forces host mappings, which is also what a bit-exact CPU-oracle comparison needs. Unset is automatic and conservative: GPU-resident unless that would force routed-expert CPU offload | auto (GPU-resident when it fits) | no |
+| `TS_DSV41_ENGRAM_WARM` | V4.1, host mappings only | `1` reads the Engram table pages at load. Worth 207-221 → 506-528 prefill tok/s on eight A40s when the tables are host-mapped, and irrelevant on the GPU-resident default. Costs ~60 GiB of host page cache and ~130 s of startup | off | no |
+| `TS_DSV41_ENGRAM_THREADS` | V4.1, host mappings only | Persistent lookup workers, `1`-`32`. One token selects 24 independent rows per table, so serial reads mean serialized page faults | min(16, hardware threads) | no |
+| `TS_DSV41_ENGRAM_RANDOM` | V4.1, host mappings on Linux | Random-access advice for the mapped Engram ranges. `0` disables, `1` forces | auto | no |
+| `TS_DSV41_ENGRAM_SIDECAR` | V4.1 | Explicit path to the prepared `deepseek41.engram.bin` sidecar instead of the one beside the shards | beside the GGUF | no |
+| `TS_DSV4_LOAD_CONTIGUOUS` | V4 and V4.1 | `0` reverts the weight loader to handing its chunk jobs out from a shared cursor, which makes every reader stride `threads x chunk` through the file instead of reading one contiguous run. Kept only so the contiguous default can be A/B'd: on a MooseFS mount it measured 2.5x slower (363-382 s against 144-155 s to load the Q4_K_M release on eight A40s) | on | no |
+| `TS_DSV4_LOAD_DROP_CACHE` | V4 and V4.1 | `1` releases each weight chunk's page cache once the chunk is on the device. Does not change load time; ends the load with ~39 GiB of page cache instead of ~330 GiB, which leaves room for the host-resident experts. Off by default because the call costs real time on FUSE | off | no |
+| `TS_DSV41_REWIND_CHECKPOINT` | V4.1, native executor | `0` drops the per-slot rewind checkpoint (a shadow copy of the raw sliding-window and compressor-state rings, taken at every prompt boundary). Without it a partial KV reuse can only rewind as far as the live ring reaches — 385 positions on the released checkpoint — so a multi-turn thinking chat re-prefills instead. Costs ~21 MiB of VRAM per sequence slot | on | no |
+| `TS_DSV41_SPARSE_FA` | V4.1 | `1` selects sparse flash attention. Opt-in, with documented floating-point differences from the dense path | off | no |
+| `TS_DSV41_COMPACT_RAW_GATHER` | V4.1 | `1` selects compact gathering for the raw sliding window. Opt-in, with the same floating-point caveat | off | no |
+| `TS_DSV41_ALLOW_NON_CUDA_GPU` | V4.1 | `1` permits `ggml_vulkan` / `ggml_metal`, where the ordinary graph runs on the GPU and only the architecture-specific ops fall back to the CPU backend, at a host round trip each. Opt-in because the refusal it lifts was closing a *silent* fallback | off | no |
+| `TS_DSV41_VISION_FA` / `TS_DSV41_VISION_BF16_GEMM` | V4.1 vision companion | `TS_DSV41_VISION_FA=1` selects flash attention with F16 intermediates in the image encoder (larger real-image feature differences); `TS_DSV41_VISION_BF16_GEMM=0` selects the diagnostic F32-promoted matrix path | dense F32 attention, BF16 GEMM with F32 accumulation | no |
+| `TS_DSV41_TRACE_DIR` / `TS_DSV41_VISION_TRACE_DIR` | V4.1 (diagnostic) | Directories for text-graph and vision-encoder tensor dumps. Both retain intermediates and add device transfers — leave unset for benchmarks | unset | no |
+
 ## Out-of-Matrix GLM 5.x (`glm-dsa`) Knobs
 
 These configure the GLM 5.x (`glm-dsa`) executor — the native whole-model ggml

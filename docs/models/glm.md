@@ -6,8 +6,10 @@ GLM-5.2 is a 744B-parameter MoE (256 routed experts, top-8, plus one shared
 expert) built on **DeepSeek Sparse Attention**: Multi-head Latent Attention with
 weight absorption, and a "lightning indexer" that decides which cached tokens
 each query may attend to. Advertised context: 1M tokens. The GGUF architecture
-id is `glm-dsa`. **GLM-5.3-Flash** (`glm5next`) runs through the same executor -
-see [its section below](#glm-53-flash-glm5next).
+id is `glm-dsa`. **GLM-5.3** is the same block shape under a newer release and
+shares this whole page - see [its section below](#glm-53-glm-dsa). **GLM-5.3-Flash**
+(`glm5next`) runs through the same executor - see
+[its section below](#glm-53-flash-glm5next).
 
 ## The block
 
@@ -530,6 +532,49 @@ dropped from the prompt, matching the template's `clear_thinking` default. Tool 
 one XML element per argument (values that were rendered with `tojson` are parsed
 back into numbers / arrays / objects).
 
+## GLM-5.3 (`glm-dsa`)
+
+GLM-5.3 (not Flash) is the same architecture as GLM-5.2, so everything above
+applies to it unchanged: `general.architecture` is `glm-dsa`, `block_count` is
+79 (78 trunk + one NextN), 256 routed experts top-8 with one shared expert,
+MLA with the lightning indexer, `rope.freq_base` 8e6, `context_length` 1M.
+It needs no new code path and no new flag - it is the GLM-5.2 loader.
+
+Two differences matter in practice, both read off the published GGUF:
+
+- **Text only.** [unsloth/GLM-5.3-GGUF](https://huggingface.co/unsloth/GLM-5.3-GGUF)
+  publishes no mmproj of any kind at any quant, so there is no vision tower to
+  point `--mmproj` at. GLM-5.3-**Flash** is the one that takes images.
+- **`--spec` only without `--tp`.** The NextN block at `blk.78` is complete
+  (`nextn.eh_proj` / `enorm` / `hnorm` / `shared_head_norm`, plus a full MLA +
+  256-expert layer), but it ships no `nextn.shared_head_head.weight`, so it
+  borrows the trunk's LM head. Under tensor parallelism that head is
+  column-parallel, and the loader refuses rather than drafting from one rank's
+  strip of the vocabulary:
+
+  ```
+  [glm] the NextN block has no LM head of its own and the trunk head is
+        column-parallel under --tp 8; serving standard decode
+  ```
+
+  So speculation is engaged on the **default layer split** (no `--tp`, every
+  visible GPU). Check the load banner before believing a `--spec` run drafted
+  anything, and check the one the executor you are actually running prints: on
+  the GGML backends that is the native executor, whose banner reads
+
+  ```
+  [glm] glm-dsa: 78 trunk layers +1 NextN/MTP draft block, n_embd=6144, ...
+  ```
+
+  and, when the block was declared but not loaded,
+  `78 trunk layers (NextN block present but not loaded; --spec loads it)`.
+  The `NextN/MTP draft head ready (block 78, ...)` line belongs to the managed
+  per-op path (`TS_GLM_NATIVE=0`) and is not printed on a GPU run.
+
+At UD-Q2_K_XL the checkpoint is 236.4 GiB across seven shards, so it wants a
+box whose *combined* VRAM clears that with room for the KV cache - six of the
+eight 45 GiB A40s by weight alone, eight in practice.
+
 ## GLM-5.3-Flash (`glm5next`)
 
 GLM-5.3-Flash is the hybrid successor: 320B parameters, 288 routed experts
@@ -641,3 +686,21 @@ attention, while the projections, hyper-connections, router, experts and the
 LM head run once over the batch. Verified by a serial-vs-batched equality
 harness (`benchmarks/ParityHarness --batched`): 3 concurrent sequences, every
 step fused, token-for-token equal to serial decode.
+
+## Benchmark matrix
+
+[`benchmark_config_glm53_qwen38.json`](../../benchmarks/engine_comparison/benchmark_config_glm53_qwen38.json)
+registers `glm53` and `glm53-flash` (alongside Qwen3.8-Flash-Next) against
+pinned Hugging Face revisions, with the observed shard sizes and the modality /
+MTP facts above recorded per entry. Its default backend passes no `--tp` and
+pins no `CUDA_VISIBLE_DEVICES`, which for these two models means the native glm
+executor claims every visible GPU and places whole layers on them - the only
+placement in which a 236 GiB checkpoint loads, and the only one in which
+GLM-5.3's NextN block loads. That is a property of this family's executor, not
+of the harness: the config's third model (`qwen4exp`) is spread by the *shared*
+loader and therefore needs an explicit `--tp N`, so it sits on a second backend
+column and its default cells are recorded as skips. The llama.cpp column is
+available for `glm53` only: the llama.cpp build on that host (ggml 0.23.0) has
+`glm-dsa` in its arch table and `src/models/glm-dsa.cpp`, but the string
+`glm5next` appears nowhere in its sources - so check for it before assuming a
+reference column.

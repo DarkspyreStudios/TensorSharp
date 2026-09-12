@@ -141,6 +141,17 @@ namespace TensorSharp.Runtime
         public string? GrammarActivationTrigger { get; init; }
 
         /// <summary>
+        /// Optional trigger used only when reasoning was enabled for this request.
+        /// Families such as DeepSeek V4.1 start directly in JSON when reasoning is
+        /// disabled, but must finish their reasoning block before JSON enforcement.
+        /// </summary>
+        public string? ThinkingGrammarActivationTrigger { get; init; }
+
+        /// <summary>Trained single token that may close this family's open
+        /// reasoning channel at its budget. Null retains the host's hard stop.</summary>
+        public string? ThinkingBudgetEndToken { get; init; }
+
+        /// <summary>
         /// Text the GENERATION PROMPT appends after the assistant role marker that
         /// re-rendering the same turn as HISTORY does not reproduce - given the
         /// thinking flag the turn ran under. Returns null/empty when the family's
@@ -152,6 +163,13 @@ namespace TensorSharp.Runtime
         /// conversation at full cost while still answering correctly.
         /// </summary>
         public Func<bool, string?>? AssistantGenerationSuffix { get; init; }
+
+        /// <summary>
+        /// Whether cached assistant tokens may replace the template's history.
+        /// Disable when the protocol deliberately changes past reasoning or turn
+        /// framing; replaying raw tokens would violate the model's input format.
+        /// </summary>
+        public bool AllowRawAssistantTokenSplicing { get; init; } = true;
 
         /// <summary>
         /// True when this family's template emits an EMPTY

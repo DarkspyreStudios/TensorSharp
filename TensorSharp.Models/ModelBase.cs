@@ -1119,6 +1119,11 @@ namespace TensorSharp.Models
                 bosId,
                 gguf.GetString("tokenizer.chat_template"),
                 tokenizerModel);
+            // The V4.1 reference renderer emits BOS itself. Its published GGUF
+            // correctly disables automatic insertion, although the inherited V4
+            // Jinja template contains bos_token and triggers the generic override.
+            if (gguf.GetString("general.architecture") == "deepseek41")
+                addBos = false;
             if (addBos && !addBosMetadata)
             {
                 Console.WriteLine(
@@ -2317,10 +2322,38 @@ namespace TensorSharp.Models
             TruncateKVCacheCore(tokenCount);
         }
 
+        /// <summary>
+        /// Truncate when this model can reach <paramref name="tokenCount"/>, else report
+        /// false having changed nothing (see <see cref="IModelArchitecture.TryTruncateKVCache"/>
+        /// for why a model that supports truncation can still refuse a particular depth).
+        ///
+        /// <para>The tensor-parallel broadcast happens only AFTER the local truncation
+        /// succeeded: a refusal must not leave the worker nodes rewound while the driver
+        /// is not.</para>
+        /// </summary>
+        public bool TryTruncateKVCache(int tokenCount)
+        {
+            if (!TryTruncateKVCacheCore(tokenCount)) return false;
+            if (_distributedDriver) _tpGroup.BroadcastControl(TpControlTruncate, new[] { tokenCount });
+            return true;
+        }
+
+        /// <summary>See <see cref="IModelArchitecture.KVCacheTruncationGranularity"/>.</summary>
+        public virtual int KVCacheTruncationGranularity => 1;
+
         protected virtual void TruncateKVCacheCore(int tokenCount)
         {
             Console.WriteLine($"[KV cache] Truncating from {_cacheSeqLen} to {tokenCount}");
             _cacheSeqLen = tokenCount;
+        }
+
+        /// <summary>Refusable counterpart of <see cref="TruncateKVCacheCore"/>. Override
+        /// it INSTEAD of the void form when the depth a rewind can reach depends on where
+        /// the sequence is; the default never refuses.</summary>
+        protected virtual bool TryTruncateKVCacheCore(int tokenCount)
+        {
+            TruncateKVCacheCore(tokenCount);
+            return true;
         }
 
         /// <summary>
@@ -2670,18 +2703,17 @@ namespace TensorSharp.Models
                     "desynchronising the others, so this run is refused. Start the node without --tp-node-id/--tp-peers.");
             }
 
-            // No sharding, but the architecture can still spread its LAYERS across the
-            // GPUs. That is what an operator asking for N GPUs wants, and it is the same
-            // mode llama.cpp uses for these models, so honour --tp N as a layer split
-            // rather than throwing the second GPU away.
+            // Native executors own their placement and any optional reductions;
+            // pass the device count without creating the shared TP group.
             if (architecture.MultiGpu == MultiGpuMode.LayerSplit
                 && ModelArchitectureDescriptor.BackendHasSeveralDevices(backend))
             {
                 layerSplitDegree = tpDegree;
                 Console.WriteLine(
-                    $"  Multi-GPU: {tpDegree} GPUs by LAYER SPLIT (each GPU holds a contiguous run of whole " +
+                    architecture.DescribeMultiGpuPlacement?.Invoke(tpDegree) ??
+                    ($"  Multi-GPU: {tpDegree} GPUs by LAYER SPLIT (each GPU holds a contiguous run of whole " +
                     "layers), not tensor parallelism - this architecture shards no weights. Same mode " +
-                    "llama.cpp uses for it. This raises capacity; it is not expected to raise decode speed.");
+                    "llama.cpp uses for it. This raises capacity; it is not expected to raise decode speed."));
                 return 1;
             }
 

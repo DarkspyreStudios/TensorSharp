@@ -819,6 +819,159 @@ re-arms under the new policy on the next turn (`BatchExecutor.SetSpeculation`).
 for a settings switch — TensorAgent's applies at once through it — and for an A/B
 that must not reload the model between its passes.
 
+## The 2026-09 ggml_cuda regression, and what is left
+
+Speculation on Qwen 3.5-0.8B under `ggml_cuda` measured **5.3x SLOWER** than
+plain decoding (108.5 tok/s plain, 20.5 tok/s with the n-gram drafter). Drafting
+was not the cost: over that run `draft=1 ms` and `verify=355 ms` against
+`plain=4647 ms` for 93 steps, i.e. the steps where the drafter proposed nothing
+cost 50 ms/token where the non-speculative engine spends 9.2.
+
+The chain, in the order it has to be read:
+
+1. `LinearSpecTrunk.ForwardPlain` sends an UNPARKED plain step to `SpecForward`
+   (the verify graph family) whenever the model declares
+   `SpecPlainStepCostsFamilySwitch`. That is right for an isolated plain step
+   between verifies and wrong for a long run of them.
+2. The governor never parked, so the run never left that family. Its plain
+   baseline read **247.4 ms/token** against a true 9.2, because the only plain
+   steps it sampled were calibration steps that pay a graph-family transition.
+   Against that baseline a 44 ms speculative step is an overwhelming win.
+3. Parked steps - the one clean, amortized measurement of plain cost the
+   governor ever takes, 32 to 256 of them per park - were explicitly discarded
+   as "not samples".
+
+Three changes, none model-specific:
+
+* `SpeculationCostGovernor.Record` now feeds parked steps into the plain
+  baseline (skipping the first, which pays the transition).
+* `SpeculativeExecution` counts consecutive no-draft steps and, after two,
+  takes the model's own decode for the rest of the run - the switch is amortized
+  by the run itself.
+* The plain branch stopped allocating a vocabulary-sized logits array per token.
+
+A fourth is Qwen 3.5 specific: `ggml_cuda` now keeps the gated-delta-net
+recurrent state on the device across a speculative step instead of draining it
+to host mirrors and re-uploading it, which is what Metal already did
+(`TS_QWEN35_SPEC_DEVICE_STATE=0` restores the drain).
+
+Measured after, same machine, same prompt: **1.13x slower** than plain
+(112.4 -> 99.3 tok/s) with the governor parking correctly. Isolating the fourth
+change with its kill switch shows it is worth 1.67x on its own (99.3 with it,
+59.3 without).
+
+### Measure on a quiet machine, or do not measure
+
+The first pass at the numbers below reported a 246 ms verify step, a 65 ms state
+snapshot and 67 ms plain steps, and concluded that the verify path had a
+per-call floor no acceptance rate could pay for. **That conclusion was wrong, and
+the cause was the measuring environment.** An `nvidia-smi -l 1` left running on
+the box for eight hours was taking the driver lock every second; on a 0.8B model
+whose decode step is launch-latency bound, that inflated everything and made
+otherwise identical runs vary by 3x - plain greedy read anywhere between 105 and
+293 tok/s with the same code and the same prompt.
+
+With that process killed, identical runs agree to a few percent. Always check
+`ps -eo pcpu,pid,comm --sort=-pcpu` and `nvidia-smi --query-compute-apps` before
+believing a speculative measurement.
+
+### What a speculative step actually costs
+
+Qwen 3.5-0.8B Q8_0, ggml_cuda, quiet box, drafting forced on
+(`TS_SPEC_ADAPTIVE=0`): 57 drafted, 10 accepted, 19 verifies, 76 plain steps.
+
+| phase | per call |
+| --- | ---: |
+| verify step | 8.7 ms |
+| recurrent-state snapshot | 3.0 ms |
+| plain step on the speculative family | 5.3 ms |
+| plain step on the non-speculative route | 3.4 ms |
+
+These are sane numbers, and they say where the loss comes from. A verify plus its
+snapshot costs 11.7 ms and emits, at 17% acceptance with a 3-token window,
+1.53 tokens: 7.7 ms per token against 3.4 ms for a plain decode. The plain steps
+on the speculative route cost 5.3 ms rather than 3.4 ms.
+
+So beating plain decoding is an ACCEPTANCE problem, not a floor problem. At
+11.7 ms per verify a break-even against 3.4 ms/token needs about 3.4 accepted
+tokens per verify.
+
+And on this scenario the drafter cannot get there. Widening the window does not
+help at all - tokens emitted per verify stayed at ~1.5 for windows of 3, 8 and 16,
+while drafted tokens rose from 57 to 218 - so it is the FIRST drafted token that
+is usually wrong, not the tail. Tightening the match instead (`--spec-pmin`,
+which scales the required n-gram context length) kills drafting outright: at
+pmin 0.5 the drafter proposed 18 tokens in 105 steps, and at 0.75 and 1.0 it
+proposed none. A 2-token context matches somewhere in a 2,777-token corpus almost
+always, and almost always in the wrong place; a 6-token context never matches at
+all. The model is not echoing its prompt verbatim in this scenario, so there is
+nothing for a suffix matcher to find.
+
+With the governor on and the default window, speculation measured 0.87x, 0.93x
+and 0.94x of plain across three runs, every stream identical. That is the honest
+current state: the regression is gone, the remaining 6-13% is the speculative
+route's residual per-step overhead, and closing it further needs a workload where
+a drafter can actually earn its verify.
+
+### A correctness bug at a nine-row verify (Qwen 3.5, ggml)
+
+Speculation's whole contract is that the emitted stream is what plain greedy
+would have produced. On Qwen 3.5-0.8B / ggml_cuda that contract **breaks once the
+verify batch reaches nine rows**, which is a draft window of 8 or more.
+Reproducible, with `benchmarks/AgentTurnBench --scenarios spec --spec-file 2000`
+and `TS_SPEC_ADAPTIVE=0` to force drafting:
+
+| draft window | verify rows | result |
+| ---: | ---: | --- |
+| 6 | 7 | identical to plain greedy |
+| 7 | 8 | identical to plain greedy |
+| 8 | 9 | **diverges at token 74** |
+| 9 | 10 | **diverges at token 74** |
+| 10 | 11 | **diverges at token 74** |
+
+The culprit is the per-row recurrent-state snapshot path. `TS_Q35_VERIFY_SNAPSHOTS=0`
+at draft window 8 produces an identical stream; leaving it on diverges. Nine rows
+is also where ggml's 2..8-row matvec kernels give way to the large-batch path,
+which is the same boundary Gemma 4 already avoids for speed
+(`Gemma4Model.SpecPreferredDraftWindow => 7`).
+
+**The default is not affected.** `Qwen35Model.SpecPreferredDraftWindow` is 3 on a
+recurrent trunk, and a preferred window narrows the DEFAULT only - it never
+overrides a number the operator typed. So this is reachable by passing
+`--spec-draft 8` or wider, and not otherwise.
+
+**Workaround until it is fixed:** `--spec-draft 7` or lower, or
+`TS_Q35_VERIFY_SNAPSHOTS=0`.
+
+Two C#-side guards were tried and do NOT work, which is worth recording so nobody
+repeats them: requesting one snapshot instead of N moved the divergence from
+token 74 to token 33, and additionally turning off the deferred state download
+moved it to token 18. The native reads `TS_Q35_VERIFY_SNAPSHOTS` itself for
+`fv_snapshots_cfg`, so the environment variable disables a combination the
+managed side cannot reproduce by toggling its own arguments. The fix belongs in
+`ggml_ops_qwen35_verify.cpp`, in how the snapshot slots are captured and
+committed for a batch wider than eight rows.
+
+### Device-resident recurrent state: fast and currently wrong
+
+`TS_QWEN35_VERIFY_RESIDENT=1` keeps the gated-delta-net conv and delta state on
+the device instead of moving ~60 MB per call. It is a large win on paper and it
+breaks the output, which is why it stays opt-in:
+
+* Resident on every call: the stream diverged from plain greedy at token 53. A
+  resident call updates the state IN PLACE, so
+  `SpecSnapshotRecurrentState`'s shortcut - the live slices ARE the snapshot,
+  because a verify only reads them - stops being true, and a rejected draft rolls
+  back to nothing.
+* Resident on single-token calls only, leaving verifies with separate in/out
+  buffers: diverged at token 2, and gave up the plain-step win as well.
+
+Making it correct needs a real snapshot in resident mode. The state is already on
+the device, so a device-to-device copy is about 0.2 ms for 60 MB on an A40 - the
+expensive part was always the host round trip, not the copy.
+`BackendType.Cuda` already has that path (`MtpSnapshotRecurrentStateCudaDevice`);
+ggml_cuda does not.
+
 ## Measuring it
 
 On the phone, `TensorAgent/scripts/bench-spec-device.sh` deploys the app, launches

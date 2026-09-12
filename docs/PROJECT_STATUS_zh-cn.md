@@ -6,6 +6,22 @@
 
 TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码包含 CLI、服务端/Web UI、兼容 HTTP API、AgentHost，以及 TensorAgent iOS/iPadOS 应用。AgentHost 与 TensorAgent 属于以源码为先的能力，最新标签版不一定已经包含它们。
 
+### 最新加入的架构
+
+上一个发布标签之后又落地了两个系列，两者都带着值得先了解的限制。
+
+- **DeepSeek V4.1 Flash（`deepseek41`）**——专用的原生 V4.1 计算图，外加可选的视觉
+  伴随文件。服务后端是 `ggml_cuda`；`ggml_cpu` 用同一套图跑标量回退实现，作为正确性
+  通道；`ggml_vulkan` 与 `ggml_metal` 需要 `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；其余后端
+  会直接拒绝该检查点，而不会把 V4.1 的权重塞进 V4 的图。Q2_K 版本必须先准备好 Engram
+  sidecar 才能运行。多 GPU 指的是按层切分；routed-MoE 张量并行藏在 `TS_DSV41_TP`
+  之后，实测比按层切分更慢。并发请求各有独立槽位，但目前回退到逐槽前向，因此并发还不
+  等于批处理的 GPU 吞吐；也没有 V4.1 的 DSpark。哪些已实测、哪些明确未验证，都记录在
+  [验证报告](deepseek41_validation.md)与[模型卡片](models/deepseek41.md)中。
+- **Hunyuan Dense（`hunyuan-dense`）**——腾讯的稠密 Hunyuan 解码器，加入之后官方
+  Hy-MT2 GGUF 才不会因架构未注册而加载失败。第一版：仅文本、单设备、走通用 per-op
+  路径，没有工具调用也没有思考模式。见[模型卡片](models/hunyuan-dense_zh-cn.md)。
+
 ### TensorAgent 与 iOS
 
 TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运行 TensorSharp 引擎。它把原生 GGML 作为 iOS `.xcframework` 链接进来，在真机上使用 `ggml_metal`，并与 CLI、服务端共享与宿主无关的聊天流水线（`TensorSharp.Chat`）。iOS 目标通过 `TensorSharpIosTargets=true` 启用；它不是独立的数值后端，也不是远程推理服务。

@@ -1,0 +1,249 @@
+// DeepSeek V4.1 graph methods. Included inside graph_builder to share the
+// existing ggml scheduler, MoE kernels, weight placement and sequence slots.
+// Equations follow deepseek-ai/DeepSeek-V4.1-Flash/inference/model.py.
+
+ggml_tensor * v41_shared_mask = nullptr;
+ggml_tensor * v41_shared_top = nullptr;
+ggml_tensor * v41_candidates = nullptr;
+
+ggml_tensor * v41_quant(ggml_tensor * x, int mode, int dev)
+{
+    x = ggml_cont(ctx, x);
+    return fused_node(TSG_DSV41_FUSED_QUANT, GGML_TYPE_F32,
+        x->ne[0], x->ne[1], x->ne[2], x->ne[3], { x }, dev, mode);
+}
+
+// Rotate only the last n_rot components; the preceding components are MLA
+// content dimensions. V4.1 does not normalize the projected query heads.
+ggml_tensor * v41_rope(ggml_tensor * x, ggml_tensor * pos, int il, bool inverse = false)
+{
+    const int64_t head = x->ne[0], nhead = x->ne[1], n = x->ne[2];
+    const int64_t nope = head - hp.n_rot;
+    ggml_tensor * content = ggml_view_3d(ctx, x, nope, nhead, n, x->nb[1], x->nb[2], 0);
+    ggml_tensor * tail = ggml_view_3d(ctx, x, hp.n_rot, nhead, n, x->nb[1], x->nb[2], nope * x->nb[0]);
+    float base, scale, ext, factor, fast, slow;
+    int orig;
+    rope_params(il, base, scale, ext, factor, fast, slow, orig);
+    tail = inverse
+        ? ggml_rope_ext_back(ctx, tail, pos, nullptr, hp.n_rot, GGML_ROPE_TYPE_NORMAL, orig, base, scale, ext, factor, fast, slow)
+        : ggml_rope_ext(ctx, tail, pos, nullptr, hp.n_rot, GGML_ROPE_TYPE_NORMAL, orig, base, scale, ext, factor, fast, slow);
+    return ggml_concat(ctx, content, tail, 0);
+}
+
+ggml_tensor * build_engram(int il, ggml_tensor * x)
+{
+    const auto & L = m.layers[il];
+    if (L.engram_index < 0) return x;
+    const int64_t dim = hp.n_embd, hc = hp.hc_mult;
+    ggml_tensor * lookup = res.inp.engram[L.engram_index];
+    if (m.engram_on_device)
+    {
+        // The table is resident on this layer's device: gather the quantized
+        // rows here. The id array is laid out token-major (index = token *
+        // hash_columns + column), so get_rows returns [head_dim, hash_columns *
+        // nt] in exactly the order the host path staged its F32 rows. The
+        // reshape below is therefore a relabelling, not a copy.
+        const int64_t head_dim = m.engram.head_dim, cols = m.engram.hash_columns();
+        lookup = ggml_get_rows(ctx, L.engram_embd, res.inp.engram_ids[L.engram_index]);
+        // Pin the gather to the device that holds the table. Device weight
+        // buffers are not marked USAGE_WEIGHTS, so the scheduler's "run the op
+        // where the weight lives" rule does not apply here, and a 30 GiB table
+        // must never become a cross-backend copy.
+        pin(lookup, L.device);
+        lookup = ggml_reshape_2d(ctx, lookup, cols * head_dim, nt);
+        if (res.image_tokens)
+        {
+            // Visual positions consume no Engram embedding. The host path
+            // wrote zero rows for them; zero the gathered rows the same way,
+            // so a garbage-free but arbitrary row cannot reach the gate.
+            ggml_tensor * text_mask = ggml_scale_bias(ctx,
+                ggml_cast(ctx, res.inp.image_types[L.device], GGML_TYPE_F32), -1.0f, 1.0f);
+            lookup = ggml_mul(ctx, lookup, ggml_reshape_2d(ctx, text_mask, 1, nt));
+        }
+    }
+    ggml_tensor * kv = ggml_mul_mat(ctx, L.engram_wkv, lookup);
+    trace_v41(kv, il, "engram_kv");
+    ggml_tensor * key = ggml_cont(ctx, ggml_view_2d(ctx, kv, dim * hc, nt, kv->nb[1], 0));
+    key = ggml_reshape_3d(ctx, key, dim, hc, nt);
+    ggml_tensor * value = ggml_view_3d(ctx, kv, dim, 1, nt, dim * sizeof(float), kv->nb[1], dim * hc * sizeof(float));
+    // Q2_K releases quantize the learned elementwise weights too. get_rows
+    // converts the four small rows to F32 on the owning GPU.
+    ggml_tensor * qw = ggml_get_rows(ctx, L.engram_q, res.inp.engram_rows);
+    ggml_tensor * kw = ggml_get_rows(ctx, L.engram_k, res.inp.engram_rows);
+    ggml_tensor * q = ggml_mul(ctx, ggml_rms_norm(ctx, x, hp.rms_eps), qw);
+    key = ggml_mul(ctx, ggml_rms_norm(ctx, key, hp.rms_eps), kw);
+    ggml_tensor * dot = ggml_scale(ctx, ggml_sum_rows(ctx, ggml_mul(ctx, q, key)), 1.0f / sqrtf((float) dim));
+    trace_v41(dot, il, "engram_dot");
+    ggml_tensor * magnitude = ggml_sqrt(ctx, ggml_clamp(ctx, ggml_abs(ctx, dot), 1e-6f, INFINITY));
+    ggml_tensor * sign = ggml_scale_bias(ctx, ggml_step(ctx, ggml_scale(ctx, dot, -1.0f)), -2.0f, 1.0f);
+    ggml_tensor * gate = ggml_sigmoid(ctx, ggml_mul(ctx, sign, magnitude));
+    if (res.image_tokens)
+    {
+        // Every visual span position, including START/NEWLINE/END, suppresses
+        // Engram. Its negative history marker also blocks later text lookback.
+        ggml_tensor * text_mask = ggml_scale_bias(ctx,
+            ggml_cast(ctx, res.inp.image_types[L.device], GGML_TYPE_F32), -1.0f, 1.0f);
+        gate = ggml_mul(ctx, gate, ggml_reshape_3d(ctx, text_mask, 1, 1, nt));
+    }
+    trace_v41(gate, il, "engram_gate");
+    value = ggml_repeat_4d(ctx, value, dim, hc, nt, 1);
+    return ggml_add(ctx, x, ggml_mul(ctx, value, gate));
+}
+
+// The returned latent is normalized but not rotated: the indexer's K
+// projection consumes this version, before the main compressed cache is quantized.
+ggml_tensor * v41_compress(int il, ggml_tensor * cur, const plan_inputs & pi, const comp_plan & plan)
+{
+    const auto & L = m.layers[il];
+    const auto & C = m.active_slot->layers[il];
+    const int ratio = hp.compress_ratios[il];
+    const int64_t head = hp.n_embd_head;
+    ggml_tensor * kv = ggml_mul_mat(ctx, L.attn_comp_wkv, cur);
+    if (ratio == 1) return rms(kv, L.attn_comp_norm);
+    ggml_tensor * score = ggml_mul_mat(ctx, L.attn_comp_wgate, cur);
+    ggml_tensor * latent = nullptr;
+    if (pi.write_idxs)
+    {
+        const int64_t n = plan.state_write_idxs.size();
+        ggml_tensor * all_kv = ggml_concat(ctx, C.comp_state_kv, kv, 1);
+        ggml_tensor * all_score = ggml_concat(ctx, C.comp_state_score, score, 1);
+        ggml_tensor * values = ggml_reshape_3d(ctx, ggml_get_rows(ctx, all_kv, pi.read_idxs), head, ratio, n);
+        ggml_tensor * scores = ggml_reshape_3d(ctx, ggml_get_rows(ctx, all_score, pi.read_idxs), head, ratio, n);
+        values = ggml_cont(ctx, ggml_permute(ctx, values, 1, 0, 2, 3));
+        scores = ggml_cont(ctx, ggml_permute(ctx, scores, 1, 0, 2, 3));
+        latent = ggml_sum_rows(ctx, ggml_mul(ctx, values, ggml_soft_max(ctx, scores)));
+        latent = ggml_cont(ctx, ggml_permute(ctx, latent, 1, 0, 2, 3));
+        latent = rms(ggml_reshape_2d(ctx, latent, head, n), L.attn_comp_norm);
+        // Read the old tail before overwriting it with this ubatch's tail.
+        ggml_build_forward_expand(gf, latent);
+    }
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.comp_state_kv, ggml_get_rows(ctx, kv, pi.persist_src), pi.persist_dst));
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.comp_state_score, ggml_get_rows(ctx, score, pi.persist_src), pi.persist_dst));
+    return latent;
+}
+
+ggml_tensor * build_attention_v41(int il, ggml_tensor * cur, ggml_tensor * pos)
+{
+    const auto & L = m.layers[il];
+    const auto & C = m.active_slot->layers[il];
+    const int dev = L.device, ratio = hp.compress_ratios[il];
+    const int64_t head = hp.n_embd_head;
+    trace_v41(cur, il, "attn_input");
+    ggml_tensor * qr = rms(ggml_mul_mat(ctx, L.wq_a, cur), L.attn_q_a_norm);
+    trace_v41(qr, il, "qr");
+    ggml_tensor * q = v41_rope(ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.wq_b, qr), head, hp.n_head, nt), pos, il);
+    trace_v41(q, il, "query");
+    ggml_tensor * kv = rms(ggml_mul_mat(ctx, L.wkv, cur), L.attn_kv_norm);
+    kv = v41_quant(v41_rope(ggml_reshape_3d(ctx, kv, head, 1, nt), pos, il), 0, dev);
+    trace_v41(kv, il, "raw_kv");
+    ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.raw_k, ggml_reshape_2d(ctx, kv, head, nt), res.inp.raw_idxs[dev]));
+    ggml_tensor * k = ggml_reshape_3d(ctx, C.raw_k, head, 1, m.ring_raw);
+    ggml_tensor * mask = res.inp.raw_mask[dev];
+
+    if (ratio)
+    {
+        const auto & source = m.active_slot->layers[L.kv_source];
+        const auto & pi = ratio == 2 ? res.inp.csa[dev] : res.inp.hca[dev];
+        const auto & plan = ratio == 2 ? res.plan_csa : res.plan_hca;
+        if (L.kv_source == il)
+        {
+            ggml_tensor * latent = v41_compress(il, cur, pi, plan);
+            if (latent)
+            {
+                trace_v41(latent, il, "latent");
+                const int64_t n = latent->ne[1];
+                ggml_tensor * ik = rms(ggml_mul_mat(ctx, L.indexer_k, latent), L.indexer_k_norm);
+                ik = v41_quant(v41_rope(ggml_reshape_3d(ctx, ik, hp.indexer_head_size, 1, n), pi.write_pos, il), 1, dev);
+                ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.lid_k, ggml_reshape_2d(ctx, ik, hp.indexer_head_size, n), pi.write_idxs));
+                latent = v41_quant(v41_rope(ggml_reshape_3d(ctx, latent, head, 1, n), pi.write_pos, il), 2, dev);
+                ggml_build_forward_expand(gf, ggml_set_rows(ctx, C.csa_k, ggml_reshape_2d(ctx, latent, head, n), pi.write_idxs));
+            }
+        }
+        if (L.index_source == il && plan.n_kv <= hp.indexer_top_k)
+        {
+            // Every reachable compressed row is selected. Keep producing K
+            // caches, but omit query projections and top-k until selection matters.
+            v41_shared_mask = pi.kq_mask;
+            v41_shared_top = nullptr;
+        }
+        else if (L.index_source == il)
+        {
+            ggml_tensor * iq = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, L.indexer_attn_q_b, qr), hp.indexer_head_size, hp.indexer_n_head, nt);
+            iq = v41_quant(v41_rope(iq, pos, il), 1, dev);
+            ggml_tensor * iw = ggml_scale(ctx, ggml_mul_mat(ctx, L.indexer_proj, cur),
+                1.0f / sqrtf((float) (hp.indexer_head_size * hp.indexer_n_head)));
+            ggml_tensor * ik = ggml_view_2d(ctx, source.lid_k, hp.indexer_head_size, plan.n_kv, source.lid_k->nb[1], 0);
+            ik = ggml_reshape_3d(ctx, ik, hp.indexer_head_size, 1, plan.n_kv);
+            ggml_tensor * imask = pi.kq_mask;
+            if (v41_candidates && il > hp.candidate_source)
+                imask = ggml_add(ctx, imask, v41_candidates);
+            ggml_tensor * scores = ggml_lightning_indexer(ctx, iq, ik, iw, imask);
+            if (il == hp.candidate_source && plan.n_kv > (int64_t) hp.candidate_topk * hp.candidate_block)
+            {
+                ggml_tensor * blocks = fused_node(TSG_DSV41_CANDIDATE_SCORES, GGML_TYPE_F32,
+                    (plan.n_kv + hp.candidate_block - 1) / hp.candidate_block, nt, 1, 1,
+                    { scores, pos }, dev, hp.candidate_block);
+                ggml_tensor * selected = ggml_cont(ctx, ggml_top_k(ctx, blocks, std::min<int64_t>(hp.candidate_topk, blocks->ne[0])));
+                v41_candidates = fused_node(TSG_DSV41_CANDIDATE_MASK, GGML_TYPE_F16,
+                    plan.n_kv, nt, 1, 1, { blocks, selected }, dev, hp.candidate_block);
+            }
+            trace_v41(scores, il, "index_scores");
+            ggml_tensor * top = ggml_cont(ctx, ggml_top_k(ctx, scores, std::min<int64_t>(hp.indexer_top_k, plan.n_kv)));
+            trace_v41(top, il, "index_top");
+            v41_shared_top = top;
+            // Gathered decode consumes the selected row IDs directly. The
+            // full-width mask is needed only by masked-dense attention.
+            v41_shared_mask = res.inp.gather_mask[dev] ? nullptr : build_top_k_mask(pi.kq_mask, top);
+        }
+        if (res.inp.gather_mask[dev])
+        {
+            if (!v41_shared_top || v41_shared_top->ne[0] != hp.indexer_top_k)
+                throw std::runtime_error("V4.1 index source has not published a complete sparse selection");
+            // Writes to source.csa_k were expanded before index selection.
+            // Every selected row is visible under dsv41_use_gather's gate,
+            // including candidate-pruned layers, so the compact tail is all zero.
+            // Gather where the large shared cache resides. Gathering on the
+            // consumer would copy the entire cache across GPUs first.
+            const int source_dev = m.layers[L.kv_source].device;
+            ggml_tensor * raw = C.raw_k;
+            int64_t raw_rows = m.ring_raw;
+            if (res.inp.raw_read_idxs[dev])
+            {
+                // KGATHER's i0=0 mode gathers every output row from src[1].
+                // Compact on the raw cache's own GPU first: reading fewer rows
+                // inside the source-GPU kernel alone would still make the ggml
+                // scheduler transfer the complete C.raw_k input beforehand.
+                // Masked duplicate rows pad the final K width to CUDA's
+                // head-512 attention stride without changing visible rows.
+                raw_rows = res.inp.raw_read_idxs[dev]->ne[0];
+                raw = fused_node(TSG_DSV4_FUSED_KGATHER, GGML_TYPE_F16,
+                    head, 1, raw_rows, 1,
+                    { C.raw_k, C.raw_k, res.inp.raw_read_idxs[dev] }, dev, 0);
+            }
+            k = fused_node(TSG_DSV4_FUSED_KGATHER, GGML_TYPE_F16,
+                head, 1, raw_rows + hp.indexer_top_k, 1,
+                { raw, source.csa_k, v41_shared_top }, source_dev, (int) raw_rows);
+            mask = res.inp.gather_mask[dev];
+        }
+        else
+        {
+            if (!v41_shared_mask) throw std::runtime_error("V4.1 index source has not published its selection");
+            ggml_tensor * compressed = ggml_view_2d(ctx, source.csa_k, head, plan.n_kv, source.csa_k->nb[1], 0);
+            compressed = ggml_reshape_3d(ctx, compressed, head, 1, plan.n_kv);
+            k = ggml_concat(ctx, k, compressed, 2);
+            mask = ggml_concat(ctx, mask, v41_shared_mask, 0);
+        }
+    }
+    // The CPU F16 attention kernel also narrows Q and its running numerator
+    // to F16. Keep the trained cache quantization, but accumulate in F32.
+    if (ggml_backend_is_cpu(m.backends[dev])) k = ggml_cast(ctx, k, GGML_TYPE_F32);
+    ggml_tensor * out = attn_mha(q, k, mask, L.attn_sinks, 1.0f / sqrtf((float) head), dev);
+    out = v41_rope(ggml_reshape_3d(ctx, out, head, hp.n_head, nt), pos, il, true);
+    const int64_t group_dim = hp.n_head / hp.o_groups * head;
+    ggml_tensor * grouped = ggml_permute(ctx, ggml_reshape_3d(ctx, out, group_dim, hp.o_groups, nt), 0, 2, 1, 3);
+    ggml_tensor * oa = ggml_mul_mat(ctx, ggml_reshape_3d(ctx, L.wo_a, L.wo_a->ne[0], hp.o_lora_rank, hp.o_groups), grouped);
+    oa = ggml_cont_2d(ctx, ggml_permute(ctx, oa, 0, 2, 1, 3), hp.o_lora_rank * hp.o_groups, nt);
+    ggml_tensor * result = ggml_mul_mat(ctx, L.wo_b, oa);
+    trace_v41(result, il, "attn_output");
+    return result;
+}

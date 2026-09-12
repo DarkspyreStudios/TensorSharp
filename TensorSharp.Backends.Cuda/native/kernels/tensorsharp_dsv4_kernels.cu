@@ -2505,3 +2505,549 @@ extern "C" __global__ void ts_dsv4_dspark_conf_f32(
     if (threadIdx.x == 0)
         conf[t] = 1.0f / (1.0f + expf(-red[0]));
 }
+
+// ===========================================================================
+// DeepSeek V4.1
+//
+// V4.1 keeps V4's LoRA-factored Q, shared K(=V) head, sinks and grouped output
+// projection, and changes: no per-head query norm; compression ratios 1 and 2
+// with a non-overlapping window and no absolute positional embedding; the
+// indexer's K comes from the compressed latent; one layer per ratio group owns
+// the caches and the sparse selection; and every cache commit reproduces the
+// checkpoint's trained quantization.
+//
+// The quantization below is written out here rather than shared with any other
+// backend, because this backend must stand alone. It has to agree to the bit
+// with the reference, because the bins decide which compressed rows the sparse
+// selection keeps -- not just the last digit of a value.
+// ===========================================================================
+
+// Round to BF16 and back, leaving NaN/Inf alone.
+__device__ __forceinline__ float ts_dsv41_bf16(float v)
+{
+    unsigned int bits = __float_as_uint(v);
+    if ((bits & 0x7f800000u) != 0x7f800000u)
+        bits = (bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u;
+    return __uint_as_float(bits);
+}
+
+// Round half to even, for a non-negative value.
+__device__ __forceinline__ float ts_dsv41_round_even(float v)
+{
+    const float base = floorf(v);
+    const float frac = v - base;
+    const bool up = (frac > 0.5f) || (frac == 0.5f && (((int)base) & 1) != 0);
+    return base + (up ? 1.0f : 0.0f);
+}
+
+// Finite E4M3 (FP8), round-to-nearest-even, saturating at 448. frexp's exponent
+// is ilogb + 1; the step 2^(exponent-4) leaves four significant bits and
+// reproduces the format's subnormal step below 2^-6.
+__device__ __forceinline__ float ts_dsv41_e4m3(float v)
+{
+    const float mag = fminf(fabsf(v), 448.0f);
+    const int e = ilogbf(fmaxf(mag, 0.015625f)) + 1;
+    const float step = ldexpf(1.0f, e - 4);
+    return copysignf(ts_dsv41_round_even(__fdiv_rn(mag, step)) * step, v);
+}
+
+// E2M1 (FP4). Magnitudes 0, .5, 1, 1.5, 2, 3, 4, 6; the inclusive boundaries
+// alternate so a midpoint tie selects an even code.
+__device__ __forceinline__ float ts_dsv41_e2m1(float v)
+{
+    const float m = fabsf(v);
+    const float r = m <= 0.25f ? 0.0f : m < 0.75f ? 0.5f
+                  : m <= 1.25f ? 1.0f : m < 1.75f ? 1.5f
+                  : m <= 2.5f  ? 2.0f : m < 3.5f  ? 3.0f
+                  : m <= 5.0f  ? 4.0f : 6.0f;
+    return copysignf(r, v);
+}
+
+__device__ __forceinline__ float ts_dsv41_ceil_pow2(float v)
+{
+    const unsigned int bits = __float_as_uint(v);
+    const int e = (int)((bits >> 23) & 255u) - 127 + ((bits & 0x7fffffu) != 0 ? 1 : 0);
+    return ldexpf(1.0f, e);
+}
+
+// mode 0 = FP8 E4M3 (raw rows), 1 = MXFP4 (indexer), 2 = NVFP4 (compressed).
+__device__ __forceinline__ float ts_dsv41_quant_scale(float amax, int mode)
+{
+    if (mode == 0)
+        return ts_dsv41_ceil_pow2(fmaxf(amax, 1e-4f) * (1.0f / 448.0f));
+    if (mode == 1)
+        return ts_dsv41_ceil_pow2(fmaxf(amax, 6.0f * 1.17549435e-38f) * (1.0f / 6.0f));
+    return ts_dsv41_e4m3(__fdiv_rn(fmaxf(amax, 6.0f * 0.001953125f), 6.0f));
+}
+
+__device__ __forceinline__ int ts_dsv41_quant_block(int mode) { return mode == 2 ? 16 : 32; }
+
+// Quantize a contiguous row already staged in shared memory. Divide, never
+// multiply by a reciprocal: the NVFP4 scale is an E4M3 value rather than a
+// power of two, and the reciprocal's rounding moves exact FP4 midpoints across
+// a bin. One thread owns a whole group, which keeps the block amax private.
+__device__ __forceinline__ void ts_dsv41_quant_row(float* row, int n, int mode, int tid, int nthreads)
+{
+    const int len = ts_dsv41_quant_block(mode);
+    for (int g = tid; g < n / len; g += nthreads)
+    {
+        float* p = row + (size_t)g * len;
+        float amax = 0.0f;
+        for (int i = 0; i < len; ++i)
+        {
+            const float v = ts_dsv41_bf16(p[i]);
+            p[i] = v;
+            amax = fmaxf(amax, fabsf(v));
+        }
+        const float scale = ts_dsv41_quant_scale(amax, mode);
+        for (int i = 0; i < len; ++i)
+        {
+            const float q = mode == 0 ? ts_dsv41_e4m3(__fdiv_rn(p[i], scale))
+                                      : ts_dsv41_e2m1(__fdiv_rn(p[i], scale));
+            p[i] = ts_dsv41_bf16(q * scale);
+        }
+    }
+}
+
+// Rotate the last nRot components of a staged row in place (interleaved pairs).
+__device__ __forceinline__ void ts_dsv41_rope_row(float* row, const float* tab, int dim, int nRot, int tid, int nthreads)
+{
+    const int rbase = dim - nRot;
+    for (int i = tid; i < nRot / 2; i += nthreads)
+    {
+        const float c = tab[2 * i + 0], s = tab[2 * i + 1];
+        const float x0 = row[rbase + 2 * i + 0], x1 = row[rbase + 2 * i + 1];
+        row[rbase + 2 * i + 0] = x0 * c - x1 * s;
+        row[rbase + 2 * i + 1] = x0 * s + x1 * c;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// attention preparation
+//
+// Same shape as the V4 kernel with two changes: the projected query heads are
+// NOT re-normalized (their leading head_dim - n_rot components are MLA content
+// dimensions, handed to attention as the projection produced them), and the
+// shared K row is quantized the way the trained cache is before it is stored.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void ts_dsv41_attn_prep_f32(
+    float* __restrict__ q,               // [nt, NH, HD] in-place
+    const float* __restrict__ kvRaw,     // [nt, HD]
+    const float* __restrict__ kvNormW,   // [HD]
+    const float* __restrict__ ropeTab,   // [nCtx, nRot]
+    half* __restrict__ ring,             // [ringRows, HD]
+    const int p0,
+    const int ringRows,
+    const int NH,
+    const int HD,
+    const int nRot,
+    const float eps)
+{
+    const int h = blockIdx.x;
+    const int t = blockIdx.y;
+    const bool isKv = h == NH;
+
+    extern __shared__ float sh41[];
+    __shared__ float red[256];
+
+    float* qDst = q + ((size_t)t * NH + h) * HD;
+    const float* src = isKv ? kvRaw + (size_t)t * HD : qDst;
+
+    for (int d = threadIdx.x; d < HD; d += blockDim.x)
+        sh41[d] = src[d];
+    __syncthreads();
+
+    if (isKv)
+    {
+        float acc = 0.0f;
+        for (int d = threadIdx.x; d < HD; d += blockDim.x)
+            acc += sh41[d] * sh41[d];
+        red[threadIdx.x] = acc;
+        __syncthreads();
+        for (int s = blockDim.x / 2; s > 0; s >>= 1)
+        {
+            if (threadIdx.x < s)
+                red[threadIdx.x] += red[threadIdx.x + s];
+            __syncthreads();
+        }
+        const float inv = rsqrtf(red[0] / HD + eps);
+        for (int d = threadIdx.x; d < HD; d += blockDim.x)
+            sh41[d] *= inv * kvNormW[d];
+        __syncthreads();
+    }
+
+    const long long p = (long long)p0 + t;
+    ts_dsv41_rope_row(sh41, ropeTab + p * nRot, HD, nRot, threadIdx.x, blockDim.x);
+    __syncthreads();
+
+    if (isKv)
+    {
+        ts_dsv41_quant_row(sh41, HD, 0, threadIdx.x, blockDim.x);
+        __syncthreads();
+        half* out = ring + (size_t)(p % ringRows) * HD;
+        float* back = (float*) kvRaw + (size_t)t * HD;   // scratch, already consumed
+        for (int d = threadIdx.x; d < HD; d += blockDim.x)
+        {
+            out[d] = __float2half(sh41[d]);
+            // Write the committed value back so a trace of kvRaw shows what went
+            // into the cache rather than the projection that preceded it.
+            back[d] = sh41[d];
+        }
+    }
+    else
+    {
+        for (int d = threadIdx.x; d < HD; d += blockDim.x)
+            qDst[d] = sh41[d];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// block compressor
+//
+// One block per compressed row. Ratio 1 compresses nothing: the latent is the
+// normalized projection of that one token. Ratio 2 reduces each non-overlapping
+// pair with a per-dimension softmax over the pair's gate projection. A window
+// position before this ubatch is read from the state ring.
+//
+// The latent is left unrotated and unquantized: the indexer's K projection
+// consumes this version, and ts_dsv41_commit_f32 finishes both caches after.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void ts_dsv41_compress_f32(
+    const float* __restrict__ stKv,      // [nt, HD]
+    const float* __restrict__ stScore,   // [nt, HD]   (unused when ratio == 1)
+    const float* __restrict__ histKv,    // [ratio, HD]
+    const float* __restrict__ histScore, // [ratio, HD]
+    const float* __restrict__ normW,     // [HD]
+    float* __restrict__ latent,          // [nBlocks, HD]
+    const long long firstBoundary,
+    const int p0,
+    const int ratio,
+    const int HD,
+    const float eps)
+{
+    const int bi = blockIdx.x;
+    const long long p = firstBoundary + (long long)bi * ratio;
+    const long long start = p + 1 - ratio;
+
+    extern __shared__ float shc[];
+    __shared__ float red[256];
+
+    for (int d = threadIdx.x; d < HD; d += blockDim.x)
+    {
+        float v;
+        if (ratio == 1)
+        {
+            v = stKv[(size_t)(start - p0) * HD + d];
+        }
+        else
+        {
+            float m = -INFINITY;
+            for (int w = 0; w < ratio; ++w)
+            {
+                const long long tw = start + w;
+                const float sc = tw >= p0 ? stScore[(size_t)(tw - p0) * HD + d]
+                                          : histScore[(size_t)(tw % ratio) * HD + d];
+                m = fmaxf(m, sc);
+            }
+            float se = 0.0f, sv = 0.0f;
+            for (int w = 0; w < ratio; ++w)
+            {
+                const long long tw = start + w;
+                const size_t off = (size_t)(tw >= p0 ? (tw - p0) : (tw % ratio)) * HD + d;
+                const float sc = tw >= p0 ? stScore[off] : histScore[off];
+                const float kv = tw >= p0 ? stKv[off] : histKv[off];
+                const float e = __expf(sc - m);
+                se += e;
+                sv += e * kv;
+            }
+            v = sv / se;
+        }
+        shc[d] = v;
+    }
+    __syncthreads();
+
+    float acc = 0.0f;
+    for (int d = threadIdx.x; d < HD; d += blockDim.x)
+        acc += shc[d] * shc[d];
+    red[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s)
+            red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    const float inv = rsqrtf(red[0] / HD + eps);
+
+    float* out = latent + (size_t)bi * HD;
+    for (int d = threadIdx.x; d < HD; d += blockDim.x)
+        out[d] = shc[d] * inv * normW[d];
+}
+
+// Rotate a produced row at its block-start position, quantize it, and store it
+// F16 into the shared cache. Serves both the compressed cache (mode 2) and the
+// indexer cache (mode 1); `dim` and `mode` are what differ between them.
+extern "C" __global__ void ts_dsv41_commit_f32(
+    const float* __restrict__ rows,      // [nBlocks, dim]
+    const float* __restrict__ ropeTab,   // [nCtx, nRot]
+    half* __restrict__ cache,            // [cacheRows, dim]
+    const long long firstBoundary,
+    const int ratio,
+    const int dim,
+    const int nRot,
+    const int mode)
+{
+    const int bi = blockIdx.x;
+    const long long p = firstBoundary + (long long)bi * ratio;
+    const long long start = p + 1 - ratio;
+    const long long row = p / ratio;
+
+    extern __shared__ float shk[];
+    for (int d = threadIdx.x; d < dim; d += blockDim.x)
+        shk[d] = rows[(size_t)bi * dim + d];
+    __syncthreads();
+
+    ts_dsv41_rope_row(shk, ropeTab + start * nRot, dim, nRot, threadIdx.x, blockDim.x);
+    __syncthreads();
+    ts_dsv41_quant_row(shk, dim, mode, threadIdx.x, blockDim.x);
+    __syncthreads();
+
+    half* out = cache + (size_t)row * dim;
+    for (int d = threadIdx.x; d < dim; d += blockDim.x)
+        out[d] = __float2half(shk[d]);
+}
+
+// Persist the last `ratio` token projections so a block straddling the next
+// ubatch boundary still sees its earlier half.
+extern "C" __global__ void ts_dsv41_persist_f32(
+    const float* __restrict__ stKv,
+    const float* __restrict__ stScore,
+    float* __restrict__ histKv,
+    float* __restrict__ histScore,
+    const int p0,
+    const int nt,
+    const int ratio,
+    const int HD)
+{
+    const int i = blockIdx.y;                 // 0..min(nt, ratio)-1, newest last
+    const int t = nt - min(nt, ratio) + i;
+    const int d = blockIdx.x * blockDim.x + threadIdx.x;
+    if (d >= HD)
+        return;
+    const int slot = (int)(((long long)p0 + t) % ratio);
+    histKv[(size_t)slot * HD + d] = stKv[(size_t)t * HD + d];
+    histScore[(size_t)slot * HD + d] = stScore[(size_t)t * HD + d];
+}
+
+// Rotate and quantize the indexer's query heads, and prescale its weights.
+extern "C" __global__ void ts_dsv41_idx_prep_f32(
+    float* __restrict__ iq,              // [nt, IH, ID] in-place
+    float* __restrict__ iw,              // [nt, IH] in-place
+    const float* __restrict__ ropeTab,
+    const int p0,
+    const int IH,
+    const int ID,
+    const int nRot,
+    const float iwScale)
+{
+    const int h = blockIdx.x;
+    const int t = blockIdx.y;
+
+    extern __shared__ float shq[];
+    float* dst = iq + ((size_t)t * IH + h) * ID;
+    for (int d = threadIdx.x; d < ID; d += blockDim.x)
+        shq[d] = dst[d];
+    __syncthreads();
+
+    ts_dsv41_rope_row(shq, ropeTab + ((long long)p0 + t) * nRot, ID, nRot, threadIdx.x, blockDim.x);
+    __syncthreads();
+    ts_dsv41_quant_row(shq, ID, 1, threadIdx.x, blockDim.x);
+    __syncthreads();
+
+    for (int d = threadIdx.x; d < ID; d += blockDim.x)
+        dst[d] = shq[d];
+    if (h == 0 && threadIdx.x == 0)
+    {
+        float* w = iw + (size_t)t * IH;
+        for (int i = 0; i < IH; ++i)
+            w[i] *= iwScale;
+    }
+}
+
+// sum_h relu(q_h . k) * w_h over every visible compressed row, with rows the
+// candidate layer pruned scored -inf so they rank last.
+extern "C" __global__ void ts_dsv41_idx_scores_f32(
+    const float* __restrict__ iq,
+    const float* __restrict__ iw,
+    const half* __restrict__ lidK,
+    const unsigned char* __restrict__ candidates,   // [nt, rows] or null
+    float* __restrict__ scores,                     // [nt, rows]
+    const int p0,
+    const int ratio,
+    const int IH,
+    const int ID,
+    const int rows,
+    const int maxVis)
+{
+    const int r = blockIdx.x * blockDim.y + threadIdx.y;
+    const int t = blockIdx.y;
+    if (r >= maxVis)
+        return;
+    const int nVis = (int)((((long long)p0 + t) + 1) / ratio);
+    float* out = scores + (size_t)t * rows;
+    if (r >= nVis)
+        return;
+    if (candidates && candidates[(size_t)t * rows + r] == 0)
+    {
+        if (threadIdx.x == 0)
+            out[r] = -INFINITY;
+        return;
+    }
+
+    const float* q = iq + (size_t)t * IH * ID;
+    const float* w = iw + (size_t)t * IH;
+    const half* k = lidK + (size_t)r * ID;
+
+    float score = 0.0f;
+    for (int h = 0; h < IH; ++h)
+    {
+        float acc = 0.0f;
+        for (int d = threadIdx.x; d < ID; d += warpSize)
+            acc += q[(size_t)h * ID + d] * __half2float(k[d]);
+        acc = ts_dsv4_warp_sum(acc);
+        if (acc > 0.0f)
+            score += acc * w[h];
+    }
+    if (threadIdx.x == 0)
+        out[r] = score;
+}
+
+// Pool the indexer scores into fixed row blocks, pin the block holding the
+// query's own newest row, keep the best few, and publish the surviving rows as
+// the mask every later indexer layer intersects with visibility.
+extern "C" __global__ void ts_dsv41_candidate_f32(
+    const float* __restrict__ scores,     // [nt, rows]
+    unsigned char* __restrict__ mask,     // [nt, rows]
+    const int p0,
+    const int ratio,
+    const int rows,
+    const int blockLen,
+    const int topk)
+{
+    const int t = blockIdx.x;
+    const long long p = (long long)p0 + t;
+    const int nVis = (int)((p + 1) / ratio);
+    const int nBlocks = (nVis + blockLen - 1) / blockLen;
+    const float* s = scores + (size_t)t * rows;
+    unsigned char* m = mask + (size_t)t * rows;
+
+    for (int r = threadIdx.x; r < nVis; r += blockDim.x)
+        m[r] = 0;
+    __syncthreads();
+
+    if (nBlocks <= 0)
+        return;
+
+    // Rank blocks by pooled max, ties by lowest block id, with the pinned block
+    // forced first. nBlocks can be large, so each thread ranks its own blocks by
+    // counting how many beat them rather than materializing a sort.
+    const long long pinned = p / blockLen;
+    for (int b = threadIdx.x; b < nBlocks; b += blockDim.x)
+    {
+        float best = -INFINITY;
+        const int end = min(nVis, (b + 1) * blockLen);
+        for (int r = b * blockLen; r < end; ++r)
+            best = fmaxf(best, s[r]);
+        if (b == (int)pinned)
+            best = INFINITY;
+        if (best == -INFINITY)
+            continue;
+
+        int rank = 0;
+        for (int o = 0; o < nBlocks && rank < topk; ++o)
+        {
+            if (o == b)
+                continue;
+            float other = -INFINITY;
+            const int oend = min(nVis, (o + 1) * blockLen);
+            for (int r = o * blockLen; r < oend; ++r)
+                other = fmaxf(other, s[r]);
+            if (o == (int)pinned)
+                other = INFINITY;
+            if (other > best || (other == best && o < b))
+                ++rank;
+        }
+        if (rank >= topk)
+            continue;
+        for (int r = b * blockLen; r < end; ++r)
+            m[r] = 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Engram
+//
+// The gathered rows are projected into one key per hyper-connection stream plus
+// a single shared value; the key is scored against the residual and the value
+// added back through a signed square-root sigmoid gate.
+// ---------------------------------------------------------------------------
+extern "C" __global__ void ts_dsv41_engram_gate_f32(
+    float* __restrict__ xs,              // [nt, HC, E] in-place residual
+    const float* __restrict__ kv,        // [nt, (HC+1)*E]
+    const float* __restrict__ qw,        // [HC, E]
+    const float* __restrict__ kw,        // [HC, E]
+    const int E,
+    const float eps)
+{
+    const int st = blockIdx.x;
+    const int t = blockIdx.y;
+    const int HC41 = gridDim.x;
+
+    __shared__ float red[256];
+    float* x = xs + ((size_t)t * HC41 + st) * E;
+    const float* key = kv + (size_t)t * (HC41 + 1) * E + (size_t)st * E;
+    const float* value = kv + (size_t)t * (HC41 + 1) * E + (size_t)HC41 * E;
+
+    float sx = 0.0f, sk = 0.0f;
+    for (int d = threadIdx.x; d < E; d += blockDim.x)
+    {
+        sx += x[d] * x[d];
+        sk += key[d] * key[d];
+    }
+    red[threadIdx.x] = sx;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    const float invX = rsqrtf(red[0] / E + eps);
+    __syncthreads();
+    red[threadIdx.x] = sk;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    const float invK = rsqrtf(red[0] / E + eps);
+    __syncthreads();
+
+    float dot = 0.0f;
+    for (int d = threadIdx.x; d < E; d += blockDim.x)
+        dot += (x[d] * invX * qw[(size_t)st * E + d]) * (key[d] * invK * kw[(size_t)st * E + d]);
+    red[threadIdx.x] = dot;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1)
+    {
+        if (threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    const float scaled = red[0] * rsqrtf((float)E);
+    // Signed square root, floored away from zero, then a sigmoid.
+    const float magnitude = sqrtf(fmaxf(fabsf(scaled), 1e-6f));
+    const float gate = 1.0f / (1.0f + __expf(-(scaled >= 0.0f ? magnitude : -magnitude)));
+
+    for (int d = threadIdx.x; d < E; d += blockDim.x)
+        x[d] += gate * value[d];
+}

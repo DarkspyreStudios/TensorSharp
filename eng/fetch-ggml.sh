@@ -10,11 +10,12 @@
 # Environment overrides:
 #   TENSORSHARP_GGML_GIT_URL   git URL                (default: ggml-org/ggml)
 #   TENSORSHARP_GGML_GIT_REF   branch/tag/commit      (default: master, the ggml default branch)
-#   TENSORSHARP_GGML_NO_UPDATE if set to 1/ON/true and a checkout already exists,
-#                              skip the network fetch and use what is on disk.
+#   TENSORSHARP_GGML_NO_UPDATE if set to 1/ON/true and a checkout or complete
+#                              source copy exists, use what is on disk.
 #
-# The upstream checkout is consumed unchanged; TensorSharp-specific behavior belongs
-# in TensorSharp.GGML.Native, not in patches applied during dependency fetching.
+# Fetching leaves upstream sources unchanged. The CUDA native CMake configure
+# applies the reviewed source-precision fix from eng/ggml-patches; model-specific
+# behavior remains in TensorSharp.GGML.Native.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,6 +48,17 @@ is_truthy() {
         *) return 1 ;;
     esac
 }
+
+# A pinned source archive or rsync copy need not contain Git metadata. Honor
+# the explicit offline/no-update choice before partial-clone cleanup can remove
+# those sources (and invalidate another build using them).
+if is_truthy "${NO_UPDATE_RAW}" &&
+   [[ -f "${GGML_DIR}/CMakeLists.txt" &&
+      -f "${GGML_DIR}/src/CMakeLists.txt" &&
+      -f "${GGML_DIR}/include/ggml.h" ]]; then
+    echo "ggml: TENSORSHARP_GGML_NO_UPDATE set; using existing sources at ${GGML_DIR}"
+    exit 0
+fi
 
 if [[ -d "${GGML_DIR}/.git" ]]; then
     if is_truthy "${NO_UPDATE_RAW}"; then

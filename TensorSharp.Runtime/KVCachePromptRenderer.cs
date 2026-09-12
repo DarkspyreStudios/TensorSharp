@@ -432,6 +432,8 @@ namespace TensorSharp.Runtime
             bool toolResultsProvable = true;
             int placeholderCount = 0;
             int breakpointCount = 0;
+            bool allowRawAssistantTokenSplicing =
+                ChatProtocolRegistry.For(architecture)?.AllowRawAssistantTokenSplicing ?? true;
 
             // A marker on any tool means "keep the tool block cached". The chat
             // template renders the whole tool list as one unit, so a marker on
@@ -450,6 +452,7 @@ namespace TensorSharp.Runtime
                 ChatMessage msg = messages[i];
                 bool hasRawTokens = msg != null
                     && msg.Role == "assistant"
+                    && allowRawAssistantTokenSplicing
                     && msg.RawOutputTokens != null
                     && msg.RawOutputTokens.Count > 0;
 
@@ -617,7 +620,9 @@ namespace TensorSharp.Runtime
                     ToolCalls = hasRawTokens && !useRawToolCallReplayMarker
                         ? null
                         : msg.ToolCalls,
+                    ToolCallId = msg.ToolCallId,
                     ImagePaths = msg.ImagePaths,
+                    ImageTimestamps = msg.ImageTimestamps,
                     AudioPaths = msg.AudioPaths,
                     IsVideo = msg.IsVideo,
                     // Kept for the Jinja context's narrowly scoped Gemma 4 replay.

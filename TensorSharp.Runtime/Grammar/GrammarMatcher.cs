@@ -277,42 +277,57 @@ namespace TensorSharp.Runtime.Grammar
             int remaining = partial.Remaining;
             if (remaining < 1 || remaining > 3) return false;
 
-            // The value seen so far bounds the final code point to a range.
+            // UTF-8 prefixes bound a contiguous interval, but only Unicode
+            // scalars in that interval can be completed by the strict decoder.
             uint low = partial.Value << (remaining * 6);
-            uint high = low | ((1u << (remaining * 6)) - 1);
+            uint high = Math.Min(low | ((1u << (remaining * 6)) - 1), 0x10FFFFu);
             if (low == 0)
-            {
                 low = remaining switch { 1 => 0x80, 2 => 0x800, 3 => 0x10000, _ => 0 };
-            }
+            if (low > high) return false;
+            return (low <= 0xD7FF && PartialRangeMatches(pos, low, Math.Min(high, 0xD7FFu))) ||
+                   (high >= 0xE000 && PartialRangeMatches(pos, Math.Max(low, 0xE000u), high));
+        }
 
-            GrammarElement e = _grammar[pos];
-            bool isPositive = e.Type == GrammarElementType.Char ||
-                              e.Type == GrammarElementType.CharAny;
-            int p = pos;
+        private bool PartialRangeMatches(int pos, uint low, uint high)
+        {
+            if (low > high) return false;
+            GrammarElement first = _grammar[pos];
+            if (first.Type == GrammarElementType.CharAny) return true;
+            bool positive = first.Type == GrammarElementType.Char;
+            uint cursor = low;
             do
             {
-                if (_grammar[p + 1].Type == GrammarElementType.CharRngUpper)
+                // Negated classes need the union of every forbidden interval.
+                // A single non-overlap proves nothing: a later alternative may
+                // cover the entire prefix range. Extend coverage from the first
+                // remaining scalar; stop when any gap admits a completion.
+                bool covered = false;
+                uint through = cursor;
+                int p = pos;
+                do
                 {
-                    if (Overlaps(_grammar[p].Value, _grammar[p + 1].Value, low, high) == isPositive)
-                        return true;
-                    p += 2;
+                    uint start = _grammar[p].Value, end = start;
+                    if (_grammar[p + 1].Type == GrammarElementType.CharRngUpper)
+                    {
+                        end = _grammar[p + 1].Value;
+                        p += 2;
+                    }
+                    else p++;
+                    if (positive && Overlaps(start, end, low, high)) return true;
+                    if (!positive && start <= cursor && end >= cursor)
+                    {
+                        covered = true;
+                        through = Math.Max(through, end);
+                    }
                 }
-                else if (_grammar[p].Type == GrammarElementType.CharAny)
-                {
-                    return true;
-                }
-                else
-                {
-                    if (Overlaps(_grammar[p].Value, _grammar[p].Value, low, high) == isPositive)
-                        return true;
-                    p += 1;
-                }
+                while (_grammar[p].Type == GrammarElementType.CharAlt);
+                if (positive) return false;
+                if (!covered) return true;
+                if (through >= high) return false;
+                cursor = through + 1;
             }
-            while (_grammar[p].Type == GrammarElementType.CharAlt);
-
-            // For a negated class, any code point outside every listed range is
-            // acceptable, so the prefix survives unless the ranges cover it all.
-            return !isPositive;
+            while (cursor <= high);
+            return false;
         }
 
         private static bool Overlaps(uint lo1, uint hi1, uint lo2, uint hi2) =>
@@ -386,17 +401,28 @@ namespace TensorSharp.Runtime.Grammar
             if (partial.Remaining == 0)
             {
                 if (b < 0x80) { codePoint = b; complete = true; return true; }
-                if ((b & 0xE0) == 0xC0) { partial = new PartialUtf8((uint)(b & 0x1F), 1); return true; }
-                if ((b & 0xF0) == 0xE0) { partial = new PartialUtf8((uint)(b & 0x0F), 2); return true; }
-                if ((b & 0xF8) == 0xF0) { partial = new PartialUtf8((uint)(b & 0x07), 3); return true; }
-                return false;   // continuation byte or 0xF8..0xFF with nothing open
+                if (b >= 0xC2 && b <= 0xDF) { partial = new PartialUtf8((uint)(b & 0x1F), 1); return true; }
+                if (b >= 0xE0 && b <= 0xEF) { partial = new PartialUtf8((uint)(b & 0x0F), 2); return true; }
+                if (b >= 0xF0 && b <= 0xF4) { partial = new PartialUtf8((uint)(b & 0x07), 3); return true; }
+                return false;   // stray continuation, overlong lead, or above U+10FFFF
             }
 
             if ((b & 0xC0) != 0x80) return false;   // expected a continuation byte
+            // Reject impossible prefixes immediately, before a byte-fallback
+            // token can commit them. Three-byte sequences starting E0 need
+            // A0..BF; ED must stay below the UTF-16 surrogate range. Four-byte
+            // sequences starting F0/F4 have the Unicode scalar bounds below.
+            // After a valid four-byte first continuation Value is >= 0x10,
+            // so it cannot be confused with the E0/ED prefixes at Remaining=2.
+            if (partial.Remaining == 2 &&
+                ((partial.Value == 0 && b < 0xA0) || (partial.Value == 0xD && b >= 0xA0))) return false;
+            if (partial.Remaining == 3 &&
+                ((partial.Value == 0 && b < 0x90) || (partial.Value == 4 && b > 0x8F))) return false;
             uint value = (partial.Value << 6) | (uint)(b & 0x3F);
             int remaining = partial.Remaining - 1;
             if (remaining == 0)
             {
+                if (value > 0x10FFFF || (value >= 0xD800 && value <= 0xDFFF)) return false;
                 partial = PartialUtf8.Empty;
                 codePoint = value;
                 complete = true;

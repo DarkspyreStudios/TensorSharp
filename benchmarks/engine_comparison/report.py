@@ -67,6 +67,29 @@ def _rec_tp(rec) -> int:
         return 1
 
 
+def _rec_cpu_moe(rec) -> int:
+    """Layers this cell offloaded to the host (0 = fully resident, -1 = all).
+    Absent in every result recorded before the axis existed, hence the default."""
+    try:
+        return int(rec.get("cpu_moe_layers", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _partial_workflow(rec) -> bool:
+    """True when a multi-turn cell (agentic / code_edit) stopped before its last
+    turn. Its timings then belong to a SHORTER conversation than the scenario
+    names — the final turn of an agentic workflow re-prefills the whole history,
+    so a 1-of-3 cell is not the same workload as a 3-of-3 one and must not be
+    tabulated beside it. Single-request cells and every result recorded before
+    `turns_expected` existed default to 1/1, i.e. never partial."""
+    try:
+        expected = int(rec.get("turns_expected", 1) or 1)
+        return expected > 1 and int(rec.get("turns", 1) or 1) < expected
+    except (TypeError, ValueError):
+        return False
+
+
 # Performance-ratio comparisons: TensorSharp (numerator) vs a reference engine
 # on the *same* backend, so the columns stay apples-to-apples. A ratio > 1.0×
 # means TensorSharp is faster (for throughput metrics) / lower-latency (TTFT).
@@ -77,10 +100,10 @@ def load_all() -> dict:
     """Returns (baseline, rows).
 
     baseline[model][scenario][(engine,backend,tp)] = record   (only mtp-off,
-    concurrency-1 cells, so the headline per-engine tables stay apples-to-apples;
-    each tensor-parallel degree is its own column).
-    rows = every record (all mtp / tp / concurrency axes), used by the MTP,
-    tensor-parallelism and concurrency sections.
+    concurrency-1, fully-GPU-resident cells, so the headline per-engine tables
+    stay apples-to-apples; each tensor-parallel degree is its own column).
+    rows = every record (all mtp / tp / cpu-moe / concurrency axes), used by the
+    MTP, tensor-parallelism, MoE-offload and concurrency sections.
     """
     out: dict = {}
     rows = []
@@ -91,8 +114,9 @@ def load_all() -> dict:
             continue
         eng, backend, model, scenario = d["engine"], d["backend"], d["model"], d["scenario"]
         rows.append(d)
-        if d.get("mtp", False) or int(d.get("concurrency", 1) or 1) != 1:
-            continue  # keep the baseline tables to the single-stream, no-MTP point
+        if (d.get("mtp", False) or int(d.get("concurrency", 1) or 1) != 1
+                or _rec_cpu_moe(d) != 0):
+            continue  # baseline tables: single-stream, no MTP, fully GPU-resident
         out.setdefault(model, {}).setdefault(scenario, {})[(eng, backend, _rec_tp(d))] = d
     return out, rows
 
@@ -105,6 +129,11 @@ def _cell(rec, metric) -> str:
         return "—"
     if status != "ok":
         return "fail"
+    if _partial_workflow(rec):
+        # The request was served, so the cell is not a failure — but the number
+        # measures a shorter conversation than the scenario, so it is named
+        # rather than printed. `detail` on the record says which turn stopped it.
+        return f"partial {rec.get('turns', 1)}/{rec.get('turns_expected', 1)}"
     v = rec.get(metric, 0.0) or 0.0
     return f"{v:.1f}" if v > 0 else "—"
 
@@ -141,8 +170,11 @@ def metric_table(scen_map: dict, cols: list, metric: str) -> str:
 
 
 def _ok_value(rec, metric: str) -> float:
-    """The metric value only when the cell actually ran; else 0.0."""
-    if not rec or rec.get("status") != "ok":
+    """The metric value only when the cell actually ran the workload it claims;
+    else 0.0 (which every ratio renders as `—`). A multi-turn workflow that
+    stopped early ran a different, shorter conversation, so it is excluded here
+    too rather than quietly becoming the numerator of a speedup."""
+    if not rec or rec.get("status") != "ok" or _partial_workflow(rec):
         return 0.0
     return float(rec.get(metric, 0.0) or 0.0)
 
@@ -361,7 +393,8 @@ def tp_section(rows: list) -> str:
     # index: (engine, backend, model, scenario) -> {tp: rec}
     idx: dict = {}
     for r in rows:
-        if r.get("mtp", False) or int(r.get("concurrency", 1) or 1) != 1:
+        if (r.get("mtp", False) or int(r.get("concurrency", 1) or 1) != 1
+                or _rec_cpu_moe(r) != 0):
             continue
         key = (r["engine"], r["backend"], r["model"], r["scenario"])
         idx.setdefault(key, {})[_rec_tp(r)] = r
@@ -389,6 +422,68 @@ def tp_section(rows: list) -> str:
             scale = (f"{top / base:.2f}× (tp{base_tp}→tp{top_tp})"
                      if base > 0 and top > 0 and top_tp != base_tp else "—")
             return f"| {label} | {metric_label} | " + " | ".join(cells) + f" | {scale} |"
+
+        lines.append(_row("decode t/s", "decode_tps"))
+        lines.append(_row("prefill t/s", "prefill_tps"))
+    return "\n".join(lines)
+
+
+def cpu_moe_section(rows: list) -> str:
+    """What MoE CPU offload costs: per (engine, backend, model, scenario),
+    decode and prefill throughput at each `--n-cpu-moe` point plus the ratio
+    against the fully GPU-resident cell. Offload buys VRAM (it is what makes a
+    checkpoint that does not fit run at all) and pays for it in throughput, so a
+    ratio below 1.0x here is the expected shape, not a regression."""
+    points = sorted({_rec_cpu_moe(r) for r in rows})
+    if points == [0]:
+        return "_No MoE CPU-offload cells were run (use `--n-cpu-moe off,8,all`)._"
+
+    # index: (engine, backend, model, scenario, tp) -> {(layers, threads): rec},
+    # single-stream MTP-off cells only, so the only thing that varies down a row
+    # is the offload point itself.
+    idx: dict = {}
+    axis: list = []
+    for r in rows:
+        if r.get("mtp", False) or int(r.get("concurrency", 1) or 1) != 1:
+            continue
+        key = (r["engine"], r["backend"], r["model"], r["scenario"], _rec_tp(r))
+        point = (_rec_cpu_moe(r), int(r.get("cpu_moe_threads", 0) or 0))
+        idx.setdefault(key, {})[point] = r
+        if point not in axis:
+            axis.append(point)
+    # Resident first, then by layer count; `all` (-1) is the most offloaded
+    # point there is, so it sorts last rather than first.
+    axis.sort(key=lambda pt: (pt[0] != 0, float("inf") if pt[0] < 0 else pt[0], pt[1]))
+
+    series = {k: v for k, v in idx.items()
+              if any(pt[0] != 0 and v[pt].get("status") == "ok" for pt in v)}
+    if not series:
+        return "_No MoE CPU-offload cells produced a result._"
+
+    def _point_label(pt) -> str:
+        if pt[0] == 0:
+            return "resident"
+        return ("ncmoe=" + ("all" if pt[0] < 0 else str(pt[0]))
+                + (f"/{pt[1]}t" if pt[1] > 0 else ""))
+
+    head = ("| Engine · Backend · Model · Scenario | metric | "
+            + " | ".join(_point_label(pt) for pt in axis) + " | vs resident |")
+    sep = "|---|---|" + "|".join(["---:"] * len(axis)) + "|---:|"
+    lines = [head, sep]
+    for key, by_point in sorted(series.items()):
+        eng, backend, model, scenario, tp = key
+        label = f"{eng} · {backend}{f'·tp{tp}' if tp > 1 else ''} · {model} · {scenario}"
+        offloaded = [pt for pt in axis
+                     if pt[0] != 0 and by_point.get(pt, {}).get("status") == "ok"]
+        top = offloaded[-1] if offloaded else None
+
+        def _row(metric_label, metric_key):
+            cells = [_cell(by_point.get(pt), metric_key) for pt in axis]
+            base = _ok_value(by_point.get((0, 0)), metric_key)
+            off = _ok_value(by_point.get(top), metric_key) if top else 0.0
+            ratio = (f"{off / base:.2f}× ({_point_label(top)})"
+                     if base > 0 and off > 0 else "—")
+            return f"| {label} | {metric_label} | " + " | ".join(cells) + f" | {ratio} |"
 
         lines.append(_row("decode t/s", "decode_tps"))
         lines.append(_row("prefill t/s", "prefill_tps"))
@@ -539,6 +634,13 @@ def _mark(v) -> str:
     return "yes" if v else ("no" if v is False else "?")
 
 
+# Scenario kinds that record a correctness verdict in `tool_call_ok`. A cell of
+# one of these often carries no comparable text at all (a tool call instead of
+# content, or a workflow that stopped), so it is kept in the quality table for
+# its structural check even when there is nothing to diff.
+_CHECKED_KINDS = ("function_call", "agentic", "code_edit")
+
+
 def quality_section(data: dict) -> str:
     """Output-quality comparison of TensorSharp vs llama.cpp on the same
     backend. Both engines decode the same GGUF greedily (temperature=0), so
@@ -571,7 +673,7 @@ def quality_section(data: dict) -> str:
                     kind = config.SCENARIOS[scenario_id].kind
                 except KeyError:
                     kind = ""
-                if sim is None and kind not in ("json_mode", "function_call"):
+                if sim is None and kind not in _CHECKED_KINDS:
                     continue
                 spec = config.BACKENDS.get(backend)
                 label = (spec.display if spec else backend) + (f" · tp{tp}" if tp > 1 else "")
@@ -591,8 +693,9 @@ def quality_section(data: dict) -> str:
         if kind == "json_mode":
             checks = (f"json valid: TS {_mark(_json_valid(_rec_output_text(ts)))} / "
                       f"ref {_mark(_json_valid(_rec_output_text(ref)))}")
-        elif kind == "function_call":
-            checks = (f"tool call: TS {_mark(ts.get('tool_call_ok'))} / "
+        elif kind in _CHECKED_KINDS:
+            label = "tool call" if kind == "function_call" else "workflow"
+            checks = (f"{label}: TS {_mark(ts.get('tool_call_ok'))} / "
                       f"ref {_mark(ref.get('tool_call_ok'))}")
         else:
             checks = "—"
@@ -625,15 +728,30 @@ def quality_section(data: dict) -> str:
     return "\n".join(out)
 
 
+def _scenario_kind(scenario_id: str) -> str:
+    try:
+        return config.SCENARIOS[scenario_id].kind
+    except KeyError:
+        return ""
+
+
 def tool_summary(rows: list) -> str:
-    fc = [r for r in rows if r["scenario"] == "function_call" and r["status"] == "ok"]
+    """Every cell that recorded a correctness verdict: the single-request
+    `function_call` check and the multi-turn workflows, which also report how
+    far they got (`turns`) — `1/3` with `no` is a workflow the model broke at
+    its first tool call, and the record's `detail` says why."""
+    fc = [r for r in rows
+          if r["status"] == "ok" and _scenario_kind(r["scenario"]) in _CHECKED_KINDS]
     if not fc:
-        return "_No function-call cells were run._"
-    lines = ["| Engine · Backend · Model | tool_call emitted |", "|---|:---:|"]
-    for r in sorted(fc, key=lambda r: (r["engine"], r["backend"], _rec_tp(r), r["model"])):
-        ok = r.get("tool_call_ok")
-        mark = "yes" if ok else ("no" if ok is False else "?")
-        lines.append(f"| {r['engine']} · {_backend_label(r)} · {r['model']} | {mark} |")
+        return "_No correctness-bearing cells (function_call / agentic / code_edit) were run._"
+    lines = ["| Engine · Backend · Model | Scenario | turns | correct |",
+             "|---|---|:---:|:---:|"]
+    for r in sorted(fc, key=lambda r: (r["engine"], r["backend"], _rec_tp(r),
+                                       r["model"], r["scenario"])):
+        turns = (f"{int(r.get('turns', 1) or 1)}/{int(r.get('turns_expected', 1) or 1)}"
+                 if int(r.get("turns_expected", 1) or 1) > 1 else "—")
+        lines.append(f"| {r['engine']} · {_backend_label(r)} · {r['model']} | "
+                     f"{r['scenario']} | {turns} | {_mark(r.get('tool_call_ok'))} |")
     return "\n".join(lines)
 
 
@@ -770,6 +888,15 @@ def main():
     out.append(tp_section(rows))
     out.append("")
 
+    out.append("## MoE CPU offload (`--n-cpu-moe`)\n")
+    out.append("Routed experts of the first N layers kept in system RAM and multiplied on "
+               "the host, against the same cell fully GPU-resident. This axis buys VRAM — "
+               "it is what makes a checkpoint that does not fit run at all, and nearly "
+               "doubles the context the loader can size — and pays for it in throughput, "
+               "so `< 1.0×` is the expected shape here. Single-stream, MTP-off cells only.\n")
+    out.append(cpu_moe_section(rows))
+    out.append("")
+
     out.append("## Parallel-request scaling (concurrency)\n")
     out.append("`decode/req` is the mean per-request decode tok/s; `aggregate` is the "
                "system-wide decode throughput (total generated tokens / the wall window "
@@ -778,7 +905,11 @@ def main():
     out.append(concurrency_section(rows))
     out.append("")
 
-    out.append("## Function-calling correctness\n")
+    out.append("## Tool-call and workflow correctness\n")
+    out.append("`function_call` emits one tool call; `agentic` and `code_edit` drive a "
+               "multi-turn workflow and `turns` says how many of its round trips ran "
+               "(a short count is a workflow the model broke — the cell's `detail` "
+               "names the turn and the reason).\n")
     out.append(tool_summary(rows))
     out.append("")
 
@@ -786,10 +917,11 @@ def main():
     print(f"Wrote {REPORT_PATH}")
 
     # Flat CSV
-    fields = ["engine", "backend", "model", "scenario", "mtp", "tp", "concurrency",
+    fields = ["engine", "backend", "model", "scenario", "mtp", "tp",
+              "cpu_moe_layers", "cpu_moe_threads", "concurrency",
               "status", "detail", "prompt_tokens", "completion_tokens", "ttft_ms",
               "prefill_tps", "decode_tps", "aggregate_decode_tps", "requests_ok",
-              "total_wall_ms", "finish_reason", "tool_call_ok",
+              "turns", "turns_expected", "total_wall_ms", "finish_reason", "tool_call_ok",
               "steps", "edit_total_ms", "edit_first_total_ms", "edit_text_encode_ms",
               "edit_vae_encode_ms", "edit_sampling_ms", "edit_per_step_ms",
               "edit_vae_decode_ms", "edit_width", "edit_height", "edit_image"]

@@ -79,14 +79,16 @@
   <p><strong>每个模型家族都有纯 C# 路径。</strong>MiniMax-H3 是最后一个没有的：它此前每个阶段都是无条件的原生 ggml 调用，而现在 <code>--backend cpu</code> 上的 t2v、i2v、fl2v 与参考条件（静图、片段、音轨）都走托管的 DiT、文本编码器、VAE 与视觉塔。输出与 GGML 路径贴合得很紧 —— t2v、i2v 与 ref-audio 的吻合程度甚至高于 GGML 自家 flash 内核与其显式 softmax 回退之间的吻合程度 —— 唯一的例外是视觉塔，其残差比该对照更大，原因尚未查明。速度是有得有失、并非一律更慢：同一段片段上，i2v 为 70 s、<code>ggml_cpu</code> 为 176 s，ref-audio 为 63 s 对 71 s；但 t2v 为 69 s 对 14 s、ref-image 为 112 s 对 20 s —— 视觉塔是托管路径里最贵的一段。→ <a href="models-video_zh-cn.html#minimax-h3">MiniMax-H3</a></p>
   <p>非 ggml 的各家族共用同一套原语：<code>Direct{Context,Linear,Ops}</code>（<code>TensorSharp.Models/Direct/DirectOps.cs</code>）同时支撑 Wan 视频网络与 MiniMax-H3 的 <code>cpu</code> 与 <code>cuda</code> 路径，其按行循环也走同一个工作线程池。在 CPU 上 <code>DirectLinear</code> 不再于加载时把量化权重展开成 F32，而是保留 GGUF 的存储类型直接参与乘法：一段小型 Wan 渲染（256×160、5 帧、1 步、<code>--backend cpu</code>）实测 80.9 s 对 121.4 s，权重内存少 4×，而且相对原生 <code>ggml_cpu</code> 渲染反而<em>略更接近</em>（43.51 dB 对 43.39 dB）。F16/BF16/F32 权重仍走普通 GEMM；<code>TS_DIRECT_QUANT_WEIGHTS=0</code> 可恢复旧行为。</p>
 
-  <h3 id="deepseek4">DeepSeek V4 与 GLM 5.x：专属整模型执行器</h3>
-  <p>有两个架构不走通用的逐算子前向。<code>deepseek4</code> 那套 284B 的压缩稀疏注意力 MoE 结构由三套专属的整模型执行器之一运行：</p>
+  <h3 id="deepseek4">DeepSeek V4、V4.1 与 GLM 5.x：专属整模型执行器</h3>
+  <p>有三个架构不走通用的逐算子前向。<code>deepseek4</code> 那套 284B 的压缩稀疏注意力 MoE 结构由三套专属的整模型执行器之一运行：</p>
   <ul>
     <li><strong><code>--backend cuda</code></strong> —— 不依赖 ggml 的 Direct CUDA 引擎。量化权重从 GGUF 分片直接流式写入按设备的竞技场。</li>
     <li><strong><code>--backend ggml_cuda</code> / <code>ggml_vulkan</code></strong> —— 原生 ggml 执行器：自行加载分片 GGUF，在设备上持有全部 DSV4 KV 状态，并把每个 prefill/decode 微批作为一张计算图执行，配合按形状签名的缓存，使稳态 decode 直接重放已捕获的 CUDA 图。</li>
     <li><strong><code>--backend cpu</code></strong> —— 100% 纯 C# 执行器，零原生依赖，直接从内存映射的 GGUF 分片提供量化权重。</li>
   </ul>
   <p>三者都会<strong>把权重按层切分到所有可见 GPU</strong>（CPU 那套则从映射分片流式读取），因此远大于单卡显存的模型依然跑得起来；<code>--tp N</code> 或 <code>TS_DSV4_NGPU</code> 用来限制使用几张卡。投机解码（<a href="advanced_zh-cn.html#dspark">DSpark</a>）可用于两个 GPU 引擎。→ <a href="models-text_zh-cn.html#deepseek4">DeepSeek V4 的下载与命令</a></p>
+
+  <p id="deepseek41"><strong><code>deepseek41</code> 是刻意收窄的。</strong>DeepSeek V4.1 只有一套原生计算图，<code>--backend ggml_cuda</code> 是它的服务路径——只有这条路径为它的融合算子提供了内核。<code>ggml_cpu</code> 用这些算子回退到的标量实现加载同一套图，目的是在没有 GPU 时验证架构，而不是拿来对外服务：这个检查点每层每个 token 要从 246 GiB 中读出 384 个路由专家中的 6 个。<code>TS_DSV41_ALLOW_NON_CUDA_GPU=1</code> 可额外允许 <code>ggml_vulkan</code> 与 <code>ggml_metal</code>：普通计算图仍跑在 GPU 上，只有架构专属算子落到 CPU 后端，每次都要一次主机往返——需要显式开启，因为那道拒绝原本挡住的是<em>静默</em>回退。其余后端（包括 <code>cpu</code> 与 <code>cuda</code>）会在读取权重之前就失败，而不会把 V4.1 的权重塞进 V4 的图。在 GPU 上，架构专属算子以 <code>GGML_OP_CUSTOM</code> 节点发出，由一个 TensorSharp 后端执行——它<em>包裹</em>所在 GPU 的 CUDA 后端并在调度器中取而代之，因此普通节点仍以图视图的形式在同一条流上交给 CUDA。→ <a href="models-text_zh-cn.html#deepseek41">DeepSeek V4.1</a></p>
 
   <p><code>glm-dsa</code> 那套 744B-A40B 的 MLA + DeepSeek 稀疏注意力结构同样如此，只不过是两套：</p>
   <ul>

@@ -845,6 +845,42 @@ namespace TensorSharp.Models
             return inputTokens;
         }
 
+        internal List<int> ProcessDeepSeek41History(DeepSeek41Model model, List<ChatMessage> history, List<int> inputTokens)
+        {
+            var imagePaths = GetImagePathsInPromptOrder(history);
+            if (imagePaths.Count == 0)
+                return inputTokens;
+            if (!model.IsVisionEncoderLoaded)
+                throw new InvalidOperationException("Image input requires the prepared deepseek41.vision.gguf companion.");
+
+            int imageId = model.ImageTokenId;
+            int placeholders = 0;
+            foreach (int token in inputTokens)
+                if (token == imageId) placeholders++;
+            if (placeholders != imagePaths.Count)
+                throw new InvalidOperationException($"V4.1 prompt has {placeholders} image placeholders for {imagePaths.Count} attachments.");
+
+            var cached = new CachedEmbedding[imagePaths.Count];
+            var counts = new int[imagePaths.Count];
+            for (int i = 0; i < imagePaths.Count; i++)
+            {
+                cached[i] = GetOrCreateCachedEmbedding(_visionCache, imagePaths[i], fullPath =>
+                    CreateCachedEmbedding(fullPath, model.EncodeImage(fullPath)));
+                counts[i] = cached[i].TokenCount;
+            }
+            inputTokens = ChatTemplate.ExpandImageTokens(inputTokens, imageId, counts);
+            int searchFrom = 0;
+            for (int i = 0; i < cached.Length; i++)
+            {
+                int start = FindTokenPosition(inputTokens, imageId, searchFrom);
+                if (start < 0)
+                    throw new InvalidOperationException("Expanded V4.1 image span is missing from the prompt.");
+                _preparedVisionEmbeddings.Add(new PreparedEmbeddingSpan(cached[i], start, start, start + counts[i]));
+                searchFrom = start + counts[i];
+            }
+            return inputTokens;
+        }
+
         private CachedEmbedding GetOrCreateGlmNextVisionEmbedding(
             GlmNextVisionEncoder encoder,
             GlmNextImageProcessor processor,

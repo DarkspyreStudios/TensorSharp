@@ -204,7 +204,15 @@ endif()
 # inner binary dir exceeds ~137 characters ("CL.exe could not be run:
 # DirectoryNotFoundException ... cmTC_*.tlog"). Every character saved here buys
 # headroom for repos cloned into deeper paths.
+if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/../eng/ggml-patches/apply.cmake")
+endif()
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml" g)
+
+# Eight CUDA devices each have a companion backend for architecture-specific
+# kernels, followed by the host backend: 17 scheduler entries. Upstream's
+# default of 16 aborts the first forward pass on an eight-GPU DeepSeek load.
+target_compile_definitions(ggml-base PRIVATE GGML_SCHED_MAX_BACKENDS=32)
 
 if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN AND TARGET ggml-vulkan)
     # ggml-vulkan.cpp includes <spirv/unified1/spirv.hpp>, but upstream's CMake
@@ -276,6 +284,8 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_mamba2.cpp
     ggml_ops_moe.cpp
     ggml_ops_deepseek4.cpp
+    ggml_ops_deepseek41_tp.cpp
+    ggml_ops_deepseek41_vision.cpp
     ggml_ops_glm_dsa.cpp
     ggml_ops_dsv4_fused_cpu.cpp
     ggml_ops_paged_attention.cpp
@@ -404,7 +414,87 @@ set_target_properties(GgmlOps PROPERTIES
 )
 
 if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
+    set_property(SOURCE ggml_ops_deepseek4.cpp APPEND PROPERTY COMPILE_DEFINITIONS TSG_GGML_TEST_HOOKS)
+    set_property(SOURCE ggml_ops_deepseek41_tp.cpp APPEND PROPERTY COMPILE_DEFINITIONS TSG_GGML_TEST_HOOKS)
     enable_testing()
+    add_executable(GgmlOpsDsv41EngramIoTest tests/dsv41_engram_io_test.cpp)
+    target_link_libraries(GgmlOpsDsv41EngramIoTest PRIVATE Threads::Threads)
+    add_test(NAME deepseek41-engram-parallel-io COMMAND GgmlOpsDsv41EngramIoTest)
+    add_executable(GgmlOpsDsv41EngramAdviceTest tests/dsv41_engram_advice_test.cpp)
+    add_test(NAME deepseek41-engram-mapped-advice COMMAND GgmlOpsDsv41EngramAdviceTest)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_executable(GgmlOpsDsv41EngramIoBench tests/dsv41_engram_io_bench.cpp)
+        target_link_libraries(GgmlOpsDsv41EngramIoBench PRIVATE Threads::Threads)
+        # Run explicitly with a scratch directory on the filesystem being measured.
+    endif()
+    add_executable(GgmlOpsDsv41TpTest tests/dsv41_tp_test.cpp ggml_ops_deepseek41_tp.cpp)
+    target_compile_definitions(GgmlOpsDsv41TpTest PRIVATE TSG_GGML_TEST_HOOKS)
+    target_include_directories(GgmlOpsDsv41TpTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(GgmlOpsDsv41TpTest PRIVATE ggml-cpu ggml-base Threads::Threads)
+    add_test(NAME deepseek41-moe-tensor-parallel COMMAND GgmlOpsDsv41TpTest)
+    add_test(NAME deepseek41-tp-failure-recovery COMMAND GgmlOpsDsv41TpTest --failure-only)
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA AND NOT WIN32)
+        target_compile_definitions(GgmlOpsDsv41TpTest PRIVATE TSG_GGML_USE_CUDA=1)
+        target_link_libraries(GgmlOpsDsv41TpTest PRIVATE ggml-cuda)
+        # Multi-device tests are explicit: a one-GPU CI lane must not claim
+        # that its skipped multi-device checks established tensor parallelism.
+        foreach(TP_RANKS 2 4 8)
+            add_test(NAME deepseek41-moe-tensor-parallel-cuda-${TP_RANKS}
+                     COMMAND GgmlOpsDsv41TpTest --cuda ${TP_RANKS})
+            set_tests_properties(deepseek41-moe-tensor-parallel-cuda-${TP_RANKS}
+                                 PROPERTIES SKIP_RETURN_CODE 77)
+        endforeach()
+    endif()
+    add_executable(GgmlOpsSchedulerCapacityTest tests/scheduler_capacity_test.cpp)
+    target_include_directories(GgmlOpsSchedulerCapacityTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/include")
+    target_link_libraries(GgmlOpsSchedulerCapacityTest PRIVATE ggml-cpu ggml-base)
+    add_test(NAME scheduler-seventeen-backends COMMAND GgmlOpsSchedulerCapacityTest)
+
+    add_executable(GgmlOpsDsv41RawGatherTest
+        tests/dsv41_raw_gather_test.cpp ggml_ops_dsv4_fused_cpu.cpp)
+    target_include_directories(GgmlOpsDsv41RawGatherTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(GgmlOpsDsv41RawGatherTest PRIVATE ggml-base)
+    add_test(NAME deepseek41-compact-raw-gather COMMAND GgmlOpsDsv41RawGatherTest)
+
+    add_executable(GgmlOpsDsv41TruncateTest tests/dsv41_truncate_test.cpp)
+    target_include_directories(GgmlOpsDsv41TruncateTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME deepseek41-truncate-guards COMMAND GgmlOpsDsv41TruncateTest)
+
+    add_executable(GgmlOpsDsv41QuantTest
+        tests/dsv41_quant_test.cpp ggml_ops_dsv4_fused_cpu.cpp)
+    target_include_directories(GgmlOpsDsv41QuantTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/include")
+    target_link_libraries(GgmlOpsDsv41QuantTest PRIVATE ggml-base)
+    add_test(NAME deepseek41-activation-quant-candidates COMMAND GgmlOpsDsv41QuantTest)
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA AND NOT WIN32)
+        add_executable(GgmlOpsDsv41SparseFaTest tests/dsv41_sparse_fa_test.cpp)
+        target_link_libraries(GgmlOpsDsv41SparseFaTest PRIVATE ggml-cuda ggml-base Threads::Threads)
+        add_test(NAME deepseek41-sparse-flash-attention-cuda COMMAND GgmlOpsDsv41SparseFaTest)
+        set_tests_properties(deepseek41-sparse-flash-attention-cuda PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(GgmlOpsCudaMatmulPrecisionTest tests/cuda_matmul_precision_test.cpp)
+        target_link_libraries(GgmlOpsCudaMatmulPrecisionTest PRIVATE ggml-cuda ggml-base)
+        add_test(NAME cuda-explicit-f32-matmul COMMAND GgmlOpsCudaMatmulPrecisionTest)
+        set_tests_properties(cuda-explicit-f32-matmul PROPERTIES SKIP_RETURN_CODE 77)
+        add_executable(GgmlOpsDsv41QuantCudaTest tests/dsv41_quant_test.cpp)
+        target_compile_definitions(GgmlOpsDsv41QuantCudaTest PRIVATE TSG_GGML_USE_CUDA=1)
+        target_include_directories(GgmlOpsDsv41QuantCudaTest PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/include")
+        target_link_libraries(GgmlOpsDsv41QuantCudaTest PRIVATE GgmlOps ggml-cuda)
+        add_test(NAME deepseek41-activation-quant-candidates-cuda COMMAND GgmlOpsDsv41QuantCudaTest)
+        set_tests_properties(deepseek41-activation-quant-candidates-cuda PROPERTIES SKIP_RETURN_CODE 77)
+        # Explicit two-GPU transfer/attention measurement; never time this in a
+        # concurrent CTest lane or treat it as full-model throughput evidence.
+        add_executable(GgmlOpsDsv41CompactGatherBench tests/dsv41_compact_gather_bench.cpp)
+        target_compile_definitions(GgmlOpsDsv41CompactGatherBench PRIVATE TSG_GGML_USE_CUDA=1)
+        target_include_directories(GgmlOpsDsv41CompactGatherBench PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/include")
+        target_link_libraries(GgmlOpsDsv41CompactGatherBench PRIVATE GgmlOps ggml-cuda ggml-cpu)
+    endif()
+
     add_executable(GgmlOpsAttentionAllocTest
         tests/attention_alloc_test.cpp ggml_ops_attention_alloc.cpp)
     target_include_directories(GgmlOpsAttentionAllocTest PRIVATE

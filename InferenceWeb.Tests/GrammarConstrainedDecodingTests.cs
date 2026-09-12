@@ -621,6 +621,24 @@ public class GrammarConstrainedDecodingTests
     }
 
     [Fact]
+    public void DeepSeek41ThinkingJson_ActivatesOnlyAfterCompleteFragmentedThinkingClose()
+    {
+        var tokenizer = new PieceTokenizer("Reasoning", "</th", "ink>", "{", "}", "\"", "answer");
+        var constraint = new GrammarConstraint(Grammar.JsonObject(), tokenizer);
+        constraint.ActivateAfter(OutputParserFactory.GrammarActivationTrigger("deepseek41", true));
+        constraint.Accept(tokenizer.LookupToken("Reasoning"));
+        constraint.Accept(tokenizer.LookupToken("</th"));
+        Assert.False(constraint.IsActive);
+        var logits = new float[tokenizer.VocabSize];
+        constraint.ApplyMask(logits, allowEos: false);
+        Assert.All(logits, value => Assert.False(float.IsNegativeInfinity(value)));
+        constraint.Accept(tokenizer.LookupToken("ink>"));
+        Assert.True(constraint.IsActive);
+        Assert.True(Allows(constraint, tokenizer.LookupToken("{")));
+        Assert.False(Allows(constraint, tokenizer.LookupToken("Reasoning")));
+    }
+
+    [Fact]
     public void LazyConstraintEnforcesAfterItsTrigger()
     {
         var tok = new PieceTokenizer("<|channel|>", "analysis", "final", "<|message|>", "{", "}", "\"", "a", "The");

@@ -254,7 +254,16 @@ namespace TensorSharp.Runtime.Speculative
             {
                 _parkedRemaining--;
                 ParkedSteps++;
-                return;                             // parked steps are not samples
+                // A parked step IS the plain baseline: it runs the same decode the
+                // non-speculative engine would have run for this token. Sampling it
+                // costs nothing and is the only measurement of plain cost taken
+                // outside a graph-family transition, so the next round starts with a
+                // baseline drawn from 32-256 clean tokens instead of three dear
+                // calibration steps. The first one after speculation is skipped:
+                // that is the step that pays the transition.
+                if (!speculated)
+                    RecordPlainSample(elapsedTicks, tokensEmitted);
+                return;
             }
             if (_recheckRemaining > 0)
             {
@@ -315,11 +324,7 @@ namespace TensorSharp.Runtime.Speculative
             }
             else
             {
-                if (!_plainFirstSkipped) { _plainFirstSkipped = true; return; }
-                _plainTicks += elapsedTicks;
-                _plainTokens += tokensEmitted;
-                _plainSamples++;
-                PlainMsPerToken = MsPerToken(_plainTicks, _plainTokens);
+                RecordPlainSample(elapsedTicks, tokensEmitted);
             }
 
             if (_specSamples < ProbeStepsThisRound || _plainSamples < CalibrationPlainSteps)
@@ -344,6 +349,21 @@ namespace TensorSharp.Runtime.Speculative
                 : Math.Min(ParkedProbeInterval, FirstParkInterval << Math.Min(_consecutiveLosses - 1, 5));
             _recheckRemaining = _specWins ? WinRecheckInterval : 0;
             ResetRound();
+        }
+
+        /// <summary>
+        /// One plain-side sample. The first of a round is dropped: a plain step that
+        /// follows a speculative one pays whatever the backend charges to change
+        /// graph family, and charging a transition to the steady-state cost of plain
+        /// decoding is what let a 5x regression read as a win.
+        /// </summary>
+        private void RecordPlainSample(long elapsedTicks, int tokensEmitted)
+        {
+            if (!_plainFirstSkipped) { _plainFirstSkipped = true; return; }
+            _plainTicks += elapsedTicks;
+            _plainTokens += tokensEmitted;
+            _plainSamples++;
+            PlainMsPerToken = MsPerToken(_plainTicks, _plainTokens);
         }
 
         /// <summary>

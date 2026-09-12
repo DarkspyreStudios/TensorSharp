@@ -5,9 +5,9 @@ Configuration loader for the cross-engine inference benchmark.
 Three engines (TensorSharp, llama.cpp, vLLM) are compared on the *same* GGUF
 files, the *same* host, through one uniform OpenAI `/v1/chat/completions`
 surface, across text / image / audio / video / single-turn / multi-turn /
-function-call / structured-output scenarios, on any compute backend declared
-in the config's `backends` registry (ggml_cuda / ggml_vulkan / ggml_metal /
-ggml_cpu / cpu / ...).
+function-call / structured-output / agentic-tool-loop / code-edit scenarios, on
+any compute backend declared in the config's `backends` registry (ggml_cuda /
+ggml_vulkan / ggml_metal / ggml_cpu / cpu / ...).
 
 Nothing here is hardcoded: every setting — host paths, the model / scenario /
 engine / backend registries, and the run defaults — is read from a JSON config
@@ -253,6 +253,14 @@ class ModelSpec:
     # MTP / NextN speculative decoding (TensorSharp only).
     mtp_supported: bool = False       # model ships a draft head we can engage
     mtp_draft: Optional[Path] = None  # separate draft GGUF (Gemma 4); None = embedded (Qwen 3.6)
+    # Whether the model has routed experts at all, i.e. whether the MoE
+    # CPU-offload axis (`--n-cpu-moe`) means anything for it. Tri-state on
+    # purpose: `false` gates the model out of that axis with a reason naming the
+    # config key, `true` opts it in, and an absent key (the case for every
+    # config written before the axis existed) runs the cell and lets the engine
+    # be the one to complain — the harness does not guess an architecture fact
+    # the config never stated.
+    is_moe: Optional[bool] = None
     # Tensor parallelism range this model can be hosted at. Weights that do not
     # fit one GPU declare e.g. `"min_tp": 4`; architectures whose shards must
     # divide a small head count declare e.g. `"max_tp": 2` (Gemma 4 26B-A4B has
@@ -342,6 +350,7 @@ def _build_models(cfg: dict) -> dict:
             diffusion_steps=int(steps),
             is_image_edit=bool(m.get("is_image_edit", False)),
             components={k: _path(v) for k, v in (m.get("components") or {}).items()},
+            is_moe=(bool(m["is_moe"]) if m.get("is_moe") is not None else None),
             mtp_supported=bool(m.get("mtp_supported", False)),
             mtp_draft=_path(m.get("mtp_draft")),
             min_tp=int(m.get("min_tp", 1) or 1),
@@ -388,12 +397,41 @@ def _build_scenarios(cfg: dict) -> dict:
     return out
 
 
+# Scenarios that are the same for every model and every host, and therefore do
+# not need to be declared in a config's `scenarios` block: the long-prompt
+# prefill dataset (`prefill_<N>`), and the two client-driven multi-turn
+# workflows. Synthesizing them is what makes `--scenarios agentic` work against
+# a config written before they existed, without editing that config — and
+# without adding anything to its `defaults.scenarios`, so an existing run is
+# unchanged.
+_SYNTH_SCENARIOS = {
+    "agentic": ScenarioSpec(
+        short_id="agentic",
+        kind="agentic",
+        description=("Multi-step tool use: two dependent tool calls plus a final "
+                     "answer that can only come from the tool results"),
+        modality=None,
+        max_tokens=512),
+    "code_edit": ScenarioSpec(
+        short_id="code_edit",
+        kind="code_edit",
+        description=("Code generation then a specific edit to the generated "
+                     "program, checked by parsing the edited source"),
+        modality=None,
+        max_tokens=512),
+}
+
+
 def synth_scenario(sid: str) -> Optional[ScenarioSpec]:
-    """Synthesize a ScenarioSpec for a generic `prefill_<N>` / `prefill_<N>k` id
-    (the long-prompt prefill dataset, e.g. `prefill_8k`, `prefill_512`). These do
-    not need to be declared in a config's `scenarios` block, so they work against
-    any config file. Returns None for anything that is not a prefill id."""
-    if not isinstance(sid, str) or not sid.startswith("prefill_"):
+    """Synthesize a ScenarioSpec for an id that needs no config declaration: a
+    generic `prefill_<N>` / `prefill_<N>k` (the long-prompt prefill dataset, e.g.
+    `prefill_8k`, `prefill_512`), or one of the model-independent multi-turn
+    workflows in `_SYNTH_SCENARIOS`. Returns None for anything else."""
+    if not isinstance(sid, str):
+        return None
+    if sid in _SYNTH_SCENARIOS:
+        return _SYNTH_SCENARIOS[sid]
+    if not sid.startswith("prefill_"):
         return None
     suffix = sid.split("prefill_", 1)[-1].strip().lower()
     try:
@@ -475,6 +513,12 @@ class BackendSpec:
     ts_tp: Optional[bool] = None       # TensorSharp can tensor-parallelize here
                                        # (None = infer from ts_backend)
     ts_tp_arg: str = "--tp"            # flag carrying the TP degree
+    # MoE CPU offload (`--n-cpu-moe N` / `--cpu-moe-threads M`). None = infer
+    # from ts_backend + the backend kind; the arg names are configurable so a
+    # build that spells them differently needs no code change.
+    ts_cpu_moe: Optional[bool] = None
+    ts_cpu_moe_arg: str = "--n-cpu-moe"
+    ts_cpu_moe_threads_arg: str = "--cpu-moe-threads"
     # llama.cpp mapping (llama_ngl None = llama.cpp cannot run it).
     llama_ngl: Optional[int] = None    # value passed to `-ngl`
     llama_server_exe: Optional[Path] = None      # per-backend build (e.g. a Vulkan
@@ -489,6 +533,21 @@ class BackendSpec:
     # support split buffers") — override per backend for an engine build that
     # only has the old mode.
     llama_tp_extra_args: tuple = ("--split-mode", "tensor")
+    # llama.cpp's MoE CPU offload. It spells a layer COUNT the same way
+    # (`--n-cpu-moe N` / `-ncmoe N`), but `all` is a TensorSharp-only value for
+    # that flag: llama.cpp parses `-ncmoe`'s argument as an integer and spells
+    # "every layer" as a separate switch (`--cpu-moe` / `-cmoe`, the mapping
+    # this repo's FEATURES.md states). So the `all` axis point emits
+    # `llama_cpu_moe_all_arg` instead of `--n-cpu-moe all`, which llama-server
+    # would reject at startup.
+    # llama.cpp also has no MoE-specific worker pool, so the host-thread knob
+    # lands on its global `--threads`: that is the nearest equivalent, not the
+    # same thing, and it moves every CPU-side op. Leave `--cpu-moe-threads` at 0
+    # (the default) to send no thread count at all.
+    llama_cpu_moe: Optional[bool] = None
+    llama_cpu_moe_arg: str = "--n-cpu-moe"
+    llama_cpu_moe_all_arg: str = "--cpu-moe"
+    llama_cpu_moe_threads_arg: str = "--threads"
     # Multi-GPU device selection: the env var that restricts a launched engine to
     # the first N devices (so a `--tp N` cell really uses N GPUs and a tp=1 cell
     # really uses one). None = infer from the backend id / TensorSharp backend.
@@ -527,6 +586,9 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
         ts_env={str(k): str(v) for k, v in (ts.get("env") or {}).items()},
         ts_tp=(bool(ts["tp"]) if ts.get("tp") is not None else None),
         ts_tp_arg=str(ts.get("tp_arg", "--tp")),
+        ts_cpu_moe=(bool(ts["cpu_moe"]) if ts.get("cpu_moe") is not None else None),
+        ts_cpu_moe_arg=str(ts.get("cpu_moe_arg", "--n-cpu-moe")),
+        ts_cpu_moe_threads_arg=str(ts.get("cpu_moe_threads_arg", "--cpu-moe-threads")),
         llama_ngl=(int(llama["ngl"]) if llama.get("ngl") is not None else None),
         llama_server_exe=_path(llama.get("server_exe")),
         llama_extra_args=tuple(str(a) for a in llama.get("extra_args", [])),
@@ -534,6 +596,10 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
         llama_tp=(bool(llama["tp"]) if llama.get("tp") is not None else None),
         llama_tp_extra_args=tuple(str(a) for a in llama.get(
             "tp_extra_args", ["--split-mode", "row"])),
+        llama_cpu_moe=(bool(llama["cpu_moe"]) if llama.get("cpu_moe") is not None else None),
+        llama_cpu_moe_arg=str(llama.get("cpu_moe_arg", "--n-cpu-moe")),
+        llama_cpu_moe_all_arg=str(llama.get("cpu_moe_all_arg", "--cpu-moe")),
+        llama_cpu_moe_threads_arg=str(llama.get("cpu_moe_threads_arg", "--threads")),
         visible_devices_env=b.get("visible_devices_env"),
         vllm=bool(b.get("vllm", False)),
         sdcpp_enabled=sdcpp is not None,
@@ -673,6 +739,160 @@ def tp_device_env(backend: str, tp: int) -> dict:
     return {var: ",".join(str(d) for d in pool[:tp])}
 
 
+# ---------------------------------------------------------------------------
+# MoE CPU offload (`--n-cpu-moe` / `--cpu-moe-threads`)
+# ---------------------------------------------------------------------------
+# `--n-cpu-moe N` keeps the routed experts of the first N layers in system RAM
+# and multiplies them on the host; attention, the norms, the router and the
+# always-active shared expert stay on the accelerator. `--cpu-moe-threads M`
+# sizes that host matmul. Both are launch options, so a cell that changes them
+# relaunches the server, exactly like `--tp`.
+#
+# This is a FIT knob, not a speed one: it is what makes a checkpoint that does
+# not fit run at all, and it costs decode throughput to do it. That is precisely
+# why it belongs on the matrix — the price has to be measurable, not folklore.
+CPU_MOE_ALL = -1                  # `--n-cpu-moe all`: every layer
+
+
+@dataclass(frozen=True)
+class CpuMoeSpec:
+    """One point on the MoE-CPU-offload axis (layers offloaded + host threads).
+
+    The default instance is the baseline "off" point: it emits no launch flags
+    at all and keeps a cell byte-identical to a run that never knew about this
+    axis."""
+    layers: int = 0               # 0 = off; CPU_MOE_ALL = every layer
+    threads: int = 0              # 0 = let the engine pick its own default
+
+    @property
+    def active(self) -> bool:
+        return self.layers != 0
+
+    @property
+    def layers_arg(self) -> str:
+        """The value handed to `--n-cpu-moe`."""
+        return "all" if self.layers == CPU_MOE_ALL else str(self.layers)
+
+    @property
+    def tag(self) -> str:
+        """Result-filename / log-name suffix. Empty for the baseline point, so
+        existing result files keep their historical names."""
+        if not self.active:
+            return ""
+        return f"__ncmoe{self.layers_arg}" + (f"t{self.threads}" if self.threads > 0 else "")
+
+    @property
+    def label(self) -> str:
+        """Human-readable axis point for console + report output."""
+        if not self.active:
+            return "off"
+        return self.layers_arg + (f"/{self.threads}t" if self.threads > 0 else "")
+
+
+def parse_cpu_moe_layers(value) -> int:
+    """`off`/`0` -> 0, `all` -> CPU_MOE_ALL, `8` -> 8. Raises on anything else.
+
+    The vocabulary is the server flag's own (a non-negative integer, or `all`)
+    plus the single word `off`, which is this axis's name for the baseline point
+    and the only spelling the harness adds. There is deliberately no second word
+    for it: `none` and friends are rejected rather than quietly accepted, so a
+    typo in a sweep is an error instead of a silently un-offloaded cell."""
+    tok = str(value).strip().lower()
+    if tok in ("off", "0"):
+        return 0
+    if tok == "all":
+        return CPU_MOE_ALL
+    n = int(tok)                                  # ValueError propagates
+    if n < 0:
+        raise ValueError(f"negative --n-cpu-moe layer count: {value}")
+    return n
+
+
+def cpu_moe_axis(layer_values, thread_values) -> list:
+    """The `(layers, threads)` axis points for a run, ordered and deduped.
+
+    Threads are only meaningful where something is actually offloaded, so the
+    off point collapses to a single baseline cell however many thread counts
+    were requested — otherwise `--n-cpu-moe off --cpu-moe-threads 32,64` would
+    silently run the identical baseline twice."""
+    out: list = []
+    for lv in layer_values:
+        layers = lv if isinstance(lv, int) else parse_cpu_moe_layers(lv)
+        for tv in (thread_values or [0]):
+            threads = int(tv)
+            if threads < 0:
+                raise ValueError(f"negative --cpu-moe-threads value: {tv}")
+            spec = CpuMoeSpec(layers=layers, threads=threads if layers != 0 else 0)
+            if spec not in out:
+                out.append(spec)
+    return out or [CpuMoeSpec()]
+
+
+def ts_cpu_moe_supported(spec: BackendSpec) -> bool:
+    """TensorSharp can offload this backend's routed experts to the host.
+    Inferred as "any GPU-kind backend TensorSharp can launch": offloading to the
+    CPU is only meaningful when the experts would otherwise live on an
+    accelerator."""
+    if spec.ts_cpu_moe is not None:
+        return spec.ts_cpu_moe
+    return spec.ts_backend is not None and spec.kind == "gpu"
+
+
+def llama_cpu_moe_supported(spec: BackendSpec) -> bool:
+    if spec.llama_cpu_moe is not None:
+        return spec.llama_cpu_moe
+    return spec.kind == "gpu" and bool(spec.llama_ngl)
+
+
+# Every spelling of the offload knobs an engine understands, so a backend entry
+# that already pins one in its own `extra_args` / `env` can be detected. These
+# are the ENGINE's aliases, not new harness options: the harness still emits
+# exactly one spelling (the backend's `*_arg`), it just has to recognise the
+# others to see a collision.
+_TS_CPU_MOE_ALIASES = ("--n-cpu-moe", "-ncmoe", "--cpu-moe", "-cmoe")
+_TS_CPU_MOE_THREAD_ALIASES = ("--cpu-moe-threads",)
+_TS_CPU_MOE_ENV = ("TS_N_CPU_MOE", "TS_CPU_MOE")
+_TS_CPU_MOE_THREAD_ENV = ("TS_CPU_MOE_THREADS",)
+_LLAMA_CPU_MOE_ALIASES = ("--n-cpu-moe", "-ncmoe", "--cpu-moe", "-cmoe")
+_LLAMA_CPU_MOE_THREAD_ALIASES = ("--threads", "-t")
+
+
+def cpu_moe_pinned(spec: BackendSpec, engine: str, threads: int = 0) -> str:
+    """The offload setting this backend entry already PINS, or "".
+
+    A backend entry may hardcode the offload itself — that is how this axis was
+    measured before it existed, as a cloned backend per point (see
+    `ggml_cuda_layer_cpu_moe4` in benchmark_config_deepseek41.json). The axis
+    would then append a SECOND copy of the same flag and every engine here keeps
+    whichever it parsed last, so the cell would quietly measure one offload
+    while its record claimed the other. Report the collision instead; the caller
+    turns it into a skip with a reason.
+
+    `threads` > 0 also checks the host-thread knob, which is only a conflict
+    when the axis is actually going to send one."""
+    if engine == "tensorsharp":
+        args, flags = spec.ts_extra_args, _TS_CPU_MOE_ALIASES
+        env, env_keys = spec.ts_env, _TS_CPU_MOE_ENV
+        if threads > 0:
+            flags = flags + _TS_CPU_MOE_THREAD_ALIASES
+            env_keys = env_keys + _TS_CPU_MOE_THREAD_ENV
+    elif engine == "llamacpp":
+        args, flags = spec.llama_extra_args, _LLAMA_CPU_MOE_ALIASES
+        env, env_keys = spec.llama_env, ()
+        if threads > 0:
+            flags = flags + _LLAMA_CPU_MOE_THREAD_ALIASES
+    else:
+        return ""
+    for a in args:
+        token = str(a).split("=", 1)[0]
+        if token in flags:
+            return token
+    for key in env_keys:
+        if key in (env or {}):
+            return key
+    return ""
+
+
 # llama.cpp server launch options.
 _llama = _CFG.get("llama", {}) or {}
 LLAMA_CONTEXT_SIZE = int(_llama.get("context_size", 8192))
@@ -696,9 +916,13 @@ DEFAULT_BACKENDS = _resolve_backend_list(_defaults.get("backends") or list(BACKE
 #   * mtp         - whether MTP/NextN speculative decoding is engaged (TensorSharp)
 #   * concurrency - number of identical requests fired in parallel at one server
 #   * tp          - tensor-parallel degree (GPUs one model is split across)
+#   * cpu_moe     - routed-expert CPU offload (`--n-cpu-moe` / `--cpu-moe-threads`)
 DEFAULT_MTP_MODES = [bool(x) for x in _defaults.get("mtp_modes", [False])]
 DEFAULT_CONCURRENCY = [int(x) for x in _defaults.get("concurrency", [1])]
 DEFAULT_TP_DEGREES = [int(x) for x in _defaults.get("tp_degrees", [1])]
+DEFAULT_CPU_MOE_LAYERS = [parse_cpu_moe_layers(x)
+                          for x in _defaults.get("cpu_moe_layers", ["off"])]
+DEFAULT_CPU_MOE_THREADS = [int(x) for x in _defaults.get("cpu_moe_threads", [0])]
 
 # Ordered pool of GPU device ids the TP axis may use (`defaults.tp_devices`).
 # When set, every launched engine is pinned to the first `tp` of them; when
@@ -731,7 +955,7 @@ SERVER_MAX_TOKENS = int(_defaults.get("server_max_tokens", 512))
 # ---------------------------------------------------------------------------
 def applies(engine: str, backend: str, model: ModelSpec,
             scenario: ScenarioSpec, mtp: bool = False,
-            tp: int = 1) -> tuple[bool, str]:
+            tp: int = 1, cpu_moe: Optional[CpuMoeSpec] = None) -> tuple[bool, str]:
     """Return (runnable, skip_reason). A non-runnable combination is recorded
     as a skip in the result set rather than silently dropped."""
     eng = ENGINES[engine]
@@ -805,6 +1029,37 @@ def applies(engine: str, backend: str, model: ModelSpec,
         return False, (f"{model.short_id} cannot be split across more than "
                        f"{model.max_tp} GPU(s) by TensorSharp")
 
+    # MoE CPU offload: the routed experts of `layers` layers stay in system RAM
+    # and are multiplied on the host. Only the two server engines are launched
+    # by this harness, so only they can be driven into it.
+    cm = cpu_moe or CpuMoeSpec()
+    if cm.active:
+        if b.kind != "gpu":
+            return False, (f"MoE CPU offload is meaningless on the {b.backend_id} "
+                           f"backend (its experts are already host-resident)")
+        if engine == "tensorsharp" and not ts_cpu_moe_supported(b):
+            return False, f"TensorSharp has no MoE CPU-offload path on {b.backend_id}"
+        if engine == "llamacpp" and not llama_cpu_moe_supported(b):
+            return False, f"llama.cpp has no MoE CPU-offload path on {b.backend_id}"
+        if engine in ("vllm", "sdcpp"):
+            return False, f"{eng.display} is not driven into MoE CPU offload by this harness"
+        if scenario.kind == "image_edit":
+            return False, "image-edit pipeline has no routed experts to offload"
+        # A backend that already pins the offload in its own extra_args/env is
+        # the pre-axis way of measuring this (one cloned backend per point).
+        # Sweeping the axis on top of it would hand the engine the flag twice
+        # and silently keep whichever it parsed last, so refuse the cell and
+        # name what to fix rather than record a number under the wrong label.
+        pinned = cpu_moe_pinned(b, engine, cm.threads)
+        if pinned:
+            return False, (f"{b.backend_id} already pins {pinned} for {eng.display}; "
+                           f"sweep --n-cpu-moe on a backend that does not")
+        # Only an explicit `"is_moe": false` gates a model out; an absent key
+        # means the config never said, and the cell runs so the engine — not a
+        # guess here — is what reports a dense checkpoint.
+        if model.is_moe is False:
+            return False, f"{model.short_id} is declared dense (`is_moe: false`): no routed experts"
+
     # CPU-kind backends are restricted to small/medium models (large MoE on
     # CPU is impractically slow).
     if b.kind == "cpu" and model.size_class == "large":
@@ -819,7 +1074,9 @@ def applies(engine: str, backend: str, model: ModelSpec,
     if model.is_diffusion:
         if engine != "tensorsharp":
             return False, "diffusion model only supported by TensorSharp"
-        if scenario.kind not in ("text", "multi_turn"):
+        # code_edit is plain multi-turn text, so it stays; agentic needs tool
+        # declarations, which this family cannot carry.
+        if scenario.kind not in ("text", "multi_turn", "code_edit"):
             return False, "diffusion model is text-only (no tools/json/multimodal)"
 
     # llama.cpp has no video CLI/endpoint path.

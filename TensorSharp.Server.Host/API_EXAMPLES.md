@@ -682,6 +682,34 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   }"
 ```
 
+### Chat Completions with Video (DeepSeek V4.1)
+
+`video_url` is a V4.1 extension to the Chat Completions content array. The server samples
+the clip through its existing video decoder and turns each frame into an image span, so the
+model needs its prepared vision companion attached with `--mmproj`.
+
+```bash
+VID_B64=$(base64 < clip.mp4 | tr -d '\n')
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf\",
+    \"messages\": [{
+      \"role\": \"user\",
+      \"content\": [
+        {\"type\": \"text\", \"text\": \"What happens in this clip?\"},
+        {\"type\": \"video_url\", \"video_url\": {\"url\": \"data:video/mp4;base64,$VID_B64\", \"fps\": 1, \"max_frames\": 3}}
+      ]
+    }],
+    \"max_tokens\": 200
+  }"
+```
+
+`fps` must be greater than zero and at most 60, and `max_frames` must be 1-64; the defaults
+are 1 fps and 16 frames. Frames keep their source order and each carries its source time in
+seconds, so this is frame sampling rather than a temporal encoder. Remote HTTP URLs are not
+fetched — send a data URI. Audio parts are refused with HTTP 400 rather than dropped.
+
 ### Chat Completions with Tool Calling
 
 ```bash

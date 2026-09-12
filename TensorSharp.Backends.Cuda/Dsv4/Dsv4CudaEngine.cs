@@ -78,6 +78,20 @@ namespace TensorSharp.Cuda
             public float[] CompApe, CompNorm, IdxCompApe, IdxCompNorm;
             public float[] GateInp, ExpProbsBias, FfnNorm;
             public int[] Tid2Eid;
+
+            // ---- V4.1 ----
+            /// <summary>Layer that builds the compressed and indexer caches this
+            /// layer reads, and the layer that publishes the sparse selection.
+            /// Both -1 on uncompressed layers.</summary>
+            public int KvSource = -1, IndexSource = -1;
+            /// <summary>V4.1 projects the compressed latent into the indexer's key
+            /// space instead of running a second compressor for it.</summary>
+            public QuantWeightDesc IndexerK;
+            public float[] IndexerKNorm;
+            /// <summary>Index into the sidecar's table list, or -1.</summary>
+            public int EngramIndex = -1;
+            public QuantWeightDesc EngramWkv;
+            public float[] EngramQ, EngramK;
         }
 
         public sealed class ModelDesc
@@ -97,6 +111,18 @@ namespace TensorSharp.Cuda
             public float[] OutputNorm, HcHeadFn, HcHeadScale, HcHeadBase;
             public float[] RopeRawTable, RopeCompTable; // [nCtx * nRot] interleaved cos/sin
             public LayerDesc[] Layers;
+
+            // ---- V4.1 ----
+            /// <summary>deepseek41 rather than deepseek4: compression ratios 1 and
+            /// 2, shared caches, candidate pruning, Engram tables, delayed
+            /// hyper-connection gates and the trained cache quantization.</summary>
+            public bool V41;
+            /// <summary>Indexer layer that prunes the key space for the layers
+            /// after it, and the geometry of that pruning. -1 when absent.</summary>
+            public int CandidateSource = -1, CandidateTopk, CandidateBlock;
+            /// <summary>Host-side Engram gather; required when any layer names an
+            /// Engram table.</summary>
+            public IDsv41EngramSource Engram;
             /// <summary>Optional DSpark speculative-decoding module (see
             /// Dsv4CudaEngine.Dspark.cs); null when no drafter was loaded.</summary>
             public DsparkDesc Dspark;
@@ -137,6 +163,11 @@ namespace TensorSharp.Cuda
             public Tensor RingK, CompK, LidK;
             public Tensor HistKv, HistScore, LidHistKv, LidHistScore;
             public int ShFf;
+
+            // ---- V4.1 ----
+            public int KvSource = -1, IndexSource = -1, EngramIndex = -1;
+            public DevQW IndexerK, EngramWkv;
+            public Tensor IndexerKNorm, EngramQ, EngramK;
         }
 
         private sealed class Dev
@@ -174,6 +205,11 @@ namespace TensorSharp.Cuda
             public Tensor Xs, XsOut, Cur, Inv, Mixes, Pre, Post, Comb;
             public Tensor Qr, Q, KvRaw, StKv, StScore, LidStKv, LidStScore;
             public Tensor Iq, Iw, IdxScores, TopkIdx, TopkCnt;
+            // V4.1: the delayed hyper-connection gates (a block collapses the
+            // streams with the PREVIOUS block's gates), the compressed latent
+            // being built, the candidate mask, and the Engram staging.
+            public Tensor PreAttn, PreFfn, Latent, LatentK, CandMask, EngramLookup, EngramKv;
+            public IntPtr EngramPinned;
             public Tensor AttnO, OGrouped, OGroupedOut, OG, AttnOut, FfnOut;
             public Tensor RouterLogits, Sel, SelW, Counts, Offsets, Cursors, RowOfSlot, SlotToken;
             public Tensor ActQ8A, ActQ8B, ExpGate, ExpUp, ExpDown, ShGate, ShUp, ShDown;
@@ -257,8 +293,10 @@ namespace TensorSharp.Cuda
             // NUbatch of headroom; the compressor state rings do not).
             _maxDraft = m.Dspark != null ? m.Dspark.BlockSize : 0;
             _ringRaw = Pad(m.NSwa + m.NUbatch, 256);
-            _compRowsCsa = m.NCtx / CsaRatio + 1;
-            _compRowsHca = m.NCtx / HcaRatio + 1;
+            // V4.1 compresses at ratios 1 and 2 rather than 4 and 128, so the
+            // same two row counts stand for a different pair of groups.
+            _compRowsCsa = m.NCtx / (m.V41 ? 2 : CsaRatio) + 1;
+            _compRowsHca = m.NCtx / (m.V41 ? 1 : HcaRatio) + 1;
 
             // ---- devices ----
             // Created before the layer split, which needs each device's free
@@ -645,6 +683,11 @@ namespace TensorSharp.Cuda
             if (l.IdxQB.IsValid) yield return l.IdxQB;
             if (l.IdxCompWkv.IsValid) yield return l.IdxCompWkv;
             if (l.IdxCompWgate.IsValid) yield return l.IdxCompWgate;
+            // V4.1 only, and only on the layers that carry them. This enumeration
+            // sizes the arena as well as filling it, so a weight missing here
+            // overflows the arena rather than being quietly skipped.
+            if (l.IndexerK.IsValid) yield return l.IndexerK;
+            if (l.EngramWkv.IsValid) yield return l.EngramWkv;
             if (!skipRoutedExperts)
             {
                 yield return l.GateExps;
@@ -881,6 +924,11 @@ namespace TensorSharp.Cuda
             dst.IdxQB = UploadQuant(dev, src.IdxQB);
             dst.IdxCompWkv = UploadQuant(dev, src.IdxCompWkv);
             dst.IdxCompWgate = UploadQuant(dev, src.IdxCompWgate);
+            // V4.1: the indexer's K projection off the compressed latent, and the
+            // Engram projection. Both are default-valued on layers that do not
+            // carry them, which UploadQuant passes through unchanged.
+            dst.IndexerK = UploadQuant(dev, src.IndexerK);
+            dst.EngramWkv = UploadQuant(dev, src.EngramWkv);
             if (il < _nCpuMoe)
             {
                 // --n-cpu-moe: the stacked experts stay in system RAM and their
@@ -924,6 +972,29 @@ namespace TensorSharp.Cuda
             // F32 compressor state rings. Allocator-owned, one tensor each.
             int hd = _m.HeadDim;
             dst.RingK = AllocT(dev, DType.Float16, _ringRaw, hd);
+            if (_m.V41)
+            {
+                dst.KvSource = src.KvSource;
+                dst.IndexSource = src.IndexSource;
+                dst.EngramIndex = src.EngramIndex;
+                dst.IndexerKNorm = UploadF32(dev, src.IndexerKNorm);
+                dst.EngramQ = UploadF32(dev, src.EngramQ);
+                dst.EngramK = UploadF32(dev, src.EngramK);
+                // Only the per-ratio source layer owns the shared caches; every
+                // other compressed layer in its group reads them.
+                if (dst.Ratio != 0 && dst.KvSource == il)
+                {
+                    int rows = V41Rows(dst.Ratio);
+                    dst.CompK = AllocT(dev, DType.Float16, rows, hd);
+                    dst.LidK = AllocT(dev, DType.Float16, rows, _m.IdxHeadSize);
+                    if (dst.Ratio > 1)
+                    {
+                        dst.HistKv = AllocF32(dev, dst.Ratio, hd);
+                        dst.HistScore = AllocF32(dev, dst.Ratio, hd);
+                    }
+                }
+                return;
+            }
             if (dst.Ratio == CsaRatio)
             {
                 dst.CompK = AllocT(dev, DType.Float16, _compRowsCsa, hd);
@@ -958,6 +1029,10 @@ namespace TensorSharp.Cuda
             dev.OwnedTensors.Add(t);
             return t;
         }
+
+        /// <summary>Compressed rows a V4.1 ratio group needs for the whole
+        /// context. Ratio 1 keeps one row per token, ratio 2 one per pair.</summary>
+        private int V41Rows(int ratio) => ratio == 2 ? _compRowsCsa : _compRowsHca;
 
         private static Tensor AllocF32(Dev dev, params long[] sizes) => AllocT(dev, DType.Float32, sizes);
 
@@ -1010,7 +1085,7 @@ namespace TensorSharp.Cuda
             dev.LidStScore = AllocF32(dev, nt, 2 * m.IdxHeadSize);
             dev.Iq = AllocF32(dev, nt, (long)m.IdxNHead * m.IdxHeadSize);
             dev.Iw = AllocF32(dev, nt, Math.Max(m.IdxNHead, 1));
-            dev.IdxScores = AllocF32(dev, nt, _compRowsCsa);
+            dev.IdxScores = AllocF32(dev, nt, Math.Max(_compRowsCsa, m.V41 ? _compRowsHca : 0));
             dev.TopkIdx = AllocI32(dev, nt, Math.Max(m.IdxTopK, 1));
             dev.TopkCnt = AllocI32(dev, nt);
             dev.AttnO = AllocF32(dev, nt, (long)m.NHead * hd);
@@ -1018,6 +1093,25 @@ namespace TensorSharp.Cuda
             dev.OGroupedOut = AllocF32(dev, (long)m.OGroups * nt, m.OLoraRank);
             dev.OG = AllocF32(dev, nt, (long)m.OGroups * m.OLoraRank);
             dev.AttnOut = AllocF32(dev, nt, e);
+            if (m.V41)
+            {
+                // The delayed gates: each block computes its own but collapses
+                // with the previous block's, so two live buffers, not one.
+                dev.PreAttn = AllocF32(dev, nt, HC);
+                dev.PreFfn = AllocF32(dev, nt, HC);
+                // One extra row so a ratio-1 group can hold every token's block.
+                dev.Latent = AllocF32(dev, nt + 1, hd);
+                dev.LatentK = AllocF32(dev, nt + 1, m.IdxHeadSize);
+                if (m.CandidateSource >= 0)
+                    dev.CandMask = AllocT(dev, DType.UInt8, nt, Math.Max(_compRowsCsa, _compRowsHca));
+                if (m.Engram != null)
+                {
+                    long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
+                    dev.EngramLookup = AllocF32(dev, nt, cols);
+                    dev.EngramKv = AllocF32(dev, nt, (long)(HC + 1) * e);
+                    CudaDriverApi.cuMemHostAlloc(out dev.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/).ThrowOnError();
+                }
+            }
             dev.FfnOut = AllocF32(dev, nt, e);
             dev.RouterLogits = AllocF32(dev, nt, m.NExpert);
             dev.Sel = AllocI32(dev, nt, m.NExpertUsed);
@@ -1092,6 +1186,10 @@ namespace TensorSharp.Cuda
                 Memset0(L.LidHistScore);
             }
             ResetDspark();
+            // Engram lookbacks reach earlier positions, so the hash history has
+            // to go when the sequence does.
+            _m.Engram?.ResetEngram();
+            _v41CandActive = false;
             NPast = 0;
         }
 
@@ -1189,6 +1287,32 @@ namespace TensorSharp.Cuda
         // stage-by-stage A/B against the exact managed reference).
         private static readonly bool StageDebug = EnvInt("TS_DSV4_CUDA_DEBUG", 0) != 0;
 
+        /// <summary>
+        /// TS_DSV4_CUDA_TRACE_DIR writes whole tensors under the same names the
+        /// managed executor writes with TS_DSV4_CPU_TRACE_DIR, so the two
+        /// directories can be diffed tensor by tensor. That is the only tractable
+        /// way to find which layer of a forty-layer graph first disagrees.
+        /// </summary>
+        private static readonly string TraceDir = Environment.GetEnvironmentVariable("TS_DSV4_CUDA_TRACE_DIR");
+        private int _traceP0;
+
+        private void Trace(Dev dev, string name, Tensor t, long count)
+        {
+            if (TraceDir == null || t == null)
+                return;
+            System.IO.Directory.CreateDirectory(TraceDir);
+            dev.MakeCurrent();
+            CudaDriverApi.cuStreamSynchronize(dev.Stream);
+            var host = new float[count];
+            fixed (float* h = host)
+                CudaDriverApi.cuMemcpyDtoH((IntPtr)h, Ptr(t), new UIntPtr((ulong)count * 4)).ThrowOnError();
+            var bytes = new byte[count * 4];
+            Buffer.BlockCopy(host, 0, bytes, 0, bytes.Length);
+            System.IO.File.WriteAllBytes(System.IO.Path.Combine(TraceDir, $"p{_traceP0:D6}_{name}.f32"), bytes);
+        }
+
+        private static string TraceLayer(int il, string what) => $"blk{il:D2}_{what}";
+
         private void Dump(Dev dev, string label, Tensor t, int n = 6)
         {
             if (!StageDebug || t == null)
@@ -1252,6 +1376,13 @@ namespace TensorSharp.Cuda
             }
             Tensor TokensOf(Dev dev) => parity == 0 ? dev.TokensDev0 : dev.TokensDev1;
 
+            // A candidate mask belongs to one ubatch; a stale one would prune the
+            // next ubatch's queries against the previous ubatch's scores.
+            _v41CandActive = false;
+            _traceP0 = p0;
+            if (m.V41 && m.Engram != null)
+                m.Engram.BeginEngramUbatch(new ReadOnlySpan<int>(tokens, tokOff, nt), p0);
+
             // embedding on device 0
             var dev0 = _devs[0];
             dev0.MakeCurrent();
@@ -1260,6 +1391,7 @@ namespace TensorSharp.Cuda
             StageEnd(dev0, 0);
             CheckSync(dev0, "embed");
             Dump(dev0, "embed.xs", dev0.Xs);
+            Trace(dev0, "embedding", dev0.Xs, (long)nt * HC * e);
 
             int curDev = 0;
             for (int il = 0; il < m.NLayer; il++)
@@ -1296,9 +1428,21 @@ namespace TensorSharp.Cuda
                 var dev = _devs[curDev];
                 dev.MakeCurrent();
 
+                // ---- Engram (V4.1, on the layers the sidecar names) ----
+                // Runs before the attention block and rewrites the residual in
+                // place, which is where the reference puts it.
+                if (L.EngramIndex >= 0)
+                    EngramLayer(dev, L, nt);
+
                 // ---- attention super-block ----
+                // V4.1 delays the hyper-connection collapse by one block: each
+                // block computes its own gates but collapses the streams with the
+                // previous block's, and the first block uses the stream mean.
                 bool dbg = StageDebug && il == 0;
-                HcPre(dev, L, nt, attn: true);
+                HcPre(dev, L, nt, attn: true,
+                    delayed: m.V41 ? (il == 0 ? null : dev.PreFfn) : null,
+                    publish: m.V41 ? dev.PreAttn : null,
+                    meanCollapse: m.V41 && il == 0);
                 if (dbg)
                 {
                     Dump(dev, "L0.attn.mixes", dev.Mixes);
@@ -1310,10 +1454,15 @@ namespace TensorSharp.Cuda
                 StageEnd(dev, 1);
                 if (dbg)
                     Dump(dev, "L0.attn.cur_norm", dev.Cur);
+                Trace(dev, TraceLayer(il, "attn_input"), dev.Cur, (long)nt * e);
                 CheckSync(dev, $"hc_pre_attn L{il}");
-                Attention(dev, L, il, nt, p0, TokensOf(dev));
+                if (m.V41)
+                    AttentionV41(dev, L, il, nt, p0);
+                else
+                    Attention(dev, L, il, nt, p0, TokensOf(dev));
                 if (dbg)
                     Dump(dev, "L0.attn.out", dev.AttnOut);
+                Trace(dev, TraceLayer(il, "attn_out"), dev.AttnOut, (long)nt * e);
                 dev.DK.HcPost(dev.Xs, dev.AttnOut, dev.Post, dev.Comb, dev.XsOut, nt, e, dev.Stream);
                 SwapXs(dev);
                 StageEnd(dev, 1);
@@ -1322,14 +1471,19 @@ namespace TensorSharp.Cuda
                 CheckSync(dev, $"attn L{il}");
 
                 // ---- FFN super-block ----
-                HcPre(dev, L, nt, attn: false);
+                HcPre(dev, L, nt, attn: false,
+                    delayed: m.V41 ? dev.PreAttn : null,
+                    publish: m.V41 ? dev.PreFfn : null);
                 RmsNorm(dev, dev.Cur, L.FfnNorm, nt);
+                Trace(dev, TraceLayer(il, "ffn_input"), dev.Cur, (long)nt * e);
                 StageEnd(dev, 1);
                 MoeFfn(dev, L, il, nt, TokensOf(dev));
                 if (dbg)
                     Dump(dev, "L0.ffn.out", dev.FfnOut);
+                Trace(dev, TraceLayer(il, "ffn_out"), dev.FfnOut, (long)nt * e);
                 dev.DK.HcPost(dev.Xs, dev.FfnOut, dev.Post, dev.Comb, dev.XsOut, nt, e, dev.Stream);
                 SwapXs(dev);
+                Trace(dev, TraceLayer(il, "hidden"), dev.Xs, (long)nt * HC * e);
                 StageEnd(dev, 1);
                 if (StageDebug)
                     Dump(dev, $"L{il}.ffn.xs_post", dev.Xs);
@@ -1360,6 +1514,15 @@ namespace TensorSharp.Cuda
                 dev.MakeCurrent();
                 int headRows = allLogitsRows ? nt : 1;
                 Tensor logitsDst = allLogitsRows ? _specLogits : dev.Logits;
+                if (m.V41)
+                {
+                    // V4.1 has no head mixer: the last layer's FFN block already
+                    // published the gates the head collapses with.
+                    using Tensor headXs = allLogitsRows ? dev.Xs.CopyRef() : dev.Xs.Narrow(0, nt - 1, 1);
+                    using Tensor headPre = allLogitsRows ? dev.PreFfn.CopyRef() : dev.PreFfn.Narrow(0, nt - 1, 1);
+                    dev.DK.HcCollapse(headXs, headPre, dev.Cur, headRows, e, dev.Stream);
+                }
+                else
                 using (Tensor headX = allLogitsRows ? dev.Xs.CopyRef() : dev.Xs.Narrow(0, nt - 1, 1))
                 {
                     dev.DK.HcHead(headX, Ptr(_hcHeadFn), Ptr(_hcHeadScale), Ptr(_hcHeadBase), dev.Cur, e,
@@ -1391,7 +1554,14 @@ namespace TensorSharp.Cuda
             Ops.RMSNorm(view, view, weight, null, _m.RmsEps);
         }
 
-        private void HcPre(Dev dev, DevLayer l, int nt, bool attn)
+        /// <param name="delayed">V4.1 only. The block still derives its own gates
+        /// from the current streams, but collapses them with the gates the
+        /// PREVIOUS block published; the first block of the model collapses with
+        /// a plain stream mean instead. Publishing happens into
+        /// <paramref name="publish"/> after the collapse, so the two buffers
+        /// never alias.</param>
+        private void HcPre(Dev dev, DevLayer l, int nt, bool attn,
+            Tensor delayed = null, Tensor publish = null, bool meanCollapse = false)
         {
             var m = _m;
             int flatDim = HC * m.NEmbd;
@@ -1404,7 +1574,15 @@ namespace TensorSharp.Cuda
             MatMulF32(dev, Ptr(fn), dev.Xs, dev.Mixes, flatDim, HcMixDim, nt);
             dev.DK.HcGatesComb(dev.Mixes, dev.Inv, Ptr(scale), Ptr(baseW), dev.Pre, dev.Post, dev.Comb,
                 nt, m.HcSinkhornIters, m.HcEps, dev.Stream);
-            dev.DK.HcCollapse(dev.Xs, dev.Pre, dev.Cur, nt, m.NEmbd, dev.Stream);
+
+            if (meanCollapse)
+                dev.DK.HcMean(dev.Xs, dev.Cur, nt, m.NEmbd, m.NEmbd, 0, dev.Stream);
+            else
+                dev.DK.HcCollapse(dev.Xs, delayed ?? dev.Pre, dev.Cur, nt, m.NEmbd, dev.Stream);
+
+            if (publish != null)
+                CudaDriverApi.cuMemcpyDtoDAsync(Ptr(publish), Ptr(dev.Pre),
+                    new UIntPtr((ulong)((long)nt * HC * 4)), dev.Stream).ThrowOnError();
         }
 
         // -------------------------------------------------------------------
@@ -1529,6 +1707,180 @@ namespace TensorSharp.Cuda
             StageEnd(dev, 6);
             CheckSync(dev, $"out_proj L{il}");
         }
+
+        // -------------------------------------------------------------------
+        // V4.1 attention
+        //
+        // Mirrors DeepSeek4CpuExecutor.AttentionV41, which is held to the
+        // PyTorch reference by InferenceWeb.Tests.Dsv41CpuExecutorTests. The
+        // differences from V4 are: no per-head query norm, a non-overlapping
+        // compressor window with no absolute positional embedding, the indexer's
+        // K projected from the compressed latent, one layer per ratio group
+        // owning the caches and the sparse selection, optional candidate
+        // pruning, and the trained cache quantization on every commit.
+        // -------------------------------------------------------------------
+
+        private void AttentionV41(Dev dev, DevLayer l, int il, int nt, int p0)
+        {
+            var m = _m;
+            int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
+            int ratio = l.Ratio;
+            IntPtr ropeTab = Ptr(ratio != 0 ? dev.RopeComp : dev.RopeRaw);
+
+            MatMul(dev, l.WqA, dev.Cur, dev.Qr, nt);
+            RmsNorm(dev, dev.Qr, l.QANorm, nt);
+            MatMul(dev, l.WqB, dev.Qr, dev.Q, nt);
+            MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
+            dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK),
+                p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
+            Trace(dev, TraceLayer(il, "q"), dev.Q, (long)nt * nh * hd);
+            Trace(dev, TraceLayer(il, "raw_k"), dev.KvRaw, (long)nt * hd);
+            StageEnd(dev, 2);
+            CheckSync(dev, $"v41_attn_prep L{il}");
+
+            int mode = 0;
+            if (ratio != 0)
+            {
+                if (l.KvSource == il)
+                    CompressV41(dev, l, nt, p0, ratio);
+                StageEnd(dev, 3);
+                CheckSync(dev, $"v41_compress L{il}");
+                if (l.IndexSource == il)
+                {
+                    BuildIndexerV41(dev, l, il, nt, p0, ratio);
+                    StageEnd(dev, 4);
+                    CheckSync(dev, $"v41_indexer L{il}");
+                }
+                mode = 1;   // the selection published by this group's index source
+            }
+
+            DevLayer source = ratio != 0 ? _layers[l.KvSource] : l;
+            float kqScale = 1.0f / MathF.Sqrt(hd);
+            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(source.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
+                p0, m.NSwa, _ringRaw, nh, hd, mode, ratio == 0 ? 1 : ratio, m.IdxTopK, kqScale, nt, dev.Stream);
+            StageEnd(dev, 5);
+            CheckSync(dev, $"v41_attn_core L{il}");
+
+            OutProjection(dev, l, nt, p0, ropeTab);
+        }
+
+        /// <summary>One normalized latent per complete block, then the indexer K
+        /// projection off the UNROTATED latent, then both caches committed.</summary>
+        private void CompressV41(Dev dev, DevLayer l, int nt, int p0, int ratio)
+        {
+            var m = _m;
+            int hd = m.HeadDim, id = m.IdxHeadSize;
+
+            MatMul(dev, l.CompWkv, dev.Cur, dev.StKv, nt);
+            if (ratio > 1)
+                MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
+
+            long firstBoundary = -1;
+            for (long p = p0; p < (long)p0 + nt; p++)
+            {
+                if ((p + 1) % ratio == 0) { firstBoundary = p; break; }
+            }
+            int nBlocks = firstBoundary < 0 ? 0 : (int)(((long)p0 + nt - 1 - firstBoundary) / ratio) + 1;
+
+            if (nBlocks > 0)
+            {
+                dev.DK.V41Compress(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), Ptr(l.CompNorm),
+                    dev.Latent, firstBoundary, nBlocks, p0, ratio, hd, m.RmsEps, dev.Stream);
+
+                using (Tensor latentRows = Rows(dev.Latent, nBlocks))
+                using (Tensor keyRows = Rows(dev.LatentK, nBlocks))
+                {
+                    MatMul(dev, l.IndexerK, latentRows, keyRows, nBlocks);
+                    RmsNorm(dev, keyRows, l.IndexerKNorm, nBlocks);
+                }
+
+                dev.DK.V41Commit(dev.LatentK, Ptr(dev.RopeComp), Ptr(l.LidK),
+                    firstBoundary, nBlocks, ratio, id, m.NRot, 1, dev.Stream);
+                dev.DK.V41Commit(dev.Latent, Ptr(dev.RopeComp), Ptr(l.CompK),
+                    firstBoundary, nBlocks, ratio, hd, m.NRot, 2, dev.Stream);
+            }
+
+            if (ratio > 1)
+                dev.DK.V41Persist(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), p0, nt, ratio, hd, dev.Stream);
+        }
+
+        private void BuildIndexerV41(Dev dev, DevLayer l, int il, int nt, int p0, int ratio)
+        {
+            var m = _m;
+            DevLayer source = _layers[l.KvSource];
+            int rows = dev.IdxScores.Sizes[1] is long c ? (int)c : 0;
+
+            MatMul(dev, l.IdxQB, dev.Qr, dev.Iq, nt);
+            MatMul(dev, l.IdxProj, dev.Cur, dev.Iw, nt);
+            float iwScale = 1.0f / MathF.Sqrt((float)m.IdxHeadSize * m.IdxNHead);
+            dev.DK.V41IdxPrep(dev.Iq, dev.Iw, Ptr(dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, m.NRot,
+                iwScale, nt, dev.Stream);
+
+            // Rows this layer may see: visibility, then whatever the candidate
+            // layer left standing for the layers after it.
+            bool prune = _v41CandActive && il > m.CandidateSource;
+            int maxVis = (int)(((long)p0 + nt) / ratio);
+            dev.DK.V41IdxScores(dev.Iq, dev.Iw, Ptr(source.LidK), prune ? Ptr(dev.CandMask) : IntPtr.Zero,
+                dev.IdxScores, p0, ratio, m.IdxNHead, m.IdxHeadSize, rows, maxVis, nt, dev.Stream);
+
+            if (il == m.CandidateSource)
+            {
+                dev.DK.V41Candidate(dev.IdxScores, Ptr(dev.CandMask), p0, ratio, rows,
+                    m.CandidateBlock, m.CandidateTopk, nt, dev.Stream);
+                _v41CandActive = true;
+            }
+
+            dev.DK.TopK(dev.IdxScores, dev.TopkIdx, dev.TopkCnt, p0, ratio, m.IdxTopK, rows, nt, dev.Stream);
+        }
+
+        /// <summary>Inverse RoPE on the rope slice, then the grouped LoRA output
+        /// projection. Shared by both architectures.</summary>
+        private void OutProjection(Dev dev, DevLayer l, int nt, int p0, IntPtr ropeTab)
+        {
+            var m = _m;
+            int nh = m.NHead, hd = m.HeadDim;
+            int hpg = nh / m.OGroups;
+            // p0, not 0: the inverse rotation has to undo the rotation each token
+            // was given at its OWN absolute position.
+            dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, m.NRot, hpg, nt, dev.Stream);
+
+            int groupDim = hpg * hd;
+            int oCat = m.OGroups * m.OLoraRank;
+            var woA = l.WoA;
+            for (int g = 0; g < m.OGroups; g++)
+            {
+                var slice = woA;
+                slice.Ptr = (IntPtr)((long)woA.Ptr + (long)g * m.OLoraRank * woA.RowBytes);
+                slice.Ne1 = m.OLoraRank;
+                using Tensor input = Block(dev.OGrouped, (long)g * nt, nt, groupDim);
+                using Tensor output = Block(dev.OGroupedOut, (long)g * nt, nt, m.OLoraRank);
+                MatMul(dev, slice, input, output, nt);
+            }
+            dev.DK.Regroup(dev.OGroupedOut, dev.OG, m.OGroups, nt, m.OLoraRank, dev.Stream);
+            MatMul(dev, l.WoB, dev.OG, dev.AttnOut, nt);
+            StageEnd(dev, 6);
+        }
+
+        /// <summary>
+        /// Gathers this ubatch's Engram rows for one layer and folds them into
+        /// the residual. The table stays on the host: the executor hashes and
+        /// dequantizes the selected rows, and only those cross the bus.
+        /// </summary>
+        private void EngramLayer(Dev dev, DevLayer l, int nt)
+        {
+            var m = _m;
+            long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
+            m.Engram.GatherEngramRows(l.EngramIndex, nt, (float*)dev.EngramPinned);
+            CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.EngramLookup), dev.EngramPinned,
+                new UIntPtr((ulong)(nt * cols * 4)), dev.Stream).ThrowOnError();
+            MatMul(dev, l.EngramWkv, dev.EngramLookup, dev.EngramKv, nt);
+            dev.DK.V41EngramGate(dev.Xs, dev.EngramKv, Ptr(l.EngramQ), Ptr(l.EngramK),
+                HC, m.NEmbd, m.RmsEps, nt, dev.Stream);
+        }
+
+        /// <summary>A candidate mask belongs to one ubatch: the rows it names are
+        /// scored against this ubatch's queries.</summary>
+        private bool _v41CandActive;
 
         private void RunCompressor(Dev dev, int nt, int p0, int ratio, int coff, int head, int stateSize, int cw,
             Tensor stKv, Tensor stScore, Tensor histKv, Tensor histScore, Tensor normW, Tensor cache, Tensor ropeTab)

@@ -1212,7 +1212,16 @@ namespace TensorSharp.Runtime.Scheduling
                             throw new InvalidOperationException(
                                 $"Retained fused cache for {seq.RequestId} was rebound but its holder was not found.");
                         }
-                        _model.TruncateKVCache(retainedTruncationTarget);
+                        // A retained holder was matched with a trailing rewind
+                        // (FindRetainedFusedMatch). If the model declines it the holder's
+                        // head is still where it was, so decoding would continue from
+                        // positions this turn's prompt does not contain.
+                        if (!_model.TryTruncateKVCache(retainedTruncationTarget))
+                        {
+                            throw new InvalidOperationException(
+                                $"Retained fused cache for {seq.RequestId} needed a rewind to " +
+                                $"{retainedTruncationTarget} tokens that the model declined.");
+                        }
                     }
 
                     // A planned live-cache continuation is only materialized on
@@ -2297,6 +2306,20 @@ namespace TensorSharp.Runtime.Scheduling
             if (lcp == liveLen)
                 return liveLen;   // exact prefix: continue with no rewind at all
 
+            // A rewind has to land where the model can put its head - DeepSeek V4.1 only
+            // stops on a compression-block boundary. Align DOWN before measuring the
+            // rewind, so the depth limit below and the truncate at execution time are
+            // talking about the same target rather than the plan promising a position the
+            // model then declines.
+            int align = _model.KVCacheTruncationGranularity;
+            if (align > 1 && lcp % align != 0)
+            {
+                lcp -= lcp % align;
+                if (lcp <= 0)
+                    return LiveContinuationDeclined(seq,
+                        $"the matched prefix is shorter than this model's {align}-token rewind granularity");
+            }
+
             // The cache holds tokens the prompt does not reproduce. Continuing means
             // rewinding past them, which is only sound when the model can rewind.
             int rewind = liveLen - lcp;
@@ -3135,38 +3158,61 @@ namespace TensorSharp.Runtime.Scheduling
                     && _liveCacheLen >= seq.NumComputedTokens
                     && (_liveCacheLen == seq.NumComputedTokens || _model.SupportsKVCacheTruncation))
                 {
-                    if (_liveCacheLen > seq.NumComputedTokens)
+                    // The scheduler may have matched a prefix shorter than what the cache
+                    // holds, because the previous turn ended on a control token the
+                    // template does not re-render (see MaxLiveContinuationRewindTokens).
+                    // Drop those trailing positions so the model's cache and this sequence
+                    // agree on where the next token goes - the same rewind speculative
+                    // decoding performs when a draft is rejected.
+                    //
+                    // TryTruncate, not Truncate: a model whose rewind depth depends on
+                    // where the sequence is (DeepSeek V4.1's sliding-window ring) can
+                    // decline this one, and claiming the live prefix anyway would decode
+                    // the rest of the turn against positions the cache still holds.
+                    bool headAgrees = _liveCacheLen == seq.NumComputedTokens;
+                    if (!headAgrees)
                     {
-                        // The scheduler matched a prefix shorter than what the cache
-                        // holds, because the previous turn ended on a control token the
-                        // template does not re-render (see
-                        // MaxLiveContinuationRewindTokens). Drop those trailing
-                        // positions so the model's cache and this sequence agree on
-                        // where the next token goes - the same rewind speculative
-                        // decoding performs when a draft is rejected.
-                        _model.TruncateKVCache(seq.NumComputedTokens);
-                        _liveCacheLen = seq.NumComputedTokens;
+                        headAgrees = _model.TryTruncateKVCache(seq.NumComputedTokens);
+                        if (headAgrees)
+                        {
+                            _liveCacheLen = seq.NumComputedTokens;
+                        }
+                        else
+                        {
+                            _logger.LogInformation(
+                                "Live-cache continuation for {RequestId} needed a {Rewind}-token rewind the " +
+                                "model declined at execution time; its prompt re-prefills after all.",
+                                seq.RequestId, _liveCacheLen - seq.NumComputedTokens);
+                        }
                     }
-                    _liveCacheSeq = seq;
-                    _currentOwner = seq;
-                    _ownerTokensInModel = seq.NumComputedTokens;
-                    _ownerForwardedTokens = 0;
-                    return;
-                }
 
-                // The live cache was invalidated between scheduling and execution
-                // (e.g. a concurrent sequence took ownership). Drop the reused-prefix
-                // claim and re-prefill from scratch via the normal path below; the
-                // sequence keeps its reserved blocks so accounting stays consistent.
-                // Information, not Debug: admission has already reported this request
-                // as reusing the live prefix, and this retracts that. A turn whose
-                // announced reuse silently became a full re-prefill is exactly the
-                // latency mystery this whole logging path exists to prevent.
-                _logger.LogInformation(
-                    "Live-cache continuation for {RequestId} was no longer valid at execution time " +
-                    "(another sequence took the cache); its prompt re-prefills after all.",
-                    seq.RequestId);
-                seq.ClearLiveCacheContinuation();
+                    if (headAgrees)
+                    {
+                        _liveCacheSeq = seq;
+                        _currentOwner = seq;
+                        _ownerTokensInModel = seq.NumComputedTokens;
+                        _ownerForwardedTokens = 0;
+                        return;
+                    }
+
+                    seq.ClearLiveCacheContinuation();
+                }
+                else
+                {
+                    // The live cache was invalidated between scheduling and execution
+                    // (e.g. a concurrent sequence took ownership). Drop the reused-prefix
+                    // claim and re-prefill from scratch via the normal path below; the
+                    // sequence keeps its reserved blocks so accounting stays consistent.
+                    // Information, not Debug: admission has already reported this request
+                    // as reusing the live prefix, and this retracts that. A turn whose
+                    // announced reuse silently became a full re-prefill is exactly the
+                    // latency mystery this whole logging path exists to prevent.
+                    _logger.LogInformation(
+                        "Live-cache continuation for {RequestId} was no longer valid at execution time " +
+                        "(another sequence took the cache); its prompt re-prefills after all.",
+                        seq.RequestId);
+                    seq.ClearLiveCacheContinuation();
+                }
             }
 
             // Swap out the previous owner.
@@ -3314,6 +3360,11 @@ namespace TensorSharp.Runtime.Scheduling
         /// preemption, recompute, rollback — invalidates the stash.</summary>
         private static int TakePendingOrSample(SequenceState seq)
         {
+            if (seq.GetOrCreateSampler().TryGetForcedThinkingToken(seq.OutputTokens, out int thinkingEnd))
+            {
+                seq.PendingDeviceToken = null;
+                return thinkingEnd;
+            }
             if (seq.PendingDeviceToken.HasValue)
             {
                 int t = seq.PendingDeviceToken.Value;
@@ -3330,6 +3381,8 @@ namespace TensorSharp.Runtime.Scheduling
         /// leaves the fallback loop a token source.</summary>
         private static int PeekPendingOrSample(SequenceState seq)
         {
+            if (seq.GetOrCreateSampler().TryGetForcedThinkingToken(seq.OutputTokens, out int thinkingEnd))
+                return thinkingEnd;
             if (seq.PendingDeviceToken.HasValue)
             {
                 if (seq.PendingDevicePosition == seq.NumComputedTokens)

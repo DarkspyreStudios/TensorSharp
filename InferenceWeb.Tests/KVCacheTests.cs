@@ -409,4 +409,103 @@ public class KVCacheTests
         Assert.Equal(2, plan.ReusedPrefixLength);
         Assert.Equal(1, plan.TokensToForward);
     }
+
+    /// <summary>
+    /// The one-token back-off is a REAL rewind, so a model that cannot rewind must not
+    /// get it. This shape - cache equal to the input, but with no cached logits, so the
+    /// exact-match branch does not fire - used to pass the non-truncatable guard (which
+    /// ran before the back-off) and hand such a model a one-token truncation. Models
+    /// whose TruncateKVCacheCore only moves a managed counter would then have forwarded
+    /// the last prompt token at a position their cache already held.
+    /// </summary>
+    [Fact]
+    public void PlanReuse_InputEqualsCacheWithoutLogits_NonTruncatableModel_ReturnsReset()
+    {
+        var cache = new KVCache();
+        cache.RecordAppend(new[] { 1, 2, 3, 4 }, nextLogits: null);
+
+        var plan = cache.PlanReuse(new[] { 1, 2, 3, 4 }, supportsTruncation: false);
+
+        Assert.Equal(ReusePlanKind.Reset, plan.Kind);
+        Assert.Equal(4, plan.TokensToForward);
+    }
+
+    [Fact]
+    public void PlanReuse_InputEqualsCacheWithoutLogits_TruncatableModel_RewindsOneToken()
+    {
+        var cache = new KVCache();
+        cache.RecordAppend(new[] { 1, 2, 3, 4 }, nextLogits: null);
+
+        var plan = cache.PlanReuse(new[] { 1, 2, 3, 4 }, supportsTruncation: true);
+
+        Assert.Equal(ReusePlanKind.PartialReuse, plan.Kind);
+        Assert.Equal(3, plan.ReusedPrefixLength);
+        Assert.Equal(1, plan.TokensToForward);
+    }
+
+    /// <summary>
+    /// A model that can only put its head on a compression-block boundary (DeepSeek V4.1,
+    /// granularity 2) gets a target rounded DOWN, so it keeps the reuse instead of
+    /// declining the whole prefix over one token.
+    /// </summary>
+    [Fact]
+    public void PlanReuse_Granularity_RoundsARealRewindDownToABoundary()
+    {
+        var cache = new KVCache();
+        cache.RecordAppend(new[] { 1, 2, 3, 4, 5, 6, 7, 8 }, new float[] { 0.5f });
+
+        // Diverges at index 5 (odd), so the reusable prefix rounds down to 4.
+        var plan = cache.PlanReuse(new[] { 1, 2, 3, 4, 5, 99, 100 },
+            supportsTruncation: true, truncationGranularity: 2);
+
+        Assert.Equal(ReusePlanKind.PartialReuse, plan.Kind);
+        Assert.Equal(4, plan.ReusedPrefixLength);
+        Assert.Equal(3, plan.TokensToForward);
+    }
+
+    [Fact]
+    public void PlanReuse_Granularity_LeavesAnAlreadyAlignedRewindAlone()
+    {
+        var cache = new KVCache();
+        cache.RecordAppend(new[] { 1, 2, 3, 4, 5, 6, 7, 8 }, new float[] { 0.5f });
+
+        var plan = cache.PlanReuse(new[] { 1, 2, 3, 4, 99, 100 },
+            supportsTruncation: true, truncationGranularity: 2);
+
+        Assert.Equal(4, plan.ReusedPrefixLength);
+        Assert.Equal(2, plan.TokensToForward);
+    }
+
+    /// <summary>
+    /// Reusing the cache WHOLE truncates nothing, so the granularity must not apply:
+    /// rounding there would turn a free extension into a real (and shorter) rewind, and
+    /// on the released DeepSeek V4.1 checkpoint every odd-length prompt would pay for it.
+    /// </summary>
+    [Fact]
+    public void PlanReuse_Granularity_DoesNotShortenAWholeCacheExtension()
+    {
+        var cache = new KVCache();
+        cache.RecordAppend(new[] { 1, 2, 3, 4, 5 }, new float[] { 0.5f });
+
+        var plan = cache.PlanReuse(new[] { 1, 2, 3, 4, 5, 6, 7 },
+            supportsTruncation: true, truncationGranularity: 2);
+
+        Assert.Equal(ReusePlanKind.PartialReuse, plan.Kind);
+        Assert.Equal(5, plan.ReusedPrefixLength);
+        Assert.Equal(2, plan.TokensToForward);
+    }
+
+    [Fact]
+    public void PlanReuse_Granularity_ResetsWhenRoundingLeavesNothing()
+    {
+        var cache = new KVCache();
+        cache.RecordAppend(new[] { 1, 2, 3, 4 }, new float[] { 0.5f });
+
+        // Only token 0 matches, and a 2-token granularity cannot land on 1.
+        var plan = cache.PlanReuse(new[] { 1, 99, 100 },
+            supportsTruncation: true, truncationGranularity: 2);
+
+        Assert.Equal(ReusePlanKind.Reset, plan.Kind);
+        Assert.Equal(3, plan.TokensToForward);
+    }
 }

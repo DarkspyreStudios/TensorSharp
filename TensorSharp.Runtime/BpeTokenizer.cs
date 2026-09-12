@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -67,7 +68,7 @@ namespace TensorSharp.Runtime
         private readonly Dictionary<string, int> _vocabLookup;
         private readonly Dictionary<string, int> _mergeLookup;
         private readonly List<string> _specialTokens;
-        private readonly Regex _pretokenizerRegex;
+        private readonly Regex[] _pretokenizerPasses;
         private readonly int _bosTokenId;
         private readonly int[] _eosTokenIds;
         private readonly bool _addBos;
@@ -116,7 +117,14 @@ namespace TensorSharp.Runtime
 
             string pattern = ResolvePreTokenizerPattern(preTokenizerType);
 
-            _pretokenizerRegex = new Regex(pattern, RegexOptions.Compiled);
+            _pretokenizerPasses = preTokenizerType is "joyai-llm" or "deepseek-v3" or "hunyuan-dense"
+                ? new[]
+                {
+                    new Regex(@"\p{N}{1,3}", RegexOptions.Compiled),
+                    new Regex(@"[一-龥぀-ゟ゠-ヿ]+", RegexOptions.Compiled),
+                    new Regex(pattern, RegexOptions.Compiled),
+                }
+                : new[] { new Regex(pattern, RegexOptions.Compiled) };
         }
 
         /// <summary>
@@ -148,12 +156,10 @@ namespace TensorSharp.Runtime
                 "qwen35" =>
                     @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+",
                 // DeepSeek V3/V4 family pre-tokenizer (llama.cpp DEEPSEEK3_LLM /
-                // JOYAI_LLM). llama.cpp applies three regexes as sequential split
-                // passes; a single ordered alternation produces the same splits for
-                // these patterns (verified against the llama-tokenize oracle).
+                // JOYAI_LLM). Numbers and CJK are isolated in preceding passes.
+                // Combining these into one alternation changes boundaries at mixed
+                // CJK/Latin text and can incorrectly attach whitespace to CJK.
                 "joyai-llm" or "deepseek-v3" or "hunyuan-dense" =>
-                    @"\p{N}{1,3}|" +
-                    @"[一-龥぀-ゟ゠-ヿ]+|" +
                     @"[!""#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|" +
                     @"[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+|" +
                     @" ?[\p{P}\p{S}]+[\r\n]*|" +
@@ -217,11 +223,8 @@ namespace TensorSharp.Runtime
                     continue;
                 }
 
-                var matches = _pretokenizerRegex.Matches(frag.text);
-                foreach (Match match in matches)
+                foreach (string split in SplitForBpe(frag.text))
                 {
-                    string split = match.Value;
-
                     if (_spmStyleBpe)
                     {
                         string spmNormalized = split.Replace(" ", "\u2581", StringComparison.Ordinal);
@@ -265,6 +268,92 @@ namespace TensorSharp.Runtime
 
             return ids;
         }
+
+        /// <summary>
+        /// Apply isolated split passes without dropping unmatched text. .NET regex
+        /// Unicode categories classify UTF-16 code units, unlike the code-point
+        /// categories in the reference tokenizers. Match a category-equivalent BMP
+        /// projection for supplementary characters, then recover original spans.
+        /// The common BMP-only path uses the original string without projection.
+        /// </summary>
+        internal IReadOnlyList<string> SplitForBpe(string text)
+        {
+            string matchText = text;
+            List<int>? offsets = null;
+            if (text.AsSpan().IndexOfAnyInRange('\uD800', '\uDFFF') >= 0)
+            {
+                var projected = new StringBuilder(text.Length);
+                offsets = new List<int>(text.Length + 1);
+                int sourceOffset = 0;
+                foreach (Rune rune in text.EnumerateRunes())
+                {
+                    offsets.Add(sourceOffset);
+                    projected.Append(rune.IsBmp ? (char)rune.Value : CategoryRepresentative(Rune.GetUnicodeCategory(rune)));
+                    sourceOffset += rune.Utf16SequenceLength;
+                }
+                offsets.Add(text.Length);
+                matchText = projected.ToString();
+            }
+
+            var ranges = new List<(int Start, int Length)> { (0, matchText.Length) };
+            foreach (Regex pass in _pretokenizerPasses)
+            {
+                var next = new List<(int Start, int Length)>();
+                foreach (var range in ranges)
+                {
+                    int position = 0;
+                    foreach (var match in pass.EnumerateMatches(matchText.AsSpan(range.Start, range.Length)))
+                    {
+                        if (match.Index > position) next.Add((range.Start + position, match.Index - position));
+                        if (match.Length > 0) next.Add((range.Start + match.Index, match.Length));
+                        position = match.Index + match.Length;
+                    }
+                    if (position < range.Length) next.Add((range.Start + position, range.Length - position));
+                }
+                ranges = next;
+            }
+
+            var splits = new List<string>(ranges.Count);
+            foreach (var range in ranges)
+            {
+                int start = offsets == null ? range.Start : offsets[range.Start];
+                int end = offsets == null ? range.Start + range.Length : offsets[range.Start + range.Length];
+                splits.Add(text.Substring(start, end - start));
+            }
+            return splits;
+        }
+
+        // Representatives avoid ASCII and the explicit CJK/kana ranges used by
+        // pre-tokenizers; only the Unicode category of a supplementary rune should
+        // affect their generic letter, number, punctuation and symbol branches.
+        private static char CategoryRepresentative(UnicodeCategory category) => category switch
+        {
+            UnicodeCategory.UppercaseLetter => 'Ω',
+            UnicodeCategory.LowercaseLetter => 'α',
+            UnicodeCategory.TitlecaseLetter => 'ǅ',
+            UnicodeCategory.ModifierLetter => 'ʰ',
+            UnicodeCategory.OtherLetter => 'ꀀ',
+            UnicodeCategory.NonSpacingMark => '\u0301',
+            UnicodeCategory.SpacingCombiningMark => '\u0903',
+            UnicodeCategory.EnclosingMark => '\u0488',
+            UnicodeCategory.DecimalDigitNumber => '٠',
+            UnicodeCategory.LetterNumber => 'Ⅻ',
+            UnicodeCategory.OtherNumber => '²',
+            UnicodeCategory.ConnectorPunctuation => '‿',
+            UnicodeCategory.DashPunctuation => '‐',
+            UnicodeCategory.OpenPunctuation => '❨',
+            UnicodeCategory.ClosePunctuation => '❩',
+            UnicodeCategory.InitialQuotePunctuation => '‘',
+            UnicodeCategory.FinalQuotePunctuation => '’',
+            UnicodeCategory.OtherPunctuation => '※',
+            UnicodeCategory.MathSymbol => '∑',
+            UnicodeCategory.CurrencySymbol => '¢',
+            UnicodeCategory.ModifierSymbol => '˂',
+            UnicodeCategory.OtherSymbol => '♥',
+            UnicodeCategory.Format => '\u200B',
+            UnicodeCategory.PrivateUse => '\uE000',
+            _ => '\u0378',
+        };
 
         private string NormalizeSplit(string split)
         {

@@ -149,6 +149,7 @@ namespace TensorSharp.Server.RequestParsers
             // omitting it entirely; both leave the defaults from ToolFunction.
             if (!TryGetObject(fnEl, "parameters", out var paramsEl))
                 return tf;
+            tf.ParametersSchemaJson = paramsEl.GetRawText();
 
             if (TryGetObject(paramsEl, "properties", out var propsEl))
             {

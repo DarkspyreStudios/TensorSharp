@@ -130,13 +130,18 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ChatMessage> messages;
             try
             {
-                messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _uploads, logger);
+                messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _uploads, logger, _svc.Architecture);
             }
             catch (UploadLimitExceededException ex)
             {
                 logger.LogWarning(LogEventIds.UploadRejected,
                     "/v1/responses attachment rejected: {Reason}", ex.Message);
                 await WriteErrorAsync(ctx, ex.StatusCode, ex.Message);
+                return;
+            }
+            catch (JsonException ex)
+            {
+                await WriteErrorAsync(ctx, 400, ex.Message);
                 return;
             }
             var tools = ToolFunctionParser.ParseOpenAIResponses(body);

@@ -76,6 +76,34 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
         Assert.Equal("1", Environment.GetEnvironmentVariable("TS_MTP_SPEC"));
     }
 
+    [Fact]
+    public void DraftModelTestScope_RestoresArchitectureLoaderFallbacks()
+    {
+        string[] names = { "TS_DSV4_DSPARK", "TS_QWEN35_DFLASH", "TS_MUSE_GLIMMER_DFLASH", "TS_NEMOTRON_DFLASH" };
+        foreach (string name in names)
+            _env.Set(name, "/original/drafter.gguf");
+
+        string gguf = Path.Combine(Path.GetTempPath(), $"drafter-{Guid.NewGuid():N}.gguf");
+        File.WriteAllBytes(gguf, new byte[] { 1, 2, 3 });
+        try
+        {
+            using (var inner = new EnvScope())
+            {
+                inner.ClearSpeculationVars();
+                Assert.True(TensorSharp.Server.Hosting.ServerOptionsBuilder.ApplySpeculativeCliFlags(
+                    new[] { "--draft-model", gguf }));
+                foreach (string name in names)
+                    Assert.Equal(gguf, Environment.GetEnvironmentVariable(name));
+            }
+            foreach (string name in names)
+                Assert.Equal("/original/drafter.gguf", Environment.GetEnvironmentVariable(name));
+        }
+        finally
+        {
+            File.Delete(gguf);
+        }
+    }
+
     [Theory]
     [InlineData("--spec-draft", "4")]
     [InlineData("--spec-draft=4", null)]

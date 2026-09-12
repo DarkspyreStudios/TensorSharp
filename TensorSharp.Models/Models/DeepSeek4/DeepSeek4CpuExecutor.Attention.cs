@@ -210,7 +210,13 @@ namespace TensorSharp.Models
                     act + (long)i * actBytes, wRef.Ne0);
             });
 
-            int totalRows = w.Ne1;
+            // Rows, not Ne1: wo_a ships either as [group_dim, o_groups*rank] or
+            // as [group_dim, rank, o_groups], and reading Ne1 on the 3D spelling
+            // computes only the first group's rank rows -- leaving every later
+            // group's LoRA output at whatever the previous token left behind.
+            int totalRows = checked(w.Ne1 * w.Ne2);
+            if (totalRows != _oGroups * _oLoraRank)
+                return false;
             const int RowsPerTask = 128;
             int nBlocks = (totalRows + RowsPerTask - 1) / RowsPerTask;
             PFor(nBlocks, bi =>

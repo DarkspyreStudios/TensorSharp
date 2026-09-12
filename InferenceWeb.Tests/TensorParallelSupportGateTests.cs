@@ -174,6 +174,18 @@ public class TensorParallelSupportGateTests
     }
 
     [Fact]
+    public void DeepSeek41NativeExecutor_RejectsDistributedGroupBeforeSidecarOrWeights()
+    {
+        var context = new ModelCreateContext(
+            "/model-is-not-opened.gguf", BackendType.GgmlCuda, probe: null,
+            tpDegree: 2, tpGroup: new StubTpGroup());
+
+        var error = Assert.Throws<NotSupportedException>(() => Arch("deepseek41").ApplyNativeTunables(context));
+        Assert.Contains("single-process", error.Message, StringComparison.Ordinal);
+        Assert.Contains("--tp-node-id/--tp-peers", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void NoTpRequested_IsAlwaysAPassthrough()
     {
         // The gate must not fire on ordinary single-GPU runs of the very

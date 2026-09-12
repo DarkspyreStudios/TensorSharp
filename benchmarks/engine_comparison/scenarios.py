@@ -3,9 +3,28 @@
 Scenario -> request payload builders.
 
 Each builder returns a dict describing one `/v1/chat/completions` request:
-  { "messages", "tools", "response_format", "checker" }
+  { "messages", "tools", "response_format", "checker", "followups" }
 `checker(metrics) -> Optional[bool]` is used by correctness-bearing scenarios
-(function_call) to record whether the model did the expected thing.
+(function_call, agentic, code_edit) to record whether the model did the expected
+thing.
+
+`followups` turns a cell into a client-driven multi-turn workflow. It is a list
+of callables, one per FOLLOW-UP request; each is handed the metrics of the turn
+that just finished plus the messages that produced it, and returns the request
+overrides for the next turn ({"messages": [...], optionally "tools",
+"response_format", "extra_body"}). Raising from a follow-up ends the
+conversation there and the reason is recorded on the cell — a scenario must
+never fabricate the next turn out of a response that did not contain what that
+turn needs, because the cell would then silently be measuring something else.
+
+Everything is driven from the client on purpose. TensorSharp's own code-exec
+surface (`--code-exec`: shell / read_file / edit_file / write_file /
+apply_patch) is answered *inside the server* and never handed back to the API
+client, it is off by default, and its request workspace is destroyed when the
+response ends — so it can neither be observed round-trip-by-round-trip nor
+carry a file from one request to the next, and llama.cpp/vLLM have no
+equivalent at all. A client-driven loop is therefore the only shape that is
+both measurable and identical on every engine.
 
 Image is sent in the portable OpenAI `image_url` form to every engine. Audio
 and video differ per engine (TensorSharp accepts a message-level base64 array /
@@ -16,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import functools
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -187,7 +207,6 @@ def _multi_turn(engine, model):
 
 
 def _function_call(engine, model):
-    import json
     tools = json.loads(_read_asset("tools/weather.json", _DEFAULT_WEATHER_TOOL))
 
     def checker(metrics):
@@ -248,12 +267,254 @@ def _video(engine, model):
     return {"messages": [{"role": "user", "content": parts}]}
 
 
+# ---------------------------------------------------------------------------
+# Agentic tool loop (multi-step, client-driven)
+# ---------------------------------------------------------------------------
+# Two DEPENDENT tool calls and then a final answer, over three round trips:
+#
+#   1. read_invoice("INV-472")        -> {unit_price: 13.75, quantity: 5}
+#   2. calculate_total(13.75, 5)      -> {total: 74.25}   (a handling fee the
+#                                        model was never told about is in there)
+#   3. final answer                   -> {"invoice_id": "INV-472", "total": 74.25}
+#
+# The fixtures are chosen so that a correct final answer PROVES the tool results
+# were used, rather than merely correlating with them: 13.75 and 5 appear
+# nowhere in the prompt, so turn 2's arguments can only have come from turn 1's
+# result, and 74.25 is deliberately NOT unit_price * quantity (68.75), so the
+# total can only have come from turn 2's result. A model that ignores the tools
+# and answers from arithmetic lands on 68.75 and is marked wrong.
+#
+# The tool-call shape is checked the way `validate_deepseek41_tools.py` checks
+# it: a structured `tool_calls` entry with a non-empty id, `type: "function"`,
+# the declared name, and arguments that are a complete JSON string. Nothing is
+# executed — every tool result is a fixed fixture.
+_AGENTIC_INVOICE_ID = "INV-472"
+_AGENTIC_INVOICE_RESULT = {"invoice_id": _AGENTIC_INVOICE_ID,
+                           "unit_price": 13.75, "quantity": 5}
+_AGENTIC_TOTAL_RESULT = {"total": 74.25,
+                         "note": "includes the 5.50 handling fee on this account"}
+_AGENTIC_FINAL = {"invoice_id": _AGENTIC_INVOICE_ID, "total": 74.25}
+
+
+def _tool(name: str, description: str, properties: dict, required: list) -> dict:
+    return {"type": "function", "function": {
+        "name": name, "description": description,
+        "parameters": {"type": "object", "properties": properties,
+                       "required": required, "additionalProperties": False}}}
+
+
+_AGENTIC_TOOLS = [
+    _tool("read_invoice", "Read an invoice by its identifier.",
+          {"invoice_id": {"type": "string"}}, ["invoice_id"]),
+    _tool("calculate_total", "Calculate the payable total for an invoice line.",
+          {"unit_price": {"type": "number"}, "quantity": {"type": "integer"}},
+          ["unit_price", "quantity"]),
+]
+
+
+def _structured_call(metrics, expect_name: str, expect_args: dict) -> dict:
+    """The one structured tool call `metrics` must carry, or raise.
+
+    Raising is the point: it stops the conversation instead of inventing a tool
+    result for a call the model never made, which would leave the remaining
+    turns measuring a different workload than the one the cell claims to be."""
+    if metrics.get("finish_reason") != "tool_calls":
+        raise ValueError(f"expected finish_reason=tool_calls for {expect_name}, "
+                         f"got {metrics.get('finish_reason') or 'none'}")
+    calls = metrics.get("tool_call_details") or []
+    if len(calls) != 1:
+        raise ValueError(f"expected exactly one structured tool call for "
+                         f"{expect_name}, got {len(calls)}")
+    call = calls[0]
+    if not isinstance(call.get("id"), str) or not call["id"] or call.get("type") != "function":
+        raise ValueError("tool call needs a non-empty id and type=function")
+    fn = call.get("function") or {}
+    if fn.get("name") != expect_name:
+        raise ValueError(f"expected {expect_name}, got {fn.get('name') or 'no name'}")
+    try:
+        args = json.loads(fn.get("arguments") or "")
+    except ValueError as ex:
+        raise ValueError(f"{expect_name} arguments are not complete JSON: {ex}")
+    if args != expect_args:
+        raise ValueError(f"expected {expect_name}({expect_args}), got {args}")
+    return call
+
+
+def _tool_turn(metrics, messages, result: dict, expect_name: str,
+               expect_args: dict, follow_up: str, final: bool) -> dict:
+    """Append the assistant's own call plus its fixture result, then ask the
+    next question. The call id is echoed back exactly as the model produced it,
+    so a server that loses track of its own ids fails here rather than later."""
+    call = _structured_call(metrics, expect_name, expect_args)
+    nxt = list(messages) + [
+        metrics["assistant_message"],
+        {"role": "tool", "tool_call_id": call["id"],
+         "content": json.dumps(result, sort_keys=True)},
+        {"role": "user", "content": follow_up}]
+    out = {"messages": nxt}
+    if final:
+        # Ask for the answer, not another call. `tool_choice: "none"` keeps the
+        # tool catalogue in the conversation (so the history still parses) while
+        # forbidding a new call, which is how validate_deepseek41_tools.py ends
+        # its own workflow.
+        out["extra_body"] = {"tool_choice": "none"}
+    return out
+
+
+def _json_answer(metrics):
+    """The assistant's final content parsed as JSON, or None.
+
+    One tolerance, and only one: a single fenced ```json block is unwrapped
+    first. The fence is an artifact of some chat templates rather than a wrong
+    answer, and unwrapping it is what keeps this checkable on every engine."""
+    msg = metrics.get("assistant_message")
+    text = (msg or {}).get("content") if isinstance(msg, dict) else None
+    if not isinstance(text, str):
+        return None
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.split("\n", 1)[-1] if "\n" in body else ""
+        body = body.rsplit("```", 1)[0]
+    try:
+        return json.loads(body.strip())
+    except ValueError:
+        return None
+
+
+def _agentic(engine, model):
+    def checker(metrics):
+        # Three round trips, and the last one carries the tool-derived answer.
+        # `turns` < 3 means a follow-up refused to continue (the detail on the
+        # cell says which), which is a failed workflow, not a passed one.
+        if int(metrics.get("turns", 1) or 1) != 3:
+            return False
+        return _json_answer(metrics) == _AGENTIC_FINAL
+
+    followups = [
+        lambda m, msgs: _tool_turn(
+            m, msgs, _AGENTIC_INVOICE_RESULT, "read_invoice",
+            {"invoice_id": _AGENTIC_INVOICE_ID},
+            "Now call calculate_total with the unit_price and quantity that "
+            "read_invoice returned.", final=False),
+        lambda m, msgs: _tool_turn(
+            m, msgs, _AGENTIC_TOTAL_RESULT, "calculate_total",
+            {"unit_price": _AGENTIC_INVOICE_RESULT["unit_price"],
+             "quantity": _AGENTIC_INVOICE_RESULT["quantity"]},
+            "Report the result. Return only a JSON object with exactly the keys "
+            "invoice_id and total, taking total from calculate_total's result. "
+            "Do not recompute it and do not call any tool.", final=True),
+    ]
+    return {"messages": [
+        {"role": "user",
+         "content": _context_preamble("agentic") +
+                    f"Read invoice {_AGENTIC_INVOICE_ID} with read_invoice. Call "
+                    f"exactly one tool in this turn and wait for its result."}],
+        "tools": _AGENTIC_TOOLS,
+        "followups": followups,
+        "checker": checker}
+
+
+# ---------------------------------------------------------------------------
+# Code generation + edit (multi-step, client-driven)
+# ---------------------------------------------------------------------------
+# Turn 1 asks for a small program; turn 2 asks for one specific, mechanically
+# checkable change to THAT program and the checker parses the result to see
+# whether the change actually landed. Both turns are ordinary chat completions,
+# so this runs on every engine and every registered model.
+_CODE_FN = "slugify"
+_CODE_EDITED_FN = "slugify_title"
+_CODE_LIMIT_PARAM = "max_length"
+_CODE_LIMIT_DEFAULT = 40
+
+
+def _python_source(metrics) -> str:
+    """The Python source in an assistant reply: the first fenced block when the
+    reply has one, otherwise the whole reply (models that were told "code only"
+    often skip the fence)."""
+    msg = metrics.get("assistant_message")
+    text = (msg or {}).get("content") if isinstance(msg, dict) else None
+    if not isinstance(text, str):
+        return ""
+    if "```" in text:
+        parts = text.split("```")
+        if len(parts) >= 3:
+            block = parts[1]
+            # Drop the language tag on the fence's opening line.
+            return block.split("\n", 1)[1] if "\n" in block else ""
+    return text
+
+
+def _function_def(source: str, name: str):
+    """The `ast.FunctionDef` called `name` in `source`, or None when the source
+    does not parse or does not define it."""
+    import ast
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def _code_edit(engine, model):
+    def checker(metrics):
+        import ast
+        turns = metrics.get("turn_metrics") or []
+        if len(turns) != 2:
+            return False
+        # The first turn must really have produced the program being edited,
+        # otherwise turn 2 was asked to edit nothing and a fresh function that
+        # happens to match would pass.
+        first = _function_def(_python_source(turns[0]), _CODE_FN)
+        if first is None or [a.arg for a in first.args.args] != ["text"]:
+            return False
+        edited = _function_def(_python_source(turns[-1]), _CODE_EDITED_FN)
+        if edited is None:
+            return False
+        if [a.arg for a in edited.args.args] != ["text", _CODE_LIMIT_PARAM]:
+            return False
+        defaults = edited.args.defaults
+        if len(defaults) != 1 or not isinstance(defaults[0], ast.Constant):
+            return False
+        if defaults[0].value != _CODE_LIMIT_DEFAULT:
+            return False
+        # A parameter that is declared but never read is a rename, not the edit
+        # that was asked for: the truncation has to be in the body.
+        return any(isinstance(n, ast.Name) and n.id == _CODE_LIMIT_PARAM
+                   for n in ast.walk(ast.Module(body=edited.body, type_ignores=[])))
+
+    def edit_request(metrics, messages):
+        return {"messages": list(messages) + [
+            metrics["assistant_message"],
+            {"role": "user", "content":
+                f"Make exactly this change and return the complete updated "
+                f"function the same way: rename it to `{_CODE_EDITED_FN}`, and give "
+                f"it a second parameter `{_CODE_LIMIT_PARAM}` that defaults to "
+                f"{_CODE_LIMIT_DEFAULT} and truncates the returned slug to at most "
+                f"that many characters. Change nothing else."}]}
+
+    return {"messages": [
+        {"role": "user",
+         "content": _context_preamble("code_edit") +
+                    f"Write a Python function `{_CODE_FN}(text)` that lowercases "
+                    f"the text, replaces every run of non-alphanumeric characters "
+                    f"with a single hyphen, and strips leading and trailing "
+                    f"hyphens. Reply with only the function in one ```python code "
+                    f"block."}],
+        "followups": [edit_request],
+        "checker": checker}
+
+
 _BUILDERS = {
     "text_short": _text_short,
     "text_long": _text_long,
     "multi_turn": _multi_turn,
     "function_call": _function_call,
     "json_mode": _json_mode,
+    "agentic": _agentic,
+    "code_edit": _code_edit,
     "image": _image,
     "audio": _audio,
     "video": _video,
@@ -269,6 +530,7 @@ def build_request(scenario_id: str, engine: str, model: config.ModelSpec) -> dic
     req.setdefault("tools", None)
     req.setdefault("response_format", None)
     req.setdefault("checker", None)
+    req.setdefault("followups", None)
     return req
 
 

@@ -465,6 +465,7 @@ namespace TensorSharp.AgentHost.Skills
             Role = message.Role,
             Content = message.Content,
             ImagePaths = message.ImagePaths != null ? new List<string>(message.ImagePaths) : null,
+            ImageTimestamps = message.ImageTimestamps != null ? new List<double?>(message.ImageTimestamps) : null,
             AudioPaths = message.AudioPaths != null ? new List<string>(message.AudioPaths) : null,
             TextFilePaths = message.TextFilePaths != null ? new List<string>(message.TextFilePaths) : null,
             TextFileNames = message.TextFileNames != null ? new List<string>(message.TextFileNames) : null,

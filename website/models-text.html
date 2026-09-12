@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Text &amp; LLM Models — TensorSharp Wiki</title>
-  <meta name="description" content="Download-and-run recipes for all ten text architectures, plus per-family notes for multimodal input, thinking mode and tool calling.">
+  <meta name="description" content="Download-and-run recipes for all twelve text architectures, plus per-family notes for multimodal input, thinking mode and tool calling.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -33,6 +33,34 @@ dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models/gem
 dotnet run --project TensorSharp.Server.Host -c Release --no-build -- --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_cuda</code></pre>
   <p>On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>; on a supported Windows/Linux Vulkan GPU, request <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> instead and use <code>ggml_vulkan</code>. For image, video, or audio input, also run <code>hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models</code> and pass <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>. The server's browser UI is <code>http://localhost:5000/</code>; its liveness endpoint is <code>/health</code>. See <a href="getting-started.html#e4b-fast-lane">Getting Started</a> for Windows PowerShell and full platform syntax.</p>
+
+  <h3 id="deepseek41">DeepSeek V4.1 Flash (384 routed experts, text + image/video, thinking, tools)</h3>
+  <p>V4.1 is not V4 with new weights — it differs on every forward pass, and renaming the GGUF architecture to <code>deepseek4</code> is invalid. TensorSharp gives it its own native graph: four residual streams with delayed hyper-connection mixing, a 128-token raw sliding window per attention block (the first two layers have no compressed attention, the next 18 compress at ratio 2 and the last 20 at ratio 1), a lightning indexer with candidate block filtering, and Engram n-gram features injected at layers 1 and 14. <strong><code>ggml_cuda</code> is the serving backend.</strong> <code>ggml_cpu</code> runs the same graph on scalar fallbacks so the architecture can be checked without a GPU; <code>ggml_vulkan</code> and <code>ggml_metal</code> need <code>TS_DSV41_ALLOW_NON_CUDA_GPU=1</code> and pay a host round trip per architecture-specific op; every other backend, <code>cpu</code> and <code>cuda</code> included, refuses the checkpoint rather than loading V4.1 weights into the V4 graph.</p>
+  <p>The published Q2_K release <strong>does not run on its own</strong>. It needs a tokenizer-derived Engram sidecar prepared from the official repository, and images need a second prepared file — the conversion drops the vision tower, aligner and visual routing biases.</p>
+  <pre data-lang="bash"><code># Seven Q2_K shards, 246.35 GiB, mixed Q2_K/Q3_K tensors — keep them in one directory
+python3 -m venv /tmp/dsv41-tools
+/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 tokenizers==0.22.2 huggingface_hub gguf
+hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+    --revision 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5 \
+    --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
+
+# Required: the Engram sidecar, from the official config.json / tokenizer.json
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
+    --repo deepseek-ai/DeepSeek-V4.1-Flash \
+    --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+# Optional: the ~970 MB vision companion that --mmproj needs
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
+    --repository deepseek-ai/DeepSeek-V4.1-Flash \
+    --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+# Served over eight GPUs — --tp here is a LAYER SPLIT, not tensor parallelism
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+    --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
+    --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
+    --backend ggml_cuda --tp 8 --port 5000</code></pre>
+  <p>The two Engram tables are <strong>GPU-resident by default</strong>, gathered in-graph with <code>get_rows</code> over the quantized rows, because TensorSharp keeps them in the checkpoint's own quantization — a Q2_K row of 256 values is 84 bytes, so both 384M-row tables together are 60.2 GiB. Measured on eight A40s with a cold prompt each time: 532–541 prefill / 35.6–35.9 decode tok/s GPU-resident, against 506–528 / 34.5–35.2 for host mappings warmed with <code>TS_DSV41_ENGRAM_WARM=1</code> and 207–221 / 28.0–29.2 unwarmed. The GPU-resident path also removes a 130-second whole-table warm at startup and the 60 GiB of host page cache the warmed path depends on. Placement is conservative: if putting the tables on GPUs would force routed-expert CPU offload, they stay host mappings and startup says so.</p>
+  <p>Multi-GPU means a layer split. <code>TS_DSV41_TP=N</code> opts into experimental routed-MoE tensor parallelism over the same GPUs — gate/up split along the FFN intermediate, down along its input, partials reduced through host-staged F32 buffers — and the first full Q2_K run of it was <em>slower</em> than the split. Concurrent requests get isolated sequence slots but fall back to per-slot forwards, so concurrency is not batched GPU throughput here. There is no V4.1 DSpark: V4 drafters are rejected rather than half-loaded. Audio-bearing requests are refused with HTTP 400 instead of being silently dropped. What has been measured, and what explicitly has not, is in the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/deepseek41_validation.md">validation report</a>.</p>
 
   <h3 id="deepseek4">DeepSeek V4 Flash (284B MoE, text, thinking, tools, DSpark)</h3>
   <p>A 284B mixture-of-experts model with a 128-token raw sliding window plus block-compressed attention (1M advertised context). It does <em>not</em> use the generic per-op forward: TensorSharp runs it through one of three dedicated whole-model executors — <code>--backend cuda</code> (direct CUDA, no ggml), <code>--backend ggml_cuda</code> / <code>ggml_vulkan</code> (native ggml), and <code>--backend cpu</code> (100% pure C#, no native dependencies). All of them layer-split the weights across every visible GPU, so a model far bigger than one card still runs; <code>--tp N</code> (or <code>TS_DSV4_NGPU</code>) caps how many GPUs it uses.</p>
@@ -180,6 +208,14 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nv
   <p>For image input use the Nemotron 3 Nano Omni GGUF with its <code>mmproj-BF16.gguf</code> (table above). Audio inference is not functional — the required Parakeet audio mmproj is not shipped with the GGUF distribution.</p>
   <p><strong>Nemotron 3.5 Lightning 30B-A3B</strong> loads through the same <code>nemotron_h_moe</code> path — 23 Mamba-2 + 23 MoE + 6 attention layers, e.g. <code>NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MXFP4_MOE.gguf</code> (~17 GB) from <a href="https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF" target="_blank" rel="noopener">unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF</a>. It is the one Nemotron that takes a block drafter: NVIDIA's DSpark module, exported as a <code>dflash</code>-architecture GGUF and loaded with <code>--draft-model</code>, makes it the first recurrent (Mamba-2) trunk to run block speculative decoding. → <a href="advanced.html#dflash">how block drafting works</a></p>
 
+  <h3 id="hunyuan-dense">Hunyuan Dense (text only, single device)</h3>
+  <p>Tencent's dense Hunyuan decoders — the checkpoints declaring <code>general.architecture = hunyuan-dense</code>, such as the Hy-MT2 releases. Before the architecture was registered these official files failed at load: the loader fails closed on an unknown architecture rather than guessing a nearby graph. The text graph matches llama.cpp's <code>hunyuan-vl</code> text tower — RMSNorm, fused QKV, NeoX RoPE, then per-head Q/K RMSNorm, GQA and SwiGLU. <strong>QK-norm runs after RoPE</strong>, the opposite of Qwen 3.5; getting that order wrong yields fluent nonsense rather than a load error, so the norms are mandatory and a layer missing them throws.</p>
+  <pre data-lang="bash"><code># Any GGUF whose general.architecture is hunyuan-dense — the file name is not what selects it
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+    --model models/&lt;your-hunyuan-dense&gt;.gguf \
+    --backend ggml_cuda --input prompt.txt --max-tokens 200</code></pre>
+  <p>First cut: text only, single device, generic per-op path, no thinking channel and no tool parser. Extra GPUs stay idle and startup says so rather than leaving it to be inferred.</p>
+
   <h3 id="mistral3">Mistral 3 (text + image)</h3>
   <pre data-lang="bash"><code>hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
 hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
@@ -229,13 +265,14 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/di
   <p>Send images/audio/video via the <a href="cli.html#examples">CLI</a> (<code>--image</code>, <code>--video</code>, <code>--audio</code>), the <a href="server.html#webui">Web UI</a> uploads, or the <a href="http-api.html">HTTP API</a> (base64 <code>images</code> array for Ollama, <code>image_url</code> data URI for OpenAI). <strong>PDF documents</strong> are supported too — born-digital PDFs have their complete text layer extracted and inlined into the prompt; scanned PDFs fall back to page images for vision-capable models — via the CLI's <code>--pdf</code> flag (one-shot mode) or the Web UI upload (<code>TS_PDF_MAX_PAGES</code> caps the page count; default: all pages).</p>
 
   <h2 id="thinking">Thinking / reasoning mode</h2>
-  <p>Thinking-capable models (Qwen 3.5/3.6, Qwen 3.8 Flash Next, Gemma 4, GPT OSS, Nemotron-H, DeepSeek V4, GLM 5.x, Muse-Glimmer) produce structured chain-of-thought before the final answer. The thinking content is separated from the visible response so the client can show or hide it.</p>
+  <p>Thinking-capable models (Qwen 3.5/3.6, Qwen 3.8 Flash Next, Gemma 4, GPT OSS, Nemotron-H, DeepSeek V4, DeepSeek V4.1, GLM 5.x, Muse-Glimmer) produce structured chain-of-thought before the final answer. The thinking content is separated from the visible response so the client can show or hide it.</p>
   <ul>
     <li><strong>Qwen 3.5/3.6 / Nemotron-H</strong> — <code>&lt;think&gt;…&lt;/think&gt;</code> tags.</li>
     <li><strong>Qwen 3.8 Flash Next</strong> — the same <code>&lt;think&gt;…&lt;/think&gt;</code> tags, but always on: the generation prompt opens the block unconditionally, so there is no non-thinking mode to switch to.</li>
     <li><strong>Gemma 4</strong> — <code>&lt;|channel&gt;thought …&lt;channel|&gt;</code> tags.</li>
     <li><strong>GPT OSS</strong> — Harmony format: <code>&lt;|channel|&gt;analysis</code> for thinking, <code>&lt;|channel|&gt;final</code> for the answer.</li>
     <li><strong>DeepSeek V4</strong> — <code>&lt;think&gt;…&lt;/think&gt;</code> tags; the chat template closes the block immediately unless thinking is requested, so reasoning is opt-in.</li>
+    <li><strong>DeepSeek V4.1</strong> — the same tags, with a trained closing transition: at <code>TS_THINKING_BUDGET</code> the model emits <code>&lt;/think&gt;</code> and finishes the answer inside the original <code>max_tokens</code>. The budget defaults to 75% of the output allowance when that allowance is at least 512 tokens.</li>
     <li><strong>GLM 5.x</strong> — <code>&lt;think&gt;…&lt;/think&gt;</code> tags, also opt-in: <code>--think</code> adds a <code>Reasoning Effort: Max</code> system line and leaves the block open for the model to close, and without it the prompt emits an empty <code>&lt;think&gt;&lt;/think&gt;</code>. Earlier turns' reasoning is always dropped from the prompt. <strong>GLM-5.3-Flash always reasons</strong>: its <code>Reasoning Effort: Max</code> system line is unconditional, the generation prompt always opens <code>&lt;think&gt;</code>, and past turns keep their reasoning.</li>
     <li><strong>Muse-Glimmer</strong> — an <code>assistant to=self</code> reasoning channel emitted by the chat template.</li>
   </ul>
@@ -249,6 +286,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/di
     <li><strong>Gemma 4</strong> — <code>&lt;|tool_call&gt;call:function_name{args}&lt;tool_call|&gt;</code></li>
     <li><strong>GPT OSS (Harmony)</strong> — tools declared as a TypeScript namespace; calls emitted on the commentary channel.</li>
     <li><strong>Muse-Glimmer</strong> — ATEM XML markup declared by the chat template; the parser lifts the calls into the same structured <code>tool_calls</code> shape.</li>
+    <li><strong>DeepSeek V4.1</strong> — <em>spaced</em> DSML (<code>&lt;｜DSML｜ calls&gt;</code>), which V4's unspaced form is not compatible with. On <code>/v1/chat/completions</code> a request-local grammar enforces the declared tools at the token level: <code>tool_choice</code> auto / required / none / a named function and <code>parallel_tool_calls: false</code> are all honoured, and unsupported schema assertions are refused with HTTP 400 before generation.</li>
     <li><strong>DeepSeek V4</strong> — DSML markup: the system prompt teaches the syntax and carries one JSON schema per function, and the model answers with <code>&lt;｜DSML｜tool_calls&gt;&lt;｜DSML｜invoke name="NAME"&gt;&lt;｜DSML｜parameter name="key" string="true|false"&gt;value&lt;/｜DSML｜parameter&gt;…</code>.</li>
     <li><strong>GLM 5.x</strong> — XML with per-argument tags: <code>&lt;tool_call&gt;NAME&lt;arg_key&gt;k&lt;/arg_key&gt;&lt;arg_value&gt;v&lt;/arg_value&gt;…&lt;/tool_call&gt;</code>. The function name follows the opening tag as bare text and every argument is its own key/value pair; values the template rendered with <code>tojson</code> are parsed back into numbers, arrays and objects.</li>
   </ul>

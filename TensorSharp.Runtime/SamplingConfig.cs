@@ -132,6 +132,10 @@ namespace TensorSharp.Runtime
         /// </remarks>
         public Grammar.GrammarConstraint? Grammar { get; set; }
 
+        /// <summary>Optional immutable policy that closes an open reasoning
+        /// channel at its budget and continues within MaxTokens.</summary>
+        public ThinkingTokenBudget? ThinkingBudget { get; set; }
+
         /// <summary>
         /// Returns true if this config is effectively greedy decoding.
         /// </summary>
@@ -248,8 +252,8 @@ namespace TensorSharp.Runtime
                 MaxTokens = MaxTokens,
                 StopSequences = StopSequences != null ? new List<string>(StopSequences) : null,
                 FirstTokenAllowList = FirstTokenAllowList,
+                ThinkingBudget = ThinkingBudget,
             };
         }
     }
 }
-

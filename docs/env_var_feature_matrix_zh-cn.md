@@ -200,6 +200,33 @@ Muse-Glimmer 的融合整模型内核与它的 DFlash 块级草稿模型各有�
 | `TS_SPEC_ADAPTIVE` | 投机解码（所有草稿器） | `0` 关闭成本调节器，于是起草不再与普通 baseline 做对比、也永远不会被暂停。用于 A/B 测量：调节器每一轮的 baseline 步骤都是普通 decode，它们并不免费 | 开 | 未注册 | 否 |
 | `TS_GGML_LOG_DEBUG` | GGML 后端 | `1` 把 ggml 的 DEBUG 日志通道透传出来而不是丢弃。它承载 CUDA 后端的 "CUDA graph warmup complete" / "reset" 这两行，而这是唯一能看出一张图是否真的被 CUDA graph 捕获的途径 | 关 | 未注册 | 否 |
 
+## 矩阵外的 DeepSeek V4 / V4.1 开关
+
+这些变量配置 DeepSeek 的整模型执行器。V4 有三套（Direct CUDA、原生 ggml、纯 C#）；
+V4.1 只有一套原生 `ggml_cuda` 计算图，另有 `ggml_cpu` 作为标量正确性通道。它们都没有
+注册进 `EnvVarMatrix.All`，因此默认的 TestMatrix 扫描不会覆盖。完整背景见
+[V4 卡片](models/deepseek4_zh-cn.md)与 [V4.1 卡片](models/deepseek41_zh-cn.md)。
+
+| 变量 | 适用范围 | 作用 | 默认值 | 在矩阵中 |
+|---|---|---|---|---|
+| `TS_DSV4_NGPU` | V4 与 V4.1 | 按层切分把整层铺到几张 GPU 上——对这两个架构来说，`--tp N` 设置的就是它。`0` 表示使用所有可见设备 | `0`（全部可见） | 否 |
+| `TS_DSV4_UBATCH` | V4 与 V4.1 | Prefill 微批宽度 | 保守配置为 `256`；八卡 A40 的实测 V4.1 配置用 `1024` | 否 |
+| `TS_DSV4_THREADS` | V4 与 V4.1 | 纯 GPU 加载时的原生线程池。CPU 专家卸载改用探测到的可用并行度，由 `--cpu-moe-threads N` / `TS_CPU_MOE_THREADS` 设定 | min(核数, 32) | 否 |
+| `TS_DSV4_PERF` | V4 与 V4.1 | `1` 打印分阶段耗时 | 关 | 否 |
+| `TS_DSV4_VRAM_RESERVE_MB` / `TS_DSV4_GRAPH_CACHE` / `TS_DSV4_LOAD_THREADS` / `TS_DSV4_LOAD_CHUNK_MB` / `TS_DSV4_MOE_MMAP` | V4 与 V4.1 | 放置余量、计算图缓存深度、权重加载并行度，以及驻留主机的专家是否直接在 GGUF 映射上就地相乘 | 见各卡片 | 否 |
+| `TS_DSV4_DSPARK` | 仅 V4 | DSpark 草稿 GGUF，等价于 `--draft-model`。V4.1 会拒绝 V4 的草稿模型——它没有 DSpark 路径 | 未设置 | 否 |
+| `TS_DSV41_TP` | V4.1 | `0` 关闭；`2`–`8` 打开**实验性 routed-MoE 张量并行**，且必须与 `--tp` / `TS_DSV4_NGPU` 选中的 GPU 数一致。gate/up 沿 FFN 中间维切分，down 沿输入维切分，partial 经主机中转的 F32 缓冲归约。首次完整 Q2_K 实测比按层切分更慢 | `0` | 否 |
+| `TS_DSV41_ENGRAM_DEVICE` | V4.1 | `1` 要求 Engram 表驻留 GPU，放不下就失败；`0` 强制主机映射，需要与 CPU oracle 逐位一致时也用它。不设置则自动且保守：只要不会因此逼出路由专家的 CPU 卸载，就放在 GPU 上 | 自动（放得下就驻留 GPU） | 否 |
+| `TS_DSV41_ENGRAM_WARM` | V4.1，仅主机映射 | `1` 在加载时读入 Engram 表页。表在主机上时，八卡 A40 的 prefill 从 207–221 提升到 506–528 tok/s；在默认的 GPU 驻留路径上无意义。代价是约 60 GiB 主机页缓存与约 130 秒启动时间 | 关 | 否 |
+| `TS_DSV41_ENGRAM_THREADS` | V4.1，仅主机映射 | 常驻查表工作线程数，`1`–`32`。单个 token 在每张表上要取 24 行互不相关的数据，串行读意味着串行缺页 | min(16, 硬件线程数) | 否 |
+| `TS_DSV41_ENGRAM_RANDOM` | V4.1，Linux 上的主机映射 | 对映射的 Engram 区间给出随机访问建议。`0` 关闭，`1` 强制 | 自动 | 否 |
+| `TS_DSV41_ENGRAM_SIDECAR` | V4.1 | 显式指定已准备好的 `deepseek41.engram.bin`，而不是使用分片旁边那个 | 与 GGUF 同目录 | 否 |
+| `TS_DSV41_SPARSE_FA` | V4.1 | `1` 选择稀疏 flash attention。需显式开启，与稠密路径存在已记录的浮点差异 | 关 | 否 |
+| `TS_DSV41_COMPACT_RAW_GATHER` | V4.1 | `1` 为原始滑动窗口选择紧凑 gather。同样需显式开启，同样有浮点差异 | 关 | 否 |
+| `TS_DSV41_ALLOW_NON_CUDA_GPU` | V4.1 | `1` 允许 `ggml_vulkan` / `ggml_metal`：普通计算图跑在 GPU 上，只有架构专属算子回退到 CPU 后端，每次都要一次主机往返。之所以需要显式开启，是因为它解除的那道拒绝原本挡住的是*静默*回退 | 关 | 否 |
+| `TS_DSV41_VISION_FA` / `TS_DSV41_VISION_BF16_GEMM` | V4.1 视觉伴随文件 | `TS_DSV41_VISION_FA=1` 让图像编码器使用 F16 中间量的 flash attention（真实图像上的特征差异更大）；`TS_DSV41_VISION_BF16_GEMM=0` 选择诊断用的 F32 提升矩阵路径 | 稠密 F32 注意力，BF16 GEMM + F32 累加 | 否 |
+| `TS_DSV41_TRACE_DIR` / `TS_DSV41_VISION_TRACE_DIR` | V4.1（诊断） | 文本计算图与视觉编码器的张量转储目录。两者都会保留中间张量并增加设备传输——跑基准时保持不设置 | 未设置 | 否 |
+
 ## 矩阵外的 GLM 5.x（`glm-dsa`）开关
 
 这些变量配置 GLM 5.x（`glm-dsa`）执行器——`ggml_cuda` / `ggml_vulkan` /

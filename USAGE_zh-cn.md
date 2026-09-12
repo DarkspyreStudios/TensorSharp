@@ -255,7 +255,8 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | `--tp <N>` | 多卡度 —— 单个进程内把模型摊到几张 GPU 上（默认：`1`）。到底走哪一种多卡模式由架构决定，而不是由你决定：实现了张量并行的走**张量并行**（在层*内部*切权重），Qwen 3.8 Flash Next（`qwen4exp`）与 DeepSeek V4 走**按层切分**（整层落在单卡 —— 买的是容量，不是速度）。GLM 5.x 不传此参数时按层切分；在 GGML GPU 后端上，传入它则为 GLM-5.2 与 GLM-5.3-Flash 选择原生本地单进程 TP。两种模式都不支持的架构会在 stderr 上明确说明并只用一张卡。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。详见[张量并行与分布式推理](#张量并行与分布式推理)。 |
 | `--tp-node-id <N>` | 多节点分布式张量并行中本节点的 0 起始编号。必须与 `--tp-peers` 一起使用。 |
 | `--tp-peers <list>` | 集群中所有节点的 `host:port` 列表（逗号分隔，例如 `192.168.1.10:9500,192.168.1.11:9500`）。所有节点必须使用完全相同的列表。必须与 `--tp-node-id` 一起使用。 |
-| `--interactive` / `-i` | 进入交互式 REPL 聊天会话（逐轮输入/输出），支持 KV 缓存复用、斜杠命令、运行时热切换 模型/后端/投影器、文件附件（图像、音频、视频、文本）以及实时调整采样参数。完整命令列表见下文「**交互式 REPL 命令**」一节 |
+| `--interactive` / `-i` / `--chat` | 进入交互式 REPL 聊天会话（逐轮输入/输出），支持 KV 缓存复用、斜杠命令、运行时热切换 模型/后端/投影器、文件附件（图像、音频、视频、文本）以及实时调整采样参数。完整命令列表见下文「**交互式 REPL 命令**」一节 |
+| `--no-prefix-cache` | 不在第一条消息之前先把提示词中共享的那部分前向一遍。默认情况下，交互式会话在启动时就会前向它的 system 块、工具声明与技能目录，于是第一条消息可以接着它们继续，而不必重新 prefill（在一个 agent 配置上实测 18.5s → 0.3s）；代价是会话需要这么久才就绪。它与 `--warmup-runs` 无关 |
 | `--system <text>` | 用于初始化交互式会话的系统提示词（在 REPL 中可用 `/system` 覆盖） |
 | `--system-file <path>` | 从 UTF-8 文本文件读取初始系统提示词（`--system` 的替代写法） |
 | `--think` | 启用思维链/推理模式。所有系列（含 GLM 5.x）都是按需开启：不加时 GLM 的模板会把推理块立刻闭合（`<think></think>`），模型直接作答；加上后提示里会带上 `Reasoning Effort: Max`，并留下一个未闭合的 `<think>` 交给模型自己收尾。REPL 里用 `/think on\|off` 切换。 |
@@ -327,6 +328,7 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--top-p <f>` | Nucleus 采样阈值（1.0 = 关闭） |
 | `--min-p <f>` | 最小概率过滤（0 = 关闭） |
 | `--repeat-penalty <f>` | 重复惩罚（1.0 = 无） |
+| `--penalty-last-n <N>` | 重复 / presence / frequency 惩罚回看多少个最近的 token。`0` 关闭历史惩罚，`-1` 使用全部历史（默认：64） |
 | `--presence-penalty <f>` | 存在惩罚（0 = 关闭） |
 | `--frequency-penalty <f>` | 频率惩罚（0 = 关闭） |
 | `--seed <N>` | **文本**采样的随机种子（-1 = 非确定性）。图像与视频生成的噪声改由 `--diffusion-seed` 决定。 |
@@ -339,6 +341,10 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--bench-kvcache` | 运行多轮 KV 缓存复用基准（对比启用缓存与强制重置时的 prefill 延迟） |
 | `--bench-kv-turns <N>` | `--bench-kvcache` 使用的对话轮数（默认：4，最多 8） |
 | `--bench-chunked` | 运行分块 prefill 微基准（Gemma 4） |
+| `--bench-fixed-tokens` | 喂入预先确定的 decode token 流并计时，跳过主机侧贪心采样，便于与 llama-bench 对比。仍会报告一条不计时的贪心正确性链 |
+| `--paged-bench` | 跨会话分页 KV 缓存基准：先付一次完整 prefill，再测量第二个同前缀请求能省回多少 |
+| `--paged-bench-prompt <N>` | `--paged-bench` 的提示词长度（token，默认：2048） |
+| `--paged-bench-trials <N>` | `--paged-bench` 的试验次数（默认：3） |
 | `--warmup-runs <N>` | 在对真实文本 / 多模态 prompt 计时前丢弃的前向次数（默认：0） |
 | `--test-chunked-prefill` | 运行分块 prefill 正确性检查（对比分块与非分块 logits） |
 | `--correct-prefill <N>` | `--test-chunked-prefill` 使用的 prompt 长度 |
@@ -354,6 +360,7 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--qwen-image-vl <path>` | 覆盖解析到的 Qwen2.5-VL-7B 文本编码器 GGUF。 |
 | `--qwen-image-mmproj <path>` | 覆盖解析到的 Qwen2.5-VL mmproj（视觉接地）GGUF。 |
 | `--qwen-image-lora <path>` | Qwen-Image-Edit 的 Lightning 蒸馏 LoRA（`.safetensors`）。它以运行期 F32 旁路的形式接在每个目标投影旁（`y = W_quant·x + b + (alpha/rank)·up·(down·x)`），量化基权重原样保留——**不会**被合并进权重。步数从文件名自动推导（例如 4 或 8），并把 CFG 切换为 1.0、时间步 shift 固定为 3，于是默认的 30 步 × 2 次 CFG 前向（60 次 DiT 前向）变成 4–8 次。它需要整模型或融合逐块的 CUDA 前向路径；在没有该旁路的路径上会直接报错而不是输出噪声。环境变量：`TS_QWEN_IMAGE_LORA`。 |
+| `--offload-cpu` | 从内存流式读取 DiT 权重，而不是常驻显存：每步更慢，但小显存卡也能做原生约 1 MP 的编辑。默认：自动——只有当目标分辨率与常驻权重放不下时才会自动启用 |
 | `--width <px>` / `--height <px>` | Qwen-Image-Edit 与视频生成的输出尺寸。默认 `0` —— 自动（Qwen-Image-Edit：源图尺寸，按 VRAM 钳制；MiniMax-H3：640×384，有条件图时按该面积取图片宽高比，并向上取整到 32 的倍数；Wan：按输入图的宽高比取模型原生面积，TI2V-5B 为 1280×704，其余为 832×480）。 |
 | `--video-frames <N>` | 视频帧数，会对齐到模型自己的时间网格（Wan 为 `4k+1`；MiniMax-H3 为 `17k+5` —— 5、22、39、56、73、90…）。默认：33；Wan2.2-TI2V 为 49，MiniMax-H3 为 22。`1` 生成一张静态图（配合 `--output out.png`）。 |
 | `--fps <N>` | 保存的 MP4 的播放帧率（默认：16；Wan2.2-TI2V 为 24）。以固定帧率训练的模型（MiniMax-H3，24 fps）会覆盖任何其他取值。 |
@@ -611,6 +618,7 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `--top-p <f>` | Nucleus 采样阈值（`1.0` = 关闭） |
 | `--min-p <f>` | min-p 过滤（`0` = 关闭） |
 | `--repeat-penalty <f>` | 重复惩罚（`1.0` = 无） |
+| `--penalty-last-n <N>` | 重复 / presence / frequency 惩罚回看的历史长度。`0` 关闭，`-1` 使用全部历史（默认：64） |
 | `--presence-penalty <f>` | 存在惩罚（`0` = 关闭） |
 | `--frequency-penalty <f>` | 频率惩罚（`0` = 关闭） |
 | `--seed <N>` | 随机种子（`-1` = 非确定性） |
@@ -618,6 +626,8 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `--sampling-precedence <config\|request>` | 当请求同时携带了你在上面配置过的采样参数时，以谁为准。`config`（默认）保留你的配置值 —— VS Code Copilot Chat 等客户端会把 `temperature`/`top_p` 硬编码进每一次请求，否则就会静默覆盖你的配置；你**没有**配置过的参数仍然取请求中的值。`request` 恢复“客户端优先”。环境变量：`TENSORSHARP_SAMPLING_PRECEDENCE`。 |
 | `--kv-cache-dtype <type>` | 托管模型的 KV 缓存精度：`f32`、`f16`、`q8_0` 或 `q4_0`（量化缓存以微小数值漂移换取内存节省；各档位的取舍见上文 CLI 参数表）。默认：自动 —— 由后端 / 模型决定。环境变量：`KV_CACHE_DTYPE`。 |
 | `--continuous-batching` / `--no-continuous-batching` | 启用（默认）或关闭迭代级分页批处理。启用时服务会在批内动态加入 / 抢占序列，并在实现了 `IBatchedPagedModel` 的模型上将多个序列打包到一次前向中执行。`--no-continuous-batching` 会让所有模型回退到按序列 KV 交换。别名：`--paged-batching` / `--no-paged-batching`。 |
+| `--no-webui` | 不提供内置 Web UI；`GET /` 改为返回纯文本存活探测。所有 HTTP API 端点（含 `/uploads`）照常可用。环境变量：`TS_NO_WEBUI` |
+| `--no-prefix-cache` | 不在对外服务之前准备所有会话共享的那段提示词，也不在两次启动之间保留它。默认情况下服务端会在启动时把这段提示词前向一次并保存结果，于是一个进程的第一条消息与其他消息代价相同（在一个 agent 配置上实测 21.8s → 0.7s） |
 | `--prefill-chunk-size <N>` | 混合 prefill+decode 步中每个请求的 prefill 上限，使活跃输出流更频繁地轮到 GPU（默认：`256`）；仅有 prefill 时仍会公平用满设备 token 预算。环境变量：`TS_SCHED_PREFILL_CHUNK`。 |
 | `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（Qwen 3.6 与 GLM 5.2 的 NextN 块）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。仅对单序列（无并发）请求生效：草稿头每步最多提议 `--spec-draft` 个 token，主干网络用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，输出与标准 decode 一致。仅在有收益处自动启用：Qwen 3.6 的内嵌 NextN 块在所有后端上都被认为有收益，而 Gemma 4 的独立草稿头只在各 ggml 后端与 Direct `cuda` 后端上启用；CPU / GGML CPU / MLX 走标准 decode。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC`）。 |
 | `--spec-type <name>` | 投机算法：`auto`（默认）/ `draft-head` / `block` / `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强。环境变量：`TS_SPEC_TYPE`。 |
@@ -1422,6 +1432,9 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | GPT OSS | ✅ | MoE 专家切分，attention sink，YaRN。`cuda` 与 GGML 后端均可运行；GGML 路径目前仍按 token 逐个遍历专家（尚未使用专家并行） |
 | Nemotron-H | ✅ | Mamba2 在 rank 0 上复制计算，MoE 专家切分。GGML 上的限制与 GPT OSS 相同 |
 | GLM 5.x | ✅（仅本地） | 仅限 GGML GPU 后端；GLM-5.2 与 GLM-5.3-Flash 的原生 TP 路径都只支持本地单进程。GLM-5.2 切 MLA head 与每个路由专家内的隐藏行。GLM-5.3-Flash 还会切 KDA head 并让每个 rank 持有对应的递归状态；其 MLA head 与路由专家隐藏行同样切分。注意力局部输出会在每次非线性 Sinkhorn 超连接之前归约。在 GLM-5.3 满足条件的分段快路径上，路由 MoE 局部输出先归约，随后每个 rank 在本地计算并加入其复制的共享专家；超连接、池化 indexer、router、norm、稠密层与 embedding 也保持不切分并按 rank 执行，output norm / LM head 留在 rank 0。CPU MoE、tracing、部分 `TS_GLM_TP_SHARD` 切分、超额 rank 或缺少原生超连接内核时使用组合调度器回退，其中共享专家只在 rank 0 运行一次；`TS_GLM_TP_FUSED=0` 可强制该诊断回退。不传 `--tp` 仍默认按层切分 |
+| DeepSeek V4 Flash | 按层切分 | 不是张量并行：整模型执行器按每张卡的空闲显存把连续的整层装箱分配，`--tp N`（或 `TS_DSV4_NGPU`）只限制这次切分用几张卡 |
+| DeepSeek V4.1 Flash | 按层切分（+ 实验性 routed-MoE TP） | 按层放置是默认路径，也是有实测数据的路径。`TS_DSV41_TP=N`（2–8，且必须等于 `--tp` / `TS_DSV4_NGPU` 选中的 GPU 数）会把路由专家的 gate/up 沿 FFN 中间维、down 沿输入维切分，partial 结果经主机中转的 F32 缓冲归约；注意力、共享专家与各类 cache 仍按层放置。切分按块对齐且不等宽（2304 的中间维是 9 个 256 元素的 K-quant 块：两 rank 为 1280+1024，四 rank 为 768+512+512+512）。首次完整 Q2_K 实测比按层切分更慢，因此仍属实验性。注意力 TP 与分布式组尚未实现 |
+| Hunyuan Dense | — | 单设备：既没有 TP 也没有按层切分。启动时会在 stderr 上明说，而不是让多余的 GPU 闲置 |
 | DiffusionGemma | — | 不适用（扩散模型） |
 | Qwen-Image-Edit | — | 不适用（图像生成） |
 

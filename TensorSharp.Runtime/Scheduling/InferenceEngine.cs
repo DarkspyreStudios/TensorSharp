@@ -33,6 +33,7 @@ namespace TensorSharp.Runtime.Scheduling
         private readonly IModelArchitecture _model;
         private readonly ILogger _logger;
         private readonly bool _stopRepetition;
+        private readonly int _nativeSlotContextLimit;
         private readonly BlockPool _pool;
         private readonly ContinuousBatchScheduler _scheduler;
         private readonly BatchExecutor _executor;
@@ -58,6 +59,7 @@ namespace TensorSharp.Runtime.Scheduling
             ArgumentNullException.ThrowIfNull(cfg);
             _logger = logger ?? NullLogger.Instance;
             _stopRepetition = cfg.StopRepetition;   // cfg is null-checked above
+            _nativeSlotContextLimit = UsesNativeDeepSeek41Slots(model) ? Math.Max(0, model.MaxContextLength) : 0;
 
             long blockBytes = ComputeBlockByteSize(model, cfg.BlockSize);
             int numBlocks = ResolveEffectiveNumBlocks(model, cfg, _logger);
@@ -593,7 +595,23 @@ namespace TensorSharp.Runtime.Scheduling
             switch (cmd.Kind)
             {
                 case EngineCommandKind.Submit:
-                    try { _scheduler.Submit(cmd.Sequence); }
+                    try
+                    {
+                        // A larger metadata pool accounts for independent native
+                        // slots; it must not enlarge any individual slot's context.
+                        long requested = (long)cmd.Sequence.PromptTokens.Count + cmd.Sequence.MaxNewTokens;
+                        if (_nativeSlotContextLimit > 0 && requested > _nativeSlotContextLimit)
+                        {
+                            var error = new InvalidOperationException(
+                                $"DeepSeek V4.1 request requires {requested} tokens, but each native sequence slot " +
+                                $"has a context limit of {_nativeSlotContextLimit}. Shorten the prompt or output allowance.");
+                            cmd.Sequence.Status = SequenceStatus.FinishedError;
+                            cmd.Sequence.FinishReason = "error";
+                            cmd.Sequence.Error = error;
+                            throw error;
+                        }
+                        _scheduler.Submit(cmd.Sequence);
+                    }
                     catch (Exception ex)
                     {
                         if (_handles.TryRemove(cmd.Sequence.RequestId, out var h))
@@ -726,6 +744,19 @@ namespace TensorSharp.Runtime.Scheduling
                             && (seq.SamplingConfig?.StopRepetition ?? true)
                             && RepetitionGuard.IsLooping(seq.OutputTokens, emittedCount, out int period, out int repeats))
                         {
+                            // V4.1's trained reasoning close can recover a looping
+                            // thought and leave room for the answer. The next normal
+                            // sample/forward commits it, respecting cancellation,
+                            // EOS, the original length cap and delayed grammars.
+                            // Never discard an already-forwarded speculative tail.
+                            if (emittedCount == seq.OutputTokens.Count &&
+                                seq.GetOrCreateSampler().TryRequestThinkingClosure(seq.OutputTokens))
+                            {
+                                _logger.LogWarning(
+                                    "Request {RequestId} closing looping reasoning after {Emitted} tokens (period {Period})",
+                                    seq.RequestId, emittedCount, period);
+                                continue;
+                            }
                             TruncateUnpublishedTail(seq, emittedCount);
                             LogSpeculationStatsIfAny(seq);
                             _logger.LogWarning(
@@ -783,8 +814,9 @@ namespace TensorSharp.Runtime.Scheduling
         }
 
         /// <summary>Resolve the physical block-table capacity. By default it is
-        /// large enough for one full model context; only metadata is allocated up
-        /// front and the comparatively large snapshot slabs remain lazy. An
+        /// large enough for one full model context, or one context per allowed
+        /// native V4.1 sequence slot. Only metadata is allocated up front and the
+        /// comparatively large snapshot slabs remain lazy. An
         /// explicit TS_SCHED_NUM_BLOCKS value is a hard operator limit.</summary>
         private static int ResolveEffectiveNumBlocks(
             IModelArchitecture model,
@@ -802,25 +834,36 @@ namespace TensorSharp.Runtime.Scheduling
             if (contextLength <= 0)
                 return numBlocks;
 
-            long neededLong = ((long)contextLength + cfg.BlockSize - 1) / cfg.BlockSize;
+            // V4.1 stores complete per-request KV state in native slots. Its
+            // zero-byte block pool only tracks scheduling reservations; limiting
+            // that pool to one aggregate context needlessly evicts healthy slots
+            // and recomputes their prompts. Size metadata for all admitted slots.
+            // Other architectures retain their existing shared-pool semantics.
+            int contexts = UsesNativeDeepSeek41Slots(model) ? Math.Max(1, cfg.MaxNumRunningSequences) : 1;
+            long neededLong = ((long)contextLength + cfg.BlockSize - 1) / cfg.BlockSize * contexts;
             if (neededLong > int.MaxValue)
                 throw new InvalidOperationException(
-                    $"Model context {contextLength} requires too many KV blocks " +
+                    $"Model context {contextLength} across {contexts} sequence context(s) requires too many KV blocks " +
                     $"at block size {cfg.BlockSize}.");
 
             int neededBlocks = (int)neededLong;
             if (neededBlocks > numBlocks)
             {
                 logger?.LogInformation(
-                    "Sizing KV block pool to model context: {ContextTokens} tokens -> " +
+                    "Sizing KV block pool to model context: {ContextTokens} tokens x {SequenceContexts} context(s) -> " +
                     "{Blocks} blocks of {BlockSize} (configured default was {ConfiguredBlocks}). " +
                     "Set TS_SCHED_NUM_BLOCKS to impose an explicit hard limit.",
-                    contextLength, neededBlocks, cfg.BlockSize, numBlocks);
+                    contextLength, contexts, neededBlocks, cfg.BlockSize, numBlocks);
                 numBlocks = neededBlocks;
             }
 
             return numBlocks;
         }
+
+        private static bool UsesNativeDeepSeek41Slots(IModelArchitecture model)
+            => string.Equals(model.Config?.Architecture, "deepseek41", StringComparison.OrdinalIgnoreCase)
+                && !model.SupportsKVStateSnapshot
+                && model is IBatchedPagedModel { SupportsPerSequenceFusedForward: true };
 
         private struct EngineCommand
         {

@@ -1,0 +1,158 @@
+{
+  "source": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "revision": "dba1be0a40aa45a94ad051997016db3960a90277",
+  "processor": "image_processor.py",
+  "pillow_version": "11.3.0",
+  "cases": [
+    {
+      "name": "wide",
+      "image": "wide.png",
+      "width": 67,
+      "height": 13,
+      "patch_grid": [
+        18,
+        89
+      ],
+      "llm_grid": [
+        6,
+        30
+      ],
+      "resized_height": 252,
+      "resized_width": 1246,
+      "patch_shape": [
+        1602,
+        3,
+        14,
+        14
+      ],
+      "patch_sha256": "74ebcb2558d823a8fe3b5c19d4a58b2ecad279faad8edcac75c2871704384811",
+      "patch_bytes": 3767904,
+      "token_count": 188
+    },
+    {
+      "name": "tall",
+      "image": "tall.png",
+      "width": 13,
+      "height": 67,
+      "patch_grid": [
+        89,
+        18
+      ],
+      "llm_grid": [
+        30,
+        6
+      ],
+      "resized_height": 1246,
+      "resized_width": 252,
+      "patch_shape": [
+        1602,
+        3,
+        14,
+        14
+      ],
+      "patch_sha256": "7efe2c26930b40cb1eb1ded49f487dc116047919f9ef96fa674e4dcc74511873",
+      "patch_bytes": 3767904,
+      "token_count": 212
+    },
+    {
+      "name": "alpha_ignored",
+      "image": "alpha_ignored.png",
+      "width": 19,
+      "height": 25,
+      "patch_grid": [
+        45,
+        34
+      ],
+      "llm_grid": [
+        15,
+        12
+      ],
+      "resized_height": 630,
+      "resized_width": 476,
+      "patch_shape": [
+        1530,
+        3,
+        14,
+        14
+      ],
+      "patch_sha256": "959375a02e0fae30367656c62babcfa8ffdde671a353bef87e7a767499fbac82",
+      "patch_bytes": 3598560,
+      "token_count": 197
+    },
+    {
+      "name": "downsample",
+      "image": "downsample.png",
+      "width": 1900,
+      "height": 1100,
+      "patch_grid": [
+        71,
+        123
+      ],
+      "llm_grid": [
+        24,
+        41
+      ],
+      "resized_height": 994,
+      "resized_width": 1722,
+      "patch_shape": [
+        8733,
+        3,
+        14,
+        14
+      ],
+      "patch_sha256": "ddb77f5f0a29af8a9565f6f4e0fdd121ba04f8bddd2637305b1c722def4dd50f",
+      "patch_bytes": 20540016,
+      "token_count": 1010
+    },
+    {
+      "name": "non_square",
+      "image": "non_square.png",
+      "width": 73,
+      "height": 91,
+      "patch_grid": [
+        44,
+        35
+      ],
+      "llm_grid": [
+        15,
+        12
+      ],
+      "resized_height": 616,
+      "resized_width": 490,
+      "patch_shape": [
+        1540,
+        3,
+        14,
+        14
+      ],
+      "patch_sha256": "ead03a842699ef86688ceb4e81eb6e47054a9072ac18c5837d116b28081d834f",
+      "patch_bytes": 3622080,
+      "token_count": 197
+    },
+    {
+      "name": "one_pixel",
+      "image": "one_pixel.png",
+      "width": 1,
+      "height": 1,
+      "patch_grid": [
+        39,
+        39
+      ],
+      "llm_grid": [
+        13,
+        13
+      ],
+      "resized_height": 546,
+      "resized_width": 546,
+      "patch_shape": [
+        1521,
+        3,
+        14,
+        14
+      ],
+      "patch_sha256": "9399f235abb855612786afba5a98fbce748dd8d892664d34c4d963ca8ef57608",
+      "patch_bytes": 3577392,
+      "token_count": 184
+    }
+  ]
+}

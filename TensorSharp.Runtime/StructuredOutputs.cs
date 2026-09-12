@@ -163,6 +163,7 @@ namespace TensorSharp.Runtime
                 Role = msg.Role,
                 Content = msg.Content,
                 ImagePaths = msg.ImagePaths != null ? new List<string>(msg.ImagePaths) : null,
+                ImageTimestamps = msg.ImageTimestamps != null ? new List<double?>(msg.ImageTimestamps) : null,
                 AudioPaths = msg.AudioPaths != null ? new List<string>(msg.AudioPaths) : null,
                 TextFilePaths = msg.TextFilePaths != null ? new List<string>(msg.TextFilePaths) : null,
                 TextFileNames = msg.TextFileNames != null ? new List<string>(msg.TextFileNames) : null,

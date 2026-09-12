@@ -6,6 +6,34 @@ This page keeps repository-level status and longer explanations that do not belo
 
 TensorSharp is a native .NET 10 inference engine for GGUF models. The current source includes CLI, server/Web UI, compatible HTTP APIs, AgentHost, and the TensorAgent iOS/iPadOS application. AgentHost and TensorAgent are source-first capabilities: the latest tagged release may not contain them yet.
 
+### Newest architectures
+
+Two families landed after the last release tag, and both carry limits worth
+knowing before you plan around them.
+
+- **DeepSeek V4.1 Flash (`deepseek41`)** — a dedicated native V4.1 graph with an
+  optional vision companion. `ggml_cuda` is the serving backend; `ggml_cpu`
+  runs the same graph on scalar fallbacks as a correctness path, `ggml_vulkan`
+  and `ggml_metal` need `TS_DSV41_ALLOW_NON_CUDA_GPU=1`, and every other backend
+  refuses the checkpoint rather than loading V4.1 weights into the V4 graph. The
+  Q2_K release needs a prepared Engram sidecar before it will run at all.
+  Multi-GPU means a layer split; routed-MoE tensor parallelism exists behind
+  `TS_DSV41_TP` and has measured slower than the split. Concurrent requests get
+  isolated slots but fall back to per-slot forwards, so concurrency is not
+  batched GPU throughput yet, and there is no V4.1 DSpark. A multi-turn chat
+  reuses its KV prefix: the reasoning drop in ordinary chat makes the render
+  diverge one token after the previous turn's assistant header, and the native
+  executor rewinds to that point instead of re-prefilling the conversation, which
+  needs a per-slot checkpoint of the raw sliding-window ring because generating an
+  answer wraps it. What is measured, and
+  what is explicitly not, is tracked in the
+  [validation report](deepseek41_validation.md) beside the
+  [model card](models/deepseek41.md).
+- **Hunyuan Dense (`hunyuan-dense`)** — Tencent's dense Hunyuan decoders, added
+  so the official Hy-MT2 GGUFs load instead of failing on an unregistered
+  architecture. First cut: text only, single device, generic per-op path, no
+  tools and no thinking. See the [model card](models/hunyuan-dense.md).
+
 ### TensorAgent and iOS
 
 TensorAgent is a .NET MAUI iOS/iPadOS application that runs the TensorSharp engine locally. It links the native GGML library as an iOS `.xcframework`, uses `ggml_metal` on physical devices, and shares the host-neutral chat pipeline (`TensorSharp.Chat`) with the CLI and server. The iOS target is enabled with `TensorSharpIosTargets=true`; it is not a separate numerical backend or a remote inference service.

@@ -5,8 +5,9 @@
 GLM-5.2 是一个 744B 参数的 MoE 模型（256 个路由专家，top-8，外加 1 个共享专家），
 构建在 **DeepSeek 稀疏注意力**之上：带权重吸收的 Multi-head Latent Attention，
 再加一个 "lightning indexer"，由它决定每个 query 可以看见哪些已缓存的 token。
-官方宣称上下文：1M token。GGUF 架构 id 是 `glm-dsa`。**GLM-5.3-Flash**（`glm5next`）
-复用同一个执行器——见[下文专节](#glm-53-flashglm5next)。
+官方宣称上下文：1M token。GGUF 架构 id 是 `glm-dsa`。**GLM-5.3** 是同一套层结构的
+新版本，整页内容对它同样适用——见[下文专节](#glm-53glm-dsa)。**GLM-5.3-Flash**
+（`glm5next`）复用同一个执行器——见[下文专节](#glm-53-flashglm5next)。
 
 ## 这一层长什么样
 
@@ -439,6 +440,47 @@ GGUF 宣称 1,048,576 token，但这并不意味着缓存放得下：78 层里�
 每个参数一个 XML 元素（用 `tojson` 渲染的值会被解析回数字 / 数组 / 对象）。
 
 
+## GLM-5.3（`glm-dsa`）
+
+GLM-5.3（非 Flash）与 GLM-5.2 是同一套架构，因此上文内容对它原样适用：
+`general.architecture` 为 `glm-dsa`，`block_count` 为 79（78 层主干 + 1 个
+NextN），256 个路由专家 top-8 外加 1 个共享专家，带 lightning indexer 的 MLA，
+`rope.freq_base` 8e6，`context_length` 1M。它不需要新代码路径，也不需要新开关
+——就是 GLM-5.2 的加载器。
+
+实际使用中有两点差异，均直接读自已发布的 GGUF：
+
+- **仅文本。**[unsloth/GLM-5.3-GGUF](https://huggingface.co/unsloth/GLM-5.3-GGUF)
+  在任何量化下都没有发布 mmproj，因此没有视觉塔可供 `--mmproj` 指向。支持图像的
+  是 GLM-5.3-**Flash**。
+- **`--spec` 只在不带 `--tp` 时生效。**`blk.78` 上的 NextN 块是完整的
+  （`nextn.eh_proj` / `enorm` / `hnorm` / `shared_head_norm`，外加一整层 MLA +
+  256 专家 MoE），但它没有自己的 `nextn.shared_head_head.weight`，只能借用主干的
+  LM head。在张量并行下该 head 是按列切分的，加载器宁可拒绝，也不会用某个 rank
+  上的词表切片来 draft：
+
+  ```
+  [glm] the NextN block has no LM head of its own and the trunk head is
+        column-parallel under --tp 8; serving standard decode
+  ```
+
+  因此投机解码是在**默认按层切分**（不传 `--tp`，用上每一张可见 GPU）时生效的。
+  在相信某次 `--spec` 运行真的 draft 过之前，先看加载横幅——而且要看你实际跑的那个
+  执行器打出来的那一条：在 GGML 后端上跑的是原生执行器，它的横幅是
+
+  ```
+  [glm] glm-dsa: 78 trunk layers +1 NextN/MTP draft block, n_embd=6144, ...
+  ```
+
+  若声明了 NextN 却没有加载，则写作
+  `78 trunk layers (NextN block present but not loaded; --spec loads it)`。
+  `NextN/MTP draft head ready (block 78, ...)` 那一行属于托管逐算子路径
+  （`TS_GLM_NATIVE=0`），GPU 运行时不会出现。
+
+UD-Q2_K_XL 量化下 checkpoint 为 7 个分片共 236.4 GiB，因此需要一台**合计**显存
+能装下它并为 KV 缓存留出余量的机器——按权重算至少要 8 张 45 GiB A40 中的 6 张，
+实际用满 8 张。
+
 ## GLM-5.3-Flash（`glm5next`）
 
 GLM-5.3-Flash 是混合架构的后继者：320B 参数、288 个路由专家（top-8、1 个共享、
@@ -528,3 +570,17 @@ GLM-5.3 的模板始终思考：`<|system|>Reasoning Effort: Max` 无条件出�
 工具调用与 GLM-5.2 相同的 XML 元素形式。图像渲染为
 `<|begin_of_image|><|image|><|end_of_image|>`，宿主把 `<|image|>` 展开为合并
 patch 的 token 数。
+
+## 基准矩阵
+
+[`benchmark_config_glm53_qwen38.json`](../../benchmarks/engine_comparison/benchmark_config_glm53_qwen38.json)
+把 `glm53` 与 `glm53-flash`（连同 Qwen3.8-Flash-Next）注册到固定的 Hugging Face
+revision 上，并逐条记录了实测的分片大小以及上面这些模态 / MTP 事实。它的默认后端
+不传 `--tp`、也不设置 `CUDA_VISIBLE_DEVICES`：对这两个模型来说，原生 glm 执行器会
+接管每一张可见 GPU 并按整层放置——这是 236 GiB checkpoint 唯一装得下的放置方式，也
+是 GLM-5.3 的 NextN 块唯一会被加载的放置方式。这是这一系列执行器的性质，而不是基准
+框架的性质：该配置里的第三个模型（`qwen4exp`）由**共享**加载器切分，因此必须显式传
+`--tp N`，它落在第二个后端列上，默认矩阵里它的格子会被记为跳过。llama.cpp 那一列只
+对 `glm53` 可用：那台机器上的
+llama.cpp（ggml 0.23.0）架构表里有 `glm-dsa`，也有 `src/models/glm-dsa.cpp`，但
+`glm5next` 这个字符串在它的源码里一处都找不到——在假定有参照列之前先确认这一点。

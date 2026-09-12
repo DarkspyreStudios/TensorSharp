@@ -16,16 +16,24 @@
 //
 // Injection works without touching the vendored ggml: the graph builder emits
 // GGML_OP_CUSTOM nodes (public ggml_custom_4d API) whose userdata points at a
-// tsg_dsv4_fused_desc, and a minimal ggml-backend implemented here claims
-// those nodes in ggml_backend_sched. The backend reports the paired CUDA
-// device's default buffer type as its own, so the scheduler interleaves
-// CUDA-backend and fused-backend splits with no tensor copies and no
-// synchronization; kernels are launched on the ggml-cuda backend's own stream
-// (obtained from its context), so plain stream order guarantees correctness
-// and ggml-cuda's per-split CUDA-graph capture keeps working around us.
+// tsg_dsv4_fused_desc, and the ggml-backend implemented here runs them.
+//
+// That backend is registered with ggml_backend_sched INSTEAD OF the CUDA
+// backend it wraps, not alongside it, and claims the CUDA device's ops and
+// buffer types as well as its own fused nodes. Ordinary nodes are forwarded to
+// the CUDA backend as graph views; fused nodes launch here. Everything goes to
+// the CUDA backend's own stream, asynchronously, so one device's whole subgraph
+// is a single ordered submission.
+//
+// Registering both backends is what the earlier design did, and it is why this
+// matters: the scheduler splits the graph wherever the backend changes, which a
+// DeepSeek V4.1 layer does about 14 times. That cost 565 splits per decode
+// token, each ~5.6 nodes of work, and a blocking host synchronization at every
+// one of the 564 boundaries.
 // ---------------------------------------------------------------------------
 
 #include "ggml_ops_dsv4_fused.h"
+#include "dsv41_quant.h"
 
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
@@ -33,6 +41,13 @@
 #include "ggml-cuda/common.cuh"   // ggml_backend_cuda_context (stream access)
 
 #include <cstring>
+
+bool tsg_dsv4_cuda_supports_native_bf16(ggml_backend_t backend) {
+    if (!ggml_backend_is_cuda(backend)) return false;
+    const auto * context = static_cast<const ggml_backend_cuda_context *>(backend->context);
+    const int cc = ggml_cuda_info().devices[context->device].cc;
+    return GGML_CUDA_CC_IS_NVIDIA(cc) && cc >= GGML_CUDA_CC_AMPERE;
+}
 
 // ---------------------------------------------------------------------------
 // Kernels
@@ -506,10 +521,91 @@ static __global__ void tsg_dsv4_kgather_f16(
 // Launcher
 // ---------------------------------------------------------------------------
 
+// One warp owns a block of 32 (MX) or 16 (NV) activations. Four groups per
+// CTA amortize launch overhead while keeping maxima entirely in registers.
+static __global__ void tsg_dsv41_quant_f32(const float * input, float * output,
+                                         int64_t groups, int mode)
+{
+    const int lane = threadIdx.x & 31;
+    const int block = mode == 2 ? 16 : 32;
+    const int64_t group = (int64_t) blockIdx.x * 4 + threadIdx.x / 32;
+    if (group >= groups) return;
+    const float value = lane < block ? tsg_dsv41_bf16(input[group * block + lane]) : 0.0f;
+    float amax = fabsf(value);
+    for (int delta = 16; delta > 0; delta /= 2)
+        amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, delta));
+    const float scale = tsg_dsv41_quant_scale(amax, mode);
+    if (lane < block)
+        output[group * block + lane] = tsg_dsv41_quant_value(value, scale, mode);
+}
+
+static __global__ void tsg_dsv41_candidate_scores_f32(const float * scores, const int32_t * pos,
+        float * output, int64_t count, int width, int blocks, int block_size)
+{
+    const int64_t index = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const int64_t query = index / blocks;
+    const int block = int(index % blocks);
+    float best = -INFINITY;
+    for (int key = block * block_size; key < min(width, (block + 1) * block_size); ++key)
+        best = fmaxf(best, scores[query * width + key]);
+    output[index] = pos[query] >= 0 && block == pos[query] / block_size ? INFINITY : best;
+}
+
+static __global__ void tsg_dsv41_candidate_mask_f16(const float * pooled, const int32_t * topk,
+        half * output, int width, int blocks, int k, int block_size)
+{
+    const int query = blockIdx.x;
+    half * out = output + (int64_t) query * width;
+    for (int key = threadIdx.x; key < width; key += blockDim.x)
+        out[key] = __float2half(-INFINITY);
+    __syncthreads();
+    for (int i = threadIdx.x; i < k; i += blockDim.x)
+    {
+        const int block = topk[(int64_t) query * k + i];
+        if (block < 0 || block >= blocks || !(pooled[(int64_t) query * blocks + block] > -INFINITY)) continue;
+        for (int key = block * block_size; key < min(width, (block + 1) * block_size); ++key)
+            out[key] = __float2half(0.0f);
+    }
+}
+
 static void tsg_dsv4_fused_launch(const tsg_dsv4_fused_desc * d, ggml_tensor * dst, cudaStream_t stream)
 {
     switch (d->kind)
     {
+        case TSG_DSV41_FUSED_QUANT:
+        {
+            const ggml_tensor * src = dst->src[0];
+            const int block = d->i0 == 2 ? 16 : 32;
+            GGML_ASSERT(d->i0 >= 0 && d->i0 <= 2);
+            GGML_ASSERT(src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+            GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(dst));
+            GGML_ASSERT(src->ne[0] % block == 0 && ggml_nelements(src) == ggml_nelements(dst));
+            const int64_t groups = ggml_nelements(src) / block;
+            tsg_dsv41_quant_f32<<<(unsigned) ((groups + 3) / 4), 128, 0, stream>>>(
+                (const float *) src->data, (float *) dst->data, groups, d->i0);
+        } break;
+        case TSG_DSV41_CANDIDATE_SCORES:
+        {
+            const ggml_tensor * src = dst->src[0];
+            const int64_t count = ggml_nelements(dst);
+            GGML_ASSERT(d->i0 > 0 && dst->ne[0] == (src->ne[0] + d->i0 - 1) / d->i0);
+            GGML_ASSERT(src->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
+            GGML_ASSERT(ggml_is_contiguous(src) && ggml_is_contiguous(dst));
+            tsg_dsv41_candidate_scores_f32<<<(unsigned) ((count + 255) / 256), 256, 0, stream>>>(
+                (const float *) src->data, (const int32_t *) dst->src[1]->data,
+                (float *) dst->data, count, (int) src->ne[0], (int) dst->ne[0], d->i0);
+        } break;
+        case TSG_DSV41_CANDIDATE_MASK:
+        {
+            const ggml_tensor * scores = dst->src[0], * topk = dst->src[1];
+            GGML_ASSERT(d->i0 > 0 && dst->type == GGML_TYPE_F16);
+            GGML_ASSERT(scores->type == GGML_TYPE_F32 && topk->type == GGML_TYPE_I32);
+            GGML_ASSERT(ggml_is_contiguous(scores) && ggml_is_contiguous(topk) && ggml_is_contiguous(dst));
+            tsg_dsv41_candidate_mask_f16<<<(unsigned) dst->ne[1], 256, 0, stream>>>(
+                (const float *) scores->data, (const int32_t *) topk->data, (half *) dst->data,
+                (int) dst->ne[0], (int) scores->ne[0], (int) topk->ne[0], d->i0);
+        } break;
         case TSG_DSV4_FUSED_COMPRESS:
         {
             const ggml_tensor * st_kv        = dst->src[0];
@@ -749,8 +845,69 @@ static const char * tsg_dsv4_backend_get_name(ggml_backend_t backend)
 
 static void tsg_dsv4_backend_free(ggml_backend_t backend)
 {
+    // The device record is this backend's own (see tsg_dsv4_fused_backend_init)
+    // and shares the context, so free it here and only here.
+    delete backend->device;
     delete (tsg_dsv4_backend_ctx *) backend->context;
     delete backend;
+}
+
+static ggml_guid_t tsg_dsv4_backend_guid();
+
+// The CUDA backend behind `backend`, or `backend` itself when it is not one of
+// ours. Delegated calls must name the CUDA backend, because ggml-cuda checks
+// ggml_backend_is_cuda on the arguments it is handed.
+static ggml_backend_t tsg_dsv4_unwrap(ggml_backend_t backend)
+{
+    if (!backend || !backend->guid || !ggml_guid_matches(backend->guid, tsg_dsv4_backend_guid()))
+        return backend;
+    return ((tsg_dsv4_backend_ctx *) backend->context)->cuda_backend;
+}
+
+static void tsg_dsv4_backend_set_tensor_async(ggml_backend_t backend, ggml_tensor * tensor,
+        const void * data, size_t offset, size_t size)
+{
+    ggml_backend_t cuda = tsg_dsv4_unwrap(backend);
+    cuda->iface.set_tensor_async(cuda, tensor, data, offset, size);
+}
+
+static void tsg_dsv4_backend_get_tensor_async(ggml_backend_t backend, const ggml_tensor * tensor,
+        void * data, size_t offset, size_t size)
+{
+    ggml_backend_t cuda = tsg_dsv4_unwrap(backend);
+    cuda->iface.get_tensor_async(cuda, tensor, data, offset, size);
+}
+
+// Peer-to-peer device copies at the layer-split boundaries. Without this the
+// scheduler falls back to a host round trip for every cross-device tensor.
+static bool tsg_dsv4_backend_cpy_tensor_async(ggml_backend_t backend_src, ggml_backend_t backend_dst,
+        const ggml_tensor * src, ggml_tensor * dst)
+{
+    ggml_backend_t cuda_src = tsg_dsv4_unwrap(backend_src);
+    ggml_backend_t cuda_dst = tsg_dsv4_unwrap(backend_dst);
+    if (!cuda_dst || !cuda_dst->iface.cpy_tensor_async) return false;
+    return cuda_dst->iface.cpy_tensor_async(cuda_src, cuda_dst, src, dst);
+}
+
+// Dropping these would silently disable ggml-cuda's graph optimization and
+// ggml_backend_sched's host-weight offload for every GPU this backend replaces.
+static void tsg_dsv4_backend_graph_optimize(ggml_backend_t backend, ggml_cgraph * cgraph,
+        ggml_backend_graph_optimize_params * params)
+{
+    ggml_backend_t cuda = tsg_dsv4_unwrap(backend);
+    if (cuda->iface.graph_optimize) cuda->iface.graph_optimize(cuda, cgraph, params);
+}
+
+static void tsg_dsv4_backend_event_record(ggml_backend_t backend, ggml_backend_event_t event)
+{
+    ggml_backend_t cuda = tsg_dsv4_unwrap(backend);
+    cuda->iface.event_record(cuda, event);
+}
+
+static void tsg_dsv4_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event)
+{
+    ggml_backend_t cuda = tsg_dsv4_unwrap(backend);
+    cuda->iface.event_wait(cuda, event);
 }
 
 static void tsg_dsv4_backend_synchronize(ggml_backend_t backend)
@@ -760,54 +917,87 @@ static void tsg_dsv4_backend_synchronize(ggml_backend_t backend)
     cudaStreamSynchronize(tsg_dsv4_backend_stream(c));
 }
 
+// This backend owns every node the scheduler gives it: fused nodes launch here,
+// and each maximal run of ordinary nodes is handed to the CUDA backend as a
+// graph view. Submission is asynchronous throughout, so the whole device
+// subgraph is one ordered stream with no host round trip inside it.
 static enum ggml_status tsg_dsv4_backend_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph)
 {
     auto * c = (tsg_dsv4_backend_ctx *) backend->context;
     cudaSetDevice(c->device);
     cudaStream_t stream = tsg_dsv4_backend_stream(c);
 
+    int run_start = -1;     // first node of the pending run of ordinary nodes
+    bool run_has_work = false;  // ... and whether any of them computes anything
+    auto flush = [&](int end) -> enum ggml_status
+    {
+        const int start = run_start;
+        const bool work = run_has_work;
+        run_start = -1;
+        run_has_work = false;
+        // A run of nothing but views and reshapes has no kernels to launch, and
+        // handing it to ggml-cuda would still cost a CUDA-graph capture cycle.
+        if (start < 0 || !work) return GGML_STATUS_SUCCESS;
+        ggml_cgraph view = ggml_graph_view(cgraph, start, end);
+        return ggml_backend_graph_compute_async(c->cuda_backend, &view);
+    };
+
     for (int i = 0; i < cgraph->n_nodes; i++)
     {
         ggml_tensor * node = cgraph->nodes[i];
-        switch (node->op)
-        {
-            case GGML_OP_NONE:
-            case GGML_OP_VIEW:
-            case GGML_OP_RESHAPE:
-            case GGML_OP_PERMUTE:
-            case GGML_OP_TRANSPOSE:
-                continue;
-            default:
-                break;
-        }
         const tsg_dsv4_fused_desc * d = tsg_dsv4_node_desc(node);
         if (!d)
         {
-            GGML_LOG_ERROR("%s: unexpected op %s in fused split\n", __func__, ggml_op_desc(node));
-            return GGML_STATUS_FAILED;
+            if (run_start < 0) run_start = i;
+            switch (node->op)
+            {
+                case GGML_OP_NONE:
+                case GGML_OP_VIEW:
+                case GGML_OP_RESHAPE:
+                case GGML_OP_PERMUTE:
+                case GGML_OP_TRANSPOSE:
+                    break;
+                default:
+                    run_has_work = true;
+                    break;
+            }
+            continue;
+        }
+        // A fused node depends on the run before it, so that run has to be
+        // submitted first; both go to the same stream, which orders them.
+        const enum ggml_status status = flush(i);
+        if (status != GGML_STATUS_SUCCESS)
+        {
+            // Whatever we already launched is still in flight on this stream.
+            // Drain it before returning, so the caller's error handling does
+            // not race kernels that are still reading the graph's tensors.
+            cudaStreamSynchronize(stream);
+            return status;
         }
         tsg_dsv4_fused_launch(d, node, stream);
     }
-    return GGML_STATUS_SUCCESS;
+    const enum ggml_status status = flush(cgraph->n_nodes);
+    if (status != GGML_STATUS_SUCCESS) cudaStreamSynchronize(stream);
+    return status;
 }
 
 static const ggml_backend_i tsg_dsv4_backend_iface = {
     /* .get_name            = */ tsg_dsv4_backend_get_name,
     /* .free                = */ tsg_dsv4_backend_free,
-    /* .set_tensor_async    = */ nullptr,
-    /* .get_tensor_async    = */ nullptr,
+    /* .set_tensor_async    = */ tsg_dsv4_backend_set_tensor_async,
+    /* .get_tensor_async    = */ tsg_dsv4_backend_get_tensor_async,
     /* .set_tensor_2d_async = */ nullptr,
     /* .get_tensor_2d_async = */ nullptr,
-    /* .cpy_tensor_async    = */ nullptr,
+    /* .cpy_tensor_async    = */ tsg_dsv4_backend_cpy_tensor_async,
     /* .synchronize         = */ tsg_dsv4_backend_synchronize,
     /* .graph_plan_create   = */ nullptr,
     /* .graph_plan_free     = */ nullptr,
     /* .graph_plan_update   = */ nullptr,
     /* .graph_plan_compute  = */ nullptr,
     /* .graph_compute       = */ tsg_dsv4_backend_graph_compute,
-    /* .event_record        = */ nullptr,
-    /* .event_wait          = */ nullptr,
-    /* .graph_optimize      = */ nullptr,
+    /* .event_record        = */ tsg_dsv4_backend_event_record,
+    /* .event_wait          = */ tsg_dsv4_backend_event_wait,
+    /* .graph_optimize      = */ tsg_dsv4_backend_graph_optimize,
 };
 
 // ---- device iface ----
@@ -857,13 +1047,44 @@ static ggml_backend_buffer_type_t tsg_dsv4_dev_get_buffer_type(ggml_backend_dev_
 
 static bool tsg_dsv4_dev_supports_op(ggml_backend_dev_t dev, const ggml_tensor * op)
 {
-    GGML_UNUSED(dev);
-    return tsg_dsv4_node_desc(op) != nullptr;
+    auto * c = (tsg_dsv4_backend_ctx *) dev->context;
+    if (tsg_dsv4_node_desc(op) != nullptr) return true;
+    // Claiming the CUDA device's ops too is what keeps this device's subgraph in
+    // ONE scheduler split. Registering both backends instead splits the graph at
+    // every alternation between them -- roughly 14 times per DeepSeek V4.1 layer.
+    return ggml_backend_dev_supports_op(c->cuda_dev, op);
 }
 
 static bool tsg_dsv4_dev_supports_buft(ggml_backend_dev_t dev, ggml_backend_buffer_type_t buft)
 {
-    return buft == ((tsg_dsv4_backend_ctx *) dev->context)->cuda_buft;
+    auto * c = (tsg_dsv4_backend_ctx *) dev->context;
+    return buft == c->cuda_buft || ggml_backend_dev_supports_buft(c->cuda_dev, buft);
+}
+
+// Events belong to the paired CUDA device, which is also where they are
+// recorded and waited on, so they behave exactly as an unwrapped CUDA event.
+static ggml_backend_event_t tsg_dsv4_dev_event_new(ggml_backend_dev_t dev)
+{
+    auto * c = (tsg_dsv4_backend_ctx *) dev->context;
+    return c->cuda_dev->iface.event_new ? c->cuda_dev->iface.event_new(c->cuda_dev) : nullptr;
+}
+
+static void tsg_dsv4_dev_event_free(ggml_backend_dev_t dev, ggml_backend_event_t event)
+{
+    auto * c = (tsg_dsv4_backend_ctx *) dev->context;
+    if (c->cuda_dev->iface.event_free) c->cuda_dev->iface.event_free(c->cuda_dev, event);
+}
+
+static void tsg_dsv4_dev_event_synchronize(ggml_backend_dev_t dev, ggml_backend_event_t event)
+{
+    auto * c = (tsg_dsv4_backend_ctx *) dev->context;
+    if (c->cuda_dev->iface.event_synchronize) c->cuda_dev->iface.event_synchronize(c->cuda_dev, event);
+}
+
+static bool tsg_dsv4_dev_offload_op(ggml_backend_dev_t dev, const ggml_tensor * op)
+{
+    auto * c = (tsg_dsv4_backend_ctx *) dev->context;
+    return c->cuda_dev->iface.offload_op && c->cuda_dev->iface.offload_op(c->cuda_dev, op);
 }
 
 static const ggml_backend_device_i tsg_dsv4_device_iface = {
@@ -878,10 +1099,10 @@ static const ggml_backend_device_i tsg_dsv4_device_iface = {
     /* .buffer_from_host_ptr = */ nullptr,
     /* .supports_op          = */ tsg_dsv4_dev_supports_op,
     /* .supports_buft        = */ tsg_dsv4_dev_supports_buft,
-    /* .offload_op           = */ nullptr,
-    /* .event_new            = */ nullptr,
-    /* .event_free           = */ nullptr,
-    /* .event_synchronize    = */ nullptr,
+    /* .offload_op           = */ tsg_dsv4_dev_offload_op,
+    /* .event_new            = */ tsg_dsv4_dev_event_new,
+    /* .event_free           = */ tsg_dsv4_dev_event_free,
+    /* .event_synchronize    = */ tsg_dsv4_dev_event_synchronize,
 };
 
 static ggml_guid_t tsg_dsv4_backend_guid()
@@ -907,9 +1128,11 @@ ggml_backend_t tsg_dsv4_fused_backend_init(ggml_backend_t cuda_backend)
     snprintf(ctx->name, sizeof(ctx->name), "TSDSV4-%d", ctx->device);
     snprintf(ctx->desc, sizeof(ctx->desc), "TensorSharp DSV4 fused ops (CUDA%d)", ctx->device);
 
-    // one static device record per CUDA device index
-    static ggml_backend_device devices[GGML_CUDA_MAX_DEVICES];
-    ggml_backend_device * dev = &devices[ctx->device];
+    // One device record per backend instance, not one per CUDA device index: a
+    // shared static would be re-pointed at each new model's context, and freeing
+    // any one model would leave the others' device record dangling. The record
+    // is reached on every supports_op call, so this has to be per instance.
+    auto * dev = new ggml_backend_device();
     dev->iface = tsg_dsv4_device_iface;
     dev->reg = nullptr;
     dev->context = ctx;

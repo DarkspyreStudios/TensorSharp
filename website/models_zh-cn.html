@@ -23,7 +23,7 @@
   <p>完整参考分为四个页面。如果你已经确定要用哪个模型，从"模型下载"开始；如果还在挑选，从对应的分类页面开始。</p>
   <div class="card-grid">
     <a class="card" href="models-downloads_zh-cn.html"><div class="ic">⬇️</div><h3>模型下载</h3><p>所有 GGUF，以及各家族所需的投影器、VAE、编码器与草稿模型。</p></a>
-    <a class="card" href="models-text_zh-cn.html"><div class="ic">🧠</div><h3>文本与 LLM 模型</h3><p>十种架构及其运行示例，加上多模态输入、思考模式与工具调用。</p></a>
+    <a class="card" href="models-text_zh-cn.html"><div class="ic">🧠</div><h3>文本与 LLM 模型</h3><p>十二种架构及其运行示例，加上多模态输入、思考模式与工具调用。</p></a>
     <a class="card" href="models-image_zh-cn.html"><div class="ic">🖼️</div><h3>图像生成</h3><p>Qwen-Image-Edit、Lightning LoRA，以及 DiT 步缓存。</p></a>
     <a class="card" href="models-video_zh-cn.html"><div class="ic">🎬</div><h3>视频生成</h3><p>MiniMax-H3 带原生立体声音频，以及 Wan 2.1 / 2.2 与那个把数小时变成几分钟的蒸馏检查点。</p></a>
   </div>
@@ -33,6 +33,7 @@
   <table>
     <thead><tr><th>架构</th><th>GGUF 架构键</th><th>示例模型</th><th>多模态</th><th>思考</th><th>工具</th><th>MTP 推测</th></tr></thead>
     <tbody>
+      <tr><td><strong>DeepSeek V4.1 Flash</strong></td><td><code>deepseek41</code></td><td>DeepSeek-V4.1-Flash（40 层，384 个路由专家 top-6 加一个共享专家，四条残差流与延迟 hyper-connection 混合，第 1 与第 14 层注入 Engram n-gram 特征，声明 1M 上下文）。服务后端为 <code>ggml_cuda</code>；Q2_K 版本必须先准备 Engram sidecar 才能运行</td><td>配合单独准备的视觉伴随文件（<code>--mmproj</code>）支持图像与视频；音频会被拒绝，而不是被忽略</td><td class="yes">支持</td><td class="yes">支持（带空格的 DSML，受语法约束）</td><td class="no">—（V4 的草稿模型会被拒绝）</td></tr>
       <tr><td><strong>DeepSeek V4 Flash</strong></td><td><code>deepseek4</code></td><td>DeepSeek-V4-Flash（284B MoE，256 专家，压缩稀疏注意力，1M 上下文）</td><td>仅文本</td><td class="yes">是</td><td class="yes">是（DSML）</td><td class="yes">是（DSpark 块级草稿器，独立 GGUF）</td></tr>
       <tr><td><strong>GLM 5.x</strong></td><td><code>glm-dsa</code>、<code>glm5next</code></td><td>GLM-5.2（744B-A40B MoE，256 专家，MLA + DeepSeek 稀疏注意力，1M 上下文）；GLM-5.3-Flash（320B，288 个路由专家，45 个主干层里 34 层 KDA 线性注意力，另外 11 层是 NoPE MLA/DSA 配池化索引器）</td><td>5.3-Flash 支持图像（5.2 仅文本）</td><td class="yes">是</td><td class="yes">是（XML 工具调用）</td><td class="no">—</td></tr>
       <tr><td><strong>Gemma 4</strong></td><td><code>gemma4</code></td><td>gemma-4-E4B、12B、31B、26B-A4B (MoE)</td><td>图像、视频、音频</td><td class="yes">是</td><td class="yes">是</td><td class="yes">是（独立草稿）</td></tr>
@@ -40,8 +41,10 @@
       <tr><td><strong>Qwen 3.8 Flash Next</strong></td><td><code>qwen4exp</code></td><td>Qwen3.8-Flash-Next（混合 MoE：GatedDeltaNet 递归层与全注意力层交错，其中一部分挂在 Qwen 稀疏注意力的索引器之后；PLE n-gram 嵌入块；×4 超连接流；512 专家、每 token 用 10 个）</td><td>图像</td><td class="yes">是</td><td class="no">否——暂没有结构化输出解析器</td><td class="no">—</td></tr>
       <tr><td><strong>GPT OSS</strong></td><td><code>gptoss</code>、<code>gpt-oss</code></td><td>gpt-oss-20b (MoE)</td><td>仅文本</td><td class="yes">是（始终）</td><td class="yes">是</td><td class="no">—</td></tr>
       <tr><td><strong>Nemotron-H</strong></td><td><code>nemotron_h</code>、<code>nemotron_h_moe</code></td><td>Nemotron-H-8B、47B、Nemotron 3 Nano Omni</td><td>图像（Omni）</td><td class="yes">是</td><td class="yes">是</td><td class="no">—</td></tr>
+      <tr><td><strong>Hunyuan Dense</strong></td><td><code>hunyuan-dense</code></td><td>腾讯稠密 Hunyuan 解码器，例如 Hy-MT2 系列——GQA，其 per-head QK-norm 在 NeoX RoPE <em>之后</em>，随后是 SwiGLU。单设备</td><td>仅文本</td><td class="no">不支持</td><td class="no">不支持</td><td class="no">—</td></tr>
       <tr><td><strong>Mistral 3</strong></td><td><code>mistral3</code></td><td>Mistral-Small-3.1-24B-Instruct</td><td>图像</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>Muse-Glimmer</strong></td><td><code>muse-glimmer</code>、<code>muse_glimmer</code></td><td>Muse-Glimmer-30B（交错滑动窗口 + NoPE 全注意力层，注意力输出门控）</td><td>图像</td><td class="yes">是</td><td class="yes">是（ATEM）</td><td class="yes">是（DFlash 块草稿模型，独立 GGUF）</td></tr>
+      <tr><td><strong>Bonsai Q1_0</strong></td><td><code>qwen3</code>（8B）、<code>qwen35</code>（27B）</td><td>Bonsai-8B（36 层稠密 GQA）与 Bonsai-27B（48 层 GatedDeltaNet + 16 层全注意力），均为每权重 1.125 比特。仅本地导入——这两个 GGUF 既未声明发布仓库 URL，也未声明许可证</td><td>仅文本</td><td class="yes">27B 支持；8B 模板固定输出一个空的 think 块</td><td class="yes">支持</td><td class="no">—</td></tr>
       <tr><td><strong>DiffusionGemma</strong></td><td><code>diffusion-gemma</code>、<code>diffusion_gemma</code></td><td>diffusion-gemma 文本扩散 GGUF</td><td>仅文本</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>Qwen-Image-Edit</strong></td><td><code>qwen_image</code>、<code>qwen-image</code></td><td>qwen-image-edit MMDiT（+ VAE 与 Qwen2.5-VL 伴随文件）</td><td>图像编辑（图像+文本 → 图像）</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>MiniMax-H3</strong></td><td><code>minimax-h3</code>、<code>minimax_h3</code></td><td>MiniMax-H3 FL2VA / Ref2VA 去噪器（+ Qwen3-VL-32B 文本编码器、视频 VAE 与音频 VAE 伴随文件）。公开的 GGUF 没有任何元数据，靠张量表识别</td><td>视频输出 <strong>+ 32 kHz 立体声音频</strong>（文本 → 视频、图像 → 视频、首尾帧、参考 → 视频）</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>

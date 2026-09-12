@@ -36,7 +36,7 @@ namespace TensorSharp.Server.ProtocolAdapters
     /// non-streaming returns a single <c>chat.completion</c>) are highly
     /// interdependent and easier to follow when kept together.
     /// </summary>
-    public sealed class OpenAIChatAdapter
+    public sealed partial class OpenAIChatAdapter
     {
         private readonly ModelService _svc;
         private readonly InferenceQueue _queue;
@@ -118,7 +118,7 @@ namespace TensorSharp.Server.ProtocolAdapters
             List<ChatMessage> messages;
             try
             {
-                messages = ChatMessageParser.ParseOpenAI(messagesEl, _uploads, openaiLogger);
+                messages = ChatMessageParser.ParseOpenAI(messagesEl, _uploads, openaiLogger, _svc.Architecture);
             }
             catch (UploadLimitExceededException ex)
             {
@@ -136,9 +136,22 @@ namespace TensorSharp.Server.ProtocolAdapters
                 });
                 return;
             }
+            catch (JsonException ex)
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = new { message = ex.Message, type = "invalid_request_error" } });
+                return;
+            }
             string requestId = OpenAIResponseFactory.NewRequestId();
 
             var openaiTools = ToolFunctionParser.ParseOpenAI(body);
+            bool toolsDisabled = body.TryGetProperty("tool_choice", out var toolChoice) &&
+                toolChoice.ValueKind == JsonValueKind.String && toolChoice.GetString() == "none";
+            // Keep the parsed assistant/tool history, but do not offer any new
+            // tools when the client requests a final answer. This also permits
+            // a JSON response after a tool round with the original tool catalog.
+            if (toolsDisabled)
+                openaiTools = null;
             bool openaiThink = body.TryGetProperty("think", out var oaiThinkProp) && oaiThinkProp.GetBoolean();
             var requestedSkills = SkillSelectionParser.Parse(body);
 
@@ -170,17 +183,18 @@ namespace TensorSharp.Server.ProtocolAdapters
             // The compatibility check sees the CLIENT's tools, never the built-in skill
             // tools added below: a request that combines response_format with skills is
             // legal (skills are delivered inline for it, see SkillRequestPlan.Create),
-            // while one that combines response_format with its own tools is not.
-            if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(ctx, responseFormat, openaiThink, openaiTools))
+            // while active client tool generation remains incompatible with it.
+            if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(
+                    ctx, responseFormat, openaiThink, openaiTools, _svc.Architecture))
                 return;
 
             using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
-                _workspaces, _codeRunner, _svc.Architecture, allowTools: responseFormat == null);
+                _workspaces, _codeRunner, _svc.Architecture, allowTools: responseFormat == null && !toolsDisabled);
 
             var skillPlan = SkillRequestPlan.Create(
                 _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), openaiTools,
                 _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
-                allowTools: responseFormat == null, codeRunner: _codeRunner,
+                allowTools: responseFormat == null && !toolsDisabled, codeRunner: _codeRunner,
                 workspace: workspaceLease?.Workspace, logger: openaiLogger);
 
             if (unknownSkills.Count > 0)
@@ -202,6 +216,17 @@ namespace TensorSharp.Server.ProtocolAdapters
             }
 
             var effectiveTools = skillPlan?.Tools ?? openaiTools;
+            TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar toolGrammar = null;
+            if (IsDeepSeek41(_svc.Architecture))
+            {
+                try { toolGrammar = PrepareDeepSeek41ToolGrammar(body, openaiTools, effectiveTools, responseFormat); }
+                catch (Exception ex) when (ex is NotSupportedException or JsonException or ArgumentException)
+                {
+                    ctx.Response.StatusCode = 400;
+                    await ctx.Response.WriteAsJsonAsync(new { error = new { message = ex.Message, type = "invalid_request_error" } });
+                    return;
+                }
+            }
             var inferenceMessages = StructuredOutputPrompt.Apply(messages, responseFormat);
             if (skillPlan != null)
             {
@@ -218,12 +243,12 @@ namespace TensorSharp.Server.ProtocolAdapters
             if (stream)
             {
                 await StreamCompletionAsync(ctx, requestId, modelName, inferenceMessages, maxTokens,
-                    samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger);
+                    samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger, toolGrammar);
             }
             else
             {
                 await CompleteSyncAsync(ctx, requestId, modelName, inferenceMessages, maxTokens,
-                    samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger);
+                    samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger, toolGrammar);
             }
         }
 
@@ -233,12 +258,25 @@ namespace TensorSharp.Server.ProtocolAdapters
             HttpContext ctx,
             StructuredOutputFormat responseFormat,
             bool openaiThink,
-            List<ToolFunction> openaiTools)
+            List<ToolFunction> openaiTools,
+            string architecture)
         {
-            if (openaiThink)
+            bool delayedThinkingGrammar = !string.IsNullOrEmpty(
+                ChatProtocolRegistry.For(architecture)?.ThinkingGrammarActivationTrigger);
+            if (openaiThink && !delayedThinkingGrammar)
             {
                 ctx.Response.StatusCode = 400;
                 await ctx.Response.WriteAsJsonAsync(new { error = new { message = "response_format cannot be combined with think=true", type = "invalid_request_error" } });
+                return false;
+            }
+
+            if (openaiThink && delayedThinkingGrammar &&
+                Environment.GetEnvironmentVariable("TS_JSON_GRAMMAR") == "0")
+            {
+                ctx.Response.StatusCode = 400;
+                await ctx.Response.WriteAsJsonAsync(new { error = new { message =
+                    "response_format with think=true requires the delayed JSON grammar; TS_JSON_GRAMMAR=0 disables it.",
+                    type = "invalid_request_error" } });
                 return false;
             }
 
@@ -305,7 +343,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// </para>
         /// </remarks>
         private SamplingConfig WithStructuredOutputConstraint(
-            SamplingConfig samplingConfig, StructuredOutputFormat responseFormat)
+            SamplingConfig samplingConfig, StructuredOutputFormat responseFormat, bool enableThinking)
         {
             if (responseFormat == null || samplingConfig == null)
                 return samplingConfig;
@@ -338,7 +376,7 @@ namespace TensorSharp.Server.ProtocolAdapters
                     // do so: enforcing the schema from token 0 forbids its own
                     // channel header and it answers the shape instead of the
                     // question (see OutputParserFactory.GrammarActivationTrigger).
-                    string trigger = OutputParserFactory.GrammarActivationTrigger(_svc.Architecture);
+                    string trigger = OutputParserFactory.GrammarActivationTrigger(_svc.Architecture, enableThinking);
                     if (trigger != null)
                         constraint.ActivateAfter(trigger);
                     withGrammar.Grammar = constraint;
@@ -346,6 +384,9 @@ namespace TensorSharp.Server.ProtocolAdapters
                 }
                 catch (Exception ex)
                 {
+                    if (enableThinking && !string.IsNullOrEmpty(
+                        ChatProtocolRegistry.For(_svc.Architecture)?.ThinkingGrammarActivationTrigger))
+                        throw new InvalidOperationException("Cannot construct the delayed JSON grammar required for thinking output.", ex);
                     _loggerFactory.CreateLogger("TensorSharp.Server.OpenAI.StructuredOutput")
                         .LogWarning(ex,
                             "Could not build a grammar for {Kind}; falling back to the " +
@@ -411,7 +452,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             StructuredOutputFormat responseFormat,
             QueueTicket ticket,
             SkillRequestPlan skillPlan,
-            ILogger skillLogger)
+            ILogger skillLogger,
+            TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar toolGrammar)
         {
             // Only the strict json_schema path must buffer the whole response so it
             // can be schema-normalized before anything is sent to the client. Plain
@@ -458,7 +500,8 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
-            samplingConfig = WithStructuredOutputConstraint(samplingConfig, responseFormat);
+            samplingConfig = WithStructuredOutputConstraint(samplingConfig, responseFormat, openaiThink);
+            samplingConfig = WithDeepSeek41ToolGrammar(samplingConfig, toolGrammar, openaiThink);
 
             bool useStreamParser = openaiThink || (openaiTools != null && openaiTools.Count > 0)
                 || OutputParserFactory.IsAlwaysRequired(_svc.Architecture);
@@ -707,7 +750,8 @@ namespace TensorSharp.Server.ProtocolAdapters
             StructuredOutputFormat responseFormat,
             QueueTicket ticket,
             SkillRequestPlan skillPlan,
-            ILogger skillLogger)
+            ILogger skillLogger,
+            TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar toolGrammar)
         {
             await ticket.WaitUntilReadyAsync();
 
@@ -719,7 +763,8 @@ namespace TensorSharp.Server.ProtocolAdapters
                 return;
             }
 
-            samplingConfig = WithStructuredOutputConstraint(samplingConfig, responseFormat);
+            samplingConfig = WithStructuredOutputConstraint(samplingConfig, responseFormat, openaiThink);
+            samplingConfig = WithDeepSeek41ToolGrammar(samplingConfig, toolGrammar, openaiThink);
 
             var collector = new ChatStreamCollector();
             int promptTokens = 0, evalTokens = 0, kvReusedTokens = 0;

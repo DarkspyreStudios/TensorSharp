@@ -1819,6 +1819,9 @@ namespace TensorSharp.Chat
                 uiTools = ToolFunctionParser.ParseOllama(body);
 
             var messages = ChatMessageParser.ParseWebUi(messagesEl);
+            string audioInputError = ChatGenerationPipeline.UnsupportedAudioInputError(_svc.Architecture, messages);
+            if (audioInputError != null)
+                throw new WebUiRequestRejectedException(400, new { error = audioInputError });
             var requestedSkills = SkillSelectionParser.Parse(body);
             bool? requestedDiscovery = SkillSelectionParser.ParseDiscovery(body);
             WebUiSkillRoute inferredSkillRoute = null;

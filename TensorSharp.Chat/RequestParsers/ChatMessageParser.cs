@@ -30,7 +30,7 @@ namespace TensorSharp.Server.RequestParsers
     /// directory so subsequent attachments (and ChatStream's media injector)
     /// resolve the same way regardless of how the request arrived.
     /// </summary>
-    internal static class ChatMessageParser
+    internal static partial class ChatMessageParser
     {
         /// <summary>
         /// Parse the messages array from the Web UI's <c>/api/chat</c> body.
@@ -240,8 +240,29 @@ namespace TensorSharp.Server.RequestParsers
         /// either a plain string content, or an array of parts where each part
         /// is either text or an image (data URL or external URL).
         /// </summary>
-        public static List<ChatMessage> ParseOpenAI(JsonElement messagesEl, UploadStoragePolicy uploads, ILogger logger = null)
+        public static List<ChatMessage> ParseOpenAI(JsonElement messagesEl, UploadStoragePolicy uploads, ILogger logger = null,
+            string architecture = null)
         {
+            // Scan the complete request before writing any uploads: an image
+            // preceding unsupported audio or an invalid image must not leave
+            // partial files, or silently disappear from the model's input.
+            if (string.Equals(architecture, "deepseek41", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (JsonElement message in messagesEl.EnumerateArray())
+                    if (message.TryGetProperty("content", out JsonElement content) && content.ValueKind == JsonValueKind.Array)
+                        foreach (JsonElement part in content.EnumerateArray())
+                        {
+                            if (part.TryGetProperty("type", out JsonElement type) &&
+                                type.ValueKind == JsonValueKind.String)
+                            {
+                                if (type.GetString() is "input_audio" or "audio_url")
+                                    throw new JsonException(ChatGenerationPipeline.DeepSeek41AudioInputError);
+                                if (type.GetString() == "image_url")
+                                    ValidateDeepSeek41ImageUrl(part);
+                            }
+                        }
+            }
+
             var messages = new List<ChatMessage>();
             int droppedImages = 0;
             int droppedAudio = 0;
@@ -295,6 +316,7 @@ namespace TensorSharp.Server.RequestParsers
                                     string b64 = url.Substring(commaIdx + 1);
                                     string path = WriteBase64Image(b64, uploads);
                                     msg.ImagePaths.Add(path);
+                                    msg.ImageTimestamps?.Add(null);
                                 }
                                 else if (!string.IsNullOrEmpty(url))
                                 {
@@ -302,6 +324,12 @@ namespace TensorSharp.Server.RequestParsers
                                     // decoded; counted so the drop is reported below.
                                     droppedImages++;
                                 }
+                            }
+                            else if (type == "video_url" && part.TryGetProperty("video_url", out var videoUrl))
+                            {
+                                if (architecture != "deepseek41")
+                                    throw new JsonException("video_url frame sampling is currently implemented for DeepSeek V4.1 only.");
+                                AppendDeepSeek41Video(msg, videoUrl, uploads);
                             }
                             else if (type == "input_audio" && part.TryGetProperty("input_audio", out var audioEl))
                             {
@@ -339,6 +367,8 @@ namespace TensorSharp.Server.RequestParsers
                 // for images), accepted alongside the OpenAI content-part form.
                 AppendMessageLevelAudios(msgEl, msg, uploads);
 
+                ReadOpenAIHistory(msgEl, msg);
+
                 messages.Add(msg);
             }
 
@@ -359,6 +389,71 @@ namespace TensorSharp.Server.RequestParsers
             return messages;
         }
 
+        private static void ValidateDeepSeek41ImageUrl(JsonElement part)
+        {
+            if (!part.TryGetProperty("image_url", out JsonElement image) ||
+                image.ValueKind != JsonValueKind.Object ||
+                !image.TryGetProperty("url", out JsonElement value) ||
+                value.ValueKind != JsonValueKind.String)
+                throw new JsonException("DeepSeek V4.1 image_url must contain a base64 image data URI in url.");
+
+            ValidateDeepSeek41ImageDataUri(value.GetString());
+        }
+
+        private static void ValidateDeepSeek41ImageDataUri(string url)
+        {
+            int comma = !string.IsNullOrEmpty(url) && url.StartsWith("data:", StringComparison.Ordinal)
+                ? url.IndexOf(',') : -1;
+            if (comma <= 0)
+                throw new JsonException("DeepSeek V4.1 image_url supports base64 image data URIs; remote URLs are not fetched.");
+
+            // Preserve the existing data-URI header and base64 whitespace
+            // handling. This scan validates without allocating decoded bytes;
+            // WriteBase64Image performs the one decode after all parts pass.
+            if (!System.Buffers.Text.Base64.IsValid(url.AsSpan(comma + 1), out int decodedLength))
+                throw new JsonException("DeepSeek V4.1 image_url contains invalid base64.");
+            if (decodedLength == 0)
+                throw new JsonException("DeepSeek V4.1 image_url contains an empty image.");
+        }
+
+        private static void ReadOpenAIHistory(JsonElement source, ChatMessage message)
+        {
+            if (source.TryGetProperty("tool_call_id", out var resultId) && resultId.ValueKind == JsonValueKind.String)
+                message.ToolCallId = resultId.GetString();
+            if ((source.TryGetProperty("reasoning_content", out var reasoning) ||
+                 source.TryGetProperty("reasoning", out reasoning)) && reasoning.ValueKind == JsonValueKind.String)
+                message.Thinking = reasoning.GetString();
+
+            if (!source.TryGetProperty("tool_calls", out var calls) || calls.ValueKind == JsonValueKind.Null)
+                return;
+            if (calls.ValueKind != JsonValueKind.Array)
+                throw new JsonException("tool_calls must be an array.");
+
+            message.ToolCalls = new List<ToolCall>();
+            foreach (JsonElement call in calls.EnumerateArray())
+            {
+                if (call.ValueKind != JsonValueKind.Object || !call.TryGetProperty("function", out var function) ||
+                    function.ValueKind != JsonValueKind.Object ||
+                    !function.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String)
+                    throw new JsonException("Each tool call requires a function name.");
+
+                Dictionary<string, object> arguments = new();
+                if (function.TryGetProperty("arguments", out var value))
+                {
+                    string json = value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
+                    arguments = JsonSerializer.Deserialize<Dictionary<string, object>>(json)
+                        ?? throw new JsonException("Tool arguments must be a JSON object.");
+                }
+                message.ToolCalls.Add(new ToolCall
+                {
+                    Id = call.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null,
+                    Name = name.GetString(),
+                    Arguments = arguments,
+                    Index = message.ToolCalls.Count,
+                });
+            }
+        }
+
         /// <summary>
         /// Parse the Responses API <c>input</c> field, which is either a plain
         /// string (shorthand for a single user turn) or an array of message
@@ -367,8 +462,37 @@ namespace TensorSharp.Server.RequestParsers
         /// string is prepended as a system message, matching how the real API
         /// folds it into the model's system prompt.
         /// </summary>
-        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string instructions, UploadStoragePolicy uploads, ILogger logger = null)
+        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string instructions, UploadStoragePolicy uploads, ILogger logger = null,
+            string architecture = null)
         {
+            if (string.Equals(architecture, "deepseek41", StringComparison.OrdinalIgnoreCase) &&
+                inputEl.ValueKind == JsonValueKind.Array)
+            {
+                // Validate every supported message before any media is written.
+                // Check the audio type before decoding its payload: missing or
+                // malformed unsupported audio must not silently disappear.
+                foreach (JsonElement item in inputEl.EnumerateArray())
+                {
+                    if (item.TryGetProperty("type", out JsonElement itemType) &&
+                        (itemType.ValueKind != JsonValueKind.String || itemType.GetString() != "message"))
+                        continue;
+                    if (item.TryGetProperty("content", out JsonElement content) && content.ValueKind == JsonValueKind.Array)
+                        foreach (JsonElement part in content.EnumerateArray())
+                            if (part.TryGetProperty("type", out JsonElement type) &&
+                                type.ValueKind == JsonValueKind.String)
+                            {
+                                if (type.GetString() is "input_audio" or "audio_url")
+                                    throw new JsonException(ChatGenerationPipeline.DeepSeek41AudioInputError);
+                                if (type.GetString() == "input_image")
+                                {
+                                    if (!part.TryGetProperty("image_url", out JsonElement url) || url.ValueKind != JsonValueKind.String)
+                                        throw new JsonException("DeepSeek V4.1 input_image.image_url must contain a base64 image data URI.");
+                                    ValidateDeepSeek41ImageDataUri(url.GetString());
+                                }
+                            }
+                }
+            }
+
             var messages = new List<ChatMessage>();
             Dictionary<string, int> skippedItems = null;
             int droppedImages = 0;

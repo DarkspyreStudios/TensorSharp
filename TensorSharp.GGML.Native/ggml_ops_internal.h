@@ -983,11 +983,16 @@ namespace tsg
 #endif
 
     // Worker-thread count for the host MoE matmul (--cpu-moe-threads). Zero
-    // restores the default (available_cpu_parallelism() - 1). Must be an
+    // clears the explicit override. Must be an
     // explicit call rather than an environment variable: .NET's
     // Environment.SetEnvironmentVariable does not write the native environment
     // on Linux, so std::getenv here never observed the flag.
     void moe_set_host_thread_count(int threads);
+
+    // Only the explicit native/CLI override, or zero when unset. Model-specific
+    // backends can apply their own automatic count and environment precedence
+    // without accidentally inheriting the generic host-MoE default policy.
+    int host_moe_explicit_thread_count();
 
     // Default worker count for a host-side expert matmul: half the usable CPU
     // parallelism, capped at 64 (the decode-side matmul is one token wide, so

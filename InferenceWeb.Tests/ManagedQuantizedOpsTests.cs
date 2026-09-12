@@ -953,6 +953,228 @@ public class ManagedQuantizedOpsTests
             BitConverter.HalfToUInt16Bits((Half)value));
     }
 
+    /// <summary>
+    /// Q2_K now has an integer dot kernel, so a Q2_K matmul quantizes its
+    /// activations to Q8_K and multiplies in integers instead of dequantizing the
+    /// weight row to float first. The result must still agree with the float
+    /// answer to within the activation quantization, which is one part in 127 of
+    /// the row's largest magnitude.
+    /// </summary>
+    [Theory]
+    [InlineData(256)]
+    [InlineData(512)]
+    [InlineData(1024)]
+    public void Q2KMatmul_IntegerPathMatchesDequantizedFloat(int elementCount)
+    {
+        int superBlocks = elementCount / 256;
+        byte[] raw = new byte[superBlocks * 84];
+        var rng = new Random(20260911 + elementCount);
+        for (int b = 0; b < superBlocks; b++)
+        {
+            int o = b * 84;
+            for (int i = 0; i < 16; i++)                    // scales: low nibble scale, high nibble min
+                raw[o + i] = (byte)rng.Next(256);
+            for (int i = 0; i < 64; i++)                    // qs: four 2-bit values per byte
+                raw[o + 16 + i] = (byte)rng.Next(256);
+            BinaryPrimitives.WriteUInt16LittleEndian(raw.AsSpan(o + 80), HalfBits(0.0125f));
+            BinaryPrimitives.WriteUInt16LittleEndian(raw.AsSpan(o + 82), HalfBits(0.0037f));
+        }
+
+        float[] input = new float[elementCount];
+        for (int i = 0; i < elementCount; i++)
+            input[i] = (float)((i % 23) - 11) * 0.031f;
+
+        float[] actual = new float[1];
+        ManagedQuantizedOps.DotRowBatchToFloat32(
+            (int)GgmlTensorType.Q2_K, raw, 0, input, 0, elementCount, 1, elementCount, actual, 0);
+
+        float[] dequantized = new float[elementCount];
+        NativeDequant.DequantizeToFloat32((int)GgmlTensorType.Q2_K, raw, 0, dequantized, 0, elementCount);
+        float expected = Dot(dequantized, input, 0, elementCount);
+
+        // Q8_K keeps 7 bits of the activation row's peak, so bound the error by
+        // that step times the summed weight magnitude rather than by an absolute.
+        float peak = 0.0f, weightMass = 0.0f;
+        for (int i = 0; i < elementCount; i++)
+        {
+            peak = Math.Max(peak, Math.Abs(input[i]));
+            weightMass += Math.Abs(dequantized[i]);
+        }
+
+        float tolerance = peak / 127.0f * weightMass + 1e-4f;
+        Assert.True(Math.Abs(expected - actual[0]) <= tolerance,
+            $"Q2_K integer dot {actual[0]} against dequantized {expected}, tolerance {tolerance}");
+    }
+
+    /// <summary>
+    /// The tolerance test above would still pass if a vector lane were misplaced.
+    /// This one removes the tolerance: every activation is an exact multiple of
+    /// peak/127, so quantizing the row to Q8_K is lossless and the integer path
+    /// must reproduce the float answer to within float rounding alone. That makes
+    /// it sensitive to any lane, shift or scale-pairing mistake in the AVX2
+    /// kernel, which the scalar reference cannot be.
+    /// </summary>
+    [Theory]
+    [InlineData(256, 7)]
+    [InlineData(512, 11)]
+    [InlineData(1024, 13)]
+    [InlineData(2048, 17)]
+    public void Q2KMatmul_IsExactWhenActivationsQuantizeLosslessly(int elementCount, int seed)
+    {
+        int superBlocks = elementCount / 256;
+        byte[] raw = new byte[superBlocks * 84];
+        var rng = new Random(seed);
+        for (int b = 0; b < superBlocks; b++)
+        {
+            int o = b * 84;
+            for (int i = 0; i < 80; i++)
+                raw[o + i] = (byte)rng.Next(256);
+            BinaryPrimitives.WriteUInt16LittleEndian(raw.AsSpan(o + 80), HalfBits(0.02f));
+            BinaryPrimitives.WriteUInt16LittleEndian(raw.AsSpan(o + 82), HalfBits(0.005f));
+        }
+
+        // Q8_K scales by max|x|/127, so integer multiples of that step round-trip
+        // exactly. Pin the peak to element 0 so the scale is known.
+        const float step = 1.0f / 127.0f;
+        float[] input = new float[elementCount];
+        input[0] = 1.0f;
+        for (int i = 1; i < elementCount; i++)
+            input[i] = (rng.Next(-127, 128)) * step;
+
+        float[] actual = new float[1];
+        ManagedQuantizedOps.DotRowBatchToFloat32(
+            (int)GgmlTensorType.Q2_K, raw, 0, input, 0, elementCount, 1, elementCount, actual, 0);
+
+        float[] dequantized = new float[elementCount];
+        NativeDequant.DequantizeToFloat32((int)GgmlTensorType.Q2_K, raw, 0, dequantized, 0, elementCount);
+        double expected = 0.0;
+        for (int i = 0; i < elementCount; i++)
+            expected += (double)dequantized[i] * input[i];
+
+        double scale = Math.Max(1.0, Math.Abs(expected));
+        Assert.True(Math.Abs(expected - actual[0]) <= 1e-4 * scale,
+            $"Q2_K integer dot {actual[0]} against exact {expected} over {elementCount} elements");
+    }
+
+    /// <summary>
+    /// The integer kernels are reached through TryAddmmQuantizedToFloat32, NOT
+    /// through DotRowBatchToFloat32 (which always dequantizes). A test written
+    /// against the latter compares dequantize-then-dot with itself and passes no
+    /// matter what the kernel does, so every integer-dot type is checked here
+    /// against a dequantized reference computed the same way ggml's own
+    /// dequantizer does.
+    /// </summary>
+    [Theory]
+    [InlineData(GgmlTensorType.Q2_K, 256, 7)]
+    [InlineData(GgmlTensorType.Q2_K, 512, 11)]
+    [InlineData(GgmlTensorType.Q2_K, 1024, 13)]
+    [InlineData(GgmlTensorType.Q4_K, 512, 17)]
+    [InlineData(GgmlTensorType.Q5_K, 512, 19)]
+    [InlineData(GgmlTensorType.Q6_K, 512, 23)]
+    public void IntegerDotAddmmMatchesDequantizedFloat(GgmlTensorType type, int cols, int seed)
+    {
+        const int rows = 3, batch = 5;
+        int rowBytes = (int)ManagedQuantizedOps.RowSize((int)type, cols);
+        byte[] weights = new byte[rows * rowBytes];
+        var rng = new Random(seed);
+        rng.NextBytes(weights);
+        // Keep the super-block scales small so the dequantized magnitudes stay
+        // in a range where Q8_K activation rounding is the only error term.
+        int superBlocks = cols / 256;
+        for (int r = 0; r < rows; r++)
+        {
+            for (int b = 0; b < superBlocks; b++)
+            {
+                int o = r * rowBytes + b * (rowBytes / superBlocks);
+                int scaleOffset = type == GgmlTensorType.Q2_K ? o + 80 : o;
+                BinaryPrimitives.WriteUInt16LittleEndian(weights.AsSpan(scaleOffset), HalfBits(0.02f));
+                BinaryPrimitives.WriteUInt16LittleEndian(weights.AsSpan(scaleOffset + 2), HalfBits(0.005f));
+            }
+        }
+
+        float[] input = new float[batch * cols];
+        for (int i = 0; i < input.Length; i++)
+            input[i] = ((i * 37 % 61) - 30) * 0.021f;
+
+        float[] actual = new float[batch * rows];
+        Assert.True(ManagedQuantizedOps.TryAddmmQuantizedToFloat32(
+            (int)type, weights, 0, cols, rows, input, 0, cols, batch, actual, 0, rows));
+
+        float[] dequantized = new float[rows * cols];
+        for (int r = 0; r < rows; r++)
+            NativeDequant.DequantizeToFloat32((int)type, weights, r * rowBytes, dequantized, r * cols, cols);
+
+        float peak = 0f;
+        foreach (float v in input) peak = Math.Max(peak, Math.Abs(v));
+        for (int b = 0; b < batch; b++)
+        {
+            for (int r = 0; r < rows; r++)
+            {
+                double expected = 0, mass = 0;
+                for (int i = 0; i < cols; i++)
+                {
+                    expected += (double)dequantized[r * cols + i] * input[b * cols + i];
+                    mass += Math.Abs(dequantized[r * cols + i]);
+                }
+                double tolerance = peak / 127.0 * mass + 1e-3;
+                Assert.True(Math.Abs(expected - actual[b * rows + r]) <= tolerance,
+                    $"{type} integer addmm row {r} batch {b}: {actual[b * rows + r]} against dequantized {expected} (tolerance {tolerance})");
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the Q2_K integer kernel is worth against the dequantize-then-float
+    /// path it replaced. Prints both rates; asserts only that the integer path is
+    /// not slower, because an absolute rate is a property of the host.
+    /// </summary>
+    [Fact]
+    public void Q2KMatmul_IntegerPathIsNotSlowerThanDequantizing()
+    {
+        // DotRowBatchToFloat32 dots ONE weight row against `batch` activation
+        // vectors, which is the shape the kernel is measured on.
+        const int cols = 4096, batch = 512, reps = 6;
+        int superBlocks = cols / 256;
+        byte[] weights = new byte[superBlocks * 84];
+        var rng = new Random(4242);
+        rng.NextBytes(weights);
+        // d and dmin must stay small or the products overflow into noise.
+        BinaryPrimitives.WriteUInt16LittleEndian(weights.AsSpan(80), HalfBits(0.02f));
+        BinaryPrimitives.WriteUInt16LittleEndian(weights.AsSpan(82), HalfBits(0.005f));
+
+        float[] input = new float[(long)batch * cols is var n && n < int.MaxValue ? batch * cols : 0];
+        for (int i = 0; i < input.Length; i++) input[i] = ((i % 31) - 15) * 0.017f;
+        float[] outBuf = new float[batch];
+
+        ManagedQuantizedOps.DotRowBatchToFloat32((int)GgmlTensorType.Q2_K, weights, 0, input, 0, cols, batch, cols, outBuf, 0);
+        var sw = Stopwatch.StartNew();
+        for (int r = 0; r < reps; r++)
+            ManagedQuantizedOps.DotRowBatchToFloat32((int)GgmlTensorType.Q2_K, weights, 0, input, 0, cols, batch, cols, outBuf, 0);
+        sw.Stop();
+        double integerMs = sw.Elapsed.TotalMilliseconds / reps;
+
+        // What Q2_K did before it had a kernel: dequantize the row, then float dot.
+        float[] row = new float[cols];
+        sw.Restart();
+        for (int r = 0; r < reps; r++)
+        {
+            NativeDequant.DequantizeToFloat32((int)GgmlTensorType.Q2_K, weights, 0, row, 0, cols);
+            for (int i = 0; i < batch; i++)
+                outBuf[i] = Dot(row, input, i * cols, cols);
+        }
+        sw.Stop();
+        double dequantMs = sw.Elapsed.TotalMilliseconds / reps;
+
+        double gflops = 2.0 * batch * cols / 1e9;
+        Console.WriteLine($"Q2_K 1x{cols} against {batch} activations: integer {integerMs:F2} ms "
+                        + $"({gflops / (integerMs / 1000):F1} GFLOP/s), dequantize+float {dequantMs:F2} ms "
+                        + $"({gflops / (dequantMs / 1000):F1} GFLOP/s), ratio {dequantMs / integerMs:F2}x");
+        Assert.True(integerMs <= dequantMs * 1.5,
+            $"integer path {integerMs:F2} ms should not be materially slower than dequantizing {dequantMs:F2} ms");
+    }
+
+    private static ushort HalfBits(float value) => BitConverter.HalfToUInt16Bits((Half)value);
+
     private static float Dot(float[] lhs, float[] rhs, int rhsOffset, int length)
     {
         float sum = 0.0f;

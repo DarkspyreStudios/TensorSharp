@@ -28,6 +28,7 @@ public class ServerOptionsBuilderTests : IDisposable
 
     public ServerOptionsBuilderTests()
     {
+        _env.ClearSpeculationVars();
         // Build needs a writable base directory because it creates an
         // "uploads" folder under it. Use a temp dir per test instance to keep
         // the workspace clean.
@@ -1393,6 +1394,7 @@ public class ServerOptionsBuilderTests : IDisposable
             checkedFlags++;
 
             using var scope = new EnvScope();
+            scope.ClearSpeculationVars();
             string[] args = SampleArgsFor(flag, usage);
             Exception ex = Record.Exception(() =>
             {

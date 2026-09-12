@@ -9,10 +9,11 @@
 # Environment overrides:
 #   TENSORSHARP_GGML_GIT_URL   git URL                (default: ggml-org/ggml)
 #   TENSORSHARP_GGML_GIT_REF   branch/tag/commit      (default: master, the ggml default branch)
-#   TENSORSHARP_GGML_NO_UPDATE if set to 1/ON/true and a checkout already exists,
-#                              skip the network fetch and use what is on disk.
-# The upstream checkout is consumed unchanged; TensorSharp-specific behavior belongs
-# in TensorSharp.GGML.Native, not in patches applied during dependency fetching.
+#   TENSORSHARP_GGML_NO_UPDATE if set to 1/ON/true and a checkout or complete
+#                              source copy exists, use what is on disk.
+# Fetching leaves upstream sources unchanged. The CUDA native CMake configure
+# applies the reviewed source-precision fix from eng/ggml-patches; model-specific
+# behavior remains in TensorSharp.GGML.Native.
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -43,6 +44,16 @@ try {
 
 function Test-Truthy([string] $Value) {
     return $Value -match '^(1|ON|on|On|TRUE|true|True|YES|yes|Yes)$'
+}
+
+# Pinned source archives and rsync copies may intentionally omit Git metadata.
+# Keep valid sources before partial-clone cleanup when no-update is requested.
+if ((Test-Truthy $env:TENSORSHARP_GGML_NO_UPDATE) -and
+    (Test-Path (Join-Path $GgmlDir "CMakeLists.txt") -PathType Leaf) -and
+    (Test-Path (Join-Path $GgmlDir "src/CMakeLists.txt") -PathType Leaf) -and
+    (Test-Path (Join-Path $GgmlDir "include/ggml.h") -PathType Leaf)) {
+    Write-Host "ggml: TENSORSHARP_GGML_NO_UPDATE set; using existing sources at $GgmlDir"
+    exit 0
 }
 
 if (Test-Path (Join-Path $GgmlDir ".git")) {
