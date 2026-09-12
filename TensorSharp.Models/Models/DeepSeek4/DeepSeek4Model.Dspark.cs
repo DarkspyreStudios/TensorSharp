@@ -140,9 +140,18 @@ namespace TensorSharp.Models
             lock (_sync)
             {
                 if (_cudaExec != null)
+                {
                     _cudaExec.Rewind(length);
-                else
-                    GgmlDeepSeek4Native.Rewind(_handle, length);
+                }
+                // The native rewind refuses whatever it cannot serve, and a refusal that
+                // is dropped here leaves the drafter's rejected tail in the cache with
+                // every later token attending to it - fluent output from the wrong
+                // positions, with nothing in the log to say so.
+                else if (!GgmlDeepSeek4Native.Rewind(_handle, length))
+                {
+                    throw new InvalidOperationException(
+                        $"DeepSeek {Config.Architecture} refused a speculative cache rewind to {length} tokens.");
+                }
             }
         }
 

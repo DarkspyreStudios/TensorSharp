@@ -45,12 +45,48 @@ public class KVCacheMultiTurnIntegrationTests
             _cacheLen = 0;
         }
 
+        /// <summary>How far back this model can move its head, mirroring DeepSeek V4.1's
+        /// bounded sliding-window ring. int.MaxValue is a model with no such bound.</summary>
+        public int MaxRewind { get; init; } = int.MaxValue;
+
+        /// <summary>The multiple a rewind target must be, mirroring a compressed cache
+        /// whose head can only stop on a block boundary.</summary>
+        public int Granularity { get; init; } = 1;
+
+        /// <summary>How many truncations this model declined, so a test can tell a reset it
+        /// planned from a reset it fell back to.</summary>
+        public int DeclinedTruncations { get; private set; }
+
+        /// <summary>Targets where the head actually MOVED, as opposed to a whole-cache
+        /// reuse whose "truncation" is a no-op.</summary>
+        public List<int> RealTruncationTargets { get; } = new();
+
         public void Truncate(int n)
         {
-            if (!SupportsTruncation && n != _cacheLen)
-                throw new InvalidOperationException("Recurrent model can only truncate to the current cache length.");
+            if (!TryTruncate(n))
+                throw new InvalidOperationException($"This model cannot truncate to {n} (head at {_cacheLen}).");
+        }
+
+        /// <summary>Refusable truncation, the shape of ModelBase.TryTruncateKVCache: a
+        /// refusal changes nothing and the caller resets and re-prefills.</summary>
+        public bool TryTruncate(int n)
+        {
+            // Mirrors dsv41_plan_truncate: a target that IS the head moves nothing, so
+            // neither the depth nor the alignment applies to it. Only a real rewind has to
+            // land where the model can put its head.
+            bool reachable = n == _cacheLen
+                || (SupportsTruncation
+                    && _cacheLen - n <= MaxRewind
+                    && (Granularity <= 1 || n % Granularity == 0));
+            if (!reachable)
+            {
+                DeclinedTruncations++;
+                return false;
+            }
             Operations.Add(("truncate", n));
+            if (n != _cacheLen) RealTruncationTargets.Add(n);
             _cacheLen = n;
+            return true;
         }
 
         public float[] Forward(int[] tokens)
@@ -198,36 +234,35 @@ public class KVCacheMultiTurnIntegrationTests
                 tokenizer, chatTemplate: null, history,
                 architecture: "fake", addGenerationPrompt: true);
 
-            ReusePlan plan = kvCache.PlanReuse(inputTokens, model.SupportsTruncation);
-            int forwarded;
-            switch (plan.Kind)
+            ReusePlan plan = kvCache.PlanReuse(inputTokens, model.SupportsTruncation, model.Granularity);
+            int forwarded = -1;
+
+            if (plan.Kind == ReusePlanKind.ExactMatch)
             {
-                case ReusePlanKind.ExactMatch:
-                    forwarded = 0;
-                    break;
-                case ReusePlanKind.PartialReuse:
-                {
-                    model.Truncate(plan.ReusedPrefixLength);
-                    kvCache.TruncateTo(plan.ReusedPrefixLength);
-                    var suffix = new int[plan.TokensToForward];
-                    for (int i = 0; i < plan.TokensToForward; i++)
-                        suffix[i] = inputTokens[plan.ReusedPrefixLength + i];
-                    var logits = model.Forward(suffix);
-                    kvCache.RecordAppend(suffix, logits);
-                    forwarded = suffix.Length;
-                    break;
-                }
-                case ReusePlanKind.Reset:
-                default:
-                {
-                    model.Reset();
-                    kvCache.Reset();
-                    var allTokens = inputTokens.ToArray();
-                    var logits = model.Forward(allTokens);
-                    kvCache.RecordAppend(allTokens, logits);
-                    forwarded = allTokens.Length;
-                    break;
-                }
+                forwarded = 0;
+            }
+            else if (plan.Kind == ReusePlanKind.PartialReuse
+                     && model.TryTruncate(plan.ReusedPrefixLength))
+            {
+                kvCache.TruncateTo(plan.ReusedPrefixLength);
+                var suffix = new int[plan.TokensToForward];
+                for (int i = 0; i < plan.TokensToForward; i++)
+                    suffix[i] = inputTokens[plan.ReusedPrefixLength + i];
+                var logits = model.Forward(suffix);
+                kvCache.RecordAppend(suffix, logits);
+                forwarded = suffix.Length;
+            }
+
+            if (forwarded < 0)
+            {
+                // Either the plan said Reset, or the model declined the rewind the plan
+                // wanted - the same fallback InteractiveSession.ApplyReusePlan takes.
+                model.Reset();
+                kvCache.Reset();
+                var allTokens = inputTokens.ToArray();
+                var logits = model.Forward(allTokens);
+                kvCache.RecordAppend(allTokens, logits);
+                forwarded = allTokens.Length;
             }
 
             result.Add((inputTokens.Count, forwarded));
@@ -552,6 +587,74 @@ public class KVCacheMultiTurnIntegrationTests
             $"Turn 2 should forward very few tokens with big cache; got {stats[1].forwardedTokens}");
         Assert.True(stats[1].forwardedTokens < stats[0].forwardedTokens / 5,
             $"Turn 2 forward ({stats[1].forwardedTokens}) should be <<< turn 1 ({stats[0].forwardedTokens})");
+    }
+
+    /// <summary>
+    /// A model whose rewind depth depends on where the sequence is - DeepSeek V4.1's
+    /// sliding-window ring is the case in hand - can decline the truncation a partial reuse
+    /// needs. The orchestrator must then reset and re-prefill, not continue from a head
+    /// that did not move. The declined turn looks exactly like a planned Reset from the
+    /// outside, which is why the model counts refusals.
+    /// </summary>
+    [Fact]
+    public void MultiTurn_ModelDeclinesTheRewind_OrchestratorResetsAndRePrefills()
+    {
+        var tokenizer = new SimpleTokenizer();
+        var kvRenderer = new KVCachePromptRenderer(new SimpleRenderer());
+        var kvCache = new KVCache();
+        // Reachable only within 8 positions of the head: turn 1's 200-token reply puts the
+        // reusable prefix far outside it.
+        var model = new RecordingFakeModel { MaxRewind = 8 };
+
+        var bigRaw = new List<int>();
+        for (int i = 0; i < 200; i++) bigRaw.Add(10000 + i);
+
+        var stats = RunConversation(model, tokenizer, kvRenderer, kvCache,
+            new[] { "First user turn that establishes context", "Q" },
+            new[] { bigRaw, new List<int> { 9001 } });
+
+        Assert.Equal(0, model.DeclinedTruncations);   // the renderer extends exactly here
+        Assert.True(stats[1].forwardedTokens < stats[1].promptTokens,
+            "turn 2 extended the cache, so it cannot have forwarded the whole prompt");
+
+        // Now force a divergence the model cannot rewind to: replace the cache tail so the
+        // next render no longer extends it.
+        kvCache.RecordAppend(Enumerable.Range(30000, 40).ToArray(), new float[] { 1f });
+        for (int i = 0; i < 40; i++) model.Forward(new[] { 30000 + i });
+        int operationsBefore = model.Operations.Count;
+
+        var diverged = kvRenderer.RenderToTokens(tokenizer, chatTemplate: null,
+            new List<ChatMessage> { new() { Role = "user", Content = "Something else entirely" } },
+            architecture: "fake", addGenerationPrompt: true);
+        ReusePlan plan = kvCache.PlanReuse(diverged, model.SupportsTruncation, model.Granularity);
+        Assert.Equal(ReusePlanKind.PartialReuse, plan.Kind);
+        Assert.False(model.TryTruncate(plan.ReusedPrefixLength));
+        Assert.Equal(1, model.DeclinedTruncations);
+        // Nothing was mutated by the refusal.
+        Assert.Equal(operationsBefore, model.Operations.Count);
+    }
+
+    /// <summary>
+    /// A model that can only stop on a block boundary gets an aligned target, so it never
+    /// has to decline over a single token.
+    /// </summary>
+    [Fact]
+    public void MultiTurn_GranularModel_NeverDeclinesForAlignment()
+    {
+        var tokenizer = new SimpleTokenizer();
+        var kvRenderer = new KVCachePromptRenderer(new SimpleRenderer());
+        var kvCache = new KVCache();
+        var model = new RecordingFakeModel { Granularity = 2 };
+
+        var stats = RunConversation(model, tokenizer, kvRenderer, kvCache,
+            new[] { "First user turn", "Second", "Third" },
+            new[] { new List<int> { 11, 12, 13 }, new List<int> { 21, 22, 23 }, new List<int> { 31 } });
+
+        Assert.Equal(0, model.DeclinedTruncations);
+        foreach (int target in model.RealTruncationTargets)
+            Assert.True(target % 2 == 0, $"rewind target {target} is not on a 2-token boundary");
+        Assert.True(stats[2].forwardedTokens < stats[0].forwardedTokens,
+            "the third turn should still forward less than the cold first turn");
     }
 
     private static void ApplyResetThenForward(RecordingFakeModel model, KVCache kvCache, List<int> tokens)

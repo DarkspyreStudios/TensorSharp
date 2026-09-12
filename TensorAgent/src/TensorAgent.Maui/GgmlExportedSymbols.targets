@@ -75,6 +75,8 @@
     <ReferenceNativeSymbol Include="TSGgml_Dsv4SetActiveSlot" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4SlotAlloc" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4SlotFree" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv4Truncate" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Dsv4TruncateAlign" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4VocabSize" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FlashAttnDecodeF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FusedActMulF32" SymbolType="Function" />

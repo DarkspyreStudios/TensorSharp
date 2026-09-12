@@ -457,6 +457,10 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     target_link_libraries(GgmlOpsDsv41RawGatherTest PRIVATE ggml-base)
     add_test(NAME deepseek41-compact-raw-gather COMMAND GgmlOpsDsv41RawGatherTest)
 
+    add_executable(GgmlOpsDsv41TruncateTest tests/dsv41_truncate_test.cpp)
+    target_include_directories(GgmlOpsDsv41TruncateTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME deepseek41-truncate-guards COMMAND GgmlOpsDsv41TruncateTest)
+
     add_executable(GgmlOpsDsv41QuantTest
         tests/dsv41_quant_test.cpp ggml_ops_dsv4_fused_cpu.cpp)
     target_include_directories(GgmlOpsDsv41QuantTest PRIVATE

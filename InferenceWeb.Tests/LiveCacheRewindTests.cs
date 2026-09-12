@@ -50,7 +50,8 @@ public class LiveCacheRewindTests
         IReadOnlyList<int> liveCache,
         int pooledCap,
         bool canTruncate,
-        int maxRewind = 16)
+        int maxRewind = 16,
+        int granularity = 1)
     {
         int liveLen = liveCache.Count;
         if (liveLen <= pooledCap)
@@ -74,6 +75,16 @@ public class LiveCacheRewindTests
         if (lcp == liveLen)
             return liveLen;
 
+        // A rewind has to land where the model can put its head: DeepSeek V4.1 stops only
+        // on a compression-block boundary. Aligned DOWN before the rewind is measured, so
+        // the limit below and the truncate at execution time mean the same target.
+        if (granularity > 1 && lcp % granularity != 0)
+        {
+            lcp -= lcp % granularity;
+            if (lcp <= 0)
+                return 0;
+        }
+
         int rewind = liveLen - lcp;
         if (rewind > maxRewind)
             return 0;
@@ -86,6 +97,56 @@ public class LiveCacheRewindTests
 
     private static List<int> Tokens(int count, int seed = 1)
         => Enumerable.Range(0, count).Select(i => seed * 1000 + i).ToList();
+
+    // ---- a model whose head only stops on a block boundary -----------------
+
+    /// <summary>
+    /// DeepSeek V4.1 can only rewind to a multiple of its widest compression ratio, so the
+    /// matched prefix is rounded DOWN. A plan that promised an odd position would be
+    /// declined at execution time, after admission had already announced the reuse.
+    /// </summary>
+    [Fact]
+    public void GranularModel_RoundsTheMatchedPrefixDownToABoundary()
+    {
+        var cache = Tokens(2000);
+        // Diverges at 1995 (odd), 5 tokens of trailing rewind.
+        var prompt = Tokens(1995).Concat(Tokens(40, seed: 2)).ToList();
+
+        Assert.Equal(1995, Decide(prompt, cache, pooledCap: 0, canTruncate: true));
+        Assert.Equal(1994, Decide(prompt, cache, pooledCap: 0, canTruncate: true, granularity: 2));
+    }
+
+    /// <summary>
+    /// Aligning down never costs more than granularity-1 tokens, and never turns a
+    /// continuation into a re-prefill while a usable prefix remains - unless it pushes the
+    /// rewind past the depth limit, which is the honest outcome at the boundary.
+    /// </summary>
+    [Fact]
+    public void GranularModel_AligningIsVisibleAtTheRewindLimitRatherThanSilent()
+    {
+        // An aligned target already inside the limit is unaffected.
+        var evenCache = Tokens(2000);
+        var evenPrompt = Tokens(1984).Concat(Tokens(40, seed: 2)).ToList();
+        Assert.Equal(1984, Decide(evenPrompt, evenCache, pooledCap: 0, canTruncate: true, granularity: 2));
+
+        // The one case where alignment changes the verdict: a 16-token rewind that
+        // alignment widens to 17, one past the limit. Declining is the honest outcome -
+        // the alternative is a plan that announces a reuse the model will refuse.
+        var oddCache = Tokens(2001);
+        var oddPrompt = Tokens(1985).Concat(Tokens(40, seed: 2)).ToList();
+        Assert.Equal(1985, Decide(oddPrompt, oddCache, pooledCap: 0, canTruncate: true));
+        Assert.Equal(0, Decide(oddPrompt, oddCache, pooledCap: 0, canTruncate: true, granularity: 2));
+    }
+
+    [Fact]
+    public void GranularModel_ExactExtensionIsNeverAligned()
+    {
+        // The prompt extends the cache exactly: nothing is truncated, so the odd cache
+        // length must be kept whole rather than rounded into a real rewind.
+        var cache = Tokens(1999);
+        var prompt = Tokens(1999).Concat(Tokens(40, seed: 2)).ToList();
+        Assert.Equal(1999, Decide(prompt, cache, pooledCap: 0, canTruncate: true, granularity: 2));
+    }
 
     // ---- the case the fix exists for ---------------------------------------
 

@@ -20,7 +20,12 @@ knowing before you plan around them.
   Multi-GPU means a layer split; routed-MoE tensor parallelism exists behind
   `TS_DSV41_TP` and has measured slower than the split. Concurrent requests get
   isolated slots but fall back to per-slot forwards, so concurrency is not
-  batched GPU throughput yet, and there is no V4.1 DSpark. What is measured, and
+  batched GPU throughput yet, and there is no V4.1 DSpark. A multi-turn chat
+  reuses its KV prefix: the reasoning drop in ordinary chat makes the render
+  diverge one token after the previous turn's assistant header, and the native
+  executor rewinds to that point instead of re-prefilling the conversation, which
+  needs a per-slot checkpoint of the raw sliding-window ring because generating an
+  answer wraps it. What is measured, and
   what is explicitly not, is tracked in the
   [validation report](deepseek41_validation.md) beside the
   [model card](models/deepseek41.md).

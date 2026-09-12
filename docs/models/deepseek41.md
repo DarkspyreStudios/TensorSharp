@@ -447,6 +447,65 @@ is supplied. `TS_DSV4_UBATCH` controls the forward microbatch, defaulting to 256
 for V4.1. A larger advertised model window does not establish that a particular
 GPU configuration can allocate or efficiently serve it.
 
+### Multi-turn KV reuse
+
+A second turn's rendered prompt is not a continuation of the first turn's cache.
+Ordinary chat drops the previous assistant turn's reasoning (see the history
+policy above), so the render diverges from the cache exactly one token after the
+previous turn's `<｜Assistant｜>`: the cache holds `<think>` there, the render
+`</think>`. Everything before that point still matches, and from the third turn
+on that is the WHOLE of the previous turn's prompt, because that prompt already
+rendered the earlier turns with their reasoning removed.
+
+The native executor therefore supports partial reuse: `TSGgml_Dsv4Truncate`
+moves a slot's head back so the matching prefix is kept and only the new suffix
+is forwarded. Per-turn prefill is then a function of the newest answer rather
+than of the whole conversation. Two conditions bound it, both stated in
+`dsv41_truncate.h`:
+
+* **Alignment.** The target must be a multiple of the widest compression ratio
+  (2 for the released checkpoint), so no compression block straddles the new
+  head. Callers align their reuse length down; it costs at most one token.
+* **Depth.** The raw sliding window lives in a ring of
+  `pad64(n_swa + n_ubatch, 256)` positions - 512 for the released checkpoint,
+  whose window is 128 - so a rewind reaches 385 positions back from the state it
+  rewinds from. Generating an answer moves the head thousands of positions past
+  the prompt boundary the next turn wants, which is why every slot keeps a
+  **rewind checkpoint**: a shadow copy of the two modularly-addressed rings (the
+  raw window and the compressor state), taken at the end of every multi-token
+  forward, i.e. at a prompt boundary. Decode steps deliberately do not move it.
+  The shadow costs `n_embd_head x ring_raw x 2` bytes per layer per slot - about
+  21 MiB for the released checkpoint - and `TS_DSV41_REWIND_CHECKPOINT=0` turns
+  it off, after which a rewind deeper than the live ring is declined.
+
+Measured on eight A40s with the Q4_K_M release (`--n-cpu-moe 2`, greedy, the
+reported prompt then two `continue` turns, `TS_KV_DEBUG=1`). The divergence lands
+exactly where the policy puts it - in both turns the cache holds token 128821
+(`<think>`) where the render holds 128822 (`</think>`), one token past
+`<｜Assistant｜>`:
+
+| turn | prompt tokens | matching prefix | plan | prefill |
+|---:|---:|---:|---|---:|
+| 1 | 38 | 0 (cold) | Reset | 970 ms |
+| 2 | 2,056 | 37, aligned to 36 | PartialReuse | 8,399 ms |
+| 3 | 5,841 | 2,055, aligned to 2,054 | PartialReuse | 17,058 ms |
+
+Turn 2 recovers only a constant - the system block, the question and the
+assistant header - because the cache past that point is the first answer WITH its
+reasoning, which the prompt no longer contains. Turn 3 recovers the whole of turn
+2's prompt, and the share grows from there: the matching prefix grows with the
+conversation while the re-forwarded suffix stays the size of one answer. Both
+rewinds are far outside the live ring (6,529 positions for turn 3) and are served
+by the checkpoint.
+
+A decline is a normal outcome, not an error: the caller resets and re-prefills,
+which is what happened for every turn before this existed. Plain `deepseek4`
+does not truncate at all - its compressor overlaps blocks, so a boundary still
+reads the previous block's state rows and aligning the head is not sufficient -
+and neither do V4.1's direct-CUDA and pure-C# executors, which have no
+checkpoint. `--think` off needs none of this: without the reasoning drop the
+render is a pure extension of the cache and reuse needs no rewind.
+
 Native V4.1 requests own independent KV slots. The scheduler therefore sizes
 its metadata-only block pool for one context per allowed running request.
 The scheduler default permits 16 running requests; the example explicitly

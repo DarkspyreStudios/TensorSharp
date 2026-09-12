@@ -184,8 +184,16 @@ namespace TensorSharp.Runtime
         ///
         /// <paramref name="supportsTruncation"/> models that report <c>false</c> can only
         /// reuse the cache when the entire current cache is a prefix of the new input.
+        ///
+        /// <paramref name="truncationGranularity"/> is the model's
+        /// <c>KVCacheTruncationGranularity</c>: a reused prefix SHORTER than the cache is
+        /// rounded down to a multiple of it, because a model whose caches are compressed
+        /// in blocks can only put its head on a block boundary. It deliberately does not
+        /// apply when the cache is reused whole - that case truncates nothing, so rounding
+        /// would turn a free extension into a real (and shorter) rewind.
         /// </summary>
-        public ReusePlan PlanReuse(IReadOnlyList<int> inputTokens, bool supportsTruncation)
+        public ReusePlan PlanReuse(IReadOnlyList<int> inputTokens, bool supportsTruncation,
+            int truncationGranularity = 1)
         {
             if (inputTokens == null || inputTokens.Count == 0)
                 return ReusePlan.Reset(0);
@@ -211,16 +219,27 @@ namespace TensorSharp.Runtime
                 }
             }
 
-            // For non-truncatable models (recurrent state): only reuse if the cache is a
-            // prefix of the new input.
-            if (!supportsTruncation && common < _tokens.Count)
-                return ReusePlan.Reset(inputTokens.Count);
-
             // We always need at least one token in the forward to compute fresh logits for
             // the next step. If the input matches the cache for all but its last position,
             // back the prefix off by one to leave a token to forward.
             if (common == inputTokens.Count)
                 common = Math.Max(0, inputTokens.Count - 1);
+
+            // Only a prefix shorter than the cache is a real rewind, and only a real
+            // rewind has to land where the model can put its head.
+            if (common < _tokens.Count && truncationGranularity > 1)
+                common -= common % truncationGranularity;
+
+            // For non-truncatable models (recurrent state): only reuse if the cache is a
+            // prefix of the new input.
+            //
+            // Checked AFTER the back-off and the alignment, not before: when the cache
+            // equals the input but its logits were dropped, the back-off turns a whole-cache
+            // reuse into a one-token rewind, and that is as real a rewind as any other. A
+            // model that cannot perform it would have moved only its managed mirror and
+            // then forwarded the last prompt token at a position its cache already holds.
+            if (!supportsTruncation && common < _tokens.Count)
+                return ReusePlan.Reset(inputTokens.Count);
 
             int suffixLength = inputTokens.Count - common;
 

@@ -39,6 +39,7 @@
 #include "ggml_ops_dsv4_fused.h"
 #include "dsv41_engram.h"
 #include "dsv41_raw_gather.h"
+#include "dsv41_truncate.h"
 #include "dsv41_engram_io.h"
 #include "dsv41_engram_advice.h"
 #include "ggml_ops_deepseek41_vision.h"
@@ -57,6 +58,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <filesystem>
@@ -206,6 +208,16 @@ struct dsv4_slot_layer
     ggml_tensor * comp_state_score = nullptr; // F32 [coff*head, state_size]
     ggml_tensor * lid_state_kv = nullptr;     // F32 [2*idx_head, 8]
     ggml_tensor * lid_state_score = nullptr;  // F32 [2*idx_head, 8]
+
+    // Rewind checkpoint (V4.1 only, see dsv4_slot::cp_n_past). Shadow copies of
+    // the two caches whose addressing is MODULAR, so a later position overwrites
+    // an earlier one's row: the raw sliding-window ring and the compressor state
+    // ring. The compressed caches (csa_k / lid_k / hca_k) need no shadow - they
+    // are addressed by absolute block index pos/ratio and only ever grow, so a
+    // truncation makes their tail invisible rather than wrong.
+    ggml_tensor * raw_k_cp = nullptr;          // F16 [n_embd_head, ring_raw]
+    ggml_tensor * comp_state_kv_cp = nullptr;  // F32, same shape as comp_state_kv
+    ggml_tensor * comp_state_score_cp = nullptr;
 };
 
 // One independent sequence context: its own caches + position, sharing the
@@ -247,6 +259,19 @@ struct dsv4_slot
     bool v41_failed = false;
     int id = 0;
     int32_t n_past = 0;
+    // Rewind checkpoint: the modular ring state as it stood at the end of the
+    // most recent MULTI-TOKEN forward, i.e. at a prompt boundary. -1 when there
+    // is none (a fresh or reset slot, or a build without the shadow tensors).
+    //
+    // Why a boundary rather than "wherever we are": the raw ring holds only
+    // ring_raw = pad64(n_swa + n_ubatch, 256) positions, so generating a turn's
+    // answer overwrites the rows of the tokens the NEXT turn wants to rewind to.
+    // A chat template that re-renders a past assistant turn differently (V4.1
+    // drops past reasoning in ordinary chat) diverges from the cache exactly one
+    // token after the previous turn's <|Assistant|>, which is one position
+    // before this checkpoint - so keeping the boundary state is what makes that
+    // rewind possible at all. Decode steps deliberately do not move it.
+    int32_t cp_n_past = -1;
     std::vector<dsv4_slot_layer> layers;
     // DSpark: one SWA ring per drafter stage, keyed by trunk position and fed
     // from the trunk's own hidden states (see build_dspark_ring_update).
@@ -513,6 +538,21 @@ struct dsv4_model
     int64_t ring_raw = 0;
     int64_t n_csa_rows = 0;
     int64_t n_hca_rows = 0;
+
+    // Whether every slot carries the rewind-checkpoint shadow rings, so
+    // TSGgml_Dsv4Truncate can rewind past the raw ring's own span. V4.1 only,
+    // and TS_DSV41_REWIND_CHECKPOINT=0 turns it off (the truncate then only
+    // reaches back as far as the live ring, and refuses beyond it).
+    bool rewind_cp = false;
+    // Positions a truncation may rewind past, counted from the reference state
+    // it rewinds from. The raw ring holds ring_raw positions and a query at the
+    // new head still reads n_swa - 1 of them, so this is the slack between the
+    // two. Zero when the architecture has no raw window to preserve.
+    int64_t rewind_span = 0;
+    // The truncation target must be a multiple of this, so no compression block
+    // straddles it and the compressor state ring is never read for a position
+    // the rewind dropped. lcm of the per-layer compression ratios.
+    int32_t truncate_align = 1;
 
     // sequence slots (per-request caches); slot 0 is the primary/single-stream
     // slot created at load. All Forward/Reset/NPast calls act on active_slot.
@@ -875,6 +915,24 @@ struct load_job
 // ggml_backend_tensor_set copies on cudaStreamPerThread, so reads and uploads
 // to all GPUs proceed concurrently. Jobs are handed out in file order per
 // shard to keep the concurrent streams roughly sequential for readahead.
+//
+// Each chunk's page cache is released as soon as the chunk is on the device,
+// because THE LOADER NEVER READS THOSE BYTES AGAIN and leaving them cached is
+// what makes a large checkpoint load slowly. Measured on an 8xA40 box with a
+// 373.5 GiB cgroup limit, reading 221 GiB off the MooseFS mount with this
+// function's 16 threads:
+//
+//   keeping the pages  2.58 GiB/s overall, and the rate DECAYS as the cache
+//                      fills: 5.24 GiB/s for the first window, 0.38 GiB/s for
+//                      the last, with cgroup usage climbing to 228 GiB
+//   dropping each      6.25 GiB/s overall and FLAT: 8.8-9.1 GiB/s throughout,
+//   consumed chunk     with cgroup usage falling to 26 GiB
+//
+// A 415 GiB checkpoint cannot fit its streamed weights in that cgroup at all
+// (294.8 GiB of reads plus a 119.4 GiB host mapping), so without this the
+// kernel spends most of the load reclaiming page cache it was never going to
+// reuse. Cache the loader does NOT own is left alone: the host-resident experts
+// are served from their own mapping and are deliberately prefaulted below.
 static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_job> & jobs, int n_threads)
 {
     std::sort(jobs.begin(), jobs.end(), [](const load_job & a, const load_job & b)
@@ -886,17 +944,107 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
     if (n_threads > (int) jobs.size()) n_threads = (int) jobs.size();
     if (n_threads < 1) n_threads = 1;
 
-    std::atomic<size_t> cursor(0);
     std::atomic<bool> failed(false);
+    // Releasing each consumed chunk's page cache keeps the process's memory
+    // footprint down (measured: 39 GiB of page cache at the end of a load instead
+    // of ~330 GiB, which leaves room for the host experts the next phase pins).
+    // It did NOT make the load faster on the 8xA40 box - reads were 5374s of
+    // thread time with it and 5539s without, inside run-to-run spread - and each
+    // call costs real time on FUSE, so it is opt-in.
+    bool drop_cache = false;
+    if (const char * e = getenv("TS_DSV4_LOAD_DROP_CACHE")) drop_cache = atoi(e) != 0;
 
-    auto worker = [&]()
+    // Each thread walks ONE CONTIGUOUS RUN of the sorted job list instead of
+    // taking every n_threads'th job from a shared cursor.
+    //
+    // Why it matters: jobs are sorted by (shard, file_off), so a shared cursor
+    // makes every descriptor read a chunk and then jump n_threads * chunk bytes -
+    // 1 GiB at the defaults. Readahead is per-descriptor, so none of the streams
+    // is sequential. Measured on the MooseFS mount, 16 threads, 64 MiB reads,
+    // same bytes: strided 1.16-1.28 GiB/s, contiguous 2.16-2.17 GiB/s. The API is
+    // not the difference (fread and pread came out within noise of each other in
+    // both orders); the order is. TensorSharp.Runtime/GgufReader.cs:330 records
+    // the same finding for the managed prefault ("~3x slower on MooseFS").
+    //
+    // Ranges are split by BYTES, not by job count, because a tensor's last chunk
+    // is a partial one and counting jobs would hand some threads more data than
+    // others. A thread that finishes early steals from the BACK of the furthest
+    // behind range, so the victim keeps reading forwards.
+    bool contiguous = true;
+    if (const char * e = getenv("TS_DSV4_LOAD_CONTIGUOUS")) contiguous = atoi(e) != 0;
+
+    struct range { std::atomic<size_t> next; size_t end; };
+    std::vector<range> ranges((size_t) n_threads);
+    {
+        size_t total = 0;
+        for (const load_job & j : jobs) total += j.len;
+        size_t at = 0, acc = 0;
+        for (int k = 0; k < n_threads; k++)
+        {
+            const size_t target = (size_t) ((double) total * (k + 1) / n_threads);
+            const size_t begin = at;
+            while (at < jobs.size() && (acc < target || k == n_threads - 1))
+            {
+                acc += jobs[at].len;
+                at++;
+                if (k == n_threads - 1 ? at == jobs.size() : acc >= target) break;
+            }
+            ranges[(size_t) k].next.store(begin, std::memory_order_relaxed);
+            ranges[(size_t) k].end = at;
+        }
+        // Any tail left by rounding belongs to the last range.
+        ranges[(size_t) n_threads - 1].end = jobs.size();
+    }
+    std::atomic<size_t> cursor(0);
+
+    // Hand out the next job for thread k: its own range first, then, once that is
+    // exhausted, the BACK of whichever range has the most left - so the thread it
+    // steals from keeps reading forwards. Stealing is rare (ranges are equal by
+    // bytes) and is serialized on one mutex rather than raced with atomics.
+    std::mutex steal_mu;
+    auto claim = [&](int k, size_t & out) -> bool
+    {
+        const size_t own = ranges[(size_t) k].next.fetch_add(1, std::memory_order_relaxed);
+        if (own < ranges[(size_t) k].end) { out = own; return true; }
+
+        std::lock_guard<std::mutex> lock(steal_mu);
+        int victim = -1;
+        size_t most = 0;
+        for (int v = 0; v < n_threads; v++)
+        {
+            const size_t next = ranges[(size_t) v].next.load(std::memory_order_relaxed);
+            const size_t left = ranges[(size_t) v].end > next ? ranges[(size_t) v].end - next : 0;
+            if (left > most) { most = left; victim = v; }
+        }
+        // Leave the last job of a range to its owner: stealing it would race the
+        // owner's own fetch_add for the same index.
+        if (victim < 0 || most < 2) return false;
+        ranges[(size_t) victim].end--;
+        out = ranges[(size_t) victim].end;
+        return true;
+    };
+    // Where a slow load actually goes. Summed over threads, so the totals exceed
+    // the wall clock by roughly the thread count when both stages are busy; the
+    // RATIO between them is what says whether to tune the reader or the uploader.
+    std::atomic<uint64_t> read_ns(0), set_ns(0), read_bytes(0);
+    const bool perf = []() { const char * e = getenv("TS_DSV4_PERF"); return e && atoi(e) > 0; }();
+
+    auto worker = [&](int thread_index)
     {
         std::vector<FILE *> files(shards.paths.size(), nullptr);
         std::vector<uint8_t> staging;
         while (!failed.load(std::memory_order_relaxed))
         {
-            size_t i = cursor.fetch_add(1, std::memory_order_relaxed);
-            if (i >= jobs.size()) break;
+            size_t i;
+            if (contiguous)
+            {
+                if (!claim(thread_index, i)) break;
+            }
+            else
+            {
+                i = cursor.fetch_add(1, std::memory_order_relaxed);
+                if (i >= jobs.size()) break;
+            }
             const load_job & j = jobs[i];
 
             FILE *& f = files[j.shard];
@@ -917,7 +1065,10 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
 #else
             fseeko(f, (off_t) j.file_off, SEEK_SET);
 #endif
-            if (fread(staging.data(), 1, j.len, f) != j.len)
+            auto t_read0 = std::chrono::steady_clock::now();
+            const size_t got = fread(staging.data(), 1, j.len, f);
+            auto t_read1 = std::chrono::steady_clock::now();
+            if (got != j.len)
             {
                 // Not a truncated file (dsv4_check_shard_complete already ruled
                 // that out), so name the exact read that failed.
@@ -927,14 +1078,38 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
                 break;
             }
             ggml_backend_tensor_set(j.t, staging.data(), j.tensor_off, j.len);
+#if !defined(_WIN32)
+            // After the device has it, this range is dead weight in the page
+            // cache. Dropping it keeps the reader threads out of reclaim.
+            if (drop_cache) posix_fadvise(fileno(f), (off_t) j.file_off, (off_t) j.len, POSIX_FADV_DONTNEED);
+#endif
+            if (perf)
+            {
+                auto t_set1 = std::chrono::steady_clock::now();
+                read_ns.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    t_read1 - t_read0).count(), std::memory_order_relaxed);
+                set_ns.fetch_add((uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    t_set1 - t_read1).count(), std::memory_order_relaxed);
+                read_bytes.fetch_add(j.len, std::memory_order_relaxed);
+            }
         }
         for (FILE * f : files) if (f) fclose(f);
     };
 
     std::vector<std::thread> pool;
     pool.reserve(n_threads);
-    for (int i = 0; i < n_threads; i++) pool.emplace_back(worker);
+    for (int i = 0; i < n_threads; i++) pool.emplace_back(worker, i);
     for (auto & th : pool) th.join();
+    if (perf && read_bytes.load() > 0)
+    {
+        const double gib = read_bytes.load() / 1073741824.0;
+        const double rs = read_ns.load() / 1e9, ss = set_ns.load() / 1e9;
+        fprintf(stderr, "[dsv4] load split over %d %s thread(s): file reads %.1fs (%.2f GiB/s per thread), "
+                "host->device %.1fs (%.2f GiB/s per thread), %.1f%% of thread time in reads\n",
+                n_threads, contiguous ? "contiguous" : "interleaved",
+                rs, rs > 0 ? gib / rs : 0.0, ss, ss > 0 ? gib / ss : 0.0,
+                100.0 * rs / std::max(1e-9, rs + ss));
+    }
     return !failed.load();
 }
 
@@ -965,6 +1140,43 @@ static void dsv4_reset_slot(dsv4_slot & slot)
         if (slot.buf[d]) ggml_backend_buffer_clear(slot.buf[d], 0);
     dsv4_init_slot_state_rows(slot);
     slot.v41_failed = false;
+    // The shadow rings live in the same buffers and were just zeroed, so the
+    // checkpoint they described is gone with them.
+    slot.cp_n_past = -1;
+}
+
+// Copy the modular ring state into (save) or out of (!save) the slot's shadow
+// tensors. Both sides live in the same per-device buffer, so this is a
+// device-local copy; the compressed caches are deliberately not touched.
+static void dsv4_copy_rewind_rings(dsv4_slot & slot, bool save)
+{
+    for (auto & C : slot.layers)
+    {
+        auto move = [&](ggml_tensor * live, ggml_tensor * shadow)
+        {
+            if (!live || !shadow) return;
+            ggml_backend_tensor_copy(save ? live : shadow, save ? shadow : live);
+        };
+        move(C.raw_k, C.raw_k_cp);
+        move(C.comp_state_kv, C.comp_state_kv_cp);
+        move(C.comp_state_score, C.comp_state_score_cp);
+    }
+}
+
+// Record the slot's state as the rewind checkpoint. Called at the end of every
+// multi-token forward (see dsv4_slot::cp_n_past); a no-op without the shadows.
+static void dsv4_checkpoint_slot(const dsv4_model & m, dsv4_slot & slot)
+{
+    if (!m.rewind_cp || slot.v41_failed) return;
+    dsv4_copy_rewind_rings(slot, /*save*/ true);
+    slot.cp_n_past = slot.n_past;
+    // engram_history needs no shadow: it is indexed by absolute position and
+    // hash_tokens only ever writes from the current head forward, so its first
+    // `target` entries are already what a rewind to `target` wants.
+    //
+    // What decides whether a later rewind can USE this - the alignment and depth
+    // guards, and why each is exactly where it is - lives in dsv41_truncate.h so
+    // it can be tested without a model.
 }
 
 // Allocate a new sequence slot: per-layer caches + compressor state rings on
@@ -979,7 +1191,8 @@ static dsv4_slot * dsv4_slot_alloc(dsv4_model & m)
 
     for (int d = 0; d <= m.n_gpu; d++)
     {
-        ggml_init_params cp = { (size_t) (hp.n_layer * 10 + 32) * ggml_tensor_overhead(), nullptr, true };
+        // 10 cache tensors per layer, plus the 3 rewind-checkpoint shadows.
+        ggml_init_params cp = { (size_t) (hp.n_layer * 13 + 32) * ggml_tensor_overhead(), nullptr, true };
         slot->ctx[d] = ggml_init(cp);
         if (!slot->ctx[d]) return nullptr;
     }
@@ -1021,6 +1234,20 @@ static dsv4_slot * dsv4_slot_alloc(dsv4_model & m)
                 {
                     C.comp_state_kv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head, ratio + 1);
                     C.comp_state_score = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head, ratio + 1);
+                }
+            }
+            if (m.rewind_cp)
+            {
+                C.raw_k_cp = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, head, m.ring_raw);
+                ggml_format_name(C.raw_k_cp, "cp_raw_k.%d.%d", slot->id, il);
+                if (C.comp_state_kv)
+                {
+                    C.comp_state_kv_cp = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                        C.comp_state_kv->ne[0], C.comp_state_kv->ne[1]);
+                    C.comp_state_score_cp = ggml_new_tensor_2d(ctx, GGML_TYPE_F32,
+                        C.comp_state_score->ne[0], C.comp_state_score->ne[1]);
+                    ggml_format_name(C.comp_state_kv_cp, "cp_csa_kv.%d.%d", slot->id, il);
+                    ggml_format_name(C.comp_state_score_cp, "cp_csa_score.%d.%d", slot->id, il);
                 }
             }
         }
@@ -1666,6 +1893,31 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     m->n_csa_rows = pad64(m->n_ctx / (hp.v41 ? 2 : CSA_RATIO) + 1, 256);
     m->n_hca_rows = pad64(m->n_ctx / (hp.v41 ? 1 : HCA_RATIO) + 1, 256);
 
+    // --- truncation (partial KV reuse) capability -------------------------
+    // V4.1 only. V4's compressor OVERLAPS blocks (build_comp_plan's `overlap`
+    // is !v41), so a block boundary still reads the PREVIOUS block's rows out
+    // of the state ring and aligning the target to the ratio is not enough;
+    // that case is left refusing rather than half-proved. V4.1 compresses
+    // disjoint blocks, so a target aligned to the widest ratio reads nothing
+    // the rewind dropped.
+    if (hp.v41)
+    {
+        int32_t align = 1;
+        for (int il = 0; il < hp.n_layer; il++)
+        {
+            const int32_t r = std::max(1, hp.compress_ratios[il]);
+            align = (int32_t) std::lcm((int64_t) align, (int64_t) r);
+        }
+        m->truncate_align = align;
+        // A query at the new head reads the raw window (new_head - n_swa,
+        // new_head]; the ring holds ring_raw consecutive positions, so this is
+        // how far the head may move back before one of those rows has been
+        // overwritten by an abandoned position.
+        m->rewind_span = std::max<int64_t>(0, m->ring_raw - hp.n_swa + 1);
+        m->rewind_cp = true;
+        if (const char * e = getenv("TS_DSV41_REWIND_CHECKPOINT")) m->rewind_cp = atoi(e) != 0;
+    }
+
     // --- what a layer costs its device beyond its weights -----------------
     // The KV caches and compressor state rings are allocated on the layer's
     // own device right after the weights, so the split has to price them:
@@ -1687,6 +1939,17 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 b += (head + idx) * rows * 2;
                 if (ratio > 1) b += 2 * head * (ratio + 1) * 4;
             }
+            if (m->rewind_cp)
+            {
+                // Rewind-checkpoint shadows: the raw ring, and the compressor
+                // state ring where the layer owns one.
+                b += (size_t) (head * m->ring_raw * 2);
+                if (ratio > 1
+                    && std::find(hp.kv_sources.begin(), hp.kv_sources.end(), il) != hp.kv_sources.end())
+                {
+                    b += (size_t) (2 * head * (ratio + 1) * 4);
+                }
+            }
         }
         else if (ratio == CSA_RATIO)
         {
@@ -1702,7 +1965,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             b += (size_t) (head * m->n_hca_rows * 2);                    // hca_k F16
             b += (size_t) (2 * head * st * 4);                           // comp_state kv+score F32
         }
-        return b + 10 * 256;   // ggml buffer alignment padding per tensor
+        return b + 13 * 256;   // ggml buffer alignment padding per tensor
     };
 
     // --- per-device VRAM budget -------------------------------------------
@@ -2517,20 +2780,37 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                     ranges.emplace_back((const volatile char *) t->data, ggml_nbytes(t));
                     warm_bytes += ggml_nbytes(t);
                 }
+                // Split each tensor into spans so the pool is sized by BYTES, not by
+                // tensor count: --n-cpu-moe 2 leaves 6 tensors, which capped the pool
+                // at 6 threads and made this 31 s for 16.4 GiB. Each thread still walks
+                // one contiguous span, which is what readahead wants.
+                const size_t warm_span = (size_t) 256 * 1024 * 1024;
+                std::vector<std::pair<const volatile char *, size_t>> spans;
+                for (const auto & r : ranges)
+                    for (size_t off = 0; off < r.second; off += warm_span)
+                        spans.emplace_back(r.first + off, std::min(warm_span, r.second - off));
                 std::atomic<size_t> r_cursor(0);
                 auto warm_worker = [&]()
                 {
                     for (;;)
                     {
                         const size_t i = r_cursor.fetch_add(1, std::memory_order_relaxed);
-                        if (i >= ranges.size()) break;
-                        const volatile char * p = ranges[i].first;
-                        for (size_t off = 0; off < ranges[i].second; off += 4096)
+                        if (i >= spans.size()) break;
+                        const volatile char * p = spans[i].first;
+#if !defined(_WIN32)
+                        // Ask for the whole span at once before walking it. Touching one
+                        // byte per page faults 4 KiB at a time, and on a FUSE mount each
+                        // fault is a round trip; MADV_WILLNEED lets the filesystem read
+                        // the span in its own units. The touch loop below still runs, so
+                        // the pages are guaranteed resident either way.
+                        (void) madvise((void *) (uintptr_t) p, spans[i].second, MADV_WILLNEED);
+#endif
+                        for (size_t off = 0; off < spans[i].second; off += 4096)
                             (void) p[off];
                     }
                 };
                 std::vector<std::thread> warm_pool;
-                for (int i = 0; i < std::min<int>(load_threads, (int) ranges.size()); i++) warm_pool.emplace_back(warm_worker);
+                for (int i = 0; i < std::min<int>(load_threads, (int) spans.size()); i++) warm_pool.emplace_back(warm_worker);
                 for (auto & th : warm_pool) th.join();
                 fprintf(stderr, "[dsv4] prefaulted %.1f GiB of mmapped host experts in %.1fs\n",
                         warm_bytes / 1073741824.0,
@@ -5725,6 +6005,11 @@ TSG_EXPORT int TSGgml_Dsv4Forward(void * handle, const int32_t * tokens, int n_t
         return -3;
     }
 
+    // A multi-token call is a prompt, so this is the boundary a later turn wants
+    // to rewind to (see dsv4_slot::cp_n_past). A single-token decode step is not,
+    // and must leave the checkpoint where the prompt left it.
+    if (n_tokens > 1) tsg_dsv4::dsv4_checkpoint_slot(*m, *slot);
+
     if (perf)
     {
         auto t1 = std::chrono::steady_clock::now();
@@ -5882,14 +6167,73 @@ TSG_EXPORT int TSGgml_Dsv4DsparkDraft(void * handle, int anchor_token, int32_t *
 
 // Drop the KV of rejected speculative tokens. Nothing is restored: the rings
 // are sized so a rejected tail cannot alias a row a later pass reads, and the
-// compressed rows it wrote are recomputed before they become visible. V4.1's
-// compressor state and Engram history require replay/snapshots, so this V4
-// speculation-only ABI must refuse it without mutating the active slot.
+// compressed rows it wrote are recomputed before they become visible. V4 only:
+// it is the DSpark rollback ABI, its no-restore argument rests on
+// state_extra == DSpark's block size, and a V4.1 load has no drafter. A
+// conversational rewind (any depth, from any position) is TSGgml_Dsv4Truncate.
 TSG_EXPORT int TSGgml_Dsv4Rewind(void * handle, int n_past)
 {
     auto * m = (tsg_dsv4::dsv4_model *) handle;
     if (!m || m->hp.v41 || n_past < 0 || n_past > m->active_slot->n_past) return 0;
     m->active_slot->n_past = n_past;
+    return 1;
+}
+
+// The multiple a TSGgml_Dsv4Truncate target must be, or 0 when this model
+// cannot truncate at all. The caller aligns its own reuse length DOWN to this
+// rather than losing the whole prefix to a refusal over one token.
+TSG_EXPORT int TSGgml_Dsv4TruncateAlign(void * handle)
+{
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    if (!m || !m->hp.v41) return 0;
+    return m->truncate_align;
+}
+
+// Move the ACTIVE slot's head back to `n_past`, so the next forward appends
+// there and the K/V of the first `n_past` positions is reused instead of
+// re-prefilled. This is the conversational counterpart of Rewind: it serves any
+// depth the slot can still honour, not just a speculative block.
+//
+// Returns 1 when the slot now holds exactly `n_past` positions and a forward
+// from there is identical to a fresh prefill of the same tokens; 0 when it
+// cannot, in which case NOTHING was mutated and the caller must Reset and
+// re-prefill. A refusal is normal, not an error: the raw sliding-window ring is
+// only ring_raw positions deep, so a rewind past the checkpoint's reach has no
+// correct answer (the dropped positions' K rows are gone, and recomputing one
+// needs its own equally-gone window).
+TSG_EXPORT int TSGgml_Dsv4Truncate(void * handle, int n_past)
+{
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    if (!m || !m->hp.v41) return 0;
+    tsg_dsv4::dsv4_slot * slot = m->active_slot;
+    if (!slot || slot->v41_failed) return 0;
+
+    const dsv41_truncate_route route = dsv41_plan_truncate(
+        n_past, slot->n_past, m->rewind_cp ? slot->cp_n_past : -1,
+        m->rewind_span, m->truncate_align);
+
+    switch (route)
+    {
+        case dsv41_truncate_route::refuse:
+            return 0;
+        case dsv41_truncate_route::none:
+            return 1;
+        case dsv41_truncate_route::reset:
+            tsg_dsv4::dsv4_reset_slot(*slot);
+            return 1;
+        case dsv41_truncate_route::checkpoint:
+            tsg_dsv4::dsv4_copy_rewind_rings(*slot, /*save*/ false);
+            break;
+        case dsv41_truncate_route::live:
+            break;
+    }
+
+    slot->n_past = n_past;
+    // Indexed by absolute position and only ever written from the head forward,
+    // so dropping the tail is the whole of it. hash_tokens' contiguity guard
+    // wants size() == the next start position, which is exactly n_past.
+    if ((int32_t) slot->engram_history.size() > n_past)
+        slot->engram_history.resize((size_t) n_past);
     return 1;
 }
 

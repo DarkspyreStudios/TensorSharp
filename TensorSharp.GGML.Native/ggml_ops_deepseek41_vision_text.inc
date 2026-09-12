@@ -134,6 +134,8 @@ TSG_EXPORT int TSGgml_Dsv41ForwardVision(void * handle, const int32_t * tokens,
             done += nt;
             image_done += images;
         }
+        // Same prompt-boundary rule as the text forward: this call is a prompt.
+        if (n_tokens > 1) tsg_dsv4::dsv4_checkpoint_slot(m, slot);
         return 0;
     }
     catch (const std::exception & e)

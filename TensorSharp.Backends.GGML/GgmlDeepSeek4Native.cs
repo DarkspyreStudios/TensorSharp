@@ -57,6 +57,14 @@ namespace TensorSharp.GGML
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_Dsv4Truncate(IntPtr handle, int nPast);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_Dsv4TruncateAlign(IntPtr handle);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Dsv4VocabSize(IntPtr handle);
 
         [LibraryImport(DllName)]
@@ -146,8 +154,29 @@ namespace TensorSharp.GGML
             }
         }
 
-        /// <summary>Drop the KV of rejected speculative tokens (position rewind only).</summary>
+        /// <summary>Drop the KV of rejected speculative tokens (position rewind only).
+        /// V4 only; a conversational rewind of any depth is <see cref="Truncate"/>.</summary>
         public static bool Rewind(IntPtr handle, int nPast) => TSGgml_Dsv4Rewind(handle, nPast) != 0;
+
+        /// <summary>
+        /// Move the active slot's head back to <paramref name="nPast"/> so the next
+        /// forward appends there and the K/V of the first <paramref name="nPast"/>
+        /// positions is reused. True when the slot now holds exactly that many
+        /// positions and continuing is identical to a fresh prefill of them.
+        ///
+        /// <para>False means the slot was NOT modified and the caller must reset and
+        /// re-prefill. That is a normal outcome, not an error: the raw sliding-window
+        /// ring is finite, so a rewind further back than the slot's checkpoint can
+        /// reach has no correct answer. Callers must never ignore it - continuing at
+        /// the stale head silently answers from the wrong positions.</para>
+        /// </summary>
+        public static bool Truncate(IntPtr handle, int nPast) => TSGgml_Dsv4Truncate(handle, nPast) != 0;
+
+        /// <summary>The multiple a <see cref="Truncate"/> target must be (so no
+        /// compression block straddles the new head), or 0 when this model cannot
+        /// truncate at all. Align the reuse length DOWN to it rather than losing the
+        /// whole prefix to a refusal over one token.</summary>
+        public static int TruncateAlign(IntPtr handle) => TSGgml_Dsv4TruncateAlign(handle);
 
         public static int VocabSize(IntPtr handle) => TSGgml_Dsv4VocabSize(handle);
         public static int CtxSize(IntPtr handle) => TSGgml_Dsv4CtxSize(handle);

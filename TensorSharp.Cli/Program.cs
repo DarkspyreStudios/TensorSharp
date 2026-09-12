@@ -1598,13 +1598,15 @@ namespace TensorSharp.Cli
                 else
                 {
                     var sw = Stopwatch.StartNew();
-                    ReusePlan plan = kvCache.PlanReuse(inputTokens, model.SupportsKVCacheTruncation);
-                    float[] logits = ApplyReusePlan(model, kvCache, plan, inputTokens);
+                    ReusePlan plan = kvCache.PlanReuse(inputTokens, model.SupportsKVCacheTruncation,
+                        model.KVCacheTruncationGranularity);
+                    float[] logits = ApplyReusePlan(model, kvCache, plan, inputTokens,
+                        out ReusePlanKind appliedPlan);
                     prefillMs = sw.Elapsed.TotalMilliseconds;
 
                     _log.LogInformation(LogEventIds.KvCacheReusePlan,
                         "kv plan={Plan} prefillMs={PrefillMs:F1} description={Description}",
-                        plan.Kind, prefillMs, DescribePlan(plan, inputTokens.Count));
+                        appliedPlan, prefillMs, DescribePlan(plan, inputTokens.Count));
 
                     var decodeSw = Stopwatch.StartNew();
                     for (int step = 0; step < turnMaxTokens; step++)
@@ -1669,23 +1671,32 @@ namespace TensorSharp.Cli
         /// Apply a <see cref="ReusePlan"/> to bring the model's KV state up to date and
         /// return next-token logits. Mirrors the orchestration logic used by ModelService.
         /// </summary>
-        static float[] ApplyReusePlan(ModelBase model, KVCache kvCache, ReusePlan plan, List<int> inputTokens)
+        /// <param name="applied">What happened, rather than what was planned: a model whose
+        /// rewind depth depends on where the sequence is can decline the truncation a partial
+        /// reuse needs, and the full re-prefill is then the only correct answer.</param>
+        static float[] ApplyReusePlan(ModelBase model, KVCache kvCache, ReusePlan plan,
+            List<int> inputTokens, out ReusePlanKind applied)
         {
-            switch (plan.Kind)
-            {
-                case ReusePlanKind.ExactMatch:
-                    return plan.CachedLogits;
+            applied = plan.Kind;
 
-                case ReusePlanKind.PartialReuse:
+            if (plan.Kind == ReusePlanKind.ExactMatch)
+                return plan.CachedLogits;
+
+            if (plan.Kind == ReusePlanKind.PartialReuse)
+            {
+                int reused = plan.ReusedPrefixLength;
+                // A reuse boundary inside an image span would truncate half an
+                // injection; the injector pulls it back to the span start.
+                int clamped = model.MultimodalInjector.ClampReusablePrefix(reused);
+                if (clamped != reused)
+                    reused = clamped;
+                // Realign after the clamp: it knows about media spans, not about a model
+                // whose head can only stop on a compression-block boundary.
+                int granularity = model.KVCacheTruncationGranularity;
+                if (granularity > 1) reused -= reused % granularity;
+                if (reused > 0 && model.TryTruncateKVCache(reused))
                 {
-                    int reused = plan.ReusedPrefixLength;
-                    // A reuse boundary inside an image span would truncate half an
-                    // injection; the injector pulls it back to the span start.
-                    int clamped = model.MultimodalInjector.ClampReusablePrefix(reused);
-                    if (clamped != reused)
-                        reused = clamped;
                     int suffixLength = inputTokens.Count - reused;
-                    model.TruncateKVCache(reused);
                     kvCache.TruncateTo(reused);
 
                     // Vision embeddings and the IMRoPE slice for the tokens being
@@ -1695,23 +1706,25 @@ namespace TensorSharp.Cli
                     var suffix = new int[suffixLength];
                     for (int i = 0; i < suffixLength; i++)
                         suffix[i] = inputTokens[reused + i];
-                    float[] logits = model.ForwardRefill(suffix);
-                    kvCache.RecordAppend(suffix, logits);
-                    return logits;
+                    float[] suffixLogits = model.ForwardRefill(suffix);
+                    kvCache.RecordAppend(suffix, suffixLogits);
+                    return suffixLogits;
                 }
 
-                case ReusePlanKind.Reset:
-                default:
-                {
-                    model.ResetKVCache();
-                    kvCache.Reset();
-                    model.MultimodalInjector.QueuePromptEmbeddingsForSlice(0, inputTokens.Count);
-                    var allTokens = inputTokens.ToArray();
-                    float[] logits = model.Forward(allTokens);
-                    kvCache.RecordAppend(allTokens, logits);
-                    return logits;
-                }
+                _log.LogDebug(LogEventIds.KvCacheReusePlan,
+                    "partial reuse declined by the model at {Reused} of {Cached} cached token(s); "
+                    + "re-prefilling {PromptTokens} token(s)",
+                    reused, kvCache.Count, inputTokens.Count);
+                applied = ReusePlanKind.Reset;
             }
+
+            model.ResetKVCache();
+            kvCache.Reset();
+            model.MultimodalInjector.QueuePromptEmbeddingsForSlice(0, inputTokens.Count);
+            var allTokens = inputTokens.ToArray();
+            float[] logits = model.Forward(allTokens);
+            kvCache.RecordAppend(allTokens, logits);
+            return logits;
         }
 
         static string DescribePlan(ReusePlan plan, int totalTokens)
@@ -3516,8 +3529,9 @@ namespace TensorSharp.Cli
                 }
 
                 var sw = Stopwatch.StartNew();
-                ReusePlan plan = kvCache.PlanReuse(inputTokens, model.SupportsKVCacheTruncation);
-                float[] logits = ApplyReusePlan(model, kvCache, plan, inputTokens);
+                ReusePlan plan = kvCache.PlanReuse(inputTokens, model.SupportsKVCacheTruncation,
+                    model.KVCacheTruncationGranularity);
+                float[] logits = ApplyReusePlan(model, kvCache, plan, inputTokens, out ReusePlanKind appliedPlan);
                 prefillMs[turn] = sw.Elapsed.TotalMilliseconds;
 
                 // Generate the assistant response so the cached path has realistic raw
@@ -3539,7 +3553,7 @@ namespace TensorSharp.Cli
 
                 _log.LogInformation(LogEventIds.CliBenchmark,
                     "benchmark turn {Turn}: promptTokens={PromptTokens} prefillMs={PrefillMs:F1} decodeTokens={DecodeTokens} plan={Plan}",
-                    turn + 1, inputTokens.Count, prefillMs[turn], generatedTokens.Count, plan.Kind);
+                    turn + 1, inputTokens.Count, prefillMs[turn], generatedTokens.Count, appliedPlan);
 
                 // Append the assistant turn so subsequent renders include it.
                 var parser = OutputParserFactory.Create(arch);

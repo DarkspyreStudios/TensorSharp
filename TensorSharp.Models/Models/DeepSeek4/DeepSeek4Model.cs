@@ -31,6 +31,11 @@ namespace TensorSharp.Models
         private DeepSeek4CpuExecutor _cpuExec;
         private DeepSeek4CudaExecutor _cudaExec;
         private readonly object _sync = new object();
+        // The multiple a native KV truncation target must be, or 0 when this load cannot
+        // truncate at all (plain V4, or a V4.1 served by the direct-CUDA or pure-C# executor
+        // rather than the native one). Resolved once: it is a property of the checkpoint's
+        // compression ratios, and SupportsKVCacheTruncation is read on hot scheduler paths.
+        private readonly int _truncateAlign;
         protected IntPtr NativeHandle => _handle;
         protected object NativeSync => _sync;
 
@@ -129,6 +134,9 @@ namespace TensorSharp.Models
                     ? GgmlDeepSeek4Native.DsparkBlockSize(_handle) : 0;
                 if (_handle == IntPtr.Zero)
                     throw new InvalidOperationException($"Failed to load {arch} model from {ggufPath} (see stderr for details).");
+                // Zero for plain V4: its compressor overlaps blocks, so a rewind reads state
+                // rows an aligned target does not protect, and the native side declines.
+                _truncateAlign = GgmlDeepSeek4Native.TruncateAlign(_handle);
             }
         }
 
@@ -245,7 +253,62 @@ namespace TensorSharp.Models
             return int.TryParse(raw, out int v) && v > 0 ? v : fallback;
         }
 
-        public override bool SupportsKVCacheTruncation => false;
+        /// <summary>
+        /// Partial KV reuse, on the V4.1 native executor only.
+        ///
+        /// <para>Why it matters here: V4.1's chat protocol re-renders a past assistant
+        /// turn with its reasoning removed (ordinary chat drops it, per DeepSeek's
+        /// reference encoder), so from the second turn on the rendered prompt diverges
+        /// from the cache exactly one token after the previous turn's
+        /// <c>&lt;|Assistant|&gt;</c> - and everything before that point is the WHOLE of
+        /// the previous prompt. Without truncation the planner throws all of it away and
+        /// re-prefills, which turns per-turn prefill into a function of the entire
+        /// conversation instead of the newest answer.</para>
+        ///
+        /// <para>Why only V4.1, and only native: the native executor can rewind past its
+        /// raw sliding-window ring because every slot carries a checkpoint of the modular
+        /// rings taken at the last prompt boundary (TSGgml_Dsv4Truncate). Plain V4
+        /// compresses OVERLAPPING blocks, so a boundary still reads the previous block's
+        /// state rows and aligning the head to the ratio is not sufficient; the direct-CUDA
+        /// and pure-C# V4.1 executors have no such checkpoint, and their position rewind
+        /// (Dsv4CudaEngine.Rewind) is sized for a rejected speculative block, not a
+        /// conversational one. Those three keep re-prefilling, which is correct, just not
+        /// cheap.</para>
+        /// </summary>
+        public override bool SupportsKVCacheTruncation => _truncateAlign > 0;
+
+        /// <summary>The compression-block alignment the native truncate requires (the lcm
+        /// of the per-layer compress ratios: 2 for the released checkpoint).</summary>
+        public override int KVCacheTruncationGranularity => Math.Max(1, _truncateAlign);
+
+        /// <summary>
+        /// Refusable truncation. A refusal is normal - it means the target is further back
+        /// than the slot's checkpoint can reach - and the caller resets and re-prefills.
+        /// </summary>
+        protected override bool TryTruncateKVCacheCore(int tokenCount)
+        {
+            lock (_sync)
+            {
+                if (!SupportsKVCacheTruncation) return false;
+                return GgmlDeepSeek4Native.Truncate(_handle, tokenCount);
+            }
+        }
+
+        /// <summary>
+        /// The non-refusable form, for callers with no re-prefill fallback. It throws
+        /// rather than returning with the head where it was: continuing from a stale head
+        /// answers from positions the caller believes it dropped, and nothing downstream
+        /// could tell.
+        /// </summary>
+        protected override void TruncateKVCacheCore(int tokenCount)
+        {
+            if (!TryTruncateKVCacheCore(tokenCount))
+            {
+                throw new InvalidOperationException(
+                    $"DeepSeek {Config.Architecture} cannot truncate its KV cache to {tokenCount} tokens " +
+                    $"(head at {CacheSeqLen}). Use TryTruncateKVCache and re-prefill when it declines.");
+            }
+        }
 
         protected override float[] ForwardCore(int[] tokens)
         {

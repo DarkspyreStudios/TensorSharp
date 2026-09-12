@@ -2322,10 +2322,38 @@ namespace TensorSharp.Models
             TruncateKVCacheCore(tokenCount);
         }
 
+        /// <summary>
+        /// Truncate when this model can reach <paramref name="tokenCount"/>, else report
+        /// false having changed nothing (see <see cref="IModelArchitecture.TryTruncateKVCache"/>
+        /// for why a model that supports truncation can still refuse a particular depth).
+        ///
+        /// <para>The tensor-parallel broadcast happens only AFTER the local truncation
+        /// succeeded: a refusal must not leave the worker nodes rewound while the driver
+        /// is not.</para>
+        /// </summary>
+        public bool TryTruncateKVCache(int tokenCount)
+        {
+            if (!TryTruncateKVCacheCore(tokenCount)) return false;
+            if (_distributedDriver) _tpGroup.BroadcastControl(TpControlTruncate, new[] { tokenCount });
+            return true;
+        }
+
+        /// <summary>See <see cref="IModelArchitecture.KVCacheTruncationGranularity"/>.</summary>
+        public virtual int KVCacheTruncationGranularity => 1;
+
         protected virtual void TruncateKVCacheCore(int tokenCount)
         {
             Console.WriteLine($"[KV cache] Truncating from {_cacheSeqLen} to {tokenCount}");
             _cacheSeqLen = tokenCount;
+        }
+
+        /// <summary>Refusable counterpart of <see cref="TruncateKVCacheCore"/>. Override
+        /// it INSTEAD of the void form when the depth a rewind can reach depends on where
+        /// the sequence is; the default never refuses.</summary>
+        protected virtual bool TryTruncateKVCacheCore(int tokenCount)
+        {
+            TruncateKVCacheCore(tokenCount);
+            return true;
         }
 
         /// <summary>

@@ -617,15 +617,72 @@ TS_DSV4_FA=0 TS_DSV4_GATHER=0 python eng/tests/dsv41-inference.py \
   --backend CUDA --gpus 1 --report /tmp/fixture-cuda-f32-attention.json
 ```
 
-Each inference run now checks 41 outputs: full prefill, individual decode,
+Each inference run now checks 79 outputs: full prefill, individual decode,
 3-token and 5-token chunks, reset with a different prompt, and two interleaved
-sequence slots, plus continuation after rejected rewind. V4.1 rejects rewind
-without changing its position or compressor state; the added regression check
-passes with the other 40 outputs at `atol=rtol=2e-5`. JSON reports
+sequence slots, plus continuation after rejected rewind, plus 25 partial-KV-reuse
+checks (below). V4.1 rejects the speculation-only rewind
+without changing its position or compressor state; that regression check
+passes with the others at `atol=rtol=2e-5`. JSON reports
 retain individual errors, greedy-token agreement, tolerances, and relevant
 environment variables. `--report` preserves separate precision-mode results.
 Relative L2 is `norm(native-reference) / norm(reference)`; passing the
 elementwise check requires `abs(error) <= atol + rtol*abs(reference)`.
+
+### Partial KV reuse (conversational rewind)
+
+`TSGgml_Dsv4Truncate` moves a slot's head back so a multi-turn chat keeps the
+prefix its re-rendered prompt still matches. Three kinds of check cover it, and
+they are separated on purpose because they answer different questions:
+
+* **The checkpoint must be indistinguishable from the live rings.**
+  `truncate_checkpoint_matches_live_*` performs the same rewind twice - once while
+  the live rings still hold the window, once after decoding far enough past the
+  prompt that only the prompt-boundary checkpoint can serve it - and compares the
+  two continuations. Same retained prefix, same refill, so any discrepancy is the
+  restore. Measured **bit-identical (0.0)** on CPU and on CUDA, for both fixtures.
+* **The rewound continuation must be the oracle's answer.**
+  `truncate_live_*` compares against `eng/dsv41-reference.py` at the run's
+  tolerance, from several heads and depths, including a rewind to zero (which is a
+  reset, so it also proves the Engram token history goes with it).
+* **The rewind must not move the answer further than a chunk boundary already
+  does.** `truncate_live_*_vs_cold` compares against this backend's own cold
+  prefill of the same tokens, with a self-calibrated bar: the run first measures
+  its own whole-prompt-versus-chunked spread (`cold_chunk_spread_*`) and requires
+  the rewind to stay inside it. The retained prefix is computed inside a larger
+  forward in one case and as its own call in the other, which on CUDA differs by
+  up to 9e-3 for reasons that have nothing to do with the cache path.
+
+Refusals are checked too, and each must leave the sequence usable: a misaligned
+target, a target past the head, a negative target, and a rewind deeper than any
+reachable state (which is the correct answer, not a failure - the dropped
+positions' K rows are gone and recomputing one needs its own equally-gone
+window). Every one of the 54 pre-existing checks is **bit-identical** before and
+after the change, on CPU and CUDA and on both fixtures, so the truncation support
+costs nothing numerically.
+
+What the three kinds of number say together, on the CUDA-index fixture whose
+512-wide shared head matches the released checkpoint's:
+
+| quantity | FA on | FA off | what it is |
+|---|---:|---:|---|
+| `truncate_checkpoint_matches_live_*` | 0.0 | 0.0 | the rewind mechanism itself |
+| `truncate_live_16_to_8_vs_cold` | 8.9e-3 | 0.0 | a rewound prefix vs a chunk-matched cold prefill |
+| `cold_chunk_spread_16_at_8` | 3.6e-2 | 1.9e-6 | **no truncation at all**: one whole-prompt call vs two |
+
+Read down the FA-off column: the rewind is arithmetically EXACT - restoring the
+checkpoint and continuing reproduces a cold prefill of the same tokens bit for
+bit. Read across: with flash attention on, the same rewind differs by 8.9e-3,
+while merely splitting a prefill into two calls differs by 3.6e-2 with no
+truncation involved at all. The sensitivity is the flash-attention kernel's
+dependence on batch shape, it is four times larger for plain chunking than for a
+rewind, and the rewind contributes none of it. Every one of these numbers is 0.0
+on CPU.
+
+The consequence worth stating plainly: greedy decoding can fork on differences of
+that size, so a reused turn's text is not expected to be byte-identical to a
+re-prefilled one. That is a property of prefix reuse in general - the
+pure-extension reuse that `--think`-off and tool turns have always had included -
+not of the rewind.
 
 | Fixture / execution | Elementwise result | Maximum absolute error | Maximum relative L2 | Greedy agreement |
 |---|---:|---:|---:|---:|
@@ -633,6 +690,15 @@ elementwise check requires `abs(error) <= atol + rtol*abs(reference)`.
 | Default fixture, VM CPU | 40/40 at `atol=rtol=2e-5` | 5.0366e-6 | 1.4291e-6 | 40/40 |
 | Default fixture, VM CUDA, F32 attention fallback | 41/41 at `atol=rtol=2e-5` | 5.4390e-6 | 1.5317e-6 | 41/41 |
 | CUDA-index fixture, VM CUDA, F32 attention fallback | 41/41 at `atol=rtol=2e-5` | 7.3910e-6 | 2.3932e-6 | 41/41 |
+| Default fixture, VM CPU, with partial-reuse checks | 79/79 at `atol=rtol=2e-5` | 5.1410e-6 | — | 79/79 |
+| Default fixture, VM CUDA, F32 attention fallback, with partial-reuse checks | 79/79 at `atol=rtol=2e-5` | — | — | 79/79 |
+| CUDA-index fixture, VM CUDA, F32 attention fallback, with partial-reuse checks | 74/79 at `atol=rtol=2e-5` | 6.5920e-5 | 2.5060e-5 | 79/79 |
+
+The five CUDA-index rows outside tolerance are the pre-existing position-24
+`chunk_*` / `interleaved_*` prefill checks at 6.6e-5, all with the reference's
+greedy token; no partial-reuse check is among them. Those five are bit-identical
+to a build from `HEAD`, as are the other 49 pre-existing checks, on both backends
+and both fixtures.
 
 The earlier CUDA failures in 16-token prefill were traced to cuBLAS dispatch:
 `Sgemm` ignored the requested pedantic `GemmEx` computation mode. Engram injection
