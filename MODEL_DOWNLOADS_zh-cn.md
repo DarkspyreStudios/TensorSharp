@@ -23,7 +23,9 @@ TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核�
 | Nemotron 3.5 | Nemotron-3.5-Lightning-30B-A3B（23 Mamba-2 + 23 MoE + 6 注意力的混合架构） | [unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF)，例如 `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MXFP4_MOE.gguf`（MoE 专家为 MXFP4，约 17 GB）；`general.architecture` = `nemotron_h_moe`。更小 / 其他量化见 [ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF](https://huggingface.co/ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF)（BF16/Q4_0/Q8_0 与独立的 MTP GGUF）。可选的提速产物见下一行的 DSpark drafter |
 | Nemotron 3.5 | DSpark 投机 drafter（可选，仅提速） | [magnitudedev/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark-GGUF](https://huggingface.co/magnitudedev/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark-GGUF)，是官方 `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark` 模块的 llama.cpp DFlash 导出版（6 层 SWA、Markov head r512、attention sinks）；用 `--draft-model` 加载即可启用块级（DSpark）投机解码。也可用 `eng/nemotron-dspark-to-gguf.py` 从官方 safetensors 重新构建 |
 | Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF)，Pixtral 投影器 `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` |
+| Hunyuan Dense | 腾讯稠密 Hunyuan 检查点（`hunyuan-dense`） | 任何 `general.architecture` 为 `hunyuan-dense` 的 GGUF 均可加载，例如 Hy-MT2 系列（参考对话模板取自 `tencent/Hy-MT2-1.8B`）。仅文本、单设备，没有投影器也没有草稿模型。见 [hunyuan-dense](docs/models/hunyuan-dense_zh-cn.md) |
 | Muse-Glimmer | Muse-Glimmer-30B（稠密，支持图像） | [unsloth/Muse-Glimmer-30B-GGUF](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF)，如 `Muse-Glimmer-30B-UD-Q4_K_XL.gguf` 或 `Muse-Glimmer-30B-Q8_0.gguf`；`general.architecture` 为 `muse-glimmer` / `muse_glimmer`。图像输入需同仓库的 `mmproj-Muse-Glimmer-30B-Q8_0.gguf`，且必须**显式**用 `--mmproj` 指定——这是唯一没有 mmproj 自动探测的系列。可选提速产物：同仓库的 DFlash 分块 draft `dflash-kquant.gguf`，用 `--draft-model` 加载即可无损推测解码——不要传任何采样参数，它只在纯贪心下生效 |
+| DeepSeek V4.1 | DeepSeek-V4.1-Flash（`deepseek41`，384 个路由专家） | [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5)，固定 revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5`——七个 Q2_K 分片（246.35 GiB，张量类型混合 Q2_K/Q3_K）需放在同一目录，`--model` 指向第一个分片。该文件**不能单独运行**：`eng/dsv41-prepare.py` 会依据官方 [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) 的 `config.json` / `tokenizer.json` 在分片旁生成由分词器派生的 Engram sidecar；`eng/dsv41-prepare-vision.py` 生成约 970 MB 的可选视觉伴随文件，图像与视频经 `--mmproj` 使用。服务后端为 `ggml_cuda`；V4 的草稿模型会被拒绝。完整流程与校验哈希见 [deepseek41](docs/models/deepseek41_zh-cn.md) |
 | DeepSeek V4 | DeepSeek-V4-Flash-0731（284B MoE） | [unsloth/DeepSeek-V4-Flash-0731-GGUF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF)；每种量化一个子目录（`UD-Q8_K_XL/`、`UD-IQ4_XS/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。仅文本 |
 | GLM 5.x | GLM-5.2（744B-A40B MoE，内嵌 NextN MTP） | [unsloth/GLM-5.2-GGUF](https://huggingface.co/unsloth/GLM-5.2-GGUF)；每种量化一个子目录（`UD-Q4_K_XL/`、`UD-IQ2_XXS/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。**仅文本**——下一行的 GLM-5.3-Flash 才是支持图像的那个。这些 GGUF 已带有服务端 `--spec` 所需的 NextN 块——与 Qwen 3.6 不同，不存在需要挑选的独立 MTP 仓库 |
 | GLM 5.x | GLM-5.3（`glm-dsa`，256 个路由专家，仅文本） | [unsloth/GLM-5.3-GGUF](https://huggingface.co/unsloth/GLM-5.3-GGUF)；每种量化一个子目录（`UD-Q2_K_XL/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。`general.architecture` 为 `glm-dsa`，层结构与 GLM-5.2 一致（79 个 block —— 78 层主干加 1 个 NextN ——256 个路由专家 top-8、带 lightning indexer 的 MLA、rope base 8e6），因此直接走现有的 GLM-5.2 路径，无需额外开关。**仅文本**——与下面的 Flash 仓库不同，这个仓库完全没有发布 mmproj。它确实带着供 `--spec` 使用的 NextN 块，但 `blk.78` 没有自己的 `nextn.shared_head_head.weight`，draft 块只能借用主干的 LM head——而在 `--tp N` 下该 head 是按列切分的。加载器拒绝用某个 rank 上的词表切片来 draft，并在 stderr 上明说，所以只有**不带** `--tp`（即默认按层切分到所有可见 GPU）运行时 `--spec` 才会真正生效 |
@@ -91,6 +93,36 @@ Gemma 4 目前已有可用的推测解码路径：上表中的 `gemma4-assistant
 echo "列出三条关于月球的事实。" > prompt.txt
 ```
 
+**DeepSeek V4.1 Flash**（384 个路由专家，仅 `ggml_cuda`，必须先准备 Engram sidecar）：
+
+```bash
+# 七个分片共 246 GiB Q2_K 权重，Engram 预热还需要约 60 GiB 主机页缓存
+python3 -m venv /tmp/dsv41-tools
+/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 tokenizers==0.22.2 huggingface_hub gguf
+hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+    --revision 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5 \
+    --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
+
+# 必需：由官方 config/tokenizer 派生的 Engram sidecar
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
+    --repo deepseek-ai/DeepSeek-V4.1-Flash \
+    --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+# 可选：约 970 MB 的视觉伴随文件，--mmproj 用它启用图像与视频
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
+    --repository deepseek-ai/DeepSeek-V4.1-Flash \
+    --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+    --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
+    --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
+    --backend ggml_cuda --tp 8 --port 5000
+```
+
+这里的 `--tp N` 表示在 N 张 GPU 上**按层切分**，不是张量并行；`TS_DSV41_TP=N` 才会打开实验性的
+routed-MoE TP，而它目前实测比按层切分更慢。权重与上下文放不下时加 `--n-cpu-moe N`。
+Python 只用于准备 sidecar，推理阶段不需要。
+
 **DeepSeek V4 Flash**（284B MoE，纯文本，支持 DSpark 推测解码）：
 
 ```bash
@@ -149,6 +181,19 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nv
 ```
 
 图像输入请改用 Omni 发行版：从 [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) 下载 `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` 与 `mmproj-BF16.gguf`；当前发行版没有真实音频推理所需的 Parakeet audio mmproj。
+
+**Hunyuan Dense**（腾讯稠密 Hunyuan / Hy-MT2，仅文本，单设备）：
+
+这里不固定任何仓库：只要 GGUF 的 `general.architecture` 是 `hunyuan-dense` 就能加载，
+架构由该键决定，与文件名无关。
+
+```bash
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+    --model models/<your-hunyuan-dense>.gguf \
+    --backend ggml_cuda --input prompt.txt --max-tokens 200
+```
+
+没有投影器，没有草稿模型；多余的 GPU 会闲置，启动时会明确提示而不是悄悄占用。
 
 **Mistral 3**（文本 + 图像）：
 

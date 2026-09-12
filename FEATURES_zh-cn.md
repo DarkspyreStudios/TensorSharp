@@ -4,9 +4,9 @@
 > [TensorSharp](README_zh-cn.md) 文档的一部分。
 
 
-- **多架构支持** —— DeepSeek V4 Flash、GLM 5.x（GLM-5.2 `glm-dsa` 与 GLM-5.3-Flash `glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H、Mistral 3、Muse-Glimmer、Qwen-Image-Edit（图像编辑）、MiniMax-H3（视频 + 原生 32 kHz 立体声音频），以及 Wan 2.1/2.2（仅视频）
+- **多架构支持** —— DeepSeek V4 Flash、DeepSeek V4.1 Flash（`deepseek41`，服务后端为 `ggml_cuda`）、GLM 5.x（GLM-5.2 `glm-dsa` 与 GLM-5.3-Flash `glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H、Mistral 3、Hunyuan Dense（`hunyuan-dense`）、Muse-Glimmer、Qwen-Image-Edit（图像编辑）、MiniMax-H3（视频 + 原生 32 kHz 立体声音频），以及 Wan 2.1/2.2（仅视频）
 - **多模态推理** —— 图像、视频和音频输入（Gemma 4）；图像输入（Qwen 3.5/3.6-family / Qwen 3.8 Flash Next / GLM-5.3-Flash / Mistral 3 / Muse-Glimmer / Nemotron-H Omni，各自通过自己的 `mmproj` 视觉塔）。音频输入仅 Gemma 4 支持。`--pdf` 与架构无关：原生数字 PDF 的文本层会被内联进任意模型的提示词，只有扫描件才回退为页面图像（此时需要视觉模型）。生成的媒体是另一条轴：Qwen-Image-Edit 输出图像，Wan 2.1/2.2 输出 H.264 MP4，而 MiniMax-H3 是唯一**连音频一起输出**的家族——32 kHz 立体声音轨与画面联合去噪，并作为旁挂 `.wav` 写在 MP4 旁边
-- **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、GLM 5.x）
+- **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、DeepSeek V4.1、GLM 5.x）
 - **工具调用 / 函数调用** —— 模型可调用用户定义的工具；所有三种 API 风格均支持多轮工具调用对话
 - **Agent Skills（智能体技能）** —— 面向模型的说明文件夹（`SKILL.md` + 脚本 / 参考文档 / 素材），只在任务需要时才加载。每次请求用 `"skills": ["pdf"]`（所有聊天 API）或 CLI 的 `--skill` 选中；其余内容由模型通过内置的 `skills_list` / `skills_read` 工具自取，而这些工具由 TensorSharp 在进程内应答，因此普通 OpenAI 客户端拿到的仍然只是一条写完的回复。→ [Agent Skills（智能体技能）](#agent-skills智能体技能)
 - **代码执行** —— `--code-exec` 提供 `read_file`、`edit_file`、`write_file`、`shell` 与原子 `apply_patch`：读取有界源码、做最小精确修改、运行测试，再根据带源码片段的诊断修复并验证。Web UI / CLI 为整个聊天保留工作区；每个 OpenAI / Ollama HTTP 请求只在自己的内部工具轮次间保留私有工作区，响应后删除。开启代码执行时技能脚本共享该工作区，否则使用逐次临时目录。功能默认关闭，并在 macOS（Seatbelt）与 Linux（`bwrap` 0.12.0+）上实行“沙箱或拒绝”；Windows 必须显式传入会放开文件与网络约束的 `--code-exec-unconfined`。模型命令默认不能访问 IP 网络；`--code-exec-allow-network` 会授予不受限的宿主 IP 网络访问，且与 `--skills-allow-network`、宿主代办装包三个权限彼此独立。→ [完整安全与工作区说明](docs/agent_skills.md)
@@ -43,12 +43,13 @@
 
 ## 思维链 / 推理模式
 
-支持思维链模式的模型（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、DeepSeek V4、GLM 5.x）可以在生成最终答案之前产出结构化的思维链推理内容。思维内容与主要回复分开，客户端可选择显示或隐藏。
+支持思维链模式的模型（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、DeepSeek V4、DeepSeek V4.1、GLM 5.x）可以在生成最终答案之前产出结构化的思维链推理内容。思维内容与主要回复分开，客户端可选择显示或隐藏。
 
 - **Qwen 3.5/3.6-family / Nemotron-H：** 使用 `<think>...</think>` 标签
 - **Gemma 4：** 使用 `<|channel>thought\n...<channel|>` 标签
 - **GPT OSS：** 使用 Harmony 格式，以 `<|channel|>analysis` 标记思维过程，以 `<|channel|>final` 标记最终回复
 - **DeepSeek V4：** 使用 `<think>...</think>` 标签；不传 `--think` 时聊天模板会直接闭合该块，因此推理是显式开启的
+- **DeepSeek V4.1：** 同样使用 `<think>...</think>`，但带有训练过的收尾转换——达到 `TS_THINKING_BUDGET` 时模型会输出 `</think>`，并在原有 `max_tokens` 之内继续写最终答案。当请求的输出额度不少于 512 token 时，预算默认取 75%；额度更小则没有自动预算，设为 `0` 可关闭。推理进入重复循环时，重复守卫也会请求同一个收尾转换
 - **GLM 5.x：** 同样是 `<think>...</think>`，也与其他系列一样按需开启——加 `--think` 会补上 `Reasoning Effort: Max` 系统行，并在生成提示里留下一个未闭合的 `<think>` 由模型自己收尾；不加时提示里写的是空的 `<think></think>`，模型于是直接作答。历史轮次的思考内容始终不会带进提示，与模板 `clear_thinking` 的默认行为一致
 
 通过 `--think`（控制台）、`"think": true`（Ollama API）或 Web 界面中的思维链开关启用。
@@ -266,6 +267,8 @@ TensorSharp 支持**张量并行（TP）**——按 Megatron-LM 列/行并行范
 | GLM-5.2（`glm-dsa`） | 默认按层切分到所有可见 GPU；`--tp N` 会把它换成原生本地单进程张量并行 |
 | GLM-5.3-Flash（`glm5next`） | 默认按层切分到所有可见 GPU；`--tp N` 在 GGML GPU 后端上选择原生本地张量并行 |
 | DeepSeek V4 Flash | 默认按层切分到所有可见 GPU；`--tp N` 只限制这次切分用几张卡（与 `TS_DSV4_NGPU` 相同） |
+| DeepSeek V4.1 Flash | 默认按层切分到所有可见 GPU，并按每张卡的空闲显存来分配；`--tp N` / `TS_DSV4_NGPU` 限制卡数。`TS_DSV41_TP=N` 可额外打开实验性的 routed-MoE 张量并行（gate/up 沿 FFN 中间维切分，down 沿输入维切分，经主机中转做 F32 归约）——目前实测比按层切分更慢。注意力 TP 与分布式组尚未实现 |
+| Hunyuan Dense（`hunyuan-dense`） | 单设备——两种模式都不支持；启动时会在 stderr 上明说 |
 | Qwen 3.8 Flash Next（`qwen4exp`） | 按层切分，用 `--tp N` 显式开启（GGML CUDA / Vulkan） |
 
 启动时会打印实际跑的是哪一种模式，因此不必从 `nvidia-smi` 去猜。
@@ -345,6 +348,7 @@ Responses API 存储（`TS_RESPONSES_STORE_REDIS_URL`）用于持久化响应。
 - **Gemma 4：** `<|tool_call>call:function_name{args}<tool_call|>`
 - **GPT OSS（Harmony）：** 工具以 TypeScript namespace 形式声明在 developer 消息中，调用通过 commentary channel 输出：`<|channel|>commentary to=functions.NAME <|constrain|>json<|message|>{args}<|call|>`
 - **DeepSeek V4：** DSML 标记 —— 系统提示词负责讲解语法并携带每个函数的 JSON schema，模型则以 `<｜DSML｜tool_calls><｜DSML｜invoke name="NAME"><｜DSML｜parameter name="key" string="true|false">value</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>` 作答。`string="false"` 表示该参数是 JSON 类型
+- **DeepSeek V4.1：** *带空格的* DSML —— `<｜DSML｜ calls>` 与 `<｜DSML｜ invoke name="tool">`，与 V4 不带空格的格式不兼容。在 `/v1/chat/completions` 上，声明的工具由请求级语法强制约束：`tool_choice` 的 `auto` / `required` / `none` / 指定函数，以及 `parallel_tool_calls: false`，都在 token 层面生效；字符串可用 `string="false"` 以 JSON 形式无损传递；不支持的 schema 断言在生成之前以 HTTP 400 拒绝，而不是被悄悄丢弃
 - **GLM 5.x：** 逐参数标签的 XML —— `<tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>`，函数名以裸文本紧跟在开标签之后，每个参数是自成一组的 `<arg_key>` / `<arg_value>`（模板里用 `tojson` 渲染过的值会被解析回数字、数组与对象）
 
 输出解析器（`OutputParser.cs`）会自动从模型原始输出中提取工具调用，与架构无关。

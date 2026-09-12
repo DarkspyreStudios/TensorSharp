@@ -26,7 +26,9 @@ TensorSharp loads models in GGUF format. Below are verified Hugging Face repos f
 | Nemotron 3.5 | Nemotron-3.5-Lightning-30B-A3B (hybrid 23 Mamba-2 + 23 MoE + 6 attention) | [unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF) — e.g. `NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MXFP4_MOE.gguf` (MoE experts MXFP4, ~17 GB); `general.architecture` = `nemotron_h_moe`. Smaller/other quants: [ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF](https://huggingface.co/ggml-org/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF) (BF16/Q4_0/Q8_0 + separate MTP GGUFs). Optional speed artifact: the DSpark drafter below |
 | Nemotron 3.5 | DSpark speculative drafter (optional — speed only) | [magnitudedev/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark-GGUF](https://huggingface.co/magnitudedev/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark-GGUF) — the llama.cpp DFlash export of the official `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark` module (6 SWA layers, Markov head r512, attention sinks); loaded with `--draft-model` for block (DSpark) speculative decoding. Rebuild it from the official safetensors with `eng/nemotron-dspark-to-gguf.py` |
 | Mistral 3 | Mistral-Small-3.1-24B-Instruct-2503 | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) — Pixtral mmproj `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` in the same repo |
+| Hunyuan Dense | Tencent dense Hunyuan checkpoints (`hunyuan-dense`) | Any GGUF whose `general.architecture` is `hunyuan-dense`, such as the Hy-MT2 releases (`tencent/Hy-MT2-1.8B` supplies the reference chat template). Text only, single device, no projector and no drafter. See [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
 | Muse-Glimmer | Muse-Glimmer-30B (dense, image-capable) | [unsloth/Muse-Glimmer-30B-GGUF](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF) — e.g. `Muse-Glimmer-30B-UD-Q4_K_XL.gguf` or `Muse-Glimmer-30B-Q8_0.gguf`; `general.architecture` = `muse-glimmer` / `muse_glimmer`. Image input requires `mmproj-Muse-Glimmer-30B-Q8_0.gguf` (same repo) passed **explicitly** with `--mmproj` — this is the one family with no mmproj auto-detection. Optional speed artifacts: the DFlash block drafter `dflash-kquant.gguf` (same repo) or the newer DFlash2 drafter [z-lab/Muse-Glimmer-30B-DFlash2-GGUF](https://huggingface.co/z-lab/Muse-Glimmer-30B-DFlash2-GGUF) (prefer `-Q4_K_M` on a 16 GB card — see the note on drafter size in [speculative_decoding.md](docs/speculative_decoding.md#what-to-expect)), loaded with `--draft-model` for lossless speculative decoding — pass no sampler flags, it needs plain greedy |
+| DeepSeek V4.1 | DeepSeek-V4.1-Flash (`deepseek41`, 384 routed experts) | [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5) at revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5` — seven Q2_K shards (246.35 GiB, mixed Q2_K/Q3_K tensors) kept in one directory; point `--model` at the first shard. The file **does not run on its own**: `eng/dsv41-prepare.py` writes the tokenizer-derived Engram sidecar beside the shards from the official [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) `config.json` / `tokenizer.json`, and `eng/dsv41-prepare-vision.py` builds the optional ~970 MB vision companion that `--mmproj` needs for images and video. `ggml_cuda` is the serving backend; V4 drafters are rejected. Full recipe and checkpoint hashes: [deepseek41.md](docs/models/deepseek41.md) |
 | DeepSeek V4 | DeepSeek-V4-Flash-0731 (284B MoE) | [unsloth/DeepSeek-V4-Flash-0731-GGUF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF) — one subdirectory per quant (`UD-Q8_K_XL/`, `UD-IQ4_XS/`, `UD-IQ1_S/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. Text only |
 | GLM 5.x | GLM-5.2 (744B-A40B MoE, embedded NextN MTP) | [unsloth/GLM-5.2-GGUF](https://huggingface.co/unsloth/GLM-5.2-GGUF) — one subdirectory per quant (`UD-Q4_K_XL/`, `UD-IQ2_XXS/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. **Text only** — GLM-5.3-Flash in the next row is the one that takes images. These GGUFs already carry the NextN block for the server's `--spec` — unlike Qwen 3.6 there is no separate MTP repo to pick |
 | GLM 5.x | GLM-5.3 (`glm-dsa`, 256 routed experts, text only) | [unsloth/GLM-5.3-GGUF](https://huggingface.co/unsloth/GLM-5.3-GGUF) — one subdirectory per quant (`UD-Q2_K_XL/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. `general.architecture` = `glm-dsa`, and the block shape matches GLM-5.2 (79 blocks — 78 trunk plus one NextN — 256 routed experts top-8, MLA with the lightning indexer, rope base 8e6), so it loads on the existing GLM-5.2 path with nothing new to enable. **Text only** — this repo publishes no mmproj at all, unlike the Flash one below. It does carry the NextN block for `--spec`, but `blk.78` ships no `nextn.shared_head_head.weight` of its own, so the draft block borrows the trunk's LM head — which is column-parallel under `--tp N`. The loader refuses to draft from one rank's strip of the vocabulary and says so on stderr, so `--spec` is only engaged when you run **without** `--tp`, i.e. on the default layer split across every visible GPU |
@@ -102,6 +104,37 @@ The `hf download` commands need the Hugging Face CLI (`pip install -U huggingfac
 echo "Give me three facts about the Moon." > prompt.txt
 ```
 
+**DeepSeek V4.1 Flash** — 384 routed experts, `ggml_cuda` only, needs a prepared Engram sidecar ([vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5))
+
+```bash
+# 246 GiB of Q2_K weights across seven shards, plus ~60 GiB of host page cache for Engram warming
+python3 -m venv /tmp/dsv41-tools
+/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 tokenizers==0.22.2 huggingface_hub gguf
+hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+    --revision 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5 \
+    --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
+
+# Required: the tokenizer-derived Engram sidecar, from the official repository's config/tokenizer
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
+    --repo deepseek-ai/DeepSeek-V4.1-Flash \
+    --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+# Optional: the ~970 MB vision companion that --mmproj needs for images and video
+/tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
+    --repository deepseek-ai/DeepSeek-V4.1-Flash \
+    --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+    --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
+    --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
+    --backend ggml_cuda --tp 8 --port 5000
+```
+
+`--tp N` here selects a **layer split** across N GPUs, not tensor parallelism; `TS_DSV41_TP=N`
+opts into the experimental routed-MoE TP, which has measured slower than the split so far.
+Add `--n-cpu-moe N` when the weights and context do not fit. Python is needed to prepare the
+sidecars, not to serve.
+
 **DeepSeek V4 Flash** — 284B MoE, text only, DSpark speculative decoding ([unsloth/DeepSeek-V4-Flash-0731-GGUF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF))
 
 ```bash
@@ -168,6 +201,19 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nv
 ```
 
 For image input use the Omni distribution instead: `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` + `mmproj-BF16.gguf` from [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF). Audio is not functional (it needs a Parakeet audio mmproj the GGUFs do not ship).
+
+**Hunyuan Dense** — Tencent dense Hunyuan / Hy-MT2, text only, single device
+
+No repository is pinned here: any GGUF whose `general.architecture` is `hunyuan-dense` loads,
+and the architecture is selected from that key rather than from the file name.
+
+```bash
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+    --model models/<your-hunyuan-dense>.gguf \
+    --backend ggml_cuda --input prompt.txt --max-tokens 200
+```
+
+No projector, no drafter, and extra GPUs stay idle — startup says so rather than using them.
 
 **Mistral 3** — text + image (Pixtral) ([bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF))
 

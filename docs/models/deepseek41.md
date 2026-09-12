@@ -1,6 +1,6 @@
 # DeepSeek V4.1 Flash (`deepseek41`)
 
-[← back to model index](README.md)
+[← back to model index](README.md) | [中文](deepseek41_zh-cn.md)
 
 TensorSharp has a dedicated **V4.1 inference graph on `ggml_cuda`**, with an
 optional native vision encoder. It uses the DeepSeek whole-model loader and

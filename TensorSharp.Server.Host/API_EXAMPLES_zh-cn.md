@@ -662,6 +662,33 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   }"
 ```
 
+### Chat Completions + 视频（DeepSeek V4.1）
+
+`video_url` 是 V4.1 对 Chat Completions content 数组的扩展。服务端用既有的视频解码器
+对片段采样，并把每一帧变成一个图像 span，因此模型需要用 `--mmproj` 挂上准备好的视觉
+伴随文件。
+
+```bash
+VID_B64=$(base64 < clip.mp4 | tr -d '\n')
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf\",
+    \"messages\": [{
+      \"role\": \"user\",
+      \"content\": [
+        {\"type\": \"text\", \"text\": \"这段视频里发生了什么？\"},
+        {\"type\": \"video_url\", \"video_url\": {\"url\": \"data:video/mp4;base64,$VID_B64\", \"fps\": 1, \"max_frames\": 3}}
+      ]
+    }],
+    \"max_tokens\": 200
+  }"
+```
+
+`fps` 必须大于 0 且不超过 60，`max_frames` 取 1–64；默认是 1 fps、16 帧。帧保持原始顺序，
+并各自带上以秒为单位的源时间，所以这是抽帧而不是时序编码器。远程 HTTP URL 不会被拉取，
+请发送 data URI。带音频的部分以 HTTP 400 拒绝，而不是被丢弃。
+
 ### Chat Completions + 工具调用
 
 ```bash
