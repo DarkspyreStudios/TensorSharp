@@ -11,10 +11,14 @@ TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码�
 上一个发布标签之后又落地了两个系列，两者都带着值得先了解的限制。
 
 - **DeepSeek V4.1 Flash（`deepseek41`）**——专用的原生 V4.1 计算图，外加可选的视觉
-  伴随文件。服务后端是 `ggml_cuda`；`ggml_cpu` 用同一套图跑标量回退实现，作为正确性
-  通道；`ggml_vulkan` 与 `ggml_metal` 需要 `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；其余后端
-  会直接拒绝该检查点，而不会把 V4.1 的权重塞进 V4 的图。Q2_K 版本必须先准备好 Engram
-  sidecar 才能运行。多 GPU 指的是按层切分；routed-MoE 张量并行藏在 `TS_DSV41_TP`
+  伴随文件。服务后端是 `ggml_cuda`；`ggml_cpu` 用同一套图跑标量回退实现，`cpu` 则运行
+  纯 C# 的 V4.1 执行器，两者都是正确性与可移植性通道；`cuda` 用 Direct CUDA 引擎自己的
+  内核运行 V4.1，但尚无数值门禁；`ggml_vulkan` 与 `ggml_metal` 需要
+  `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会拒绝该检查点。每一种量化都必须先准备好
+  Engram sidecar 才能运行——社区 GGUF 仓库都不附带，需用 `eng/dsv41-prepare.py` 生成。
+  Q2_K 与 Q4_K_M 均已测试；在 Q4_K_M 上两张 Engram 表各 51.5 GiB，只能留在主机内存映射
+  中，因此在 8x46 GB 上必须把路由专家卸载到 CPU（见
+  [量化报告](validation/deepseek41-quants/README.md)）。多 GPU 指的是按层切分；routed-MoE 张量并行藏在 `TS_DSV41_TP`
   之后，实测比按层切分更慢。并发请求各有独立槽位，但目前回退到逐槽前向，因此并发还不
   等于批处理的 GPU 吞吐；也没有 V4.1 的 DSpark。哪些已实测、哪些明确未验证，都记录在
   [验证报告](deepseek41_validation.md)与[模型卡片](models/deepseek41.md)中。

@@ -93,7 +93,7 @@ Gemma 4 目前已有可用的推测解码路径：上表中的 `gemma4-assistant
 echo "列出三条关于月球的事实。" > prompt.txt
 ```
 
-**DeepSeek V4.1 Flash**（384 个路由专家，仅 `ggml_cuda`，必须先准备 Engram sidecar）：
+**DeepSeek V4.1 Flash**（384 个路由专家，服务后端为 `ggml_cuda`，必须先准备 Engram sidecar）：
 
 ```bash
 # 七个分片共 246 GiB Q2_K 权重，Engram 预热还需要约 60 GiB 主机页缓存
@@ -107,6 +107,13 @@ hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
     --repo deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
+
+# 也可以改用 Q4_K_M：十一个分片共 415 GiB。它的两张 Engram 表各 51.5 GiB，
+# 只能留在主机内存映射中，因此在 8x46 GB 上必须把路由专家卸载到 CPU，
+# 加载器会打印它需要的 --n-cpu-moe N。
+#   --include "DeepSeek-V4.1-Flash-Q4_K_M-*.gguf" --local-dir models/deepseek41-q4
+# 下面的 sidecar 步骤对每一种量化都是必需的：社区 GGUF 仓库都不附带
+# deepseek41.engram.bin。
 
 # 可选：约 970 MB 的视觉伴随文件，--mmproj 用它启用图像与视频
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \

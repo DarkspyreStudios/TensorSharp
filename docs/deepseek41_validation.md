@@ -17,6 +17,17 @@ JSON latency regressions are not explained by the follow-up controls, and a
 compatible llama.cpp comparison is unavailable. The passing cases do not close
 those requirements.
 
+Two later reports extend this one and are not superseded by it. The
+[quantization report](validation/deepseek41-quants/README.md) covers the
+Q4_K_M release, where the Engram tables no longer fit in VRAM and the routed
+experts need CPU offload. The
+[direct-CUDA backend report](validation/deepseek41-cuda-backend/README.md)
+covers `--backend cuda`, which runs V4.1 on its own kernels and is explicitly
+not yet held to a numerical gate. The pure-C# `cpu` executor is checked against
+`eng/dsv41-reference.py` at 2e-5 on the F32 fixture; quantized fixtures are
+chaotic for every implementation, including the native one, and are not a
+tight-tolerance target.
+
 The checkpoint is `vcruz305/DeepSeek-V4.1-Flash-GGUF`, revision
 `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5`, Q2_K, seven shards beginning with
 `DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf`. Use these exact files for both
@@ -261,6 +272,95 @@ TS_DSV4_FA=0 python eng/tests/dsv41-gather.py BOUNDARY_FIXTURE_DIRECTORY \
 | Qwen3.5 latency follow-up controls | A [60-case managed/native swap diagnostic](validation/deepseek41/json-performance/qwen35-cross-phase/README.md) passes every answer and retains higher solo TTFT with final managed in that fixed-order diagnostic; native prefill medians remain 27–29 ms. A [30-case EventPipe diagnostic](validation/deepseek41/json-performance/qwen35-eventpipe/README.md) passes every answer and both trace integrity audits, but does not reproduce the median gap. Its slow solo observations contain longer inherited cache-reset residence in both builds, with no GC-reason suspension overlapping the six solo first-token intervals. The subsequent [72-case uninstrumented control](validation/deepseek41/json-performance/qwen35-solo72/README.md) holds final native fixed and passes all answers and both whole-18 timing comparisons in B/F/F/B order. Baseline/final median TTFT is 67.54/64.36 ms and 69.89/65.38 ms; request wall is 124.22/118.67 ms and 125.15/121.49 ms. All observations and the predeclared first-three/later-fifteen groups remain. This larger control does not reproduce the earlier slowdown. No production change was made, no fix is claimed, and the differing controls do not establish universal absence of regression. |
 | Image/video | F32 native vision/mixed-input fixture: 158/158 passed on one GPU, eight-GPU layer placement, and eight-GPU routed TP with one CPU-MoE layer and microbatch three. Tiny BF16 dense/flash suites each passed 18/18 at separately stated bounds. Actual Q2_K media HTTP passed 25/25 requests across concurrency 1/4 (OCR, multiple-image order, image follow-up, video order, timestamp), plus 1/1 image-after-long-text request. The final real-image BF16 encoder comparison has relative L2 0.016584 and exceeds tiny-fixture numerical bounds; HTTP success does not establish strict encoder parity |
 | Audio | Unsupported by the official model configuration; four actual HTTP rejection checks passed |
+
+## Q4_K_M throughput work (eight A40s, 2026-09-12)
+
+The Q4_K_M release is 414.2 GiB against 360 GiB of VRAM, so unlike Q2_K it
+cannot hold the two 51.5 GiB Engram tables on the devices and it needs some
+routed-expert CPU offload. Both facts drove the work below. Every row is a
+cold-prompt measurement -- each repeat sends a different prompt body, so its
+n-grams select Engram rows that run has not touched -- on the same host, same
+checkpoint and same `MAX_CONTEXT` 65536 / `TS_DSV4_UBATCH` 1024 /
+`TS_SCHED_MAX_RUNNING_SEQS` 4 profile.
+
+| | before | after |
+|---|---:|---:|
+| Prefill, 4,924-token prompt (tok/s) | 199.7 / 252.5 / 250.9 | 451.8 / 463.9 / 492.1 |
+| Decode, single stream (tok/s) | 23.5 / 25.8 / 25.9 | 31.9 / 31.0 / 32.5 |
+| Decode aggregate, 2 concurrent (tok/s) | 24.8 | 39.3 |
+| Decode aggregate, 4 concurrent (tok/s) | 24.3 | 48.9 |
+| Decode aggregate, 8 concurrent (tok/s) | 26.5 | 48.5 |
+| Four concurrent 10.8k-token documents | server aborted | 4/4 answered |
+| Routed-expert layers on the host | 3 of 40 | 1 of 40 |
+
+"before" is the same binary with `TS_DSV41_ENGRAM_WARM=0`,
+`TS_DSV4_VRAM_RESERVE_MB=5240`, `TS_BATCHED_FUSED_DECODE=0` and
+`TS_DSV4_GRAPH_CACHE_HEADROOM_MB=0`, which reproduces the previous behaviour on
+one build.
+
+Where the time went, from `TS_DSV4_PERF=2`, per 1024-token prefill chunk and per
+decoded token:
+
+| | before | after |
+|---|---:|---:|
+| Prefill input preparation | 1,435-2,565 ms | 56-81 ms |
+| Prefill graph compute | 2,326-2,750 ms | 2,139-2,154 ms |
+| Decode input preparation | 5-15 ms | 0.86-0.95 ms |
+| Decode graph compute | 36-39 ms | 35.6-35.9 ms |
+| Scheduler splits per prefill chunk | 14 | 10 |
+
+Input preparation is the host Engram lookup, and it is what automatic warming
+removes. Graph compute and the split count move with the routed-expert offload
+count, which the smaller device-memory reserve cut from three layers to one.
+
+### What the decode step is made of
+
+`TS_DSV4_PERF=3` reports how a device subgraph is submitted. A single-token
+V4.1 decode graph is 3,235-3,352 nodes, 2,194-2,269 of which compute something
+(~55 a layer), submitted as 59 device subgraphs, 331-337 forwarded runs of
+ordinary nodes and 400-406 fused kernel launches. The submitting thread spends
+3.6-3.7 ms doing that and then waits ~31 ms, so the step is bound by the device,
+not by submission.
+
+Against that, one token's weights are 9.78 GiB at Q4_K_M -- 128.6 MiB of routed
+experts, 21.4 MiB of shared expert and 76.5 MiB of attention per layer, plus a
+543 MiB output head -- which is 14.0 ms at the A40's 696 GB/s. The remainder is
+the floor under ~2,200 small kernels, which is why token-batched decode helps
+and why raising single-stream decode further needs fewer kernels rather than
+fewer bytes.
+
+### Token-batched decode equivalence
+
+Solo decode reproduced its own greedy output on 6/6 prompts at 200 tokens. A
+four-wide batched step matched the solo text on 2-3/6, diverging mid-answer and
+continuing coherently. The discriminating control is batch WIDTH: the same
+prompt at width 2 and at width 4 uses the same code path with identical per-slot
+wiring and only wider GEMMs, and those two disagree on 1/4 prompts -- the same
+rate. Output therefore depends on which requests share a step.
+
+Per-slot state separation is checked separately and is exact: four concurrent
+10,836-token documents, each hiding a different secret, were answered 4/4 with
+their own secret and 0/4 containing another slot's secret, both serially and
+under batched decode.
+
+### Routed-MoE tensor parallelism on this checkpoint
+
+`TS_DSV41_TP=8` shards the routed experts evenly, which at Q4_K_M removes the
+capacity cliff entirely: 38.3 GiB of shards a rank and **zero** CPU-offloaded
+layers. It is still slower than layer split, because attention, the shared
+expert and the caches keep their layer placement and the partial sums reduce
+through host-staged F32 buffers on a box whose GPUs have no NVLink and straddle
+two NUMA nodes.
+
+| eight A40s, Q4_K_M | Prefill tok/s | Decode tok/s | CPU-MoE layers |
+|---|---:|---:|---:|
+| Layer split | 451.8-492.1 | 31.0-32.5 | 1 |
+| `TS_DSV41_TP=8` | 391.9-410.4 | 21.4-22.0 | 0 |
+
+Decode splits rise from 62 to 132 per step under TP. This reproduces the Q2_K
+conclusion on a checkpoint where TP has a genuine placement advantage, so it is
+the placement-independent result: on this topology the host-staged reduction
+costs more than the CPU-MoE layer it removes.
 
 ## Full-checkpoint warm measurements
 

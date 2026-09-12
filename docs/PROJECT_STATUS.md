@@ -13,10 +13,16 @@ knowing before you plan around them.
 
 - **DeepSeek V4.1 Flash (`deepseek41`)** — a dedicated native V4.1 graph with an
   optional vision companion. `ggml_cuda` is the serving backend; `ggml_cpu`
-  runs the same graph on scalar fallbacks as a correctness path, `ggml_vulkan`
-  and `ggml_metal` need `TS_DSV41_ALLOW_NON_CUDA_GPU=1`, and every other backend
-  refuses the checkpoint rather than loading V4.1 weights into the V4 graph. The
-  Q2_K release needs a prepared Engram sidecar before it will run at all.
+  runs the same graph on scalar fallbacks and `cpu` runs a pure-C# V4.1 executor,
+  both as correctness and portability paths. `cuda` runs V4.1 through the
+  direct-CUDA engine's own kernels and is not yet held to a numerical gate.
+  `ggml_vulkan` and `ggml_metal` need `TS_DSV41_ALLOW_NON_CUDA_GPU=1`; `mlx`
+  refuses the checkpoint. Every release needs a prepared Engram sidecar before it
+  will run at all — the community GGUF repositories do not ship one, so generate
+  it with `eng/dsv41-prepare.py`. Q2_K and Q4_K_M are both tested; at Q4_K_M the
+  two Engram tables are 51.5 GiB each and stay host mappings, so the checkpoint
+  needs routed-expert CPU offload on 8x46 GB (see the
+  [quantization report](validation/deepseek41-quants/README.md)).
   Multi-GPU means a layer split; routed-MoE tensor parallelism exists behind
   `TS_DSV41_TP` and has measured slower than the split. Concurrent requests get
   isolated slots but fall back to per-slot forwards, so concurrency is not

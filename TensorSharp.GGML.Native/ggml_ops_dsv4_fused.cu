@@ -40,6 +40,9 @@
 #include "ggml-cuda.h"
 #include "ggml-cuda/common.cuh"   // ggml_backend_cuda_context (stream access)
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 
 bool tsg_dsv4_cuda_supports_native_bf16(ggml_backend_t backend) {
@@ -917,6 +920,32 @@ static void tsg_dsv4_backend_synchronize(ggml_backend_t backend)
     cudaStreamSynchronize(tsg_dsv4_backend_stream(c));
 }
 
+// Submission diagnostics (TS_DSV4_PERF>=3). Plain relaxed atomics: they are
+// incremented on whichever thread submits a device subgraph and read once the
+// forward has finished.
+static std::atomic<unsigned long long> tsg_dsv4_stat_calls{0}, tsg_dsv4_stat_views{0},
+    tsg_dsv4_stat_fused{0}, tsg_dsv4_stat_nodes{0}, tsg_dsv4_stat_submit_ns{0};
+
+void tsg_dsv4_fused_counters_reset()
+{
+    tsg_dsv4_stat_calls.store(0, std::memory_order_relaxed);
+    tsg_dsv4_stat_views.store(0, std::memory_order_relaxed);
+    tsg_dsv4_stat_fused.store(0, std::memory_order_relaxed);
+    tsg_dsv4_stat_nodes.store(0, std::memory_order_relaxed);
+    tsg_dsv4_stat_submit_ns.store(0, std::memory_order_relaxed);
+}
+
+tsg_dsv4_fused_counters tsg_dsv4_fused_counters_read()
+{
+    tsg_dsv4_fused_counters out;
+    out.calls = tsg_dsv4_stat_calls.load(std::memory_order_relaxed);
+    out.views = tsg_dsv4_stat_views.load(std::memory_order_relaxed);
+    out.fused = tsg_dsv4_stat_fused.load(std::memory_order_relaxed);
+    out.nodes = tsg_dsv4_stat_nodes.load(std::memory_order_relaxed);
+    out.submit_ms = tsg_dsv4_stat_submit_ns.load(std::memory_order_relaxed) / 1.0e6;
+    return out;
+}
+
 // This backend owns every node the scheduler gives it: fused nodes launch here,
 // and each maximal run of ordinary nodes is handed to the CUDA backend as a
 // graph view. Submission is asynchronous throughout, so the whole device
@@ -926,6 +955,8 @@ static enum ggml_status tsg_dsv4_backend_graph_compute(ggml_backend_t backend, g
     auto * c = (tsg_dsv4_backend_ctx *) backend->context;
     cudaSetDevice(c->device);
     cudaStream_t stream = tsg_dsv4_backend_stream(c);
+    static const bool stats = []() { const char * e = getenv("TS_DSV4_PERF"); return e && atoi(e) >= 3; }();
+    const auto submit_t0 = std::chrono::steady_clock::now();
 
     int run_start = -1;     // first node of the pending run of ordinary nodes
     bool run_has_work = false;  // ... and whether any of them computes anything
@@ -938,6 +969,7 @@ static enum ggml_status tsg_dsv4_backend_graph_compute(ggml_backend_t backend, g
         // A run of nothing but views and reshapes has no kernels to launch, and
         // handing it to ggml-cuda would still cost a CUDA-graph capture cycle.
         if (start < 0 || !work) return GGML_STATUS_SUCCESS;
+        if (stats) tsg_dsv4_stat_views.fetch_add(1, std::memory_order_relaxed);
         ggml_cgraph view = ggml_graph_view(cgraph, start, end);
         return ggml_backend_graph_compute_async(c->cuda_backend, &view);
     };
@@ -974,10 +1006,19 @@ static enum ggml_status tsg_dsv4_backend_graph_compute(ggml_backend_t backend, g
             cudaStreamSynchronize(stream);
             return status;
         }
+        if (stats) tsg_dsv4_stat_fused.fetch_add(1, std::memory_order_relaxed);
         tsg_dsv4_fused_launch(d, node, stream);
     }
     const enum ggml_status status = flush(cgraph->n_nodes);
     if (status != GGML_STATUS_SUCCESS) cudaStreamSynchronize(stream);
+    if (stats)
+    {
+        tsg_dsv4_stat_calls.fetch_add(1, std::memory_order_relaxed);
+        tsg_dsv4_stat_nodes.fetch_add((unsigned long long) cgraph->n_nodes, std::memory_order_relaxed);
+        tsg_dsv4_stat_submit_ns.fetch_add((unsigned long long)
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - submit_t0).count(), std::memory_order_relaxed);
+    }
     return status;
 }
 
