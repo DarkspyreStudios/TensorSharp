@@ -32,7 +32,7 @@ using TensorSharp.Cuda;
 
 namespace TensorSharp.Models
 {
-    internal sealed unsafe class DeepSeek4CudaExecutor : IDisposable
+    internal sealed unsafe class DeepSeek4CudaExecutor : IDisposable, IDsv41EngramSource
     {
         private const int CsaRatio = 4;
         private const int HcaRatio = 128;
@@ -231,6 +231,8 @@ namespace TensorSharp.Models
 
             OpenShards(ggufPath, dsparkPath);
             ParseHparams();
+            if (_isV41)
+                LoadEngramSidecar(ggufPath);
             Mark("shards opened / hparams parsed");
 
             // Large weights are read exactly once, on their way to VRAM, so the
@@ -303,7 +305,12 @@ namespace TensorSharp.Models
 
         private void OpenShards(string firstPath, string dsparkPath = null)
         {
-            var first = new GgufFile(firstPath);
+            // Standalone, like the rest of the loop below: this executor
+            // enumerates the shards itself from split.count, so letting shard 1
+            // also pull in its siblings would build a second, duplicate set of
+            // GgufFile objects -- a second mmap and mlock pass over the whole
+            // checkpoint, and a merged tensor table this code does not use.
+            var first = GgufFile.OpenWithoutSiblingShards(firstPath);
             _shards.Add(first);
             _shardPaths.Add(firstPath);
 
@@ -317,7 +324,11 @@ namespace TensorSharp.Models
                     for (int i = 2; i <= splitCount; i++)
                     {
                         string path = firstPath.Substring(0, pos) + $"-{i:D5}-of-" + firstPath.Substring(pos + marker.Length);
-                        _shards.Add(new GgufFile(path));
+                        // This loop IS the shard enumeration, so each shard is opened
+                        // for itself. Letting it expand its siblings again would open
+                        // every file N times and attribute every tensor to whichever
+                        // shard happened to be opened last.
+                        _shards.Add(GgufFile.OpenWithoutSiblingShards(path));
                         _shardPaths.Add(path);
                     }
                 }
@@ -419,7 +430,13 @@ namespace TensorSharp.Models
         private void ParseHparams()
         {
             GgufFile g = _shards[0];
-            const string a = "deepseek4";
+            // V4 and V4.1 are separate architectures with separate key prefixes.
+            string arch = g.GetString("general.architecture", "deepseek4");
+            if (arch != "deepseek4" && arch != "deepseek41")
+                throw new NotSupportedException(
+                    $"The DeepSeek CUDA executor requires the deepseek4 or deepseek41 architecture, got '{arch}'.");
+            _isV41 = arch == "deepseek41";
+            string a = arch;
             _nLayer = (int)g.GetUint32($"{a}.block_count");
             _nEmbd = (int)g.GetUint32($"{a}.embedding_length");
             _nHead = (int)g.GetUint32($"{a}.attention.head_count");
@@ -465,6 +482,145 @@ namespace TensorSharp.Models
 
             _compCorr0 = MathF.Max(0f, MathF.Floor(YarnCorrDim(_nRot, _nCtxOrig, _yarnBetaFast, _compressRopeBase)));
             _compCorr1 = MathF.Min(_nRot - 1, MathF.Ceiling(YarnCorrDim(_nRot, _nCtxOrig, _yarnBetaSlow, _compressRopeBase)));
+        }
+
+        /// <summary>deepseek41 rather than deepseek4.</summary>
+        private bool _isV41;
+        private Dsv41EngramData _engram;
+        private int[] _v41KvSource, _v41IndexSource;
+        private int[] _engramHistory;
+        private int _engramHistoryLength;
+        private int[] _engramHashes;
+        private int _engramUbatchTokens;
+
+        /// <summary>
+        /// Reads <c>deepseek41.engram.bin</c> from beside the checkpoint and
+        /// derives this checkpoint's cache-sharing topology from it. The GGUF
+        /// conversion keeps neither the compressed token map nor the bucket
+        /// layout, so V4.1 cannot address an Engram row without the sidecar.
+        /// </summary>
+        private void LoadEngramSidecar(string ggufPath)
+        {
+            string[] tokens = _shards[0].GetStringArray("tokenizer.ggml.tokens")
+                ?? throw new InvalidOperationException("DeepSeek V4.1 tokenizer metadata is missing");
+            ulong fingerprint = 14695981039346656037UL;
+            foreach (string token in tokens)
+                fingerprint = Dsv41EngramData.FingerprintToken(fingerprint, token);
+
+            string directory = Path.GetDirectoryName(Path.GetFullPath(ggufPath));
+            string sidecar = Path.Combine(directory ?? string.Empty, "deepseek41.engram.bin");
+            _engram = Dsv41EngramData.Load(sidecar, (uint)tokens.Length, fingerprint);
+
+            if (_engram.Layers[^1].Id >= _nLayer ||
+                _engram.KvSourceLayerIds[^1] >= _nLayer || _engram.IndexSourceLayerIds[^1] >= _nLayer)
+                throw new InvalidOperationException("DeepSeek V4.1 sidecar names a layer beyond the layer count");
+
+            _v41KvSource = new int[_nLayer];
+            _v41IndexSource = new int[_nLayer];
+            int kv = -1, index = -1;
+            for (int il = 0; il < _nLayer; il++)
+            {
+                if (Array.IndexOf(_engram.KvSourceLayerIds, il) >= 0) kv = il;
+                if (Array.IndexOf(_engram.IndexSourceLayerIds, il) >= 0) index = il;
+                int ratio = _compressRatios[il];
+                if (ratio < 0 || ratio > 2)
+                    throw new NotSupportedException($"Invalid DeepSeek V4.1 compression ratio {ratio} on layer {il}.");
+                if (ratio != 0 && (kv < 0 || index < 0 ||
+                    _compressRatios[kv] != ratio || _compressRatios[index] != ratio))
+                    throw new InvalidOperationException(
+                        "DeepSeek V4.1 cache-sharing topology does not match the compression ratios");
+                _v41KvSource[il] = ratio != 0 ? kv : -1;
+                _v41IndexSource[il] = ratio != 0 ? index : -1;
+            }
+        }
+
+        // -------------------------------------------------------------------
+        // IDsv41EngramSource: the host side of the Engram lookup
+        //
+        // An Engram table is hundreds of millions of rows and tens to hundreds
+        // of GiB. It stays a host mapping and only the rows a token actually
+        // selects are dequantized and handed to the engine, which uploads them.
+        // -------------------------------------------------------------------
+
+        private struct EngramTable
+        {
+            public byte* Base;
+            public GgmlTensorType Type;
+            public long RowBytes;
+            public long Rows;
+        }
+
+        private EngramTable[] _engramTables;
+
+        public int HashColumns => (int)_engram.HashColumns;
+
+        public int HeadDim => (int)_engram.HeadDim;
+
+        public void BeginEngramUbatch(ReadOnlySpan<int> tokens, int startPos)
+        {
+            _engramHashes = _engram.HashTokens(tokens, startPos, ref _engramHistory, ref _engramHistoryLength);
+            _engramUbatchTokens = tokens.Length;
+        }
+
+        public void ResetEngram() => _engramHistoryLength = 0;
+
+        public void GatherEngramRows(int engramIndex, int count, float* dst)
+        {
+            if (_engramHashes == null || count > _engramUbatchTokens)
+                throw new InvalidOperationException("[dsv4-cuda] Engram rows requested before the ubatch was hashed");
+
+            EngramTable table = _engramTables[engramIndex];
+            int columns = HashColumns, headDim = HeadDim;
+            int rowValues = columns * headDim;
+            fixed (int* hashes = _engramHashes)
+            {
+                int* mine = hashes + (long)engramIndex * _engramUbatchTokens * columns;
+                // Each (token, column) is an independent random row: the one place
+                // this executor touches the big table at all.
+                Parallel.For(0, count, t =>
+                {
+                    float* rows = dst + (long)t * rowValues;
+                    int* ids = mine + (long)t * columns;
+                    for (int c = 0; c < columns; c++)
+                    {
+                        int row = ids[c];
+                        if ((uint)row >= (uint)table.Rows)
+                            throw new InvalidOperationException("[dsv4-cuda] Engram lookup is out of bounds");
+                        ManagedQuantizedOps.DequantizeRowToFloat32(
+                            (int)table.Type, (IntPtr)(table.Base + row * table.RowBytes),
+                            rows + c * headDim, headDim);
+                    }
+                });
+            }
+        }
+
+        /// <summary>Maps one Engram table read-only. Falls back to a full staged
+        /// copy only when the platform cannot map, which for a table this size
+        /// would mean RAM the box does not have -- so say so rather than
+        /// silently allocating.</summary>
+        private EngramTable MapEngramTable(string name)
+        {
+            if (!_tensorMap.TryGetValue(name, out var entry))
+                throw new InvalidOperationException($"[dsv4-cuda] missing tensor: {name}");
+            GgufTensorInfo info = entry.Info;
+            long bytes = entry.File.GetTensorByteCount(info);
+            long offset = entry.File.DataOffset + (long)info.Offset;
+
+            IntPtr mapped = IntPtr.Zero;
+            if (_shardSources != null)
+                _shardSources[_shardIndexOf[entry.File]].TryMapRange(offset, bytes, out mapped);
+            if (mapped == IntPtr.Zero && !entry.File.TryGetTensorDataPointer(info, out mapped))
+                throw new InvalidOperationException(
+                    $"[dsv4-cuda] cannot memory-map {name} ({bytes / (1024.0 * 1024 * 1024):F1} GiB). " +
+                    "The Engram tables are read row by row and are far too large to stage in RAM.");
+
+            return new EngramTable
+            {
+                Base = (byte*)mapped,
+                Type = info.Type,
+                RowBytes = ManagedQuantizedOps.RowSize((int)info.Type, (int)info.Shape[0]),
+                Rows = info.Shape.Length > 1 ? (long)info.Shape[1] : 1,
+            };
         }
 
         private static float YarnCorrDim(int nDims, int nCtxOrig, float nRot, float freqBase)
@@ -614,9 +770,16 @@ namespace TensorSharp.Models
                 TokEmbd = tokEmbd,
                 Output = GetQW("output.weight"),
                 OutputNorm = GetF32("output_norm.weight"),
-                HcHeadFn = GetF32("output_hc_fn.weight"),
-                HcHeadScale = GetF32("output_hc_scale.weight"),
-                HcHeadBase = GetF32("output_hc_base.weight"),
+                // V4.1 collapses the streams for the head with the LAST layer's
+                // FFN gates, so it ships no output_hc_* tensors at all.
+                HcHeadFn = GetF32("output_hc_fn.weight", required: !_isV41),
+                HcHeadScale = GetF32("output_hc_scale.weight", required: !_isV41),
+                HcHeadBase = GetF32("output_hc_base.weight", required: !_isV41),
+                V41 = _isV41,
+                CandidateSource = _isV41 ? _engram.CandidateSourceLayerId : -1,
+                CandidateTopk = _isV41 ? (int)_engram.CandidateTopkBlocks : 0,
+                CandidateBlock = _isV41 ? (int)_engram.CandidateBlockSize : 0,
+                Engram = _isV41 ? this : null,
                 RopeRawTable = BuildRopeTable(nCtx, comp: false),
                 RopeCompTable = BuildRopeTable(nCtx, comp: true),
                 Layers = new Dsv4CudaEngine.LayerDesc[_nLayer],
@@ -657,7 +820,41 @@ namespace TensorSharp.Models
                     UpShexp = GetQW(p + "ffn_up_shexp.weight"),
                 };
 
-                if (L.Ratio != 0)
+                if (_isV41)
+                {
+                    // Only the per-ratio source layers carry compressor and
+                    // indexer-query tensors; the rest of their group reads the
+                    // caches those layers build.
+                    L.KvSource = _v41KvSource[il];
+                    L.IndexSource = _v41IndexSource[il];
+                    if (L.KvSource == il)
+                    {
+                        L.CompWkv = GetQW(p + "attn_compressor_kv.weight");
+                        L.CompNorm = GetF32(p + "attn_compressor_norm.weight");
+                        if (L.Ratio > 1)
+                            L.CompWgate = GetQW(p + "attn_compressor_gate.weight");
+                        L.IndexerK = GetQW(p + "indexer.attn_k.weight");
+                        L.IndexerKNorm = GetF32(p + "indexer.k_norm.weight");
+                    }
+                    if (L.IndexSource == il)
+                    {
+                        L.IdxProj = GetQW(p + "indexer.proj.weight");
+                        L.IdxQB = GetQW(p + "indexer.attn_q_b.weight");
+                    }
+                    for (int t = 0; t < _engram.Layers.Length; t++)
+                    {
+                        if (_engram.Layers[t].Id != il)
+                            continue;
+                        L.EngramIndex = t;
+                        L.EngramWkv = GetQW(p + "engram_wkv.weight");
+                        L.EngramQ = GetF32(p + "engram_q.weight");
+                        L.EngramK = GetF32(p + "engram_k.weight");
+                        _engramTables ??= new EngramTable[_engram.Layers.Length];
+                        _engramTables[t] = MapEngramTable(p + "engram_embd.weight");
+                        break;
+                    }
+                }
+                else if (L.Ratio != 0)
                 {
                     L.CompWkv = GetQW(p + "attn_compressor_kv.weight");
                     L.CompWgate = GetQW(p + "attn_compressor_gate.weight");

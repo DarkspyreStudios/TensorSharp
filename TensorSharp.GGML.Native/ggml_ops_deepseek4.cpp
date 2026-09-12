@@ -40,6 +40,7 @@
 #include "dsv41_engram.h"
 #include "dsv41_raw_gather.h"
 #include "dsv41_engram_io.h"
+#include "dsv41_engram_advice.h"
 #include "ggml_ops_deepseek41_vision.h"
 #include "ggml_ops_deepseek41_tp.h"
 
@@ -328,7 +329,10 @@ struct plan_inputs
 // host round trip — happen inside the per-token compute.
 struct graph_inputs
 {
+    // Host-lookup path: F32 [hash_columns * head_dim, nt] staged rows.
     std::vector<ggml_tensor *> engram;
+    // Device-table path: I32 [hash_columns * nt] row ids consumed by get_rows.
+    std::vector<ggml_tensor *> engram_ids;
     ggml_tensor * engram_rows = nullptr;
     ggml_tensor * image_embeddings = nullptr; // F32 [hidden, number of image positions]
     ggml_tensor * image_indices = nullptr;    // I64 [number of image positions]
@@ -434,6 +438,10 @@ struct dsv4_model
     dsv4_hparams hp;
     tsg_dsv41::engram_data engram;
     std::unique_ptr<tsg_dsv41::engram_io_pool> engram_io;
+    // Engram tables live on the GPU that owns their layer and are gathered by
+    // ggml get_rows, instead of being read and dequantized on the host. Set at
+    // load once the placement is known to fit; see dsv4_load.
+    bool engram_on_device = false;
     std::unique_ptr<tsg_dsv41_tp::executor> moe_tp;
     std::unique_ptr<dsv41_vision_attachment> vision;
 
@@ -442,8 +450,14 @@ struct dsv4_model
     int n_gpu = 0;
     int n_backends = 0;
 
-    // fused-op backends (one per GPU, launching on the CUDA backend's stream)
+    // fused-op backends (one per GPU, wrapping that GPU's CUDA backend)
     ggml_backend_t ts_backends[MAX_GPUS] = {};
+    // What ggml_backend_sched is given for each device: the wrapper for a GPU
+    // when fused ops are available, the CUDA backend otherwise, and the CPU
+    // backend at index n_gpu -- the same indexing as backends[], because
+    // graph_builder::pin() is called with n_gpu for host-resident routed
+    // experts. Use this, not backends[], to place graph tensors.
+    ggml_backend_t dev_backends[MAX_GPUS + 1] = {};
     bool fused = false;
 
     // Persistent worker pool for the CPU backend — see dsv4_load. Shared by
@@ -1251,6 +1265,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     auto t_start = std::chrono::steady_clock::now();
 
     std::unique_ptr<dsv4_model> m(new dsv4_model());
+    bool engram_random_advice = false, engram_random_override = false;
 
     // --- backends ---
     // Only devices belonging to the backend the caller selected. GgmlOps links
@@ -1294,23 +1309,20 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         return nullptr;
     }
 
+    // Report the compute devices before metadata scans and weight uploads can
+    // take minutes. The CPU scheduler pool below is auxiliary to these devices.
+    fprintf(stderr, "[dsv4] compute devices initialized: %d %s\n",
+            n_gpu, cpu_only ? "CPU device(s)" : "GPU(s)");
+    for (int d = 0; d < n_gpu; ++d)
     {
-        // DeepSeek V4's architecture-specific ops (the 4-stream hyper-connections
-        // and the lightning indexer) ship kernels for CPU and CUDA only.
-        // Elsewhere ggml_backend_sched routes them to the CPU backend, which is
-        // correct but costs a host round trip per layer. Worth saying once, so a
-        // slow Vulkan run does not read as a mystery.
-        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(m->backends[0]));
-        const char * rn = reg ? ggml_backend_reg_name(reg) : nullptr;
-        if (!cpu_only && !dsv4_backend_matches(rn, "CUDA"))
-        {
-            fprintf(stderr,
-                    "[dsv4] note: the %s backend has no kernels for this architecture's hyper-connection and "
-                    "lightning-indexer ops; they run on the CPU backend (correct, but a host round trip per "
-                    "layer). --backend ggml_cuda / cuda keep everything on the GPU.\n",
-                    rn ? rn : "selected");
-        }
+        ggml_backend_t backend = m->backends[d];
+        ggml_backend_dev_t device = ggml_backend_get_device(backend);
+        fprintf(stderr, "[dsv4]   compute device %d: backend=%s, device=%s (%s)\n",
+                d, ggml_backend_name(backend),
+                device ? ggml_backend_dev_name(device) : "unknown",
+                device ? ggml_backend_dev_description(device) : "unknown");
     }
+
     m->n_gpu = n_gpu;
     ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     {
@@ -1344,7 +1356,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         ggml_threadpool_params tpp = ggml_threadpool_params_default(cpu_threads);
         m->cpu_threadpool = ggml_threadpool_new(&tpp);
         if (m->cpu_threadpool) ggml_backend_cpu_set_threadpool(cpu, m->cpu_threadpool);
-        fprintf(stderr, "[dsv4] CPU fallback/host-expert pool: threads=%d, persistent=%s\n",
+        fprintf(stderr, "[dsv4] auxiliary CPU worker pool: threads=%d, persistent=%s\n",
                 cpu_threads, m->cpu_threadpool ? "yes" : "no");
 #if defined(TSG_GGML_TEST_HOOKS)
         if (m->cpu_threadpool) m->test_cpu_pool_threads = tpp.n_threads;
@@ -1355,6 +1367,12 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 
     // --- fused-op backends (kernel-count is the decode wall; the fused ops
     // collapse the small-op chains, injected via GGML_OP_CUSTOM nodes) ---
+    //
+    // Each fused backend WRAPS its GPU's CUDA backend and takes its place in the
+    // scheduler, so a device's whole subgraph stays in one split. Registering
+    // both would split the graph at every alternation between them: a V4.1 layer
+    // alternates ~14 times, which cost 565 splits and 564 blocking host
+    // synchronizations per decode token.
     {
         const char * fe = getenv("TS_DSV4_FUSED");
         bool want_fused = !cpu_only && !(fe && atoi(fe) == 0);
@@ -1372,10 +1390,15 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 #else
         (void) want_fused;
 #endif
+        // The scheduler backend for a device: the wrapper when fused ops are
+        // available, otherwise the CUDA backend itself. Weights and buffers are
+        // unaffected -- both report the same buffer type. Index n_gpu is the CPU
+        // backend, which host-resident routed experts are pinned to.
+        for (int d = 0; d < n_gpu; d++)
+            m->dev_backends[d] = m->fused ? m->ts_backends[d] : m->backends[d];
+        m->dev_backends[n_gpu] = cpu;
         int nb = 0;
-        for (int d = 0; d < n_gpu; d++) m->sched_backends[nb++] = m->backends[d];
-        if (m->fused)
-            for (int d = 0; d < n_gpu; d++) m->sched_backends[nb++] = m->ts_backends[d];
+        for (int d = 0; d < n_gpu; d++) m->sched_backends[nb++] = m->dev_backends[d];
         m->sched_backends[nb++] = cpu;
         for (int i = 0; i < nb; i++)
             m->sched_bufts[i] = ggml_backend_get_default_buffer_type(m->sched_backends[i]);
@@ -1412,6 +1435,55 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     if (arch != "deepseek4" && arch != "deepseek41")
         throw std::runtime_error("DeepSeek executor requires deepseek4 or deepseek41 architecture");
     hp.v41 = arch == "deepseek41";
+    if (hp.v41 && !cpu_only)
+    {
+        // V4.1's fused kernels are CUDA-only. A non-CUDA GPU backend can still
+        // run the model -- its architecture-specific ops fall to the CPU
+        // backend's scalar implementations, which are the same ones the CPU
+        // oracle is checked against -- but at a host round trip per occurrence.
+        // That is a portability path, not a serving one, so it is opt-in: the
+        // failure this rejection originally closed was a SILENT fallback onto
+        // whichever GPU enumerated first, not an explicit request.
+        const char * allow = getenv("TS_DSV41_ALLOW_NON_CUDA_GPU");
+        if (allow && strcmp(allow, "0") != 0 && strcmp(allow, "1") != 0)
+            throw std::runtime_error("TS_DSV41_ALLOW_NON_CUDA_GPU must be 0 or 1");
+        const bool allowed = allow && strcmp(allow, "1") == 0;
+        for (int d = 0; d < n_gpu; ++d)
+        {
+            ggml_backend_dev_t device = ggml_backend_get_device(m->backends[d]);
+            ggml_backend_reg_t reg = device ? ggml_backend_dev_backend_reg(device) : nullptr;
+            const char * name = reg ? ggml_backend_reg_name(reg) : nullptr;
+            if (name && dsv4_backend_matches(name, "CUDA")) continue;
+            if (!allowed)
+                throw std::runtime_error("DeepSeek V4.1 requires CUDA-family GPU devices; selected device " +
+                    std::to_string(d) + " uses " + (name ? name : "an unknown backend") +
+                    ". Alternate GPU fallback is not supported for V4.1. Set "
+                    "TS_DSV41_ALLOW_NON_CUDA_GPU=1 to run it anyway, with this architecture's ops on the CPU "
+                    "backend (correct, but a host round trip per occurrence).");
+            fprintf(stderr,
+                "[dsv41] device %d uses the %s backend: V4.1's architecture-specific ops have no kernels there "
+                "and will run on the CPU backend, one host round trip each. Correctness path, not a serving "
+                "path.\n", d, name ? name : "selected");
+        }
+    }
+    if (!hp.v41 && !cpu_only)
+    {
+        // DeepSeek V4's architecture-specific ops (the 4-stream hyper-connections
+        // and the lightning indexer) ship kernels for CPU and CUDA only.
+        // Elsewhere ggml_backend_sched routes them to the CPU backend, which is
+        // correct but costs a host round trip per layer. Worth saying once, so a
+        // slow Vulkan run does not read as a mystery.
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(m->backends[0]));
+        const char * rn = reg ? ggml_backend_reg_name(reg) : nullptr;
+        if (!dsv4_backend_matches(rn, "CUDA"))
+        {
+            fprintf(stderr,
+                    "[dsv4] note: the %s backend has no kernels for this architecture's hyper-connection and "
+                    "lightning-indexer ops; they run on the CPU backend (correct, but a host round trip per "
+                    "layer). --backend ggml_cuda / cuda keep everything on the GPU.\n",
+                    rn ? rn : "selected");
+        }
+    }
     int tp_ranks = 0;
     if (const char * value = getenv("TS_DSV41_TP"))
     {
@@ -1509,6 +1581,9 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     // can move off the accelerator. Tracked separately from layer_bytes so the
     // split can price a layer with and without them.
     std::vector<size_t> layer_exps_bytes(hp.n_layer, 0);
+    // V4.1 Engram table bytes only. Priced into the split when the tables are
+    // placed on their layer's GPU, and excluded when they stay host mappings.
+    std::vector<size_t> layer_engram_bytes(hp.n_layer, 0);
     size_t root_bytes = 0;
 
     for (size_t si = 0; si < shards.paths.size(); si++)
@@ -1545,8 +1620,11 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             int bid = -1;
             if (sscanf(name, "blk.%d.", &bid) == 1 && bid >= 0 && bid < hp.n_layer)
             {
-                // Engram tables are sparse random-access CPU mappings, never GPU residents.
-                if (!(hp.v41 && strstr(name, ".engram_embd.") != nullptr))
+                // Engram tables are priced separately: whether they weigh on a
+                // device depends on the placement chosen below.
+                if (hp.v41 && strstr(name, ".engram_embd.") != nullptr)
+                    layer_engram_bytes[bid] += src.size;
+                else
                     layer_bytes[bid] += src.size;
                 if (strstr(name, "_exps.") != nullptr)
                     layer_exps_bytes[bid] += src.size;
@@ -1635,8 +1713,33 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     std::vector<size_t> dev_budget((size_t) n_gpu, 0);
     std::vector<size_t> dev_free((size_t) n_gpu, 0);
     {
-        size_t reserve_mb = 2048;
+        // The scheduler's compute buffers are sized from the largest ubatch graph
+        // and cannot be known before the model exists, so the split holds back a
+        // reserve. A flat 2 GiB was too small for this architecture once the
+        // weights nearly fill the cards: the lightning indexer's top-k runs an
+        // argsort over every visible compressed row, and CUB takes its workspace
+        // from the CUDA VMM pool at RUN time, not from any layer's budget. A
+        // 1024-token ubatch over a 64k context is ~768 MiB for that one transient
+        // alone, and a DeepSeek V4.1 Q4_K_M prefill of a 28k-token prompt aborted
+        // in argsort_f32_i32_cuda_cub with the flat reserve.
+        //
+        // So price the transients that scale: the indexer's scores and its sort
+        // workspace, and the hidden activations of one ubatch across the streams.
+        // TS_DSV4_VRAM_RESERVE_MB still overrides, including downward.
+        const int64_t comp_rows = m->n_ctx / (hp.v41 ? 1 : CSA_RATIO) + 1;
+        // The factor on the indexer term is deliberately generous. CUB's segmented
+        // argsort workspace is not a published function of the input, the graph
+        // has other transients that scale with the ubatch (the MoE staging for
+        // 384 experts, the attention over 512-wide heads), and holding back too
+        // much VRAM costs a --n-cpu-moe suggestion the loader prints by name --
+        // while holding back too little costs an abort in the middle of a
+        // request, after the model has loaded and answered.
+        const double idx_mb = (double) m->n_ubatch * comp_rows * 4.0 * 3.0 / (1024.0 * 1024.0);
+        const double act_mb = (double) m->n_ubatch * hp.n_embd * 4.0 * (hp.hc_mult + 2) / (1024.0 * 1024.0);
+        size_t reserve_mb = (size_t) std::max(2048.0, 4.0 * idx_mb + act_mb + 2048.0);
         if (const char * e = getenv("TS_DSV4_VRAM_RESERVE_MB")) { long v = atol(e); if (v >= 0) reserve_mb = (size_t) v; }
+        fprintf(stderr, "[dsv4] VRAM reserve: %zu MiB per device (indexer %.0f x4 + activations %.0f + 2048 headroom)\n",
+                reserve_mb, idx_mb, act_mb);
         // Per-device residents the split does not attribute to any layer.
         size_t per_dev_fixed = 0;
         if (m->fused) per_dev_fixed += (size_t) (2 * hp.n_rot * m->n_ctx * 4);   // rope cos/sin tables
@@ -1696,10 +1799,67 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         fixed_bytes[0] += embd_bytes;
         fixed_bytes[(size_t) n_gpu - 1] += head_bytes;
 
+        // V4.1: prefer placing each Engram table on the GPU that owns its
+        // layer. The lookup then becomes a device get_rows over the quantized
+        // table instead of host page faults plus a CPU dequantize and an
+        // upload. A table is tens of GiB, so it is only taken when it costs no
+        // routed-expert offload the run was not already going to pay; the
+        // packer prices the tables through layer_cost while `engram_device` is
+        // set, and the decision is made just after the offload search below.
+        bool engram_device = false;
+        bool engram_device_forced = false;
+        {
+            // Validate the option on every path, including CPU-only, so a typo
+            // is never silently accepted -- but only V4.1 on an accelerator has
+            // tables to place.
+            const char * option = getenv("TS_DSV41_ENGRAM_DEVICE");
+            bool want = !option || strcmp(option, "1") == 0;
+            if (option && strcmp(option, "0") != 0 && strcmp(option, "1") != 0)
+                throw std::runtime_error("TS_DSV41_ENGRAM_DEVICE must be 0 or 1 (unset selects automatically)");
+            if (hp.v41 && !cpu_only)
+            {
+                // The gather is a plain ggml get_rows over the quantized table.
+                // A backend that has no get_rows kernel for that type would put
+                // the node on the CPU and copy tens of GiB per token, so check
+                // before choosing the placement rather than discovering it at
+                // the first decode.
+                bool gatherable = true;
+                for (int il = 0; il < hp.n_layer && gatherable; ++il)
+                {
+                    const auto it = sources.find("blk." + std::to_string(il) + ".engram_embd.weight");
+                    if (it == sources.end()) continue;
+                    ggml_init_params probe_params = { ggml_tensor_overhead() * 8, nullptr, true };
+                    ggml_context * probe = ggml_init(probe_params);
+                    if (!probe) { gatherable = false; break; }
+                    ggml_tensor * table = ggml_new_tensor_2d(probe, it->second.type, it->second.ne[0], it->second.ne[1]);
+                    ggml_tensor * ids = ggml_new_tensor_1d(probe, GGML_TYPE_I32, 24);
+                    ggml_tensor * rows = ggml_get_rows(probe, table, ids);
+                    for (int d = 0; d < n_gpu && gatherable; ++d)
+                        gatherable = ggml_backend_supports_op(m->backends[d], rows);
+                    ggml_free(probe);
+                }
+                if (!gatherable)
+                {
+                    if (option && strcmp(option, "1") == 0)
+                        throw std::runtime_error("TS_DSV41_ENGRAM_DEVICE=1 cannot be honoured: the selected devices "
+                            "have no get_rows kernel for this checkpoint's Engram table quantization.");
+                    if (want)
+                        fprintf(stderr, "[dsv41] Engram tables stay host mappings: the selected devices have no "
+                            "get_rows kernel for their quantization\n");
+                    want = false;
+                }
+                engram_device = want;
+                engram_device_forced = option && strcmp(option, "1") == 0;
+            }
+            else if (option && strcmp(option, "1") == 0)
+                throw std::runtime_error("TS_DSV41_ENGRAM_DEVICE=1 requires DeepSeek V4.1 on GPU devices; this run "
+                    + std::string(hp.v41 ? "selected the CPU device" : "is not V4.1") + ".");
+        }
         auto layer_cost = [&](int il, int n_cpu) -> size_t
         {
             size_t w = layer_bytes[il];
             if (il < n_cpu || tp_ranks) w -= layer_exps_bytes[il];
+            if (engram_device) w += layer_engram_bytes[il];
             return w + layer_cache_bytes(il);
         };
 
@@ -1734,6 +1894,58 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         // How many leading layers have to give up their experts.
         int need_cpu_moe = 0;
         while (need_cpu_moe <= hp.n_layer && !pack(1.0, need_cpu_moe, nullptr)) need_cpu_moe++;
+        if (engram_device)
+        {
+            // `need_cpu_moe` above was priced WITH the tables on GPUs. Price the
+            // same model without them, and keep the tables on GPUs only when
+            // two things hold: they cost no routed-expert offload beyond what
+            // this run was going to pay anyway, and they still leave a little of
+            // every device's budget unspent.
+            //
+            // The first matters because paying for device tables with host
+            // expert matmuls on every token is a bad trade -- though an operator
+            // who already asked for --n-cpu-moe should not be refused a
+            // placement that fits inside it. The second matters because the
+            // packer prices ONE sequence slot's caches, and 60 GiB of tables
+            // would otherwise be allowed to consume exactly the headroom the
+            // next concurrent sequence needs.
+            constexpr double engram_device_margin = 0.95;
+            const int with_tables = need_cpu_moe;
+            engram_device = false;
+            int without_tables = 0;
+            while (without_tables <= hp.n_layer && !pack(1.0, without_tables, nullptr)) without_tables++;
+            const int already_paying = n_cpu_moe_req >= 0 ? std::max(n_cpu_moe_req, without_tables) : without_tables;
+
+            const char * refused = nullptr;
+            if (with_tables > hp.n_layer)
+                refused = "they do not fit these devices even with every routed expert on the host";
+            else if (with_tables > already_paying)
+                refused = "they would cost routed-expert offload this run was not already paying";
+            else
+            {
+                // pack() prices the tables only while engram_device is set, so
+                // set it before asking whether the margin holds.
+                engram_device = true;
+                if (!pack(engram_device_margin, std::max(with_tables, n_cpu_moe_req < 0 ? 0 : n_cpu_moe_req), nullptr))
+                {
+                    engram_device = false;
+                    refused = "they would leave no headroom for a second concurrent sequence";
+                }
+            }
+
+            if (engram_device)
+                need_cpu_moe = with_tables;
+            else
+            {
+                need_cpu_moe = without_tables;
+                if (engram_device_forced)
+                    throw std::runtime_error(std::string("TS_DSV41_ENGRAM_DEVICE=1 does not fit on these devices: ") +
+                        refused + ". With host tables this model needs --n-cpu-moe " +
+                        std::to_string(without_tables) + ". Unset the option to choose automatically, or free VRAM.");
+                fprintf(stderr, "[dsv41] Engram tables stay host mappings: %s\n", refused);
+            }
+        }
+        m->engram_on_device = engram_device;
 
         if (n_cpu_moe_req < 0)
         {
@@ -1811,6 +2023,12 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         for (int il = 0; il < n_cpu_moe && il < hp.n_layer; il++)
             m->layers[il].cpu_moe = true;
 
+        if (cpu_only)
+            fprintf(stderr, "[dsv4] routed-expert placement: all %d layer(s) on the explicitly selected CPU device\n",
+                    hp.n_layer);
+        else
+            fprintf(stderr, "[dsv4] routed-expert CPU offload: %d of %d layer(s); %d layer(s) on GPUs\n",
+                    n_cpu_moe, hp.n_layer, hp.n_layer - n_cpu_moe);
         if (n_cpu_moe > 0)
         {
             size_t host_bytes = 0;
@@ -1942,7 +2160,10 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             }
             if (has("engram_embd.weight"))
             {
-                L.engram_embd = W(n_gpu, "blk.%d.engram_embd.weight", il);
+                // On the layer's own device the graph gathers rows with
+                // get_rows; otherwise the table stays a host mapping (context
+                // n_gpu) that the executor reads and dequantizes per token.
+                L.engram_embd = W(m->engram_on_device ? d : n_gpu, "blk.%d.engram_embd.weight", il);
                 L.engram_k = W(d, "blk.%d.engram_k.weight", il);
                 L.engram_q = W(d, "blk.%d.engram_q.weight", il);
                 L.engram_wkv = W(d, "blk.%d.engram_wkv.weight", il);
@@ -2089,8 +2310,27 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 throw std::runtime_error("TS_DSV41_ENGRAM_THREADS must be in [1, 32]");
             io_threads = (unsigned) requested;
         }
-        m->engram_io.reset(new tsg_dsv41::engram_io_pool(io_threads));
-        fprintf(stderr, "[dsv41] Engram sparse prefill reads: %u persistent I/O threads\n", io_threads);
+        const char * random_option = getenv("TS_DSV41_ENGRAM_RANDOM");
+        // Resolve first, unconditionally: the parser is what rejects a bad
+        // value, and short-circuiting it would silently accept typos on the
+        // now-default device path.
+        const bool random_wanted = tsg_dsv41::resolve_engram_random(random_option, io_threads);
+        engram_random_advice = random_wanted && !m->engram_on_device;
+        engram_random_override = random_option != nullptr;
+        if (m->engram_on_device)
+        {
+            // Nothing reads the tables from host memory, so there is no I/O
+            // pool, no whole-table warming and no mapping advice to apply.
+            fprintf(stderr, "[dsv41] Engram lookup: GPU-resident tables, gathered in-graph (no host reads)\n");
+            if (random_option || getenv("TS_DSV41_ENGRAM_THREADS") || getenv("TS_DSV41_ENGRAM_WARM"))
+                fprintf(stderr, "[dsv41] note: TS_DSV41_ENGRAM_THREADS/WARM/RANDOM only affect host-mapped "
+                    "tables; set TS_DSV41_ENGRAM_DEVICE=0 to use that path\n");
+        }
+        else
+        {
+            m->engram_io.reset(new tsg_dsv41::engram_io_pool(io_threads));
+            fprintf(stderr, "[dsv41] Engram sparse prefill/decode reads: %u persistent I/O threads\n", io_threads);
+        }
         int kv_source = -1, index_source = -1;
         for (int il = 0; il < hp.n_layer; ++il)
         {
@@ -2340,8 +2580,8 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 
         auto t_end = std::chrono::steady_clock::now();
         double secs = std::chrono::duration<double>(t_end - t_start).count();
-        fprintf(stderr, "[dsv4] loaded %.1f GiB across %d GPU(s) in %.1fs (%.2f GiB/s, %d load threads%s; n_ctx=%d, ring=%" PRId64 ", csa_rows=%" PRId64 ", hca_rows=%" PRId64 ")\n",
-                uploaded / (1024.0 * 1024.0 * 1024.0), n_gpu, secs,
+        fprintf(stderr, "[dsv4] loaded %.1f GiB across %d %s in %.1fs (%.2f GiB/s, %d load threads%s; n_ctx=%d, ring=%" PRId64 ", csa_rows=%" PRId64 ", hca_rows=%" PRId64 ")\n",
+                uploaded / (1024.0 * 1024.0 * 1024.0), n_gpu, cpu_only ? "CPU device(s)" : "GPU(s)", secs,
                 secs > 0 ? uploaded / (1024.0 * 1024.0 * 1024.0) / secs : 0.0,
                 load_threads,
                 m->mmap_weight_bytes > 0 ? "; host weights mmapped" : "",
@@ -2373,7 +2613,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 
     if (hp.v41)
     {
-        const char * warm = getenv("TS_DSV41_ENGRAM_WARM");
+        const char * warm = m->engram_on_device ? nullptr : getenv("TS_DSV41_ENGRAM_WARM");
         if (warm && atoi(warm) != 0)
         {
             size_t bytes = 0;
@@ -2397,6 +2637,36 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                     m->engram_io->threads());
             }
         }
+        // Apply sparse-read advice only after optional whole-table warming,
+        // which benefits from sequential readahead. Never alter another host
+        // tensor's entire shard, or an allocation that is not one of our mmaps.
+        if (engram_random_advice)
+        {
+            size_t accepted = 0, unsupported = 0, skipped = 0, failed = 0;
+            for (const auto & layout : m->engram.layers)
+            {
+                const auto * table = m->layers[layout.id].engram_embd;
+                const auto found = std::find(m->mmap_bufs.begin(), m->mmap_bufs.end(), table->buffer);
+                if (!table->buffer || found == m->mmap_bufs.end()) { ++skipped; continue; }
+                const size_t index = size_t(found - m->mmap_bufs.begin());
+                const auto result = tsg_dsv41::advise_engram_random(m->mmap_addrs[index], m->mmap_sizes[index],
+                    table->data, ggml_nbytes(table));
+                if (result.status == tsg_dsv41::mapped_advice_status::applied) ++accepted;
+                else if (result.status == tsg_dsv41::mapped_advice_status::unsupported) ++unsupported;
+                else if (result.status == tsg_dsv41::mapped_advice_status::empty) ++skipped;
+                else
+                {
+                    ++failed;
+                    fprintf(stderr, "[dsv41] Engram random advice was not applied to layer %d (error %d); continuing\n",
+                        layout.id, result.error);
+                }
+            }
+            fprintf(stderr, "[dsv41] Engram mmap advice: RANDOM (%s; accepted=%zu, unsupported=%zu, skipped=%zu, failed=%zu)\n",
+                engram_random_override ? "override=1" : "automatic: parallel I/O", accepted, unsupported, skipped, failed);
+        }
+        else if (!m->engram_on_device)
+            fprintf(stderr, "[dsv41] Engram mmap advice: default (%s)\n",
+                engram_random_override ? "override=0" : "automatic: one I/O thread");
     }
 
     // primary sequence slot (slot 0) — the CLI / single-stream cache
@@ -2676,9 +2946,10 @@ struct graph_builder
     // are always pinned; supports_op is not meaningful for them.
     void pin(ggml_tensor * t, int dev)
     {
-        if (t->op != GGML_OP_NONE && !ggml_backend_supports_op(m.backends[dev], t))
+        ggml_backend_t backend = m.dev_backends[dev];
+        if (t->op != GGML_OP_NONE && !ggml_backend_supports_op(backend, t))
             return;
-        ggml_backend_sched_set_tensor_backend(res.sched, t, m.backends[dev]);
+        ggml_backend_sched_set_tensor_backend(res.sched, t, backend);
     }
 
     ggml_tensor * new_input_i32(int64_t n, const char * name, int dev)
@@ -2729,8 +3000,8 @@ struct graph_builder
         for (ggml_tensor * t : args) a[n++] = t;
 
         ggml_tensor * out = ggml_custom_4d(ctx, type, ne0, ne1, ne2, ne3, a, n, tsg_dsv4_fused_cpu, 1, &d);
-        if (m.ts_backends[dev])
-            ggml_backend_sched_set_tensor_backend(res.sched, out, m.ts_backends[dev]);
+        // Keep the node on its layer's device; its backend runs it there.
+        if (m.fused) pin(out, dev);
         return out;
     }
 
@@ -4237,13 +4508,25 @@ struct graph_builder
         if (hp.v41)
         {
             inp.engram.resize(m.engram.layers.size());
+            inp.engram_ids.resize(m.engram.layers.size());
             inp.engram_rows = new_input_i32(hp.hc_mult, "engram_stream_rows", m.layers[m.engram.layers[0].id].device);
             for (size_t e = 0; e < m.engram.layers.size(); ++e)
             {
+                const int dev = m.layers[m.engram.layers[e].id].device;
+                if (m.engram_on_device)
+                {
+                    // One id per (token, hash column); build_engram gathers the
+                    // quantized rows on this device. 4 bytes per row crosses the
+                    // link instead of head_dim F32 values.
+                    auto * ids = new_input_i32(m.engram.hash_columns() * nt, "engram_ids", dev);
+                    ggml_format_name(ids, "engram_ids.%d", (int) e);
+                    inp.engram_ids[e] = ids;
+                    continue;
+                }
                 auto * rows = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, m.engram.hash_columns() * m.engram.head_dim, nt);
                 ggml_set_input(rows);
                 ggml_format_name(rows, "engram_lookup.%d", (int) e);
-                pin(rows, m.layers[m.engram.layers[e].id].device);
+                pin(rows, dev);
                 inp.engram[e] = rows;
             }
         }
@@ -4801,31 +5084,69 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
         std::iota(streams.begin(), streams.end(), 0);
         set_i32(res.inp.engram_rows, streams);
         const size_t n_hash = m.engram.hash_columns();
-        std::vector<float> rows((size_t) nt * n_hash * m.engram.head_dim);
+        if (nt <= 0 || n_hash == 0 || m.engram.head_dim == 0 ||
+            (size_t) nt > SIZE_MAX / n_hash || (size_t) nt * n_hash > SIZE_MAX / m.engram.head_dim / sizeof(float))
+            throw std::runtime_error("V4.1 Engram staging dimensions overflow");
+        const size_t n_rows = (size_t) nt * n_hash;
+        if (m.engram_on_device)
+        {
+            // Hand the validated row ids to the graph; the gather and the
+            // dequantize happen on the device that owns the table.
+            for (size_t e = 0; e < m.engram.layers.size(); ++e)
+            {
+                const auto * table = m.layers[m.engram.layers[e].id].engram_embd;
+                const int32_t * ids = hashes.data() + e * n_rows;
+                for (size_t i = 0; i < n_rows; ++i)
+                    if (ids[i] < 0 || (uint64_t) ids[i] >= (uint64_t) table->ne[1])
+                        throw std::runtime_error("DeepSeek V4.1 Engram lookup is out of bounds");
+                ggml_backend_tensor_set(res.inp.engram_ids[e], ids, 0, n_rows * sizeof(int32_t));
+            }
+        }
+        else
+        {
+        const size_t row_values = n_rows * m.engram.head_dim;
+        const size_t table_bytes = row_values * sizeof(float);
+        // Stage both published Engram tables together, without amplifying
+        // large custom batches/configurations beyond 64 MiB. A single table
+        // larger than the budget retains the prior one-table memory bound.
+        constexpr size_t staging_budget = (size_t) 64 * 1024 * 1024;
+        const size_t group_size = std::max<size_t>(1, std::min(m.engram.layers.size(), staging_budget / table_bytes));
+        std::vector<std::vector<float>> rows;
+        rows.reserve(group_size);
+        for (size_t e = 0; e < group_size; ++e) rows.emplace_back(row_values);
+        std::vector<std::function<void(size_t)>> reads;
+        reads.reserve(m.engram.layers.size());
         for (size_t e = 0; e < m.engram.layers.size(); ++e)
         {
             auto * table = m.layers[m.engram.layers[e].id].engram_embd;
             if (!table->data || !ggml_backend_buffer_is_host(table->buffer))
                 throw std::runtime_error("V4.1 Engram lookup requires a host-resident table");
             const auto * traits = ggml_get_type_traits(table->type);
-            m.engram.lookup(e, table->data, table->ne[1], table->nb[1],
-                hashes.data() + e * nt * n_hash, nt, rows.data(),
-                [&](const void * src, float * dst, size_t n) {
-                    if (table->type == GGML_TYPE_F32) memcpy(dst, src, n * sizeof(float));
-                    else if (traits->to_float) traits->to_float(src, dst, n);
+            reads.emplace_back(m.engram.prepare_lookup(e, table->data, table->ne[1], table->nb[1],
+                hashes.data() + e * n_rows, nt, rows[e % group_size].data(),
+                [type = table->type, to_float = traits->to_float](const void * src, float * dst, size_t n) {
+                    if (type == GGML_TYPE_F32) memcpy(dst, src, n * sizeof(float));
+                    else if (to_float) to_float(src, dst, n);
                     else throw std::runtime_error("Unsupported V4.1 Engram quantization");
-                }, [&](size_t count, auto row) {
-                    auto lookup = [&](size_t i) {
-                        // Image positions do not consume Engram embeddings.
-                        // Avoid their otherwise random table reads entirely.
-                        if (image_tokens && image_mask[i / n_hash])
-                            std::fill_n(rows.data() + i * m.engram.head_dim, m.engram.head_dim, 0.0f);
-                        else row(i);
-                    };
-                    if (nt >= 4) m.engram_io->run(count, lookup);
-                    else for (size_t i = 0; i < count; ++i) lookup(i);
-                });
-            ggml_backend_tensor_set(res.inp.engram[e], rows.data(), 0, rows.size() * sizeof(float));
+                }));
+        }
+        // Every table/hash is validated before the first read. Interleave
+        // tables so a slow tail in layer 1 cannot hold up all layer 14 reads.
+        for (size_t first = 0; first < reads.size(); first += group_size)
+        {
+            const size_t count = std::min(group_size, reads.size() - first);
+            m.engram_io->run(count * n_rows, [&](size_t task) {
+                const size_t table = first + task % count, row = task / count;
+                // Visual positions break hashing history and never touch the
+                // table, including when a zero row occupies the shared group.
+                if (image_tokens && image_mask[row / n_hash])
+                    std::fill_n(rows[table % group_size].data() + row * m.engram.head_dim, m.engram.head_dim, 0.0f);
+                else reads[table](row);
+            });
+            // run() drains all workers before uploads or staging-buffer reuse.
+            for (size_t e = first; e < first + count; ++e)
+                ggml_backend_tensor_set(res.inp.engram[e], rows[e % group_size].data(), 0, table_bytes);
+        }
         }
     }
     auto t_inputs = now();
@@ -5310,7 +5631,9 @@ TSG_TEST_EXPORT int TSGgml_Dsv4TestSharedPlacement(void * handle, int layer, int
         if (node->op != GGML_OP_MUL_MAT || !node->src[0] ||
             (node->src[0] != weight && !strstr(node->src[0]->name, weight->name))) continue;
         auto actual = ggml_backend_sched_get_tensor_backend(graph.sched, node);
-        auto expected = m->backends[L.device];
+        // The scheduler's backend for a device, which is the fused wrapper when
+        // fused ops are available and the CUDA backend otherwise.
+        auto expected = m->dev_backends[L.device];
         snprintf(description, (size_t) capacity, "%s -> %s", actual ? ggml_backend_name(actual) : "unassigned",
                  ggml_backend_name(expected));
         return actual == expected ? 1 : 0;

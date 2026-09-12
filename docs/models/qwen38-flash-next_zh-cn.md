@@ -49,3 +49,26 @@ KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓�
 llama.cpp 的 `--tensor-split`），并且在无法满足给定值时直接抛异常，而不是悄悄忽略
 ——这很有用，因为自动均衡只按权重计价，看不见视觉塔，而视觉塔加载得更晚、会落在
 GPU 0 上。
+
+## 基准矩阵
+
+[`benchmark_config_glm53_qwen38.json`](../../benchmarks/engine_comparison/benchmark_config_glm53_qwen38.json)
+以 `qwen38-flash-next` 的名字把本模型注册到固定的 Hugging Face revision 上，并挂上
+它的 `mmproj-BF16.gguf`，好让 `image` 场景能跑。其中两条事实值得在这里重复。
+
+一是已发布的 Q8_0 分片里**完全没有** `nextn` / `mtp` 张量，因此 `mtp_supported`
+为 false，`--mtp on` 的格子会带着理由被跳过，而不是悄悄按普通解码跑掉。
+
+二是**本模型只能跑在会传 `--tp N` 的那一列上**。原因就在上一节：切分度来自 `--tp`，
+所以在不传 `--tp` 的后端列上，TensorSharp 只会建单设备上下文，175.3 GiB 会全部压到
+一张卡上。因此配置里给了它 `min_tp`（4，仅按权重算出的下限——8 才是这台 8×A40 机器
+应当使用的度数），在不传 `--tp` 的那一列上，这些格子会被记为
+`needs --tp 4 (does not fit 1 GPU(s))` 的跳过，而不是留给它去 OOM。跑法：
+
+```
+python run_matrix.py --config benchmark_config_glm53_qwen38.json \
+    --models qwen38-flash-next --backends ggml_cuda_tp
+```
+
+那一列会让 llama.cpp 用 `--split-mode layer` 切在同样这些 GPU 上，于是参照列两边是
+同一种放置方式——对 `qwen4exp` 而言，这也是两个引擎各自唯一的多卡模式。

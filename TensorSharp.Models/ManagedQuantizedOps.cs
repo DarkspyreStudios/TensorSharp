@@ -40,6 +40,7 @@ namespace TensorSharp.Models
         private const int Q5_1BlockBytes = 4 + 4 + QK5_1 / 2;
         private const int Q8_0BlockBytes = 2 + QK8_0;
         private const int Q8_1BlockBytes = 4 + QK8_1;
+        private const int Q2_KBlockBytes = QK_K / 16 + QK_K / 4 + 2 + 2;   // scales[16] | qs[64] | d | dmin
         private const int Q4_KBlockBytes = 4 + K_SCALE_SIZE + QK_K / 2;
         private const int Q5_KBlockBytes = 4 + K_SCALE_SIZE + QK_K / 8 + QK_K / 2;
         private const int Q6_KBlockBytes = QK_K / 2 + QK_K / 4 + QK_K / 16 + 2;
@@ -860,6 +861,7 @@ namespace TensorSharp.Models
                     activationRowBytes = elementCount / QK8_1 * Q8_1BlockBytes;
                     return true;
 
+                case GgmlTensorType.Q2_K:
                 case GgmlTensorType.Q4_K:
                 case GgmlTensorType.Q5_K:
                 case GgmlTensorType.Q6_K:
@@ -919,6 +921,7 @@ namespace TensorSharp.Models
                 GgmlTensorType.Q5_1 => VecDotQ5_1Q8_1(weightRow, activationRow, elementCount / QK5_1),
                 GgmlTensorType.Q8_0 => VecDotQ8_0Q8_0(weightRow, activationRow, elementCount / QK8_0),
                 GgmlTensorType.Q8_1 => VecDotQ8_1Q8_0(weightRow, activationRow, elementCount / QK8_1),
+                GgmlTensorType.Q2_K => VecDotQ2_KQ8_K(weightRow, activationRow, elementCount / QK_K),
                 GgmlTensorType.Q4_K => VecDotQ4_KQ8_K(weightRow, activationRow, elementCount / QK_K),
                 GgmlTensorType.Q5_K => VecDotQ5_KQ8_K(weightRow, activationRow, elementCount / QK_K),
                 GgmlTensorType.Q6_K => VecDotQ6_KQ8_K(weightRow, activationRow, elementCount / QK_K),
@@ -2459,6 +2462,134 @@ namespace TensorSharp.Models
             }
 
             return HorizontalSum(acc);
+        }
+
+        /// <summary>
+        /// Q2_K weight row against a Q8_K activation row.
+        ///
+        /// A Q2_K super-block is 16 sub-blocks of 16 values: scales[16] | qs[64] |
+        /// d | dmin, where sub-block s dequantizes as
+        /// <c>d*(scales[s]&amp;0xF) * q - dmin*(scales[s]&gt;&gt;4)</c>. The dot therefore
+        /// factors into one integer sum per sub-block plus the activation's own
+        /// per-sub-block sums, which Q8_K already carries as bsums:
+        ///   <c>d8 * ( d * SUM_s scale_s*dot_s  -  dmin * SUM_s min_s*bsums[s] )</c>
+        ///
+        /// The 2-bit values are packed so that sub-blocks 2g and 2g+1 share one
+        /// 32-byte span of qs at shift 2g, which is what lets the AVX2 path do a
+        /// whole 32-element group per iteration.
+        /// </summary>
+        private static unsafe float VecDotQ2_KQ8_K(byte* q2k, byte* q8k, int superBlockCount)
+        {
+            if (Avx2.IsSupported)
+                return VecDotQ2_KQ8_KAvx2(q2k, q8k, superBlockCount);
+
+            return VecDotQ2_KQ8_KScalar(q2k, q8k, superBlockCount);
+        }
+
+        private static unsafe float VecDotQ2_KQ8_KScalar(byte* q2k, byte* q8k, int superBlockCount)
+        {
+            float sum = 0.0f;
+
+            for (int block = 0; block < superBlockCount; block++)
+            {
+                byte* scales = q2k;
+                byte* qs = q2k + QK_K / 16;
+                float d = HalfToSingle(ReadUInt16(q2k + QK_K / 16 + QK_K / 4));
+                float dmin = HalfToSingle(ReadUInt16(q2k + QK_K / 16 + QK_K / 4 + 2));
+
+                float d8 = ReadSingle(q8k);
+                sbyte* q8Values = (sbyte*)(q8k + 4);
+                short* bsums = (short*)(q8k + 4 + QK_K);
+
+                int scaled = 0, minSum = 0;
+                for (int s = 0; s < QK_K / 16; s++)
+                {
+                    // Sub-blocks 0..7 read the first 32 packed bytes, 8..15 the second.
+                    int span = (s < 8 ? 0 : 32) + ((s & 1) != 0 ? 16 : 0);
+                    int shift = 2 * ((s & 7) >> 1);
+                    byte sc = scales[s];
+
+                    int dot = 0;
+                    sbyte* x = q8Values + s * 16;
+                    for (int l = 0; l < 16; l++)
+                        dot += ((qs[span + l] >> shift) & 3) * x[l];
+
+                    scaled += (sc & 0xF) * dot;
+                    minSum += (sc >> 4) * bsums[s];
+                }
+
+                sum += d8 * (d * scaled - dmin * minSum);
+
+                q2k += Q2_KBlockBytes;
+                q8k += Q8_KBlockBytes;
+            }
+
+            return sum;
+        }
+
+        private static unsafe float VecDotQ2_KQ8_KAvx2(byte* q2k, byte* q8k, int superBlockCount)
+        {
+            float sum = 0.0f;
+            Vector256<byte> mask3 = Vector256.Create((byte)3);
+
+            for (int block = 0; block < superBlockCount; block++)
+            {
+                byte* scales = q2k;
+                byte* qs = q2k + QK_K / 16;
+                float d = HalfToSingle(ReadUInt16(q2k + QK_K / 16 + QK_K / 4));
+                float dmin = HalfToSingle(ReadUInt16(q2k + QK_K / 16 + QK_K / 4 + 2));
+
+                float d8 = ReadSingle(q8k);
+                sbyte* q8Values = (sbyte*)(q8k + 4);
+                short* bsums = (short*)(q8k + 4 + QK_K);
+
+                // The min term is 16 products of small integers; scalar is fine and
+                // keeps the vector path free for the quantized dot.
+                int minSum = 0;
+                for (int s = 0; s < QK_K / 16; s++)
+                    minSum += (scales[s] >> 4) * bsums[s];
+
+                Vector256<int> scaledAcc = Vector256<int>.Zero;
+                for (int half = 0; half < 2; half++)
+                {
+                    Vector256<byte> packed = Avx.LoadVector256(qs + half * 32);
+                    for (int g = 0; g < 4; g++)
+                    {
+                        int s0 = half * 8 + g * 2;      // sub-block holding the low 16
+                        int shift = 2 * g;
+
+                        // (packed >> shift) & 3, as 32 unsigned 2-bit values.
+                        Vector256<byte> values = shift == 0
+                            ? Avx2.And(packed, mask3)
+                            : Avx2.And(Avx2.ShiftRightLogical(packed.AsUInt16(), (byte)shift).AsByte(), mask3);
+
+                        Vector256<sbyte> x = Avx.LoadVector256((sbyte*)(q8Values + (s0 * 16)));
+
+                        // maddubs pairs adjacent products: outputs 0..7 come from the
+                        // low 16 elements (scale s0), outputs 8..15 from the high 16
+                        // (scale s0+1), so one int16 scale vector covers both.
+                        Vector256<short> prod = Avx2.MultiplyAddAdjacent(values, x);
+                        Vector256<short> sc = Vector256.Create(
+                            (short)(scales[s0] & 0xF), (short)(scales[s0] & 0xF),
+                            (short)(scales[s0] & 0xF), (short)(scales[s0] & 0xF),
+                            (short)(scales[s0] & 0xF), (short)(scales[s0] & 0xF),
+                            (short)(scales[s0] & 0xF), (short)(scales[s0] & 0xF),
+                            (short)(scales[s0 + 1] & 0xF), (short)(scales[s0 + 1] & 0xF),
+                            (short)(scales[s0 + 1] & 0xF), (short)(scales[s0 + 1] & 0xF),
+                            (short)(scales[s0 + 1] & 0xF), (short)(scales[s0 + 1] & 0xF),
+                            (short)(scales[s0 + 1] & 0xF), (short)(scales[s0 + 1] & 0xF));
+                        scaledAcc = Avx2.Add(scaledAcc, Avx2.MultiplyAddAdjacent(prod, sc));
+                    }
+                }
+
+                int scaled = HorizontalSumInt(scaledAcc);
+                sum += d8 * (d * scaled - dmin * minSum);
+
+                q2k += Q2_KBlockBytes;
+                q8k += Q8_KBlockBytes;
+            }
+
+            return sum;
         }
 
         private static unsafe float VecDotQ4_KQ8_K(byte* q4k, byte* q8k, int superBlockCount)

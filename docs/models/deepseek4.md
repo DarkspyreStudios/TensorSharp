@@ -11,7 +11,7 @@ Sinkhorn-normalized mixing. Advertised context: 1M tokens (YaRN ×16).
 
 ## How TensorSharp runs it
 
-DeepSeek V4 has three whole-model executors:
+DeepSeek V4 has three whole-model executors, reached through `--backend`:
 
 - **`--backend cuda`**: a **direct-CUDA whole-model engine**
   (`TensorSharp.Backends.Cuda/Dsv4/Dsv4CudaEngine.cs`), independent of ggml.
@@ -28,6 +28,16 @@ DeepSeek V4 has three whole-model executors:
   fallback, which is what is left of the Vulkan/CUDA gap. The decomposition is
   worth +34% prefill and +14% decode on Vulkan and is chosen automatically by a
   load-time `ggml_backend_supports_op` probe (`TS_DSV4_HC_NATIVE=0/1` to A/B).
+- **`--backend ggml_cpu`**: the same native ggml executor on a single CPU
+  compute device, with the architecture-specific ops running their scalar CPU
+  kernels. Until V4.1 needed this path, the loader was asked for "any GPU" here
+  and a CUDA box silently ran the GPUs instead — including for the Linux
+  default, which is `ggml_cpu` when `--backend` is not passed. It now runs where
+  it says, and says so once on stderr (`[dsv4] --backend ggml_cpu: DeepSeek V4
+  will run on ONE CPU device, not on any GPU this host has...`) because the same
+  launch line used to mean the GPUs. `--backend ggml_cuda` is how you ask for
+  them now. No CPU throughput has been measured for V4 on this backend and none
+  is quoted here; every number in this card is from a GPU executor.
 - **`--backend cpu`**: a **100% pure C# whole-model executor**
   (`TensorSharp.Models/Models/DeepSeek4/DeepSeek4CpuExecutor.cs`) — no native
   dependencies at all. It serves the quantized weights straight from the

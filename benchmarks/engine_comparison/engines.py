@@ -13,6 +13,11 @@ response so they are independent of any engine-specific internal timer:
 
 DiffusionGemma denoises a whole block at once (no per-token stream), so it is
 run non-streaming and its throughput is wall-clock tokens/second.
+
+A scenario may also drive a multi-turn workflow (`run_conversation`), where each
+turn's request is built from the previous turn's response. Such a cell reports
+the FINAL turn's metrics — the turn whose prompt is the whole conversation —
+with `total_wall_ms` covering every turn and `turns` saying how many ran.
 """
 from __future__ import annotations
 
@@ -60,6 +65,20 @@ class BenchResult:
     concurrency: int = 1                     # parallel identical requests at this cell
     aggregate_decode_tps: float = 0.0        # system-wide decode tok/s across all parallel seqs
     requests_ok: int = 0                     # successful requests out of `concurrency`
+    # MoE CPU offload (`--n-cpu-moe N` / `--cpu-moe-threads M`). 0 layers is the
+    # baseline; -1 means `all`. 0 threads means the engine picked its own.
+    cpu_moe_layers: int = 0
+    cpu_moe_threads: int = 0
+    # Round trips this cell drove, and how many the scenario asked for. 1/1 for
+    # every single-request scenario; the client-driven workflows (agentic,
+    # code_edit) report the turns they got through, and the throughput fields
+    # above belong to the LAST of them (the turn that carries the whole
+    # conversation as its prompt), while `total_wall_ms` covers the conversation
+    # end to end. `turns < turns_expected` means the workflow stopped early, so
+    # those timings describe a SHORTER conversation than the cell's name claims
+    # and report.py refuses to tabulate them against a complete one.
+    turns: int = 1
+    turns_expected: int = 1
     # Image-edit (stable-diffusion) cells: per-phase pipeline timings in ms, all
     # from each engine's OWN pipeline timers (so HTTP/process overhead is out).
     # `edit_total_ms` is the WARM request (weights already served once);
@@ -343,12 +362,8 @@ def run_openai_chat_parallel(base_url: str, model_name: str, messages: list, *,
                              timeout_s: float = 1200.0) -> dict:
     """Fire `concurrency` identical chat completions at the same server at once
     and return one aggregated metrics dict (same keys as `run_openai_chat` plus
-    `aggregate_decode_tps`, `requests_ok`, `per_request`).
-
-    Per-request metrics are reported as the mean across the successful requests;
-    `aggregate_decode_tps` is the *system* decode throughput — total generated
-    tokens divided by the wall window during which any sequence was decoding
-    (max last-token time − min first-token time, on the shared process clock).
+    `aggregate_decode_tps`, `requests_ok`, `per_request`); see
+    `_aggregate_parallel` for how the numbers are folded together.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -373,7 +388,16 @@ def run_openai_chat_parallel(base_url: str, model_name: str, messages: list, *,
     if not ok:
         first_err = next((e for e in errors if e is not None), None)
         raise RuntimeError(f"all {n} parallel requests failed: {first_err}")
+    return _aggregate_parallel(ok)
 
+
+def _aggregate_parallel(ok: list) -> dict:
+    """Fold the successful parallel results into one cell metrics dict.
+
+    Per-request metrics are the mean across the successful requests;
+    `aggregate_decode_tps` is the *system* decode throughput — total generated
+    tokens divided by the wall window during which any sequence was decoding
+    (max last-token time - min first-token time, on the shared process clock)."""
     def _mean(key: str) -> float:
         return sum(float(r.get(key, 0.0) or 0.0) for r in ok) / len(ok)
 
@@ -403,6 +427,132 @@ def run_openai_chat_parallel(base_url: str, model_name: str, messages: list, *,
         "requests_ok": len(ok),
         "per_request": ok,
     }
+
+
+# ---------------------------------------------------------------------------
+# Client-driven multi-turn conversation runner
+# ---------------------------------------------------------------------------
+def run_conversation(base_url: str, model_name: str, messages: list, *,
+                     followups: list,
+                     tools: Optional[list] = None,
+                     response_format: Optional[dict] = None,
+                     max_tokens: int = 128,
+                     stream: bool = True,
+                     extra_body: Optional[dict] = None,
+                     timeout_s: float = 1200.0) -> dict:
+    """Drive a scenario's multi-turn workflow and return ONE cell metrics dict.
+
+    `followups` is the scenario's list of turn builders (see scenarios.py): each
+    is handed the metrics of the turn that just finished plus the messages that
+    produced it, and returns the request overrides for the next turn. A
+    follow-up that raises ends the conversation there; the reason (including the
+    exception type, so a harness bug reads differently from a model that did not
+    call the tool) is returned as `conversation_detail` and the cell records it.
+
+    The returned dict is the FINAL turn's metrics — the turn whose prompt is the
+    whole conversation, which is the one an agentic workload is actually paced
+    by — plus `turns`, `turn_metrics` and a `total_wall_ms` covering every turn.
+    `t_start_abs` is likewise moved to the start of the conversation so a
+    parallel aggregation window spans the whole workflow rather than its tail."""
+    t_conv = time.monotonic()
+    turn_metrics: list = []
+    detail = ""
+    msgs = list(messages)
+    req = {"tools": tools, "response_format": response_format,
+           "extra_body": dict(extra_body) if extra_body else None}
+    for i in range(len(followups) + 1):
+        m = run_openai_chat(base_url, model_name, msgs,
+                            max_tokens=max_tokens, stream=stream,
+                            timeout_s=timeout_s, **req)
+        turn_metrics.append(m)
+        if i >= len(followups):
+            break
+        try:
+            nxt = followups[i](m, msgs)
+        except Exception as ex:
+            detail = (f"conversation stopped after turn {i + 1}/{len(followups) + 1}: "
+                      f"{type(ex).__name__}: {ex}")
+            break
+        msgs = nxt["messages"]
+        # A turn may re-declare tools / response_format, and its extra body
+        # fields are merged onto the ones already in effect (so the run-wide
+        # reasoning mode survives a turn that only sets `tool_choice`). Whatever
+        # a turn does not mention carries forward from the turn before it, not
+        # from the start of the conversation — otherwise a later turn would
+        # silently undo an earlier turn's change. A scenario therefore states
+        # only what it is actually changing.
+        merged = dict(req["extra_body"] or {})
+        merged.update(nxt.get("extra_body") or {})
+        req = {"tools": nxt.get("tools", req["tools"]),
+               "response_format": nxt.get("response_format", req["response_format"]),
+               "extra_body": merged or None}
+
+    t_end = time.monotonic()
+    out = dict(turn_metrics[-1])
+    out["turns"] = len(turn_metrics)
+    out["turn_metrics"] = turn_metrics
+    out["conversation_detail"] = detail
+    out["final_turn_wall_ms"] = turn_metrics[-1].get("total_wall_ms", 0.0)
+    out["total_wall_ms"] = (t_end - t_conv) * 1000.0
+    out["t_start_abs"] = t_conv
+    out["t_end_abs"] = t_end
+    return out
+
+
+def run_conversation_parallel(base_url: str, model_name: str, messages: list, *,
+                              concurrency: int, followups: list,
+                              tools: Optional[list] = None,
+                              response_format: Optional[dict] = None,
+                              max_tokens: int = 128,
+                              stream: bool = True,
+                              extra_body: Optional[dict] = None,
+                              timeout_s: float = 1200.0) -> dict:
+    """`concurrency` copies of the same workflow, driven at one server at once.
+
+    Each client runs its own independent conversation (the follow-ups depend on
+    that client's own responses), and the results are folded together exactly
+    like `run_openai_chat_parallel` does — with the decode window spanning the
+    parallel FINAL turns and the wall window spanning the whole workflows."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = max(1, int(concurrency))
+    results: list[Optional[dict]] = [None] * n
+    errors: list[Optional[Exception]] = [None] * n
+
+    def _worker(i: int):
+        try:
+            results[i] = run_conversation(
+                base_url, model_name, messages, followups=followups,
+                tools=tools, response_format=response_format,
+                max_tokens=max_tokens, stream=stream,
+                extra_body=extra_body, timeout_s=timeout_s)
+        except Exception as ex:  # captured per-client; surfaced in aggregate
+            errors[i] = ex
+
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(_worker, range(n)))
+
+    ok = [r for r in results if r is not None]
+    if not ok:
+        first_err = next((e for e in errors if e is not None), None)
+        raise RuntimeError(f"all {n} parallel conversations failed: {first_err}")
+
+    rep = ok[0]
+    agg = _aggregate_parallel(ok)
+    # Correctness is judged on the representative conversation, so the checker
+    # needs its structured message and turn history, not just the folded numbers.
+    agg["assistant_message"] = rep.get("assistant_message")
+    agg["tool_call_details"] = rep.get("tool_call_details") or []
+    agg["turn_metrics"] = rep.get("turn_metrics") or []
+    # `turns` is the WORST client's, not the representative one's: the cell's
+    # claim is "N copies of this workflow ran", so one client that stopped early
+    # makes the cell an incomplete workflow even if the representative finished.
+    # Reporting the representative's count would hide that behind a full-length
+    # number the aggregate timings no longer describe.
+    agg["turns"] = min(int(r.get("turns", 1) or 1) for r in ok)
+    details = sorted({r.get("conversation_detail") or "" for r in ok} - {""})
+    agg["conversation_detail"] = "; ".join(details)
+    return agg
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +729,7 @@ class ServerHandle:
 class TensorSharpServer(ServerHandle):
     def __init__(self, model: config.ModelSpec, backend: str, log_path: Path,
                  max_tokens: int = config.SERVER_MAX_TOKENS, mtp: bool = False,
-                 tp: int = 1):
+                 tp: int = 1, cpu_moe: Optional[config.CpuMoeSpec] = None):
         super().__init__(f"http://127.0.0.1:{config.TENSORSHARP_PORT}",
                          config.TENSORSHARP_PORT, log_path)
         self.model = model
@@ -587,6 +737,7 @@ class TensorSharpServer(ServerHandle):
         self.max_tokens = max_tokens
         self.mtp = mtp
         self.tp = max(1, int(tp or 1))
+        self.cpu_moe = cpu_moe or config.CpuMoeSpec()
 
     def start(self):
         spec = config.BACKENDS[self.backend]
@@ -623,6 +774,14 @@ class TensorSharpServer(ServerHandle):
         # Tensor parallelism: split the hosted model across `tp` local GPUs.
         if self.tp > 1:
             cmd += [spec.ts_tp_arg, str(self.tp)]
+        # MoE CPU offload: the routed experts of the first N layers stay in
+        # system RAM and are multiplied on the host. The baseline point emits
+        # nothing at all, so a run that does not use this axis launches the
+        # exact command line it always did.
+        if self.cpu_moe.active:
+            cmd += [spec.ts_cpu_moe_arg, self.cpu_moe.layers_arg]
+            if self.cpu_moe.threads > 0:
+                cmd += [spec.ts_cpu_moe_threads_arg, str(self.cpu_moe.threads)]
         env = os.environ.copy()
         # Some native architectures expose explicit tensor-shard activation
         # separately from the GPU-count CLI argument. Keep it tied to this
@@ -639,12 +798,13 @@ class TensorSharpServer(ServerHandle):
 # ---------------------------------------------------------------------------
 class LlamaCppServer(ServerHandle):
     def __init__(self, model: config.ModelSpec, backend: str, log_path: Path,
-                 tp: int = 1):
+                 tp: int = 1, cpu_moe: Optional[config.CpuMoeSpec] = None):
         super().__init__(f"http://127.0.0.1:{config.LLAMA_PORT}",
                          config.LLAMA_PORT, log_path)
         self.model = model
         self.backend = backend
         self.tp = max(1, int(tp or 1))
+        self.cpu_moe = cpu_moe or config.CpuMoeSpec()
 
     def start(self):
         spec = config.BACKENDS[self.backend]
@@ -674,6 +834,19 @@ class LlamaCppServer(ServerHandle):
         # visible-devices env var below, so exactly `tp` GPUs are used.
         if self.tp > 1:
             cmd += [str(a) for a in spec.llama_tp_extra_args]
+        # MoE CPU offload. llama.cpp spells a layer COUNT the same way, but not
+        # `all`: it parses `-ncmoe`'s argument as an integer and has a separate
+        # switch for every layer (`--cpu-moe`), so the `all` point must send
+        # that instead of a value llama-server would refuse to parse. Its
+        # host-thread knob is the global `--threads` (see the backend spec),
+        # which is why a thread count is only sent when one was asked for.
+        if self.cpu_moe.active:
+            if self.cpu_moe.layers == config.CPU_MOE_ALL:
+                cmd += [spec.llama_cpu_moe_all_arg]
+            else:
+                cmd += [spec.llama_cpu_moe_arg, self.cpu_moe.layers_arg]
+            if self.cpu_moe.threads > 0:
+                cmd += [spec.llama_cpu_moe_threads_arg, str(self.cpu_moe.threads)]
         if self.model.mmproj is not None and self.model.mmproj.exists():
             cmd += ["--mmproj", str(self.model.mmproj)]
         env = os.environ.copy()
@@ -738,11 +911,13 @@ class SdCppCli(ServerHandle):
 
 def make_server(engine: str, model: config.ModelSpec, backend: str,
                 log_path: Path, max_tokens: int = config.SERVER_MAX_TOKENS,
-                mtp: bool = False, tp: int = 1) -> ServerHandle:
+                mtp: bool = False, tp: int = 1,
+                cpu_moe: Optional[config.CpuMoeSpec] = None) -> ServerHandle:
     if engine == "tensorsharp":
-        return TensorSharpServer(model, backend, log_path, max_tokens, mtp=mtp, tp=tp)
+        return TensorSharpServer(model, backend, log_path, max_tokens, mtp=mtp, tp=tp,
+                                 cpu_moe=cpu_moe)
     if engine == "llamacpp":
-        return LlamaCppServer(model, backend, log_path, tp=tp)
+        return LlamaCppServer(model, backend, log_path, tp=tp, cpu_moe=cpu_moe)
     if engine == "vllm":
         return VllmConnector(model, backend, log_path)
     if engine == "sdcpp":

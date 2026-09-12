@@ -8,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tsg_dsv41 {
@@ -182,6 +183,19 @@ struct engram_data {
     void lookup(size_t layer_index, const void * table, uint64_t table_rows, size_t row_bytes,
                 const int32_t * hashes, size_t count, float * output,
                 Dequantize dequantize, ParallelFor parallel_for) const {
+        auto row = prepare_lookup(layer_index, table, table_rows, row_bytes, hashes, count, output,
+            std::move(dequantize));
+        parallel_for(count * hash_columns(), std::move(row));
+    }
+
+    // Validate the entire lookup before scheduling any work. The returned
+    // callable owns its scalar arguments and dequantizer, so callers may stage
+    // several tables before submitting them together. The table, hashes, and
+    // output storage must remain alive, and the validated hashes unchanged,
+    // until every submitted row completes.
+    template<typename Dequantize>
+    auto prepare_lookup(size_t layer_index, const void * table, uint64_t table_rows, size_t row_bytes,
+                        const int32_t * hashes, size_t count, float * output, Dequantize dequantize) const {
         if (layer_index >= layers.size() || table_rows != layers[layer_index].rows || !table || !row_bytes ||
             table_rows > SIZE_MAX / row_bytes || !hash_columns() || !head_dim ||
             (count && (!hashes || !output)) || count > SIZE_MAX / hash_columns() / head_dim / sizeof(float))
@@ -192,10 +206,12 @@ struct engram_data {
             if (hashes[i] < 0 || uint64_t(hashes[i]) >= table_rows)
                 throw std::runtime_error("DeepSeek V4.1 Engram lookup is out of bounds");
         }
-        // Validate before submitting work; each callback writes a disjoint row.
-        parallel_for(n_rows, [&](size_t i) {
-            dequantize(data + size_t(hashes[i]) * row_bytes, output + i * head_dim, head_dim);
-        });
+        // Each callback writes a disjoint row. Do not capture references to
+        // this stack frame: deferred callbacks outlive prepare_lookup().
+        return [data, row_bytes, hashes, output, dimension = head_dim,
+                dequantize = std::move(dequantize)](size_t i) mutable {
+            dequantize(data + size_t(hashes[i]) * row_bytes, output + i * dimension, dimension);
+        };
     }
 };
 

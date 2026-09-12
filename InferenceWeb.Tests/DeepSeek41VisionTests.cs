@@ -88,6 +88,42 @@ public sealed class DeepSeek41VisionTests
         Assert.DoesNotContain("<video>", rendered);
     }
 
+    /// <summary>
+    /// The companion used to load with a hardcoded "CUDA", which on
+    /// <c>--backend ggml_cpu</c> pulled a GPU into an explicitly CPU-only run.
+    /// These names are the ggml registry names the native loader matches, so
+    /// they are also what the text executor asks for. Only these two backends
+    /// reach a V4.1 load at all (DeepSeek41Architecture.ValidateLoad).
+    /// </summary>
+    [Theory]
+    [InlineData(BackendType.GgmlCuda, "CUDA")]
+    [InlineData(BackendType.GgmlCpu, "CPU")]
+    public void VisionCompanion_LoadsOnTheTextModelsOwnBackend(BackendType backend, string expected)
+        => Assert.Equal(expected, DeepSeek41Model.ResolveVisionBackendName(backend));
+
+    /// <summary>
+    /// V4.1 refuses these two backends before any weight is read, so this is a
+    /// drift guard on the shared registry-name table rather than a claim that
+    /// the companion runs on Vulkan or Metal: the helper must name the backend
+    /// the operator chose, never substitute a different one.
+    /// </summary>
+    [Theory]
+    [InlineData(BackendType.GgmlVulkan, "Vulkan")]
+    [InlineData(BackendType.GgmlMetal, "Metal")]
+    public void VisionBackendNameNeverSubstitutesAnotherBackend(BackendType backend, string expected)
+        => Assert.Equal(expected, DeepSeek41Model.ResolveVisionBackendName(backend));
+
+    [Theory]
+    [InlineData(BackendType.Cpu)]
+    [InlineData(BackendType.Cuda)]
+    [InlineData(BackendType.Mlx)]
+    public void VisionCompanion_RefusesBackendsWithNoGgmlRegistryName(BackendType backend)
+    {
+        var error = Assert.Throws<NotSupportedException>(() => DeepSeek41Model.ResolveVisionBackendName(backend));
+        Assert.Contains(backend.ToString(), error.Message);
+        Assert.Contains("ggml_cuda", error.Message);
+    }
+
     [Fact]
     public void VisionInterface_IsSpecificToV41AndCompanionDiscoveryIsExact()
     {

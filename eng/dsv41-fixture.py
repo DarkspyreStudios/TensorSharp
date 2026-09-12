@@ -21,6 +21,8 @@ def main():
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--f32", action="store_true", help="Store identical dequantized weights as F32 to isolate architecture from quantized matmul rounding")
     parser.add_argument("--cuda-index", action="store_true", help="Use 128-dimensional, 32-head indexing supported by the CUDA index kernel")
+    parser.add_argument("--cuda-attn", action="store_true", help="Use the 512-wide shared K(=V) head the direct-CUDA engine requires (implies --cuda-index)")
+    parser.add_argument("--q8", action="store_true", help="Store every quantized weight as Q8_0 instead of Q2_K where the row divides: near-lossless, so implementations can be compared at a tight tolerance, and it is a type every backend's expert kernels accept")
     parser.add_argument("--index-topk", type=int, default=2, help="Use 512 to exercise the real checkpoint's gather/bucket boundary")
     parser.add_argument("--token-count", type=int, default=16)
     args = parser.parse_args()
@@ -47,8 +49,12 @@ def main():
     c = config["text_config"]
     c["index_topk"] = args.index_topk
     c["candidate_topk_blocks"] = max(2, (args.index_topk + 1) // c["candidate_block_size"] + 1)
-    if args.cuda_index:
+    if args.cuda_index or args.cuda_attn:
         c["index_n_heads"], c["index_head_dim"] = 32, 128
+    if args.cuda_attn:
+        # The direct-CUDA engine specializes its attention kernel to a 512-wide
+        # shared head, so a fixture meant to exercise it has to use that width.
+        c["head_dim"], c["qk_rope_head_dim"] = 512, 64
     tokens = [f"t{i}" for i in range(c["vocab_size"])]
     tokenizer = Tokenizer(models.WordLevel({token: i for i, token in enumerate(tokens)}, unk_token="t2"))
     module_spec = importlib.util.spec_from_file_location("dsv41_prepare", Path(__file__).with_name("dsv41-prepare.py"))
@@ -108,7 +114,7 @@ def main():
             data = np.array([.2, .3, .4], dtype=np.float32)
         else:
             data = rng.normal(0, scale, shape).astype(np.float32)
-        if mode == "quant" and shape[-1] % 256 == 0:
+        if mode == "quant" and shape[-1] % 256 == 0 and not args.q8:
             # Q2_K's public Python converter only dequantizes. Construct valid
             # blocks directly: scales/mins=3, with centered two-bit payloads.
             blocks = int(np.prod(shape)) // 256
@@ -132,7 +138,8 @@ def main():
         else:
             writer.add_tensor(name, data)
 
-    dim, hc, qrank, head, heads, rank, groups = 256, 4, 64, 64, 4, 64, 2
+    dim, hc, qrank, heads, rank, groups = 256, 4, 64, 4, 64, 2
+    head = c["head_dim"]
     add("token_embd.weight", (256, dim), scale=.3)
     add("output_norm.weight", (dim,), "norm")
     add("output.weight", (256, dim))

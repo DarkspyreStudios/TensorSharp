@@ -1229,16 +1229,19 @@ namespace TensorSharp.Models
             if (_fdSpecSessionActive)
                 return;
             _fdSpecSessionActive = true;
-            // Metal keeps its decode graph across the switch (the next replay takes
-            // a reseed flag and uploads the host conv/delta state into its stable
-            // bindings); a grow or reset still hard-drops it. A hard drop here meant
-            // a graph rebuild every time a parked speculator went back to the fused
-            // decode.
+            // Metal and CUDA keep their decode graph across the switch (the next
+            // replay takes a reseed flag and uploads the host conv/delta state into
+            // its stable bindings); a grow or reset still hard-drops it. A hard drop
+            // here meant a graph rebuild every time a parked speculator went back to
+            // the fused decode, and on CUDA that rebuild is a capture as well: it
+            // put the governor's plain baseline at 247 ms/token against a true 9.2,
+            // so speculation never parked and every no-draft step stayed on the dear
+            // verify family.
             // Speculative paths may fall back to host/per-op recurrent kernels,
             // which invalidate the state buffers captured by the decode graph.
             // Speculation already latches fused decode off for the session, so
             // retaining that graph has no benefit and risks dangling bindings.
-            InvalidateFullDecodeState(hardBindings: _backend != BackendType.GgmlMetal);
+            InvalidateFullDecodeState(hardBindings: !SpecKeepsDecodeGraph);
         }
 
         /// <summary>
@@ -1793,6 +1796,34 @@ namespace TensorSharp.Models
         // gated_delta_net state snapshots, K=N), eliminating both the verify transfer AND
         // the host snapshot. See memory qwen35-mtp-spec-perf. _fvStateResident latches the
         // seed; reset on KV reset/grow (InvalidateVerifyCache).
+        /// <summary>
+        /// Device-resident GDN state for the speculative family. Opt-in
+        /// (TS_QWEN35_VERIFY_RESIDENT=1) and currently INCORRECT - do not turn it
+        /// on expecting speed.
+        ///
+        /// <para>It is fast. Measured on Qwen 3.5-0.8B / ggml_cuda it took a
+        /// verify from 246 ms to 17 ms, a state snapshot from 65 ms to 6 ms and a
+        /// plain step on the speculative family from 67 ms to 3.5 ms, by keeping
+        /// the conv and delta state on the device instead of moving ~60 MB per
+        /// call.</para>
+        ///
+        /// <para>It is also wrong, in two ways that were measured rather than
+        /// argued. A resident call updates the state IN PLACE, so the state the
+        /// call started from no longer exists afterwards - which makes
+        /// SpecSnapshotRecurrentState's shortcut ("the live slices ARE the
+        /// snapshot, because a verify only reads them") false, and a rejected
+        /// draft then rolls back to nothing: the stream diverged from plain greedy
+        /// at token 53. Restricting residency to single-token calls, so verifies
+        /// keep separate in/out buffers, does not rescue it either - mixing
+        /// resident and non-resident calls against one graph cache diverged at
+        /// token 2 and gave up the plain-step win as well.</para>
+        ///
+        /// <para>Making this correct needs a real snapshot in resident mode. The
+        /// state is already on the device, so a device-to-device copy is about
+        /// 0.2 ms for 60 MB on an A40 - the 65 ms was the host round trip, not the
+        /// copy. BackendType.Cuda already has that path
+        /// (MtpSnapshotRecurrentStateCudaDevice); ggml_cuda does not.</para>
+        /// </summary>
         private static readonly bool _fvResidentEnabled =
             string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_VERIFY_RESIDENT"), "1", StringComparison.Ordinal);
         private bool _fvStateResident;
@@ -1809,8 +1840,12 @@ namespace TensorSharp.Models
             // download can otherwise leave a cached verify graph holding a freed
             // buffer. Metal's default host-mode verify remains correct and the
             // experimental resident mode was never enabled there by default.
+            // Single-token calls only. A multi-row verify updates the state in
+            // place, which destroys the very state a rollback has to restore; see
+            // the note on _fvResidentEnabled.
             return residentEnabled &&
                 backend != BackendType.GgmlMetal &&
+                seqLen == 1 &&
                 !(nLogitRows > 0 && nLogitRows < seqLen);
         }
 
@@ -1843,6 +1878,26 @@ namespace TensorSharp.Models
         /// this trunk cost more than the plain decode it was meant to beat.
         /// </summary>
         private bool _fvDeviceStateCurrent;
+
+        /// <summary>
+        /// Backends whose speculative verify can leave the recurrent state on the
+        /// device between calls, rather than draining it to the host mirrors and
+        /// re-uploading it every step. The native verifier's state-half tracking is
+        /// backend independent, so this is a property of what has been measured,
+        /// not of what is possible. TS_QWEN35_SPEC_DEVICE_STATE=0 forces the drain
+        /// back on, which is the switch to try first if a speculative stream ever
+        /// stops matching plain greedy.
+        /// </summary>
+        private bool SpecKeepsDeviceState =>
+            (_backend == BackendType.GgmlMetal || _backend == BackendType.GgmlCuda) &&
+            Environment.GetEnvironmentVariable("TS_QWEN35_SPEC_DEVICE_STATE") != "0";
+
+        /// <summary>
+        /// Backends that keep the captured fused-decode graph across a
+        /// speculative-session transition. Same switch, because a retained graph is
+        /// only safe where the state it is bound to survives the transition.
+        /// </summary>
+        private bool SpecKeepsDecodeGraph => SpecKeepsDeviceState;
 
         /// <summary>Pull the live device state back into the host mirrors and clear
         /// <see cref="_fvDeviceStateCurrent"/>. Every path that reads the mirrors -
@@ -1907,13 +1962,15 @@ namespace TensorSharp.Models
             // switching graph families.
             if (_fdStateResident)
                 InvalidateFullDecodeState();
-            // Metal's verifier tracks which shared state half is authoritative,
+            // The verifier tracks which shared state half is authoritative,
             // including after prefill and snapshot commits. It selects that half
             // when building a graph and rejects cached graphs bound to the other
-            // half. Keep this chain on-device; draining here needlessly downloaded
-            // and re-uploaded every recurrent layer before each speculative step.
-            // Other backends retain their existing graph-family transition.
-            if (_backend != BackendType.GgmlMetal && _fvDeviceStateCurrent
+            // half (ggml_ops_qwen35_verify.cpp, the device_state_current chain),
+            // and none of that tracking is backend specific. Keep this chain
+            // on-device; draining here downloads and re-uploads every recurrent
+            // layer before each speculative step, which on CUDA measured as tens of
+            // milliseconds per decoded token.
+            if (!SpecKeepsDeviceState && _fvDeviceStateCurrent
                 && (seqLen == 1 || nLogitRows <= 0))
                 DrainDeviceRecurrentState();
 
@@ -2093,11 +2150,13 @@ namespace TensorSharp.Models
                     float* convOut = convOutBase + (long)_fvGdnSlot[l] * convBlock;
                     IntPtr deltaPtr = (IntPtr)GetFloatPtr(_deltaStateTensor[l]);
                     // Seed from the host only when it is authoritative. A current
-                    // Metal verify state lives in the native shared slices, so the
-                    // host ring may be stale and its packing/upload is unnecessary.
-                    // The separate experimental resident mode still seeds on its
-                    // first call and after invalidation.
-                    if (!(_backend == BackendType.GgmlMetal && _fvDeviceStateCurrent)
+                    // device-held verify state lives in the native shared slices, so
+                    // the host ring may be stale and this packing and upload -- two
+                    // full strided transposes per recurrent layer per token -- is
+                    // both unnecessary and wrong to apply. The separate experimental
+                    // resident mode still seeds on its first call and after
+                    // invalidation.
+                    if (!(SpecKeepsDeviceState && _fvDeviceStateCurrent)
                         && (!residentThisCall || !_fvStateResident))
                     {
                         float[] ring = _convState[l];

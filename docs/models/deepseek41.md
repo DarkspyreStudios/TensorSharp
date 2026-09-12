@@ -7,6 +7,9 @@ optional native vision encoder. It uses the DeepSeek whole-model loader and
 scheduler, with V4.1-specific attention, Engram, residual connections, and chat handling. This card describes
 the implemented path and its limits. Model-quality and performance claims need
 the measured artifacts tracked in the [validation report](../deepseek41_validation.md).
+The same graph also loads on `--backend ggml_cpu`, which exists to run and check
+the architecture without a GPU rather than to serve it — see
+[Running on the ggml CPU backend](#running-on-the-ggml-cpu-backend).
 
 The [official model](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash)
 declares `DeepseekV41ForCausalLM`. Its text network has 40 layers, hidden size
@@ -294,8 +297,54 @@ This requires the `gguf` Python package and reads all three routed matrices
 in each selected layer. Record its I/O time separately. Pages remain evictable;
 Engram warming alone does not warm CPU expert weights.
 
+### Where the Engram tables live
+
+By default the two Engram tables are **GPU-resident**: each is loaded onto the
+device that owns its layer, and the graph gathers rows with `get_rows` over the
+quantized table. The host never reads a row, so nothing is dequantized on the
+CPU and only the row ids cross the link. Startup prints
+`Engram lookup: GPU-resident tables, gathered in-graph`.
+
+This is possible because TensorSharp keeps the tables in the checkpoint's
+quantization. A Q2_K row of 256 values is 84 bytes, so both 384M-row tables
+together are 60.2 GiB. vLLM and SGLang store the same rows as FP8 values plus
+per-32 block scales, 264 bytes a row, which is why their default is a host
+table with an FP8 gather kernel.
+
+Placement is automatic and conservative: the tables are priced into the
+layer-split packing, and if putting them on GPUs would force any routed-expert
+CPU offload, they stay host mappings instead and startup says so. Set
+`TS_DSV41_ENGRAM_DEVICE=0` to force host mappings or `=1` to require GPU
+residency and fail if it does not fit. `TS_DSV41_ENGRAM_THREADS`,
+`TS_DSV41_ENGRAM_WARM` and `TS_DSV41_ENGRAM_RANDOM` only affect host mappings;
+startup notes when one is set on the GPU-resident path.
+
+Measured on eight A40s with a cold prompt each time, so every prompt selects
+rows it has not touched before:
+
+| Engram placement | Prefill tok/s | Decode tok/s |
+|---|---:|---:|
+| Host mapping, no warming | 207-221 | 28.0-29.2 |
+| Host mapping, `TS_DSV41_ENGRAM_WARM=1` | 506-528 | 34.5-35.2 |
+| GPU-resident (default) | 532-541 | 35.6-35.9 |
+
+The GPU-resident path also removes the 130-second whole-table warm from
+startup and the 60.1 GiB of host page cache the warm path depends on. All three
+paths produced identical text at temperature 0 on the determinism check.
+
+That is argmax stability rather than bitwise agreement: ggml's CPU and CUDA
+Q2_K dequantizers evaluate the same expression, but the device one may contract
+a multiply-subtract into an FMA and differ by up to one ulp. Use
+`TS_DSV41_ENGRAM_DEVICE=0` for a run that must match the CPU oracle bit for
+bit.
+
+### Host-mapped Engram tables
+
+These options apply only when the tables stay on the host, which happens when
+the GPUs cannot hold them or `TS_DSV41_ENGRAM_DEVICE=0` is set.
+
 On network-backed storage, first access to sparse Engram rows can dominate
-prefill latency. `TS_DSV41_ENGRAM_WARM=1` optionally reads the Engram table
+prefill and decode latency. `TS_DSV41_ENGRAM_WARM=1` optionally reads the Engram table
 pages at model load. It reads only those tables, creates no private copy or
 pinned allocation, and leaves the pages evictable by the operating system.
 Warming is skipped with a diagnostic unless the mapped host weights plus
@@ -303,9 +352,77 @@ Warming is skipped with a diagnostic unless the mapped host weights plus
 warm inference separately.
 
 `TS_DSV41_ENGRAM_THREADS=1..32` controls the persistent lookup workers;
-the default is the smaller of 16 and the hardware thread count. Prefill
-batches of at least four tokens use parallel row lookup. Single-token decode
-keeps serial lookup to avoid worker coordination overhead.
+the default is the smaller of 16 and the hardware thread count. Both prefill
+and decode use parallel row lookup: a single token selects 24 independent
+rows per Engram table. Setting one worker keeps reads serial. This avoids
+serialized page faults during decode without changing the embedding values.
+The executor interleaves reads from both tables in one worker-pool job and
+uploads each table's rows after the workers finish. Staging is grouped within
+64 MiB; a single larger table retains the previous one-table allocation bound.
+
+On Linux, parallel lookup automatically requests random-access advice for
+the mapped Engram ranges to reduce unnecessary readahead. The hint is applied
+after optional whole-table warming and leaves other tensor ranges at their
+existing policy, except for shared boundary pages. Set
+`TS_DSV41_ENGRAM_RANDOM=0` to disable it or `=1` to force it. When unset, a
+one-worker configuration retains the default mapping policy. Unsupported
+platforms and rejected OS hints remain nonfatal. The source comparison and
+paired scratch-file results are in the
+[Engram investigation](../validation/deepseek41/cli-gpu-execution/README.md).
+
+### Backends
+
+`--backend ggml_cuda` is the serving path: it is the only one with kernels for
+this architecture's fused ops.
+
+`--backend ggml_cpu` runs the whole model on one CPU device, with the scalar
+implementations those fused ops fall back to. It exists so the architecture can
+be run and checked without a GPU. It is not a serving path: this checkpoint
+reads six of 384 routed experts per layer per token out of 246 GiB.
+
+`TS_DSV41_ALLOW_NON_CUDA_GPU=1` additionally permits `ggml_vulkan` and
+`ggml_metal`. There the ordinary graph runs on the GPU and only the
+architecture-specific ops fall to the CPU backend, at a host round trip per
+occurrence. It is opt-in rather than automatic because what the refusal
+originally closed was a silent fallback onto whichever GPU enumerated first, not
+an explicit request; startup names each device it applies to. Treat it as a
+portability and correctness path until it has been measured on your hardware.
+
+### One backend per GPU
+
+The architecture-specific DeepSeek ops (compressors, attention prologue and
+epilogue, MoE routing and reduction, clamped SwiGLU, hyper-connection gates,
+top-k masks) are emitted as `GGML_OP_CUSTOM` nodes and run by a TensorSharp
+backend. That backend **wraps** its GPU's CUDA backend and takes its place in
+`ggml_backend_sched`: it claims the CUDA device's ops and buffer types as well
+as its own, forwards ordinary nodes to CUDA as graph views, and launches the
+fused kernels on the same stream.
+
+Registering the two backends side by side instead splits the graph wherever the
+backend changes, which a V4.1 layer does about fourteen times. A decode graph
+was cut into 565 splits of roughly six nodes each, and the scheduler performs a
+blocking host synchronization at every boundary. Wrapping brings that to one
+split per GPU:
+
+| | Splits per decode graph | Decode compute | Decode tok/s |
+|---|---:|---:|---:|
+| Side-by-side backends | 565 / 577 | 26.6-27.1 ms | 35.6 |
+| Wrapping backend | 8 | 23.2-23.5 ms | 41.1 |
+
+Prefill is unchanged by this, as expected: a prefill split already does
+milliseconds of work, so a per-boundary synchronization was noise there. Set
+`TS_DSV4_FUSED=0` to fall back to stock CUDA kernels for these ops entirely.
+
+Startup reports each initialized compute device and the routed-expert CPU
+offload count. With `--backend ggml_cuda` and no CPU-offload option, all 40
+layers run on CUDA devices. The `auxiliary CPU worker pool` message describes
+the scheduler's host pool; it does not indicate CPU-only inference. Engram
+lookups still use host memory, and layer split executes successive layers on
+successive GPUs, so low per-device utilization alone does not establish a
+CPU fallback. `TS_DSV4_PERF=2` reports input preparation and graph-compute times;
+`TS_DSV4_PERF=3` additionally logs actual scheduler backend transitions. These
+are diagnostic modes whose logging overhead affects throughput. See the
+[CLI execution investigation](../validation/deepseek41/cli-gpu-execution/README.md).
 
 `TS_DSV41_SPARSE_FA=1` opts into CUDA mask-compacted flash attention for
 single-token batches or at least 16,384 cached keys. It attends to at most
@@ -360,6 +477,112 @@ baseline. Set `BENCH_DSV41_GGUF` to the first shard if using the model directory
 in this card; the matrix's default directory name differs. Its text scenarios
 do not substitute for the separate strict tool, JSON, image/video, and reasoning
 checks in the validation report.
+
+### Running on the ggml CPU backend
+
+`--backend ggml_cpu` selects the loader's CPU-only branch: one CPU compute
+device instead of enumerated accelerators, every layer on it, and every
+V4.1-specific op running the scalar CPU implementation in
+`ggml_ops_dsv4_fused_cpu.cpp` rather than a CUDA kernel. Startup prints
+`compute devices initialized: 1 CPU device(s)` and
+`routed-expert placement: all 40 layer(s) on the explicitly selected CPU device`.
+
+**This is a correctness and portability path, not a serving path.** Every
+decoded token reads six of 384 routed experts in each of 40 layers, out of a
+246 GiB Q2_K checkpoint, on general-purpose cores. Those reference kernels run
+one worker per node (the V4.1 quantize, candidate-score and candidate-mask
+kernels are the exceptions), and the wrapping backend of
+[One backend per GPU](#one-backend-per-gpu) is a CUDA object that is not built
+here at all, so none of that section's numbers carry over. Treat this backend
+as a way to run the architecture where there is no CUDA device — to check a
+change, to compare a CUDA result against a host one, or to bring the model up on
+a machine that cannot host it otherwise. Do not put it behind a serving
+endpoint and do not quote it as a throughput number: this card reports no CPU
+throughput because none has been measured.
+
+The server's default backend is `ggml_cpu` on everything but macOS, so omitting
+`--backend` on a GPU box selects this path. That used to be a refusal naming
+`ggml_cuda`; it now loads, and the load says so once on stderr before any weight
+is read (`[dsv41] --backend ggml_cpu: DeepSeek V4.1 will run on ONE CPU
+device...`). If you see that line on a machine with GPUs, you wanted
+`--backend ggml_cuda`.
+
+What the CPU path *does* have is agreement evidence, and it is per-op rather
+than per-checkpoint. The validation report's
+[fixture comparison](../deepseek41_validation.md#independent-numerical-reference) records 41/41 elementwise
+checks at `atol=rtol=2e-5` against the independent oracle on a local CPU, with
+maximum absolute error 5.1633e-6 and 41/41 greedy-token agreement. That covers
+the fused ops and the fixture-sized graph. A full-checkpoint CPU run has not
+been measured, so CPU/CUDA parity on the real weights is not established here.
+
+```bash
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  --model /models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
+  --backend ggml_cpu --port 5000
+```
+
+The preparation steps are unchanged: the tokenizer-derived
+`deepseek41.engram.bin` sidecar is required on the CPU backend exactly as it is
+on CUDA, and the load is refused without it before any weight is read.
+
+`TS_DSV4_THREADS` sets the compute thread count, defaulting to at most 32. That
+cap was chosen for GPU runs, where those threads only do auxiliary host work; on
+a CPU-only run they are the whole engine, so set it to the cores the run may
+actually use. `TS_DSV4_UBATCH` (default 256) and `MAX_CONTEXT` (default 65,536)
+behave as they do on CUDA, and both cost host memory rather than VRAM here.
+
+The options that name GPUs behave as follows:
+
+- `TS_DSV41_TP` shards routed-expert dimensions across GPUs. Combined with
+  `ggml_cpu` it is refused before the checkpoint is opened, not ignored.
+- `TS_DSV4_NGPU` selects how many GPUs to enumerate. There are none to
+  enumerate here, so the loader never reads it; it is neither an error nor a
+  way to get more than the one CPU device.
+- `--tp N` finds no second device to split layers across, so the multi-GPU
+  gate degrades it to a single device with a warning. That warning is written
+  for GPU hosts and says "Running on ONE GPU"; on this backend read it as one
+  CPU device.
+- The Engram tables stay host-mapped: the GPU-resident placement described
+  above needs a device to place them on. `TS_DSV41_ENGRAM_DEVICE=1` is
+  therefore refused here before the checkpoint is opened rather than accepted
+  and ignored, and so is any value other than `0` or `1`; `=0` names the host
+  mappings this path already uses and is accepted. Because the tables are
+  host-mapped, the [host-mapped Engram options](#host-mapped-engram-tables) —
+  `TS_DSV41_ENGRAM_WARM`, `TS_DSV41_ENGRAM_THREADS`, `TS_DSV41_ENGRAM_RANDOM` —
+  all apply on this backend.
+- `TS_DSV4_VRAM_RESERVE_MB` is subtracted from the one device's free memory
+  before layers are packed onto it. That device is the host here, so its
+  2048 MiB default holds back 2 GiB of system RAM, and the loader's refusal
+  when the model does not fit is worded for VRAM ("not enough VRAM ... Re-run
+  with `--n-cpu-moe N`"). The advice is still the right advice — see below.
+- `TS_DSV41_COMPACT_RAW_GATHER` was measured on CUDA and defaults off; it
+  changes the graph rather than the kernel, so it is reachable here, but
+  nothing on this path has been measured with it enabled. Leave it off.
+- `TS_DSV41_SPARSE_FA` does nothing here. It sets flash attention's `n_kv_max`
+  bound, and ggml's CPU flash-attention kernel reads only the first three op
+  parameters (`ggml-cpu/ops.cpp`), never that one. Setting it is silently
+  inert rather than slow or wrong; there is no mask-compacted CPU kernel to
+  opt into.
+
+Read from the loader rather than measured: layer weights are allocated on the
+selected compute device, which on this path is the host, so they are a private
+anonymous allocation rather than an evictable GGUF mapping. That is the one
+operational decision worth making before a long load — `--cpu-moe` (or
+`--n-cpu-moe N`) moves the routed experts of those layers into the loader's
+host context, which *is* served from the GGUF mapping, so the kernel can evict
+those pages instead of the process being killed for them. It is also what the
+loader tells you to do if the weights plus this context's caches do not fit,
+even though it says "VRAM" while doing so. Neither the resident footprint nor
+the load time of a CPU-only full-checkpoint load has been measured.
+
+The vision companion follows the text model onto the same backend. It loaded
+with a hardcoded `CUDA` until this path existed, which would have pulled a GPU
+into an explicitly CPU-only run; a backend with no ggml registry name is now
+refused by name instead of attempted.
+
+`--backend cpu` remains a different thing and stays refused: that is the pure
+C# executor (`DeepSeek4CpuExecutor`), which implements V4's graph, not V4.1's.
+`--backend cuda`, the direct-CUDA V4 engine, is refused for the same reason.
 
 ## Forward graph and state
 
@@ -481,8 +704,13 @@ original output limit retain precedence.
 
 ## Current limits and tensor-parallel work
 
-- Only `ggml_cuda` is enabled for V4.1. Other backends fail before loading the
-  weights into a V4 executor.
+- `ggml_cuda` is the only backend for serving V4.1. `ggml_cpu` loads the same
+  native graph on its scalar CPU implementations, as a correctness and
+  portability path with no measured throughput; see
+  [Running on the ggml CPU backend](#running-on-the-ggml-cpu-backend). Every
+  other backend — including `cpu` and `cuda`, whose executors implement V4 —
+  fails before the weights are read, rather than loading V4.1 weights into a
+  V4 graph.
 - Multi-GPU execution defaults to whole-layer placement. `TS_DSV41_TP` enables
   experimental routed-MoE tensor parallelism with host-staged reduction.
   Attention tensor parallelism and distributed groups are not implemented.

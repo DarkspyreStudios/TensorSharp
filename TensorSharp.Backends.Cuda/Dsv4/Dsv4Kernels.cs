@@ -54,10 +54,28 @@ namespace TensorSharp.Cuda
         private readonly IntPtr dsparkArgmax;
         private readonly IntPtr dsparkConf;
 
+        // V4.1
+        private readonly IntPtr v41AttnPrep;
+        private readonly IntPtr v41Compress;
+        private readonly IntPtr v41Commit;
+        private readonly IntPtr v41Persist;
+        private readonly IntPtr v41IdxPrep;
+        private readonly IntPtr v41IdxScores;
+        private readonly IntPtr v41Candidate;
+        private readonly IntPtr v41EngramGate;
+
         private Dsv4Kernels(CudaModule module)
         {
             this.module = module;
             embed = module.GetFunction("ts_dsv4_embed_f32");
+            v41AttnPrep = module.GetFunction("ts_dsv41_attn_prep_f32");
+            v41Compress = module.GetFunction("ts_dsv41_compress_f32");
+            v41Commit = module.GetFunction("ts_dsv41_commit_f32");
+            v41Persist = module.GetFunction("ts_dsv41_persist_f32");
+            v41IdxPrep = module.GetFunction("ts_dsv41_idx_prep_f32");
+            v41IdxScores = module.GetFunction("ts_dsv41_idx_scores_f32");
+            v41Candidate = module.GetFunction("ts_dsv41_candidate_f32");
+            v41EngramGate = module.GetFunction("ts_dsv41_engram_gate_f32");
             hcRms = module.GetFunction("ts_dsv4_hc_rms_f32");
             hcGatesComb = module.GetFunction("ts_dsv4_hc_gates_comb_f32");
             hcCollapse = module.GetFunction("ts_dsv4_hc_collapse_f32");
@@ -106,6 +124,13 @@ namespace TensorSharp.Cuda
         private static void Launch(IntPtr fn, uint gx, uint gy, uint gz, int block, uint sharedBytes, IntPtr stream, void** args)
         {
             CudaDriverApi.cuLaunchKernel(fn, gx, gy, gz, (uint)block, 1, 1, sharedBytes, stream, (IntPtr)args, IntPtr.Zero).ThrowOnError();
+        }
+
+        /// <summary>Launch with a two-dimensional block, for the kernels that put
+        /// one warp on the contracted dimension and independent rows on y.</summary>
+        private static void Launch2D(IntPtr fn, uint gx, uint gy, int bx, int by, uint sharedBytes, IntPtr stream, void** args)
+        {
+            CudaDriverApi.cuLaunchKernel(fn, gx, gy, 1, (uint)bx, (uint)by, 1, sharedBytes, stream, (IntPtr)args, IntPtr.Zero).ThrowOnError();
         }
 
         private static uint CeilDiv(long n, int d) => (uint)Math.Max(1, (n + d - 1) / d);
@@ -423,6 +448,89 @@ namespace TensorSharp.Cuda
             int a5 = nt, a6 = nUsed, a7 = e;
             void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7 };
             Launch(moeScatterAdd, CeilDiv(e, BlockSize), (uint)nt, 1, BlockSize, 0, stream, args);
+        }
+
+        // -------------------------------------------------------------------
+        // V4.1
+        // -------------------------------------------------------------------
+
+        /// <summary>Query RoPE (no per-head norm) and the shared K row: norm,
+        /// RoPE, trained FP8 quantization, F16 commit into the sliding ring.</summary>
+        public void V41AttnPrep(Tensor q, Tensor kvRaw, IntPtr kvNormW, IntPtr ropeTab, IntPtr ring,
+            int p0, int ringRows, int nh, int hd, int nRot, float eps, int nt, IntPtr stream)
+        {
+            IntPtr a0 = P(q), a1 = P(kvRaw), a2 = kvNormW, a3 = ropeTab, a4 = ring;
+            int a5 = p0, a6 = ringRows, a7 = nh, a8 = hd, a9 = nRot; float a10 = eps;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9, &a10 };
+            Launch(v41AttnPrep, (uint)(nh + 1), (uint)nt, 1, BlockSize, (uint)(hd * sizeof(float)), stream, args);
+        }
+
+        /// <summary>One normalized compressed latent per complete block.</summary>
+        public void V41Compress(Tensor stKv, Tensor stScore, IntPtr histKv, IntPtr histScore, IntPtr normW,
+            Tensor latent, long firstBoundary, int nBlocks, int p0, int ratio, int hd, float eps, IntPtr stream)
+        {
+            IntPtr a0 = P(stKv), a1 = P(stScore), a2 = histKv, a3 = histScore, a4 = normW, a5 = P(latent);
+            long a6 = firstBoundary;
+            int a7 = p0, a8 = ratio, a9 = hd; float a10 = eps;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9, &a10 };
+            Launch(v41Compress, (uint)nBlocks, 1, 1, BlockSize, (uint)(hd * sizeof(float)), stream, args);
+        }
+
+        /// <summary>RoPE at the block-start position, quantize, commit F16.</summary>
+        public void V41Commit(Tensor rows, IntPtr ropeTab, IntPtr cache,
+            long firstBoundary, int nBlocks, int ratio, int dim, int nRot, int mode, IntPtr stream)
+        {
+            IntPtr a0 = P(rows), a1 = ropeTab, a2 = cache;
+            long a3 = firstBoundary;
+            int a4 = ratio, a5 = dim, a6 = nRot, a7 = mode;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7 };
+            Launch(v41Commit, (uint)nBlocks, 1, 1, BlockSize, (uint)(dim * sizeof(float)), stream, args);
+        }
+
+        public void V41Persist(Tensor stKv, Tensor stScore, IntPtr histKv, IntPtr histScore,
+            int p0, int nt, int ratio, int hd, IntPtr stream)
+        {
+            IntPtr a0 = P(stKv), a1 = P(stScore), a2 = histKv, a3 = histScore;
+            int a4 = p0, a5 = nt, a6 = ratio, a7 = hd;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7 };
+            Launch(v41Persist, CeilDiv(hd, BlockSize), (uint)Math.Min(nt, ratio), 1, BlockSize, 0, stream, args);
+        }
+
+        public void V41IdxPrep(Tensor iq, Tensor iw, IntPtr ropeTab, int p0, int ih, int id, int nRot,
+            float iwScale, int nt, IntPtr stream)
+        {
+            IntPtr a0 = P(iq), a1 = P(iw), a2 = ropeTab;
+            int a3 = p0, a4 = ih, a5 = id, a6 = nRot; float a7 = iwScale;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7 };
+            Launch(v41IdxPrep, (uint)ih, (uint)nt, 1, BlockSize, (uint)(id * sizeof(float)), stream, args);
+        }
+
+        public void V41IdxScores(Tensor iq, Tensor iw, IntPtr lidK, IntPtr candidates, Tensor scores,
+            int p0, int ratio, int ih, int id, int rows, int maxVis, int nt, IntPtr stream)
+        {
+            IntPtr a0 = P(iq), a1 = P(iw), a2 = lidK, a3 = candidates, a4 = P(scores);
+            int a5 = p0, a6 = ratio, a7 = ih, a8 = id, a9 = rows, a10 = maxVis;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6, &a7, &a8, &a9, &a10 };
+            const int RowsPerBlock = 8;   // one warp per row
+            Launch2D(v41IdxScores, CeilDiv(maxVis, RowsPerBlock), (uint)nt, 32, RowsPerBlock, 0, stream, args);
+        }
+
+        public void V41Candidate(Tensor scores, IntPtr mask, int p0, int ratio, int rows,
+            int blockLen, int topk, int nt, IntPtr stream)
+        {
+            IntPtr a0 = P(scores), a1 = mask;
+            int a2 = p0, a3 = ratio, a4 = rows, a5 = blockLen, a6 = topk;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5, &a6 };
+            Launch(v41Candidate, (uint)nt, 1, 1, BlockSize, 0, stream, args);
+        }
+
+        public void V41EngramGate(Tensor xs, Tensor kv, IntPtr qw, IntPtr kw, int hc, int e, float eps,
+            int nt, IntPtr stream)
+        {
+            IntPtr a0 = P(xs), a1 = P(kv), a2 = qw, a3 = kw;
+            int a4 = e; float a5 = eps;
+            void** args = stackalloc void*[] { &a0, &a1, &a2, &a3, &a4, &a5 };
+            Launch(v41EngramGate, (uint)hc, (uint)nt, 1, BlockSize, 0, stream, args);
         }
 
         public void Dispose()

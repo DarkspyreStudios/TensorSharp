@@ -59,3 +59,31 @@ counts per GPU (llama.cpp's `--tensor-split` in spirit) and throws rather than
 silently ignoring a value it cannot honour — useful because the automatic
 balance prices weights and cannot see the vision tower, which loads later and
 lands on GPU 0.
+
+## Benchmark matrix
+
+[`benchmark_config_glm53_qwen38.json`](../../benchmarks/engine_comparison/benchmark_config_glm53_qwen38.json)
+registers this model as `qwen38-flash-next` at a pinned Hugging Face revision,
+with its `mmproj-BF16.gguf` attached so the `image` scenario can run. Two
+registry facts are worth repeating here.
+
+The published Q8_0 shards carry **no** `nextn`/`mtp` tensors at all, so
+`mtp_supported` is false and `--mtp on` cells are gated out with a reason
+rather than quietly serving standard decode.
+
+And **this model only runs on the column that passes `--tp N`**. The section
+above is the reason: the split degree comes from `--tp`, so on a backend column
+that passes none, TensorSharp builds a single-device context and all 175.3 GiB
+land on one card. The config therefore gives it a `min_tp` (4, the weights-only
+floor — 8 is the degree the 8×A40 box is meant to use) and the harness records
+its cells on the no-`--tp` column as skips reading
+`needs --tp 4 (does not fit 1 GPU(s))` instead of letting them OOM. Run it as:
+
+```
+python run_matrix.py --config benchmark_config_glm53_qwen38.json \
+    --models qwen38-flash-next --backends ggml_cuda_tp
+```
+
+That column tells llama.cpp `--split-mode layer` over the same GPUs, so the
+reference column is the same placement on both engines — which for `qwen4exp`
+is the only one either engine has.

@@ -19,9 +19,30 @@ namespace TensorSharp.Models
         internal DeepSeek41ImageProcessor ImageProcessor { get; private set; }
         internal int ImageTokenId { get; private set; }
 
+        /// <summary>The backend the operator asked for, kept because the base
+        /// class normalizes its own copy (see DeepSeek4Model.NormalizeBackend)
+        /// and the vision companion has to load where the text executor did.</summary>
+        private readonly BackendType _requestedBackend;
+
         public DeepSeek41Model(string ggufPath, BackendType backend, int tpDegree = 1,
             ITensorParallelGroup tpGroup = null, string draftModelPath = null)
-            : base(ggufPath, backend, tpDegree, tpGroup, draftModelPath) { }
+            : base(ggufPath, backend, tpDegree, tpGroup, draftModelPath)
+            => _requestedBackend = backend;
+
+        /// <summary>
+        /// ggml registry name the vision companion loads on. It must be the text
+        /// executor's own backend: the encoder's output rows are handed straight
+        /// to the text graph, and the router biases this class attaches are
+        /// allocated on the text model's device buffers. A hardcoded "CUDA" here
+        /// pulled a GPU into an explicitly CPU-only run — and on a host with no
+        /// CUDA device it failed inside the native loader with the generic
+        /// "requested backend device is unavailable", naming neither the option
+        /// the operator set nor the one that would work.
+        /// </summary>
+        internal static string ResolveVisionBackendName(BackendType backend)
+            => BackendRegistryName(backend) ?? throw new NotSupportedException(
+                $"The DeepSeek V4.1 vision companion has no ggml backend for {backend}; " +
+                "load the model with --backend ggml_cuda or --backend ggml_cpu.");
 
         public bool IsVisionEncoderLoaded { get { lock (NativeSync) return _vision != IntPtr.Zero; } }
 
@@ -33,8 +54,8 @@ namespace TensorSharp.Models
                     throw new InvalidOperationException("The V4.1 vision companion is already loaded.");
                 if (NativeHandle == IntPtr.Zero)
                     throw new ObjectDisposedException(nameof(DeepSeek41Model));
-                IntPtr vision = GgmlDeepSeek41VisionNative.TSGgml_Dsv41VisionLoad(mmProjPath, "CUDA", 0,
-                    Math.Min(Environment.ProcessorCount, 32));
+                IntPtr vision = GgmlDeepSeek41VisionNative.TSGgml_Dsv41VisionLoad(mmProjPath,
+                    ResolveVisionBackendName(_requestedBackend), 0, Math.Min(Environment.ProcessorCount, 32));
                 if (vision == IntPtr.Zero)
                     throw new InvalidDataException($"Cannot load DeepSeek V4.1 vision companion {mmProjPath} (see stderr).");
                 try

@@ -86,6 +86,24 @@ namespace TensorSharp.Models
             public WeightRef IdxProj, IdxQB, IdxCompWkv, IdxCompWgate;
             public float[] IdxCompApe, IdxCompNorm;
 
+            /// <summary>V4.1 shares one compressed cache and one sparse selection
+            /// across each run of layers with the same compression ratio.
+            /// KvSource names the layer that builds the caches this layer reads;
+            /// IndexSource names the layer that publishes the selection. Both are
+            /// -1 on uncompressed (ratio 0) layers.</summary>
+            public int KvSource = -1, IndexSource = -1;
+            /// <summary>V4.1 projects the compressed latent into the indexer's key
+            /// space; V4 runs a second compressor for it instead.</summary>
+            public WeightRef IndexerK;
+            public float[] IndexerKNorm;
+
+            /// <summary>V4.1 Engram (layers named by the sidecar; null elsewhere).
+            /// EngramEmbd stays quantized and is read one 256-value row at a time:
+            /// it is ~30 GiB and only 24 rows per token are ever touched.</summary>
+            public int EngramIndex = -1;
+            public WeightRef EngramEmbd, EngramWkv;
+            public float[] EngramQ, EngramK;   // [n_embd * hc] elementwise gains
+
             public float[] GateInp;          // router, dequantized to F32 [nExpert x nEmbd]
             public float[] ExpProbsBias;     // [nExpert] (null for hash layers)
             public int[] Tid2Eid;            // [nVocab x nExpertUsed] (hash layers only)
@@ -109,6 +127,33 @@ namespace TensorSharp.Models
         private int _nExpert, _nExpertUsed, _nFfExp, _hashLayerCount;
         private float _expertWeightsScale;
         private bool _expertWeightsNorm;
+        /// <summary>deepseek41 rather than deepseek4: adds Engram layers, a shared
+        /// expert, and compress ratios of 1 and 2 where V4 uses 4 and 128.</summary>
+        private bool _isV41;
+        private int _nExpertShared;
+
+        // V4.1 Engram. The sidecar carries the token map and bucket layout the
+        // GGUF does not; the history is per sequence and indexed by ABSOLUTE
+        // position, which is what makes a chunked prompt hash the same as a
+        // one-shot one.
+        private Dsv41EngramData _engram;
+        private int[] _engramHistory;
+        private int _engramHistoryLength;
+        private float* _engramLookup;   // [nt][columns][headDim]
+        private float* _engramKv;       // [nt][(HC+1) * nEmbd]
+        private float* _engramQn;       // [nt][nEmbd] normalized query scratch
+        private float* _engramKn;       // [nt][nEmbd] normalized key scratch
+        private int[] _engramHashes;    // [layer][token][column] for the ubatch
+
+        // V4.1 shared compressed caches and candidate pruning.
+        private int _candidateSource = -1, _candidateTopk, _candidateBlock;
+        private int _v41MaxCompRows;    // widest compressed cache across ratio groups
+        private byte* _v41CandMask;     // [nt][rows] 1 = row survived candidate pruning
+        private bool _v41CandActive;    // a candidate mask was published this ubatch
+        private float* _latent;         // [nt+1][headDim] compressed rows being built
+        private float* _latentK;        // [nt+1][idxHeadSize] their indexer keys
+        private float* _preAttn;        // [nt][HC] V4.1 delayed hyper-connection gates
+        private float* _preFfn;
         private float[] _swigluClampExp = Array.Empty<float>();
         private float[] _swigluClampShexp = Array.Empty<float>();
         private int _idxNHead, _idxHeadSize, _idxTopK;
@@ -195,6 +240,8 @@ namespace TensorSharp.Models
 
             OpenShards(ggufPath);
             ParseHparams();
+            if (_isV41)
+                LoadEngramSidecar(ggufPath);
 
             var shardSelected = new bool[_shards.Count];
             bool anySelected = false;
@@ -268,7 +315,12 @@ namespace TensorSharp.Models
 
         private void OpenShards(string firstPath)
         {
-            var first = new GgufFile(firstPath);
+            // Standalone, like the rest of the loop below: this executor
+            // enumerates the shards itself from split.count, so letting shard 1
+            // also pull in its siblings would build a second, duplicate set of
+            // GgufFile objects -- a second mmap and mlock pass over the whole
+            // checkpoint, and a merged tensor table this code does not use.
+            var first = GgufFile.OpenWithoutSiblingShards(firstPath);
             _shards.Add(first);
             _shardPaths.Add(firstPath);
 
@@ -282,7 +334,11 @@ namespace TensorSharp.Models
                     for (int i = 2; i <= splitCount; i++)
                     {
                         string path = firstPath.Substring(0, pos) + $"-{i:D5}-of-" + firstPath.Substring(pos + marker.Length);
-                        _shards.Add(new GgufFile(path));
+                        // This loop IS the shard enumeration, so each shard is opened
+                        // for itself. Letting it expand its siblings again would open
+                        // every file N times and attribute every tensor to whichever
+                        // shard happened to be opened last.
+                        _shards.Add(GgufFile.OpenWithoutSiblingShards(path));
                         _shardPaths.Add(path);
                     }
                 }
@@ -302,7 +358,15 @@ namespace TensorSharp.Models
         private void ParseHparams()
         {
             GgufFile g = _shards[0];
-            const string a = "deepseek4";
+            // V4 and V4.1 are separate architectures with separate key prefixes,
+            // and V4.1 adds a shared expert and the Engram layers on top of V4's
+            // metadata. Everything the two share is read once, below.
+            string arch = g.GetString("general.architecture", "deepseek4");
+            if (arch != "deepseek4" && arch != "deepseek41")
+                throw new NotSupportedException(
+                    $"The DeepSeek CPU executor requires the deepseek4 or deepseek41 architecture, got '{arch}'.");
+            _isV41 = arch == "deepseek41";
+            string a = arch;
             _nLayer = (int)g.GetUint32($"{a}.block_count");
             _nEmbd = (int)g.GetUint32($"{a}.embedding_length");
             _nHead = (int)g.GetUint32($"{a}.attention.head_count");
@@ -340,6 +404,9 @@ namespace TensorSharp.Models
             _yarnBetaFast = g.GetFloat32($"{a}.rope.scaling.yarn_beta_fast", 32f);
             _yarnBetaSlow = g.GetFloat32($"{a}.rope.scaling.yarn_beta_slow", 1f);
 
+            // V4.1 runs one shared expert alongside the routed ones; V4 has none.
+            _nExpertShared = (int)g.GetUint32($"{a}.expert_shared_count", 0);
+
             int hc = (int)g.GetUint32($"{a}.hyper_connection.count", HC);
             if (hc != HC)
                 throw new NotSupportedException($"DeepSeek4 CPU executor supports hyper_connection.count == {HC}, got {hc}.");
@@ -350,6 +417,73 @@ namespace TensorSharp.Models
             _compCorr0 = MathF.Max(0f, MathF.Floor(YarnCorrDim(_nRot, _nCtxOrig, _yarnBetaFast, _compressRopeBase)));
             _compCorr1 = MathF.Min(_nRot - 1, MathF.Ceiling(YarnCorrDim(_nRot, _nCtxOrig, _yarnBetaSlow, _compressRopeBase)));
         }
+
+        /// <summary>
+        /// Reads <c>deepseek41.engram.bin</c> from beside the checkpoint. The GGUF
+        /// conversion keeps neither the compressed token map nor the bucket
+        /// layout, so V4.1 cannot address an Engram row without it. The sidecar is
+        /// bound to the checkpoint by a fingerprint over the tokenizer, because
+        /// nothing else would catch a sidecar built from a different vocabulary.
+        /// </summary>
+        private void LoadEngramSidecar(string ggufPath)
+        {
+            string[] tokens = _shards[0].GetStringArray("tokenizer.ggml.tokens")
+                ?? throw new InvalidOperationException("DeepSeek V4.1 tokenizer metadata is missing");
+            ulong fingerprint = 14695981039346656037UL;
+            foreach (string token in tokens)
+                fingerprint = Dsv41EngramData.FingerprintToken(fingerprint, token);
+
+            string directory = Path.GetDirectoryName(Path.GetFullPath(ggufPath));
+            string sidecar = Path.Combine(directory ?? string.Empty, "deepseek41.engram.bin");
+            _engram = Dsv41EngramData.Load(sidecar, (uint)tokens.Length, fingerprint);
+            _v41KvSource = new int[_nLayer];
+            _v41IndexSource = new int[_nLayer];
+
+            if (_engram.Layers[^1].Id >= _nLayer)
+                throw new InvalidOperationException("DeepSeek V4.1 Engram layer exceeds the layer count");
+            if (_engram.KvSourceLayerIds[^1] >= _nLayer || _engram.IndexSourceLayerIds[^1] >= _nLayer)
+                throw new InvalidOperationException("DeepSeek V4.1 shared-cache source exceeds the layer count");
+
+            _candidateSource = _engram.CandidateSourceLayerId;
+            _candidateTopk = (int)_engram.CandidateTopkBlocks;
+            _candidateBlock = (int)_engram.CandidateBlockSize;
+            if (_candidateSource >= 0 && Array.IndexOf(_engram.IndexSourceLayerIds, _candidateSource) < 0)
+                throw new InvalidOperationException("DeepSeek V4.1 candidate source must own an indexer");
+
+            // The pruning mask is addressed in compressed-row space, so every
+            // indexer that consumes it has to count rows the same way.
+            if (_candidateSource >= 0)
+            {
+                foreach (int id in _engram.IndexSourceLayerIds)
+                {
+                    if (id > _candidateSource && _compressRatios[id] != _compressRatios[_candidateSource])
+                        throw new NotSupportedException(
+                            "DeepSeek V4.1 candidate pruning across differing compression ratios is not supported.");
+                }
+            }
+
+            // Each layer takes the most recent source at or before it; the two
+            // lists are ascending, which Dsv41EngramData.Load already enforces.
+            int kv = -1, index = -1;
+            for (int il = 0; il < _nLayer; il++)
+            {
+                if (Array.IndexOf(_engram.KvSourceLayerIds, il) >= 0) kv = il;
+                if (Array.IndexOf(_engram.IndexSourceLayerIds, il) >= 0) index = il;
+                int ratio = _compressRatios[il];
+                if (ratio < 0 || ratio > 2)
+                    throw new NotSupportedException($"Invalid DeepSeek V4.1 compression ratio {ratio} on layer {il}.");
+                if (ratio != 0 && (kv < 0 || index < 0 ||
+                    _compressRatios[kv] != ratio || _compressRatios[index] != ratio))
+                    throw new InvalidOperationException(
+                        "DeepSeek V4.1 cache-sharing topology does not match the compression ratios");
+                _v41KvSource[il] = ratio != 0 ? kv : -1;
+                _v41IndexSource[il] = ratio != 0 ? index : -1;
+            }
+        }
+
+        // Filled by LoadEngramSidecar, consumed by LoadWeights (which builds the
+        // Layer objects afterwards).
+        private int[] _v41KvSource, _v41IndexSource;
 
         private static float YarnCorrDim(int nDims, int nCtxOrig, float nRot, float freqBase)
         {
@@ -489,9 +623,13 @@ namespace TensorSharp.Models
             _nVocab = _tokEmbd.Ne1;
             _output = GetW("output.weight");
             _outputNorm = GetF32("output_norm.weight");
-            _hcHeadFn = GetW("output_hc_fn.weight");
-            _hcHeadScale = GetF32("output_hc_scale.weight");
-            _hcHeadBase = GetF32("output_hc_base.weight");
+            // V4.1 collapses the streams for the head with the LAST layer's FFN
+            // gates (the delayed pre), so it ships no output_hc_* tensors at all.
+            _hcHeadFn = GetW("output_hc_fn.weight", required: !_isV41);
+            _hcHeadScale = GetF32("output_hc_scale.weight", required: !_isV41);
+            _hcHeadBase = GetF32("output_hc_base.weight", required: !_isV41);
+            if (!_isV41 && (!_hcHeadFn.IsValid || _hcHeadScale == null || _hcHeadBase == null))
+                throw new InvalidOperationException("[dsv4-cpu] missing output hyper-connection head tensors");
 
             _layers = new Layer[_nLayer];
             for (int il = 0; il < _nLayer; il++)
@@ -510,6 +648,20 @@ namespace TensorSharp.Models
                 L.WoA = GetW(p + "attn_output_a.weight");
                 L.WoB = GetW(p + "attn_output_b.weight");
 
+                if (_isV41 && _engram != null)
+                {
+                    for (int e = 0; e < _engram.Layers.Length; e++)
+                    {
+                        if (_engram.Layers[e].Id != il) continue;
+                        L.EngramIndex = e;
+                        L.EngramEmbd = GetW(p + "engram_embd.weight");
+                        L.EngramWkv = GetW(p + "engram_wkv.weight");
+                        L.EngramQ = GetF32(p + "engram_q.weight");
+                        L.EngramK = GetF32(p + "engram_k.weight");
+                        break;
+                    }
+                }
+
                 L.HcAttnFn = GetW(p + "hc_attn_fn.weight");
                 L.HcAttnScale = GetF32(p + "hc_attn_scale.weight");
                 L.HcAttnBase = GetF32(p + "hc_attn_base.weight");
@@ -517,7 +669,28 @@ namespace TensorSharp.Models
                 L.HcFfnScale = GetF32(p + "hc_ffn_scale.weight");
                 L.HcFfnBase = GetF32(p + "hc_ffn_base.weight");
 
-                if (L.Ratio != 0)
+                if (_isV41)
+                {
+                    // Only the source layers carry compressor and indexer query
+                    // tensors; every other compressed layer reads their caches.
+                    L.KvSource = _v41KvSource[il];
+                    L.IndexSource = _v41IndexSource[il];
+                    if (L.KvSource == il)
+                    {
+                        L.CompWkv = GetW(p + "attn_compressor_kv.weight");
+                        L.CompNorm = GetF32(p + "attn_compressor_norm.weight");
+                        if (L.Ratio > 1)
+                            L.CompWgate = GetW(p + "attn_compressor_gate.weight");
+                        L.IndexerK = GetW(p + "indexer.attn_k.weight");
+                        L.IndexerKNorm = GetF32(p + "indexer.k_norm.weight");
+                    }
+                    if (L.IndexSource == il)
+                    {
+                        L.IdxProj = GetW(p + "indexer.proj.weight");
+                        L.IdxQB = GetW(p + "indexer.attn_q_b.weight");
+                    }
+                }
+                else if (L.Ratio != 0)
                 {
                     L.CompWkv = GetW(p + "attn_compressor_kv.weight");
                     L.CompWgate = GetW(p + "attn_compressor_gate.weight");
@@ -584,8 +757,18 @@ namespace TensorSharp.Models
             return slice.View(rows, cols);
         }
 
+        /// <summary>Compressed rows a V4.1 ratio group needs for the whole context.
+        /// Ratio 1 keeps one row per token; ratio 2 one per pair. The extra row
+        /// matches the native executor's masked scratch row.</summary>
+        private int V41Rows(int ratio) => _nCtx / ratio + 1;
+
         private void AllocateCaches()
         {
+            if (_isV41)
+            {
+                AllocateCachesV41();
+                return;
+            }
             foreach (var L in _layers)
             {
                 L.RawK = AllocF32((long)_ringRaw * _headDim);
@@ -603,6 +786,34 @@ namespace TensorSharp.Models
                     L.CompK = AllocF32((long)_compRowsHca * _headDim);
                     L.HistKv = AllocF32((long)HcaRatio * _headDim);
                     L.HistScore = AllocF32((long)HcaRatio * _headDim);
+                }
+            }
+        }
+
+        /// <summary>
+        /// V4.1 caches. Every layer owns a raw sliding-window ring; only the
+        /// per-ratio source layers own the compressed and indexer caches that
+        /// the rest of their group reads.
+        /// </summary>
+        private void AllocateCachesV41()
+        {
+            _v41MaxCompRows = 1;
+            for (int il = 0; il < _nLayer; il++)
+            {
+                Layer L = _layers[il];
+                L.RawK = AllocF32((long)_ringRaw * _headDim);
+                if (L.Ratio == 0 || L.KvSource != il)
+                    continue;
+                int rows = V41Rows(L.Ratio);
+                _v41MaxCompRows = Math.Max(_v41MaxCompRows, rows);
+                L.CompK = AllocF32((long)rows * _headDim);
+                L.LidK = AllocF32((long)rows * _idxHeadSize);
+                if (L.Ratio > 1)
+                {
+                    // One slot per window position, so a block straddling the
+                    // ubatch boundary still sees its earlier half.
+                    L.HistKv = AllocF32((long)L.Ratio * _headDim);
+                    L.HistScore = AllocF32((long)L.Ratio * _headDim);
                 }
             }
         }
@@ -660,6 +871,14 @@ namespace TensorSharp.Models
         {
             int nt = _nUbatch;
             _xs = AllocF32((long)nt * HC * _nEmbd);
+            if (_isV41 && _engram != null)
+            {
+                long columns = _engram.HashColumns;
+                _engramLookup = AllocF32((long)nt * columns * _engram.HeadDim);
+                _engramKv = AllocF32((long)nt * (HC + 1) * _nEmbd);
+                _engramQn = AllocF32((long)nt * _nEmbd);
+                _engramKn = AllocF32((long)nt * _nEmbd);
+            }
             _cur = AllocF32((long)nt * _nEmbd);
             _pre = AllocF32((long)nt * HC);
             _post = AllocF32((long)nt * HC);
@@ -674,7 +893,21 @@ namespace TensorSharp.Models
             _lidStScore = AllocF32((long)nt * 2 * _idxHeadSize);
             _iq = AllocF32((long)nt * _idxNHead * _idxHeadSize);
             _iw = AllocF32((long)nt * _idxNHead);
-            _idxScores = AllocF32((long)nt * _compRowsCsa);
+            _idxScores = AllocF32((long)nt * (_isV41 ? _v41MaxCompRows : _compRowsCsa));
+            if (_isV41)
+            {
+                // One extra row so a ratio-1 group can hold every token's block.
+                _latent = AllocF32((long)(nt + 1) * _headDim);
+                _latentK = AllocF32((long)(nt + 1) * _idxHeadSize);
+                _preAttn = AllocF32((long)nt * HC);
+                _preFfn = AllocF32((long)nt * HC);
+                if (_candidateSource >= 0)
+                {
+                    var mask = new Tensor(_alloc, DType.UInt8, (long)nt * _v41MaxCompRows);
+                    _tensors.Add(mask);
+                    _v41CandMask = (byte*)CpuNativeHelpers.GetBufferStart(mask);
+                }
+            }
             _topK = (int*)AllocF32((long)nt * _idxTopK);
             _topKCount = (int*)AllocF32(nt);
             _attnO = AllocF32((long)nt * _nHead * _headDim);
@@ -719,19 +952,26 @@ namespace TensorSharp.Models
         public void Reset()
         {
             _nPast = 0;
+            // Engram lookbacks reach earlier positions, so the history has to go
+            // when the sequence does.
+            _engramHistoryLength = 0;
             foreach (var L in _layers)
             {
                 NativeMemory.Clear(L.RawK, (nuint)((long)_ringRaw * _headDim * sizeof(float)));
                 if (L.CompK != null)
                 {
-                    long rows = L.Ratio == CsaRatio ? _compRowsCsa : _compRowsHca;
+                    long rows = _isV41 ? V41Rows(L.Ratio) : L.Ratio == CsaRatio ? _compRowsCsa : _compRowsHca;
                     NativeMemory.Clear(L.CompK, (nuint)(rows * _headDim * sizeof(float)));
                 }
                 if (L.LidK != null)
-                    NativeMemory.Clear(L.LidK, (nuint)((long)_compRowsCsa * _idxHeadSize * sizeof(float)));
+                {
+                    long rows = _isV41 ? V41Rows(L.Ratio) : _compRowsCsa;
+                    NativeMemory.Clear(L.LidK, (nuint)(rows * _idxHeadSize * sizeof(float)));
+                }
                 if (L.HistKv != null)
                 {
-                    long n = L.Ratio == CsaRatio ? 2L * CsaRatio * 2 * _headDim : (long)HcaRatio * _headDim;
+                    long n = _isV41 ? (long)L.Ratio * _headDim
+                        : L.Ratio == CsaRatio ? 2L * CsaRatio * 2 * _headDim : (long)HcaRatio * _headDim;
                     NativeMemory.Clear(L.HistKv, (nuint)(n * sizeof(float)));
                     NativeMemory.Clear(L.HistScore, (nuint)(n * sizeof(float)));
                 }
@@ -813,6 +1053,18 @@ namespace TensorSharp.Models
             });
             Tick(0, t0);
             DumpDbg("embed.xs", _xs);
+            _traceP0 = p0;
+            _traceNt = nt;
+            Trace("embedding", _xs, (long)nt * HC * E);
+
+            // Engram row ids for the whole ubatch, once. The history is indexed by
+            // absolute position and extended in place, so a prompt split across
+            // ubatches hashes exactly as it would in one shot.
+            if (_engram != null)
+            {
+                var window = new ReadOnlySpan<int>(tokens, tokOff, nt);
+                _engramHashes = _engram.HashTokens(window, p0, ref _engramHistory, ref _engramHistoryLength);
+            }
 
             // per-token rope caches for this ubatch (raw + compress parameter sets)
             t0 = Stopwatch.GetTimestamp();
@@ -823,14 +1075,30 @@ namespace TensorSharp.Models
             });
             Tick(11, t0);
 
+            // A candidate mask belongs to one ubatch: the rows it names are
+            // scored against this ubatch's queries.
+            _v41CandActive = false;
+
             for (int il = 0; il < _nLayer; il++)
             {
                 Layer L = _layers[il];
 
+                // ---- Engram (V4.1, on the layers the sidecar names) ----
+                // Runs before attention and rewrites the residual in place, which
+                // is what build_engram does in the native graph.
+                if (L.EngramIndex >= 0)
+                    EngramLayer(L, nt);
+
                 // ---- attention super-block ----
+                // V4.1 delays the hyper-connection collapse by one block: each
+                // block computes its own gates but collapses the streams with the
+                // PREVIOUS block's, and the very first block uses the stream mean.
                 bool dbg = StageDebug && il == 0;
                 t0 = Stopwatch.GetTimestamp();
-                HcPre(L.HcAttnFn, L.HcAttnScale, L.HcAttnBase, nt, computeComb: true);
+                HcPre(L.HcAttnFn, L.HcAttnScale, L.HcAttnBase, nt, computeComb: true,
+                    delayedPre: _isV41 ? (il == 0 ? null : _preFfn) : null,
+                    publishPre: _isV41 ? _preAttn : null,
+                    meanCollapse: _isV41 && il == 0);
                 if (dbg)
                 {
                     DumpDbg("L0.attn.mixes", _mixes);
@@ -841,26 +1109,36 @@ namespace TensorSharp.Models
                 RmsNormRows(_cur, L.AttnNorm, nt, E);
                 if (dbg)
                     DumpDbg("L0.attn.cur_norm", _cur);
+                Trace(TraceLayer(il, "attn_input"), _cur, (long)nt * E);
                 Tick(1, t0);
-                Attention(il, nt, p0);
+                if (_isV41)
+                    AttentionV41(il, nt, p0);
+                else
+                    Attention(il, nt, p0);
                 if (dbg)
                     DumpDbg("L0.attn.out", _attnOut);
+                Trace(TraceLayer(il, "attn_out"), _attnOut, (long)nt * E);
                 t0 = Stopwatch.GetTimestamp();
                 HcPost(_attnOut, nt);
                 if (dbg)
                     DumpDbg("L0.attn.xs_post", _xs);
 
                 // ---- FFN super-block ----
-                HcPre(L.HcFfnFn, L.HcFfnScale, L.HcFfnBase, nt, computeComb: true);
+                HcPre(L.HcFfnFn, L.HcFfnScale, L.HcFfnBase, nt, computeComb: true,
+                    delayedPre: _isV41 ? _preAttn : null,
+                    publishPre: _isV41 ? _preFfn : null);
                 RmsNormRows(_cur, L.FfnNorm, nt, E);
+                Trace(TraceLayer(il, "ffn_input"), _cur, (long)nt * E);
                 Tick(1, t0);
                 MoeFfn(il, nt, tokens, tokOff);
                 if (dbg)
                     DumpDbg("L0.ffn.out", _ffnOut);
+                Trace(TraceLayer(il, "ffn_out"), _ffnOut, (long)nt * E);
                 t0 = Stopwatch.GetTimestamp();
                 HcPost(_ffnOut, nt);
                 if (dbg)
                     DumpDbg("L0.ffn.xs_post", _xs);
+                Trace(TraceLayer(il, "hidden"), _xs, (long)nt * HC * E);
                 Tick(1, t0);
             }
 
@@ -873,6 +1151,100 @@ namespace TensorSharp.Models
         }
 
         // -------------------------------------------------------------------
+        // Engram (V4.1)
+        // -------------------------------------------------------------------
+
+        /// <summary>
+        /// Gathers this ubatch's Engram rows for one layer and folds them into the
+        /// residual. Mirrors build_engram in
+        /// TensorSharp.GGML.Native/ggml_ops_deepseek41.inc.
+        ///
+        /// <para>Per token the layer reads <c>hash_columns</c> rows of
+        /// <c>head_dim</c> values out of a table with hundreds of millions of
+        /// rows, projects the concatenation through <c>engram_wkv</c> into one
+        /// key per hyper-connection stream plus a single shared value, scores each
+        /// stream against the residual, and adds the value back through a signed
+        /// square-root sigmoid gate.</para>
+        ///
+        /// <para>The table is never dequantized whole: only the selected rows are,
+        /// which is the entire reason a 30 GiB table is affordable here.</para>
+        /// </summary>
+        private void EngramLayer(Layer L, int nt)
+        {
+            int E = _nEmbd;
+            int columns = (int)_engram.HashColumns;
+            int headDim = (int)_engram.HeadDim;
+            int rowValues = columns * headDim;
+            long tableRows = _engram.Layers[L.EngramIndex].Rows;
+            var table = L.EngramEmbd;
+
+            // Sparse gather. Each (token, column) is an independent random row, so
+            // this is the one place the executor touches the big table at all.
+            fixed (int* hashes = _engramHashes)
+            {
+                int* mine = hashes + (long)L.EngramIndex * nt * columns;
+                PFor(nt, t =>
+                {
+                    float* dst = _engramLookup + (long)t * rowValues;
+                    int* ids = mine + (long)t * columns;
+                    for (int c = 0; c < columns; c++)
+                    {
+                        int row = ids[c];
+                        if ((uint)row >= (uint)tableRows)
+                            throw new InvalidOperationException("DeepSeek V4.1 Engram lookup is out of bounds");
+                        ManagedQuantizedOps.DequantizeRowToFloat32(
+                            (int)table.Type, (IntPtr)table.Row(row), dst + c * headDim, headDim);
+                    }
+                });
+            }
+
+            // One projection produces HC keys and the shared value per token.
+            MatMul(L.EngramWkv, 0, L.EngramWkv.Ne1, _engramLookup, rowValues, nt, _engramKv, (HC + 1) * E);
+
+            PFor(nt, t =>
+            {
+                float* kv = _engramKv + (long)t * (HC + 1) * E;
+                float* value = kv + (long)HC * E;            // the stream-shared value
+                float* qn = _engramQn + (long)t * E;
+                float* kn = _engramKn + (long)t * E;
+                var valueSpan = new ReadOnlySpan<float>(value, E);
+
+                for (int st = 0; st < HC; st++)
+                {
+                    float* x = _xs + ((long)t * HC + st) * E;
+                    float* key = kv + (long)st * E;
+
+                    // Both sides are RMS-normalized with no learned gain, then
+                    // scaled by their own elementwise weight row.
+                    NormalizeAndScale(x, L.EngramQ, st * E, qn, E);
+                    NormalizeAndScale(key, L.EngramK, st * E, kn, E);
+
+                    float dot = TensorPrimitives.Dot(
+                        new ReadOnlySpan<float>(qn, E), new ReadOnlySpan<float>(kn, E)) / MathF.Sqrt(E);
+
+                    // Signed square root, floored away from zero so the gradient
+                    // this mirrors stays finite, then a sigmoid.
+                    float magnitude = MathF.Sqrt(MathF.Max(MathF.Abs(dot), 1e-6f));
+                    float gate = 1.0f / (1.0f + MathF.Exp(-(dot >= 0f ? magnitude : -magnitude)));
+
+                    TensorPrimitives.MultiplyAdd(valueSpan, gate, new ReadOnlySpan<float>(x, E),
+                        new Span<float>(x, E));
+                }
+            });
+        }
+
+        /// <summary>RMS-normalizes <paramref name="src"/> over its whole length and
+        /// multiplies by a weight row, into <paramref name="dst"/>.</summary>
+        private void NormalizeAndScale(float* src, float[] weight, int weightOffset, float* dst, int n)
+        {
+            var srcSpan = new ReadOnlySpan<float>(src, n);
+            float scale = 1.0f / MathF.Sqrt(TensorPrimitives.SumOfSquares(srcSpan) / n + _rmsEps);
+            var dstSpan = new Span<float>(dst, n);
+            TensorPrimitives.Multiply(srcSpan, scale, dstSpan);
+            TensorPrimitives.Multiply(dstSpan, weight.AsSpan(weightOffset, n), dstSpan);
+        }
+
+        // -------------------------------------------------------------------
         // Hyper connections
         // -------------------------------------------------------------------
 
@@ -881,10 +1253,19 @@ namespace TensorSharp.Models
         /// sigmoid gates and the Sinkhorn-normalized 4x4 comb matrix, and
         /// collapses the HC streams into _cur (weighted by pre).
         /// </summary>
-        private void HcPre(in WeightRef fn, float[] scale, float[] baseW, int nt, bool computeComb)
+        /// <summary>
+        /// <paramref name="delayedPre"/>, <paramref name="publishPre"/> and
+        /// <paramref name="meanCollapse"/> are the V4.1 delayed-gate form: the
+        /// block still derives its own gates from the current streams, but
+        /// collapses them with the gates the previous block published (or, for
+        /// the first block of the model, with a plain stream mean).
+        /// </summary>
+        private void HcPre(in WeightRef fn, float[] scale, float[] baseW, int nt, bool computeComb,
+            float* delayedPre = null, float* publishPre = null, bool meanCollapse = false)
         {
             int E = _nEmbd;
             int flatDim = HC * E;
+            float meanWeight = 1.0f / HC;
 
             // mixes = fn x rms(flat). RMS scaling is folded into the dot result.
             var fnRef = fn;
@@ -944,13 +1325,20 @@ namespace TensorSharp.Models
                     }
                 }
 
-                // collapse streams: cur[e] = sum_s x[s][e] * pre[s]
+                // collapse streams: cur[e] = sum_s x[s][e] * w[s]
+                float* w = meanCollapse ? null : delayedPre != null ? delayedPre + (long)t * HC : pre;
                 float* cur = _cur + (long)t * E;
                 var curSpan = new Span<float>(cur, E);
                 new ReadOnlySpan<float>(flat, E).CopyTo(curSpan);
-                TensorPrimitives.Multiply(curSpan, pre[0], curSpan);
+                TensorPrimitives.Multiply(curSpan, w == null ? meanWeight : w[0], curSpan);
                 for (int s = 1; s < HC; s++)
-                    TensorPrimitives.MultiplyAdd(new ReadOnlySpan<float>(flat + (long)s * E, E), pre[s], curSpan, curSpan);
+                    TensorPrimitives.MultiplyAdd(new ReadOnlySpan<float>(flat + (long)s * E, E),
+                        w == null ? meanWeight : w[s], curSpan, curSpan);
+
+                // Publish AFTER the collapse: the gates this block computed are
+                // what the NEXT one collapses with.
+                if (publishPre != null)
+                    new ReadOnlySpan<float>(pre, HC).CopyTo(new Span<float>(publishPre + (long)t * HC, HC));
             });
         }
 
@@ -1433,19 +1821,28 @@ namespace TensorSharp.Models
             int flatDim = HC * E;
             float* x = _xs + (long)t * flatDim;
 
-            // hc_head: mixes = output_hc_fn(rms(flat)); pre = sigmoid(m*scale+base)+eps; collapse
-            float* mixes = stackalloc float[HC];
-            double ss = 0;
-            for (int i = 0; i < flatDim; i++) ss += (double)x[i] * x[i];
-            float inv = 1.0f / MathF.Sqrt((float)(ss / flatDim) + _rmsEps);
-            DotRowsF32(_hcHeadFn, x, mixes, HC);
-
             float* headBuf = stackalloc float[HC];
-            for (int s = 0; s < HC; s++)
+            if (_isV41)
             {
-                float scale = _hcHeadScale.Length >= HC ? _hcHeadScale[s] : _hcHeadScale[0];
-                float b = _hcHeadBase.Length >= HC ? _hcHeadBase[s] : _hcHeadBase[0];
-                headBuf[s] = Sigmoid(mixes[s] * inv * scale + b) + _hcEps;
+                // V4.1 has no head mixer: the last layer's FFN block already
+                // published the gates the head collapses with.
+                new ReadOnlySpan<float>(_preFfn + (long)t * HC, HC).CopyTo(new Span<float>(headBuf, HC));
+            }
+            else
+            {
+                // hc_head: mixes = output_hc_fn(rms(flat)); pre = sigmoid(m*scale+base)+eps; collapse
+                float* mixes = stackalloc float[HC];
+                double ss = 0;
+                for (int i = 0; i < flatDim; i++) ss += (double)x[i] * x[i];
+                float inv = 1.0f / MathF.Sqrt((float)(ss / flatDim) + _rmsEps);
+                DotRowsF32(_hcHeadFn, x, mixes, HC);
+
+                for (int s = 0; s < HC; s++)
+                {
+                    float scale = _hcHeadScale.Length >= HC ? _hcHeadScale[s] : _hcHeadScale[0];
+                    float b = _hcHeadBase.Length >= HC ? _hcHeadBase[s] : _hcHeadBase[0];
+                    headBuf[s] = Sigmoid(mixes[s] * inv * scale + b) + _hcEps;
+                }
             }
 
             float* cur = _cur; // reuse token-0 slot
@@ -1462,6 +1859,7 @@ namespace TensorSharp.Models
             {
                 MatMul(_output, 0, _nVocab, cur, E, 1, lo, _nVocab);
                 DumpDbg("head.logits", lo, 8);
+                Trace("logits_last", lo, _nVocab);
             }
         }
 

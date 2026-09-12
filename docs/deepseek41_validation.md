@@ -692,10 +692,12 @@ VM artifacts are under `/workspace/deepseek41-work`:
 ## Engram page-read concurrency
 
 Long prefill exposed serialized page faults while gathering sparse Engram rows
-from the network filesystem. The native executor now keeps a bounded pool of
+from the network filesystem. The initial change introduced a bounded pool of
 I/O workers per model: `TS_DSV41_ENGRAM_THREADS=1..32`, default 16 or the hardware
 thread count if smaller. Prefill chunks of at least four tokens submit disjoint
-row reads to that pool; smaller chunks retain serial lookup. No worker changes
+row reads to that pool; that version retained serial lookup for smaller chunks.
+The subsequent [CLI execution correction](validation/deepseek41/cli-gpu-execution/README.md)
+also uses the pool for decode and other small batches. No worker changes
 hash order, dequantization arithmetic, or per-sequence history.
 
 `TS_DSV41_ENGRAM_WARM=1` optionally touches all Engram table pages during model

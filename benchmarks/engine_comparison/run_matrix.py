@@ -18,15 +18,26 @@ that is not on disk yet is downloaded from the source URL its config entry
 declares (`source` / per-file `url`) into exactly that path, so the next run
 reuses it. Disable with `--download never`, re-fetch with `--download force`.
 
-Three extra axes are optional and default to the single baseline point so old
+Four extra axes are optional and default to the single baseline point so old
 invocations are unchanged:
     --mtp off|on|off,on    MTP/NextN speculative decoding (TensorSharp only;
                            relaunches the server per mode)
     --tp 1,2,4             tensor parallelism — split one model across N GPUs
                            (TensorSharp `--tp N`, llama.cpp `--split-mode tensor`);
                            relaunches the server per degree
+    --n-cpu-moe off,8,all  MoE CPU offload — keep the routed experts of the
+                           first N layers in system RAM and multiply them on the
+                           host; relaunches the server per point. Pair it with
+                           --cpu-moe-threads to size that host matmul.
     --concurrency 1,4,8    fire N identical requests in parallel per cell and
                            record system-wide aggregate decode throughput
+
+Two scenarios drive more than one round trip per cell and work against any
+config file without being declared in it (like `prefill_<N>`):
+    agentic     two dependent tool calls then an answer only the tool results
+                can produce
+    code_edit   generate a small program, then apply one specific edit to it,
+                checked by parsing the edited source
 
 Examples
 --------
@@ -51,6 +62,15 @@ python run_matrix.py --engines tensorsharp,llamacpp --backends ggml_cuda \
 # Parallel-request scaling (aggregate throughput under load)
 python run_matrix.py --engines tensorsharp,llamacpp --backends gpu \
     --models gemma4-12b --scenarios text_short --concurrency 1,4,8
+
+# What MoE CPU offload costs: fully resident vs 8 offloaded layers vs all of them
+python run_matrix.py --engines tensorsharp --backends ggml_cuda \
+    --models qwen36-35b-a3b --scenarios text_short,prefill_8k \
+    --n-cpu-moe off,8,all --cpu-moe-threads 48
+
+# Multi-step agentic tool use and a code generate-then-edit workflow
+python run_matrix.py --engines tensorsharp,llamacpp --backends ggml_cuda \
+    --models qwen36-35b-a3b --scenarios agentic,code_edit
 
 # Full matrix (engines auto-skip when a binary / endpoint is missing)
 python run_matrix.py --engines tensorsharp,llamacpp,vllm --backends gpu,cpu \
@@ -90,15 +110,17 @@ import scenarios as scen
 
 
 def _result_path(results_dir: Path, engine, backend, model_id, scenario,
-                 mtp: bool = False, concurrency: int = 1, tp: int = 1) -> Path:
-    # Baseline cells (no MTP, single GPU, single request) keep their historical
-    # filename so prior results stay valid; extra axes only add a suffix when
-    # non-default.
+                 mtp: bool = False, concurrency: int = 1, tp: int = 1,
+                 cpu_moe=None) -> Path:
+    # Baseline cells (no MTP, single GPU, no MoE offload, single request) keep
+    # their historical filename so prior results stay valid; extra axes only add
+    # a suffix when non-default.
     name = f"{engine}__{backend}__{model_id}__{scenario}"
     if mtp:
         name += "__mtp"
     if tp and tp > 1:
         name += f"__tp{tp}"
+    name += (cpu_moe or config.CpuMoeSpec()).tag
     if concurrency and concurrency > 1:
         name += f"__c{concurrency}"
     return results_dir / f"{name}.json"
@@ -106,15 +128,20 @@ def _result_path(results_dir: Path, engine, backend, model_id, scenario,
 
 def _write(results_dir: Path, res: engines.BenchResult):
     p = _result_path(results_dir, res.engine, res.backend, res.model, res.scenario,
-                     res.mtp, res.concurrency, res.tp)
+                     res.mtp, res.concurrency, res.tp,
+                     config.CpuMoeSpec(res.cpu_moe_layers, res.cpu_moe_threads))
     p.write_text(json.dumps(asdict(res), indent=2), encoding="utf-8")
 
 
 def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
-              mtp=False, concurrency=1, tp=1, results_dir=None) -> engines.BenchResult:
+              mtp=False, concurrency=1, tp=1, results_dir=None,
+              cpu_moe=None) -> engines.BenchResult:
+    cpu_moe = cpu_moe or config.CpuMoeSpec()
     res = engines.BenchResult(engine=engine_id, backend=backend,
                               model=model.short_id, scenario=scenario_id,
-                              mtp=mtp, concurrency=concurrency, tp=tp)
+                              mtp=mtp, concurrency=concurrency, tp=tp,
+                              cpu_moe_layers=cpu_moe.layers,
+                              cpu_moe_threads=cpu_moe.threads)
     sc = config.SCENARIOS[scenario_id]
 
     # Image-edit (stable-diffusion) cells run through their own engine-native
@@ -162,8 +189,30 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
     eff_max_tokens = sc.max_tokens if sc.max_tokens else max_tokens
     # Put every engine in the SAME reasoning mode (they disagree by default).
     extra_body = engines.thinking_body(engine_id, config.THINKING)
+    # A scenario with follow-ups is a client-driven conversation: each turn's
+    # request is built from the previous turn's response (see scenarios.py).
+    followups = req.get("followups")
     try:
-        if concurrency > 1:
+        if followups and concurrency > 1:
+            m = engines.run_conversation_parallel(
+                server.base_url, model_name, req["messages"],
+                concurrency=concurrency,
+                followups=followups,
+                tools=req.get("tools"),
+                response_format=req.get("response_format"),
+                max_tokens=eff_max_tokens,
+                extra_body=extra_body,
+                stream=not model.is_diffusion)
+        elif followups:
+            m = engines.run_conversation(
+                server.base_url, model_name, req["messages"],
+                followups=followups,
+                tools=req.get("tools"),
+                response_format=req.get("response_format"),
+                max_tokens=eff_max_tokens,
+                extra_body=extra_body,
+                stream=not model.is_diffusion)
+        elif concurrency > 1:
             m = engines.run_openai_chat_parallel(
                 server.base_url, model_name, req["messages"],
                 concurrency=concurrency,
@@ -197,8 +246,18 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
     res.finish_reason = m["finish_reason"]
     res.output_preview = (m.get("output_text") or "")[:300]
     res.output_text = (m.get("output_text") or "")[:8000]
+    res.turns = int(m.get("turns", 1) or 1)
+    res.turns_expected = len(followups) + 1 if followups else 1
+    notes = []
     if concurrency > 1 and res.requests_ok < concurrency:
-        res.detail = f"{res.requests_ok}/{concurrency} parallel requests ok"
+        notes.append(f"{res.requests_ok}/{concurrency} parallel requests ok")
+    # A workflow that could not continue is still a served request, so the cell
+    # stays `ok` and carries its timings; the checker below marks it incorrect
+    # and this says which turn stopped it and why.
+    if m.get("conversation_detail"):
+        notes.append(str(m["conversation_detail"]))
+    if notes:
+        res.detail = "; ".join(notes)
     checker = req.get("checker")
     if checker is not None:
         try:
@@ -268,6 +327,43 @@ def _parse_tp(s: str) -> list:
     return _parse_ints(s, "--tp", config.DEFAULT_TP_DEGREES)
 
 
+def _parse_cpu_moe_layers(s: str) -> list:
+    """'off,8,all' -> [0, 8, CPU_MOE_ALL] (deduped, ordered). Same vocabulary as
+    the server's own `--n-cpu-moe`, plus `off` for the baseline point."""
+    out = []
+    for tok in (s or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            n = config.parse_cpu_moe_layers(tok)
+        except ValueError:
+            raise SystemExit(f"--n-cpu-moe: '{tok}' is not off, a non-negative "
+                             f"integer, or all")
+        if n not in out:
+            out.append(n)
+    return out or list(config.DEFAULT_CPU_MOE_LAYERS)
+
+
+def _parse_cpu_moe_threads(s: str) -> list:
+    """'0,48' -> [0, 48]; 0 means "leave the engine's own default alone"."""
+    out = []
+    for tok in (s or "").split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            n = int(tok)
+        except ValueError:
+            raise SystemExit(f"--cpu-moe-threads: '{tok}' is not an integer")
+        if n < 0:
+            raise SystemExit(f"--cpu-moe-threads: '{tok}' must be >= 0 "
+                             f"(0 = the engine's own default)")
+        if n not in out:
+            out.append(n)
+    return out or list(config.DEFAULT_CPU_MOE_THREADS)
+
+
 def _csv(s: str) -> list:
     return [x.strip() for x in (s or "").split(",") if x.strip()]
 
@@ -311,9 +407,24 @@ def main():
                          "across N GPUs (TensorSharp `--tp N`, llama.cpp "
                          "`--split-mode tensor`); relaunches the server per degree "
                          f"(default from config: {','.join(str(t) for t in config.DEFAULT_TP_DEGREES)})")
+    ap.add_argument("--n-cpu-moe", dest="n_cpu_moe", default=None,
+                    help="MoE CPU-offload points, e.g. off or off,8,all — keep the "
+                         "routed experts of the first N layers in system RAM and "
+                         "multiply them on the host (TensorSharp / llama.cpp "
+                         "`--n-cpu-moe N`); relaunches the server per point "
+                         f"(default from config: "
+                         f"{','.join(config.CpuMoeSpec(n).label for n in config.DEFAULT_CPU_MOE_LAYERS)})")
+    ap.add_argument("--cpu-moe-threads", dest="cpu_moe_threads", default=None,
+                    help="host worker threads for the offloaded expert matmul, e.g. "
+                         "48 or 32,64 — only applies to the offloaded points of "
+                         "--n-cpu-moe; 0 leaves each engine's own default alone "
+                         f"(default from config: "
+                         f"{','.join(str(t) for t in config.DEFAULT_CPU_MOE_THREADS)})")
     ap.add_argument("--concurrency", default=None,
                     help="parallel identical requests per cell, e.g. 1 or 1,4,8 "
-                         "(measures aggregate decode throughput under load)")
+                         "(measures aggregate decode throughput under load; each "
+                         "cell records per-request and system-aggregate decode "
+                         "throughput plus how many requests succeeded)")
     ap.add_argument("--download", choices=("auto", "never", "force"), default="auto",
                     help="fetch missing model files from the source URLs declared in "
                          "the config (auto, the default), never download (never), or "
@@ -340,6 +451,20 @@ def main():
     scenario_ids = _csv(args.scenarios) or list(config.DEFAULT_SCENARIOS)
     mtp_modes = _parse_mtp(args.mtp) if args.mtp else list(config.DEFAULT_MTP_MODES)
     tp_degrees = _parse_tp(args.tp) if args.tp else list(config.DEFAULT_TP_DEGREES)
+    cpu_moe_points = config.cpu_moe_axis(
+        _parse_cpu_moe_layers(args.n_cpu_moe) if args.n_cpu_moe
+        else list(config.DEFAULT_CPU_MOE_LAYERS),
+        _parse_cpu_moe_threads(args.cpu_moe_threads) if args.cpu_moe_threads
+        else list(config.DEFAULT_CPU_MOE_THREADS))
+    # A host-thread count only reaches an engine on a point that offloads
+    # something. Asked for one with nothing offloaded, the flag would be dropped
+    # in silence and the run would look like it had measured a thread count it
+    # never sent, so say so instead. (A config DEFAULT of the same shape is not
+    # an error — it is just the axis sitting at its baseline.)
+    if args.cpu_moe_threads and not any(c.active for c in cpu_moe_points):
+        raise SystemExit("--cpu-moe-threads has nothing to size: every --n-cpu-moe "
+                         "point is the fully-resident baseline. Add an offloaded "
+                         "point, e.g. --n-cpu-moe 8.")
     concurrency_levels = _parse_concurrency(args.concurrency) if args.concurrency else list(config.DEFAULT_CONCURRENCY)
     max_tokens = args.max_tokens if args.max_tokens is not None else config.DEFAULT_MAX_TOKENS
     warmup = args.warmup if args.warmup is not None else config.DEFAULT_WARMUP
@@ -369,6 +494,7 @@ def main():
     print(f"mtp        : {['on' if m else 'off' for m in mtp_modes]}")
     print(f"tp         : {tp_degrees}"
           + (f"  (devices {config.TP_DEVICES})" if config.TP_DEVICES else ""))
+    print(f"n_cpu_moe  : {[c.label for c in cpu_moe_points]}")
     print(f"concurrency: {concurrency_levels}")
     print(f"results    : {results_dir}")
     print(f"media      : image={media['image']} audio={media['audio']} video={media['video']}")
@@ -404,9 +530,9 @@ def main():
         print()
 
     # Build the full plan, splitting into gated-skips and runnable cells. The
-    # (engine, backend, model, mtp, tp) tuple fixes how the server is launched;
-    # the concurrency axis is applied per-cell against that one server.
-    plan = []   # (engine, backend, model_id, scenario_id, mtp, tp, applies, reason)
+    # (engine, backend, model, mtp, tp, cpu_moe) tuple fixes how the server is
+    # launched; the concurrency axis is applied per-cell against that one server.
+    plan = []   # (engine, backend, model_id, scenario_id, mtp, tp, cpu_moe, applies, reason)
     for engine_id in engine_ids:
         if engine_id not in config.ENGINES:
             print(f"  unknown engine '{engine_id}', skipping")
@@ -416,22 +542,25 @@ def main():
                 model = config.MODELS[model_id]
                 for mtp in mtp_modes:
                     for tp in tp_degrees:
-                        for scenario_id in scenario_ids:
-                            sc = config.SCENARIOS[scenario_id]
-                            ok, why = config.applies(engine_id, backend, model, sc,
-                                                     mtp=mtp, tp=tp)
-                            plan.append((engine_id, backend, model_id, scenario_id,
-                                         mtp, tp, ok, why))
+                        for cmoe in cpu_moe_points:
+                            for scenario_id in scenario_ids:
+                                sc = config.SCENARIOS[scenario_id]
+                                ok, why = config.applies(engine_id, backend, model, sc,
+                                                         mtp=mtp, tp=tp, cpu_moe=cmoe)
+                                plan.append((engine_id, backend, model_id, scenario_id,
+                                             mtp, tp, cmoe, ok, why))
 
-    runnable = [p for p in plan if p[6]]
-    gated = [p for p in plan if not p[6]]
+    runnable = [p for p in plan if p[7]]
+    gated = [p for p in plan if not p[7]]
 
     # Record gated cells as skips (one per concurrency level) so the matrix is complete.
-    for engine_id, backend, model_id, scenario_id, mtp, tp, _, why in gated:
+    for engine_id, backend, model_id, scenario_id, mtp, tp, cmoe, _, why in gated:
         for conc in concurrency_levels:
             res = engines.BenchResult(engine=engine_id, backend=backend, model=model_id,
                                       scenario=scenario_id, status="skipped", detail=why,
-                                      mtp=mtp, tp=tp, concurrency=conc)
+                                      mtp=mtp, tp=tp, concurrency=conc,
+                                      cpu_moe_layers=cmoe.layers,
+                                      cpu_moe_threads=cmoe.threads)
             _write(results_dir, res)
 
     n_runnable_cells = len(runnable) * len(concurrency_levels)
@@ -439,20 +568,27 @@ def main():
           f"({len(runnable)} scenario-points x {len(concurrency_levels)} concurrency), "
           f"{len(gated) * len(concurrency_levels)} gated (recorded as skipped)\n")
 
-    # Group runnable cells by (engine, backend, model, mtp, tp) so each server
-    # starts once.
+    # Group runnable cells by (engine, backend, model, mtp, tp, cpu_moe) so each
+    # server starts once.
     def _gkey(p):
-        return (p[0], p[1], p[2], p[4], p[5])
+        return (p[0], p[1], p[2], p[4], p[5], p[6])
 
-    runnable.sort(key=_gkey)
+    # Offload points sort resident-first, then by layer count, with `all` last
+    # (it is the most offloaded point there is, not the least), so the console
+    # shows the axis in the order the report tabulates it.
+    runnable.sort(key=lambda p: (p[0], p[1], p[2], p[4], p[5],
+                                 p[6].layers != 0,
+                                 float("inf") if p[6].layers < 0 else p[6].layers,
+                                 p[6].threads))
     groups = [(k, list(g)) for k, g in groupby(runnable, key=_gkey)]
 
-    for (engine_id, backend, model_id, mtp, tp), cells in groups:
+    for (engine_id, backend, model_id, mtp, tp, cmoe), cells in groups:
         model = config.MODELS[model_id]
         scen_ids = [c[3] for c in cells]
         mtp_tag = " mtp=on" if mtp else ""
         tp_tag = f" tp={tp}" if tp > 1 else ""
-        header = f"[{engine_id}/{backend}/{model_id}{mtp_tag}{tp_tag}]"
+        cmoe_tag = f" n_cpu_moe={cmoe.label}" if cmoe.active else ""
+        header = f"[{engine_id}/{backend}/{model_id}{mtp_tag}{tp_tag}{cmoe_tag}]"
         print(f"=== {header}  scenarios={scen_ids}  concurrency={concurrency_levels} ===", flush=True)
 
         # Pre-flight: model files (all shards + companions) and engine binary present?
@@ -477,18 +613,21 @@ def main():
                     _write(results_dir, engines.BenchResult(
                         engine=engine_id, backend=backend, model=model_id,
                         scenario=c[3], status="skipped", detail=missing,
-                        mtp=mtp, tp=tp, concurrency=conc))
+                        mtp=mtp, tp=tp, concurrency=conc,
+                        cpu_moe_layers=cmoe.layers, cpu_moe_threads=cmoe.threads))
             continue
 
-        # Separate log per (engine, backend, model, mtp, tp) so the MTP / TP
-        # variants of one model don't clobber each other's server log.
+        # Separate log per (engine, backend, model, mtp, tp, cpu_moe) so the MTP /
+        # TP / offload variants of one model don't clobber each other's server log.
         log_name = (f"{engine_id}__{backend}__{model_id}"
-                    + ("__mtp" if mtp else "") + (f"__tp{tp}" if tp > 1 else ""))
+                    + ("__mtp" if mtp else "") + (f"__tp{tp}" if tp > 1 else "")
+                    + cmoe.tag)
         log_path = results_dir / "logs" / f"{log_name}.log"
         # Server max-tokens must cover the busiest cell: concurrency doesn't raise
         # per-request length, but keep the configured headroom.
         server = engines.make_server(engine_id, model, backend, log_path,
-                                     max_tokens=config.SERVER_MAX_TOKENS, mtp=mtp, tp=tp)
+                                     max_tokens=config.SERVER_MAX_TOKENS, mtp=mtp, tp=tp,
+                                     cpu_moe=cmoe)
 
         t0 = time.monotonic()
         try:
@@ -501,7 +640,8 @@ def main():
                     _write(results_dir, engines.BenchResult(
                         engine=engine_id, backend=backend, model=model_id,
                         scenario=c[3], status="fail", detail=detail,
-                        mtp=mtp, tp=tp, concurrency=conc))
+                        mtp=mtp, tp=tp, concurrency=conc,
+                        cpu_moe_layers=cmoe.layers, cpu_moe_threads=cmoe.threads))
             server.stop()
             continue
         timeout = config.READY_TIMEOUT_S[model.size_class]
@@ -519,7 +659,8 @@ def main():
                     _write(results_dir, engines.BenchResult(
                         engine=engine_id, backend=backend, model=model_id,
                         scenario=c[3], status=status, detail=detail,
-                        mtp=mtp, tp=tp, concurrency=conc))
+                        mtp=mtp, tp=tp, concurrency=conc,
+                        cpu_moe_layers=cmoe.layers, cpu_moe_threads=cmoe.threads))
             server.stop()
             continue
         print(f"    server ready in {load_s:.0f}s", flush=True)
@@ -532,7 +673,7 @@ def main():
             scenario_id = c[3]
             for conc in concurrency_levels:
                 out_file = _result_path(results_dir, engine_id, backend, model_id,
-                                        scenario_id, mtp, conc, tp)
+                                        scenario_id, mtp, conc, tp, cmoe)
                 if args.skip_existing and out_file.exists():
                     try:
                         prev = json.loads(out_file.read_text(encoding="utf-8"))
@@ -544,7 +685,7 @@ def main():
                 t = time.monotonic()
                 res = _run_cell(server, engine_id, backend, model, scenario_id,
                                 max_tokens, mtp=mtp, concurrency=conc, tp=tp,
-                                results_dir=results_dir)
+                                results_dir=results_dir, cpu_moe=cmoe)
                 _write(results_dir, res)
                 wall = time.monotonic() - t
                 if config.SCENARIOS[scenario_id].kind == "image_edit":
@@ -558,9 +699,14 @@ def main():
                           flush=True)
                     continue
                 extra = ""
+                # `turns=1/3` is the shape that matters: a workflow that
+                # stopped at its first turn would otherwise print nothing at all.
+                if res.turns_expected > 1:
+                    extra += f"  turns={res.turns}/{res.turns_expected}"
                 if res.tool_call_ok is not None:
                     extra += f"  tool_ok={res.tool_call_ok}"
-                agg = (f"  agg={res.aggregate_decode_tps:7.1f} t/s" if conc > 1 else "")
+                agg = (f"  agg={res.aggregate_decode_tps:7.1f} t/s"
+                       f"  ok={res.requests_ok}/{conc}" if conc > 1 else "")
                 print(f"    {scenario_id:14s} c={conc:<3d} {res.status:7s}  "
                       f"prefill={res.prefill_tps:7.1f} t/s  decode={res.decode_tps:6.1f} t/s{agg}  "
                       f"ttft={res.ttft_ms:7.0f}ms  wall={wall:5.1f}s{extra}  {res.detail[:50]}",

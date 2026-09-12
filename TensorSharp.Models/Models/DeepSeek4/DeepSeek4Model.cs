@@ -41,7 +41,18 @@ namespace TensorSharp.Models
             string arch = _gguf.GetString("general.architecture") ?? "deepseek4";
             bool isV41 = string.Equals(arch, "deepseek41", StringComparison.Ordinal);
             if (isV41)
+            {
                 DeepSeek41Architecture.ValidateLoad(ggufPath, backend, ResolveDsparkPath(draftModelPath), tpDegree, tpGroup);
+                // Once per load, and only here: ValidateLoad also runs as the
+                // descriptor's ApplyNativeTunables, so warning from inside it
+                // would print the same line twice.
+                if (DeepSeek41Architecture.DescribeCpuBackendChoice(backend) is string cpuNote)
+                    Console.Error.WriteLine(cpuNote);
+            }
+            else if (DescribeCpuBackendChoice(backend) is string v4CpuNote)
+            {
+                Console.Error.WriteLine(v4CpuNote);
+            }
             Config = new ModelConfig { Architecture = arch };
             ParseBaseConfig();
             if (isV41)
@@ -122,6 +133,26 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
+        /// The one line a DeepSeek V4 load on the ggml CPU backend prints, null
+        /// for every other backend.
+        ///
+        /// <para>Until <see cref="BackendRegistryName"/> learned "CPU",
+        /// <c>ggml_cpu</c> reached the native loader as "any GPU" and a
+        /// CUDA-capable host ran the GPUs. It now runs where it says, which is
+        /// orders of magnitude slower for the same launch line — and this is the
+        /// backend the server picks when <c>--backend</c> is omitted off macOS,
+        /// so a V4 script that never named one changes behavior. The device list
+        /// that follows says CPU but not that it used to say GPU, so say it
+        /// here. V4.1 prints its own, longer note instead (see
+        /// DeepSeek41Architecture.DescribeCpuBackendChoice).</para>
+        /// </summary>
+        internal static string DescribeCpuBackendChoice(BackendType backend)
+            => backend != BackendType.GgmlCpu ? null
+                : "[dsv4] --backend ggml_cpu: DeepSeek V4 will run on ONE CPU device, not on any GPU this host " +
+                  "has. This is also the backend chosen when --backend is omitted off macOS. Pass --backend " +
+                  "ggml_cuda or --backend cuda for a GPU executor.";
+
+        /// <summary>
         /// Translate the process-wide <see cref="MoeCpuOffloadConfig"/> into the
         /// native loader's routed-expert offload policy.
         ///
@@ -143,19 +174,26 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
-        /// ggml backend registry name whose GPU devices the native executor
-        /// should run on. GgmlOps links every backend it was built with and the
-        /// loader enumerates devices in registration order, so without this a
+        /// ggml backend registry name whose devices the native executor should
+        /// run on. GgmlOps links every backend it was built with and the loader
+        /// enumerates devices in registration order, so without this a
         /// CUDA-capable box runs <c>--backend ggml_vulkan</c> on its CUDA
         /// devices and the Vulkan path is never exercised. Null = any GPU.
         /// </summary>
-        private static string BackendRegistryName(BackendType backend) => backend switch
+        private protected static string BackendRegistryName(BackendType backend) => backend switch
         {
             // GGML_CUDA_NAME is "CUDA" / "ROCm" / "MUSA" depending on how
             // ggml-cuda was built; the native side treats them as one family.
             BackendType.GgmlCuda => "CUDA",
             BackendType.GgmlVulkan => "Vulkan",
             BackendType.GgmlMetal => "Metal",
+            // "CPU" is the one name that reaches the loader's cpu_only branch,
+            // where it builds a single CPU compute device instead of
+            // enumerating accelerators. Without it --backend ggml_cpu fell into
+            // the null case, which means "any GPU": on a CUDA box the operator
+            // asked for the CPU and silently got the GPUs, and on a host with
+            // no GPU at all the load failed with "refusing CPU-only run".
+            BackendType.GgmlCpu => "CPU",
             _ => null,
         };
 

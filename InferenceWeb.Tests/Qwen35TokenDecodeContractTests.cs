@@ -42,14 +42,35 @@ public class Qwen35TokenDecodeContractTests
                 environmentValue));
     }
 
+    /// <summary>
+    /// Device-resident GDN state is for SINGLE-TOKEN calls only.
+    ///
+    /// <para>A resident call updates the recurrent state in place, so the state
+    /// the call started from no longer exists afterwards. That is harmless for a
+    /// plain decode step, which is never rolled back, and wrong for a multi-row
+    /// verify, whose whole purpose is to be rolled back when a draft is rejected:
+    /// SpecSnapshotRecurrentState takes no copy when the state is device-live
+    /// because "a verify only reads the live slices", which an in-place update
+    /// makes false. Allowing it on verifies made the emitted stream diverge from
+    /// plain greedy at token 53 of a measured run.</para>
+    ///
+    /// <para>Metal stays out entirely: its decode may bind the GDN result by the
+    /// backing-base pointer while a resident verify graph retains the offset
+    /// state-view pointer.</para>
+    /// </summary>
     [Theory]
     [InlineData(BackendType.GgmlMetal, true, -1, 4, false)]
     [InlineData(BackendType.GgmlMetal, true, 4, 4, false)]
-    [InlineData(BackendType.GgmlCuda, true, -1, 4, true)]
-    [InlineData(BackendType.GgmlCuda, true, 4, 4, true)]
+    [InlineData(BackendType.GgmlMetal, true, 1, 1, false)]
+    // Multi-row verify: never resident, whatever the logit-row shape.
+    [InlineData(BackendType.GgmlCuda, true, -1, 4, false)]
+    [InlineData(BackendType.GgmlCuda, true, 4, 4, false)]
     [InlineData(BackendType.GgmlCuda, true, 1, 4, false)]
-    [InlineData(BackendType.GgmlCuda, false, -1, 4, false)]
-    public void VerifyResidentState_NeverRetainsMetalStateView(
+    // Single-token plain/decode steps: resident, which is where the time is.
+    [InlineData(BackendType.GgmlCuda, true, 1, 1, true)]
+    [InlineData(BackendType.GgmlCuda, true, -1, 1, true)]
+    [InlineData(BackendType.GgmlCuda, false, 1, 1, false)]
+    public void VerifyResidentState_IsSingleTokenOnlyAndNeverMetal(
         BackendType backend,
         bool residentEnabled,
         int nLogitRows,

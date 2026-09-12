@@ -62,13 +62,14 @@ from the result JSONs alone.
 | `config.py` | loads `benchmark_config.json`, resolves `${var}` paths + env overrides, exposes the registries + applicability gating |
 | `engines.py` | OpenAI streaming client + server lifecycle managers (TensorSharp.Server, llama-server, vLLM connector) |
 | `scenarios.py` | per-scenario, engine-aware request builders |
-| `run_matrix.py` | orchestrator — launches one server per `(engine, backend, model, mtp, tp)`, runs scenarios, writes per-cell JSON |
+| `run_matrix.py` | orchestrator — launches one server per `(engine, backend, model, mtp, tp, cpu_moe)`, runs scenarios, writes per-cell JSON |
 | `report.py` | aggregates `results/*.json` → `docs/engine_comparison_report.md` + `results/results.csv` |
 | `downloads.py` | resumable fetcher — makes a config's model files exist locally (used automatically by `run_matrix.py`) |
 | `assets/` | long-context prompt (`long_text.txt`), prefill corpus (`prefill_corpus.txt`), `tools/weather.json` |
 | `benchmark_config_prefill.json` | **prefill-only** variant — the same long-prompt sweep (2k/4k/8k/16k/32k/64k/128k tokens) but with the multimodal / diffusion scenarios and models stripped out, for a focused prefill run; select with `--config` |
 | `benchmark_config_multigpu.json` | **multi-GPU** variant — a 4-GPU Linux box (validated on 4×A40), tensor-parallel degrees 1/2/4, including a model that only fits across 4 GPUs (`min_tp`); select with `--config` |
 | `benchmark_config_ci.json` | **CI** variant used by `.github/workflows/test-matrix.yml` — TensorSharp vs llama.cpp only, `ggml_cuda` only, text + prefill scenarios |
+| `benchmark_config_glm53_qwen38.json` | **GLM-5.3 / GLM-5.3-Flash / Qwen3.8-Flash-Next** on an 8×A40 box — two columns, because the families disagree about multi-GPU placement: the GLM native executor takes every visible GPU with no `--tp` (default column), while `qwen4exp` is spread by the shared loader and needs `--tp N` (second column, `min_tp`-gated out of the default one). TensorSharp-only by default: that host's llama.cpp has no `glm5next`. Select with `--config` |
 | `download_models.py` | pre-fetches the selected models from the `source` URLs in the config (optional — `run_matrix.py` already downloads what is missing) |
 
 ## Configuration
@@ -153,6 +154,15 @@ python run_matrix.py --config benchmark_config_multigpu.json \
 python run_matrix.py --engines tensorsharp,llamacpp --backends ggml_cuda \
     --models gemma4-12b --scenarios text_short --concurrency 1,4,8
 
+# MoE CPU offload — what "make it fit" costs, fully resident vs 8 layers vs all
+python run_matrix.py --engines tensorsharp,llamacpp --backends ggml_cuda \
+    --models qwen36-35b-a3b --scenarios text_short,prefill_8k \
+    --n-cpu-moe off,8,all --cpu-moe-threads 48
+
+# Multi-step agentic tool use, and code generation followed by a specific edit
+python run_matrix.py --engines tensorsharp,llamacpp --backends ggml_cuda \
+    --models qwen36-35b-a3b --scenarios agentic,code_edit
+
 # Use an alternate settings file (e.g. a second host)
 python run_matrix.py --config configs/host-b.json --engines tensorsharp
 
@@ -165,10 +175,10 @@ section of `benchmark_config.json`. Any flag overrides the corresponding config
 default for that run only (the file is never modified).
 
 Useful flags: `--config <file>` (pick the settings file), `--engines`,
-`--backends`, `--models`, `--scenarios`, `--mtp`, `--tp`, `--concurrency`,
-`--max-tokens N`, `--warmup N` (0 disables), `--download auto|never|force`,
-`--skip-existing` (reuse prior `ok` cells), `--results <dir>`. `report.py`
-accepts `--config` and `--results`.
+`--backends`, `--models`, `--scenarios`, `--mtp`, `--tp`, `--n-cpu-moe`,
+`--cpu-moe-threads`, `--concurrency`, `--max-tokens N`, `--warmup N`
+(0 disables), `--download auto|never|force`, `--skip-existing` (reuse prior
+`ok` cells), `--results <dir>`. `report.py` accepts `--config` and `--results`.
 
 ### Choosing compute backends (`--backends`)
 
@@ -335,6 +345,131 @@ Two field notes from the 4×A40 validation host:
   the first communicator exists and, when the advertisement proves false, takes
   peer transport away from NCCL rather than giving up the device collective.
 
+### MoE CPU offload (`--n-cpu-moe off,8,all`)
+
+Keeps the routed experts of the first N layers in **system RAM** and multiplies
+them on the host; attention, the norms, the router and the always-active shared
+expert stay on the accelerator. Like `--tp`, it is a load-time decision, so each
+point relaunches the server.
+
+| | some layers | every layer | host threads |
+|---|---|---|---|
+| TensorSharp | `--n-cpu-moe N` | `--n-cpu-moe all` | `--cpu-moe-threads M` |
+| llama.cpp | `--n-cpu-moe N` | `--cpu-moe` — it parses `-ncmoe`'s argument as an integer and spells "every layer" as its own switch, so `--n-cpu-moe all` would abort llama-server at startup | `--threads M` — its nearest equivalent; llama.cpp has no MoE-specific worker pool, so this moves *every* CPU-side op |
+
+The harness sends whichever of those the point needs; both engines' spellings are
+overridable per backend (`cpu_moe_arg`, `cpu_moe_all_arg`, `cpu_moe_threads_arg`),
+and only the TensorSharp ones were read out of this repo's own
+`ServerOptionsBuilder`. The llama.cpp mapping is taken from the equivalence
+FEATURES.md states (`-ncmoe` / `-cmoe`) and has **not** been exercised against a
+real llama-server here.
+
+This axis is about **fitting, not speed**: it is what makes a checkpoint that
+does not fit run at all (and it nearly doubles the context the loader can size),
+and it pays for that in throughput — on 3×RTX PRO 6000, where GLM-5.2 already
+fits, `--n-cpu-moe 30` takes pp2048 from 915.9 to 94.7 tok/s and tg64 from 43.9
+to 16.4. A ratio below `1.0×` in the report's **MoE CPU offload** section is
+therefore the expected shape, and the number you are buying VRAM with.
+
+```bash
+--n-cpu-moe off,8,all      # axis points: fully resident, 8 layers, every layer
+--cpu-moe-threads 48       # applied to the offloaded points only
+```
+
+`--cpu-moe-threads` is a second axis (`32,64` sweeps both), but it only
+multiplies the *offloaded* points — `off` collapses to one baseline cell however
+many thread counts were asked for, because the baseline never runs a host
+matmul. `0` (the default) sends no thread count at all and leaves each engine's
+own default alone; TensorSharp's is half the CPU parallelism the process can
+actually use, and sizing it near the CPU quota is a cliff rather than a slope.
+
+`off` is the only word for the baseline point (`0` also works because the engine
+flag itself takes it); anything else — `none`, a typo — is an error rather than a
+quietly un-offloaded cell.
+
+Configuration lives in the `backends` registry:
+`tensorsharp: {"cpu_moe": true|false, "cpu_moe_arg": "--n-cpu-moe", "cpu_moe_threads_arg": "--cpu-moe-threads"}`
+and the same keys under `llamacpp`, which additionally takes `cpu_moe_all_arg`.
+Support is inferred — any gpu-kind backend the engine can launch — so an
+existing config gains the axis without being edited. Cells that cannot offload
+are recorded as skipped with the reason: a CPU-kind backend (its experts are
+already host-resident), an engine this harness does not launch (vLLM, sd.cpp),
+the image-edit pipeline, a model whose config entry explicitly declares
+**`"is_moe": false`**, or a backend that already pins the offload itself.
+
+That last one is the pre-axis way of measuring this — a cloned backend entry per
+offload point, like `ggml_cuda_layer_cpu_moe4` in
+`benchmark_config_deepseek41.json`, which hardcodes `--n-cpu-moe 4` in its
+`extra_args`. Sweeping the axis on top of such a backend would hand the engine
+the flag twice and every engine here keeps whichever it parsed last, so the cell
+is refused by name instead of recorded under an offload point it did not run.
+Note the converse, which the harness cannot fix: the baseline (`off`) point on
+such a backend records `cpu_moe_layers: 0` while the backend is in fact
+offloading 4 layers, because the offload is part of that backend's identity
+rather than of this axis. Prefer `--backends ggml_cuda --n-cpu-moe 4`.
+
+A model that says nothing about `is_moe` runs the cell and lets the engine be
+the one to report a dense checkpoint — the harness does not guess an
+architecture fact the config never stated. The cost of that choice is that a
+dense model whose engine simply no-ops the flag produces a `1.00×` row that
+looks like a measurement; declare `"is_moe": false` on dense entries to get a
+skip with a reason instead.
+
+Defaults live in `defaults.cpu_moe_layers` (default `["off"]`) and
+`defaults.cpu_moe_threads` (default `[0]`), so a run that does not pass the
+flags launches the exact command line it always did.
+
+### Multi-turn workflows (`agentic`, `code_edit`)
+
+Two scenarios drive **more than one round trip per cell**. Like `prefill_<N>`,
+they are synthesized rather than declared, so `--scenarios agentic` works
+against any config file — including one written before they existed — and
+neither is in any config's `defaults.scenarios`, so existing runs are unchanged.
+
+| Scenario | What it drives | What is checked |
+|---|---|---|
+| `agentic` | 3 round trips: `read_invoice("INV-472")` → `calculate_total(unit_price, quantity)` → a final answer with `tool_choice: "none"` | The tool-call *shape* (a structured `tool_calls` entry with a unique non-empty id, `type: "function"`, the declared name, arguments that are complete JSON) the way `validate_deepseek41_tools.py` checks it, **and** that the answer depends on the results |
+| `code_edit` | 2 round trips: write `slugify(text)`, then rename it to `slugify_title` and add a `max_length=40` parameter that truncates | The edited source is **parsed** (`ast`): the new name, exactly `(text, max_length)`, the literal default `40`, and `max_length` actually read in the body — a declared-but-unused parameter is a rename, not the edit |
+
+The dependence check in `agentic` is deliberate rather than incidental. `13.75`
+and `5` appear nowhere in the prompt, so turn 2's arguments can only have come
+from turn 1's result; and `calculate_total` returns `74.25`, **not**
+`13.75 × 5 = 68.75`, because the fixture adds a handling fee the model was never
+told about — so a model that answers from arithmetic instead of from the tool
+result lands on 68.75 and is recorded as wrong. Every tool result is a fixed
+fixture; nothing is executed.
+
+Both loops are driven **from the client**. TensorSharp's own code-execution tool
+surface (`--code-exec`: `shell`, `read_file`, `edit_file`, `write_file`,
+`apply_patch`) is answered *inside the server* and never handed back to the API
+client, it is off by default, and an OpenAI-request workspace is destroyed when
+the response ends — so it can neither be observed round-trip-by-round-trip nor
+carry a file from one request to the next, and llama.cpp and vLLM have no
+equivalent at all. A client-driven loop is the only shape that is both
+measurable and identical on every engine, which is what makes these cells
+comparable.
+
+A follow-up that cannot continue — the model emitted no structured tool call,
+or called the wrong function — **stops the conversation there** instead of
+fabricating the next turn out of a response that did not contain what that turn
+needs. The cell still records `ok` (the server answered every request it was
+given) with its timings, `turns` / `turns_expected` say how far the workflow got,
+`tool_call_ok` is `false`, and `detail` names the turn and the reason.
+
+Such a cell's timings describe a **shorter conversation** than its name, so
+`report.py` prints it as `partial 1/3` in the throughput tables and leaves it out
+of every ratio, rather than comparing one round trip against another engine's
+three. The verdict itself is in the report's **Tool-call and workflow
+correctness** table. Under `--concurrency N` the recorded `turns` is the worst
+client's, so one copy that broke marks the whole cell partial.
+
+For a multi-turn cell the reported `ttft_ms` / `prefill_tps` / `decode_tps` /
+token counts are the **final** turn's — the turn whose prompt is the whole
+conversation, which is what an agentic workload is actually paced by — while
+`total_wall_ms` covers every turn end to end. `--concurrency N` runs N
+independent copies of the workflow at once and aggregates them exactly like the
+single-request scenarios.
+
 ### Model provisioning (automatic downloads)
 
 Every model entry declares where its files come from, so a run on a host that
@@ -483,22 +618,27 @@ batching serves them concurrently) and records, per cell:
 | `decode_tps` | mean **per-request** decode tok/s |
 | `aggregate_decode_tps` | **system-wide** decode tok/s — total generated tokens / the wall window during which any sequence was decoding |
 
-`report.py` adds a **parallel-request scaling** table (per-request vs aggregate
-at each concurrency). The two axes compose: `--mtp on --concurrency 4` is valid,
-though MTP only engages for solo sequences so it has little effect under load.
+plus `requests_ok` (how many of the N succeeded). The console prints
+`ok=N/M` and `agg=` on every concurrent cell, and `report.py` adds a
+**parallel-request scaling** table (per-request vs aggregate at each
+concurrency). The axes compose: `--mtp on --concurrency 4` is valid, though MTP
+only engages for solo sequences so it has little effect under load, and
+`--concurrency N` on `agentic` / `code_edit` runs N independent copies of the
+whole workflow.
 
 Result files keep their historical names for the baseline (`mtp` off, `tp` 1,
-`concurrency` 1); non-default cells add a `__mtp`, `__tp<N>` and/or `__c<N>`
-suffix.
+no offload, `concurrency` 1); non-default cells add a `__mtp`, `__tp<N>`,
+`__ncmoe<N>[t<M>]` and/or `__c<N>` suffix.
 
 ## Output
 
-- `results/{engine}__{backend}__{model}__{scenario}[__mtp][__tp<N>][__c<N>].json`
+- `results/{engine}__{backend}__{model}__{scenario}[__mtp][__tp<N>][__ncmoe<N>[t<M>]][__c<N>].json`
   — one record per cell (`status` ∈ `ok | fail | skipped`, plus token counts,
-  `mtp`, `tp`, `concurrency`, `aggregate_decode_tps`, `requests_ok`, and
-  throughput). The baseline (MTP off, one GPU, single request) keeps the
-  suffix-free name.
-- `results/logs/{engine}__{backend}__{model}[__mtp][__tp<N>].log` — captured
+  `mtp`, `tp`, `cpu_moe_layers`, `cpu_moe_threads`, `concurrency`,
+  `aggregate_decode_tps`, `requests_ok`, `turns`, `turns_expected`, and
+  throughput). The baseline (MTP off, one GPU, fully GPU-resident, single
+  request) keeps the suffix-free name.
+- `results/logs/{engine}__{backend}__{model}[__mtp][__tp<N>][__ncmoe<N>[t<M>]].log` — captured
   server stdout/stderr (the first place to look when a group reports `fail`).
 - **Stuck/leftover servers**: a crashed or interrupted run can leave a server
   process squatting its port — in the worst case unkillable (a thread stuck in
@@ -586,6 +726,16 @@ To run it as a CI job instead, add a second job on the old
 - **MTP** (`--mtp on`) only applies to TensorSharp on models that ship a draft
   head (Qwen 3.6 embedded NextN; Gemma 4 with its paired `--draft-model`);
   every other engine/model `on` cell is recorded as skipped.
+- **`agentic`** needs an engine that returns *structured* `tool_calls`; a model
+  that answers in prose instead stops the loop and the cell records
+  `tool_call_ok=false` with the reason. DiffusionGemma cannot carry tool
+  declarations at all, so its `agentic` cells are skipped — `code_edit`, being
+  plain multi-turn text, still runs.
+- **MoE CPU offload** (`--n-cpu-moe`) is skipped on CPU-kind backends (nothing
+  to move), on the connect-only / CLI engines, on the image-edit pipeline, on
+  models whose config entry declares `"is_moe": false`, and on backends that
+  already pin the offload in their own `extra_args` (passing the flag twice
+  would silently record the wrong point).
 
 ## DeepSeek V4.1 Flash strict validation
 
@@ -650,5 +800,12 @@ Run the local harness checks with the same `requests` dependency as the engine
 matrix:
 
 ```bash
-python -m unittest test_validate_deepseek41_tools test_validate_inference test_backend_launch
+python -m unittest test_validate_deepseek41_tools test_validate_inference \
+    test_backend_launch test_scenarios test_model_registry
 ```
+
+`test_model_registry` needs nothing but the config files: it loads every
+`benchmark_config*.json` through `config.py` and checks that the registries
+resolve (defaults name real models/engines/backends, every model file has a
+download URL, nothing that is exported to a server process is a comment), plus
+the per-matrix facts that decide whether a cell can run at all.

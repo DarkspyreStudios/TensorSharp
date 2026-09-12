@@ -70,6 +70,22 @@ namespace TensorSharp.Runtime.Speculative
         private readonly float[] _stepLogits;    // [vocab] for plain/re-advance steps
         private readonly float[] _rowLogits;     // [vocab] scratch row handed to drawNext
         private readonly int[] _oneToken = new int[1];
+
+        /// <summary>Logits handed back for a plain step; see the allocation note at
+        /// its only assignment.</summary>
+        private float[] _plainOut;
+
+        /// <summary>Consecutive decode steps on which the drafter proposed nothing.
+        /// Reset by any verify.</summary>
+        private int _plainRun;
+
+        /// <summary>
+        /// How long a run of plain steps has to get before it is worth changing
+        /// graph family for. One switch amortized over this many tokens is a few
+        /// percent; staying on the speculative family for an unbounded run is a
+        /// multiple. Small, because the drafter re-arms on the very next verify.
+        /// </summary>
+        private const int PlainRunBeforeSwitch = 2;
         private readonly List<int> _draftTokens = new();
         private float[] _chunkH;                 // [chunk * hidden] prefill h capture, shifted in place into (token k, h of k-1) pairs
         private float[] _lastRowH;               // [hidden] the row the in-place shift would otherwise overwrite
@@ -356,6 +372,7 @@ namespace TensorSharp.Runtime.Speculative
             {
                 // Plain decode step (still captures h + keeps the drafter in sync).
                 Stats.PlainSteps++;
+                _plainRun++;
                 long tPlain0 = Stopwatch.GetTimestamp();
                 _oneToken[0] = lastToken;
                 // A seeded start has no carry for this token: hand the speculator the
@@ -373,8 +390,20 @@ namespace TensorSharp.Runtime.Speculative
                 // host benchmark ran prose at 23-40 tok/s under it, against 65 plain.
                 bool cheapPlain = !_needsHidden
                     || (governorDeclined && _speculator.CanArmAfterPrefixReuse && _trunk.HasCheapPlainStep);
+                // A model whose plain step costs a graph-family switch keeps
+                // isolated plain steps in the speculative family, because paying the
+                // switch twice for one token is dearer than the step it saves. That
+                // reasoning stops holding once plain steps stop being isolated: a
+                // drafter that proposes nothing for a long stretch was leaving every
+                // one of those tokens on the dear family (93 of 101 steps on a
+                // measured Qwen 3.5 run, 50 ms each against 9.2 ms for the model's
+                // own decode). After PlainRunBeforeSwitch consecutive plain steps the
+                // switch is amortized by the run itself, so take it and stay there
+                // until something actually drafts.
+                bool plainRunDominates = _plainRun > PlainRunBeforeSwitch;
                 if (cheapPlain)
-                    _trunk.ForwardPlain(lastToken, _stepLogits, parked: governorDeclined);   // the model's own decode step
+                    _trunk.ForwardPlain(lastToken, _stepLogits,
+                        parked: governorDeclined || plainRunDominates);   // the model's own decode step
                 else
                     _trunk.Forward(_oneToken, _verifyH, _stepLogits, allLogitsRows: false);
                 if (_needsHidden)
@@ -394,8 +423,15 @@ namespace TensorSharp.Runtime.Speculative
                 }
                 Stats.PlainTicks += Stopwatch.GetTimestamp() - tPlain0;
 
-                float[] plainLogits = new float[_vocab];
-                Array.Copy(_stepLogits, plainLogits, _vocab);
+                // Reused, not freshly allocated: a vocabulary row is 500-600 KB, so
+                // one array per decoded token is a large-object allocation per token
+                // on a path that is otherwise a few milliseconds. The non-speculative
+                // route hands back the model's own buffer under the same
+                // consume-before-the-next-forward contract; this buffer is written
+                // only here, so it survives until the next plain step.
+                _plainOut ??= new float[_vocab];
+                Array.Copy(_stepLogits, _plainOut, _vocab);
+                float[] plainLogits = _plainOut;
                 // A step whose DRAFT ran and proposed nothing (the head under its gate)
                 // is speculation's cost - the head pass is in it - not the plain
                 // baseline's: charged to plain it inflated the baseline every verdict
@@ -420,6 +456,7 @@ namespace TensorSharp.Runtime.Speculative
 
             // VERIFY: one batched trunk forward over [lastToken, d1..dK].
             Stats.VerifySteps++;
+            _plainRun = 0;
             int k = _draftTokens.Count;
             int[] batch = new int[k + 1];
             batch[0] = lastToken;

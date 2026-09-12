@@ -35,9 +35,33 @@ ggml_tensor * build_engram(int il, ggml_tensor * x)
     const auto & L = m.layers[il];
     if (L.engram_index < 0) return x;
     const int64_t dim = hp.n_embd, hc = hp.hc_mult;
-    // Embedding lookups happen on the host before the graph. Only 24 rows per
-    // token cross PCIe; the large, random-access tables remain file mappings.
-    ggml_tensor * kv = ggml_mul_mat(ctx, L.engram_wkv, res.inp.engram[L.engram_index]);
+    ggml_tensor * lookup = res.inp.engram[L.engram_index];
+    if (m.engram_on_device)
+    {
+        // The table is resident on this layer's device: gather the quantized
+        // rows here. The id array is laid out token-major (index = token *
+        // hash_columns + column), so get_rows returns [head_dim, hash_columns *
+        // nt] in exactly the order the host path staged its F32 rows. The
+        // reshape below is therefore a relabelling, not a copy.
+        const int64_t head_dim = m.engram.head_dim, cols = m.engram.hash_columns();
+        lookup = ggml_get_rows(ctx, L.engram_embd, res.inp.engram_ids[L.engram_index]);
+        // Pin the gather to the device that holds the table. Device weight
+        // buffers are not marked USAGE_WEIGHTS, so the scheduler's "run the op
+        // where the weight lives" rule does not apply here, and a 30 GiB table
+        // must never become a cross-backend copy.
+        pin(lookup, L.device);
+        lookup = ggml_reshape_2d(ctx, lookup, cols * head_dim, nt);
+        if (res.image_tokens)
+        {
+            // Visual positions consume no Engram embedding. The host path
+            // wrote zero rows for them; zero the gathered rows the same way,
+            // so a garbage-free but arbitrary row cannot reach the gate.
+            ggml_tensor * text_mask = ggml_scale_bias(ctx,
+                ggml_cast(ctx, res.inp.image_types[L.device], GGML_TYPE_F32), -1.0f, 1.0f);
+            lookup = ggml_mul(ctx, lookup, ggml_reshape_2d(ctx, text_mask, 1, nt));
+        }
+    }
+    ggml_tensor * kv = ggml_mul_mat(ctx, L.engram_wkv, lookup);
     trace_v41(kv, il, "engram_kv");
     ggml_tensor * key = ggml_cont(ctx, ggml_view_2d(ctx, kv, dim * hc, nt, kv->nb[1], 0));
     key = ggml_reshape_3d(ctx, key, dim, hc, nt);
