@@ -447,6 +447,55 @@ is supplied. `TS_DSV4_UBATCH` controls the forward microbatch, defaulting to 256
 for V4.1. A larger advertised model window does not establish that a particular
 GPU configuration can allocate or efficiently serve it.
 
+### Load time
+
+The weights are streamed to the GPUs by a pool of reader threads
+(`TS_DSV4_LOAD_THREADS`, default 16) in `TS_DSV4_LOAD_CHUNK_MB` chunks (default
+64). Each thread walks ONE CONTIGUOUS RUN of the job list. That matters more than
+anything else about the loader on a network filesystem: the jobs are sorted by
+(shard, file offset), so handing them out from a shared cursor - which is what
+this loader used to do - makes every file descriptor read one chunk and then jump
+`threads x chunk`, 1 GiB at the defaults. Readahead is per descriptor, so none of
+the sixteen streams is sequential.
+
+Measured on eight A40s with the Q4_K_M release on a MooseFS mount, cold (every
+run preceded by evicting all 414 GiB of shards from the page cache, alternating
+the two orders twice each):
+
+| job order | weight upload, 294.8 GiB | total model load |
+|---|---:|---:|
+| one contiguous run per thread | **141-147 s** (2.0-2.1 GiB/s) | **144-155 s** |
+| shared cursor (`TS_DSV4_LOAD_CONTIGUOUS=0`) | 360-377 s (0.78-0.82 GiB/s) | 363-382 s |
+
+**2.5x.** `TensorSharp.Runtime/GgufReader.cs:330` records the same finding for the
+managed GGUF prefault ("~3x slower on MooseFS"). Ranges are split by BYTES rather
+than job count, because a tensor's last chunk is a partial one; a thread that runs
+out steals from the BACK of the furthest-behind range so its victim keeps reading
+forwards.
+
+Three things that look like the fix and are not, each measured on this box:
+
+* **Page-locking the staging buffers.** The host-to-device copies are 87 s of
+  thread time against 5,539 s in `fread` - 1.6% of the loader's work. Pinning is
+  worth several times that on the copy itself and almost nothing on the load.
+* **More reader threads.** Throughput is not monotonic in thread count on this
+  filesystem; `TensorSharp.Backends.Cuda/Dsv4/Dsv4CudaEngine.cs:744` records
+  2.4 GB/s at 16 threads against 1.0 GB/s at 96.
+* **`MADV_WILLNEED` on the host-expert prefault.** 29.7 s and 31.3 s against a
+  27.7 s mean for the plain fault-in walk, i.e. no better.
+
+`TS_DSV4_LOAD_DROP_CACHE=1` releases each chunk's page cache once it is on the
+device. It does not make the load faster (5,374 s of read thread-time with it
+against 5,539 s without, inside the run-to-run spread) but it ends the load with
+~39 GiB of page cache instead of ~330 GiB, which leaves room for the host experts
+the next phase pins. It is off by default because each call costs real time on a
+FUSE mount.
+
+One caveat when timing this yourself: on a box whose page cache is already full of
+the checkpoint, a load can be SLOWER than one that starts with an empty cache,
+because the cgroup is at its limit before the first read and every subsequent read
+contends with reclaim. Compare like with like - evict the shards first.
+
 ### Multi-turn KV reuse
 
 A second turn's rendered prompt is not a continuation of the first turn's cache.
