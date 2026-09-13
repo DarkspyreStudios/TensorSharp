@@ -79,7 +79,7 @@ namespace TensorSharp.Runtime
                         sb.Append(message.Content ?? "");
                         if (hasTools && !toolsRendered)
                         {
-                            sb.Append("\n\n").Append(DeepSeek41ToolsHeader);
+                            sb.Append("\n\n").Append(DeepSeek41ToolsHeader.Replace("\r\n", "\n"));
                             sb.AppendJoin('\n', tools.Select(t => SpaceDeepSeek41Json(DeepSeek41ToolSchema(t))));
                             sb.Append("\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n");
                             toolsRendered = true;
