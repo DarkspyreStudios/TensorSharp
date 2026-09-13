@@ -7,9 +7,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json;
-using TensorSharp.Models;
 
 namespace TensorSharp.Server.ResponseSerializers
 {
@@ -28,7 +26,7 @@ namespace TensorSharp.Server.ResponseSerializers
 
         public static string NewFunctionCallItemId() => $"fc_{Guid.NewGuid():N}";
 
-        public static string NewCallId() => $"call_{Guid.NewGuid():N}".Substring(0, 24);
+        public static string NewCallId() => $"call_{Guid.NewGuid():N}"[..24];
 
         // ---- Output items -----------------------------------------------------
 
@@ -72,34 +70,34 @@ namespace TensorSharp.Server.ResponseSerializers
             int promptTokens,
             int evalTokens,
             int kvCacheReusedTokens,
-            string errorMessage = null,
-            string incompleteReason = null) => new
-        {
-            id = responseId,
-            @object = "response",
-            created_at = UnixNow(),
-            status,
-            error = errorMessage != null ? new { message = errorMessage, code = "server_error" } : null,
-            // Populated only for status "incomplete" — this is where the Responses
-            // API puts the fact that generation was cut off ("max_output_tokens"),
-            // the equivalent of chat completions' finish_reason "length".
-            incomplete_details = incompleteReason != null ? new { reason = incompleteReason } : null,
-            instructions,
-            max_output_tokens = maxOutputTokens,
-            model,
-            output,
-            parallel_tool_calls = true,
-            previous_response_id = (string)null,
-            store,
-            temperature = samplingConfig?.Temperature,
-            top_p = samplingConfig?.TopP,
-            truncation = "disabled",
-            // An "incomplete" response still generated (and billed) tokens — in fact
-            // its usage is the whole point, since output_tokens is what proves the
-            // budget was the thing that stopped it. Only a failed response has none.
-            usage = status != "failed" ? BuildUsage(promptTokens, evalTokens, kvCacheReusedTokens) : null,
-            metadata = new Dictionary<string, string>(),
-        };
+            string? errorMessage = null,
+            string? incompleteReason = null) => new
+            {
+                id = responseId,
+                @object = "response",
+                created_at = UnixNow(),
+                status,
+                error = errorMessage != null ? new { message = errorMessage, code = "server_error" } : null,
+                // Populated only for status "incomplete" — this is where the Responses
+                // API puts the fact that generation was cut off ("max_output_tokens"),
+                // the equivalent of chat completions' finish_reason "length".
+                incomplete_details = incompleteReason != null ? new { reason = incompleteReason } : null,
+                instructions,
+                max_output_tokens = maxOutputTokens,
+                model,
+                output,
+                parallel_tool_calls = true,
+                previous_response_id = (string?)null,
+                store,
+                temperature = samplingConfig?.Temperature,
+                top_p = samplingConfig?.TopP,
+                truncation = "disabled",
+                // An "incomplete" response still generated (and billed) tokens — in fact
+                // its usage is the whole point, since output_tokens is what proves the
+                // budget was the thing that stopped it. Only a failed response has none.
+                usage = status != "failed" ? BuildUsage(promptTokens, evalTokens, kvCacheReusedTokens) : null,
+                metadata = new Dictionary<string, string>(),
+            };
 
         // ---- Streaming events ---------------------------------------------------
         // Each payload carries its own "type" field (matching the real API) in

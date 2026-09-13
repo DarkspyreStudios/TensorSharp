@@ -13,33 +13,32 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 
-namespace TensorSharp.Server.StreamingWriters
-{
-    /// <summary>
-    /// Helpers for writing newline-delimited JSON streams. Used by the Ollama
-    /// streaming endpoints (<c>/api/generate</c>, <c>/api/chat/ollama</c>).
-    /// </summary>
-    internal static class NdJsonWriter
-    {
-        public static void ApplyHeaders(HttpResponse response)
-        {
-            response.ContentType = "application/x-ndjson";
-            response.Headers["Cache-Control"] = "no-cache";
-        }
+namespace TensorSharp.Server.StreamingWriters;
 
-        /// <summary>
-        /// Serialise <paramref name="payload"/> followed by a newline and flush
-        /// the response so the next chunk can immediately reach the client.
-        /// </summary>
-        public static async Task WriteLineAsync(
-            HttpResponse response,
-            object payload,
-            CancellationToken cancellationToken,
-            JsonSerializerOptions jsonOptions = null)
-        {
-            string json = JsonSerializer.Serialize(payload, jsonOptions);
-            await response.WriteAsync(json + "\n", cancellationToken);
-            await response.Body.FlushAsync(cancellationToken);
-        }
+/// <summary>
+/// Helpers for writing newline-delimited JSON streams. Used by the Ollama
+/// streaming endpoints (<c>/api/generate</c>, <c>/api/chat/ollama</c>).
+/// </summary>
+internal static class NdJsonWriter
+{
+    public static void ApplyHeaders(HttpResponse response)
+    {
+        response.ContentType = "application/x-ndjson";
+        response.Headers.CacheControl = "no-cache";
+    }
+
+    /// <summary>
+    /// Serialise <paramref name="payload"/> followed by a newline and flush
+    /// the response so the next chunk can immediately reach the client.
+    /// </summary>
+    public static async Task WriteLineAsync(
+        HttpResponse response,
+        object payload,
+        CancellationToken cancellationToken,
+        JsonSerializerOptions? jsonOptions = null)
+    {
+        string json = JsonSerializer.Serialize(payload, jsonOptions);
+        await response.WriteAsync(json + "\n", cancellationToken).ConfigureAwait(false);
+        await response.Body.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 }

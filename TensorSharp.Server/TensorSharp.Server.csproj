@@ -4,7 +4,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
-    <Nullable>disable</Nullable>
+    <Nullable>enable</Nullable>
     <Description>ASP.NET Core server package for TensorSharp with web UI plus Ollama and OpenAI-compatible APIs.</Description>
     <PackageTags>$(TensorSharpPackageTags);server;aspnetcore;openai;ollama;web</PackageTags>
   </PropertyGroup>

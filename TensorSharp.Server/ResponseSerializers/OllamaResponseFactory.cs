@@ -10,7 +10,6 @@
 
 using System;
 using System.Collections.Generic;
-using TensorSharp.Models;
 
 namespace TensorSharp.Server.ResponseSerializers
 {
@@ -49,20 +48,20 @@ namespace TensorSharp.Server.ResponseSerializers
             long totalNs,
             long promptNs,
             long evalNs) => new
-        {
-            model,
-            created_at = TimestampNow(),
-            response = "",
-            done = true,
-            done_reason = doneReason,
-            total_duration = totalNs,
-            prompt_eval_count = promptTokens,
-            prompt_eval_duration = promptNs,
-            eval_count = evalTokens,
-            eval_duration = evalNs,
-            prompt_cache_hit_tokens = kvCacheReusedTokens,
-            prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
-        };
+            {
+                model,
+                created_at = TimestampNow(),
+                response = "",
+                done = true,
+                done_reason = doneReason,
+                total_duration = totalNs,
+                prompt_eval_count = promptTokens,
+                prompt_eval_duration = promptNs,
+                eval_count = evalTokens,
+                eval_duration = evalNs,
+                prompt_cache_hit_tokens = kvCacheReusedTokens,
+                prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
+            };
 
         public static object GenerateError(string model, string error) => new
         {
@@ -84,20 +83,20 @@ namespace TensorSharp.Server.ResponseSerializers
             long totalNs,
             long promptNs,
             long evalNs) => new
-        {
-            model,
-            created_at = TimestampNow(),
-            response = content,
-            done = true,
-            done_reason = doneReason,
-            total_duration = totalNs,
-            prompt_eval_count = promptTokens,
-            prompt_eval_duration = promptNs,
-            eval_count = evalTokens,
-            eval_duration = evalNs,
-            prompt_cache_hit_tokens = kvCacheReusedTokens,
-            prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
-        };
+            {
+                model,
+                created_at = TimestampNow(),
+                response = content,
+                done = true,
+                done_reason = doneReason,
+                total_duration = totalNs,
+                prompt_eval_count = promptTokens,
+                prompt_eval_duration = promptNs,
+                eval_count = evalTokens,
+                eval_duration = evalNs,
+                prompt_cache_hit_tokens = kvCacheReusedTokens,
+                prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
+            };
 
         public static object QueueChatChunk(string model, int position, int pending) => new
         {
@@ -117,7 +116,7 @@ namespace TensorSharp.Server.ResponseSerializers
             done = false,
         };
 
-        public static object ChatParsedChunk(string model, string contentChunk, string thinkingChunk) => new
+        public static object ChatParsedChunk(string model, string contentChunk, string? thinkingChunk) => new
         {
             model,
             created_at = TimestampNow(),
@@ -134,20 +133,20 @@ namespace TensorSharp.Server.ResponseSerializers
             long totalNs,
             long promptNs,
             long evalNs) => new
-        {
-            model,
-            created_at = TimestampNow(),
-            message = new { role = "assistant", content = "" },
-            done = true,
-            done_reason = doneReason,
-            total_duration = totalNs,
-            prompt_eval_count = promptTokens,
-            prompt_eval_duration = promptNs,
-            eval_count = evalTokens,
-            eval_duration = evalNs,
-            prompt_cache_hit_tokens = kvCacheReusedTokens,
-            prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
-        };
+            {
+                model,
+                created_at = TimestampNow(),
+                message = new { role = "assistant", content = "" },
+                done = true,
+                done_reason = doneReason,
+                total_duration = totalNs,
+                prompt_eval_count = promptTokens,
+                prompt_eval_duration = promptNs,
+                eval_count = evalTokens,
+                eval_duration = evalNs,
+                prompt_cache_hit_tokens = kvCacheReusedTokens,
+                prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
+            };
 
         public static object ChatParsedFinalChunk(
             string model,
@@ -203,20 +202,20 @@ namespace TensorSharp.Server.ResponseSerializers
             long totalNs,
             long promptNs,
             long evalNs) => new
-        {
-            model,
-            created_at = TimestampNow(),
-            message,
-            done = true,
-            done_reason = doneReason,
-            total_duration = totalNs,
-            prompt_eval_count = promptTokens,
-            prompt_eval_duration = promptNs,
-            eval_count = evalTokens,
-            eval_duration = evalNs,
-            prompt_cache_hit_tokens = kvCacheReusedTokens,
-            prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
-        };
+            {
+                model,
+                created_at = TimestampNow(),
+                message,
+                done = true,
+                done_reason = doneReason,
+                total_duration = totalNs,
+                prompt_eval_count = promptTokens,
+                prompt_eval_duration = promptNs,
+                eval_count = evalTokens,
+                eval_duration = evalNs,
+                prompt_cache_hit_tokens = kvCacheReusedTokens,
+                prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
+            };
 
         public static object ChatNonStreamingMessage(string content, string thinking, IReadOnlyList<ToolCall> toolCalls) => new
         {
@@ -232,7 +231,7 @@ namespace TensorSharp.Server.ResponseSerializers
             content,
         };
 
-        private static IReadOnlyList<object> ConvertToolCalls(IReadOnlyList<ToolCall> toolCalls)
+        private static IReadOnlyList<object>? ConvertToolCalls(IReadOnlyList<ToolCall> toolCalls)
         {
             if (toolCalls == null || toolCalls.Count == 0)
                 return null;

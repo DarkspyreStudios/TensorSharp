@@ -44,7 +44,7 @@ namespace TensorSharp.Server.Hosting
                             deleted, ttl.TotalHours, freedBytes / (1024 * 1024), _uploads.UsedBytes / (1024 * 1024));
                     }
                 }
-                while (await timer.WaitForNextTickAsync(stoppingToken));
+                while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false));
             }
             catch (OperationCanceledException)
             {

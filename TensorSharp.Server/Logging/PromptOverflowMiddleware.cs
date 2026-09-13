@@ -23,11 +23,11 @@ namespace TensorSharp.Server.Logging
         {
             try
             {
-                await next();
+                await next().ConfigureAwait(false);
             }
             catch (PromptContextOverflowException ex) when (!context.Response.HasStarted)
             {
-                await WriteBadRequestAsync(context, ex.Message);
+                await WriteBadRequestAsync(context, ex.Message).ConfigureAwait(false);
             }
         }
 
@@ -43,11 +43,11 @@ namespace TensorSharp.Server.Logging
                 await context.Response.WriteAsJsonAsync(new
                 {
                     error = new { message, type = "invalid_request_error", code = "context_length_exceeded" }
-                });
+                }).ConfigureAwait(false);
             }
             else
             {
-                await context.Response.WriteAsJsonAsync(new { error = message });
+                await context.Response.WriteAsJsonAsync(new { error = message }).ConfigureAwait(false);
             }
         }
     }

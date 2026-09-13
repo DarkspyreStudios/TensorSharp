@@ -41,9 +41,9 @@ namespace TensorSharp.Server.Endpoints
             // With the Web UI disabled, "/" always answers the liveness text.
             endpoints.MapGet("/", async ctx =>
             {
-                if (webUiEnabled && await TrySendIndexAsync(ctx, environment))
+                if (webUiEnabled && await TrySendIndexAsync(ctx, environment).ConfigureAwait(false))
                     return;
-                await Results.Ok(LivenessMessage).ExecuteAsync(ctx);
+                await Results.Ok(LivenessMessage).ExecuteAsync(ctx).ConfigureAwait(false);
             });
 
             // Liveness probes that want the plain response rather than the UI
@@ -52,7 +52,7 @@ namespace TensorSharp.Server.Endpoints
 
             endpoints.MapFallback(async ctx =>
             {
-                if (webUiEnabled && await TrySendIndexAsync(ctx, environment))
+                if (webUiEnabled && await TrySendIndexAsync(ctx, environment).ConfigureAwait(false))
                     return;
                 // With the UI enabled, a fallback hit means index.html is
                 // missing: the resolved web root goes to the server log for the
@@ -68,7 +68,7 @@ namespace TensorSharp.Server.Endpoints
                             environment.WebRootPath ?? "(null)");
                 }
                 ctx.Response.StatusCode = 404;
-                await ctx.Response.WriteAsync(webUiEnabled ? "index.html not found." : "Not found.");
+                await ctx.Response.WriteAsync(webUiEnabled ? "index.html not found." : "Not found.").ConfigureAwait(false);
             });
 
             return endpoints;
@@ -85,7 +85,7 @@ namespace TensorSharp.Server.Endpoints
                 return false;
 
             ctx.Response.ContentType = "text/html";
-            await ctx.Response.SendFileAsync(indexPath);
+            await ctx.Response.SendFileAsync(indexPath).ConfigureAwait(false);
             return true;
         }
     }
