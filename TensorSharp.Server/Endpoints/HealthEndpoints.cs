@@ -17,76 +17,75 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
-namespace TensorSharp.Server.Endpoints
+namespace TensorSharp.Server.Endpoints;
+
+/// <summary>
+/// Serves the Web UI's <c>index.html</c> at <c>GET /</c> so the bare
+/// host:port URL opens the chat UI, keeps the plain liveness response at
+/// <c>GET /health</c> (and at <c>GET /</c> for headless deployments that
+/// ship no <c>wwwroot</c> content), plus a SPA-style fallback that serves
+/// <c>index.html</c> for any path that doesn't match a route or static file.
+/// </summary>
+public static class HealthEndpoints
 {
-    /// <summary>
-    /// Serves the Web UI's <c>index.html</c> at <c>GET /</c> so the bare
-    /// host:port URL opens the chat UI, keeps the plain liveness response at
-    /// <c>GET /health</c> (and at <c>GET /</c> for headless deployments that
-    /// ship no <c>wwwroot</c> content), plus a SPA-style fallback that serves
-    /// <c>index.html</c> for any path that doesn't match a route or static file.
-    /// </summary>
-    public static class HealthEndpoints
+    private const string LivenessMessage = "TensorSharp.Server is running";
+
+    public static IEndpointRouteBuilder MapHealthEndpoints(
+        this IEndpointRouteBuilder endpoints, IWebHostEnvironment environment, bool webUiEnabled = true)
     {
-        private const string LivenessMessage = "TensorSharp.Server is running";
-
-        public static IEndpointRouteBuilder MapHealthEndpoints(
-            this IEndpointRouteBuilder endpoints, IWebHostEnvironment environment, bool webUiEnabled = true)
+        // UseDefaultFiles() cannot rewrite "/" to "/index.html" for us:
+        // WebApplication runs routing ahead of the static-file middleware,
+        // which then bails out because this endpoint is already selected.
+        // Sending the file from the endpoint itself is what makes a bare
+        // http://host:port/ open the UI instead of the liveness text.
+        // With the Web UI disabled, "/" always answers the liveness text.
+        endpoints.MapGet("/", async ctx =>
         {
-            // UseDefaultFiles() cannot rewrite "/" to "/index.html" for us:
-            // WebApplication runs routing ahead of the static-file middleware,
-            // which then bails out because this endpoint is already selected.
-            // Sending the file from the endpoint itself is what makes a bare
-            // http://host:port/ open the UI instead of the liveness text.
-            // With the Web UI disabled, "/" always answers the liveness text.
-            endpoints.MapGet("/", async ctx =>
-            {
-                if (webUiEnabled && await TrySendIndexAsync(ctx, environment).ConfigureAwait(false))
-                    return;
-                await Results.Ok(LivenessMessage).ExecuteAsync(ctx).ConfigureAwait(false);
-            });
+            if (webUiEnabled && await TrySendIndexAsync(ctx, environment).ConfigureAwait(false))
+                return;
+            await Results.Ok(LivenessMessage).ExecuteAsync(ctx).ConfigureAwait(false);
+        });
 
-            // Liveness probes that want the plain response rather than the UI
-            // keep a stable route now that "/" serves index.html.
-            endpoints.MapGet("/health", () => Results.Ok(LivenessMessage));
+        // Liveness probes that want the plain response rather than the UI
+        // keep a stable route now that "/" serves index.html.
+        endpoints.MapGet("/health", () => Results.Ok(LivenessMessage));
 
-            endpoints.MapFallback(async ctx =>
-            {
-                if (webUiEnabled && await TrySendIndexAsync(ctx, environment).ConfigureAwait(false))
-                    return;
-                // With the UI enabled, a fallback hit means index.html is
-                // missing: the resolved web root goes to the server log for the
-                // operator diagnosing a misdeployed wwwroot. The response stays
-                // generic either way so clients don't learn host filesystem
-                // paths.
-                if (webUiEnabled)
-                {
-                    ctx.RequestServices.GetService<ILoggerFactory>()
-                        ?.CreateLogger("TensorSharp.Server.Health")
-                        .LogWarning(LogEventIds.HttpRequestRejected,
-                            "Fallback route hit but index.html is missing. WebRootPath: {WebRootPath}",
-                            environment.WebRootPath ?? "(null)");
-                }
-                ctx.Response.StatusCode = 404;
-                await ctx.Response.WriteAsync(webUiEnabled ? "index.html not found." : "Not found.").ConfigureAwait(false);
-            });
-
-            return endpoints;
-        }
-
-        private static async Task<bool> TrySendIndexAsync(HttpContext ctx, IWebHostEnvironment environment)
+        endpoints.MapFallback(async ctx =>
         {
-            string root = environment.WebRootPath;
-            if (string.IsNullOrEmpty(root))
-                return false;
+            if (webUiEnabled && await TrySendIndexAsync(ctx, environment).ConfigureAwait(false))
+                return;
+            // With the UI enabled, a fallback hit means index.html is
+            // missing: the resolved web root goes to the server log for the
+            // operator diagnosing a misdeployed wwwroot. The response stays
+            // generic either way so clients don't learn host filesystem
+            // paths.
+            if (webUiEnabled)
+            {
+                ctx.RequestServices.GetService<ILoggerFactory>()
+                    ?.CreateLogger("TensorSharp.Server.Health")
+                    .LogWarning(LogEventIds.HttpRequestRejected,
+                        "Fallback route hit but index.html is missing. WebRootPath: {WebRootPath}",
+                        environment.WebRootPath ?? "(null)");
+            }
+            ctx.Response.StatusCode = 404;
+            await ctx.Response.WriteAsync(webUiEnabled ? "index.html not found." : "Not found.").ConfigureAwait(false);
+        });
 
-            var indexPath = Path.Combine(root, "index.html");
-            if (!File.Exists(indexPath))
-                return false;
+        return endpoints;
+    }
 
-            ctx.Response.ContentType = "text/html";
-            await ctx.Response.SendFileAsync(indexPath).ConfigureAwait(false);
-            return true;
-        }
+    private static async Task<bool> TrySendIndexAsync(HttpContext ctx, IWebHostEnvironment environment)
+    {
+        string root = environment.WebRootPath;
+        if (string.IsNullOrEmpty(root))
+            return false;
+
+        var indexPath = Path.Combine(root, "index.html");
+        if (!File.Exists(indexPath))
+            return false;
+
+        ctx.Response.ContentType = "text/html";
+        await ctx.Response.SendFileAsync(indexPath).ConfigureAwait(false);
+        return true;
     }
 }

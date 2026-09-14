@@ -13,28 +13,27 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 
-namespace TensorSharp.Server.Hosting
-{
-    /// <summary>
-    /// The ASP.NET Core half of <see cref="UploadContentPolicy"/>: mounts the upload
-    /// directory at <c>/uploads</c> with the policy's content-type table. Kept apart
-    /// from the table itself because the table is shared with hosts that have no
-    /// static-file middleware at all (TensorSharp.Chat carries it), while
-    /// <see cref="StaticFileOptions"/> only exists here.
-    /// </summary>
-    public static class UploadStaticFiles
-    {
-        internal static IContentTypeProvider BuildServeContentTypes() =>
-            new FileExtensionContentTypeProvider(UploadContentPolicy.ServeContentTypes.ToDictionary(
-                kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase));
+namespace TensorSharp.Server.Hosting;
 
-        public static StaticFileOptions BuildStaticFileOptions(string uploadDirectory) => new()
-        {
-            FileProvider = new PhysicalFileProvider(uploadDirectory),
-            RequestPath = "/uploads",
-            ContentTypeProvider = BuildServeContentTypes(),
-            OnPrepareResponse = ctx =>
-                ctx.Context.Response.Headers["X-Content-Type-Options"] = "nosniff",
-        };
-    }
+/// <summary>
+/// The ASP.NET Core half of <see cref="UploadContentPolicy"/>: mounts the upload
+/// directory at <c>/uploads</c> with the policy's content-type table. Kept apart
+/// from the table itself because the table is shared with hosts that have no
+/// static-file middleware at all (TensorSharp.Chat carries it), while
+/// <see cref="StaticFileOptions"/> only exists here.
+/// </summary>
+public static class UploadStaticFiles
+{
+    internal static IContentTypeProvider BuildServeContentTypes() =>
+        new FileExtensionContentTypeProvider(UploadContentPolicy.ServeContentTypes.ToDictionary(
+            kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase));
+
+    public static StaticFileOptions BuildStaticFileOptions(string uploadDirectory) => new()
+    {
+        FileProvider = new PhysicalFileProvider(uploadDirectory),
+        RequestPath = "/uploads",
+        ContentTypeProvider = BuildServeContentTypes(),
+        OnPrepareResponse = ctx =>
+            ctx.Context.Response.Headers["X-Content-Type-Options"] = "nosniff",
+    };
 }

@@ -13,23 +13,22 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using TensorSharp.Server.ProtocolAdapters;
 
-namespace TensorSharp.Server.Endpoints
+namespace TensorSharp.Server.Endpoints;
+
+/// <summary>
+/// Routes for the Ollama-compatible HTTP surface. Maps each HTTP path onto
+/// an instance method on <see cref="OllamaAdapter"/>; behaviour lives in
+/// the adapter so the routing table stays trivially auditable.
+/// </summary>
+public static class OllamaEndpoints
 {
-    /// <summary>
-    /// Routes for the Ollama-compatible HTTP surface. Maps each HTTP path onto
-    /// an instance method on <see cref="OllamaAdapter"/>; behaviour lives in
-    /// the adapter so the routing table stays trivially auditable.
-    /// </summary>
-    public static class OllamaEndpoints
+    public static IEndpointRouteBuilder MapOllamaEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        public static IEndpointRouteBuilder MapOllamaEndpoints(this IEndpointRouteBuilder endpoints)
-        {
-            endpoints.MapGet("/api/version", () => Results.Json(new { version = "0.1.0" }));
-            endpoints.MapGet("/api/tags", (OllamaAdapter adapter) => adapter.GetTags());
-            endpoints.MapPost("/api/show", (HttpContext ctx, OllamaAdapter adapter) => adapter.ShowAsync(ctx));
-            endpoints.MapPost("/api/generate", (HttpContext ctx, OllamaAdapter adapter) => adapter.GenerateAsync(ctx));
-            endpoints.MapPost("/api/chat/ollama", (HttpContext ctx, OllamaAdapter adapter) => adapter.ChatAsync(ctx));
-            return endpoints;
-        }
+        endpoints.MapGet("/api/version", () => Results.Json(new { version = "0.1.0" }));
+        endpoints.MapGet("/api/tags", (OllamaAdapter adapter) => adapter.GetTags());
+        endpoints.MapPost("/api/show", (HttpContext ctx, OllamaAdapter adapter) => adapter.ShowAsync(ctx));
+        endpoints.MapPost("/api/generate", (HttpContext ctx, OllamaAdapter adapter) => adapter.GenerateAsync(ctx));
+        endpoints.MapPost("/api/chat/ollama", (HttpContext ctx, OllamaAdapter adapter) => adapter.ChatAsync(ctx));
+        return endpoints;
     }
 }
