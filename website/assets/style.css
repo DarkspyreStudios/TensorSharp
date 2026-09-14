@@ -276,9 +276,10 @@ td code, th code { white-space: nowrap; }
 }
 html.dark .book-kicker { color: #67e8f9; }
 .book-spotlight h2,
-.book-hero h1 { border: 0; padding: 0; margin: 0 0 10px; }
+.book-hero h1,
+.book-hero h2 { border: 0; padding: 0; margin: 0 0 10px; }
 .book-spotlight h2 { font-size: 1.65rem; }
-.book-hero h1 { font-size: 2.25rem; }
+.book-hero h1, .book-hero h2 { font-size: 2.25rem; }
 .book-subtitle { color: var(--text-soft); font-size: 1.08rem; line-height: 1.5; }
 .book-meta { color: var(--text-muted); font-size: .86rem; }
 .book-meta strong { color: var(--text-soft); }
@@ -296,7 +297,7 @@ html.dark .book-kicker { color: #67e8f9; }
   margin: 34px 0 10px; padding: 24px; text-align: center; border: 1px solid color-mix(in srgb, #0891b2 36%, var(--border));
   border-radius: 14px; background: linear-gradient(135deg, color-mix(in srgb, #06b6d4 10%, var(--surface)), var(--surface));
 }
-.book-cta-panel h2 { border: 0; margin: 0 0 8px; padding: 0; }
+.book-cta-panel h2, .book-cta-panel h3 { border: 0; margin: 0 0 8px; padding: 0; }
 .book-cta-panel p { max-width: 650px; margin: 0 auto 16px; color: var(--text-soft); }
 .book-cta-panel .btn-row { justify-content: center; margin-bottom: 0; }
 
@@ -307,7 +308,7 @@ html.dark .book-kicker { color: #67e8f9; }
 }
 a.card:hover { border-color: var(--accent); text-decoration: none; transform: translateY(-2px); transition: .15s; }
 .card .ic { font-size: 1.5rem; margin-bottom: 8px; }
-.card h3 { margin: 0 0 6px; font-size: 1.05rem; }
+.card h3, .book-entry .card h4 { margin: 0 0 6px; font-size: 1.05rem; }
 .card p { margin: 0; color: var(--text-muted); font-size: .9rem; }
 
 .callout {
@@ -406,5 +407,5 @@ a.card:hover { border-color: var(--accent); text-decoration: none; transform: tr
   .book-spotlight .book-cover-link { max-width: 160px; }
   .book-hero .book-cover-link { max-width: 210px; }
   .book-section-grid { grid-template-columns: 1fr; }
-  .book-spotlight h2, .book-hero h1 { font-size: 1.7rem; }
+  .book-spotlight h2, .book-hero h1, .book-hero h2 { font-size: 1.7rem; }
 }

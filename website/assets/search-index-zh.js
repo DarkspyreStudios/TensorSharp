@@ -6,7 +6,8 @@ window.SEARCH_INDEX_ZH = [
   { t: "其他后端与多模态", p: "首页", u: "index.html#quickstart-e4b", s: "在 ggml_metal、ggml_vulkan 或 ggml_cpu 上运行 Gemma 4 E4B，并为图像/视频/音频添加 mmproj 投影器。", k: "gemma4 gemma 4 e4b q8 原生 ggml metal vulkan cpu mmproj 投影器 多模态" },
   { t: "TensorSharp 适合谁", p: "首页", u: "index.html#audience", s: "面向开发者、管理者、CTO、学生与采用本地大模型推理的企业的价值。", k: "audience 受众 商业价值 高管 销售 市场 学生" },
 
-  { t: "From Tensors to Tokens — TensorSharp 配套图书", p: "配套图书", u: "book.html", s: "使用 TensorSharp 与 Gemma 4 E4B，在 C#/.NET 中从零构建多模态大模型推理引擎。", k: "book 图书 纸质书 amazon zhongkai fu 阅读 购买 学习 指南 教程" },
+  { t: "Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent", p: "配套图书", u: "book.html#building-inference-engines", s: "使用 TensorSharp 与 TensorAgent，围绕 Qwen 稠密模型与 MoE 模型，从零构建推理引擎和智能体运行时。", k: "book 图书 amazon zhongkai fu 阅读 购买 学习 指南 教程 qwen dense moe tensoragent 稠密 混合专家 智能体" },
+  { t: "From Tensors to Tokens — TensorSharp 配套图书", p: "配套图书", u: "book.html#why-read", s: "使用 TensorSharp 与 Gemma 4 E4B，在 C#/.NET 中从零构建多模态大模型推理引擎。", k: "book 图书 纸质书 amazon zhongkai fu 阅读 购买 学习 指南 教程" },
   { t: "本书内容", p: "配套图书", u: "book.html#inside", s: "张量存储、GGUF、量化、tokenization、Transformer 执行、多模态投影、采样、流式输出与生产级优化。", k: "章节 主题 内容 tensor stride allocator operator cpu accelerator paged kv 连续批处理 投机解码" },
   { t: "配合源码阅读", p: "配套图书", u: "book.html#read-with-repo", s: "将本书的连贯讲解与 TensorSharp 源码、快速开始、模型卡片、API 和性能文档配合使用。", k: "companion 配套 源码 github 文档 gemma4 实现" },
 

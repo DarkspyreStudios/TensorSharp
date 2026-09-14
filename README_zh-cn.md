@@ -8,17 +8,17 @@
 
 **面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 Qwen-Image-Edit 图像编辑、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。一个纯 .NET 引擎，在相同 GGUF 文件与相同 GPU 上与手工优化的 C++ `llama.cpp` 互有胜负。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills，以及用于沙箱化文件和 shell 操作的、有界进程内“模型→工具”循环。
 
-## 《From Tensors to Tokens》—— TensorSharp 实战书籍
+## 《Building Inference Engines and Agentic Runtimes from Scratch》
 
 <p align="center">
-  <a href="https://www.amazon.com/dp/B0H9P44QZZ">
-    <img src="website/assets/from-tensors-to-tokens-cover.jpg" alt="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B" width="220">
+  <a href="https://www.amazon.com/dp/B0HJQ4VQ31">
+    <img src="website/assets/building-inference-engines-cover.jpg" alt="Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent" width="220">
   </a>
 </p>
 
-Zhongkai Fu 所著的 **[From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B](https://www.amazon.com/dp/B0H9P44QZZ)** 将本仓库串成一条端到端的学习路径。全书以 Gemma 4 E4B 为示例，连接张量基础、模型执行、多模态输入，以及一个可运行 LLM 推理引擎的应用接口。
+**[Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent](https://www.amazon.com/dp/B0HJQ4VQ31)** 以 Qwen 稠密模型与混合专家（MoE）模型为例，介绍如何使用 TensorSharp 和 TensorAgent 从零构建推理引擎与智能体运行时，将模型架构、推理执行和智能体应用联系起来。建议配合源码阅读，理解这些部分如何协作。
 
-**[查看书籍介绍与仓库伴读路线](docs/BOOK_zh-cn.md)** · **[在 Amazon 购买平装本](https://www.amazon.com/dp/B0H9P44QZZ)**
+**[查看书籍介绍与仓库伴读路线](docs/BOOK_zh-cn.md)** · **[在 Amazon 购买本书](https://www.amazon.com/dp/B0HJQ4VQ31)**
 
 ## 亮点功能
 
@@ -228,7 +228,7 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 
 | 文档 | 内容 |
 |---|---|
-| [书籍指南：《From Tensors to Tokens》](docs/BOOK_zh-cn.md) | 从张量基础走向 Gemma 4 E4B 多模态推理引擎的连贯路线，含出版信息与配套仓库阅读指引 |
+| [书籍指南：《Building Inference Engines and Agentic Runtimes from Scratch》](docs/BOOK_zh-cn.md) | 以 TensorSharp 和 TensorAgent 讲解 Qwen 稠密与 MoE 模型，含书籍介绍、Amazon 购买链接与仓库伴读指引 |
 | [模型下载](MODEL_DOWNLOADS_zh-cn.md) | 各模型 `huggingface-cli` 下载 + 运行速查（量化档位、投影器、伴随文件） |
 | [使用方法](USAGE_zh-cn.md) | 完整 CLI 参考（选项、交互式 REPL、JSONL 批处理）、服务端托管、日志、HTTP API 示例、后端与环境变量矩阵 |
 | [功能特性](FEATURES_zh-cn.md) | 连续批处理、投机解码、工具调用、思维链、多模态、MoE、KV 编解码等深入说明 |
