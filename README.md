@@ -8,17 +8,17 @@
 
 **Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus Qwen-Image-Edit image editing and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. A pure-.NET engine that trades wins with the hand-tuned C++ `llama.cpp` on identical GGUF files and the same GPU. The optional `TensorSharp.AgentHost` layer adds Agent Skills and a bounded, in-process model-to-tool loop for sandboxed file and shell work.
 
-## From Tensors to Tokens — the TensorSharp book
+## Building Inference Engines and Agentic Runtimes from Scratch
 
 <p align="center">
-  <a href="https://www.amazon.com/dp/B0H9P44QZZ">
-    <img src="website/assets/from-tensors-to-tokens-cover.jpg" alt="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B" width="220">
+  <a href="https://www.amazon.com/dp/B0HJQ4VQ31">
+    <img src="website/assets/building-inference-engines-cover.jpg" alt="Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent" width="220">
   </a>
 </p>
 
-**[From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B](https://www.amazon.com/dp/B0H9P44QZZ)** by Zhongkai Fu turns this repository into a guided, end-to-end learning journey. It uses Gemma 4 E4B to connect tensor fundamentals, model execution, multimodal inputs, and the application surfaces of a working LLM inference engine.
+**[Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent](https://www.amazon.com/dp/B0HJQ4VQ31)** introduces building inference engines and agentic runtimes from scratch with TensorSharp and TensorAgent. Using Qwen dense and mixture-of-experts (MoE) models, it connects model architecture, inference execution, and agentic applications. Read it alongside the source to explore how the pieces fit together.
 
-**[Explore the book and its repository reading path](docs/BOOK.md)** · **[Buy the paperback on Amazon](https://www.amazon.com/dp/B0H9P44QZZ)**
+**[Explore the books and their repository reading paths](docs/BOOK.md)** · **[Buy on Amazon](https://www.amazon.com/dp/B0HJQ4VQ31)**
 
 ## Highlights
 
@@ -235,7 +235,7 @@ New here? The sections above are all you need to get running. Everything else is
 
 | Doc | What's inside |
 |---|---|
-| [Book guide: From Tensors to Tokens](docs/BOOK.md) | A guided path from tensor fundamentals to a multimodal Gemma 4 E4B inference engine, with publication details and links into the companion repository |
+| [Book guide: Building Inference Engines and Agentic Runtimes from Scratch](docs/BOOK.md) | Qwen dense and MoE models with TensorSharp and TensorAgent, plus book introductions, Amazon purchase links, and companion repository guides |
 | [Model Downloads](MODEL_DOWNLOADS.md) | Per-model `huggingface-cli` download + run quick reference (quant tiers, projectors, companions) |
 | [Usage](USAGE.md) | Full CLI reference (options, interactive REPL, JSONL batch), server hosting, logging, HTTP API examples, backends, and the env-var matrix |
 | [Features](FEATURES.md) | Deep dives on continuous batching, speculative decoding, tool calling, thinking mode, multimodal, MoE, KV codecs, and more |

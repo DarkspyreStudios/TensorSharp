@@ -8,7 +8,7 @@
       { page: "index",    label: { en: "Home", zh: "首页" } },
       { page: "overview", label: { en: "Overview & Architecture", zh: "概览与架构" } },
       { page: "features", label: { en: "Features", zh: "功能特性" } },
-      { page: "book",     label: { en: "TensorSharp Book", zh: "TensorSharp 配套图书" } },
+      { page: "book",     label: { en: "TensorSharp Books", zh: "TensorSharp 配套图书" } },
     ]},
     { group: { en: "Get started", zh: "快速上手" }, items: [
       { page: "getting-started", label: { en: "Getting Started", zh: "快速开始" } },
@@ -67,7 +67,7 @@
   };
 
   var REPO = "https://github.com/zhongkaifu/TensorSharp";
-  var BOOK = "https://www.amazon.com/dp/B0H9P44QZZ";
+  var BOOK = "https://www.amazon.com/dp/B0HJQ4VQ31";
 
   function el(tag, attrs, html) {
     var e = document.createElement(tag);
@@ -204,9 +204,8 @@
 
     var links = toc.querySelectorAll("a[data-target]");
     var spy = function () {
-      var pos = window.scrollY + 120;
       var current = null;
-      heads.forEach(function (h) { if (h.offsetTop <= pos) current = h.id; });
+      heads.forEach(function (h) { if (h.getBoundingClientRect().top <= 120) current = h.id; });
       links.forEach(function (l) { l.classList.toggle("active", l.dataset.target === current); });
     };
     window.addEventListener("scroll", spy, { passive: true });
