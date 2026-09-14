@@ -13,7 +13,7 @@ public sealed partial class OpenAIChatAdapter
         => ChatProtocolRegistry.For(architecture)?.Id == "deepseek41";
 
     internal static DeepSeek41ToolGrammar? PrepareDeepSeek41ToolGrammar(JsonElement body,
-        List<ToolFunction> clientTools, List<ToolFunction> effectiveTools, StructuredOutputFormat responseFormat)
+        List<ToolFunction>? clientTools, List<ToolFunction>? effectiveTools, StructuredOutputFormat? responseFormat)
     {
         var choice = DeepSeek41ToolChoice.Auto;
         string? name = null;
@@ -82,7 +82,7 @@ public sealed partial class OpenAIChatAdapter
     }
 
     private SamplingConfig? WithDeepSeek41ToolGrammar(SamplingConfig? config,
-        DeepSeek41ToolGrammar plan, bool thinking)
+        DeepSeek41ToolGrammar? plan, bool thinking)
     {
         if (plan == null) return config;
         var tokenizer = _svc.Model?.Tokenizer

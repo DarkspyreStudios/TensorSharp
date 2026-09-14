@@ -21,7 +21,7 @@ namespace TensorSharp.Server.ResponseSerializers
     /// </summary>
     internal static class OllamaResponseFactory
     {
-        public static object QueueGenerateChunk(string model, int position, int pending) => new
+        public static object QueueGenerateChunk(string? model, int position, int pending) => new
         {
             model,
             created_at = TimestampNow(),
@@ -63,7 +63,7 @@ namespace TensorSharp.Server.ResponseSerializers
                 prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
             };
 
-        public static object GenerateError(string model, string error) => new
+        public static object GenerateError(string? model, string error) => new
         {
             model,
             created_at = TimestampNow(),
@@ -108,7 +108,7 @@ namespace TensorSharp.Server.ResponseSerializers
             queue_pending = pending,
         };
 
-        public static object ChatRawTokenChunk(string model, string piece) => new
+        public static object ChatRawTokenChunk(string model, string? piece) => new
         {
             model,
             created_at = TimestampNow(),
@@ -151,7 +151,7 @@ namespace TensorSharp.Server.ResponseSerializers
         public static object ChatParsedFinalChunk(
             string model,
             string doneReason,
-            IReadOnlyList<ToolCall> collectedToolCalls,
+            IReadOnlyList<ToolCall>? collectedToolCalls,
             int promptTokens,
             int evalTokens,
             int kvCacheReusedTokens,
@@ -217,7 +217,7 @@ namespace TensorSharp.Server.ResponseSerializers
                 prompt_cache_hit_ratio = ComputeRatio(kvCacheReusedTokens, promptTokens),
             };
 
-        public static object ChatNonStreamingMessage(string content, string thinking, IReadOnlyList<ToolCall> toolCalls) => new
+        public static object ChatNonStreamingMessage(string content, string? thinking, IReadOnlyList<ToolCall>? toolCalls) => new
         {
             role = "assistant",
             content = content ?? "",
@@ -231,7 +231,7 @@ namespace TensorSharp.Server.ResponseSerializers
             content,
         };
 
-        private static IReadOnlyList<object>? ConvertToolCalls(IReadOnlyList<ToolCall> toolCalls)
+        private static IReadOnlyList<object>? ConvertToolCalls(IReadOnlyList<ToolCall>? toolCalls)
         {
             if (toolCalls == null || toolCalls.Count == 0)
                 return null;

@@ -241,12 +241,12 @@ public sealed partial class OpenAIChatAdapter
 
         if (stream)
         {
-            await StreamCompletionAsync(ctx, requestId, modelName, inferenceMessages, maxTokens,
+            await StreamCompletionAsync(ctx, requestId, modelName!, inferenceMessages, maxTokens,
                 samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger, toolGrammar).ConfigureAwait(false);
         }
         else
         {
-            await CompleteSyncAsync(ctx, requestId, modelName, inferenceMessages, maxTokens,
+            await CompleteSyncAsync(ctx, requestId, modelName!, inferenceMessages, maxTokens,
                 samplingConfig, effectiveTools, openaiThink, responseFormat, ticket, skillPlan, openaiLogger, toolGrammar).ConfigureAwait(false);
         }
     }
@@ -257,7 +257,7 @@ public sealed partial class OpenAIChatAdapter
         HttpContext ctx,
         StructuredOutputFormat responseFormat,
         bool openaiThink,
-        List<ToolFunction> openaiTools,
+        List<ToolFunction>? openaiTools,
         string architecture)
     {
         bool delayedThinkingGrammar = !string.IsNullOrEmpty(
@@ -453,13 +453,13 @@ public sealed partial class OpenAIChatAdapter
         List<ChatMessage> inferenceMessages,
         int maxTokens,
         SamplingConfig? samplingConfig,
-        List<ToolFunction> openaiTools,
+        List<ToolFunction>? openaiTools,
         bool openaiThink,
-        StructuredOutputFormat responseFormat,
+        StructuredOutputFormat? responseFormat,
         QueueTicket ticket,
-        SkillRequestPlan skillPlan,
+        SkillRequestPlan? skillPlan,
         ILogger skillLogger,
-        TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar toolGrammar)
+        TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar? toolGrammar)
     {
         // Only the strict json_schema path must buffer the whole response so it
         // can be schema-normalized before anything is sent to the client. Plain
@@ -689,11 +689,11 @@ public sealed partial class OpenAIChatAdapter
     private async Task<bool> FlushStructuredCompletionAsync(
         HttpContext ctx,
         string requestId,
-        StructuredOutputFormat responseFormat,
+        StructuredOutputFormat? responseFormat,
         string rawContent,
         bool useStreamParser,
         bool openaiThink,
-        List<ToolFunction> openaiTools,
+        List<ToolFunction>? openaiTools,
         ChatStreamUpdate update)
     {
         if (useStreamParser)
@@ -751,13 +751,13 @@ public sealed partial class OpenAIChatAdapter
         List<ChatMessage> inferenceMessages,
         int maxTokens,
         SamplingConfig? samplingConfig,
-        List<ToolFunction> openaiTools,
+        List<ToolFunction>? openaiTools,
         bool openaiThink,
-        StructuredOutputFormat responseFormat,
+        StructuredOutputFormat? responseFormat,
         QueueTicket ticket,
-        SkillRequestPlan skillPlan,
+        SkillRequestPlan? skillPlan,
         ILogger skillLogger,
-        TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar toolGrammar)
+        Runtime.Grammar.DeepSeek41ToolGrammar? toolGrammar)
     {
         await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
 

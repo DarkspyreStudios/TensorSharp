@@ -210,13 +210,13 @@ public sealed class OpenAIResponsesAdapter
 
         if (stream)
         {
-            await StreamResponseAsync(ctx, requestId, modelName, instructions, maxOutputTokens,
+            await StreamResponseAsync(ctx, requestId, modelName!, instructions, maxOutputTokens,
                 inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store, ticket,
                 skillPlan, logger).ConfigureAwait(false);
         }
         else
         {
-            await CompleteSyncAsync(ctx, requestId, modelName, instructions, maxOutputTokens,
+            await CompleteSyncAsync(ctx, requestId, modelName!, instructions, maxOutputTokens,
                 inferenceMessages, samplingConfig, effectiveTools, enableThinking, responseFormat, store, ticket,
                 skillPlan, logger).ConfigureAwait(false);
         }
@@ -240,7 +240,7 @@ public sealed class OpenAIResponsesAdapter
         HttpContext ctx,
         StructuredOutputFormat responseFormat,
         bool enableThinking,
-        List<ToolFunction> tools)
+        List<ToolFunction>? tools)
     {
         if (enableThinking)
         {
@@ -270,16 +270,16 @@ public sealed class OpenAIResponsesAdapter
         HttpContext ctx,
         string requestId,
         string modelName,
-        string instructions,
+        string? instructions,
         int maxOutputTokens,
         List<ChatMessage> inferenceMessages,
         SamplingConfig samplingConfig,
-        List<ToolFunction> tools,
+        List<ToolFunction>? tools,
         bool enableThinking,
-        StructuredOutputFormat responseFormat,
+        StructuredOutputFormat? responseFormat,
         bool store,
         QueueTicket ticket,
-        SkillRequestPlan skillPlan,
+        SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
         await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
@@ -367,16 +367,16 @@ public sealed class OpenAIResponsesAdapter
         HttpContext ctx,
         string requestId,
         string modelName,
-        string instructions,
+        string? instructions,
         int maxOutputTokens,
         List<ChatMessage> inferenceMessages,
         SamplingConfig samplingConfig,
-        List<ToolFunction> tools,
+        List<ToolFunction>? tools,
         bool enableThinking,
-        StructuredOutputFormat responseFormat,
+        StructuredOutputFormat? responseFormat,
         bool store,
         QueueTicket ticket,
-        SkillRequestPlan skillPlan,
+        SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
         await ticket.WaitUntilReadyAsync().ConfigureAwait(false);
@@ -549,7 +549,7 @@ public sealed class OpenAIResponsesAdapter
 
     // ---- Errors ------------------------------------------------------------
 
-    private static Task WriteErrorAsync(HttpContext ctx, int statusCode, string message, object? details = null, string type = "invalid_request_error")
+    private static Task WriteErrorAsync(HttpContext ctx, int statusCode, string? message, object? details = null, string type = "invalid_request_error")
     {
         ctx.Response.StatusCode = statusCode;
         return ctx.Response.WriteAsJsonAsync(new { error = new { message, type, details } }, JsonOptions.IgnoreNulls);

@@ -19,7 +19,7 @@ namespace TensorSharp.Runtime
     public class ChatMessage
     {
         public string Role { get; set; } = string.Empty;
-        public string Content { get; set; } = string.Empty;
+        public string? Content { get; set; } = string.Empty;
         /// <summary>
         /// Optional list of image file paths for multimodal messages.
         /// </summary>

@@ -83,7 +83,7 @@ namespace TensorSharp.Runtime.Logging
         /// with control characters replaced and a length cap to prevent
         /// runaway log volume from large prompts/responses.
         /// </summary>
-        public static string SanitizeForLog(string value, int maxLength = 240)
+        public static string SanitizeForLog(string? value, int maxLength = 240)
         {
             if (string.IsNullOrEmpty(value))
                 return string.Empty;

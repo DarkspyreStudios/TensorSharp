@@ -275,7 +275,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => true;
         public bool AlwaysRequired => false;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools)
+        public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
             _buffer.Clear();
             _callIndex = 0;
@@ -666,7 +666,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => true;
         public bool AlwaysRequired => false;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools) => _inner.Init(false, tools);
+        public void Init(bool enableThinking, List<ToolFunction>? tools) => _inner.Init(false, tools);
 
         public ParsedOutput Add(string text, bool done) => _inner.Add(text, done);
     }
@@ -695,7 +695,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => true;
         public bool AlwaysRequired => true;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools)
+        public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
             _buffer.Clear();
             _thinkingEnabled = enableThinking;
@@ -1036,7 +1036,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => true;
         public bool AlwaysRequired => true;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools)
+        public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
             _buffer.Clear();
             _toolArgs.Clear();
@@ -1328,7 +1328,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => false;
         public bool AlwaysRequired => false;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools) { }
+        public void Init(bool enableThinking, List<ToolFunction>? tools) { }
 
         public ParsedOutput Add(string text, bool done)
         {
@@ -1387,7 +1387,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => true;
         public bool AlwaysRequired => true;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools)
+        public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
             _buffer.Clear();
             _thinkingEnabled = enableThinking;
@@ -1678,7 +1678,7 @@ namespace TensorSharp.Runtime
         // skipping it would leak "<|start|>assistant to=self<|message|>" verbatim.
         public bool AlwaysRequired => true;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools)
+        public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
             _buffer.Clear();
             _toolArgs.Clear();
@@ -2012,7 +2012,7 @@ namespace TensorSharp.Runtime
         public bool HasToolSupport => true;
         public bool AlwaysRequired => true;
 
-        public void Init(bool enableThinking, List<ToolFunction> tools)
+        public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
             _buffer.Clear();
             _thinkingEnabled = enableThinking;

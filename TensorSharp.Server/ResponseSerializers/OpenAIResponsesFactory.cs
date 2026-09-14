@@ -62,7 +62,7 @@ namespace TensorSharp.Server.ResponseSerializers
             string responseId,
             string model,
             string status,
-            string instructions,
+            string? instructions,
             int? maxOutputTokens,
             IReadOnlyList<object> output,
             bool store,
@@ -174,7 +174,7 @@ namespace TensorSharp.Server.ResponseSerializers
             response,
         };
 
-        public static object Failed(string responseId, string model, string errorMessage) => new
+        public static object Failed(string responseId, string model, string? errorMessage) => new
         {
             type = "response.failed",
             response = new

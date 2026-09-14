@@ -187,8 +187,8 @@ internal static class OpenAIResponseFactory
 
     public static object ParsedAssistantMessage(
         string content,
-        string thinking,
-        IReadOnlyList<ToolCall> toolCalls)
+        string? thinking,
+        IReadOnlyList<ToolCall>? toolCalls)
     {
         return new
         {
@@ -211,7 +211,7 @@ internal static class OpenAIResponseFactory
         content = normalizedContent,
     };
 
-    private static IReadOnlyList<object>? BuildToolCalls(IReadOnlyList<ToolCall> toolCalls)
+    private static IReadOnlyList<object>? BuildToolCalls(IReadOnlyList<ToolCall>? toolCalls)
     {
         if (toolCalls == null || toolCalls.Count == 0)
             return null;

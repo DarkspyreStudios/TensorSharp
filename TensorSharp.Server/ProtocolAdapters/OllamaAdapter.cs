@@ -153,7 +153,7 @@ public sealed class OllamaAdapter
                 ? SamplingConfigParser.ReadRequestedMaxTokens(opts, "num_predict")
                 : null);
 
-        List<string> imagePaths;
+        List<string>? imagePaths;
         try
         {
             imagePaths = ChatMessageParser.DecodeBase64Images(body, _uploads);
@@ -177,19 +177,19 @@ public sealed class OllamaAdapter
 
         if (stream)
         {
-            await StreamGenerateAsync(ctx, modelName, prompt, imagePaths, maxTokens, samplingConfig, ticket).ConfigureAwait(false);
+            await StreamGenerateAsync(ctx, modelName, prompt!, imagePaths, maxTokens, samplingConfig, ticket).ConfigureAwait(false);
         }
         else
         {
-            await CompleteGenerateAsync(ctx, modelName, prompt, imagePaths, maxTokens, samplingConfig, ticket).ConfigureAwait(false);
+            await CompleteGenerateAsync(ctx, modelName, prompt!, imagePaths, maxTokens, samplingConfig, ticket).ConfigureAwait(false);
         }
     }
 
     private async Task StreamGenerateAsync(
         HttpContext ctx,
-        string modelName,
+        string? modelName,
         string prompt,
-        List<string> imagePaths,
+        List<string>? imagePaths,
         int maxTokens,
         SamplingConfig samplingConfig,
         QueueTicket ticket)
@@ -231,9 +231,9 @@ public sealed class OllamaAdapter
 
     private async Task CompleteGenerateAsync(
         HttpContext ctx,
-        string modelName,
+        string? modelName,
         string prompt,
-        List<string> imagePaths,
+        List<string>? imagePaths,
         int maxTokens,
         SamplingConfig samplingConfig,
         QueueTicket ticket)
@@ -384,11 +384,11 @@ public sealed class OllamaAdapter
 
         if (stream)
         {
-            await StreamChatAsync(ctx, modelName, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger).ConfigureAwait(false);
+            await StreamChatAsync(ctx, modelName!, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger).ConfigureAwait(false);
         }
         else
         {
-            await CompleteChatAsync(ctx, modelName, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger).ConfigureAwait(false);
+            await CompleteChatAsync(ctx, modelName!, messages, maxTokens, samplingConfig, ollamaTools2, ollamaThink, ticket, skillPlan, ollamaLogger).ConfigureAwait(false);
         }
     }
 
@@ -401,7 +401,7 @@ public sealed class OllamaAdapter
         List<ToolFunction>? tools,
         bool enableThinking,
         QueueTicket ticket,
-        SkillRequestPlan skillPlan,
+        SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
         NdJsonWriter.ApplyHeaders(ctx.Response);
@@ -456,13 +456,13 @@ public sealed class OllamaAdapter
                 }
 
                 object? resp = useParser
-                    ? BuildParsedChatChunk(_svc.LoadedModelName, parser, update.Piece, ref collectedToolCalls, out bool emit)
+                    ? BuildParsedChatChunk(_svc.LoadedModelName, parser, update.Piece!, ref collectedToolCalls, out bool emit)
                     : OllamaResponseFactory.ChatRawTokenChunk(_svc.LoadedModelName, update.Piece);
 
                 if (useParser && resp == null)
                     continue;
 
-                await NdJsonWriter.WriteLineAsync(ctx.Response, resp, ctx.RequestAborted, JsonOptions.IgnoreNulls).ConfigureAwait(false);
+                await NdJsonWriter.WriteLineAsync(ctx.Response, resp!, ctx.RequestAborted, JsonOptions.IgnoreNulls).ConfigureAwait(false);
             }
             else
             {
@@ -539,10 +539,10 @@ public sealed class OllamaAdapter
         List<ChatMessage> messages,
         int maxTokens,
         SamplingConfig samplingConfig,
-        List<ToolFunction> tools,
+        List<ToolFunction>? tools,
         bool enableThinking,
         QueueTicket ticket,
-        SkillRequestPlan skillPlan,
+        SkillRequestPlan? skillPlan,
         ILogger skillLogger)
     {
         await ticket.WaitUntilReadyAsync().ConfigureAwait(false);

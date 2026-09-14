@@ -203,7 +203,7 @@ namespace TensorSharp.Runtime
 
     public interface IOutputProtocolParser
     {
-        void Init(bool enableThinking, List<ToolFunction> tools);
+        void Init(bool enableThinking, List<ToolFunction>? tools);
         ParsedOutput Add(string text, bool done);
         bool HasThinkingSupport { get; }
         bool HasToolSupport { get; }

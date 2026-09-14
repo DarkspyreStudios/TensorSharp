@@ -630,7 +630,7 @@ namespace TensorSharp.Server.RequestParsers
         /// <c>/api/generate</c>. Returns null when no images are present so the
         /// downstream code path can short-circuit cleanly.
         /// </summary>
-        public static List<string> DecodeBase64Images(JsonElement body, UploadStoragePolicy uploads)
+        public static List<string>? DecodeBase64Images(JsonElement body, UploadStoragePolicy uploads)
         {
             if (!body.TryGetProperty("images", out var imgs) || imgs.ValueKind != JsonValueKind.Array)
                 return null;

@@ -27,8 +27,8 @@ namespace TensorSharp.Server.Hosting
         /// this server was launched with and return its absolute path.
         /// </summary>
         public static bool TryResolveHostedModelRequest(
-            string requestedModel,
-            string hostedModelPath,
+            string? requestedModel,
+            string? hostedModelPath,
             out string resolvedModelPath,
             out string error)
         {
