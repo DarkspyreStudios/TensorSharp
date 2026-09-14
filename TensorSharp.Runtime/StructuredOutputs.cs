@@ -45,14 +45,14 @@ namespace TensorSharp.Runtime
         public static StructuredOutputFormat JsonObject()
             => new(StructuredOutputKind.JsonObject);
 
-        public static StructuredOutputFormat JsonSchema(string name, string schemaJson,
+        public static StructuredOutputFormat JsonSchema(string? name, string? schemaJson,
             bool strict = true, string? description = null)
             => new(StructuredOutputKind.JsonSchema, name, schemaJson, strict, description);
     }
 
     public static class StructuredOutputPrompt
     {
-        public static List<ChatMessage> Apply(List<ChatMessage> messages, StructuredOutputFormat format)
+        public static List<ChatMessage> Apply(List<ChatMessage> messages, StructuredOutputFormat?format)
         {
             if (format == null)
                 return messages;
@@ -304,7 +304,7 @@ namespace TensorSharp.Runtime
             };
         }
 
-        public static StructuredOutputNormalizationResult NormalizeOutput(string rawOutput, StructuredOutputFormat format)
+        public static StructuredOutputNormalizationResult NormalizeOutput(string rawOutput, StructuredOutputFormat? format)
         {
             if (format == null)
             {

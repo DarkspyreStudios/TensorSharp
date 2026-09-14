@@ -17,7 +17,6 @@ using System.IO;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using TensorSharp.AgentHost.Skills;
-using TensorSharp.Runtime.Logging;
 using TensorSharp.Server.Hosting;
 
 namespace TensorSharp.Chat

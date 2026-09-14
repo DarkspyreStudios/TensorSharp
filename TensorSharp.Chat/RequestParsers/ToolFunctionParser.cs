@@ -10,7 +10,6 @@
 
 using System.Collections.Generic;
 using System.Text.Json;
-using TensorSharp.Models;
 
 namespace TensorSharp.Server.RequestParsers
 {
@@ -82,7 +81,7 @@ namespace TensorSharp.Server.RequestParsers
         /// <c>{type:"function", name, description, parameters}</c> directly
         /// (no nested <c>"function"</c> wrapper like Chat Completions uses).
         /// </summary>
-        public static List<ToolFunction> ParseOpenAIResponses(JsonElement body)
+        public static List<ToolFunction>? ParseOpenAIResponses(JsonElement body)
         {
             if (!TryGetArray(body, "tools", out var toolsEl))
                 return null;

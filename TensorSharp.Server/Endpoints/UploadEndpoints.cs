@@ -13,35 +13,34 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using TensorSharp.Server.ProtocolAdapters;
 
-namespace TensorSharp.Server.Endpoints
+namespace TensorSharp.Server.Endpoints;
+
+/// <summary>
+/// Multipart file upload endpoint used by the Web UI (and indirectly by
+/// Ollama / OpenAI clients that prefer references to base64).
+/// </summary>
+public static class UploadEndpoints
 {
-    /// <summary>
-    /// Multipart file upload endpoint used by the Web UI (and indirectly by
-    /// Ollama / OpenAI clients that prefer references to base64).
-    /// </summary>
-    public static class UploadEndpoints
+    public static IEndpointRouteBuilder MapUploadEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        public static IEndpointRouteBuilder MapUploadEndpoints(this IEndpointRouteBuilder endpoints)
-        {
-            endpoints.MapPost("/api/upload",
-                (HttpRequest req, WebUiAdapter adapter) => adapter.UploadAsync(req));
-            // Qwen-Image-Edit: prompt + image -> generated (downloadable) image.
-            endpoints.MapPost("/api/image-edit",
-                (HttpRequest req, WebUiAdapter adapter) => adapter.ImageEditAsync(req))
-                .DisableRequestTimeout();
-            // Streaming variant: SSE with live denoising previews (used by the Web UI).
-            endpoints.MapPost("/api/image-edit/stream",
-                (HttpContext ctx, WebUiAdapter adapter) => adapter.ImageEditStreamAsync(ctx))
-                .DisableRequestTimeout();
-            // Wan text-to-video: prompt -> generated (downloadable) MP4.
-            endpoints.MapPost("/api/video-generate",
-                (HttpRequest req, WebUiAdapter adapter) => adapter.VideoGenerateAsync(req))
-                .DisableRequestTimeout();
-            // Streaming variant: SSE with per-step denoising progress (used by the Web UI).
-            endpoints.MapPost("/api/video-generate/stream",
-                (HttpContext ctx, WebUiAdapter adapter) => adapter.VideoGenerateStreamAsync(ctx))
-                .DisableRequestTimeout();
-            return endpoints;
-        }
+        endpoints.MapPost("/api/upload",
+            (HttpRequest req, WebUiAdapter adapter) => adapter.UploadAsync(req));
+        // Qwen-Image-Edit: prompt + image -> generated (downloadable) image.
+        endpoints.MapPost("/api/image-edit",
+            (HttpRequest req, WebUiAdapter adapter) => adapter.ImageEditAsync(req))
+            .DisableRequestTimeout();
+        // Streaming variant: SSE with live denoising previews (used by the Web UI).
+        endpoints.MapPost("/api/image-edit/stream",
+            (HttpContext ctx, WebUiAdapter adapter) => adapter.ImageEditStreamAsync(ctx))
+            .DisableRequestTimeout();
+        // Wan text-to-video: prompt -> generated (downloadable) MP4.
+        endpoints.MapPost("/api/video-generate",
+            (HttpRequest req, WebUiAdapter adapter) => adapter.VideoGenerateAsync(req))
+            .DisableRequestTimeout();
+        // Streaming variant: SSE with per-step denoising progress (used by the Web UI).
+        endpoints.MapPost("/api/video-generate/stream",
+            (HttpContext ctx, WebUiAdapter adapter) => adapter.VideoGenerateStreamAsync(ctx))
+            .DisableRequestTimeout();
+        return endpoints;
     }
 }

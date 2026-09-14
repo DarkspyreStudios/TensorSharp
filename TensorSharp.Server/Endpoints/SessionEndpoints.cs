@@ -13,23 +13,22 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using TensorSharp.Server.ProtocolAdapters;
 
-namespace TensorSharp.Server.Endpoints
+namespace TensorSharp.Server.Endpoints;
+
+/// <summary>
+/// Routes for chat-session lifecycle. Each Web UI tab creates a session on
+/// load, attaches its id to every <c>/api/chat</c> request, and disposes it
+/// when the user clicks "New Chat" so the prior conversation's KV cache is
+/// released.
+/// </summary>
+public static class SessionEndpoints
 {
-    /// <summary>
-    /// Routes for chat-session lifecycle. Each Web UI tab creates a session on
-    /// load, attaches its id to every <c>/api/chat</c> request, and disposes it
-    /// when the user clicks "New Chat" so the prior conversation's KV cache is
-    /// released.
-    /// </summary>
-    public static class SessionEndpoints
+    public static IEndpointRouteBuilder MapSessionEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        public static IEndpointRouteBuilder MapSessionEndpoints(this IEndpointRouteBuilder endpoints)
-        {
-            endpoints.MapPost("/api/sessions",
-                (WebUiAdapter adapter) => adapter.CreateSession());
-            endpoints.MapDelete("/api/sessions/{id}",
-                (string id, HttpContext ctx, WebUiAdapter adapter) => adapter.DisposeSessionAsync(id, ctx));
-            return endpoints;
-        }
+        endpoints.MapPost("/api/sessions",
+            (WebUiAdapter adapter) => adapter.CreateSession());
+        endpoints.MapDelete("/api/sessions/{id}",
+            (string id, HttpContext ctx, WebUiAdapter adapter) => adapter.DisposeSessionAsync(id, ctx));
+        return endpoints;
     }
 }

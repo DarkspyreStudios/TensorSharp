@@ -13,30 +13,29 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using TensorSharp.Server.ProtocolAdapters;
 
-namespace TensorSharp.Server.Endpoints
+namespace TensorSharp.Server.Endpoints;
+
+/// <summary>
+/// Routes for the OpenAI-compatible chat-completions surface.
+/// </summary>
+public static class OpenAIEndpoints
 {
-    /// <summary>
-    /// Routes for the OpenAI-compatible chat-completions surface.
-    /// </summary>
-    public static class OpenAIEndpoints
+    public static IEndpointRouteBuilder MapOpenAIEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        public static IEndpointRouteBuilder MapOpenAIEndpoints(this IEndpointRouteBuilder endpoints)
-        {
-            endpoints.MapPost("/v1/chat/completions",
-                (HttpContext ctx, OpenAIChatAdapter adapter) => adapter.ChatCompletionsAsync(ctx));
-            endpoints.MapGet("/v1/models",
-                (OpenAIChatAdapter adapter) => adapter.ListModels());
-            endpoints.MapPost("/v1/responses",
-                (HttpContext ctx, OpenAIResponsesAdapter adapter) => adapter.CreateResponseAsync(ctx));
-            endpoints.MapGet("/v1/responses/{id}",
-                (HttpContext ctx, OpenAIResponsesAdapter adapter, string id) => adapter.GetResponseAsync(ctx, id));
-            // Text-to-video generation (Wan models). OpenAI has no stable public video
-            // API yet; this follows the images/generations envelope: prompt in, a data
-            // array with url and (optionally) b64_json out.
-            endpoints.MapPost("/v1/videos/generations",
-                (HttpRequest req, WebUiAdapter adapter) => adapter.OpenAIVideoGenerationsAsync(req))
-                .DisableRequestTimeout();
-            return endpoints;
-        }
+        endpoints.MapPost("/v1/chat/completions",
+            (HttpContext ctx, OpenAIChatAdapter adapter) => adapter.ChatCompletionsAsync(ctx));
+        endpoints.MapGet("/v1/models",
+            (OpenAIChatAdapter adapter) => adapter.ListModels());
+        endpoints.MapPost("/v1/responses",
+            (HttpContext ctx, OpenAIResponsesAdapter adapter) => adapter.CreateResponseAsync(ctx));
+        endpoints.MapGet("/v1/responses/{id}",
+            (HttpContext ctx, OpenAIResponsesAdapter adapter, string id) => adapter.GetResponseAsync(ctx, id));
+        // Text-to-video generation (Wan models). OpenAI has no stable public video
+        // API yet; this follows the images/generations envelope: prompt in, a data
+        // array with url and (optionally) b64_json out.
+        endpoints.MapPost("/v1/videos/generations",
+            (HttpRequest req, WebUiAdapter adapter) => adapter.OpenAIVideoGenerationsAsync(req))
+            .DisableRequestTimeout();
+        return endpoints;
     }
 }

@@ -2,11 +2,8 @@
 // Licensed under the BSD-3-Clause license in the repository root.
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json;
-using TensorSharp.Runtime;
 using TensorSharp.Runtime.Grammar;
-using TensorSharp.Server.Responses;
 
 namespace TensorSharp.Server.ProtocolAdapters;
 
@@ -15,11 +12,11 @@ public sealed partial class OpenAIChatAdapter
     private static bool IsDeepSeek41(string architecture)
         => ChatProtocolRegistry.For(architecture)?.Id == "deepseek41";
 
-    internal static DeepSeek41ToolGrammar PrepareDeepSeek41ToolGrammar(JsonElement body,
-        List<ToolFunction> clientTools, List<ToolFunction> effectiveTools, StructuredOutputFormat responseFormat)
+    internal static DeepSeek41ToolGrammar? PrepareDeepSeek41ToolGrammar(JsonElement body,
+        List<ToolFunction>? clientTools, List<ToolFunction>? effectiveTools, StructuredOutputFormat? responseFormat)
     {
         var choice = DeepSeek41ToolChoice.Auto;
-        string name = null;
+        string? name = null;
         bool explicitChoice = body.TryGetProperty("tool_choice", out var requested);
         if (explicitChoice)
         {
@@ -78,14 +75,14 @@ public sealed partial class OpenAIChatAdapter
         // round must not satisfy that contract invisibly on the caller's behalf.
         var tools = choice is DeepSeek41ToolChoice.Required or DeepSeek41ToolChoice.Named ? clientTools : effectiveTools;
         if (choice == DeepSeek41ToolChoice.Auto && tools is not { Count: > 0 })
-            return explicitChoice ? DeepSeek41ToolGrammar.Compile(Array.Empty<ToolFunction>(), DeepSeek41ToolChoice.None) : null;
-        var plan = DeepSeek41ToolGrammar.Compile(tools ?? new(), choice, name, parallel);
+            return explicitChoice ? DeepSeek41ToolGrammar.Compile([], DeepSeek41ToolChoice.None) : null;
+        var plan = DeepSeek41ToolGrammar.Compile(tools ?? [], choice, name, parallel);
         _ = Grammar.Parse(plan.Source); // Reject unsupported recipes before any SSE headers or inference.
         return plan;
     }
 
-    private SamplingConfig WithDeepSeek41ToolGrammar(SamplingConfig config,
-        DeepSeek41ToolGrammar plan, bool thinking)
+    private SamplingConfig? WithDeepSeek41ToolGrammar(SamplingConfig? config,
+        DeepSeek41ToolGrammar? plan, bool thinking)
     {
         if (plan == null) return config;
         var tokenizer = _svc.Model?.Tokenizer

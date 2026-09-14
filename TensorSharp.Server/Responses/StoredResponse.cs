@@ -7,18 +7,17 @@
 
 using System;
 
-namespace TensorSharp.Server.Responses
+namespace TensorSharp.Server.Responses;
+
+/// <summary>
+/// A completed Responses API object as returned to callers, cached so
+/// <c>GET /v1/responses/{id}</c> can serve it back. Stores the pre-serialised
+/// JSON body rather than the anonymous object graph so retrieval is just an
+/// echo of exactly what the client originally received.
+/// </summary>
+public sealed class StoredResponse
 {
-    /// <summary>
-    /// A completed Responses API object as returned to callers, cached so
-    /// <c>GET /v1/responses/{id}</c> can serve it back. Stores the pre-serialised
-    /// JSON body rather than the anonymous object graph so retrieval is just an
-    /// echo of exactly what the client originally received.
-    /// </summary>
-    public sealed class StoredResponse
-    {
-        public required string Id { get; init; }
-        public required string Json { get; init; }
-        public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
-    }
+    public required string Id { get; init; }
+    public required string Json { get; init; }
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

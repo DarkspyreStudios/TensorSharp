@@ -14,65 +14,64 @@ using TensorSharp.Cuda;
 using TensorSharp.GGML;
 using TensorSharp.MLX;
 
-namespace TensorSharp.Server
+namespace TensorSharp.Server;
+
+/// <summary>
+/// The Server's half of <see cref="BackendCatalog"/>: the availability probes
+/// that touch the CUDA, MLX and GGML backends. They live here rather than next
+/// to the catalog because TensorSharp.Chat must not reference
+/// TensorSharp.Backends.Cuda or TensorSharp.Backends.MLX (a static partial class
+/// cannot span two assemblies, hence a sibling class rather than a partial).
+/// </summary>
+public static class BackendCatalogProbes
 {
-    /// <summary>
-    /// The Server's half of <see cref="BackendCatalog"/>: the availability probes
-    /// that touch the CUDA, MLX and GGML backends. They live here rather than next
-    /// to the catalog because TensorSharp.Chat must not reference
-    /// TensorSharp.Backends.Cuda or TensorSharp.Backends.MLX (a static partial class
-    /// cannot span two assemblies, hence a sibling class rather than a partial).
-    /// </summary>
-    public static class BackendCatalogProbes
+    /// <summary>The backends this machine can actually run, in UI order.</summary>
+    internal static IReadOnlyList<BackendOption> GetSupportedBackends()
     {
-        /// <summary>The backends this machine can actually run, in UI order.</summary>
-        internal static IReadOnlyList<BackendOption> GetSupportedBackends()
+        return BackendCatalog.GetSupportedBackends(
+            IsGgmlBackendAvailable,
+            CudaBackend.IsAvailable,
+            MlxBackend.IsAvailable);
+    }
+
+    // The reason a GGML backend probe threw, per backend, so the startup banner
+    // can say WHY a backend is missing instead of just omitting it from the list.
+    // First failure wins; the probe may run more than once.
+    private static readonly Dictionary<GgmlBackendType, string> ProbeFailures = new();
+
+    private static bool IsGgmlBackendAvailable(GgmlBackendType backendType)
+    {
+        try
         {
-            return BackendCatalog.GetSupportedBackends(
-                IsGgmlBackendAvailable,
-                CudaBackend.IsAvailable,
-                MlxBackend.IsAvailable);
+            // Backend discovery runs at web-app startup, so it must not spin up
+            // any GGML device — otherwise picking a non-GGML backend (MLX,
+            // direct CUDA) would still trigger `ggml_metal_device_init` / etc.
+            // logs at startup. CanInitializeBackend is a lightweight compile-flag
+            // + platform check; the real GGML init is deferred until a GGML
+            // backend is actually selected.
+            return GgmlBasicOps.CanInitializeBackend(backendType);
         }
-
-        // The reason a GGML backend probe threw, per backend, so the startup banner
-        // can say WHY a backend is missing instead of just omitting it from the list.
-        // First failure wins; the probe may run more than once.
-        private static readonly Dictionary<GgmlBackendType, string> ProbeFailures = new();
-
-        private static bool IsGgmlBackendAvailable(GgmlBackendType backendType)
-        {
-            try
-            {
-                // Backend discovery runs at web-app startup, so it must not spin up
-                // any GGML device — otherwise picking a non-GGML backend (MLX,
-                // direct CUDA) would still trigger `ggml_metal_device_init` / etc.
-                // logs at startup. CanInitializeBackend is a lightweight compile-flag
-                // + platform check; the real GGML init is deferred until a GGML
-                // backend is actually selected.
-                return GgmlBasicOps.CanInitializeBackend(backendType);
-            }
-            catch (Exception ex)
-            {
-                lock (ProbeFailures)
-                {
-                    ProbeFailures.TryAdd(backendType, ex.Message);
-                }
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// The probe exceptions swallowed above, one <c>"ggml_metal: reason"</c> line
-        /// per backend, so the startup banner's backend list carries a cause.
-        /// </summary>
-        public static IReadOnlyList<string> DescribeProbeFailures()
+        catch (Exception ex)
         {
             lock (ProbeFailures)
             {
-                return ProbeFailures
-                    .Select(kv => "ggml_" + kv.Key.ToString().ToLowerInvariant() + ": " + kv.Value)
-                    .ToArray();
+                ProbeFailures.TryAdd(backendType, ex.Message);
             }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The probe exceptions swallowed above, one <c>"ggml_metal: reason"</c> line
+    /// per backend, so the startup banner's backend list carries a cause.
+    /// </summary>
+    public static IReadOnlyList<string> DescribeProbeFailures()
+    {
+        lock (ProbeFailures)
+        {
+            return ProbeFailures
+                .Select(kv => "ggml_" + kv.Key.ToString().ToLowerInvariant() + ": " + kv.Value)
+                .ToArray();
         }
     }
 }

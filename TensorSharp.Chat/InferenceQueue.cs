@@ -14,7 +14,6 @@
 // changes; once all adapters are migrated, this file (and the explicit
 // queue-position chunks they emit) can be deleted.
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;

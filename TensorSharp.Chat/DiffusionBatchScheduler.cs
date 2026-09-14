@@ -14,7 +14,6 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
-using TensorSharp.Models;
 
 namespace TensorSharp.Server
 {

@@ -11,7 +11,6 @@
 using System.Collections.Generic;
 using TensorSharp.AgentHost.Skills;
 using System.Linq;
-using TensorSharp.Models;
 
 namespace TensorSharp.Server.ResponseSerializers
 {
