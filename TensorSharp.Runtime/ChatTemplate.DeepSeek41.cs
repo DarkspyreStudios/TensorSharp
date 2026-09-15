@@ -218,29 +218,29 @@ namespace TensorSharp.Runtime
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
         };
 
-        private const string DeepSeek41ToolsHeader = """
-            ## Tools
-
-            You have access to a set of tools to help answer the user's question. You can invoke tools by writing a "<｜DSML｜ calls>" block like the following:
-
-            <｜DSML｜ calls>
-            <｜DSML｜ invoke name="$TOOL_NAME">
-            <｜DSML｜ parameter name="$PARAMETER_NAME" string="true|false">$PARAMETER_VALUE</｜DSML｜ parameter>
-            ...
-            </｜DSML｜ invoke>
-            <｜DSML｜ invoke name="$TOOL_NAME2">
-            ...
-            </｜DSML｜ invoke>
-            </｜DSML｜ calls>
-
-            String parameters should be specified as is and set `string="true"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string="false"`.
-
-            If thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.
-
-            Otherwise, output directly after </think> with tool calls or final response.
-
-            ### Available Tool Schemas
-
-            """ + "\n";
+        private const string DeepSeek41ToolsHeader = 
+            "## Tools\n"
+            +"\n"
+            +"You have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n"
+            +"\n"
+            +"<｜DSML｜ calls>\n"
+            +"<｜DSML｜ invoke name=\"$TOOL_NAME\">\n"
+            +"<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n"
+            + "...\n"
+            + "</｜DSML｜ invoke>\n"
+            +"<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n"
+            + "...\n"
+            + "</｜DSML｜ invoke>\n"
+            + "</｜DSML｜ calls>\n"
+            +"\n"
+            +"String parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n"
+            + "\n"
+            +"If thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n"
+            + "\n"
+            +"Otherwise, output directly after </think> with tool calls or final response.\n"
+            + "\n"
+            + "### Available Tool Schemas"
+            + "\n"
+            + "\n";
     }
 }
