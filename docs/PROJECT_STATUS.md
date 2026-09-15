@@ -6,6 +6,10 @@ This page keeps repository-level status and longer explanations that do not belo
 
 TensorSharp is a native .NET 10 inference engine for GGUF models. The current source includes CLI, server/Web UI, compatible HTTP APIs, AgentHost, and the TensorAgent iOS/iPadOS application. AgentHost and TensorAgent are source-first capabilities: the latest tagged release may not contain them yet.
 
+### Embedding models and serving
+
+Current source adds GGUF BERT/XLM-R sentence encoders, covering Snowflake Arctic Embed L v2.0 Q8_0 and all-MiniLM-L6-v2 Q8_0. `--embeddings` starts a dedicated resident encoder with OpenAI `/v1/embeddings`, Ollama `/api/embed`, and legacy `/api/embeddings`. Backends are 100% pure C# CPU (`cpu`) and native GGML CPU (`ggml_cpu`), Metal, and CUDA; see the [embedding guide](embeddings.md) for validation scope and reproducible comparisons. Older release archives may not include this feature.
+
 ### Newest architectures
 
 Two families landed after the last release tag, and both carry limits worth
@@ -77,6 +81,7 @@ README's summary leaves out.
 
 | Area | Status |
 |---|---|
+| Embedding models | GGUF BERT/XLM-R: Snowflake Arctic Embed L v2.0 and all-MiniLM-L6-v2; pure C# CPU and native GGML CPU/Metal/CUDA, dedicated `--embeddings` service, OpenAI/Ollama single and batched APIs. Context, tokenization, quality, and measurement scope: [guide](embeddings.md). |
 | Model families | DeepSeek V4 Flash (`deepseek4`), DeepSeek V4.1 Flash (`deepseek41`), GLM 5.x (`glm-dsa`, `glm5next`), Gemma 4, DiffusionGemma, Qwen 3.5/3.6-family (`qwen35`, `qwen35moe`, `qwen3next`), Qwen 3.8 Flash Next (`qwen4exp`), GPT OSS, Nemotron-H (incl. Nemotron 3 Nano Omni and Nemotron 3.5 Lightning, `nemotron_h_moe`), Mistral 3, Hunyuan Dense (`hunyuan-dense`), Muse-Glimmer (`muse-glimmer`, `muse_glimmer`). Image editing via Qwen-Image-Edit (`qwen_image`, `qwen-image` MMDiT); joint video-and-audio generation via MiniMax-H3 (`minimax-h3`, `minimax_h3`) and video-only generation via Wan 2.1 / 2.2 (`wan`, `wan2.1`, `wan2.2`). |
 | Inference hosts | CLI, interactive REPL, ASP.NET Core web UI, Ollama-style API, OpenAI Chat Completions-style API, and OpenAI Responses-style API. |
 | iOS application | TensorAgent targets iOS/iPadOS, links GGML as an iOS `.xcframework`, and uses `ggml_metal` on physical devices. It shares the host-neutral chat pipeline (`TensorSharp.Chat`) but serves its own phone-shaped page from an in-process loopback host, because iOS has neither an ASP.NET Core runtime pack nor child processes. Generation survives the app leaving the screen, the shared-prompt prefix checkpoint is persisted per model so the first message of a launch costs a restore instead of a full prefill (measured on iPhone 17 Pro Max with Qwen3.5 9B: a 54 s cold first message becomes a 1.2 s warm-up and a ~0.6 s first message), and the engine's memory policy is sized against what iOS jetsam actually charges. See [TensorAgent](../TensorAgent/README.md). |

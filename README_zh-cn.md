@@ -6,7 +6,7 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 Qwen-Image-Edit 图像编辑、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。一个纯 .NET 引擎，在相同 GGUF 文件与相同 GPU 上与手工优化的 C++ `llama.cpp` 互有胜负。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills，以及用于沙箱化文件和 shell 操作的、有界进程内“模型→工具”循环。
+**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 Qwen-Image-Edit 图像编辑、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills，以及用于沙箱化文件和 shell 操作的、有界进程内“模型→工具”循环。
 
 ## 《Building Inference Engines and Agentic Runtimes from Scratch》
 
@@ -22,9 +22,10 @@
 
 ## 亮点功能
 
+- **文本与代码嵌入。** GGUF BERT/XLM-R 编码器，兼容 OpenAI/Ollama 的批量嵌入 API，支持 Snowflake Arctic Embed 与 MiniLM；见[嵌入指南](docs/embeddings_zh-cn.md)。
 - **本地原生 .NET 推理。** 可通过 CLI、浏览器 Web UI，以及兼容 Ollama/OpenAI 的 API 运行 GGUF 文本与多模态模型。
 - **模型与媒体覆盖广。** 当前源码支持现代文本模型、视觉/音频输入、PDF、图像编辑和视频生成；详见[模型卡片](docs/models/README_zh-cn.md)。
-- **关键路径速度有竞争力。** 在相同模型与硬件上，TensorSharp 与 `llama.cpp` 互有胜负，并提供原生 GGML、CUDA、Vulkan、Metal、MLX 与纯 C# CPU 路径；详见[性能报告](docs/engine_comparison_report.md)。
+- **性能经过实测。** TensorSharp 在相同模型与硬件上对比 `llama.cpp`；结果对应所测的模型、后端与工作负载。详见[性能报告](docs/engine_comparison_report.md)。
 - **智能体能力覆盖 iOS。** `TensorSharp.AgentHost` 提供有界的 Agent Skills 与代码工具；[TensorAgent](TensorAgent/README.md) 使用 iOS 的 `ggml_metal` 后端，把同一套本地聊天与智能体体验带到 iPhone 和 iPad。
 - **可扩展的工程能力。** 连续批处理、分页/前缀共享 KV 缓存、投机解码、张量并行和可配置的安全边界，按需启用。详见[功能说明](FEATURES_zh-cn.md)、[使用指南](USAGE_zh-cn.md)与[当前状态](docs/PROJECT_STATUS_zh-cn.md)。
 
@@ -131,9 +132,28 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 完整命令参考：**[CLI](USAGE_zh-cn.md#控制台应用)** · **[Server](USAGE_zh-cn.md#web-应用)** · 更多可下载模型：**[模型下载](MODEL_DOWNLOADS_zh-cn.md)** · 想用配置文件？**[config/](config/README.md)**。
 
+## 文本与代码嵌入
+
+当前源码支持 **Snowflake Arctic Embed L v2.0** 与 **all-MiniLM-L6-v2** 的 GGUF 编码器，通过 OpenAI `/v1/embeddings`、Ollama `/api/embed` 和旧版 `/api/embeddings` 提供归一化向量。以下命令在完成上面的源码构建后启动小型 MiniLM 服务：
+
+```bash
+curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
+  https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/544f204f2eaa2d71361ffc74d6df7170285b286a/all-MiniLM-L6-v2-Q8_0.gguf
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
+  --embeddings --backend cpu --host 127.0.0.1 --port 5001 --no-webui
+```
+
+```bash
+curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"]}'
+```
+
+使用 `cpu` 运行 100% 纯 C# 推理，无需原生推理库；或选择原生 GGML 的 `ggml_cpu`、`ggml_metal`、`ggml_cuda`。聊天与嵌入服务分别运行。完整的 Snowflake 下载、批处理、维数缩减、C# API、分词与性能验证见[嵌入指南](docs/embeddings_zh-cn.md)。
+
 ## 选择后端
 
-每个后端对尚未实现的算子都会回退到 CPU，因此所有后端的输出都正确。
+后端支持取决于模型架构。嵌入模型支持纯 C# `cpu` 与原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`；其他模型的限制见[状态矩阵](docs/PROJECT_STATUS_zh-cn.md#状态矩阵)。
 
 | 你的硬件 | 推荐后端 | 标志 | 说明 |
 |---|---|---|---|
@@ -182,6 +202,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 | 架构 | GGUF 架构标识 | 示例模型 | 多模态 | 思维链 | 工具调用 | MTP 投机 | 卡片 |
 |---|---|---|---|---|---|---|---|
+| BERT / XLM-R 嵌入 | `bert` | Snowflake Arctic Embed L v2.0、all-MiniLM-L6-v2 | 文本 → 向量 | — | — | — | [嵌入指南](docs/embeddings_zh-cn.md) |
 | DeepSeek V4.1 Flash | `deepseek41` | DeepSeek-V4.1-Flash（40 层，384 个路由专家 top-6 加一个共享专家，四条残差流与延迟 hyper-connection 混合，Engram n-gram 特征，声明 1M 上下文） | 文本；配合准备好的视觉伴随文件（`--mmproj`）支持图像与视频，音频请求被拒绝 | 支持 | 支持（带空格的 DSML，受语法约束） | 不支持（V4 的草稿模型会被拒绝） | [deepseek41](docs/models/deepseek41_zh-cn.md) |
 | DeepSeek V4 Flash | `deepseek4` | DeepSeek-V4-Flash（284B MoE，256 专家，压缩稀疏注意力，1M 上下文） | 仅文本 | 支持 | 支持（DSML） | 支持（DSpark 块级草稿，独立 GGUF） | [deepseek4](docs/models/deepseek4_zh-cn.md) |
 | GLM 5.x | `glm-dsa`、`glm5next` | GLM-5.2（744B-A40B MoE，256 专家，MLA + DeepSeek 稀疏注意力，1M 上下文）、[GLM-5.3](docs/models/glm_zh-cn.md#glm-53glm-dsa)（与 5.2 完全相同的 79 层 `glm-dsa` 形态——78 层主干加 1 个 NextN，256 个路由专家 top-8 外加 1 个共享专家，带 lightning indexer 的 MLA，rope base 8e6——因此直接走 GLM-5.2 的加载路径，既不需要新代码也不需要新开关；仅文本）、GLM-5.3-Flash（320B MoE，288 专家，KDA 线性注意力 + NoPE MLA 与池化索引器） | 仅文本（5.2 与 5.3）、图像（5.3-Flash） | 支持 | 支持（XML 工具调用） | GLM-5.2 与 GLM-5.3 支持（内嵌 NextN 块；5.3 上投机在默认的按层切分下生效，即不传 `--tp` 时） | [glm](docs/models/glm_zh-cn.md) |
@@ -205,7 +226,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 ### 对比 llama.cpp 的同台评测（引擎对比）
 
-纯 .NET 引擎与手工优化的 C++ `llama.cpp` 正面较量：**相同的 GGUF 文件、相同的 NVIDIA RTX 3080 Laptop GPU（16 GB）、统一的 OpenAI `/v1/chat/completions` 接口**，**两个引擎均分别在 GGML CUDA 与 Vulkan 构建上测量**。下表为 **在相同后端上，TensorSharp 相对 llama.cpp 的几何平均加速比**（单流、贪心采样、关闭 MTP）；**> 1.0× 表示 TensorSharp 更快 / 延迟更低**。完整表格见 [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md)。
+TensorSharp 的 .NET 运行时与原生 GGML 执行路径对比 `llama.cpp`：**相同的 GGUF 文件、相同的 NVIDIA RTX 3080 Laptop GPU（16 GB）、统一的 OpenAI `/v1/chat/completions` 接口**，**两个引擎均分别在 GGML CUDA 与 Vulkan 构建上测量**。下表为 **在相同后端上，TensorSharp 相对 llama.cpp 的几何平均加速比**（单流、贪心采样、关闭 MTP）；**> 1.0× 表示 TensorSharp 更快 / 延迟更低**。完整表格见 [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md)。
 
 | 模型 | 后端 | decode | prefill | TTFT |
 |---|---|---:|---:|---:|

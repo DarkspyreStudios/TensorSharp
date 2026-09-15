@@ -1,6 +1,7 @@
 /* Search index for the TensorSharp wiki. Each entry:
    t = title, p = page label, u = url(+anchor), s = snippet, k = extra keywords. */
 window.SEARCH_INDEX = [
+  { t: "Embedding Models & Semantic Search", p: "Embedding Models & Semantic Search", u: "embeddings.html", s: "Snowflake Arctic Embed and MiniLM: pure C# CPU and native GGML CPU/Metal/CUDA, OpenAI/Ollama APIs, batches, dimensions, base64, and measured validation.", k: "embedding embeddings bert xlm roberta snowflake arctic minilm semantic search vector rag sqlite embed dimensions pooling 嵌入 向量 语义 检索" },
   { t: "What is TensorSharp", p: "Home", u: "index.html", s: "Native .NET GGUF inference engine — CLI, Web UI, compatible APIs, and an optional AgentHost for skills and sandboxed model-authored code.", k: "intro introduction about overview llm gguf csharp dotnet agent agentic skills code execution" },
   { t: "Quick start in ~30 seconds", p: "Home", u: "index.html#quickstart", s: "Clone, download the benchmark-verified Gemma 4 E4B Q8_0 (7.48 GiB), and run it on native GGML CUDA in four copy-paste steps.", k: "30 seconds begin start tutorial first run hello gemma e4b q8 cuda" },
   { t: "Other backends and multimodal", p: "Home", u: "index.html#quickstart-e4b", s: "Run Gemma 4 E4B on ggml_metal, ggml_vulkan, or ggml_cpu, and add the mmproj projector for image, video, or audio.", k: "gemma4 gemma 4 e4b q8 native ggml metal vulkan cpu mmproj projector multimodal" },

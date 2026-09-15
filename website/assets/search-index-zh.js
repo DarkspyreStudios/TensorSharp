@@ -1,6 +1,7 @@
 /* 中文搜索索引（TensorSharp 维基）。每条：
    t = 标题, p = 页面标签, u = url(+锚点，英文形式，app.js 会本地化为 _zh-cn), s = 摘要, k = 额外关键词。 */
 window.SEARCH_INDEX_ZH = [
+  { t: "嵌入模型与语义检索", p: "嵌入模型", u: "embeddings_zh-cn.html", s: "纯 C# CPU 与原生 GGML CPU/Metal/CUDA；Snowflake Arctic Embed 与 MiniLM：OpenAI/Ollama 嵌入 API、批处理、dimensions、base64、查询前缀与性能验证。", k: "embedding embeddings bert xlm roberta snowflake arctic minilm semantic search vector rag sqlite embed dimensions pooling 嵌入 向量 语义 检索" },
   { t: "TensorSharp 是什么", p: "首页", u: "index.html", s: "原生 .NET GGUF 推理引擎 —— CLI、Web UI、兼容 API，以及可选的 AgentHost 技能与模型生成代码沙箱。", k: "intro 简介 概览 关于 llm gguf csharp dotnet agent 智能体 技能 代码执行" },
   { t: "约 30 秒快速上手", p: "首页", u: "index.html#quickstart", s: "克隆仓库、下载经基准验证的 Gemma 4 E4B Q8_0（7.48 GiB），并通过四步可复制命令在原生 GGML CUDA 上运行。", k: "30 秒 begin 开始 教程 第一次 运行 hello gemma e4b q8 cuda" },
   { t: "其他后端与多模态", p: "首页", u: "index.html#quickstart-e4b", s: "在 ggml_metal、ggml_vulkan 或 ggml_cpu 上运行 Gemma 4 E4B，并为图像/视频/音频添加 mmproj 投影器。", k: "gemma4 gemma 4 e4b q8 原生 ggml metal vulkan cpu mmproj 投影器 多模态" },

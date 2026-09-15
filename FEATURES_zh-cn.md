@@ -4,6 +4,7 @@
 > [TensorSharp](README_zh-cn.md) 文档的一部分。
 
 
+- **句向量嵌入** — GGUF `bert` / XLM-R 编码器；Snowflake Arctic Embed L v2.0（1024 维、CLS 池化）与 all-MiniLM-L6-v2（384 维、均值池化）。100% 纯 C# CPU 与原生 GGML CPU/Metal/CUDA，完整双向注意力；托管执行使用模型独立线程池与 ARM Q8 SIMD 块；原生执行保留量化权重、紧凑投影批次、按序列隔离的注意力与图复用；OpenAI/Ollama 单条及批量输入、归一化向量、base64 与维数缩减。详见[嵌入指南](docs/embeddings_zh-cn.md)与验证报告。
 - **多架构支持** —— DeepSeek V4 Flash、DeepSeek V4.1 Flash（`deepseek41`，服务后端为 `ggml_cuda`；`cpu` 是 100% 纯 C# 的 `DeepSeek4CpuExecutor`，不用 ggml、也没有任何原生依赖，它与 `cuda`、`ggml_cpu` 都是正确性与可移植性路径，而非服务路径）、GLM 5.x（GLM-5.2 与 GLM-5.3 同为 `glm-dsa`，GLM-5.3-Flash 为 `glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H、Mistral 3、Hunyuan Dense（`hunyuan-dense`）、Muse-Glimmer、Qwen-Image-Edit（图像编辑）、MiniMax-H3（视频 + 原生 32 kHz 立体声音频），以及 Wan 2.1/2.2（仅视频）
 - **多模态推理** —— 图像、视频和音频输入（Gemma 4）；图像输入（Qwen 3.5/3.6-family / Qwen 3.8 Flash Next / GLM-5.3-Flash / Mistral 3 / Muse-Glimmer / Nemotron-H Omni，各自通过自己的 `mmproj` 视觉塔；GLM-5.2 与 GLM-5.3 同为 `glm-dsa`，均仅文本）。音频输入仅 Gemma 4 支持。`--pdf` 与架构无关：原生数字 PDF 的文本层会被内联进任意模型的提示词，只有扫描件才回退为页面图像（此时需要视觉模型）。生成的媒体是另一条轴：Qwen-Image-Edit 输出图像，Wan 2.1/2.2 输出 H.264 MP4，而 MiniMax-H3 是唯一**连音频一起输出**的家族——32 kHz 立体声音轨与画面联合去噪，并作为旁挂 `.wav` 写在 MP4 旁边
 - **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、DeepSeek V4.1、GLM 5.x）
@@ -145,7 +146,7 @@ ThreadPool，因此一个占满每个核的池会把它自己正在等的那部�
 `TS_CPU_TASK_BYTES` 与 `TS_CPU_TASKS_PER_WORKER` 调节（见
 [环境变量矩阵](docs/env_var_feature_matrix_zh-cn.md)）。
 
-**零拷贝的量化权重。** `BackendType.Cpu` 曾是 `CanUseFileMappedQuantizedWeights` 里唯一
+**`ModelBase` 加载器中的零拷贝量化权重。** `BackendType.Cpu` 曾是 `CanUseFileMappedQuantizedWeights` 里唯一
 缺席的后端，因此只有它在加载时把每一个量化张量都复制进一块新申请的匿名内存，而不是像
 所有 GGML 后端那样直接绑定 GGUF 的映射。现在它也是零拷贝绑定——`ManagedQuantizedOps`
 通过裸指针读取权重、从不写入——并且加载器会把这个拆分打印出来，例如 GLM-5.3-Flash
@@ -155,7 +156,7 @@ UD-Q2_K_XL：
 
 凡是以前会被复制一份的权重都受益，而量化的大 checkpoint 受益最明显：上面这个模型从一次
 **永远加载不完**的过程（常驻内存 412 GB 且还在涨）变成了 **约 48 秒**，其中大部分还是页
-缓存预读的时间。
+缓存预读的时间。嵌入编码器使用独立加载器，持有紧凑的量化数组，并重排支持的投影；见[嵌入执行](docs/embeddings_zh-cn.md#托管-cpu-执行)。
 
 **`IQ2_XS` / `IQ4_XS` 与直接的 i-quant 点积。** `ManagedQuantizedOps` 新增了 `IQ2_XS`
 与 `IQ4_XS` 的托管反量化实现（对着 ggml 自己的 `dequantize_row_*` 校验过），并把它们加入

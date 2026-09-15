@@ -3,6 +3,16 @@
 
 > [TensorSharp](README_zh-cn.md) 文档的一部分。快速开始命令见 [README](README_zh-cn.md#快速开始)；配置文件见 [config/README.md](config/README.md)。
 
+## 嵌入服务
+
+使用 `--model encoder.gguf --embeddings` 托管 BERT/XLM-R GGUF。后端为纯 C# `cpu` 或原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`，每个进程常驻一个编码器；聊天服务使用另一个端口。`--embedding-threads N` 配置 `cpu` 与 `ggml_cpu` 的 CPU 执行线程；`--embedding-context-size N` 缩小每条输入的 token 上限（`0` 使用模型元数据）。
+
+- OpenAI：`POST /v1/embeddings`，字符串或 token ID 的单条/批量输入，`encoding_format` 为 `float` / `base64`，可选 `dimensions`。
+- Ollama：`POST /api/embed`，字符串或字符串数组；`truncate` 默认 `true`。旧版 `POST /api/embeddings` 接受单个 `prompt`。
+- 向量按输入顺序返回并作 L2 归一化；OpenAI 超长输入报错，Ollama 截断保留末尾特殊 token。
+
+下载、curl、C#、检索质量与验证见[完整嵌入指南](docs/embeddings_zh-cn.md)。
+
 ## 计算后端
 
 | 后端 | 参数 | 适合场景 | 说明 |
@@ -14,6 +24,8 @@
 | GGML Vulkan | `--backend ggml_vulkan` | 通过 ggml 的厂商无关 GPU 推理 | 通过 GGML Vulkan 在 Windows 或 Linux 上加速——支持带 Vulkan 1.3 驱动的 AMD、Intel 与 NVIDIA GPU，驱动支持时使用 cooperative-matrix（KHR coopmat / NV coopmat2）着色器。权重与 GGML CUDA 一样常驻显存，并复用同样的融合整模型 decode/prefill 图。机器有 Vulkan 运行时（已安装 loader）时原生构建会自动启用；未安装 Vulkan SDK 或发行版开发包时，构建会通过 `eng/fetch-vulkan-toolchain.ps1` / `eng/fetch-vulkan-toolchain.sh` 自动下载便携工具链（headers、glslc、SPIRV-Headers，Windows 上还有 loader 导入库）。用 `--no-vulkan`（或 `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=OFF`）退出。 |
 | GGML CPU | `--backend ggml_cpu` | 原生 CPU 内核 | 使用原生 GGML 与优化内核进行 CPU 推理。量化权重以零拷贝方式从 GGUF 文件映射。 |
 | 纯 C# CPU | `--backend cpu` | 可移植性与调试 | 无原生依赖的可移植 CPU 推理。托管矩阵乘跑在一个常驻的"自旋后挂起"工作线程池上，默认宽度是可用核心数的一半（`TS_CPU_THREADS` 及下文其余 `TS_CPU_*` 开关）；在 direct 视频网络（Wan、MiniMax-H3）上，量化权重直接以 GGUF 存储类型参与乘法，而不再在加载时展开成 F32（`TS_DIRECT_QUANT_WEIGHTS=0` 恢复展开）。DeepSeek V4.1 Flash 与下文的 DeepSeek V4 Flash 一样，在这里也走自己的整模型执行器——100% 纯 C# 的 `DeepSeek4CpuExecutor`，它是正确性与可移植性路径，而非服务路径，其计算宽度来自 `TS_DSV4_THREADS`（这个后端上默认取全部处理器）而不是 `TS_CPU_THREADS`。 |
+
+**嵌入编码器使用独立执行器。** `cpu` 路径持有紧凑的量化数组与模型专属线程池，通过 `--embedding-threads` 配置（默认四个线程）；原生嵌入后端可能复制或重排权重。该路径的存储与线程策略见[嵌入执行](docs/embeddings_zh-cn.md#c-api-与实现)。
 
 **DeepSeek V4 Flash 是上表的例外。** 它那套 284B 的压缩稀疏注意力 MoE 结构不走通用的逐算子路径，而是使用三套专属的整模型执行器之一：Direct CUDA 引擎（`--backend cuda`）、原生 ggml 执行器（`--backend ggml_cuda` / `ggml_vulkan`），以及 100% 纯 C# 的 CPU 执行器（`--backend cpu`，直接从内存映射的 GGUF 分片提供量化权重）。三者都会把权重按层切分到所有可见 GPU（CPU 路径则从映射分片流式读取），因此远大于单卡显存的模型依然跑得起来。详见 [DeepSeek V4 卡片](docs/models/deepseek4_zh-cn.md)。
 

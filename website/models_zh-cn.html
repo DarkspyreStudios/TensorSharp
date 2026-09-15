@@ -19,9 +19,12 @@
   <p class="lede">TensorSharp 加载 GGUF 格式的模型，并从文件的 <code>general.architecture</code> 元数据自动识别架构——MiniMax-H3 是例外，它公开的 GGUF 完全没有元数据，只能靠张量表来识别。选择适合你硬件的量化（低内存用 <code>Q4_K_M</code>，更高质量用 <code>Q8_0</code>）。</p>
   <div class="callout note"><div class="ic">📘</div><p><strong>Gemma 4 E4B 是《From Tensors to Tokens》采用的示例模型。</strong>配套图书提供从张量基础到多模态推理的连贯构建过程；这组参考页面则提供最新下载与能力细节。<a href="book_zh-cn.html">了解本书 →</a></p></div>
 
+  <p><strong>新增句向量编码器：</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2，通过 <code>--embeddings</code> 与兼容 OpenAI/Ollama 的 API。 <a href="embeddings_zh-cn.html">嵌入模型、支持的后端与验证 →</a></p>
+
   <h2 id="browse">浏览模型参考</h2>
-  <p>完整参考分为四个页面。如果你已经确定要用哪个模型，从"模型下载"开始；如果还在挑选，从对应的分类页面开始。</p>
+  <p>完整参考分为五个页面。如果你已经确定要用哪个模型，从"模型下载"开始；如果还在挑选，从对应的分类页面开始。</p>
   <div class="card-grid">
+    <a class="card" href="embeddings_zh-cn.html"><div class="ic">🔎</div><h3>嵌入模型与语义检索</h3><p>Snowflake 与 MiniLM：文本/代码向量、API 与检索质量。</p></a>
     <a class="card" href="models-downloads_zh-cn.html"><div class="ic">⬇️</div><h3>模型下载</h3><p>所有 GGUF，以及各家族所需的投影器、VAE、编码器与草稿模型。</p></a>
     <a class="card" href="models-text_zh-cn.html"><div class="ic">🧠</div><h3>文本与 LLM 模型</h3><p>十二种架构及其运行示例，加上多模态输入、思考模式与工具调用。</p></a>
     <a class="card" href="models-image_zh-cn.html"><div class="ic">🖼️</div><h3>图像生成</h3><p>Qwen-Image-Edit、Lightning LoRA，以及 DiT 步缓存。</p></a>

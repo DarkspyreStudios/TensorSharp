@@ -8,6 +8,8 @@ TensorSharp loads models in GGUF format. Below are verified Hugging Face repos f
 
 | Architecture | Model | GGUF Download |
 |---|---|---|
+| Embedding encoder (`bert` / XLM-R) | Snowflake Arctic Embed L v2.0, Q8_0, 1024 dimensions | [fisher046/snowflake-arctic-embed-l-v2.0-Q8_0-GGUF](https://huggingface.co/fisher046/snowflake-arctic-embed-l-v2.0-Q8_0-GGUF), file `snowflake-arctic-embed-l-v2.0-q8_0.gguf`; about 635 MB; use `--embeddings`. Pinned revisions, checksums, and examples: [guide](docs/embeddings.md) |
+| Embedding encoder (`bert`) | all-MiniLM-L6-v2, Q8_0, 384 dimensions | [second-state/All-MiniLM-L6-v2-Embedding-GGUF](https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF), file `all-MiniLM-L6-v2-Q8_0.gguf`; about 25 MB; use `--embeddings` |
 | Gemma 4 verified native tier | gemma-4-E4B-it Q8_0 | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF) — recommended public artifact `gemma-4-E4B-it-Q8_0.gguf`; lower-memory Q4_K_M is also available; mmproj `mmproj-gemma-4-E4B-it-Q8_0.gguf` is in the same repo |
 | Gemma 4 | gemma-4-12B-it (QAT) | [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF) — mmproj `mmproj-BF16.gguf` and MTP draft `mtp-gemma-4-12B-it.gguf` in the same repo |
 | Gemma 4 | gemma-4-26B-A4B-it (MoE, QAT) | [unsloth/gemma-4-26B-A4B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF) — mmproj `mmproj-BF16.gguf` and MTP draft `mtp-gemma-4-26B-A4B-it.gguf` in the same repo |

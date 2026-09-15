@@ -286,6 +286,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_deepseek4.cpp
     ggml_ops_deepseek41_tp.cpp
     ggml_ops_deepseek41_vision.cpp
+    ggml_ops_embeddings.cpp
     ggml_ops_glm_dsa.cpp
     ggml_ops_dsv4_fused_cpu.cpp
     ggml_ops_paged_attention.cpp

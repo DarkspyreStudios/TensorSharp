@@ -19,7 +19,7 @@
   <p class="lede">TensorSharp 在相同模型与硬件上与其他推理引擎的对比 —— 文本对比 <code>llama.cpp</code>，视频生成对比 <code>stable-diffusion.cpp</code> —— 以及守护正确性的测试框架。</p>
 
   <h2 id="head-to-head">同台对比：TensorSharp vs llama.cpp</h2>
-  <p>一个<strong>纯 .NET 引擎与手工优化的 C++ <code>llama.cpp</code> 正面较量</strong> —— 相同 GGUF、相同 <strong>NVIDIA RTX 3080 Laptop GPU（16 GB）</strong>、统一的 OpenAI <code>/v1/chat/completions</code> 接口，且<strong>两个引擎均分别在 GGML CUDA 与 GGML Vulkan 构建上测量</strong>，覆盖短提示、长上下文与多轮对话场景。下方数据来自当前签入的 <code>benchmarks/engine_comparison</code> harness 运行（<code>docs/engine_comparison_report.md</code>），可在自己的硬件上复现。</p>
+  <p><strong>TensorSharp 的 .NET 运行时与原生 GGML 执行路径对比 <code>llama.cpp</code></strong> —— 相同 GGUF、相同 <strong>NVIDIA RTX 3080 Laptop GPU（16 GB）</strong>、统一的 OpenAI <code>/v1/chat/completions</code> 接口，且<strong>两个引擎均分别在 GGML CUDA 与 GGML Vulkan 构建上测量</strong>，覆盖短提示、长上下文与多轮对话场景。下方数据来自当前签入的 <code>benchmarks/engine_comparison</code> harness 运行（<code>docs/engine_comparison_report.md</code>），可在自己的硬件上复现。</p>
 
   <div class="card-grid">
     <div class="card"><div class="ic">🏆</div><h3>CUDA prefill 与 TTFT</h3><p>Gemma 4 <strong>E4B</strong> 的 prefill 几何平均快 <strong>1.28×</strong>（短提示最高 <strong>1.39×</strong>）；2-bit 量化的 Qwen 3.6 <strong>35B-A3B</strong> MoE 同样达到 <strong>1.28× prefill / 1.27× TTFT</strong>。</p></div>
@@ -44,7 +44,7 @@
     </tbody>
   </table>
   </div>
-  <p>这些领先来自 TensorSharp 的架构专属快路径：融合的整模型 prefill/verify 图（配以融合的 FFN / attention 内核）、融合的整模型 decode，以及 vLLM 式<a href="advanced_zh-cn.html#continuous-batching">带跨请求前缀共享的分页 KV 缓存</a>。即便在极限量化下引擎也不落下风：在 2-bit IQ2_XXS 权重上，dense Qwen 3.6 27B 的 decode 快 1.07×（CUDA）/ 1.02×（Vulkan），35B-A3B MoE 的 prefill 快 1.28×——纯 .NET 引擎与手工优化的 C++ 并驾齐驱。剩余低于 1.0× 的项——主要是 Qwen 3.6 35B-A3B 在 Vulkan 上的 decode（0.87×）、Qwen 3.6 27B dense 的 prefill（CUDA 0.96× / Vulkan 0.85×）以及 E4B 在 Vulkan 上的长提示 prefill（0.71×）——仍是正在优化的目标，而非最终结果。</p>
+  <p>这些领先来自 TensorSharp 的架构专属快路径：融合的整模型 prefill/verify 图（配以融合的 FFN / attention 内核）、融合的整模型 decode，以及 vLLM 式<a href="advanced_zh-cn.html#continuous-batching">带跨请求前缀共享的分页 KV 缓存</a>。即便在极限量化下引擎也不落下风：在 2-bit IQ2_XXS 权重上，dense Qwen 3.6 27B 的 decode 快 1.07×（CUDA）/ 1.02×（Vulkan），35B-A3B MoE 的 prefill 快 1.28×——这些结果对应所测模型与原生 GGML 后端。剩余低于 1.0× 的项——主要是 Qwen 3.6 35B-A3B 在 Vulkan 上的 decode（0.87×）、Qwen 3.6 27B dense 的 prefill（CUDA 0.96× / Vulkan 0.85×）以及 E4B 在 Vulkan 上的长提示 prefill（0.71×）——仍是正在优化的目标，而非最终结果。</p>
 
   <p><strong>文本场景之外</strong> —— harness 还支持工具调用、结构化输出（JSON）、图像 / 音频 / 视频、MTP 开/关与并发扩展等场景，以及对比 <code>stable-diffusion.cpp</code> 的 <code>image_edit</code> 场景；该场景较早的一次 CUDA 运行（Qwen-Image-Edit 2511 Q2_K DiT + Lightning 4-step LoRA，544×1184，4 步，相同输入与 seed）测得 TensorSharp 预热后的编辑耗时 <strong>40.44 s vs 48.16 s，约快 1.19×</strong>。这些 cell 可通过 <code>benchmarks/engine_comparison</code> 中记录的 harness 参数启用。</p>
 

@@ -11,6 +11,8 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
+using TensorSharp.Server.Hosting;
 using TensorSharp.Server.ProtocolAdapters;
 
 namespace TensorSharp.Server.Endpoints;
@@ -25,8 +27,14 @@ public static class OllamaEndpoints
     public static IEndpointRouteBuilder MapOllamaEndpoints(this IEndpointRouteBuilder endpoints)
     {
         endpoints.MapGet("/api/version", () => Results.Json(new { version = "0.1.0" }));
-        endpoints.MapGet("/api/tags", (OllamaAdapter adapter) => adapter.GetTags());
-        endpoints.MapPost("/api/show", (HttpContext ctx, OllamaAdapter adapter) => adapter.ShowAsync(ctx));
+        endpoints.MapGet("/api/tags", (HttpContext ctx) => ctx.RequestServices.GetService<EmbeddingAdapter>()?.GetTags()
+            ?? ctx.RequestServices.GetRequiredService<OllamaAdapter>().GetTags());
+        endpoints.MapPost("/api/show", (HttpContext ctx) => ctx.RequestServices.GetService<EmbeddingAdapter>() is { } embedding
+            ? embedding.ShowAsync(ctx) : ctx.RequestServices.GetRequiredService<OllamaAdapter>().ShowAsync(ctx));
+        endpoints.MapPost("/api/embed", (HttpContext ctx) =>
+            EmbeddingHosting.InvokeAsync(ctx, static (adapter, context) => adapter.OllamaAsync(context)));
+        endpoints.MapPost("/api/embeddings", (HttpContext ctx) =>
+            EmbeddingHosting.InvokeAsync(ctx, static (adapter, context) => adapter.OllamaLegacyAsync(context)));
         endpoints.MapPost("/api/generate", (HttpContext ctx, OllamaAdapter adapter) => adapter.GenerateAsync(ctx));
         endpoints.MapPost("/api/chat/ollama", (HttpContext ctx, OllamaAdapter adapter) => adapter.ChatAsync(ctx));
         return endpoints;

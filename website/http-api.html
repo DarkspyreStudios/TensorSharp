@@ -22,8 +22,8 @@
   <table>
     <thead><tr><th>Style</th><th>Endpoints</th></tr></thead>
     <tbody>
-      <tr><td><strong>Ollama-compatible</strong></td><td><code>/api/generate</code>, <code>/api/chat/ollama</code>, <code>/api/tags</code>, <code>/api/show</code></td></tr>
-      <tr><td><strong>OpenAI-compatible</strong></td><td><code>/v1/chat/completions</code>, <code>/v1/models</code>, <code>/v1/videos/generations</code>, <code>/v1/skills</code></td></tr>
+      <tr><td><strong>Ollama-compatible</strong></td><td><code>/api/embed</code>, <code>/api/embeddings</code>, <code>/api/generate</code>, <code>/api/chat/ollama</code>, <code>/api/tags</code>, <code>/api/show</code></td></tr>
+      <tr><td><strong>OpenAI-compatible</strong></td><td><code>/v1/embeddings</code>, <code>/v1/chat/completions</code>, <code>/v1/models</code>, <code>/v1/videos/generations</code>, <code>/v1/skills</code></td></tr>
       <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>, <code>/api/sessions</code>, <code>/api/models</code>, <code>/api/upload</code>, <code>/api/image-edit</code>, <code>/api/image-edit/stream</code>, <code>/api/video-generate</code>, <code>/api/video-generate/stream</code>, <code>/api/skills</code>, <code>/api/code/artifacts</code></td></tr>
       <tr><td><strong>Utilities</strong></td><td><code>/health</code>, <code>/api/version</code>, <code>/api/queue/status</code></td></tr>
     </tbody>
@@ -32,6 +32,9 @@
   <div class="callout warn"><div class="ic">⚠️</div><p><strong>Ollama chat path:</strong> the Ollama-compatible chat endpoint is <code>POST /api/chat/ollama</code> — <em>not</em> <code>/api/chat</code>, which is the Web UI's SSE endpoint. <code>/api/generate</code>, <code>/api/tags</code>, <code>/api/show</code>, and <code>/api/version</code> are at their standard Ollama paths.</p></div>
   <div class="callout note"><div class="ic">📌</div><p>Start with a required <code>--model</code> and an explicit <code>--mmproj</code> when vision/audio needs one. Requests must name that startup GGUF file or its basename. <code>/api/models/load</code> only reloads the same startup model/projector; it cannot load an arbitrary path or add a model to a model-less process. When a request omits <code>max_tokens</code> / <code>num_predict</code>, the Ollama and OpenAI compat endpoints default to <strong>200</strong> tokens (the Web UI uses <code>--max-tokens</code>, default 20000). See the <a href="server.html#start">copy/paste server quickstart</a>.</p></div>
   <div class="callout warn"><div class="ic">🔒</div><p>The server has no API-key authentication or built-in TLS and listens on <code>0.0.0.0:5000</code>. Use it on a trusted network or put an authenticating TLS reverse proxy in front of it.</p></div>
+
+  <h2 id="embeddings">Embedding service</h2>
+  <p>Start with <code>--model encoder.gguf --embeddings</code> to host Snowflake Arctic Embed L v2.0 or MiniLM. <code>POST /v1/embeddings</code>、<code>POST /api/embed</code>、<code>POST /api/embeddings</code> return normalized vectors on pure C# <code>cpu</code> or native <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>. <a href="embeddings.html">Downloads, APIs, truncation, and retrieval quality →</a></p>
 
   <h2 id="quick-call">Quick call after the server starts</h2>
   <p>The server quickstart hosts <code>gemma-4-E4B-it-Q8_0.gguf</code>. Copy this into a second terminal:</p>

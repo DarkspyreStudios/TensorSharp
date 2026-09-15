@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Embedding Models & Semantic Search — TensorSharp Wiki</title>
+  <meta name="description" content="Turn text and code into vectors for semantic search and RAG. TensorSharp runs GGUF BERT / XLM-R encoders locally and serves embeddings through OpenAI- and Ollama-compatible HTTP APIs. This feature is in current source; older release archives may not include it.">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
+  <script defer src="assets/search-index.js"></script>
+  <script defer src="assets/app.js"></script>
+</head>
+<body data-page="embeddings">
+<a class="skip" href="#content">Skip to content</a>
+<main class="content" id="content">
+  <div class="breadcrumb"><a href="index.html">Home</a> › Embedding Models & Semantic Search</div>
+  <h1>Embedding Models & Semantic Search</h1>
+  <p class="lede">Turn text and code into vectors for semantic search and RAG. TensorSharp runs GGUF BERT / XLM-R encoders locally and serves embeddings through OpenAI- and Ollama-compatible HTTP APIs. This feature is in current source; older release archives may not include it.</p>
+  <h2 id="models">Models</h2>
+  <div class="table-scroll"><table>
+    <thead><tr><th>Model</th><th>Dimensions</th><th>GGUF token limit</th><th>Pooling</th></tr></thead>
+    <tbody>
+      <tr><td>Snowflake Arctic Embed L v2.0 Q8_0</td><td>1024</td><td>8192</td><td>CLS</td></tr>
+      <tr><td>all-MiniLM-L6-v2 Q8_0</td><td>384</td><td>512</td><td>Mean</td></tr>
+    </tbody>
+  </table></div>
+  <p>Pinned downloads, checksums, and the complete protocol: <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/embeddings.md">embedding guide</a> · <a href="models-downloads.html">model downloads</a>.</p>
+  <h2 id="start">Start the service</h2>
+  <p>Embedding execution supports 100% pure C# <code>cpu</code>, plus native <code>ggml_cpu</code>, <code>ggml_metal</code>, and <code>ggml_cuda</code>. Pure C# execution needs no native inference library; native execution requires the corresponding backend build. Each process keeps one encoder resident; a chat service uses a separate port.</p>
+  <pre data-lang="bash"><code>dotnet build TensorSharp.Server.Host -c Release \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  --model models/embeddings/snowflake-arctic-embed-l-v2.0-q8_0.gguf \
+  --embeddings --backend cpu --embedding-threads 8 \
+  --host 127.0.0.1 --port 5000 --no-webui</code></pre>
+  <p><code>--embedding-context-size N</code> reduces the per-input token limit; 0 uses model metadata. <code>/v1/models</code>, <code>/api/tags</code>, <code>/api/show</code> report the hosted model and its embedding capability.</p>
+  <h2 id="api">HTTP APIs</h2>
+  <pre data-lang="bash"><code>curl http://127.0.0.1:5000/v1/embeddings \
+  -H &#x27;Content-Type: application/json&#x27; \
+  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;input&quot;:[&quot;query: read a file&quot;,&quot;def read_file(path): return open(path).read()&quot;],&quot;dimensions&quot;:256}&#x27;
+
+curl http://127.0.0.1:5000/api/embed \
+  -H &#x27;Content-Type: application/json&#x27; \
+  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;input&quot;:[&quot;query: read a file&quot;,&quot;open a document&quot;],&quot;truncate&quot;:false}&#x27;
+
+curl http://127.0.0.1:5000/api/embeddings \
+  -H &#x27;Content-Type: application/json&#x27; \
+  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;prompt&quot;:&quot;query: read a file&quot;}&#x27;</code></pre>
+  <p>OpenAI <code>input</code> accepts a string, a string array, one token-ID array, or an array of token-ID arrays; token inputs must already include this model’s special tokens. <code>encoding_format</code> is <code>float</code> or <code>base64</code> (little-endian float32). Responses include indices, vectors, and token usage. A request accepts up to 2048 inputs and 262144 total tokens. Embedding and model-show JSON bodies are limited to 16 MiB; oversized bodies return HTTP 413.</p>
+  <p>OpenAI rejects inputs beyond the context limit. Ollama <code>/api/embed</code> accepts a string or string array; <code>truncate</code> defaults to <code>true</code> and preserves the final special token, while <code>false</code> rejects overflow. Its response contains <code>embeddings</code>, nanosecond timings, and <code>prompt_eval_count</code>. Legacy <code>/api/embeddings</code> takes <code>prompt</code> and returns one <code>embedding</code>.</p>
+  <p>Concurrent callers are grouped from requests already waiting, in FIFO order, up to 64 sequences and 4096 tokens per encoder call. The first request starts immediately; there is no batching delay. Larger whole requests run alone. Each caller retains its own result order and options; canceling one caller does not cancel healthy callers. See the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/embeddings.md#concurrent-requests">request scheduling contract</a>.</p>
+  <h2 id="quality">Retrieval quality and performance</h2>
+  <p>Prefix Snowflake queries with <code>query: </code> and leave documents unprefixed. Vectors have unit L2 norm, so a dot product gives cosine similarity. <code>dimensions</code> crops the vector and normalizes it again; Snowflake’s Matryoshka training supports reduction to 256 dimensions, while arbitrary reductions on other models can lower quality. MiniLM’s upstream default sentence length is shorter than this GGUF’s 512-position capacity. Chunk code at function/class boundaries and rebuild the index when changing models or chunking.</p>
+  <p>Both implementations use full bidirectional attention and model-declared pooling. Each pure C# model owns a persistent worker pool; ARM Q8 projections use four-token × four-output signed-dot SIMD tiles. Managed FP32 attention transposes keys, computes four queries with adjacent keys in SIMD lanes, and packs values into channel tiles (four channels on ARM) for fused multiply-add. Portable vector-width and four-query dot-product fallbacks cover other processors and head sizes; padded key strides cover tails; the long path uses 64-query × 128-key tiles with ARM four-query × sixteen-output SIMD reuse and online FP32 softmax and bounded per-head scratch. Short and fallback paths keep four temporary score rows. The native executor packs heterogeneous GPU batches with sequence-isolating masks, packs CPU projections with independently padded attention, and reuses graphs.</p>
+  <p>Tokenization is checked against independent HuggingFace and llama.cpp references, including multilingual Unicode; the full guide records upstream differences. The native-free host check removes custom native assets and inspects loaded libraries after inference. The managed x86 path has guarded AVX/AVX2/AVX-512 support; the four-query × sixteen-column kernel is ARM-specific. Current timing evidence covers Apple Silicon, with x86 performance unmeasured. Performance conclusions come from measurements on identical GGUFs, hardware, and requests.</p>
+  <p><a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/validation/embeddings-2026-09/README.md">Validation results and limitations</a> · <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/benchmarks/EmbeddingBench/README.md">Reproduce the HTTP benchmark</a></p>
+  <h2 id="csharp">C# integration</h2>
+  <p><code>Backend = &quot;CPU&quot;</code> is the default pure C# encoder. Use <code>&quot;GGML_CPU&quot;</code> for native CPU execution, <code>&quot;METAL&quot;</code> for native Metal, or <code>&quot;CUDA&quot;</code> for native CUDA.</p>
+  <pre data-lang="csharp"><code>using TensorSharp.Models.Embeddings;
+
+using var model = EmbeddingModel.Load(&quot;models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf&quot;,
+    new EmbeddingModelOptions { Backend = &quot;CPU&quot;, Threads = 8 });
+EmbeddingBatchResult batch = await model.EmbedAsync(new[] { &quot;read a file&quot;, &quot;open a document&quot; });
+float[] vector = batch.Embeddings[0];</code></pre>
+</main>
+</body>
+</html>

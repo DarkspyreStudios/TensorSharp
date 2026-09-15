@@ -8,6 +8,8 @@ TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核�
 
 | 架构 | 模型 | GGUF 下载 |
 |---|---|---|
+| 嵌入编码器（`bert` / XLM-R） | Snowflake Arctic Embed L v2.0，Q8_0，1024 维 | [fisher046/snowflake-arctic-embed-l-v2.0-Q8_0-GGUF](https://huggingface.co/fisher046/snowflake-arctic-embed-l-v2.0-Q8_0-GGUF)，文件 `snowflake-arctic-embed-l-v2.0-q8_0.gguf`；约 635 MB；使用 `--embeddings`。固定修订版、校验和与示例见[指南](docs/embeddings_zh-cn.md) |
+| 嵌入编码器（`bert`） | all-MiniLM-L6-v2，Q8_0，384 维 | [second-state/All-MiniLM-L6-v2-Embedding-GGUF](https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF)，文件 `all-MiniLM-L6-v2-Q8_0.gguf`；约 25 MB；使用 `--embeddings` |
 | Gemma 4 已验证原生规格 | gemma-4-E4B-it Q8_0 | [ggml-org/gemma-4-E4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF)；推荐公开文件为 `gemma-4-E4B-it-Q8_0.gguf`，另有低内存 Q4_K_M；同仓库投影器为 `mmproj-gemma-4-E4B-it-Q8_0.gguf` |
 | Gemma 4 | 12B / 26B-A4B QAT | [unsloth/gemma-4-12B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-12B-it-qat-GGUF) / [unsloth/gemma-4-26B-A4B-it-qat-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF)；同仓库含 `mmproj-BF16.gguf`，以及匹配的 MTP draft（`mtp-gemma-4-12B-it.gguf` / `mtp-gemma-4-26B-A4B-it.gguf`，可选，仅用于推测解码） |
 | Gemma 4 | 31B / 26B-A4B | [ggml-org/gemma-4-31B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-31B-it-GGUF) / [ggml-org/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/ggml-org/gemma-4-26B-A4B-it-GGUF)；同仓库含 mmproj |

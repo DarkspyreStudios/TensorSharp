@@ -64,8 +64,14 @@ namespace TensorSharp.Server.Hosting
             SkillSandboxMode skillsSandbox = SkillSandboxMode.Required,
             bool skillsAllowNetwork = false,
             bool prefixCacheEnabled = true,
-            string prefixCacheDirectory = null)
+            string prefixCacheDirectory = null,
+            bool embeddingsEnabled = false,
+            int embeddingThreads = 0,
+            int embeddingContextSize = 0)
         {
+            EmbeddingsEnabled = embeddingsEnabled;
+            EmbeddingThreads = embeddingThreads;
+            EmbeddingContextSize = embeddingContextSize;
             PrefixCacheEnabled = prefixCacheEnabled;
             PrefixCacheDirectory = prefixCacheDirectory;
             WebUiEnabled = webUiEnabled;
@@ -110,6 +116,18 @@ namespace TensorSharp.Server.Hosting
         /// <see cref="DefaultListenUrls"/>. Never null or empty.
         /// </summary>
         public string ListenUrls { get; }
+
+        /// <summary>Host an embedding encoder instead of a chat/generation model.</summary>
+        public bool EmbeddingsEnabled { get; }
+
+        /// <summary>True when the embedding encoder runs entirely in managed C# without native backend libraries.</summary>
+        public bool UsesManagedEmbeddingBackend => EmbeddingsEnabled && BackendCatalog.Canonicalize(DefaultBackend) == "cpu";
+
+        /// <summary>Embedding CPU threads; zero uses the backend default.</summary>
+        public int EmbeddingThreads { get; }
+
+        /// <summary>Embedding token limit; zero uses the model's context length.</summary>
+        public int EmbeddingContextSize { get; }
 
         /// <summary>
         /// False when the operator passed <c>--no-webui</c> (or set

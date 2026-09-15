@@ -9,6 +9,8 @@ explain the forward graph and reproduce the inference path in TensorSharp." If
 you only need a top-level pointer, use the table below; otherwise jump into the
 individual cards.
 
+For BERT/XLM-R sentence encoders (Snowflake Arctic Embed L v2.0 and MiniLM), see the [embedding model guide](../embeddings.md) for downloads, the forward graph, and APIs.
+
 ## What every card contains
 
 Each card follows the same shape so you can diff architectures cleanly:

@@ -1,0 +1,14 @@
+{
+  "variables": { "modelRoot": "${TENSORSHARP_MODELS:-../models}" },
+  "model": {
+    "path": "${modelRoot}/embeddings/snowflake-arctic-embed-l-v2.0-q8_0.gguf",
+    "urls": ["https://huggingface.co/fisher046/snowflake-arctic-embed-l-v2.0-Q8_0-GGUF/resolve/2b05c46c74499a1a8e5075cabc6f58490aa6f2c1/snowflake-arctic-embed-l-v2.0-q8_0.gguf"],
+    "sha256": "30b0d43dd5825809d2999fa2f4013a1d788c1539ad9ec163d1d305fa3b586ed8"
+  },
+  "embeddings": true,
+  "backend": "ggml_cpu",
+  "embedding-threads": 8,
+  "host": "127.0.0.1",
+  "port": 5000,
+  "no-webui": true
+}

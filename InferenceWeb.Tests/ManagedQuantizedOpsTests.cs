@@ -7,6 +7,44 @@ namespace InferenceWeb.Tests;
 
 public class ManagedQuantizedOpsTests
 {
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(7)]
+    [InlineData(32)]
+    public unsafe void Q80IntegerDot_MatchesScalarSignedBlocksAndUnalignedBuffers(int blocks)
+    {
+        const int offset = 3;
+        byte[] weights = new byte[offset + blocks * 34];
+        byte[] activations = new byte[offset + blocks * 34];
+        float expected = 0;
+        float[] scales = { 0.03125f, 0.5f, 2f, 0.125f };
+        for (int b = 0; b < blocks; ++b)
+        {
+            int start = offset + b * 34;
+            float dw = scales[b % scales.Length];
+            float dx = scales[(b + 1) % scales.Length];
+            BinaryPrimitives.WriteUInt16LittleEndian(weights.AsSpan(start), BitConverter.HalfToUInt16Bits((Half)dw));
+            BinaryPrimitives.WriteUInt16LittleEndian(activations.AsSpan(start), BitConverter.HalfToUInt16Bits((Half)dx));
+            int dot = 0;
+            for (int i = 0; i < 32; ++i)
+            {
+                sbyte w = unchecked((sbyte)((b * 43 + i * 71) % 256 - 128));
+                sbyte x = (sbyte)((b * 31 + i * 47) % 255 - 127);
+                weights[start + 2 + i] = unchecked((byte)w);
+                activations[start + 2 + i] = unchecked((byte)x);
+                dot += w * x;
+            }
+            expected += dw * dx * dot;
+        }
+        fixed (byte* w = weights)
+        fixed (byte* x = activations)
+        {
+            float actual = ManagedQuantizedOps.DotQuantizedRow(GgmlTensorType.Q8_0, w + offset, x + offset, blocks * 32);
+            Assert.InRange(MathF.Abs(actual - expected), 0, 1e-5f * MathF.Max(1, MathF.Abs(expected)));
+        }
+    }
+
     [Fact]
     public void ShouldStoreWeightQuantized_UsesManagedCpuSupportMatrix()
     {
@@ -1123,13 +1161,44 @@ public class ManagedQuantizedOpsTests
         }
     }
 
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(9)]
+    public void BatchedQ2KRowMatchesScalarReferenceWithOffsetsAndStrides(int rows)
+    {
+        const int cols = 512, stride = cols + 16, sourceOffset = 8, inputOffset = 13, outputOffset = 7;
+        byte[] weights = new byte[sourceOffset + 2 * 84];
+        new Random(1729).NextBytes(weights);
+        for (int block = 0; block < 2; block++)
+        {
+            WriteHalf(weights, sourceOffset + block * 84 + 80, 0.02f);
+            WriteHalf(weights, sourceOffset + block * 84 + 82, 0.005f);
+        }
+        float[] inputs = Enumerable.Range(0, inputOffset + rows * stride)
+            .Select(i => (i % 31 - 15) * 0.017f).ToArray();
+        float[] output = Enumerable.Repeat(-999f, outputOffset + rows + 1).ToArray();
+        ManagedQuantizedOps.DotRowBatchToFloat32((int)GgmlTensorType.Q2_K, weights, sourceOffset,
+            inputs, inputOffset, stride, rows, cols, output, outputOffset);
+        float[] dequantized = new float[cols];
+        NativeDequant.DequantizeToFloat32((int)GgmlTensorType.Q2_K, weights, sourceOffset, dequantized, 0, cols);
+        for (int row = 0; row < rows; row++)
+        {
+            double expected = 0;
+            for (int i = 0; i < cols; i++)
+                expected += (double)dequantized[i] * inputs[inputOffset + row * stride + i];
+            Assert.InRange(Math.Abs(output[outputOffset + row] - expected), 0, 1e-4 * Math.Max(1, Math.Abs(expected)));
+        }
+        Assert.All(output.Take(outputOffset), value => Assert.Equal(-999f, value));
+        Assert.Equal(-999f, output[^1]);
+    }
+
     /// <summary>
-    /// What the Q2_K integer kernel is worth against the dequantize-then-float
-    /// path it replaced. Prints both rates; asserts only that the integer path is
-    /// not slower, because an absolute rate is a property of the host.
+    /// The batched row helper must not repeatedly sweep the activation matrix
+    /// for each quantization block. Compare with dequantizing the full row once.
     /// </summary>
     [Fact]
-    public void Q2KMatmul_IntegerPathIsNotSlowerThanDequantizing()
+    public void Q2KMatmul_BatchedRowIsNotSlowerThanDequantizing()
     {
         // DotRowBatchToFloat32 dots ONE weight row against `batch` activation
         // vectors, which is the shape the kernel is measured on.
@@ -1151,7 +1220,7 @@ public class ManagedQuantizedOpsTests
         for (int r = 0; r < reps; r++)
             ManagedQuantizedOps.DotRowBatchToFloat32((int)GgmlTensorType.Q2_K, weights, 0, input, 0, cols, batch, cols, outBuf, 0);
         sw.Stop();
-        double integerMs = sw.Elapsed.TotalMilliseconds / reps;
+        double batchedMs = sw.Elapsed.TotalMilliseconds / reps;
 
         // What Q2_K did before it had a kernel: dequantize the row, then float dot.
         float[] row = new float[cols];
@@ -1166,11 +1235,11 @@ public class ManagedQuantizedOpsTests
         double dequantMs = sw.Elapsed.TotalMilliseconds / reps;
 
         double gflops = 2.0 * batch * cols / 1e9;
-        Console.WriteLine($"Q2_K 1x{cols} against {batch} activations: integer {integerMs:F2} ms "
-                        + $"({gflops / (integerMs / 1000):F1} GFLOP/s), dequantize+float {dequantMs:F2} ms "
-                        + $"({gflops / (dequantMs / 1000):F1} GFLOP/s), ratio {dequantMs / integerMs:F2}x");
-        Assert.True(integerMs <= dequantMs * 1.5,
-            $"integer path {integerMs:F2} ms should not be materially slower than dequantizing {dequantMs:F2} ms");
+        Console.WriteLine($"Q2_K 1x{cols} against {batch} activations: batched {batchedMs:F2} ms "
+                        + $"({gflops / (batchedMs / 1000):F1} GFLOP/s), dequantize+float {dequantMs:F2} ms "
+                        + $"({gflops / (dequantMs / 1000):F1} GFLOP/s), ratio {dequantMs / batchedMs:F2}x");
+        Assert.True(batchedMs <= dequantMs * 1.5,
+            $"batched path {batchedMs:F2} ms should not be materially slower than dequantizing {dequantMs:F2} ms");
     }
 
     private static ushort HalfBits(float value) => BitConverter.HalfToUInt16Bits((Half)value);
