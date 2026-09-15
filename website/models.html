@@ -19,9 +19,12 @@
   <p class="lede">TensorSharp loads models in GGUF format and auto-detects the architecture from the file's <code>general.architecture</code> metadata — except MiniMax-H3, whose published GGUFs carry no metadata at all and are identified by their tensors instead. Pick a quantization that fits your hardware (<code>Q4_K_M</code> for low memory, <code>Q8_0</code> for higher quality).</p>
   <div class="callout note"><div class="ic">📘</div><p><strong>Gemma 4 E4B is the example model in <em>From Tensors to Tokens</em>.</strong> Read the book for a guided build from tensor fundamentals through multimodal inference; use this reference for current downloads and capability details. <a href="book.html">Explore the book →</a></p></div>
 
+  <p><strong>Sentence encoders:</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2, served through <code>--embeddings</code> and OpenAI/Ollama embedding APIs. <a href="embeddings.html">Embedding models, supported backends, and validation →</a></p>
+
   <h2 id="browse">Browse the model reference</h2>
-  <p>The full reference is split across four pages. Start with downloads if you know which model you want, or with a category page if you are still choosing.</p>
+  <p>The full reference is split across five pages. Start with downloads if you know which model you want, or with a category page if you are still choosing.</p>
   <div class="card-grid">
+    <a class="card" href="embeddings.html"><div class="ic">🔎</div><h3>Embedding Models & Semantic Search</h3><p>Snowflake and MiniLM: text/code vectors, APIs, and retrieval quality.</p></a>
     <a class="card" href="models-downloads.html"><div class="ic">⬇️</div><h3>Model Downloads</h3><p>Every GGUF, with the projector, VAE, encoder and drafter files each family needs.</p></a>
     <a class="card" href="models-text.html"><div class="ic">🧠</div><h3>Text &amp; LLM Models</h3><p>Twelve architectures, their run recipes, plus multimodal input, thinking and tool calling.</p></a>
     <a class="card" href="models-image.html"><div class="ic">🖼️</div><h3>Image Generation</h3><p>Qwen-Image-Edit, the Lightning LoRA, and the DiT step cache.</p></a>

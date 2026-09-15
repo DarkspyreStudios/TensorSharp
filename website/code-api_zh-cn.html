@@ -18,6 +18,8 @@
   <h1>从 C# 使用 TensorSharp</h1>
   <p class="lede">TensorSharp 是一个真正的 .NET 库，而不只是可执行文件。从源码 checkout 引用其项目，即可在不经过 HTTP 的情况下从自己的代码驱动推理。</p>
 
+  <p><strong>新增句向量编码器：</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2，支持纯 C# CPU 与原生 GGML CPU/Metal/CUDA，通过 <code>--embeddings</code> 提供兼容 OpenAI/Ollama 的 API。 <a href="embeddings_zh-cn.html">嵌入模型、支持的后端与验证 →</a></p>
+
   <h2 id="packages">项目与包边界</h2>
   <p>仓库按可发布包边界拆分。源码树的发布集合是下表的全部 <strong>13</strong> 个包，由 <code>eng/verify-packages.ps1</code> 校验，并作为发布流水线的门禁。</p>
   <p><strong>核验于 2026-09-08：</strong>NuGet.org 上目前只有其中 8 个，版本 <strong>3.1.2</strong>（2026 年 7 月）：Tensors、Runtime、Models、三个后端、Server 与 Cli。它们落后于当前源码树与服务器版本——已发布的 <code>TensorSharp.Server</code> 早于日志层与聊天层拆分。其余 5 个（<code>TensorSharp.Runtime.Logging</code>、<code>TensorSharp.AgentHost</code>、<code>TensorSharp.Chat</code>、<code>TensorSharp.Server.Host</code>、<code>TensorSharp.Distributed</code>）已可打包并通过校验，但尚未推送。</p>

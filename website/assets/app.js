@@ -15,6 +15,7 @@
       { page: "backends", label: { en: "Compute Backends", zh: "计算后端" } },
       { page: "models",   label: { en: "Supported Models", zh: "支持的模型" }, children: [
         { page: "models-downloads", label: { en: "Model Downloads", zh: "模型下载" } },
+        { page: "embeddings", label: { en: "Embedding Models", zh: "嵌入模型" } },
         { page: "models-text",      label: { en: "Text & LLM Models", zh: "文本与 LLM 模型" } },
         { page: "models-image",     label: { en: "Image Generation", zh: "图像生成" } },
         { page: "models-video",     label: { en: "Video Generation", zh: "视频生成" } },

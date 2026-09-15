@@ -22,8 +22,8 @@
   <table>
     <thead><tr><th>风格</th><th>端点</th></tr></thead>
     <tbody>
-      <tr><td><strong>兼容 Ollama</strong></td><td><code>/api/generate</code>、<code>/api/chat/ollama</code>、<code>/api/tags</code>、<code>/api/show</code></td></tr>
-      <tr><td><strong>兼容 OpenAI</strong></td><td><code>/v1/chat/completions</code>、<code>/v1/models</code>、<code>/v1/videos/generations</code>、<code>/v1/skills</code></td></tr>
+      <tr><td><strong>兼容 Ollama</strong></td><td><code>/api/embed</code>、<code>/api/embeddings</code>、<code>/api/generate</code>、<code>/api/chat/ollama</code>、<code>/api/tags</code>、<code>/api/show</code></td></tr>
+      <tr><td><strong>兼容 OpenAI</strong></td><td><code>/v1/embeddings</code>、<code>/v1/chat/completions</code>、<code>/v1/models</code>、<code>/v1/videos/generations</code>、<code>/v1/skills</code></td></tr>
       <tr><td><strong>Web UI (SSE)</strong></td><td><code>/api/chat</code>、<code>/api/sessions</code>、<code>/api/models</code>、<code>/api/models/load</code>、<code>/api/upload</code>、<code>/api/image-edit</code>、<code>/api/image-edit/stream</code>、<code>/api/video-generate</code>、<code>/api/video-generate/stream</code>、<code>/api/skills</code>、<code>/api/code/artifacts</code></td></tr>
       <tr><td><strong>工具端点</strong></td><td><code>/health</code>、<code>/api/version</code>、<code>/api/queue/status</code></td></tr>
     </tbody>
@@ -32,6 +32,9 @@
   <div class="callout warn"><div class="ic">⚠️</div><p><strong>Ollama 聊天路径：</strong>兼容 Ollama 的聊天端点是 <code>POST /api/chat/ollama</code>，<em>不是</em> <code>/api/chat</code>；后者是 Web UI 的 SSE 端点。<code>/api/generate</code>、<code>/api/tags</code>、<code>/api/show</code> 与 <code>/api/version</code> 使用标准 Ollama 路径。</p></div>
   <div class="callout note"><div class="ic">📌</div><p>启动时必须传入 <code>--model</code>；视觉 / 音频需要投影器时还要显式传入 <code>--mmproj</code>。请求必须指明该启动 GGUF 文件或其基名。<code>/api/models/load</code> 只能重新加载同一启动模型 / 投影器，不能加载任意路径，也不能给无模型进程添加模型。Ollama / OpenAI 兼容端点省略 <code>max_tokens</code> / <code>num_predict</code> 时默认生成 <strong>200</strong> token（Web UI 使用 <code>--max-tokens</code>，默认 20000）。见<a href="server_zh-cn.html#start">可复制粘贴的服务器快速开始</a>。</p></div>
   <div class="callout warn"><div class="ic">🔒</div><p>服务没有 API Key 身份验证或内置 TLS，并监听 <code>0.0.0.0:5000</code>。只应在可信网络中使用，或在前方部署带身份验证与 TLS 的反向代理。</p></div>
+
+  <h2 id="embeddings">嵌入服务</h2>
+  <p>使用 <code>--model encoder.gguf --embeddings</code>，托管 Snowflake Arctic Embed L v2.0 或 MiniLM。 <code>POST /v1/embeddings</code>、<code>POST /api/embed</code>、<code>POST /api/embeddings</code> 返回归一化向量；后端为纯 C# <code>cpu</code> 与原生 <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>。<a href="embeddings_zh-cn.html">下载、API、截断规则与检索质量 →</a></p>
 
   <h2 id="quick-call">服务启动后的快速调用</h2>
   <p>服务器快速开始托管 <code>gemma-4-E4B-it-Q8_0.gguf</code>。在第二个终端中粘贴：</p>

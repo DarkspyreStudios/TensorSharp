@@ -11,6 +11,21 @@ TensorSharp.Server.Host provides three API styles plus a few utility endpoints:
 
 Start the server with the exact hosted model via `--model` and, when needed, the exact projector via `--mmproj`. The projector is **not auto-detected** by `TensorSharp.Server.Host`. The Web UI and compatibility endpoints expose only that startup model/projector pair; `/api/models/load` can reload the same pair on a supported backend, but it cannot choose a model on a model-less server or switch to another file at runtime.
 
+## Embedding APIs
+
+Start an embedding service with `--model encoder.gguf --embeddings` and pure C# `cpu` or native `ggml_cpu` / `ggml_metal` / `ggml_cuda`. Each process keeps one encoder resident; run chat and embeddings separately. Snowflake Arctic Embed L v2.0 and MiniLM GGUFs are supported, and model metadata endpoints advertise the `embedding` capability.
+
+```bash
+curl http://127.0.0.1:5000/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"],"encoding_format":"float"}'
+curl http://127.0.0.1:5000/api/embed -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file"],"truncate":false}'
+curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","prompt":"read a file"}'
+```
+
+See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs, `base64`, `dimensions`, truncation, and retrieval quality.
+
 ## Current Contract
 
 | Area | Contract |

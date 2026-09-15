@@ -4,6 +4,7 @@
 > Part of the [TensorSharp](README.md) documentation.
 
 
+- **Sentence embeddings** — GGUF `bert` / XLM-R encoders: Snowflake Arctic Embed L v2.0 (1024 dimensions, CLS pooling) and all-MiniLM-L6-v2 (384 dimensions, mean pooling). 100% pure C# CPU plus native GGML CPU/Metal/CUDA, with bidirectional attention; managed execution uses a model-owned worker pool and ARM Q8 SIMD tiles; native execution retains quantized weights, packs projections, isolates attention by sequence, and reuses graphs; OpenAI/Ollama single and batched inputs, normalized vectors, base64, and dimension reduction. See the [embedding guide](docs/embeddings.md) and its validation report.
 - **Multi-architecture support** -- DeepSeek V4 Flash, DeepSeek V4.1 Flash (`deepseek41`, served on `ggml_cuda`; `cpu` is the 100% pure C# `DeepSeek4CpuExecutor` with no ggml and no native dependency, and it, `cuda` and `ggml_cpu` are correctness and portability paths, not serving paths), GLM 5.x (GLM-5.2 and GLM-5.3 both on `glm-dsa`, GLM-5.3-Flash on `glm5next`), Gemma 4, DiffusionGemma, Qwen 3.5/3.6-family, Qwen 3.8 Flash Next (`qwen4exp`), GPT OSS, Nemotron-H, Mistral 3, Hunyuan Dense (`hunyuan-dense`), Muse-Glimmer, Qwen-Image-Edit (image editing), MiniMax-H3 (video with native 32 kHz stereo audio), and Wan 2.1/2.2 (video only)
 - **Multimodal inference** -- image, video, and audio inputs (Gemma 4); images for Qwen 3.5/3.6-family / Qwen 3.8 Flash Next / GLM-5.3-Flash / Mistral 3 / Muse-Glimmer / Nemotron-H Omni, each through its own `mmproj` tower (GLM-5.2 and GLM-5.3, both `glm-dsa`, are text-only). Audio input is Gemma 4 only. `--pdf` is architecture-agnostic: a born-digital PDF's text layer is inlined into the prompt for any model, and only scanned PDFs fall back to page images (which then need a vision model). Generated media is its own axis: Qwen-Image-Edit emits an image, Wan 2.1/2.2 emit an H.264 MP4, and MiniMax-H3 is the one family whose output is **audio as well as video** — a 32 kHz stereo track denoised jointly with the picture and written as a sidecar `.wav` beside the MP4
 - **Thinking / reasoning mode** -- structured chain-of-thought output with `<think>` / `<|channel>thought` / `<|channel>analysis` / `to=self` tags (Qwen 3.5/3.6-family, Qwen 3.8 Flash Next, Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, DeepSeek V4.1, GLM 5.x)
@@ -149,7 +150,7 @@ prefill against the 48-wide one for equal-or-better decode. Tune with `TS_CPU_TH
 `TS_CPU_SPIN`, `TS_CPU_TASK_BYTES` and `TS_CPU_TASKS_PER_WORKER`
 ([env var matrix](docs/env_var_feature_matrix.md)).
 
-**Zero-copy quantized weights.** `BackendType.Cpu` was the only backend missing
+**Zero-copy quantized weights in the `ModelBase` loader.** `BackendType.Cpu` was the only backend missing
 from `CanUseFileMappedQuantizedWeights`, so it alone copied every quantized
 tensor into fresh anonymous memory at load instead of binding it straight from
 the GGUF mapping, as every GGML backend already did. It now binds them zero-copy
@@ -161,7 +162,8 @@ it -- and the loader reports the split, e.g. for GLM-5.3-Flash UD-Q2_K_XL:
 Any model whose weights used to be copied benefits and the effect is largest on
 big quantized checkpoints: that one went from a load that never completed
 (resident set 412 GB and still climbing) to **~48 s**, most of which is the
-page-cache prefault.
+page-cache prefault. The embedding encoder has a separate loader: it owns compact
+quantized arrays and repacks supported projections; see [embedding execution](docs/embeddings.md#managed-cpu-execution).
 
 **`IQ2_XS` / `IQ4_XS`, and direct i-quant dots.** `ManagedQuantizedOps` gained
 managed dequantizers for `IQ2_XS` and `IQ4_XS` (verified against ggml's own

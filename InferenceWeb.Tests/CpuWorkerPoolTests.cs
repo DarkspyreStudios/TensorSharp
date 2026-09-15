@@ -6,6 +6,8 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -25,6 +27,88 @@ namespace InferenceWeb.Tests
     /// </summary>
     public class CpuWorkerPoolTests
     {
+        [Theory]
+        [InlineData(1)]
+        [InlineData(2)]
+        [InlineData(4)]
+        public void OwnedPoolHonorsThreadCountAndJoinsWorkersOnDispose(int threadCount)
+        {
+            using var pool = new CpuWorkerPool(threadCount);
+            using var barrier = new Barrier(threadCount);
+            var participants = new ConcurrentDictionary<int, Thread>();
+            int submitter = Environment.CurrentManagedThreadId;
+            Assert.Equal(threadCount, pool.ThreadCount);
+            pool.For(threadCount, _ =>
+            {
+                participants.TryAdd(Environment.CurrentManagedThreadId, Thread.CurrentThread);
+                Assert.True(barrier.SignalAndWait(TimeSpan.FromSeconds(5)));
+            });
+            Assert.Equal(threadCount, participants.Count);
+            pool.Dispose();
+            Assert.All(participants.Where(pair => pair.Key != submitter), pair => Assert.False(pair.Value.IsAlive));
+            pool.Dispose();
+        }
+
+        [Fact]
+        public void OwnedPoolNestedJobsRemainInlineAndLeavePoolUsable()
+        {
+            using var pool = new CpuWorkerPool(3);
+            int ran = 0;
+            pool.For(32, _ => pool.For(5, _ => Interlocked.Increment(ref ran)));
+            Assert.Equal(160, ran);
+            pool.For(7, _ => Interlocked.Increment(ref ran));
+            Assert.Equal(167, ran);
+        }
+
+        [Theory]
+        [InlineData(1, 1)]
+        [InlineData(1, 8)]
+        [InlineData(2, 1)]
+        [InlineData(2, 8)]
+        public void DisposalFromAnyCallbackIsRejectedAndPoolRecovers(int threadCount, int blocks)
+        {
+            using var pool = new CpuWorkerPool(threadCount);
+            pool.For(blocks, _ => Assert.Throws<InvalidOperationException>(() => pool.Dispose()));
+            int ran = 0;
+            pool.For(19, _ => Interlocked.Increment(ref ran));
+            Assert.Equal(19, ran);
+        }
+
+        [Theory]
+        [InlineData(0)]
+        [InlineData(1)]
+        [InlineData(7)]
+        public void DisposedOwnedPoolRejectsEveryJobSize(int blocks)
+        {
+            using var pool = new CpuWorkerPool(2);
+            pool.Dispose();
+            Assert.Throws<ObjectDisposedException>(() => pool.For(blocks, _ => { }));
+            Assert.Throws<ObjectDisposedException>(() => pool.For(blocks, _ => { }, CancellationToken.None));
+        }
+
+        [Theory]
+        [InlineData(1)]
+        [InlineData(3)]
+        public void CancellationPreservesItsTokenAndPoolRecovers(int threadCount)
+        {
+            using var pool = new CpuWorkerPool(threadCount);
+            using var cancellation = new CancellationTokenSource();
+            int ran = 0;
+            var error = Assert.Throws<OperationCanceledException>(() => pool.For(128, _ =>
+            {
+                cancellation.Cancel();
+                Interlocked.Increment(ref ran);
+            }, cancellation.Token));
+            Assert.Equal(cancellation.Token, error.CancellationToken);
+            Assert.InRange(ran, 1, threadCount);
+            var alreadyCanceled = Assert.Throws<OperationCanceledException>(() =>
+                pool.For(1, _ => throw new InvalidOperationException("Canceled work must not run."), cancellation.Token));
+            Assert.Equal(cancellation.Token, alreadyCanceled.CancellationToken);
+            int recovered = 0;
+            pool.For(17, _ => Interlocked.Increment(ref recovered));
+            Assert.Equal(17, recovered);
+        }
+
         [Fact]
         public void EveryBlockRunsExactlyOnce()
         {

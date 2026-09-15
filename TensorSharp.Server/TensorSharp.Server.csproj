@@ -5,8 +5,8 @@
     <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Nullable>enable</Nullable>
-    <Description>ASP.NET Core server package for TensorSharp with web UI plus Ollama and OpenAI-compatible APIs.</Description>
-    <PackageTags>$(TensorSharpPackageTags);server;aspnetcore;openai;ollama;web</PackageTags>
+    <Description>ASP.NET Core server package for TensorSharp with embedding and chat inference, web UI, and Ollama/OpenAI-compatible APIs.</Description>
+    <PackageTags>$(TensorSharpPackageTags);server;aspnetcore;openai;ollama;embeddings;web</PackageTags>
   </PropertyGroup>
   <ItemGroup>
      <FrameworkReference Include="Microsoft.AspNetCore.App" />

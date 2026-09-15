@@ -22,6 +22,7 @@ using TensorSharp.Server.ProtocolAdapters;
 using TensorSharp.Server.Responses;
 using TensorSharp.Runtime.Redis;
 using TensorSharp.Server.Host.Hosting;
+using TensorSharp.Models.Embeddings;
 
 const long MaxRequestBodyBytes = 500L * 1024L * 1024L;
 
@@ -310,6 +311,8 @@ builder.Services.AddSingleton(sp => new ModelService(sp.GetRequiredService<ILogg
 });
 builder.Services.AddSingleton<InferenceQueue>();
 builder.Services.AddSingleton<SessionManager>();
+if (hostingOptions.EmbeddingsEnabled)
+    builder.Services.AddTensorSharpEmbeddings(hostingOptions, configuredBackendInput);
 // Engine is owned by ModelService now (so its lifecycle is tied to the
 // loaded model). Re-export it as a DI service for adapters that wish to
 // submit requests directly.
@@ -531,6 +534,7 @@ app.UseTensorSharpRequestLogging();
 // logging so the rejection is still traced; before the endpoints so it covers
 // every protocol surface.
 app.UsePromptOverflowHandling();
+app.UseEmbeddingModelGuard();
 // Serve the bundled static UI. GET / sends index.html too (see
 // HealthEndpoints), so a bare http://host:port/ opens the chat UI; the plain
 // liveness response moved to GET /health and still answers / on headless
@@ -565,7 +569,16 @@ app.MapWebUiEndpoints();
 app.MapOllamaEndpoints();
 app.MapOpenAIEndpoints();
 
-StartupModelLoader.LoadIfConfigured(
+if (hostingOptions.EmbeddingsEnabled)
+{
+    var embeddingModel = app.Services.GetRequiredService<IEmbeddingModel>();
+    startupLogger.LogInformation(LogEventIds.ModelLoadCompleted,
+        "Embedding model loaded: {Model} architecture={Architecture} dimensions={Dimensions} context={ContextLength} backend={Backend}",
+        embeddingModel.ModelName, embeddingModel.Architecture, embeddingModel.Dimensions, embeddingModel.MaxTokens,
+        hostingOptions.DefaultBackend);
+}
+else
+    StartupModelLoader.LoadIfConfigured(
     hostingOptions,
     app.Services.GetRequiredService<ModelService>(),
     configuredBackendInput,
@@ -584,7 +597,7 @@ StartupModelLoader.LoadIfConfigured(
 // answer connections until the prefill finishes. That is stated plainly in the log, and it
 // is the trade this feature exists to make: one slow startup instead of one slow first
 // message, and with the store attached above, later launches restore instead of prefill.
-if (hostingOptions.PrefixCacheEnabled && !string.IsNullOrWhiteSpace(hostingOptions.StartupModelPath))
+if (!hostingOptions.EmbeddingsEnabled && hostingOptions.PrefixCacheEnabled && !string.IsNullOrWhiteSpace(hostingOptions.StartupModelPath))
 {
     var warmupAdapter = app.Services.GetRequiredService<WebUiAdapter>();
     var warmupSessions = app.Services.GetRequiredService<SessionManager>();
@@ -630,8 +643,11 @@ StartupBanner.Emit(startupLogger, hostingOptions, hostingOptions.ListenUrls);
 // inference is already complete. The shutdown call is idempotent and a
 // no-op when no GGML backend was ever initialised. Also hooked onto
 // ProcessExit as a safety net for non-graceful exits.
-app.Lifetime.ApplicationStopped.Register(static () => GgmlBasicOps.Shutdown());
-AppDomain.CurrentDomain.ProcessExit += static (_, _) => GgmlBasicOps.Shutdown();
+if (!hostingOptions.UsesManagedEmbeddingBackend)
+{
+    app.Lifetime.ApplicationStopped.Register(static () => GgmlBasicOps.Shutdown());
+    AppDomain.CurrentDomain.ProcessExit += static (_, _) => GgmlBasicOps.Shutdown();
+}
 
 // Bind the address resolved by ServerOptionsBuilder (--port / --host / --urls,
 // then PORT / HOST / ASPNETCORE_URLS, then http://0.0.0.0:5000). Passing it to

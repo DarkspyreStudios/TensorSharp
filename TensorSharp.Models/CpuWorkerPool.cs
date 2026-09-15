@@ -25,9 +25,10 @@ namespace TensorSharp.Models
     /// process does not burn cores, and the park happens under the same lock the
     /// submitter pulses so a wakeup can never be missed.
     /// </summary>
-    internal sealed class CpuWorkerPool
+    internal sealed class CpuWorkerPool : IDisposable
     {
-        public static readonly CpuWorkerPool Shared = new CpuWorkerPool(DefaultThreadCount());
+        private static readonly Lazy<CpuWorkerPool> SharedPool = new(() => new CpuWorkerPool(DefaultThreadCount()));
+        public static CpuWorkerPool Shared => SharedPool.Value;
 
         // Waking a parked worker is expensive at this width, whatever the
         // primitive, so the design spins long enough that the steady state never
@@ -45,7 +46,6 @@ namespace TensorSharp.Models
         // needs. That is what ThreadCount is for: the pool deliberately does NOT
         // take every core.
         private static readonly int SpinsBeforePark = EnvInt("TS_CPU_SPIN", 4096);
-        private const int ParkPollMs = 5;
 
         private static int EnvInt(string name, int fallback)
             => int.TryParse(Environment.GetEnvironmentVariable(name), out int v) && v >= 0
@@ -60,6 +60,7 @@ namespace TensorSharp.Models
         private readonly object _submitLock = new object();
         private readonly object _sleepLock = new object();
         private readonly int _workers;
+        private readonly Thread[] _threads;
 
         private Action<int> _body;
         private int _blockCount;
@@ -72,9 +73,11 @@ namespace TensorSharp.Models
         private Exception _error;
         private volatile bool _shutdown;
 
-        private CpuWorkerPool(int totalThreads)
+        internal CpuWorkerPool(int totalThreads)
         {
+            if (totalThreads < 1 || totalThreads > 512) throw new ArgumentOutOfRangeException(nameof(totalThreads));
             _workers = Math.Max(0, totalThreads - 1);
+            _threads = new Thread[_workers];
             for (int i = 0; i < _workers; i++)
             {
                 var t = new Thread(WorkerLoop, 512 * 1024)
@@ -82,7 +85,15 @@ namespace TensorSharp.Models
                     IsBackground = true,
                     Name = "ts-cpu-" + i,
                 };
-                t.Start();
+                _threads[i] = t;
+                try { t.Start(); }
+                catch
+                {
+                    _shutdown = true;
+                    lock (_sleepLock) Monitor.PulseAll(_sleepLock);
+                    for (int started = 0; started < i; ++started) _threads[started].Join();
+                    throw;
+                }
             }
             // NB: the workers are NOT waited for here. WorkerLoop touches this
             // type's statics, so a thread that reaches them while the type
@@ -119,6 +130,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void For(int blockCount, Action<int> body)
         {
+            ObjectDisposedException.ThrowIf(_shutdown, this);
             if (blockCount <= 0) return;
 
             // Nested calls, and a job already in flight, both run inline: this is
@@ -126,13 +138,17 @@ namespace TensorSharp.Models
             // deadlock or oversubscribe.
             if (blockCount == 1 || _workers == 0 || _inJob || !Monitor.TryEnter(_submitLock))
             {
-                for (int i = 0; i < blockCount; i++) body(i);
+                bool wasInJob = _inJob;
+                _inJob = true;
+                try { for (int i = 0; i < blockCount; i++) body(i); }
+                finally { _inJob = wasInJob; }
                 return;
             }
 
             _inJob = true;
             try
             {
+                ObjectDisposedException.ThrowIf(_shutdown, this);
                 // Every worker must have latched a generation before the first
                 // job is published. One that started late would otherwise latch a
                 // generation already in flight, skip that job, and never
@@ -180,6 +196,37 @@ namespace TensorSharp.Models
             {
                 _inJob = false;
                 Monitor.Exit(_submitLock);
+            }
+        }
+
+        /// <summary>Cancellation is observed between blocks and propagated with
+        /// the original token after all active workers have returned.</summary>
+        public void For(int blockCount, Action<int> body, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!cancellationToken.CanBeCanceled) { For(blockCount, body); return; }
+            try
+            {
+                For(blockCount, block => { cancellationToken.ThrowIfCancellationRequested(); body(block); });
+            }
+            catch (AggregateException error) when (cancellationToken.IsCancellationRequested &&
+                error.InnerExceptions.Count == 1 && error.InnerExceptions[0] is OperationCanceledException canceled &&
+                canceled.CancellationToken == cancellationToken)
+            {
+                throw new OperationCanceledException(cancellationToken);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        public void Dispose()
+        {
+            if (_inJob) throw new InvalidOperationException("Cannot dispose a CPU worker pool from a running pool job.");
+            lock (_submitLock)
+            {
+                if (_shutdown) return;
+                _shutdown = true;
+                lock (_sleepLock) Monitor.PulseAll(_sleepLock);
+                foreach (var thread in _threads) thread.Join();
             }
         }
 
@@ -236,7 +283,7 @@ namespace TensorSharp.Models
                 lock (_sleepLock)
                 {
                     if (Volatile.Read(ref _generation) == seen && !_shutdown)
-                        Monitor.Wait(_sleepLock, ParkPollMs);
+                        Monitor.Wait(_sleepLock);
                 }
                 Interlocked.Decrement(ref _parked);
                 spins = 0;

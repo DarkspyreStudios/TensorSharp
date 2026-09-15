@@ -14,6 +14,7 @@ using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using System.Threading.Tasks;
 
@@ -246,6 +247,42 @@ namespace TensorSharp.Models
                 float* weight = (float*)src.ToPointer();
                 for (int row = 0; row < rowCount; row++)
                     outputs[row] = DotFloat(inputs + (long)row * inputRowStride, weight, (int)numElements);
+                return;
+            }
+
+            // Keep each activation row contiguous in the batch path. Traversing
+            // the entire batch once per quantization block thrashes its cache.
+            if (rowCount >= 4 && numElements <= int.MaxValue)
+            {
+                int length = (int)numElements;
+                float[] buffer = ArrayPool<float>.Shared.Rent(length);
+                try
+                {
+                    fixed (float* weight = buffer)
+                    {
+                        DequantizeToFloat32(type, (byte*)src.ToPointer(), weight, length);
+                        int row = 0;
+                        for (; row + 4 <= rowCount; row += 4)
+                        {
+                            TensorComputePrimitives.Dot4(
+                                inputs + (long)row * inputRowStride,
+                                inputs + (long)(row + 1) * inputRowStride,
+                                inputs + (long)(row + 2) * inputRowStride,
+                                inputs + (long)(row + 3) * inputRowStride,
+                                weight, length, out float r0, out float r1, out float r2, out float r3);
+                            outputs[row] = r0;
+                            outputs[row + 1] = r1;
+                            outputs[row + 2] = r2;
+                            outputs[row + 3] = r3;
+                        }
+                        for (; row < rowCount; row++)
+                            outputs[row] = DotFloat(inputs + (long)row * inputRowStride, weight, length);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<float>.Shared.Return(buffer);
+                }
                 return;
             }
 
@@ -2372,6 +2409,8 @@ namespace TensorSharp.Models
                 return VecDotQ8_0Q8_0Avx512(q8w, q8x, blockCount);
             if (Avx2.IsSupported)
                 return VecDotQ8_0Q8_0Avx2(q8w, q8x, blockCount);
+            if (Dp.IsSupported && AdvSimd.Arm64.IsSupported)
+                return VecDotQ8_0Q8_0Arm(q8w, q8x, blockCount);
 
             float sum = 0.0f;
             for (int block = 0; block < blockCount; block++)
@@ -2389,6 +2428,26 @@ namespace TensorSharp.Models
                 sum += dw * dx * isum;
             }
 
+            return sum;
+        }
+
+        private static unsafe float VecDotQ8_0Q8_0Arm(byte* q8w, byte* q8x, int blockCount)
+        {
+            float sum = 0;
+            for (int block = 0; block < blockCount; ++block)
+            {
+                byte* wb = q8w + block * Q8_0BlockBytes;
+                byte* xb = q8x + block * Q8_0BlockBytes;
+                var partial = Dp.DotProduct(Vector128<int>.Zero,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(wb + 2),
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(xb + 2));
+                partial = Dp.DotProduct(partial,
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(wb + 18),
+                    Unsafe.ReadUnaligned<Vector128<sbyte>>(xb + 18));
+                int dot = AdvSimd.Arm64.AddAcross(partial).GetElement(0);
+                // Preserve the scalar block reduction order and GGUF half scales.
+                sum += HalfToSingle(ReadUInt16(wb)) * HalfToSingle(ReadUInt16(xb)) * dot;
+            }
             return sum;
         }
 

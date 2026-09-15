@@ -11,6 +11,21 @@ TensorSharp.Server.Host 提供三种 API 风格以及若干工具型接口：
 
 启动服务时通过 `--model` 指定承载的模型文件，必要时通过 `--mmproj` **显式**指定多模态投影器；`TensorSharp.Server.Host` 不会自动探测投影器。Web UI 与兼容接口仅暴露启动时指定的模型 / 投影器组合；`/api/models/load` 可以用受支持的后端重新加载同一组合，但无模型启动时不能用它选择模型，也不能在运行时切换到其他文件。
 
+## 嵌入 API
+
+使用 `--model encoder.gguf --embeddings` 启动嵌入服务，后端选择纯 C# `cpu` 或原生 `ggml_cpu` / `ggml_metal` / `ggml_cuda`。一个进程常驻一个编码器；聊天与嵌入分别运行。支持 Snowflake Arctic Embed L v2.0 与 MiniLM GGUF，模型信息接口报告 `embedding` 能力。
+
+```bash
+curl http://127.0.0.1:5000/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"],"encoding_format":"float"}'
+curl http://127.0.0.1:5000/api/embed -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file"],"truncate":false}'
+curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","prompt":"read a file"}'
+```
+
+完整字段、token ID 输入、`base64`、`dimensions`、截断规则和检索质量见[嵌入指南](../docs/embeddings_zh-cn.md)。
+
 ## 当前契约
 
 | 范围 | 契约 |

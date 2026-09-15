@@ -60,11 +60,28 @@ public static class ServerOptionsBuilder
 
         string? startupModelPath = ResolveConfiguredModelPath(configuredModel);
         string? startupMmProjPath = ResolveConfiguredMmProjPath(configuredMmProj, startupModelPath);
+        bool embeddingsEnabled = args.Any(a => string.Equals(a, "--embeddings", StringComparison.OrdinalIgnoreCase));
+        int embeddingThreads = ReadEmbeddingIntOption(args, "--embedding-threads");
+        int embeddingContextSize = ReadEmbeddingIntOption(args, "--embedding-context-size");
+        if (embeddingsEnabled && string.IsNullOrWhiteSpace(startupModelPath))
+            throw new ArgumentException("--embeddings requires --model.");
+        if (embeddingsEnabled && startupMmProjPath != null)
+            throw new ArgumentException("--embeddings does not support --mmproj.");
+        if (!embeddingsEnabled && (embeddingThreads > 0 || embeddingContextSize > 0))
+            throw new ArgumentException("--embedding-threads and --embedding-context-size require --embeddings.");
 
         string? backendInput = configuredBackend ?? Environment.GetEnvironmentVariable("BACKEND");
         string requestedBackend = backendInput ?? (OperatingSystem.IsMacOS() ? "ggml_metal" : "ggml_cpu");
+        if (embeddingsEnabled)
+            EmbeddingHosting.ResolveModelBackend(requestedBackend);
 
-        var supportedBackends = BackendCatalogProbes.GetSupportedBackends().ToArray();
+        // A managed embedding deployment does not need native backend libraries,
+        // including the probes that normally discover the host's GPU choices.
+        var supportedBackends = embeddingsEnabled && BackendCatalog.Canonicalize(requestedBackend) == "cpu"
+            ? new[] { new BackendOption("cpu", "CPU (Pure C#)") }
+            : BackendCatalogProbes.GetSupportedBackends()
+                .Where(backend => !embeddingsEnabled || backend.Value is "cpu" or "ggml_cpu" or "ggml_metal" or "ggml_cuda")
+                .ToArray();
         string defaultBackend = BackendCatalog.ResolveDefaultBackend(requestedBackend, supportedBackends);
 
         bool maxTokensPinned = configuredMaxTokens.HasValue;
@@ -162,7 +179,22 @@ public static class ServerOptionsBuilder
             // negation: a config file emits nothing for `false`, so a positive
             // "prefix-cache": false would silently leave it on.
             prefixCacheEnabled: !configuredNoPrefixCache,
-            prefixCacheDirectory: ResolvePrefixCacheDirectory(baseDirectory, startupModelPath));
+            prefixCacheDirectory: ResolvePrefixCacheDirectory(baseDirectory, startupModelPath),
+            embeddingsEnabled: embeddingsEnabled,
+            embeddingThreads: embeddingThreads,
+            embeddingContextSize: embeddingContextSize);
+    }
+
+    private static int ReadEmbeddingIntOption(string[] args, string flag)
+    {
+        int value = 0;
+        for (int i = 0; i < args.Length; i++)
+            if (TryReadOption(args, ref i, flag, out string? raw))
+            {
+                if (!TryParsePositiveInt(raw, out value))
+                    throw new ArgumentException($"Invalid value for {flag}: '{raw}'. Expected a positive integer.");
+            }
+        return value;
     }
 
     /// <summary>
@@ -982,6 +1014,11 @@ public static class ServerOptionsBuilder
                 continue;
             }
 
+            if (string.Equals(args[i], "--embeddings", StringComparison.OrdinalIgnoreCase)
+                || TryReadOption(args, ref i, "--embedding-threads", out _)
+                || TryReadOption(args, ref i, "--embedding-context-size", out _))
+                continue;
+
             if (TryReadOption(args, ref i, "--mmproj", out string? mmProjOption))
             {
                 configuredMmProj = mmProjOption;
@@ -1419,6 +1456,7 @@ public static class ServerOptionsBuilder
         var knownFlags = new List<string>
         {
             "--model", "--mmproj", "--backend", "--max-tokens", "--video-frames", "--fps",
+            "--embeddings", "--embedding-threads", "--embedding-context-size",
             "--port", "--host", "--urls", "--no-webui", "--no-prefix-cache",
             "--temperature", "--top-k", "--top-p", "--min-p",
             "--repeat-penalty", "--repeat-last-n", "--presence-penalty", "--frequency-penalty",

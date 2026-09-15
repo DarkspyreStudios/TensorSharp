@@ -3,6 +3,16 @@
 
 > Part of the [TensorSharp](README.md) documentation. Quick-start commands are in the [README](README.md#quick-start); configuration files are in [config/README.md](config/README.md).
 
+## Embedding service
+
+Host a BERT/XLM-R GGUF with `--model encoder.gguf --embeddings`. Select pure C# `cpu` or native `ggml_cpu`, `ggml_metal`, or `ggml_cuda`; each process keeps one encoder resident, and a chat service uses a separate port. `--embedding-threads N` configures CPU execution on `cpu` and `ggml_cpu`; `--embedding-context-size N` reduces the per-input token limit (`0` uses model metadata).
+
+- OpenAI: `POST /v1/embeddings`, single/batched strings or token IDs, `encoding_format` of `float` / `base64`, optional `dimensions`.
+- Ollama: `POST /api/embed`, a string or string array; `truncate` defaults to `true`. Legacy `POST /api/embeddings` accepts one `prompt`.
+- Vectors preserve input order and have unit L2 norm. OpenAI rejects overlong inputs; Ollama truncation preserves the final special token.
+
+Downloads, curl, C#, retrieval quality, and validation are in the [full embedding guide](docs/embeddings.md).
+
 ## Compute Backends
 
 | Backend | Flag | Best fit | Description |
@@ -14,6 +24,8 @@
 | GGML Vulkan | `--backend ggml_vulkan` | Vendor-neutral GPU inference through ggml | GPU-accelerated via GGML Vulkan on Windows or Linux — runs on AMD, Intel, and NVIDIA GPUs with a Vulkan 1.3 driver, using cooperative-matrix shaders (KHR coopmat / NV coopmat2) where the driver supports them. Weights are device-resident like GGML CUDA and the same fused whole-model decode/prefill graphs are used. Enabled automatically at native build time when the machine has a Vulkan runtime (loader installed); the build downloads a portable Vulkan toolchain (headers, glslc, SPIRV-Headers, and on Windows a loader import lib) via `eng/fetch-vulkan-toolchain.ps1` / `eng/fetch-vulkan-toolchain.sh` when no Vulkan SDK or distro dev packages are installed. Opt out with `--no-vulkan` (or `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=OFF`). |
 | GGML CPU | `--backend ggml_cpu` | Native CPU kernels | CPU inference using native GGML with optimized kernels. Quantized weights are mapped zero-copy from the GGUF file. |
 | Pure C# CPU | `--backend cpu` | Portability and debugging | Portable CPU inference with no native dependencies. The managed matmuls run on a persistent spin-then-park worker pool sized at half the usable cores by default (`TS_CPU_THREADS` and the other `TS_CPU_*` knobs below), and on the direct video networks (Wan, MiniMax-H3) a quantized weight is multiplied straight out of its GGUF storage type instead of being expanded to F32 at load (`TS_DIRECT_QUANT_WEIGHTS=0` restores the expansion). DeepSeek V4.1 Flash, like DeepSeek V4 Flash below, runs a whole-model executor of its own here — the 100% pure-C# `DeepSeek4CpuExecutor`, a correctness and portability path rather than a serving one, whose compute width comes from `TS_DSV4_THREADS` (every processor by default on this backend) instead of `TS_CPU_THREADS`. |
+
+**Embedding encoders use separate executors.** On `cpu` they own compact quantized arrays and a per-model worker pool, configured by `--embedding-threads` (default four). Native embedding backends may copy or repack weights. See [embedding storage and threading](docs/embeddings.md#library-api-and-implementation) for the details of this execution path.
 
 **DeepSeek V4 Flash is the exception to the table above.** Its 284B compressed-sparse-attention MoE stack runs through one of three dedicated whole-model executors rather than the generic per-op path: a direct-CUDA engine (`--backend cuda`), the native ggml executor (`--backend ggml_cuda` / `ggml_vulkan`), and a 100% pure-C# CPU executor (`--backend cpu`) that serves quantized weights straight from the memory-mapped GGUF shards. All three layer-split the weights across every visible GPU (or, on CPU, stream them from the mapped shards), so a model far larger than one card still runs. See the [DeepSeek V4 card](docs/models/deepseek4.md).
 

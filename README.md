@@ -6,7 +6,7 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus Qwen-Image-Edit image editing and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. A pure-.NET engine that trades wins with the hand-tuned C++ `llama.cpp` on identical GGUF files and the same GPU. The optional `TensorSharp.AgentHost` layer adds Agent Skills and a bounded, in-process model-to-tool loop for sandboxed file and shell work.
+**Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus Qwen-Image-Edit image editing and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills and a bounded, in-process model-to-tool loop for sandboxed file and shell work.
 
 ## Building Inference Engines and Agentic Runtimes from Scratch
 
@@ -22,9 +22,10 @@
 
 ## Highlights
 
+- **Text and code embeddings.** GGUF BERT/XLM-R encoders with OpenAI/Ollama batch embedding APIs for Snowflake Arctic Embed and MiniLM; see the [embedding guide](docs/embeddings.md).
 - **Local, native .NET inference.** Run GGUF text and multimodal models from the CLI, browser UI, or Ollama/OpenAI-compatible APIs.
 - **Broad model and media support.** Current source covers modern text models, vision/audio input, PDF, image editing, and video generation; see the [model cards](docs/models/README.md).
-- **Fast where it matters.** TensorSharp trades wins with `llama.cpp` on identical models and hardware, with native GGML, CUDA, Vulkan, Metal, MLX, and managed CPU paths. See the [benchmark report](docs/engine_comparison_report.md).
+- **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See the [benchmark report](docs/engine_comparison_report.md).
 - **Agentic work, including iOS.** `TensorSharp.AgentHost` adds bounded Agent Skills and code tools. [TensorAgent](TensorAgent/README.md) brings the same local chat and agent experience to iPhone and iPad using the iOS `ggml_metal` backend.
 - **Production-friendly building blocks.** Continuous batching, paged/prefix-shared KV cache, speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
 
@@ -138,9 +139,28 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 
 Full command reference: **[CLI](USAGE.md#console-application)** · **[Server](USAGE.md#web-application)** · more models to download: **[Model Downloads](MODEL_DOWNLOADS.md)** · prefer a config file? **[config/](config/README.md)**.
 
+## Text and code embeddings
+
+Current source supports **Snowflake Arctic Embed L v2.0** and **all-MiniLM-L6-v2** GGUF encoders, serving normalized vectors through OpenAI `/v1/embeddings`, Ollama `/api/embed`, and legacy `/api/embeddings`. After the source build above, start the small MiniLM service:
+
+```bash
+curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
+  https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/544f204f2eaa2d71361ffc74d6df7170285b286a/all-MiniLM-L6-v2-Q8_0.gguf
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
+  --embeddings --backend cpu --host 127.0.0.1 --port 5001 --no-webui
+```
+
+```bash
+curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
+  -d '{"model":"all-MiniLM-L6-v2-Q8_0","input":["read a file","open a document"]}'
+```
+
+Use `cpu` for 100% pure C# execution without native inference libraries, or `ggml_cpu`, `ggml_metal`, and `ggml_cuda` for native GGML execution; run chat and embedding services separately. See the [embedding guide](docs/embeddings.md) for Snowflake downloads, batching, dimensions, the C# API, tokenization, and performance validation.
+
 ## Pick a Backend
 
-Every backend falls back to CPU for any op it does not implement, so output stays correct on all of them.
+Backend support depends on the model architecture. Embedding models support pure C# `cpu` and native `ggml_cpu`, `ggml_metal`, and `ggml_cuda`; see the [status matrix](docs/PROJECT_STATUS.md#status-matrix) for other model-specific limits.
 
 | Your hardware | Recommended backend | Flag | Notes |
 |---|---|---|---|
@@ -189,6 +209,7 @@ See the [performance guide and detailed fast lanes](docs/PROJECT_STATUS.md#make-
 
 | Architecture | GGUF arch keys | Example Models | Multimodal | Thinking | Tools | MTP spec | Card |
 |---|---|---|---|---|---|---|---|
+| BERT / XLM-R embeddings | `bert` | Snowflake Arctic Embed L v2.0, all-MiniLM-L6-v2 | Text → vectors | — | — | — | [Embedding guide](docs/embeddings.md) |
 | DeepSeek V4.1 Flash | `deepseek41` | DeepSeek-V4.1-Flash (40 layers, 384 routed experts at top-6 plus one shared expert, four residual streams with delayed hyper-connection mixing, Engram n-gram features, 1M declared context) | Text; image and video with the prepared vision companion (`--mmproj`), audio refused | Yes | Yes (spaced DSML, grammar-constrained) | No (V4 drafters are rejected) | [deepseek41.md](docs/models/deepseek41.md) |
 | DeepSeek V4 Flash | `deepseek4` | DeepSeek-V4-Flash (284B MoE, 256 experts, compressed sparse attention, 1M context) | Text only | Yes | Yes (DSML) | Yes (DSpark block drafter, separate GGUF) | [deepseek4.md](docs/models/deepseek4.md) |
 | GLM 5.x | `glm-dsa`, `glm5next` | GLM-5.2 (744B-A40B MoE, 256 experts, MLA + DeepSeek Sparse Attention, 1M context), [GLM-5.3](docs/models/glm.md#glm-53-glm-dsa) (the same 79-block `glm-dsa` shape as 5.2 — 78 trunk blocks plus one NextN, 256 routed experts at top-8 with one shared expert, MLA with the lightning indexer, rope base 8e6 — so it loads on the GLM-5.2 path with no new code and no new flag; text only), GLM-5.3-Flash (320B MoE, 288 experts, KDA linear attention + NoPE MLA with a pooled indexer) | Text only (5.2 and 5.3), Image (5.3-Flash) | Yes | Yes (XML tool calls) | Yes on GLM-5.2 and GLM-5.3 (embedded NextN block; on 5.3 speculation engages on the default layer split, no `--tp`) | [glm.md](docs/models/glm.md) |
@@ -212,7 +233,7 @@ End-to-end per-model documentation (origin, forward graph, components, parameter
 
 ### Head-to-head vs llama.cpp (engine comparison)
 
-A pure-.NET engine going toe-to-toe with the hand-tuned C++ `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — with **both engines measured on their GGML CUDA and Vulkan builds**. Numbers are the **geomean speedup of TensorSharp over llama.cpp on the same backend** (single-stream, greedy, MTP off); **> 1.0× means TensorSharp is faster / lower-latency**. Full per-scenario tables: [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
+TensorSharp’s .NET runtime and native GGML execution are compared with `llama.cpp` on **identical GGUF files, the same NVIDIA RTX 3080 Laptop GPU (16 GB), and one uniform OpenAI `/v1/chat/completions` surface** — with **both engines measured on their GGML CUDA and Vulkan builds**. Numbers are the **geomean speedup of TensorSharp over llama.cpp on the same backend** (single-stream, greedy, MTP off); **> 1.0× means TensorSharp is faster / lower-latency**. Full per-scenario tables: [`docs/engine_comparison_report.md`](docs/engine_comparison_report.md).
 
 | Model | Backend | decode | prefill | TTFT |
 |---|---|---:|---:|---:|

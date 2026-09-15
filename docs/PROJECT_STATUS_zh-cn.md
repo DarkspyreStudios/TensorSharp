@@ -6,6 +6,10 @@
 
 TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码包含 CLI、服务端/Web UI、兼容 HTTP API、AgentHost，以及 TensorAgent iOS/iPadOS 应用。AgentHost 与 TensorAgent 属于以源码为先的能力，最新标签版不一定已经包含它们。
 
+### 嵌入模型与服务
+
+当前源码新增 GGUF BERT/XLM-R 句向量编码器，覆盖 Snowflake Arctic Embed L v2.0 Q8_0 与 all-MiniLM-L6-v2 Q8_0。`--embeddings` 启动独立的常驻编码器，提供 OpenAI `/v1/embeddings`、Ollama `/api/embed` 与旧版 `/api/embeddings`。后端为 100% 纯 C# CPU（`cpu`）与原生 GGML CPU（`ggml_cpu`）、Metal、CUDA；验证范围和复现实验见[嵌入指南](embeddings_zh-cn.md)。旧版发布归档不一定包含这项功能。
+
 ### 最新加入的架构
 
 上一个发布标签之后又落地了两个系列，两者都带着值得先了解的限制。
@@ -59,6 +63,7 @@ TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运
 
 | 范围 | 状态 |
 |---|---|
+| 嵌入模型 | GGUF BERT/XLM-R：Snowflake Arctic Embed L v2.0、all-MiniLM-L6-v2；纯 C# CPU 与原生 GGML CPU/Metal/CUDA，独立 `--embeddings` 服务，OpenAI/Ollama 单条与批量 API。上下文、分词、质量及实测范围见[指南](embeddings_zh-cn.md)。 |
 | 模型家族 | DeepSeek V4 Flash（`deepseek4`）、DeepSeek V4.1 Flash（`deepseek41`）、GLM 5.x（`glm-dsa`、`glm5next`）、Gemma 4、DiffusionGemma、Qwen 3.5/3.6-family（`qwen35`、`qwen35moe`、`qwen3next`）、Qwen 3.8 Flash Next（`qwen4exp`）、GPT OSS、Nemotron-H（含 Nemotron 3 Nano Omni 与 Nemotron 3.5 Lightning，`nemotron_h_moe`）、Mistral 3、Hunyuan Dense（`hunyuan-dense`）、Muse-Glimmer（`muse-glimmer`、`muse_glimmer`）。图像编辑通过 Qwen-Image-Edit（`qwen_image`、`qwen-image` MMDiT）；音视频联合生成通过 MiniMax-H3（`minimax-h3`、`minimax_h3`），纯视频生成通过 Wan 2.1 / 2.2（`wan`、`wan2.1`、`wan2.2`）。 |
 | 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 风格 API 与 OpenAI Responses 风格 API。 |
 | iOS 应用 | TensorAgent 支持 iOS/iPadOS，将 GGML 作为 iOS `.xcframework` 链接，并在真机上使用 `ggml_metal`。它共享与宿主无关的聊天流水线（`TensorSharp.Chat`），但通过进程内 loopback 宿主提供自己的手机版页面——iOS 既没有 ASP.NET Core 运行时包，也不能启动子进程。生成过程在应用离开屏幕后仍然继续；共享提示词前缀的 checkpoint 会按模型持久化，使每次启动的第一条消息只需一次恢复而不必完整预填充（在 iPhone 17 Pro Max 上以 Qwen3.5 9B 实测：原本 54 秒的冷启动首条消息，变成 1.2 秒预热加约 0.6 秒的首条消息）；引擎的内存策略也按 iOS jetsam 实际计费的口径来设定。详见 [TensorAgent](../TensorAgent/README.md)。 |

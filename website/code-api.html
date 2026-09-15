@@ -18,6 +18,8 @@
   <h1>Using TensorSharp from C#</h1>
   <p class="lede">TensorSharp is a real .NET library, not just an executable. Reference its projects from a source checkout and drive inference directly from your own code when you do not want an HTTP hop.</p>
 
+  <p><strong>Sentence encoders:</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2, with pure C# CPU and native GGML CPU/Metal/CUDA execution, served through <code>--embeddings</code> and OpenAI/Ollama embedding APIs. <a href="embeddings.html">Embedding models, supported backends, and validation →</a></p>
+
   <h2 id="packages">Project and package boundaries</h2>
   <p>The repository is split along publishable package boundaries. The source tree's publish set is <strong>thirteen</strong> packages — every row below — verified by <code>eng/verify-packages.ps1</code>, which gates the release workflow.</p>
   <p><strong>Verified 2026-09-08:</strong> NuGet.org carries eight of them, at <strong>3.1.2</strong> (July 2026): Tensors, Runtime, Models, the three backends, Server, and Cli. Those lag the current source tree and server release — the published <code>TensorSharp.Server</code> predates the logging and chat splits. The other five (<code>TensorSharp.Runtime.Logging</code>, <code>TensorSharp.AgentHost</code>, <code>TensorSharp.Chat</code>, <code>TensorSharp.Server.Host</code>, <code>TensorSharp.Distributed</code>) are packable and verified but not yet pushed.</p>

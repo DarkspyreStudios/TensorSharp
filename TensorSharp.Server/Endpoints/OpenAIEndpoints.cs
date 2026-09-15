@@ -11,6 +11,8 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
+using TensorSharp.Server.Hosting;
 using TensorSharp.Server.ProtocolAdapters;
 
 namespace TensorSharp.Server.Endpoints;
@@ -25,7 +27,10 @@ public static class OpenAIEndpoints
         endpoints.MapPost("/v1/chat/completions",
             (HttpContext ctx, OpenAIChatAdapter adapter) => adapter.ChatCompletionsAsync(ctx));
         endpoints.MapGet("/v1/models",
-            (OpenAIChatAdapter adapter) => adapter.ListModels());
+            (HttpContext ctx) => ctx.RequestServices.GetService<EmbeddingAdapter>()?.ListModels()
+                ?? ctx.RequestServices.GetRequiredService<OpenAIChatAdapter>().ListModels());
+        endpoints.MapPost("/v1/embeddings",
+            (HttpContext ctx) => EmbeddingHosting.InvokeAsync(ctx, static (adapter, context) => adapter.OpenAIAsync(context)));
         endpoints.MapPost("/v1/responses",
             (HttpContext ctx, OpenAIResponsesAdapter adapter) => adapter.CreateResponseAsync(ctx));
         endpoints.MapGet("/v1/responses/{id}",

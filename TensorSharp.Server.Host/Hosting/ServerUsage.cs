@@ -93,6 +93,16 @@ namespace TensorSharp.Server.Host.Hosting
                     "Multimodal projector GGUF. A bare filename is resolved next to the model; 'none' disables it. " +
                     "Requires --model. Default: none — pass the matching projector explicitly.",
                     "--mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf"),
+                new OptionHelp("--embeddings",
+                    "Host a GGUF embedding encoder instead of a chat model. Exposes /v1/embeddings, /api/embed, and /api/embeddings. " +
+                    "Requires --model; supports cpu (pure C#, no native libraries), ggml_cpu, ggml_metal, and ggml_cuda. Chat prefix warmup is skipped.",
+                    "--model snowflake-arctic-embed-l-v2.0-q8_0.gguf --embeddings --no-webui"),
+                new OptionHelp("--embedding-threads <N>",
+                    "CPU threads for the embedding encoder. Requires --embeddings; default: backend chooses.",
+                    "--embedding-threads 8"),
+                new OptionHelp("--embedding-context-size <N>",
+                    "Maximum tokens per embedding input. Requires --embeddings; default: model context length.",
+                    "--embedding-context-size 8192"),
             }),
             ("Network", new[]
             {

@@ -11,6 +11,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.DependencyInjection;
 using TensorSharp.Server.ProtocolAdapters;
 
 namespace TensorSharp.Server.Endpoints;
@@ -25,7 +26,8 @@ public static class WebUiEndpoints
     public static IEndpointRouteBuilder MapWebUiEndpoints(this IEndpointRouteBuilder endpoints)
     {
         endpoints.MapGet("/api/queue/status", (WebUiAdapter adapter) => adapter.GetQueueStatus());
-        endpoints.MapGet("/api/models", (WebUiAdapter adapter) => adapter.GetModels());
+        endpoints.MapGet("/api/models", (HttpContext ctx) => ctx.RequestServices.GetService<EmbeddingAdapter>()?.GetWebModels()
+            ?? ctx.RequestServices.GetRequiredService<WebUiAdapter>().GetModels());
         endpoints.MapPost("/api/models/load",
             (HttpContext ctx, HttpRequest req, WebUiAdapter adapter) => adapter.LoadModelAsync(ctx, req));
         endpoints.MapPost("/api/chat",

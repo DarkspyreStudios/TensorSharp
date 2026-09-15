@@ -24,7 +24,6 @@ namespace TensorSharp.Server.Host.Hosting
     {
         private static readonly string[] EndpointSummary =
         {
-            "GET  /                          - Web UI (index.html)",
             "GET  /health                    - Health check",
             "GET  /api/tags                  - List hosted models (Ollama)",
             "POST /api/show                  - Show model details (Ollama)",
@@ -36,6 +35,35 @@ namespace TensorSharp.Server.Host.Hosting
             "POST /api/models/load           - Reload hosted model (Web UI)",
             "GET  /api/models                - Show hosted model state (Web UI)",
         };
+
+        private static readonly string[] EmbeddingEndpointSummary =
+        {
+            "GET  /health                    - Health check",
+            "POST /v1/embeddings             - Embeddings (OpenAI; float or base64)",
+            "POST /api/embed                 - Embeddings (Ollama; string or batch)",
+            "POST /api/embeddings            - Embeddings (legacy Ollama)",
+            "GET  /v1/models                 - List embedding model (OpenAI)",
+            "GET  /api/tags                  - List embedding model (Ollama)",
+            "POST /api/show                  - Embedding model details (Ollama)",
+            "GET  /api/models                - Show embedding model state",
+        };
+
+        internal static IEnumerable<string> DescribeEndpoints(ServerHostingOptions options)
+        {
+            yield return options.WebUiEnabled
+                ? "GET  /                          - Web UI (index.html)"
+                : "GET  /                          - Health check";
+            foreach (string endpoint in options.EmbeddingsEnabled ? EmbeddingEndpointSummary : EndpointSummary)
+                yield return endpoint;
+        }
+
+        private static void EmitEndpoints(ILogger logger, ServerHostingOptions options, string listenAddress)
+        {
+            logger.LogInformation(LogEventIds.HostStarting,
+                "Starting TensorSharp.Server on {ListenAddress}", listenAddress);
+            foreach (string endpoint in DescribeEndpoints(options))
+                logger.LogInformation(LogEventIds.HostConfiguration, "Endpoint: {Endpoint}", endpoint);
+        }
 
         public static void Emit(ILogger logger, ServerHostingOptions options, string listenAddress)
         {
@@ -56,10 +84,23 @@ namespace TensorSharp.Server.Host.Hosting
 
             // Why a probed backend is missing from the list above: the probe threw and
             // the exception was swallowed into "unavailable" during discovery.
-            foreach (string probeFailure in BackendCatalogProbes.DescribeProbeFailures())
+            foreach (string probeFailure in options.UsesManagedEmbeddingBackend
+                ? Array.Empty<string>() : BackendCatalogProbes.DescribeProbeFailures())
             {
                 logger.LogInformation(LogEventIds.BackendUnavailable,
                     "Backend probe failed, so that backend is not offered: {ProbeFailure}", probeFailure);
+            }
+
+            if (options.EmbeddingsEnabled)
+            {
+                logger.LogInformation(LogEventIds.HostConfiguration,
+                    "Embedding server configuration: hostedModel={HostedModel} backend={Backend} execution={Execution} threads={Threads} contextLimit={ContextLimit} listen={ListenAddress}",
+                    options.StartupModelPath, options.DefaultBackend, options.UsesManagedEmbeddingBackend ? "pure-csharp" : "native-ggml",
+                    options.EmbeddingThreads > 0 ? options.EmbeddingThreads.ToString(CultureInfo.InvariantCulture) : "backend-default",
+                    options.EmbeddingContextSize > 0 ? options.EmbeddingContextSize.ToString(CultureInfo.InvariantCulture) : "model-default",
+                    listenAddress);
+                EmitEndpoints(logger, options, listenAddress);
+                return;
             }
 
             logger.LogInformation(LogEventIds.HostConfiguration,
@@ -113,11 +154,7 @@ namespace TensorSharp.Server.Host.Hosting
                 "Sampling precedence: {SamplingPrecedence}",
                 options.SamplingDefaults.DescribePolicy());
 
-            logger.LogInformation(LogEventIds.HostStarting,
-                "Starting TensorSharp.Server on {ListenAddress}", listenAddress);
-
-            foreach (string ep in EndpointSummary)
-                logger.LogInformation(LogEventIds.HostConfiguration, "Endpoint: {Endpoint}", ep);
+            EmitEndpoints(logger, options, listenAddress);
         }
 
         public static void EmitBackendFallback(ILogger logger, ServerHostingOptions options, string requestedBackendInput)

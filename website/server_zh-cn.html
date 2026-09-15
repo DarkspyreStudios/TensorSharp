@@ -18,6 +18,9 @@
   <h1>服务器与 Web UI</h1>
   <p class="lede"><code>TensorSharp.Server</code> 是一个 ASP.NET Core 应用，托管单个 GGUF 模型，并在同一端口上暴露浏览器聊天 UI 以及兼容 Ollama 和 OpenAI 的 REST API。连续批处理引擎负责并发。</p>
 
+  <h2 id="embeddings">嵌入服务</h2>
+  <p>使用 <code>--model encoder.gguf --embeddings</code>，托管 Snowflake Arctic Embed L v2.0 或 MiniLM。 <code>POST /v1/embeddings</code>、<code>POST /api/embed</code>、<code>POST /api/embeddings</code> 返回归一化向量；后端为纯 C# <code>cpu</code> 与原生 <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>。<a href="embeddings_zh-cn.html">下载、API、截断规则与检索质量 →</a></p>
+
   <h2 id="start">启动服务器</h2>
   <h3 id="e4b-fast-lane">约 30 秒快速开始（Gemma 4 E4B）</h3>
   <p><a href="getting-started_zh-cn.html#install-dotnet">按平台安装 .NET 10 SDK</a>、Git、CMake 与 <code>curl</code>，然后在终端粘贴下面的命令。复制并运行这些命令约需 30 秒；7.48 GiB 的模型下载与首次还原/构建耗时更长，取决于网络速度与机器性能。它会通过原生 GGML 桥接托管仓库基准已验证的 Gemma 4 E4B Q8_0，使用推荐的公开 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener"><code>ggml-org</code> 文件</a>。下面的代码块面向 Linux + NVIDIA（CUDA 构建还需要 CUDA Toolkit）：</p>

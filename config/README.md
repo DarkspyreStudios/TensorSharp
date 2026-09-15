@@ -22,6 +22,17 @@ the command line still wins over all of them).
 
 ## File format
 
+Embedding hosts have pinned, checksum-verified download configurations:
+[`embedding-snowflake.json`](embedding-snowflake.json) and
+[`embedding-minilm.json`](embedding-minilm.json). For example:
+
+```bash
+TensorSharp.Server --config config/embedding-snowflake.json --backend ggml_metal
+```
+
+They default to native CPU execution and port 5000. See the
+[embedding guide](../docs/embeddings.md) for API examples and backend support.
+
 The file is a JSON object whose keys are the same long option names each host
 already accepts (listed in `--help`), with or without the leading `--`. Comments
 (`//`, `/* */`) and trailing commas are allowed.
