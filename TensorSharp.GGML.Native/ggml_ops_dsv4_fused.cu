@@ -1015,7 +1015,8 @@ static enum ggml_status tsg_dsv4_backend_graph_compute(ggml_backend_t backend, g
             return status;
         }
         if (stats) tsg_dsv4_stat_fused.fetch_add(1, std::memory_order_relaxed);
-        if (d->kind == TSG_MATMUL_F32 || d->kind == TSG_MATMUL_ID_F32)
+        if (d->kind == TSG_MATMUL_F32 || d->kind == TSG_MATMUL_ID_F32 ||
+            d->kind == TSG_MATMUL_ID_QUANT_STRIP || d->kind == TSG_MATMUL_ID_QUANT_PAIR)
             tsg_matmul_cuda_compute(c->matmul, node);
         else if (d->kind == TSG_MATMUL_Q8_F32)
             tsg_matmul_q8_cuda_compute(node, c->cuda_backend);

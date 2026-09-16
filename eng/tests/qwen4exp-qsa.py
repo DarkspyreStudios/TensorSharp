@@ -231,7 +231,7 @@ def main():
     parser.add_argument("--library", type=Path, required=True)
     parser.add_argument("--expected-native-sha256", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--backend", choices=("CPU", "CUDA"), default="CPU")
+    parser.add_argument("--backend", choices=("CPU", "CUDA", "Metal"), default="CPU")
     args = parser.parse_args()
     if args.output.exists(): raise FileExistsError(args.output)
     args.output.mkdir(parents=True)
