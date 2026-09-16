@@ -96,11 +96,15 @@ def main():
                     help="Require target feature layers on at least two actual devices")
     ap.add_argument("--prepare-only", action="store_true")
     ap.add_argument("--state-only", action="store_true", help="Run state fixtures separately; exclude independent reference checks explicitly")
+    ap.add_argument("--reference-only", action="store_true", help="Run independent reference checks only; exclude state fixtures explicitly")
+    ap.add_argument("--keep-going", action="store_true", help="Continue numerical comparisons after failure, retaining failed status and nonzero exit")
     ap.add_argument("--native-ring-control", action="store_true", help="Add diagnostic draft arithmetic using observed native KV; does not replace independent end-to-end oracle")
     ap.add_argument("--trace-native", action="store_true", help="Record native committed-KV inputs for numerical diagnosis")
     ap.add_argument("--reference-prefixes", nargs="+", type=int, default=[1, 5, 17],
                     help="Explicit reference prefix lengths; separate diagnostic scopes retain their own results")
     args = ap.parse_args()
+    if args.state_only and args.reference_only:
+        ap.error("--state-only and --reference-only are mutually exclusive")
     if any(length < 1 or length > 32 for length in args.reference_prefixes):
         ap.error("Reference prefixes must contain 1..32 tokens")
     args.out.mkdir(exist_ok=False, parents=True)
@@ -111,6 +115,7 @@ def main():
                   source_sha256=sha(__file__), backend=args.backend, gpus=args.gpus,
                   atol=2e-5, rtol=2e-5, scope="Deterministic native numerical/state fixture, not a language model")
     report["reference_checks_excluded"] = args.state_only
+    report["state_checks_excluded"] = args.reference_only
     report["native_ring_control"] = args.native_ring_control
     report["reference_prefixes"] = [] if args.state_only else args.reference_prefixes
     handles = []
@@ -119,10 +124,14 @@ def main():
     def save():
         (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
 
-    def check(name, ok, **details):
+    def check(name, ok, recoverable=False, **details):
         report["checks"].append(dict(name=name, passed=bool(ok), **details))
         save()
         if not ok:
+            if args.keep_going and recoverable:
+                report.setdefault("failed_checks", []).append(name)
+                save()
+                return
             raise AssertionError(name)
 
     def compare(name, actual, expected, exact=False):
@@ -131,7 +140,7 @@ def main():
         difference = np.abs(actual.astype(np.float64) - expected.astype(np.float64))
         np.savez(args.out / f"check-{len(report['checks']):04}-{name}.npz", actual=actual, expected=expected)
         check(name, np.array_equal(actual, expected) if exact else np.allclose(actual, expected, atol=2e-5, rtol=2e-5),
-              shape=list(actual.shape), max_abs=float(difference.max(initial=0)),
+              recoverable=True, shape=list(actual.shape), max_abs=float(difference.max(initial=0)),
               relative_l2=float(np.linalg.norm(difference) / max(np.linalg.norm(expected), 1e-30)))
 
     try:
@@ -212,6 +221,9 @@ def main():
             Path(__file__).parents[1] / "dsv41-dspark-reference.py", Path(__file__).parents[1] / "dsv41-reference.py"]}
         for length in (() if args.state_only else args.reference_prefixes):
             target = oracle.TargetWithDraftFeatures(weights, config, engram, "model", target_layers=settings["target_layers"])
+            if args.trace_native:
+                target.output_dir = args.out / "oracle-trace" / f"prefix{length}"
+                target.output_dir.mkdir(parents=True)
             expected_logits = target.forward(corpus[:length].tolist()).numpy()
             head = oracle.DSparkReference(draft_weights, weights, config,
                 **{k: v for k, v in settings.items() if k != "target_layers"})
@@ -245,6 +257,11 @@ def main():
             expected_verify = target.forward(batch.tolist()).numpy()
             compare(f"verify_full_vocabulary_prefix{length}", forward(live, batch, spec=True), expected_verify)
             compare(f"draft_confidence_prefix{length}", actual_confidence, confidence.numpy())
+        if args.reference_only:
+            if report.get("failed_checks"):
+                raise AssertionError(f"{len(report['failed_checks'])} numerical comparisons failed")
+            report["status"] = "passed"
+            return
         # Same-backend comparisons isolate rollback from independent oracle rounding.
         for length in (1, 2, 7, 8, 9, 255, 257):
             for accepted in range(6):
@@ -258,6 +275,17 @@ def main():
                 check(f"rewind_p{length}_accepted{accepted}", api["Rewind"](live, kept) == 1)
                 check("rewind_position", api["NPast"](live) == kept)
                 forward(cold, batch[:accepted+1])
+                if args.native_ring_control:
+                    # Compare the committed window in logical order, including
+                    # wrapped rings; masked rejected rows are outside this view.
+                    count = min(kept, config["text_config"]["sliding_window"])
+                    for stage in range(3):
+                        rows = []
+                        for handle in (live, cold):
+                            row = np.empty((count, config["text_config"]["head_dim"]), np.float32)
+                            check("read_native_draft_ring", read_ring(handle, stage, count, row.ctypes.data) == 1)
+                            rows.append(row)
+                        compare(f"rewound_ring_p{length}_accepted{accepted}_stage{stage}", rows[0], rows[1], exact=True)
                 left, left_conf = draft(live, 243)
                 right, right_conf = draft(cold, 243)
                 compare(f"rewound_draft_p{length}_accepted{accepted}", left, right, exact=True)
@@ -307,6 +335,8 @@ def main():
             compare("interleaved_draft_confidence", actual[1], expected[1])
         check("select_primary_before_free", api["SetActiveSlot"](live, 0) == 0)
         check("free_second_slot", api["SlotFree"](live, second) == 0)
+        if report.get("failed_checks"):
+            raise AssertionError(f"{len(report['failed_checks'])} numerical comparisons failed")
         report["status"] = "passed"
     except Exception as error:
         report.update(status="failed", error=repr(error), traceback=traceback.format_exc())
