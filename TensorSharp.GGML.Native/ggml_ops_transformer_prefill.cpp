@@ -464,7 +464,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
         // explicit mul_mat -> soft_max_ext -> mul_mat chain as fallback.
         //
         // The critical detail that took two prior attempts to find: without
-        // ggml_flash_attn_ext_set_prec(GGML_PREC_F32) the kernel uses F16
+        // ggml_prec_set_acc(GGML_PREC_F32) the kernel uses F16
         // accumulators internally for the K*Q scores and softmax, which
         // underflows/overflows for Gemma4's head_dim=256 (SWA) and 512
         // (global) on multi-token Q and silently produces wrong logits
@@ -495,13 +495,13 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
             // produced eos/garbage logits - that's the multi-token prefill
             // bug we'd been chasing.
             //
-            // ggml_flash_attn_ext_set_prec(GGML_PREC_F32) keeps the QK
+            // ggml_prec_set_acc(GGML_PREC_F32) keeps the QK
             // accumulator and softmax in F32 even when the kernel template
             // would default to F16 internals; both ollama and llama.cpp do
             // this for every flash_attn_ext call.
             flash_attn_out = ggml_flash_attn_ext(ctx, q_attn, k_attn, v_attn,
                 mask_t, 1.0f, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(flash_attn_out, GGML_PREC_F32);
+            ggml_prec_set_acc(flash_attn_out, GGML_PREC_F32);
 
             // CUDA's 512/576-dim flash-attn kernels require the grouped-query
             // path, which in turn requires a 256-aligned KV length. Decode
@@ -523,7 +523,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
 
                 flash_attn_out = ggml_flash_attn_ext(ctx, q_attn, k_attn_padded, v_attn_padded,
                     flash_mask_t, 1.0f, 0.0f, 0.0f);
-                ggml_flash_attn_ext_set_prec(flash_attn_out, GGML_PREC_F32);
+                ggml_prec_set_acc(flash_attn_out, GGML_PREC_F32);
             }
         }
 
@@ -535,7 +535,7 @@ TSG_EXPORT int TSGgml_Gemma4LayerPrefill(
         {
             ggml_tensor* q_attn_cont = ggml_cont(ctx, q_attn);
             ggml_tensor* scores = ggml_mul_mat(ctx, k_attn, q_attn_cont);
-            ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+            ggml_prec_set_acc(scores, GGML_PREC_F32);
             ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mask_t, 1.0f, 0.0f);
             ggml_tensor* v_perm = ggml_cont(ctx, ggml_permute(ctx, v_attn, 1, 0, 2, 3));
             ggml_tensor* attn_out = ggml_mul_mat(ctx, v_perm, probs);

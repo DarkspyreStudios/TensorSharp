@@ -43,7 +43,7 @@ namespace
     {
         // [S, N, H, B]: K heads/batches broadcast over Q's.
         ggml_tensor* scores = ggml_mul_mat(ctx, k32, q32);
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
 
         float softmax_scale = scale;
         if (logit_softcap != 0.0f)
@@ -145,7 +145,7 @@ ggml_tensor* tsg_flash_attn_ext_guarded(
 {
     ggml_tensor* fa = ggml_flash_attn_ext(ctx, q, k, v, mask, scale, max_bias, logit_softcap);
     if (prec != GGML_PREC_DEFAULT)
-        ggml_flash_attn_ext_set_prec(fa, prec);
+        ggml_prec_set_acc(fa, prec);
     if (sinks != nullptr)
         ggml_flash_attn_ext_add_sinks(fa, sinks);
     if (backend == nullptr || ggml_backend_supports_op(backend, fa))

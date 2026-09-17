@@ -1370,7 +1370,7 @@ namespace
                     // internally). Matches the verify-path non-flash fallback.
                     ggml_tensor* q_attn_cont = ggml_cont(ctx, q_attn);
                     ggml_tensor* kq = ggml_mul_mat(ctx, k_f32, q_attn_cont);            // [KV, 1, num_heads]
-                    ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+                    ggml_prec_set_acc(kq, GGML_PREC_F32);
                     ggml_tensor* kq_soft = ggml_soft_max_ext(ctx, kq, mask_for_attn, attn_scale, 0.0f);
                     // out = scores · V  (transpose V to [KV, head_dim, num_kv_heads])
                     ggml_tensor* v_t = ggml_cont(ctx, ggml_permute(ctx, v_f32, 1, 0, 2, 3));

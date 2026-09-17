@@ -2657,7 +2657,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             ggml_tensor * v = ggml_new_tensor_4d(pctx, GGML_TYPE_F16, hp.kv_lora_rank, 256, 1, 1);
             ggml_tensor * mask = ggml_new_tensor_4d(pctx, GGML_TYPE_F16, 256, 1, 1, 1);
             ggml_tensor * fa = ggml_flash_attn_ext(pctx, q, k, v, mask, 1.0f, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+            ggml_prec_set_acc(fa, GGML_PREC_F32);
             m->flash_attn = ggml_backend_supports_op(m->backends[0], fa);
             ggml_free(pctx);
         }
@@ -3034,7 +3034,7 @@ struct graph_builder
                 ggml_tensor * qp = ggml_permute(ctx, qi, 0, 2, 1, 3);      // [D, 1, H]
                 ggml_tensor * kp = ggml_permute(ctx, k_all, 0, 2, 1, 3);   // [D, n_kv, 1]
                 ggml_tensor * kq = ggml_mul_mat(ctx, kp, qp);              // [n_kv, 1, H]
-                ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+                ggml_prec_set_acc(kq, GGML_PREC_F32);
                 kq = ggml_cont(ctx, ggml_permute(ctx, kq, 2, 1, 0, 3));    // [H, 1, n_kv]
                 ggml_tensor * sc = ggml_relu(ctx, kq);
                 sc = ggml_mul(ctx, sc, wi);
@@ -3128,11 +3128,11 @@ struct graph_builder
             {
                 ggml_tensor * qp = ggml_permute(ctx, Qi, 0, 2, 1, 3);
                 ggml_tensor * kq = ggml_mul_mat(ctx, K, qp);                    // [n_kv, 1, n_head]
-                ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+                ggml_prec_set_acc(kq, GGML_PREC_F32);
                 kq = ggml_soft_max_ext(ctx, kq, masks[(size_t) i], hp.kq_scale(), 0.0f);
                 ggml_tensor * vp = ggml_cont(ctx, ggml_transpose(ctx, V));
                 out = ggml_mul_mat(ctx, vp, kq);                                // [kv_lora, 1, n_head]
-                ggml_mul_mat_set_prec(out, GGML_PREC_F32);
+                ggml_prec_set_acc(out, GGML_PREC_F32);
             }
             out = ggml_cont(ctx, out);
             cat = cat ? ggml_concat(ctx, cat, out, 1) : out;                    // grow along the token axis
@@ -3275,7 +3275,7 @@ struct graph_builder
         ggml_tensor * iq = ggml_mul_mat(ctx, LW.idx_attn_q_b, qr);                  // [D*H, N]
         iq = ggml_reshape_3d(ctx, iq, D, H, N);
         ggml_tensor * w = ggml_mul_mat(ctx, LW.idx_proj, cur);                      // [H, N]
-        ggml_mul_mat_set_prec(w, GGML_PREC_F32);
+        ggml_prec_set_acc(w, GGML_PREC_F32);
         w = ggml_scale(ctx, w, 1.0f / sqrtf((float) (D * H)));
 
         ggml_tensor * ape = ggml_cont(ctx, ggml_transpose(ctx, LW.idx_comp_ape));   // [r, D]
@@ -3733,7 +3733,7 @@ struct graph_builder
             // convert the query to F16 and dot in half precision. The fused
             // kernel converts the KEY up to F32 instead, and matching it is what
             // keeps the top-k selection identical at long context.
-            ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+            ggml_prec_set_acc(kq, GGML_PREC_F32);
             kq = ggml_cont(ctx, ggml_permute(ctx, kq, 2, 1, 0, 3));        // [H, nt, n_kv]
             ggml_tensor * s = ggml_relu(ctx, kq);
             s = ggml_mul(ctx, s, w);                                       // broadcast over n_kv
@@ -3880,14 +3880,14 @@ struct graph_builder
             // ([n_embd, n_kv, n_head_kv]); only the query needs permuting.
             ggml_tensor * qp = ggml_permute(ctx, Qcur, 0, 2, 1, 3);             // [n_kv_row, nt, n_head]
             ggml_tensor * kq = ggml_mul_mat(ctx, K, qp);                        // [n_kv, nt, n_head]
-            ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+            ggml_prec_set_acc(kq, GGML_PREC_F32);
             kq = ggml_soft_max_ext(ctx, kq, mask, hp.kq_scale(), 0.0f);
 
             ggml_tensor * vp = ggml_cont(ctx, ggml_transpose(ctx, V));          // [n_kv, kv_lora, 1]
             ggml_tensor * kqv = ggml_mul_mat(ctx, vp, kq);                      // [kv_lora, nt, n_head]
             // V is F16; without this the F32 softmax weights would be rounded to
             // half before the context product.
-            ggml_mul_mat_set_prec(kqv, GGML_PREC_F32);
+            ggml_prec_set_acc(kqv, GGML_PREC_F32);
             kqv = ggml_mul_mat(ctx, LW.wv_b, kqv);                               // [head_v, nt, n_head]
             kqv = ggml_permute(ctx, kqv, 0, 2, 1, 3);                           // [head_v, n_head, nt]
             cur_attn = ggml_cont_2d(ctx, kqv, (int64_t) hp.n_embd_head_v * n_head, nt);
@@ -3942,7 +3942,7 @@ struct graph_builder
         // Routing is replicated: every rank sees the same logits and picks the
         // same global top-k, so no collective is needed to agree on it.
         ggml_tensor * logits = ggml_mul_mat(ctx, LW.ffn_gate_inp, cur);    // [n_expert, nt]
-        ggml_mul_mat_set_prec(logits, GGML_PREC_F32);
+        ggml_prec_set_acc(logits, GGML_PREC_F32);
 
         ggml_tensor * probs = hp.expert_gating_func == 2
             ? ggml_sigmoid(ctx, logits)
@@ -4300,7 +4300,7 @@ struct graph_builder
         // the small tensor. F32 is not cosmetic: a bf16 head gate moves logits
         // by ~1e-2, enough to swap near-tied pools under a hard top-k cut.
         ggml_tensor * w = ggml_mul_mat(ctx, LW.idx_proj, cur);              // [H, nt]
-        ggml_mul_mat_set_prec(w, GGML_PREC_F32);
+        ggml_prec_set_acc(w, GGML_PREC_F32);
         w = ggml_scale(ctx, w, 1.0f / sqrtf((float) (D * H)));
 
         ggml_tensor * score = nullptr;

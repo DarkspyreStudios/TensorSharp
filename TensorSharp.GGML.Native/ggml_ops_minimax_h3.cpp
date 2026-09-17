@@ -158,7 +158,7 @@ float h3_flash_v_scale(int keys)
 // attention never materializes it, so one call covers the whole frame with no tile
 // seams. K/V are cast to F16 because that is what the kernel takes.
 //
-// THE ACCUMULATE IS NOT F32, whatever ggml_flash_attn_ext_set_prec below looks
+// THE ACCUMULATE IS NOT F32, whatever ggml_prec_set_acc below looks
 // like it asks for. Every flash-attention kernel in the vendored ggml keeps the
 // softmax NUMERATOR -- sum_j exp(s_j - max) * V_j -- in FP16 registers
 // (T_C_VKQ = tile<16, 8, half2>, ggml-cuda/fattn-mma-f16.cuh), and nothing under
@@ -209,7 +209,7 @@ ggml_tensor* h3_attend(ggml_context* ctx, ggml_backend_t backend,
             // Inert on every backend built here (see the note above the function);
             // kept because the request is the right one and costs nothing, but the
             // V pre-scale is what actually keeps the accumulator finite.
-            ggml_flash_attn_ext_set_prec(out, GGML_PREC_F32);
+            ggml_prec_set_acc(out, GGML_PREC_F32);
             // [hd, heads, seq] contiguous -> [inner, seq].
             ggml_tensor* merged = ggml_reshape_2d(ctx, ggml_cont(ctx, out), hd * heads, seq);
             return vScale == 1.0f ? merged : ggml_scale(ctx, merged, vScale);

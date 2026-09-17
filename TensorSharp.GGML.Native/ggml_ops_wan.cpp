@@ -505,7 +505,7 @@ ggml_tensor* wan_attention(ggml_context* ctx, ggml_tensor* q, ggml_tensor* k, gg
     if (wan_flash_enabled())
     {
         ggml_tensor* fa = ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
         if (backend_supports_op(fa))
             return ggml_reshape_2d(ctx, fa, dim, n_q);
     }

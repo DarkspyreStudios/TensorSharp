@@ -2253,7 +2253,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
                         v_full->nb[1], v_full->nb[2], static_cast<std::size_t>(ks) * v_full->nb[1]);
                     ggml_tensor* m_tile = get_tile_mask(kLen, qLen, start_pos + qs, kStartLogical, window);
                     ggml_tensor* fa = ggml_flash_attn_ext(ctx, q_tile, k_tile, v_tile, m_tile, 1.0f, 0.0f, 0.0f);
-                    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+                    ggml_prec_set_acc(fa, GGML_PREC_F32);
                     if (!backend_supports_op(fa))
                     {
                         set_last_error("Gemma4 MoE model verify: tiled flash attention unsupported for this shape; use per-op path.");
@@ -2282,7 +2282,7 @@ TSG_EXPORT int TSGgml_Gemma4MoEModelVerify(
                     ? get_tile_mask(attnKvLen, N, start_pos, keyBase, maskWindow)
                     : get_causal_mask(attnKvLen, attendLen, maskWindow);
                 ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, q_t, k_full, v_full, fa_mask, 1.0f, 0.0f, 0.0f);
-                ggml_flash_attn_ext_set_prec(attn_out, GGML_PREC_F32);
+                ggml_prec_set_acc(attn_out, GGML_PREC_F32);
                 if (!backend_supports_op(attn_out))
                 {
                     // No supported flash kernel for this shape (e.g. an exotic head_dim):

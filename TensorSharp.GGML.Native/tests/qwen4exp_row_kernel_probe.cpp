@@ -341,7 +341,7 @@ void probe_flash(ggml_backend_t backend, int T, int head_dim, int n_head, int n_
         auto* vv = ggml_view_3d(g.ctx, vt, head_dim, width, n_head_kv, vt->nb[1], vt->nb[2], 0);
         auto* mt = g.input(GGML_TYPE_F16, {width, count}, mask_rows(first, count, width));
         auto* fa = ggml_flash_attn_ext(g.ctx, qt, kv, vv, mt, scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+        ggml_prec_set_acc(fa, GGML_PREC_F32);
         return fa;
     };
     std::vector<std::vector<float>> rows;
@@ -377,7 +377,7 @@ void probe_flash(ggml_backend_t backend, int T, int head_dim, int n_head, int n_
             auto* qr = ggml_cont(v.ctx, ggml_view_3d(v.ctx, qall, head_dim, 1, n_head, qall->nb[1], qall->nb[2], (size_t)r * qall->nb[1]));
             auto* mr = ggml_cont(v.ctx, ggml_view_2d(v.ctx, mt, kv_pad, 1, mt->nb[1], (size_t)r * mt->nb[1]));
             auto* fa = ggml_flash_attn_ext(v.ctx, qr, kt, vt, mr, scale, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+            ggml_prec_set_acc(fa, GGML_PREC_F32);
             acc = acc ? ggml_concat(v.ctx, acc, fa, 2) : fa;
         }
         v.output(acc);

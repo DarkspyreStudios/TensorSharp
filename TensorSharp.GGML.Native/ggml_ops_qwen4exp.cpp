@@ -1369,7 +1369,7 @@ ggml_tensor* q4e_nodes_attn(
             else
             {
                 ggml_tensor* scores = ggml_mul_mat(ctx, kr, qr);
-                ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+                ggml_prec_set_acc(scores, GGML_PREC_F32);
                 ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mr, attn_scale, 0.0f);
                 ggml_tensor* v_perm = ggml_cont(ctx, ggml_permute(ctx, vr, 1, 0, 2, 3));
                 ar = ggml_cont(ctx, ggml_permute(ctx, ggml_mul_mat(ctx, v_perm, probs), 0, 2, 1, 3));
@@ -1391,7 +1391,7 @@ ggml_tensor* q4e_nodes_attn(
     else
     {
         ggml_tensor* scores = ggml_mul_mat(ctx, k_full, q_attn);             // [n_kv, T, nH]
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mask, attn_scale, 0.0f);
         ggml_tensor* v_perm = ggml_cont(ctx, ggml_permute(ctx, v_full, 1, 0, 2, 3));
         attn = ggml_mul_mat(ctx, v_perm, probs);                             // [hd, T, nH]

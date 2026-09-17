@@ -894,7 +894,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
 
                     ggml_tensor* q_4d = ggml_reshape_4d(ctx, q_rope, hd, 1, nH, n_slots);
                     ggml_tensor* fa = ggml_flash_attn_ext(ctx, q_4d, k_view, v_view, e.attn_mask, attn_scale, 0.0f, 0.0f);
-                    ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+                    ggml_prec_set_acc(fa, GGML_PREC_F32);
                     if (!op_unsupported && !backend_supports_op(fa))
                         op_unsupported = true;
                     if (op_unsupported)

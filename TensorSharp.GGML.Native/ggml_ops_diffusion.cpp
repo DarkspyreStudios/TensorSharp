@@ -325,7 +325,7 @@ TSG_EXPORT int TSGgml_DiffusionDecodeLayer(const TSGgmlDiffusionDecodeLayerDesc*
         ggml_fp16_t* mask_data = get_decode_mask_cached(C, kvLen, klo, kvPad);
 
         ggml_tensor* flash = ggml_flash_attn_ext(ctx, q_attn, k_attn, v_attn, mask_t, 1.0f, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(flash, GGML_PREC_F32);
+        ggml_prec_set_acc(flash, GGML_PREC_F32);
         if (!backend_supports_op(flash))
         {
             // Caller falls back to the per-op C# attention path on this backend.
@@ -741,7 +741,7 @@ TSG_EXPORT int TSGgml_DiffusionModelDecode(
             t.mask_t = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kvPad, C, 1, 1);
             t.mask_data = get_decode_mask_cached(C, kvLen, klo, kvPad);
             ggml_tensor* flash = ggml_flash_attn_ext(ctx, q_attn, k_attn, v_attn, t.mask_t, 1.0f, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(flash, GGML_PREC_F32);
+            ggml_prec_set_acc(flash, GGML_PREC_F32);
             // Check every layer, not just layer 0: the local (head_dim 256) and global
             // (head_dim 512) layers have different flash-attn support envelopes, and an
             // unsupported op aborts the process inside the CUDA backend at execution.

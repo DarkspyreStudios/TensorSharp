@@ -209,6 +209,17 @@ endif()
 # precision requirements belong to TensorSharp's own native implementation.
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml" g)
 
+if (APPLE AND TARGET ggml-metal)
+    # macOS 27 deprecates the eGPU location and Common GPU-family APIs used by
+    # upstream's device discovery. Keep ggml unchanged and scope the diagnostic
+    # exception to that upstream Objective-C file; TensorSharp sources and the
+    # rest of ggml retain their deprecation warnings. Remove when upstream has
+    # migrated these calls.
+    set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/src/ggml-metal/ggml-metal-device.m"
+        TARGET_DIRECTORY ggml-metal APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<COMPILE_LANG_AND_ID:OBJC,AppleClang>:-Wno-deprecated-declarations>")
+endif()
+
 # Eight CUDA devices each have a companion backend for architecture-specific
 # kernels, followed by the host backend: 17 scheduler entries. Upstream's
 # default of 16 aborts the first forward pass on an eight-GPU DeepSeek load.

@@ -1443,7 +1443,7 @@ namespace {
                     nullptr, scale, 0.0f, 0.0f);
             if (flash != nullptr)
             {
-                ggml_flash_attn_ext_set_prec(flash, GGML_PREC_F32);
+                ggml_prec_set_acc(flash, GGML_PREC_F32);
                 if (backend_supports_op(flash))
                     output_value = flash; // [value_dim, heads, seq_q, batch]
             }
@@ -1468,7 +1468,7 @@ namespace {
                 set_last_error("Failed to create ggml attention score node.");
                 return 0;
             }
-            ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+            ggml_prec_set_acc(scores, GGML_PREC_F32);
 
             ggml_tensor* probs = ggml_soft_max_ext(context.value, scores,
                 has_mask ? mask_binding.tensor : nullptr, scale, 0.0f);
@@ -2415,7 +2415,7 @@ namespace
 
         // scores = mul_mat(K, Q) with GQA broadcast; F32 accumulation.
         ggml_tensor* scores = ggml_mul_mat(s.ctx, s.k_in, s.q_in);
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
         ggml_tensor* probs = ggml_soft_max_ext(s.ctx, scores, s.mask, scale, 0.0f);
         ggml_tensor* v_perm = ggml_cont(s.ctx, ggml_permute(s.ctx, s.v_in, 1, 0, 2, 3));
         ggml_tensor* attn_out = ggml_mul_mat(s.ctx, v_perm, probs);
@@ -2599,7 +2599,7 @@ namespace
 
         ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, q_in, k_in, v_in, mask_tensor, scale, 0.0f, 0.0f);
         if (attn_out == nullptr) { set_last_error("Failed flash_attn_ext node."); return 0; }
-        ggml_flash_attn_ext_set_prec(attn_out, GGML_PREC_F32);
+        ggml_prec_set_acc(attn_out, GGML_PREC_F32);
         if (!backend_supports_op(attn_out))
             return -1; // no flash kernel for this geometry; let the caller fall back
 
@@ -2834,7 +2834,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
             set_last_error("Failed to create Q*K^T matmul node.");
             return 0;
         }
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
 
         // Softmax with mask: softmax(scores * scale + mask)
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mask_tensor, scale, 0.0f);
@@ -3017,7 +3017,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF16KV(
         // scores = mul_mat(K_f16, Q_f32); GQA broadcast over heads. F32 accumulation.
         ggml_tensor* scores = ggml_mul_mat(ctx, k_in, q_in);
         if (scores == nullptr) { set_last_error("Failed Q*K^T (F16 KV)."); return 0; }
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
 
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mask_tensor, scale, 0.0f);
         if (probs == nullptr) { set_last_error("Failed softmax (F16 KV)."); return 0; }
