@@ -39,7 +39,7 @@ try
 catch (Exception ex) when (ex is ArgumentException or FileNotFoundException)
 {
     Console.Error.WriteLine("Configuration error: " + ex.Message);
-    Environment.ExitCode = 1;
+    Environment.ExitCode = HostExitCodes.ConfigurationError;
     return;
 }
 
@@ -84,7 +84,7 @@ try
 catch (ArgumentException ex)
 {
     Console.Error.WriteLine("Configuration error: " + ex.Message);
-    Environment.ExitCode = 1;
+    Environment.ExitCode = HostExitCodes.ConfigurationError;
     return;
 }
 codeExecOptions.ApplyEnvironment();
@@ -114,7 +114,7 @@ catch (ArgumentException ex)
     // A configuration mistake is the operator's to fix; a stack trace buries
     // the one line they need.
     Console.Error.WriteLine("Configuration error: " + ex.Message);
-    Environment.ExitCode = 1;
+    Environment.ExitCode = HostExitCodes.ConfigurationError;
     return;
 }
 codeExecOptions.ArtifactUriPrefix = CodeArtifactEndpoints.RoutePrefix;
@@ -177,6 +177,7 @@ string configuredBackendInput = ServerOptionsBuilder.ReadConfiguredBackendInput(
 // Translate --paged-kv* flags into env vars before startup logging reads
 // PagedKvCacheConfig.FromEnvironment().
 bool pagedKvFlagsApplied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(args);
+ServerOptionsBuilder.ApplyPrefixCacheCliFlag(args);
 // Translate --redis-url into TS_KV_CACHE_REDIS_URL and
 // TS_RESPONSES_STORE_REDIS_URL so a single flag enables Redis for both the
 // paged KV cache tier and the Responses API store.
@@ -569,35 +570,55 @@ app.MapWebUiEndpoints();
 app.MapOllamaEndpoints();
 app.MapOpenAIEndpoints();
 
-if (hostingOptions.EmbeddingsEnabled)
+try
 {
-    var embeddingModel = app.Services.GetRequiredService<IEmbeddingModel>();
-    startupLogger.LogInformation(LogEventIds.ModelLoadCompleted,
-        "Embedding model loaded: {Model} architecture={Architecture} dimensions={Dimensions} context={ContextLength} backend={Backend}",
-        embeddingModel.ModelName, embeddingModel.Architecture, embeddingModel.Dimensions, embeddingModel.MaxTokens,
-        hostingOptions.DefaultBackend);
+    if (hostingOptions.EmbeddingsEnabled)
+    {
+        var embeddingModel = app.Services.GetRequiredService<IEmbeddingModel>();
+        startupLogger.LogInformation(LogEventIds.ModelLoadCompleted,
+            "Embedding model loaded: {Model} architecture={Architecture} dimensions={Dimensions} context={ContextLength} backend={Backend}",
+            embeddingModel.ModelName, embeddingModel.Architecture, embeddingModel.Dimensions, embeddingModel.MaxTokens,
+            hostingOptions.DefaultBackend);
+    }
+    else
+    {
+        StartupModelLoader.LoadIfConfigured(
+            hostingOptions,
+            app.Services.GetRequiredService<ModelService>(),
+            configuredBackendInput,
+            startupLogger);
+    }
 }
-else
-    StartupModelLoader.LoadIfConfigured(
-    hostingOptions,
-    app.Services.GetRequiredService<ModelService>(),
-    configuredBackendInput,
-    startupLogger);
+catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string loadRefusal))
+{
+    // A refused load (not enough VRAM, an unsupported KV dtype or --tp layout, a
+    // missing file or sidecar) used to leave through an unhandled exception: a stack
+    // trace after the refusal, then abort() and exit code 134. It is the operator's to
+    // fix, so it gets one line and HostExitCodes.ModelLoadRefused (USAGE.md "Exit
+    // codes"). Anything that is not a refusal still propagates with its stack trace.
+    Environment.ExitCode = StartupModelLoader.ReportRefusal(ex, loadRefusal, Console.Error, startupLogger, () =>
+    {
+        // The container owns ModelService (and whatever the refused load left behind)
+        // and the logger providers, so disposing it releases the model and flushes the
+        // file log; the ggml backend is a process global and goes last.
+        ((IDisposable)app).Dispose();
+        if (!hostingOptions.UsesManagedEmbeddingBackend)
+            GgmlBasicOps.Shutdown();
+    });
+    return;
+}
 
-// Prepare the prompt every conversation shares, HERE: after the endpoints are mapped and
-// the container is live, but before app.Run binds a socket. That position is the whole
-// safety argument. The warm-up is an ordinary chat request and the engine is not
-// concurrency-safe for two of them; every other placement has to prove that no request
-// beat it to the engine, and one that loses that race is worse than not warming at all —
-// a prefill pushed onto the batched multi-sequence path never takes the checkpoint, so it
-// would cost twenty seconds and store nothing, silently. Before the port is open there is
-// no request to race.
+// Prepare the prompt every conversation shares after the container is live, before
+// app.Run binds a socket, so warm-up cannot contend with a real request.
 //
 // The cost is that the first launch after a prompt, skills, model or DATE change does not
 // answer connections until the prefill finishes. That is stated plainly in the log, and it
 // is the trade this feature exists to make: one slow startup instead of one slow first
-// message, and with the store attached above, later launches restore instead of prefill.
-if (!hostingOptions.EmbeddingsEnabled && hostingOptions.PrefixCacheEnabled && !string.IsNullOrWhiteSpace(hostingOptions.StartupModelPath))
+// message. Models with persistent checkpoint support can restore the shared prefix on
+// later launches from the store attached above.
+if (!hostingOptions.EmbeddingsEnabled && hostingOptions.PrefixCacheEnabled
+    && TensorSharp.Runtime.Scheduling.SchedulerConfig.FromEnvironment().EnablePrefixCaching
+    && !string.IsNullOrWhiteSpace(hostingOptions.StartupModelPath))
 {
     var warmupAdapter = app.Services.GetRequiredService<WebUiAdapter>();
     var warmupSessions = app.Services.GetRequiredService<SessionManager>();
@@ -609,13 +630,8 @@ if (!hostingOptions.EmbeddingsEnabled && hostingOptions.PrefixCacheEnabled && !s
         "Preparing the shared prompt before opening the port. The first launch after a prompt, "
         + "skills or model change pays for it here instead of on the first message.");
 
-    // BOTH thinking modes, because both are reachable and they are different prefixes.
-    // Measured on Qwen 3.8: thinking off shares 6,459 tokens and thinking on shares 6,497
-    // — warming one does nothing whatsoever for the other. A client that omits `think`
-    // gets false (WebUiChatService reads it as a plain bool), while the bundled Web UI
-    // ships its reasoning toggle checked and sends true, so warming only one would leave
-    // half of this server's own callers on the slow path. Two checkpoints is exactly what
-    // the in-memory budget and the on-disk retention both hold.
+    // Both thinking modes are reachable and can render different shared prefixes. A
+    // client that omits `think` gets false, while the Web UI can send true.
     foreach (bool think in new[] { false, true })
     {
         PrefixCacheWarmup.Result warmed = PrefixCacheWarmup

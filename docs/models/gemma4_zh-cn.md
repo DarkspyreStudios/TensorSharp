@@ -410,9 +410,34 @@ rope_freqs.weight                          # 比例频率因子
 
 ### 整模型单图 prefill（`NativeGemma4ModelVerify`）
 
-在 ggml 后端上，普通的多 token prefill 由 MTP 验证所用的同一个融合整模型内核（§12）来执行：所有层在单次 GGML 图派发中完成，激活值常驻设备，而不是每层一张图。`CanUseWholeModelPrefillVerify()` 决定是否走该路径——仅限密集模型，包括 E 系列的内核内 PLE 与共享 KV donor 层；多模态 chunk 在 `startPos == 0` 时可通过内核的双向 span mask 走该路径（`TS_G4_MM_PREFILL=0` 让多模态退回逐算子路径）。`startPos > 0` 的 SWA 包裹 chunk 通过内核内的 swaPrev gather 留在融合路径上（`TS_G4_VERIFY_SWAPREV=0` 关闭）。全 MoE 变体（例如 26B-A4B）有对应的融合路径：`CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`。设 `TS_G4_WHOLE_PREFILL=0` 可强制走逐算子分块路径做 A/B。注意，块量化（`q8_0` / `q4_0`）KV cache 的多 token prefill *必须*走该路径——逐算子回退无法遍历块量化的 cache 布局。
+在 ggml 后端上，普通的多 token prefill 由 MTP 验证所用的同一个融合整模型内核（§12）来执行：所有层在单次 GGML 图派发中完成，激活值常驻设备，而不是每层一张图。`CanUseWholeModelPrefillVerify()` 决定是否走该路径——仅限密集模型，包括 E 系列的内核内 PLE 与共享 KV donor 层；多模态 chunk 在任意起始位置都可通过内核的双向 span mask 走该路径（`TS_G4_MM_PREFILL=0` 让多模态退回逐算子路径；见[复用前缀之后的图片与音频回合](#复用前缀之后的图片与音频回合)）。`startPos > 0` 的 SWA 包裹 chunk 通过内核内的 swaPrev gather 留在融合路径上（`TS_G4_VERIFY_SWAPREV=0` 关闭）。全 MoE 变体（例如 26B-A4B）有对应的融合路径：`CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`。设 `TS_G4_WHOLE_PREFILL=0` 可强制走逐算子分块路径做 A/B。注意，块量化（`q8_0` / `q4_0`）KV cache 的多 token prefill *必须*走该路径——逐算子回退无法遍历块量化的 cache 布局。
 
 调度器会把 solo（无争用）prompt 以大分块喂给该路径，分块上限由 `TS_SCHED_SOLO_PREFILL_CHUNK`（默认 8192）控制。实测设计见 [`docs/perf/gemma4-prefill-cuda-graph-design.md`](../perf/gemma4-prefill-cuda-graph-design.md)。
+
+### 复用前缀之后的图片与音频回合
+
+图片、视频帧或音频片段以一段软 token 进入提示，这些软 token 彼此双向注意。prefill 内核用每个 chunk token 一个字节（`is_except`）表达这一点：软 token 查询还会读取本 chunk 中位于其后的软 token 键，而所有查询都因果地读取其之前的键，局部层上限定在滑动窗口之内。当一个会话把缓存续接到图片回合时，图片 chunk 从非零位置 P 开始，位于之前回合留下的文本之后。
+
+在此之前，融合内核（密集的 `TSGgml_Gemma4ModelVerify`、MoE 的 `TSGgml_Gemma4MoEModelVerify`）只在 P = 0 时应用软 token 条件，因为它们拿键在缓冲区中的下标与 chunk 的字节比较。于是门控把 P > 0 的媒体 chunk 交给逐算子路径，这条路径更慢（E4B/Metal，一个复用 179 token 的 457 token 图片回合：首 token 1.25 s，冷启动为 0.64 s），而且环回绕之后是错的：它的掩码把缓冲区下标当作绝对位置，但超出窗口后收集的窗口从 P - 511 开始，而不是 0。Phase 0 因此只能让这样的回合不复用公共前缀之后的内容（`CanPrefillMediaAfterReusedPrefix`）。
+
+融合内核注意的每个缓冲区都把本 chunk 作为最后 N 个真实键：P = 0 时只有 chunk 本身，全局缓存 `[0, P + N)`，未回绕的滑动窗口缓存，或者从已回绕的环中收集并前置到 chunk 之前的上一窗口。因此键在 chunk 中的下标就是它在缓冲区中的下标减去 chunk 之前的真实键数，`gemma4_mm_mask.h` 中的行构造函数应用了这个偏移。在 P = 0 以及文本 chunk 上，它们生成的行与之前相同。逐算子路径把软 token 的绝对位置平移到其键缓冲区的坐标系中（`ShiftPositions`），与张量并行的逐算子路径早已采用的做法一致；张量并行的融合 verify 现在也在任意 P 传入 chunk 掩码（其密集变体过去在 P > 0 运行媒体 chunk 时完全没有软 token 掩码）。
+
+所以 Gemma 4 不再重写 `CanPrefillMediaAfterReusedPrefix`：图片回合在任意提示长度下都会复用会话的文本，图片 chunk 走融合图。在 E4B（Q8_0，Metal，M5 Pro）上用 IMG 会话（文本、文本、图片、文本；贪心；两轮取中位数；Web UI 一列为首 token 时间，OpenAI 一列为整个非流式请求的耗时）测得：
+
+| 第 3 回合（图片） | 6db6dbf6 | Phase 0 | 本改动 |
+|---|---|---|---|
+| Web UI，457 token 提示：复用 / 首 token 时间 | 0 / 0.64 s | 179 / 1.25 s | 179 / **0.57 s** |
+| OpenAI，457 token 提示：复用 / 耗时 | 0 / 1.80 s | 179 / 2.09 s | 179 / **1.46 s** |
+| Web UI，889 token 提示（超出窗口）：复用 / 首 token 时间 | 0 / 0.85 s | 0 / 0.90 s | 611 / **0.62 s** |
+| OpenAI，946 token 提示（超出窗口）：复用 / 耗时 | 0 / 1.86 s | 0 / 1.60 s | 668 / **1.29 s** |
+
+这些运行中的每条回复（短会话 24 个回合、长会话 16 个回合）都与 Phase 0 头部的文本相同，也与本改动关闭前缀缓存（`TS_SCHED_PREFIX_CACHE=0`）时的文本相同，纯文本回合的复用量和耗时保持不变（`AgentTurnBench --scenarios short,long,tool`，每个构建各跑两次：每一行都与 6db6dbf6 和 Phase 0 头部相差不超过 0.5%，token 完全相同）。
+
+在 CUDA 上（E4B Q8_0，A40，一轮），图片回合同样获得复用并且更快：Web UI 449 token 提示 1.10 s（6db6dbf6）/ 2.85 s（Phase 0）/ **0.93 s**，OpenAI 1.45 / 2.49 / **0.98 s**；超出窗口时，Web UI 893 token、复用 615：1.10 / 1.12 / **0.91 s**，OpenAI 870 token、复用 592：2.05 / 1.06 / **0.87 s**。不过在那里，任何构建上从缓存续接的回合都不与冷启动回复逐 token 相同：文本回合和图片回合都一样，6db6dbf6 也一样，复用前缀之后的贪心回复会在几十到几百个字符之后偏离冷启动回复，因为在这些内核上把同样的 token 分两个 chunk 而不是一个 chunk 预填充，在 E4B 上会让 logits 变动 0.65 到 0.8（即下文测试中的文本对照）。在提示完全相同时，Phase 0 头部的图片回合回复在短会话中与本改动相同（两者复用同样的前缀），超出窗口时则不同（Phase 0 头部从零 prefill）。
+
+覆盖：原生测试 `gemma4-multimodal-mask-after-reused-prefix` 保留旧行构造的逐字副本，检查它们在 P = 0 和文本上不变，并检查 P > 0 的 chunk 在每种缓冲区布局下看到的内容与冷启动 prefill 中相同查询看到的完全一致（旧的起始位置门控在其 1,200 个媒体用例中失败 1,102 个）。`Gemma4MediaAfterReusedPrefixExactnessTests`（受模型门控，`TS_TEST_MODEL_DIR`）先 prefill 一个文本回合，再以复用和不复用两种方式 prefill 一个图片或音频回合，分别在窗口内外、融合与逐算子路径上运行。它的容差是同一行中测得的两个噪声估计中较大者的两倍：去掉媒体的同样切分，以及另一条路径上的冷启动媒体 prefill。在 Metal 上（E4B、E2B）两个估计都约为 0.02 logits，融合路径的贪心输出完全相同，prefill logits 相差不超过 0.026，而在 Phase 0 头部，超出窗口时图片相差 3.2、音频相差 2.0 到 7.1（逐算子路径 3.2）。在 CUDA 上（E4B、12B、26B-A4B）两个估计为 0.35 到 1.4（12B 短文本对照为 2.7），所有行都通过；Phase 0 头部的长前缀行相差 3.3 到 3.8（图片）和 2.1（音频），高于本改动在相同行上测得的容差（1.3 到 2.8）；那里的贪心输出只比较到噪声范围内的第一个近乎平局处，通常是第一两个 token。逐算子路径的贪心输出不逐 token 比较：它自身就不可复现（四次相同的冷启动 prefill 在第 16 步解码处翻转了一个近乎平局的 token）。`Gemma4SoftTokenMaskTests` 固定了两种位置换算。
+
+有两个限制沿袭自冷启动路径。掩码标记的是软 token，而不是它们属于哪个媒体项，因此在同一 chunk 中 prefill 的两张图片会彼此双向注意。在较早回合发送过图片的会话，是在该图片自己的 chunk 中 prefill 的，那时它看不到后来的图片；而对整段历史的冷启动 prefill 让它看得到，所以两张图片之后的回复在两者之间可能不同。另外，落在 span 内部的 chunk 边界（调度器在争用时的 256 token 分块可能造成）会切断其双向注意。
 
 ### 内核内 PLE gather
 
@@ -421,6 +446,10 @@ per-layer embeddings（PLE）在融合 verify 图内通过对常驻的量化 `pe
 ### KV cache 预扩容（`PrepareForPrefill`）
 
 全新 prefill 开始时，按需增长的全局 KV cache 会被预先扩容到整个 prompt 的大小（`PrepareForPrefill(totalPromptTokens)`）。在 `start_pos == 0` 时 cache 中还没有已提交的 K/V，一次性扩容到最终大小无需拷贝任何数据——从而消除了逐次翻倍扩容（每次扩容都要重新拷贝并对整个全局 cache 做 device↔host 往返，64k 时实测约 7%）。仅 GGML GPU 后端，且钳制到模型上下文长度。
+
+### 短于 256 行或不是 256 倍数的全局缓存
+
+ggml-cuda 只在 grouped-query flash kernel 上运行 512 维全局层，该 kernel 要求 KV 窗口是 256 行的倍数。窗口会补齐到 256，但从不超过已分配的缓存，因此增长到 16 行的缓存（`TS_KV_INITIAL_TOKENS=8`），或上限为 4000 这类长度的缓存（`MAX_CONTEXT=4000`，超过 3840 个 token 后）过去会在 `ggml-cuda/fattn.cu` 中终止进程。现在这些全局层以显式注意力运行，结果相同，并打印一次 `has no flash-attention kernel` 警告；缓存长度重新成为 256 的倍数后即回到 kernel。默认的缓存大小不会走这条路径。参见 [后端没有 kernel 的 flash-attention 形状](../../DEVELOPMENT_zh-cn.md#后端没有-kernel-的-flash-attention-形状)。
 
 ### 融合 per-layer prefill（`Gemma4LayerPrefill`）
 
@@ -477,12 +506,51 @@ forward 内跨层复用的三类缓存：
 
 SWA 层用 `CopyToCacheCircular()` 在 `pos % cacheSize` 写入新 K/V 槽位，`AttentionDecodeCircular()` 走环形读。SWA 层因此无视上下文长度只分配 `slidingWindow` 个槽位 —— 常驻内存有界。
 
+### 并发请求的 token 批量融合 decode（`Gemma4ModelDecodeBatchedEx`）
+
+N >= 2 个请求同时在线时，引擎不再轮询 N 个单 token 图：`Gemma4Model.TryForwardBatchedFusedDecode` 在**一个**融合图（[`ggml_ops_gemma4_batched.cpp`](../../TensorSharp.GGML.Native/ggml_ops_gemma4_batched.cpp) 中的 `TSGgml_Gemma4ModelDecodeBatchedEx`）里为每个序列各 decode 一个 token，每步每个权重只加载一次、作用于 N 个 token。decode 受带宽限制，聚合吞吐正来自这里。每个序列保留自己的 per-request KV holder；内核以 `[layer * N + seq]` 指针数组接收这些 holder，在 `[hidden, N]` 上跑 projection / FFN / LM head，并对每个序列在其自身 cache 窗口的直接视图上跑一次单行 flash-attention。
+
+v1 内核只覆盖无 per-layer embedding、无共享 KV 层、且每个序列都还在 SWA 环内的密集模型，所以 E2B/E4B（PLE 维 256、18 个 KV-donor 层、大多数对话都会超出的 512 槽环）总是拒绝，服务器记录 "The model declined the default batched fused-decode path ... concurrency stays near 1x"。`Ex` 入口补上这三处：
+
+- **逐行 PLE。** per-layer embedding 在图内从常驻的量化 `per_layer_token_embd` 表通过对 N 个 token id 的一次 `get_rows` 收集（再加 `per_layer_model_proj` projection、其 RMSNorm 与 `1/sqrt(2)` 合并，与单 token decode 和 `ComputePLE` 完全一致），按层以 `[ple_dim, N]` 的跨步列切片注入。图内形式不可用时（`CanGatherPleInKernel` 为 false：`get_rows` 不支持的类型或带缩放的 projection），调用方改为上传 `ComputePLE` 的行，PLE 项永远不会被丢掉。
+- **KV-donor 层。** `kv_source_arr[l]` 指明第 `l` 层要 attend 的 cache 所属层。共享层只跑 Q projection，读取 donor 的逐序列窗口与 mask，不写任何东西。
+- **SWA 回绕。** 序列超出环的 local 层写到 `pos % cache_size`，并把整个环平铺读取、所有槽位有效；decode 的 softmax 对 key 的排列不变，因此旋转不需要 concat。全局（线性）层仍必须容纳整个序列；轮询回退会扩容，下一步重新进入批量路径。
+
+原生侧通过 `TSGgml_Gemma4BatchedDecodeCapabilities()`（位：PLE、KV donor、SWA wrap）报告支持范围。托管侧对已加载原生库缺少的每一位保留 v1 限制，所以旧的 `libGgmlOps`（没有探测符号）行为与以前完全一致，`TSGgml_Gemma4ModelDecodeBatched` 作为薄包装保留 v1 ABI。`TS_GEMMA4_BATCHED_CAPS=0` 可强制 v1 门控做 A/B。
+
+CUDA-graph 捕获不变：每步的所有输入（hidden 行、position、每 (层, 序列) 的 `set_rows` 写行、每层 F16 mask、PLE token id 或上传的 PLE 行）都是用 `ggml_backend_tensor_set` 刷新的图输入，图位于自己的 context 与独占 buffer 中，重复出现的请求集合在稳定地址上重放捕获的图。MoE 批量内核（`TSGgml_Gemma4MoEModelDecodeBatched`）保持无 PLE / 无 donor 的范围。
+
+**已验证**（[`Gemma4BatchedFusedDecodeParityTests`](../../InferenceWeb.Tests/Gemma4BatchedFusedDecodeParityTests.cs)，`TS_TEST_GGML_BACKEND=cuda`，gemma-4-E4B-it-Q8_0）：2、3、4 个并发序列（其中一个 prefill 超过 512 token 的 SWA 环）下，批量路径 12 步的贪心续写与轮询单 token decode 逐 token 一致，且每一步都跑在批量内核上。
+
+**实测**（gemma-4-E4B-it-Q8_0、NVIDIA A40、ggml_cuda、f16 KV、prefill 分块 512、4 个运行序列；轮询列用 `TS_GEMMA4_BATCHED_CAPS=0` 强制 v1 门控，其余完全相同）：
+
+| 负载 | 轮询（之前） | token 批量（之后） | 倍数 |
+|---|---:|---:|---:|
+| AgentTurnBench `conc`，1 个请求（decode tok/s） | 68.8 | 68.5 | 1.0× |
+| AgentTurnBench `conc`，2 路并发（总 decode tok/s） | 65.1 | 99.0 | 1.5× |
+| AgentTurnBench `conc`，4 路并发（总 decode tok/s） | 66.5 | 148.7 | 2.2× |
+| `validate_inference.py` `decode`（512 个新 token），并发 1（端到端 tok/s） | 76.8 | 77.7 | 1.0× |
+| `validate_inference.py` `decode`，并发 4（总端到端 tok/s） | 70.3 | 148.6 | 2.1× |
+| `validate_inference.py` `decode_8k`（8k prompt），并发 1 | 63.8 | 64.3 | 1.0× |
+| `validate_inference.py` `decode_8k`，并发 4 | 59.0 | 101.7 | 1.7× |
+
+`validate_inference.py` 各行比较的是本树构建的服务器与上一提交构建的服务器；两者单路（并发 1）输出逐字节一致。这里"逐 token 一致"的确切含义：AgentTurnBench `conc` 流（`compare.py` 要求输出 token id 完全相同）与 12 步的进程内 parity 测试与轮询 decode 完全一致；但在数百个贪心 token 之后，边际很小的 token 可能翻转（`ParityHarness --batched` 256 步：每组 2/3/4 路里各有一个序列分叉），而原有的 v1 内核在 gemma-4-12B（无 PLE、无共享 KV）上同样如此 —— 批处理改变 GEMM 形状从而改变舍入，这正是 GLM 批量 decode 已记录的注意事项。经 HTTP 服务器在并发 4 下，连两次轮询运行都会不同（16 个 case 中 10 个相同），因为 prefill/decode 的交错取决于调度，所以 parity 必须在进程内判断。
+
 ## 10. 内存与 KV cache 策略
 
 - **SWA 层**：容量 `_slidingWindow`，环形读写。
 - **全局层**：容量 `maxSeqLen`，线性 append/读。
 - **共享层**：alias 到 donor 的 cache，无独立分配。
 - **量化权重绑定**：在 GGML CPU / Metal / CUDA 上零拷贝 mmap（GGUF 文件用 `MemoryMappedFile` + `QuantizedWeight.CreateExternalView`）。Direct CUDA 把量化数据上传到设备一次，释放 host 拷贝。
+
+### 保留的 holder：一个块的下限
+
+已完成的并发请求的按请求 holder 只有在至少覆盖一个调度块（默认 256 token）时，才会为其对话的下一轮保留，
+规则与 Qwen 3.5 相同（`BatchExecutor.TryRetainReleasedFusedCache` 与 `DonateFinishedLiveCacheToRetained`）。
+更短的对话在每一轮与其他请求并行运行时都要重新 prefill 整个提示；单独运行的对话从没有这一下限的 live cache
+续接。holder 并不需要块粒度（按 token 逐个匹配，采用时预留 ceil(lcp / BlockSize) 个占位块），但降低下限在
+Qwen 3.5 的 Metal 精确性验证中失败，原因尚未查明，详见 [Qwen 3.5：保留的 holder：一个块的下限](qwen35_zh-cn.md#保留的-holder一个块的下限)。
+更短的 Gemma 4 holder 未经验证，因此这里同样保持该下限。
 
 ## 11. 批处理 / 分页前向（连续批处理）
 
@@ -558,7 +626,7 @@ Gemma 4 是 TensorSharp 中最难移植到分页批处理的模型，因为它�
 
 ## 12. MTP 投机解码（gemma4-assistant 草稿头）
 
-Gemma 4 在两个宿主上都支持为单序列（无并发）请求做无损的**多 token
+Gemma 4 在两个宿主上都支持为单序列（无并发）请求做**多 token
 预测（MTP）投机解码**。与 Qwen 3.6 把 NextN 块内嵌在主干 GGUF 不同，Gemma 4 的草稿头
 作为一个**独立的小 `gemma4-assistant` GGUF** 发布，通过 `--draft-model`
 （环境变量 `TS_SPEC_DRAFT_MODEL`，旧名 `TS_MTP_DRAFT_MODEL`）加载，
@@ -631,14 +699,43 @@ KV 缓存，并对每个起草 token 复用相同位置（递归只通过 `h` �
 `--spec-type ngram` 完全不需要草稿 GGUF，因此即便旁边没有 assistant 文件，也能在
 Gemma 4 checkpoint 上运行。
 
+### 12.4 贪心一致性
+
+每个输出 token 都取自主干的某一行，因此投机不会改变 token 所依据的前缀，只会改变计算这一行的
+kernel。用 `AgentTurnBench --spec-diagnostic --spec-diagnostic-teacher-force` 实测有两点后果：
+
+* **已修复：** 在不带逐层嵌入的稠密检查点（实测 12B；31B 走同一路径）上、ggml 与 CPU 后端下，越过滑动窗口的
+  一次**全部接受**的验证，过去会把被挤出的位置写回到已提交的行上，于是下一次验证偏差 30-47 个
+  logit，12B 的输出流在十个 token 内就与普通贪心分叉。现在 `SpecOnVerifyAccepted` 只对执行器会
+  重新前向的窗口恢复槽位；A40 上 12B 的 spec 与检查点克隆输出流重新与普通贪心一致，spec 提示上的
+  n-gram 接受率从 57% 升到 89%。
+* **容差：** K+1 行验证与单行 decode 是不同的 kernel。在 `ggml_cuda` 上两者的行在 E4B 上相差
+  中位数 0.5 个 logit（其 BF16 逐层嵌入投影在 ggml-cuda 中依赖 batch 形状），在 12B/26B-QAT 上为
+  1.7-2.2；Metal 上为 0.003（E4B）与 0.15（12B）；`ggml_cpu` 上为 0。若某个贪心 token 的前两名
+  logit 之差落在这一误差之内，它就可能不同：E4B 的 512 个散文 token 中出现了 4-5 次，每次的差都小于 0.25。
+
+细节与完整表格见：[What greedy parity delivers](../speculative_decoding.md#what-greedy-parity-delivers)。
+
 ## 13. 输出解析器与聊天模板
 
 `Gemma4OutputParser` 处理两种结构化包装：
 
 - **思维链** —— `<|channel>thought ... <channel|>` 的 chain-of-thought，再跟最终答案。
-- **工具调用** —— `<|tool_call>call:function_name{...args...}<tool_call|>` 块，由 `OutputParser` 解出结构化的 tool call。
+- **工具调用** —— `<|tool_call>call:function_name{...args...}<tool_call|>` 块，由 `OutputParser` 解出结构化的 tool call。参数使用 Gemma 自己的语法（裸键名，字符串用 `<|"|>` 包裹），而模型经常把看起来像标识符的字符串值直接裸写——`call:read_invoice{invoice_id:INV-472}`、`{path:src/main.py}`、`{ids:[INV-1, INV-2]}`。转换器会给每个不是 JSON 数字 / `true` / `false` / `null` 的裸值加引号（数组内也一样；数字保持数字）。参数仍无法解析的调用会以原文作为 content 返回，而不是一条空消息；多调用轮次中每个调用都带自己的 `index`，流式客户端可据此配对参数增量。
 
 聊天模板在 GGUF 没带 Jinja2 模板时回退到内置 Gemma 4 模板。
+
+### 关闭思考时的思维通道
+
+关闭思考时，没有任何 Gemma 4 模板会在工具结果之后预置内容：E2B/E4B 的 canonical 模板以及 12B/26B/DiffusionGemma 模板都让 prompt 停在 `<tool_response|>`，由模型继续自己的轮次（较大模型的模板只在新的 `<|turn>model` 之后预置闭合的 `<|channel>thought\n<channel|>`）。渲染器保持这个 prompt。我们在 E4B（Metal，Q8_0，带 skills 前导）上实测过在工具结果之后强行预置闭合块，结果更糟：模型不加标记地写出推理，再次关闭通道后才回答，推理因此进入了 `content`。
+
+E4B 在该边界上的行为（2026-09-16 验证活动，B10）改为在采样阶段处理，依据协议的 `ThinkingBudgetOpenToken` / `ThinkingBudgetEndToken` / `SuppressUnopenedThinkingEndAfter`：
+
+- **关闭思考时模型自行打开的通道会被限长。** 预算从 `<|channel>` 开始计，在超过 `max_tokens` 四分之一（最多 64 token，两倍处强制关闭）后的第一个换行处以 `<channel|>` 关闭通道。解析器隐藏思考内容，随后是答案。此前 `agentic` 的最后一轮把 256 个 token 全部花在通道里，content 为空。我们也实测过恰好在 16 或 64 token（句子中间）关闭：模型会泄漏推理或把被截断的句子续写成工具调用；而在超过 16、32、48、64 token 后的第一个换行处关闭，每次都给出了正确答案。
+- **工具结果之后，没有打开通道的 `<channel|>` 会被屏蔽。** E4B 先写出答案，关闭一个从未打开的通道，然后再写一遍答案；流式响应已经发出了第一份，客户端因此收到两份。屏蔽后模型在第一份答案后结束轮次。屏蔽需要 host logits，因此这类请求不走 device-argmax 路径。屏蔽只限于该边界：其他位置的孤立关闭标记仍由解析器用来分隔推理与答案。
+- 开启思考时，同一预算从模型的 `<|channel>` 开始计（若 prompt 在工具结果后预置了 `<|channel>thought\n`，则从第一个 token 开始计），并恰好在 `TS_THINKING_BUDGET` 处关闭。此前 Gemma 4 没有声明训练过的结束 token，通用的硬停止在寻找 Gemma 从不输出的 `</think>`。`TS_THINKING_BUDGET=0` 同时关闭两个上限。
+
+`response_format` 可以与 `"think": true` 同时使用：JSON 语法在思维通道内保持休眠，在 `<channel|>` 之后启用（`ThinkingGrammarActivationTrigger`）。关闭思考时语法从第一个 token 起生效，这同时排除了 `<|channel>`。
 
 ## 13a. 张量并行
 

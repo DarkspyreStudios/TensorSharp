@@ -78,7 +78,8 @@ namespace TensorSharp.Runtime
         /// </summary>
         public List<string>? AttachmentNames { get; set; }
         /// <summary>
-        /// True if ImagePaths represent video frames (inserts &lt;|video&gt; before frame &lt;|image&gt; tokens).
+        /// True when the message contains sampled video frames. ImageTimestamps
+        /// distinguishes timed frames from still images in mixed messages.
         /// </summary>
         public bool IsVideo { get; set; }
         /// <summary>
@@ -320,6 +321,137 @@ namespace TensorSharp.Runtime
             }
 
             return sb.ToString();
+        }
+
+        private const string NemotronHSystemMarker = "<SPECIAL_10>System";
+        private const string NemotronHTurnMarker = "<SPECIAL_11>";
+        private const string NemotronHReasoningOn = "{'reasoning': True}";
+        private const string NemotronHReasoningOff = "{'reasoning': False}";
+
+        /// <summary>
+        /// True when a <c>nemotron_h</c> GGUF carries the Nemotron-H Reasoning-128K turn
+        /// format (<c>&lt;SPECIAL_10&gt;System</c> / <c>&lt;SPECIAL_11&gt;User</c> /
+        /// <c>&lt;SPECIAL_11&gt;Assistant</c>) rather than the ChatML format of Nemotron 3
+        /// Nano / Omni. Both ship under the same architecture name, so the embedded
+        /// template is the only thing that tells them apart; rendering the Reasoning-128K
+        /// checkpoints as ChatML fed them <c>&lt;|im_start|&gt;</c> as plain text, and they
+        /// answered with <c>&lt;/think&gt;</c> and invented <c>&lt;|im_start|&gt;user</c>
+        /// turns in the content.
+        /// </summary>
+        public static bool IsNemotronHReasoningTemplate(string? template)
+            => !string.IsNullOrEmpty(template)
+               && template.Contains(NemotronHSystemMarker, StringComparison.Ordinal)
+               && template.Contains(NemotronHTurnMarker + "Assistant", StringComparison.Ordinal);
+
+        /// <summary>
+        /// Render the Nemotron-H Reasoning-128K chat format (nvidia/Nemotron-H-8B/47B-
+        /// Reasoning-128K). Mirrors the shipped template:
+        /// <code>
+        /// &lt;SPECIAL_10&gt;System\n{system}
+        /// \n&lt;SPECIAL_11&gt;User\n{user}\n&lt;SPECIAL_11&gt;Assistant\n[&lt;think&gt;\n | &lt;think&gt;&lt;/think&gt;]{assistant}...
+        /// </code>
+        /// <para>Reasoning is switched by the <c>{'reasoning': True|False}</c> marker in
+        /// the system prompt, which the template also uses to open (<c>&lt;think&gt;\n</c>)
+        /// or close (<c>&lt;think&gt;&lt;/think&gt;</c>) the reasoning block after the final
+        /// assistant header. The marker is added here from the request's thinking flag
+        /// unless the caller's system prompt already carries one. EOS is
+        /// <c>&lt;SPECIAL_11&gt;</c>, the same token that opens the next turn.</para>
+        /// <para>The shipped template has no tool syntax. Tools are declared in the system
+        /// prompt with the JSON <c>&lt;tool_call&gt;</c> convention the ChatML parser reads,
+        /// and tool results are fed back as a user turn wrapped in
+        /// <c>&lt;tool_response&gt;</c>, so an agentic loop still sees its results.</para>
+        /// </summary>
+        public static string RenderNemotronHReasoning(List<ChatMessage> messages, bool addGenerationPrompt = true,
+            List<ToolFunction>? tools = null, bool enableThinking = false)
+        {
+            messages ??= new List<ChatMessage>();
+            var sb = new StringBuilder();
+
+            bool hasSystem = messages.Count > 0 && messages[0].Role == "system";
+            string system = hasSystem ? (messages[0].Content ?? string.Empty).Trim() : string.Empty;
+            bool thinkingOn;
+            if (system.Contains(NemotronHReasoningOn, StringComparison.Ordinal))
+            {
+                thinkingOn = true;
+            }
+            else if (system.Contains(NemotronHReasoningOff, StringComparison.Ordinal))
+            {
+                thinkingOn = false;
+            }
+            else
+            {
+                thinkingOn = enableThinking;
+                string marker = enableThinking ? NemotronHReasoningOn : NemotronHReasoningOff;
+                system = system.Length > 0 ? marker + "\n" + system : marker;
+            }
+
+            if (tools != null && tools.Count > 0)
+            {
+                system += "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n" +
+                          "You are provided with function signatures within <tools></tools> XML tags:\n<tools>";
+                foreach (var tool in tools)
+                    system += "\n" + Jinja2Template.ToJson(BuildToolDeclaration(tool));
+                system += "\n</tools>\n\nFor each function call, return a json object with function name and " +
+                          "arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n" +
+                          "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call>\n" +
+                          "Function results are returned to you inside <tool_response></tool_response> tags.";
+            }
+
+            sb.Append(NemotronHSystemMarker).Append('\n').Append(system);
+
+            int start = hasSystem ? 1 : 0;
+            for (int i = start; i < messages.Count; i++)
+            {
+                var msg = messages[i];
+                bool isLast = i == messages.Count - 1;
+                switch (msg.Role)
+                {
+                    case "assistant":
+                    {
+                        var parts = new List<string>();
+                        string content = (msg.Content ?? string.Empty).Trim();
+                        if (content.Length > 0)
+                            parts.Add(content);
+                        if (msg.ToolCalls != null)
+                        {
+                            foreach (var tc in msg.ToolCalls)
+                                parts.Add("<tool_call>\n" + SerializeToolCall(tc) + "\n</tool_call>");
+                        }
+                        sb.Append(string.Join("\n", parts));
+                        break;
+                    }
+                    case "tool":
+                    {
+                        bool prevIsTool = i > start && messages[i - 1].Role == "tool";
+                        if (!prevIsTool)
+                            sb.Append('\n').Append(NemotronHTurnMarker).Append("User\n");
+                        else
+                            sb.Append('\n');
+                        sb.Append("<tool_response>\n").Append((msg.Content ?? string.Empty).Trim())
+                          .Append("\n</tool_response>");
+                        bool nextIsTool = i + 1 < messages.Count && messages[i + 1].Role == "tool";
+                        if (!nextIsTool)
+                            AppendNemotronHAssistantHeader(sb, isLast && addGenerationPrompt, thinkingOn);
+                        break;
+                    }
+                    default: // user, or a later system message rendered as a user turn
+                    {
+                        sb.Append('\n').Append(NemotronHTurnMarker).Append("User\n");
+                        sb.Append((msg.Content ?? string.Empty).Trim());
+                        AppendNemotronHAssistantHeader(sb, isLast && addGenerationPrompt, thinkingOn);
+                        break;
+                    }
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private static void AppendNemotronHAssistantHeader(StringBuilder sb, bool generationPrompt, bool thinkingOn)
+        {
+            sb.Append('\n').Append(NemotronHTurnMarker).Append("Assistant\n");
+            if (generationPrompt)
+                sb.Append(thinkingOn ? "<think>\n" : "<think></think>");
         }
 
         private static void AppendNemotronUserContent(StringBuilder sb, ChatMessage msg)
@@ -636,7 +768,8 @@ namespace TensorSharp.Runtime
         /// </summary>
         public static string RenderFromGgufTemplate(string template, List<ChatMessage> messages,
             bool addGenerationPrompt = true, string? architecture = null,
-            List<ToolFunction>? tools = null, bool enableThinking = false)
+            List<ToolFunction>? tools = null, bool enableThinking = false,
+            string? reasoningEffort = null)
         {
             // Several families ship a template built on Jinja features the lightweight
             // engine renders inconsistently (recursive macros, namespaces, tojson, dict
@@ -646,9 +779,9 @@ namespace TensorSharp.Runtime
             var protocol = ChatProtocolRegistry.For(architecture);
             if (protocol?.PreferOwnRenderer != null
                 && protocol.PreferOwnRenderer(new ChatRenderRequest(
-                    messages, addGenerationPrompt, architecture, tools, enableThinking)))
+                    messages, addGenerationPrompt, architecture, tools, enableThinking, reasoningEffort, template)))
             {
-                return RenderHardcoded(messages, addGenerationPrompt, architecture, tools, enableThinking);
+                return RenderHardcoded(messages, addGenerationPrompt, architecture, tools, enableThinking, reasoningEffort, template);
             }
 
             if (!string.IsNullOrWhiteSpace(template))
@@ -661,7 +794,12 @@ namespace TensorSharp.Runtime
                     var jinja = new Jinja2Template(effectiveTemplate);
                     var context = BuildJinja2Context(
                         preprocessed, addGenerationPrompt, tools, enableThinking, architecture);
-                    string result = jinja.Render(context).TrimEnd();
+                    string result = jinja.Render(context);
+                    // Gemma's generation boundary is part of its published template:
+                    // preserve its newline and any channel prefix exactly. Adding an
+                    // empty thought block can make E4B continue unmarked reasoning.
+                    if (architecture != "gemma4" || !addGenerationPrompt)
+                        result = result.TrimEnd();
                     if (result.Length > 0)
                     {
                         // Defensive correctness guard: a lightweight Jinja engine that
@@ -681,16 +819,7 @@ namespace TensorSharp.Runtime
                         else
                         {
                             result = StripReasoningEndSentinel(result);
-                            if (architecture == "gemma4")
-                            {
-                                if (addGenerationPrompt)
-                                {
-                                    result = enableThinking
-                                        ? EnsureGemma4ThinkingPromptNewline(result)
-                                        : EnsureGemma4ThinkingBlock(result);
-                                }
-                            }
-                            else if (IsQwen35Family(architecture) && addGenerationPrompt)
+                            if (IsQwen35Family(architecture) && addGenerationPrompt)
                                 result = enableThinking
                                     ? EnsureQwen35ThinkOpen(result)
                                     : EnsureQwen35ThinkClosed(result);
@@ -707,7 +836,7 @@ namespace TensorSharp.Runtime
             }
 
             Console.Error.WriteLine($"[ChatTemplate] Using hardcoded template for '{architecture}'");
-            return RenderHardcoded(messages, addGenerationPrompt, architecture, tools, enableThinking);
+            return RenderHardcoded(messages, addGenerationPrompt, architecture, tools, enableThinking, null, template);
         }
 
         // (architecture, reason-kind) pairs whose Jinja→hardcoded fallback has
@@ -769,9 +898,10 @@ namespace TensorSharp.Runtime
 
         private static string RenderHardcoded(List<ChatMessage> messages,
             bool addGenerationPrompt, string? architecture,
-            List<ToolFunction>? tools = null, bool enableThinking = false)
+            List<ToolFunction>? tools = null, bool enableThinking = false,
+            string? reasoningEffort = null, string? ggufTemplate = null)
         {
-            var request = new ChatRenderRequest(messages, addGenerationPrompt, architecture, tools, enableThinking);
+            var request = new ChatRenderRequest(messages, addGenerationPrompt, architecture, tools, enableThinking, reasoningEffort, ggufTemplate);
             var render = ChatProtocolRegistry.For(architecture)?.Render;
 
             // No purpose-built renderer: generic ChatML, which is also what an
@@ -879,9 +1009,11 @@ namespace TensorSharp.Runtime
         /// <list type="bullet">
         /// <item>The reasoning-effort system line is ALWAYS emitted (the template
         /// defaults <c>reasoning_effort</c> to <c>max</c>); this family has no
-        /// thinking-off prompt shape, so <paramref name="enableThinking"/> only
-        /// decides whether the generation prompt's <c>&lt;think&gt;</c> block is
-        /// left open or closed immediately.</item>
+        /// thinking-off prompt shape: the generation prompt ALWAYS ends with an open
+        /// <c>&lt;think&gt;</c>, whatever <paramref name="enableThinking"/> says. The
+        /// glm5next output parser relies on that (it starts inside the reasoning block
+        /// under think:false too), so closing the block here would turn every
+        /// think:false answer into hidden reasoning when this fallback renders.</item>
         /// <item><c>clear_thinking</c> defaults to FALSE: historical assistant
         /// turns KEEP their reasoning when the message still carries it.</item>
         /// <item>No newline after the <c>&lt;|assistant|&gt;</c> tag.</item>
@@ -952,7 +1084,7 @@ namespace TensorSharp.Runtime
             }
 
             if (addGenerationPrompt)
-                sb.Append("<|assistant|>").Append(enableThinking ? "<think>" : "<think></think>");
+                sb.Append("<|assistant|><think>");
 
             return sb.ToString();
         }
@@ -1369,14 +1501,18 @@ namespace TensorSharp.Runtime
             bool passReasoning =
                 ChatProtocolRegistry.For(architecture)?.RendersAssistantReasoning ?? false;
 
+            BuildJinjaToolIds(messages, out string[][] callIds, out string?[] resultIds);
             var msgList = new List<object>();
-            foreach (var m in messages)
+            for (int messageIndex = 0; messageIndex < messages.Count; messageIndex++)
             {
+                ChatMessage m = messages[messageIndex];
                 var dict = new Dictionary<string, object>
                 {
                     ["role"] = m.Role ?? "",
                     ["content"] = m.Content ?? ""
                 };
+                if (resultIds[messageIndex] != null)
+                    dict["tool_call_id"] = resultIds[messageIndex]!;
                 if (passReasoning
                     && m.Role == "assistant"
                     && m.ToolCalls is { Count: > 0 }
@@ -1408,10 +1544,12 @@ namespace TensorSharp.Runtime
                 if (m.ToolCalls != null && m.ToolCalls.Count > 0)
                 {
                     var tcList = new List<object>();
-                    foreach (var tc in m.ToolCalls)
+                    for (int callIndex = 0; callIndex < m.ToolCalls.Count; callIndex++)
                     {
+                        ToolCall tc = m.ToolCalls[callIndex];
                         tcList.Add(new Dictionary<string, object>
                         {
+                            ["id"] = callIds[messageIndex][callIndex],
                             ["function"] = new Dictionary<string, object>
                             {
                                 ["name"] = tc.Name,
@@ -1457,6 +1595,61 @@ namespace TensorSharp.Runtime
             }
 
             return ctx;
+        }
+
+        private static void BuildJinjaToolIds(
+            List<ChatMessage> messages, out string[][] callIds, out string?[] resultIds)
+        {
+            callIds = new string[messages.Count][];
+            resultIds = new string?[messages.Count];
+            var usedIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ChatMessage message in messages)
+            {
+                if (!string.IsNullOrEmpty(message.ToolCallId)) usedIds.Add(message.ToolCallId);
+                if (message.ToolCalls != null)
+                    foreach (ToolCall call in message.ToolCalls)
+                        if (!string.IsNullOrEmpty(call.Id)) usedIds.Add(call.Id);
+            }
+
+            int nextId = 0;
+            string NewRenderId()
+            {
+                string id;
+                do { id = "__tensorsharp_render_call_" + nextId++; }
+                while (!usedIds.Add(id));
+                return id;
+            }
+
+            for (int i = 0; i < messages.Count; i++)
+            {
+                ChatMessage message = messages[i];
+                if (!string.IsNullOrEmpty(message.ToolCallId)) resultIds[i] = message.ToolCallId;
+                if (message.ToolCalls is not { Count: > 0 }) continue;
+
+                var ids = new string[message.ToolCalls.Count];
+                for (int c = 0; c < ids.Length; c++)
+                    ids[c] = string.IsNullOrEmpty(message.ToolCalls[c].Id)
+                        ? NewRenderId() : message.ToolCalls[c].Id!;
+                callIds[i] = ids;
+
+                // Legacy local tool loops have no wire IDs and return results in
+                // call order. Give their render context an explicit association:
+                // canonical Gemma compares IDs, and two missing IDs compare equal,
+                // incorrectly naming every result after the last function.
+                // Reserve explicit results first; they may arrive out of order.
+                int end = i + 1;
+                var explicitResults = new HashSet<string>(StringComparer.Ordinal);
+                while (end < messages.Count && messages[end].Role == "tool")
+                {
+                    if (!string.IsNullOrEmpty(messages[end].ToolCallId))
+                        explicitResults.Add(messages[end].ToolCallId!);
+                    end++;
+                }
+                var unclaimed = new Queue<string>(ids.Where(id => !explicitResults.Contains(id)));
+                for (int r = i + 1; r < end; r++)
+                    if (string.IsNullOrEmpty(messages[r].ToolCallId))
+                        resultIds[r] = unclaimed.Count > 0 ? unclaimed.Dequeue() : NewRenderId();
+            }
         }
 
         /// <summary>
@@ -1574,6 +1767,11 @@ namespace TensorSharp.Runtime
 
         public static string RenderMistral3(List<ChatMessage> messages, bool addGenerationPrompt = true)
         {
+            // Mistral 3 always takes this renderer (PreferOwnRenderer), which bypasses the
+            // generic InjectMultimodalTokens pass the Jinja path runs, so the [IMG]
+            // placeholders are added here. Without them the injector found no [IMG] to
+            // expand, dropped the encoded image and the model answered from the text alone.
+            messages = InjectMultimodalTokens(messages, "mistral3");
             var sb = new StringBuilder();
             int startIdx = 0;
 
@@ -1609,11 +1807,20 @@ namespace TensorSharp.Runtime
         /// user/assistant messages with &lt;|start|&gt;role&lt;|message|&gt;content&lt;|end|&gt; framing,
         /// and a generation prompt of just &lt;|start|&gt;assistant (model generates channel tags).
         /// </summary>
+        /// <param name="reasoningEffort">The <c>Reasoning:</c> level of the system message:
+        /// <c>low</c>, <c>medium</c> (the default) or <c>high</c>. This line is the only
+        /// lever over how long GPT-OSS reasons - the model always opens the
+        /// <c>analysis</c> channel before its answer, so "thinking off" cannot be
+        /// rendered and the caller maps it to <c>low</c> instead (see
+        /// <see cref="ReasoningEffort.ForRequest"/>). It used to be hard-coded to
+        /// <c>medium</c>, which is why a 256-token request with thinking off spent its
+        /// whole budget in analysis and ended with no content.</param>
         public static string RenderHarmony(List<ChatMessage> messages, bool addGenerationPrompt = true,
-            List<ToolFunction>? tools = null, bool enableThinking = false)
+            List<ToolFunction>? tools = null, bool enableThinking = false, string? reasoningEffort = null)
         {
             var sb = new StringBuilder();
             bool hasTools = tools != null && tools.Count > 0;
+            string reasoningLevel = ReasoningEffort.Resolve(reasoningEffort);
 
             int startIdx = 0;
             string? developerContent = null;
@@ -1628,7 +1835,7 @@ namespace TensorSharp.Runtime
             sb.Append("You are ChatGPT, a large language model trained by OpenAI.\n");
             sb.Append("Knowledge cutoff: 2024-06\n");
             sb.Append($"Current date: {DateTime.Now:yyyy-MM-dd}\n\n");
-            sb.Append("Reasoning: medium\n\n");
+            sb.Append("Reasoning: ").Append(reasoningLevel).Append("\n\n");
             sb.Append("# Valid channels: analysis, commentary, final. Channel must be included for every message.");
             if (hasTools)
                 sb.Append("\nCalls to these tools must go to the commentary channel: 'functions'.");
@@ -1853,18 +2060,7 @@ namespace TensorSharp.Runtime
                 }
                 else
                 {
-                    if (msg.ImagePaths != null)
-                    {
-                        if (msg.IsVideo)
-                            sb.Append("<|video>");
-                        foreach (var _ in msg.ImagePaths)
-                            sb.Append("<|image>");
-                    }
-                    if (msg.AudioPaths != null)
-                    {
-                        foreach (var _ in msg.AudioPaths)
-                            sb.Append("<|audio>");
-                    }
+                    AppendGemma4MediaPlaceholders(msg, sb);
                     sb.Append(msg.Content?.Trim() ?? "");
                 }
                 sb.Append("<turn|>\n");
@@ -1872,10 +2068,33 @@ namespace TensorSharp.Runtime
             if (addGenerationPrompt)
             {
                 sb.Append("<|turn>model\n");
-                if (!enableThinking)
-                    sb.Append("<|channel>thought\n<channel|>");
             }
             return sb.ToString();
+        }
+
+        internal static void AppendGemma4MediaPlaceholders(ChatMessage message, StringBuilder text)
+        {
+            bool timed = message.ImagePaths != null && message.ImageTimestamps?.Count == message.ImagePaths.Count;
+            // Legacy UI histories may contain frames without source timestamps.
+            // Preserve that framing without inventing frame times.
+            if (message.IsVideo && message.ImagePaths != null && !timed) text.Append("<|video>");
+            if (message.ImagePaths != null)
+                for (int i = 0; i < message.ImagePaths.Count; ++i)
+                {
+                    if (timed && message.ImageTimestamps![i] is double time)
+                    {
+                        if (!double.IsFinite(time) || time < 0)
+                            throw new ArgumentOutOfRangeException(nameof(message.ImageTimestamps));
+                        // Gemma4Processor uses integer-truncated mm:ss source times.
+                        if (i > 0) text.Append(' ');
+                        text.Append(Math.Floor(time / 60).ToString("00", System.Globalization.CultureInfo.InvariantCulture))
+                            .Append(':').Append(Math.Floor(time % 60).ToString("00", System.Globalization.CultureInfo.InvariantCulture))
+                            .Append(' ');
+                    }
+                    text.Append("<|image>");
+                }
+            if (message.AudioPaths != null)
+                foreach (var _ in message.AudioPaths) text.Append("<|audio>");
         }
 
         private static string RenderGemma4ToolDeclaration(ToolFunction tool)
@@ -2016,39 +2235,6 @@ namespace TensorSharp.Runtime
                 return sb2.ToString();
             }
             return value?.ToString() ?? "null";
-        }
-
-        /// <summary>
-        /// Ensure the Gemma 4 prompt ends with an empty thinking block when thinking
-        /// is disabled. The GGUF Jinja2 template may not produce it, but the model
-        /// expects it to skip the thinking phase and generate content directly.
-        /// </summary>
-        private static string EnsureGemma4ThinkingBlock(string result)
-        {
-            const string emptyThinkBlock = "<|channel>thought\n<channel|>";
-            if (!result.EndsWith(emptyThinkBlock))
-            {
-                if (!result.EndsWith("\n"))
-                    result += "\n";
-                result += emptyThinkBlock;
-            }
-            return result;
-        }
-
-        /// <summary>
-        /// Restore the newline after Gemma 4's open model turn when thinking is
-        /// enabled. The embedded template ends in <c>&lt;|turn&gt;model\n</c>,
-        /// but the generic Jinja result cleanup trims that newline. Gemma 4
-        /// treats the newline as part of the generation prompt; omitting it can
-        /// drive the model into repetitive garbage instead of its reasoning
-        /// channel.
-        /// </summary>
-        private static string EnsureGemma4ThinkingPromptNewline(string result)
-        {
-            const string openModelTurn = "<|turn>model";
-            if (result.EndsWith(openModelTurn, StringComparison.Ordinal))
-                result += "\n";
-            return result;
         }
 
         /// <summary>

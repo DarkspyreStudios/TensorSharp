@@ -286,6 +286,8 @@ static int shard_first_rot(int total, int n, int r, int rot)
 // only on layers that compute a fresh top-k.
 struct glm_slot
 {
+    // A partial recurrent-state restore cannot be reused until a successful reset.
+    bool kda_restore_failed = false;
     int id = 0;
     int64_t n_past = 0;
     // [rank][layer]. Under tensor parallelism every rank keeps its own copy of
@@ -544,6 +546,35 @@ struct glm_model
     glm_slot * active_slot = nullptr;
     int next_slot_id = 0;
 
+    /// glm5next speculative decoding: a device-resident copy of ONE slot's KDA
+    /// recurrent state (conv tail + delta-net state, every rank and layer),
+    /// taken right before a verify batch and copied back when part of that
+    /// batch is rejected. One arena serves every slot - a speculative step
+    /// snapshots and restores within the same step, so two slots never need a
+    /// live copy at once, and every slot's state tensors have identical shapes
+    /// (TSGgml_GlmKdaStateCapture / TSGgml_GlmKdaStateRestore).
+    struct kda_snapshot
+    {
+        int slot_id = -1;
+        int64_t n_past = 0;
+        bool valid = false;
+        std::vector<ggml_tensor *> conv[MAX_GPUS];   // [rank][layer], mirrors glm_slot::kda_conv
+        std::vector<ggml_tensor *> ssm[MAX_GPUS];    // [rank][layer], mirrors glm_slot::kda_ssm
+        std::vector<ggml_context *> ctxs;            // one per buffer type the mirrors live in
+        std::vector<ggml_backend_buffer_t> bufs;
+
+        void release()
+        {
+            for (auto b : bufs) if (b) ggml_backend_buffer_free(b);
+            for (auto c : ctxs) if (c) ggml_free(c);
+            bufs.clear();
+            ctxs.clear();
+            for (int r = 0; r < MAX_GPUS; r++) { conv[r].clear(); ssm[r].clear(); }
+            valid = false;
+            slot_id = -1;
+        }
+    } kda_snap;
+
     bool flash_attn = false;
     bool fused_lid = false;      // ggml_lightning_indexer has a kernel here
 
@@ -609,6 +640,7 @@ struct glm_model
             if (sc.ctx) ggml_free(sc.ctx);
         }
         slot_ctxs.clear();
+        kda_snap.release();
         for (int i = 0; i <= MAX_GPUS; i++)
         {
             if (c_buf[i]) ggml_backend_buffer_free(c_buf[i]);
@@ -916,7 +948,7 @@ struct weight_loader
         const int64_t blck = ggml_blck_size(src->type);
         if (first % blck != 0 || count % blck != 0)
         {
-            fprintf(stderr, "[glm] %s: a row-parallel split at [%" PRId64 ", %" PRId64 ") is not a multiple of the "
+            tsg::report_load_refusal( "[glm] %s: a row-parallel split at [%" PRId64 ", %" PRId64 ") is not a multiple of the "
                     "%" PRId64 "-element block of %s\n", name, first, first + count, blck, ggml_type_name(src->type));
             return nullptr;
         }
@@ -967,7 +999,7 @@ static bool check_shard_complete(const char * path, gguf_context * g, ggml_conte
     }
     if (needed <= fsz) return true;
 
-    fprintf(stderr, "[glm] %s is incomplete: the file is %zu bytes but its %" PRId64 " tensors need %zu "
+    tsg::report_load_refusal( "[glm] %s is incomplete: the file is %zu bytes but its %" PRId64 " tensors need %zu "
                     "(%.2f GiB missing; %s is the last one). Re-download this file.\n",
             path, fsz, n_tensors, needed, (needed - fsz) / (1024.0 * 1024.0 * 1024.0), last ? last : "?");
     return false;
@@ -1336,6 +1368,9 @@ static void slot_free(glm_model & m, int slot_id)
     }
 
     m.slots.erase(slot_id);
+    // A snapshot of this slot's KDA state describes caches that no longer
+    // exist; slot ids are reused, so it must not survive to match a new one.
+    if (m.kda_snap.slot_id == slot_id) m.kda_snap.valid = false;
     for (auto it = m.slot_ctxs.begin(); it != m.slot_ctxs.end(); )
     {
         if (it->slot_id != slot_id) { ++it; continue; }
@@ -1401,7 +1436,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     {
         if (tp_req > MAX_GPUS)
         {
-            fprintf(stderr, "[glm] --tp %d exceeds this executor's maximum of %d ranks\n",
+            tsg::report_load_refusal( "[glm] --tp %d exceeds this executor's maximum of %d ranks\n",
                     tp_req, MAX_GPUS);
             return nullptr;
         }
@@ -1413,7 +1448,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             // multi-GPU host.
             if (getenv("TS_GLM_TP_OVERSUBSCRIBE") == nullptr)
             {
-                fprintf(stderr, "[glm] --tp %d needs %d GPUs; only %d are visible "
+                tsg::report_load_refusal( "[glm] --tp %d needs %d GPUs; only %d are visible "
                         "(TS_GLM_TP_OVERSUBSCRIBE=1 packs several ranks onto one GPU for testing)\n",
                         tp_req, tp_req, n_gpu);
                 return nullptr;
@@ -1461,7 +1496,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     ggml_context * meta0 = nullptr;
     gguf_init_params ip = { true, &meta0 };
     gguf_context * g0 = gguf_init_from_file(gguf_path, ip);
-    if (!g0) { fprintf(stderr, "[glm] failed to open %s\n", gguf_path); return nullptr; }
+    if (!g0) { tsg::report_load_refusal( "[glm] failed to open %s\n", gguf_path); return nullptr; }
 
     int32_t split_count = 1;
     kv_u32(g0, "split.count", &split_count);
@@ -1556,12 +1591,12 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
 
     if (!ok || hp.n_layer <= 0 || hp.n_nope <= 0 || hp.n_head <= 0)
     {
-        fprintf(stderr, "[glm] missing or invalid glm-dsa metadata\n");
+        tsg::report_load_refusal( "[glm] missing or invalid glm-dsa metadata\n");
         return nullptr;
     }
     if (expert_groups > 1 && expert_groups_used != expert_groups)
     {
-        fprintf(stderr, "[glm] %d expert groups (top-%d) are not supported\n", expert_groups, expert_groups_used);
+        tsg::report_load_refusal( "[glm] %d expert groups (top-%d) are not supported\n", expert_groups, expert_groups_used);
         return nullptr;
     }
     if (hp.g5n)
@@ -1573,7 +1608,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     }
     else if (hp.indexer_full.empty() || hp.indexer_full[0] == 0)
     {
-        fprintf(stderr, "[glm] layer 0 must carry a full DSA indexer\n");
+        tsg::report_load_refusal( "[glm] layer 0 must carry a full DSA indexer\n");
         return nullptr;
     }
 
@@ -1594,7 +1629,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         ggml_context * meta = nullptr;
         gguf_init_params sp = { true, &meta };
         gguf_context * g = gguf_init_from_file(shards.paths[si].c_str(), sp);
-        if (!g) { fprintf(stderr, "[glm] failed to open shard %s\n", shards.paths[si].c_str()); return nullptr; }
+        if (!g) { tsg::report_load_refusal( "[glm] failed to open shard %s\n", shards.paths[si].c_str()); return nullptr; }
         if (!check_shard_complete(shards.paths[si].c_str(), g, meta)) { gguf_free(g); ggml_free(meta); return nullptr; }
 
         const size_t data_off = gguf_get_data_offset(g);
@@ -1638,7 +1673,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     size_t embd_bytes = 0;
     {
         auto it = sources.find("token_embd.weight");
-        if (it == sources.end()) { fprintf(stderr, "[glm] token_embd.weight missing\n"); return nullptr; }
+        if (it == sources.end()) { tsg::report_load_refusal( "[glm] token_embd.weight missing\n"); return nullptr; }
         hp.n_vocab = (int32_t) it->second.ne[1];
         embd_bytes = it->second.size;
     }
@@ -1752,7 +1787,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
         }
         if (hp.n_head % group != 0 || hp.n_head / group < m->tp)
         {
-            fprintf(stderr,
+            tsg::report_load_refusal(
                     "[glm] --tp %d cannot split %d heads in the %d-head groups required by the "
                     "output weights' quantization blocks\n",
                     m->tp, hp.n_head, group);
@@ -1908,12 +1943,56 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             const int fit = w < budget ? ctx_that_fits(budget - w) : 0;
             if (fit < 256 || ctx_is_hard_limit)
             {
-                fprintf(stderr,
+                // Only advice that can actually make this load fit. The message
+                // used to end "Lower MAX_CONTEXT (0 tokens would fit) or add
+                // --n-cpu-moe N" even when the weights alone overflowed a rank
+                // and every routed expert was already counted in system RAM.
+                std::string advice;
+                auto add_advice = [&](const std::string & option)
+                {
+                    const bool first = advice.empty();
+                    advice += first ? " " : "; or ";
+                    advice += option;
+                    if (first) advice[1] = (char) std::toupper((unsigned char) advice[1]);
+                };
+                char buf[256];
+                if (fit >= 256)
+                {
+                    snprintf(buf, sizeof(buf), "set MAX_CONTEXT to %d or less", fit);
+                    add_advice(buf);
+                }
+                // Fewest leading layers whose experts, kept in system RAM, make
+                // the requested context fit at this rank count.
+                int cpu_moe_fix = -1;
+                for (int n = n_cpu_moe + 1; n <= hp.n_layer; n++)
+                    if (rank_weight_bytes(n) + kv_bytes <= budget) { cpu_moe_fix = n; break; }
+                const size_t w_all = rank_weight_bytes(hp.n_layer);
+                const int fit_all = w_all < budget ? ctx_that_fits(budget - w_all) : 0;
+                if (cpu_moe_fix > 0)
+                {
+                    snprintf(buf, sizeof(buf), "re-run with --n-cpu-moe %d (keeps the routed experts of the "
+                             "first %d layer(s) in system RAM)", cpu_moe_fix, cpu_moe_fix);
+                    add_advice(buf);
+                }
+                else if (n_cpu_moe < hp.n_layer && fit_all >= 256)
+                {
+                    snprintf(buf, sizeof(buf), "re-run with --cpu-moe and MAX_CONTEXT at most %d", fit_all);
+                    add_advice(buf);
+                }
+                if (advice.empty())
+                {
+                    snprintf(buf, sizeof(buf), "Neither a shorter context nor --n-cpu-moe can fix this: with every "
+                             "routed expert in system RAM a rank still needs %.1f GiB for the weights every rank "
+                             "replicates. Run without --tp", w_all / 1073741824.0);
+                    advice = std::string(" ") + buf +
+                             " (the layer split stores each layer on one GPU instead of on every rank), "
+                             "or on GPUs with more memory";
+                }
+                tsg::report_load_refusal(
                         "[glm] not enough VRAM for --tp %d: %.1f GiB per rank of weights plus %.1f GiB of KV and "
-                        "graphs for an %d-token context, against %.1f GiB usable on the smallest rank. Lower "
-                        "MAX_CONTEXT (%d tokens would fit) or add --n-cpu-moe N.\n",
+                        "graphs for a %d-token context, against %.1f GiB usable on the smallest rank.%s.\n",
                         m->tp, w / 1073741824.0, kv_bytes / 1073741824.0, m->n_ctx,
-                        budget / 1073741824.0, fit);
+                        budget / 1073741824.0, advice.c_str());
                 return nullptr;
             }
             if (!remeasure_ctx)
@@ -2015,7 +2094,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
                 for (int d = 0; d < n_gpu; d++) free_total += dev_free[d];
                 size_t would_free = 0;
                 for (int il = 0; il < need_cpu_moe && il < hp.n_layer; il++) would_free += layer_exps_bytes[il];
-                fprintf(stderr,
+                tsg::report_load_refusal(
                         "[glm] not enough VRAM: %.1f GiB of weights plus this context's KV caches against %.1f GiB "
                         "free across %d device(s). Re-run with --n-cpu-moe %d (moves the routed experts of the "
                         "first %d layer(s), %.1f GiB, to system RAM) or --cpu-moe to offload every layer.\n",
@@ -2365,7 +2444,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
                         && W.hc_ffn_fn && W.hc_ffn_scale && W.hc_ffn_base;
             if (!complete)
             {
-                fprintf(stderr, "[glm] layer %d rank %d is incomplete\n", il, r);
+                tsg::report_load_refusal( "[glm] layer %d rank %d is incomplete\n", il, r);
                 return nullptr;
             }
         }
@@ -2417,7 +2496,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             if (unallocated)
             {
                 m->w_buf[d] = ggml_backend_alloc_ctx_tensors(m->w_ctx[d], m->backends[d]);
-                if (!m->w_buf[d]) { fprintf(stderr, "[glm] weight allocation failed on device %d\n", d); return nullptr; }
+                if (!m->w_buf[d]) { tsg::report_load_refusal( "[glm] weight allocation failed on device %d\n", d); return nullptr; }
                 // Weights, and ggml_backend_sched has to be told so: only a
                 // WEIGHTS buffer makes it place an op on the device that holds
                 // the matrix. With the default usage it picks by its own
@@ -2553,7 +2632,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     {
         if (ggml_get_first_tensor(m->c_ctx[d]) == nullptr) continue;
         m->c_buf[d] = ggml_backend_alloc_ctx_tensors(m->c_ctx[d], m->backends[d]);
-        if (!m->c_buf[d]) { fprintf(stderr, "[glm] constant allocation failed on device %d\n", d); return nullptr; }
+        if (!m->c_buf[d]) { tsg::report_load_refusal( "[glm] constant allocation failed on device %d\n", d); return nullptr; }
         // These are per-device read-only constants — the Hadamard basis and, under
         // expert parallelism, the rank's expert mask. Marking the buffer as weights
         // is what makes ggml_backend_sched pin their consumers to this device; with
@@ -2749,7 +2828,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
             // Refuse now, with the reason, rather than letting slot_alloc fail
             // after the whole load: the measurement above mirrors exactly what
             // slot_alloc is about to allocate.
-            fprintf(stderr, "[glm] not enough VRAM left after the weights for even a 256-token context%s. "
+            tsg::report_load_refusal( "[glm] not enough VRAM left after the weights for even a 256-token context%s. "
                     "Lower TS_GLM_PLAN_SLOTS%s, set MAX_CONTEXT explicitly, or add --n-cpu-moe N to move "
                     "expert weights off the GPUs.\n",
                     plan_slots > 1 ? " per slot" : "",
@@ -2768,7 +2847,7 @@ static glm_model * glm_load(const char * gguf_path, int n_gpu_req, int n_ctx, in
     }
 
     m->active_slot = slot_alloc(*m);
-    if (!m->active_slot) { fprintf(stderr, "[glm] primary slot allocation failed\n"); return nullptr; }
+    if (!m->active_slot) { tsg::report_load_refusal( "[glm] primary slot allocation failed\n"); return nullptr; }
 
     m->logits.resize((size_t) hp.n_vocab);
 
@@ -3041,8 +3120,8 @@ struct graph_builder
             if (m.flash_attn)
             {
                 ggml_tensor * qf = ggml_permute(ctx, Qi, 0, 2, 1, 3);           // [n_kv_row, 1, n_head]
-                ggml_tensor * fa = ggml_flash_attn_ext(ctx, qf, K, V, masks[(size_t) i], hp.kq_scale(), 0.0f, 0.0f);
-                ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+                ggml_tensor * fa = tsg_flash_attn_ext_guarded(ctx, m.backends[dev], "GLM-DSA batched decode", qf, K, V, masks[(size_t) i], hp.kq_scale(), 0.0f, 0.0f,
+                    nullptr, GGML_PREC_F32);
                 out = ggml_permute(ctx, fa, 0, 2, 1, 3);                        // [kv_lora, 1, n_head]
             }
             else
@@ -3786,8 +3865,8 @@ struct graph_builder
         if (m.flash_attn)
         {
             ggml_tensor * qf = ggml_permute(ctx, Qcur, 0, 2, 1, 3);             // [n_kv_row, nt, n_head]
-            ggml_tensor * fa = ggml_flash_attn_ext(ctx, qf, K, V, mask, hp.kq_scale(), 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+            ggml_tensor * fa = tsg_flash_attn_ext_guarded(ctx, m.backends[device_of(il, rank)], "GLM-DSA forward", qf, K, V, mask, hp.kq_scale(), 0.0f, 0.0f,
+                nullptr, GGML_PREC_F32);
             // [kv_lora, n_head, nt] -> [kv_lora, nt, n_head] so wv_b's per-head
             // matmul runs as a matrix-matrix product with nt in dimension 1.
             fa = ggml_permute(ctx, fa, 0, 2, 1, 3);
@@ -4622,11 +4701,36 @@ struct graph_builder
             trace("l_out", il, 0, inpL);
         }
 
-        if (!res.want_logits)
+        if (!res.want_logits && !res.want_h)
         {
             // A non-final prefill chunk only has to leave its caches and
             // recurrent state behind.
             ggml_build_forward_expand(gf, inpL);
+            return;
+        }
+
+        if (res.want_h)
+        {
+            // Speculation wants one post-final-norm hidden state per token
+            // (llama.cpp's h_nextn), so the stream mean and the norm run over
+            // EVERY row and the LM head selects from the normed rows. Both are
+            // row-wise, so the rows the head reads are bit-identical to the
+            // select-first branch below; only rows nobody reads are extra, and
+            // at a speculative window that is a handful.
+            ggml_tensor * x3all = ggml_reshape_3d(ctx, inpL, hp.n_embd, hcm, nt);
+            ggml_tensor * hn = rms(hc_mean(x3all), m.output_norm);
+            ggml_set_output(hn);
+            ggml_set_name(hn, "h_nextn");
+            res.h_nextn = hn;
+            ggml_build_forward_expand(gf, hn);
+            if (!res.want_logits)
+                return;
+            ggml_tensor * hsel = ggml_get_rows(ctx, hn, inp.out_ids);
+            hsel = ggml_mul_mat(ctx, m.output, hsel);
+            ggml_set_output(hsel);
+            ggml_set_name(hsel, "logits");
+            res.logits = hsel;
+            ggml_build_forward_expand(gf, hsel);
             return;
         }
 
@@ -5125,13 +5229,24 @@ static bool forward_batched_decode(glm_model & m, int n, const int32_t * slot_id
     std::vector<int64_t> idx(1);
     std::vector<int32_t> v32((size_t) n);
 
+    // Each input is set on its own liveness. The token ids are only read on the
+    // device that embeds them, but EVERY device with a RoPE layer reads its own
+    // positions: skipping a device whose token input was pruned left its
+    // positions uninitialised, so on a multi-GPU layer split every layer past
+    // the first device rotated q/k by garbage and concurrent GLM-5.2 streams
+    // degenerated (glm5next is NoPE, which is why it never showed).
     for (int d = 0; d <= m.n_gpu; d++)
     {
-        if (!live(gr->inp.tokens[d])) continue;
-        for (int i = 0; i < n; i++) v32[(size_t) i] = tokens[i];
-        set_input_i32(gr->inp.tokens[d], v32.data(), (size_t) n);
-        for (int i = 0; i < n; i++) v32[(size_t) i] = positions[i];
-        set_input_i32(gr->inp.pos[d], v32.data(), (size_t) n);
+        if (live(gr->inp.tokens[d]))
+        {
+            for (int i = 0; i < n; i++) v32[(size_t) i] = tokens[i];
+            set_input_i32(gr->inp.tokens[d], v32.data(), (size_t) n);
+        }
+        if (live(gr->inp.pos[d]))
+        {
+            for (int i = 0; i < n; i++) v32[(size_t) i] = positions[i];
+            set_input_i32(gr->inp.pos[d], v32.data(), (size_t) n);
+        }
     }
 
     for (int i = 0; i < n; i++)
@@ -5813,6 +5928,8 @@ TSG_EXPORT void * TSGgml_GlmLoadModel(const char * gguf_path, int n_gpu, int n_c
                                       int n_threads, int n_cpu_moe, const char * backend_name, int tp,
                                       int ctx_is_hard_limit, int load_mtp)
 {
+    // A stale error from an earlier op must not be reported as this load's reason.
+    tsg::clear_last_error();
     try
     {
         return glm_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads, n_cpu_moe, backend_name, tp,
@@ -5820,7 +5937,7 @@ TSG_EXPORT void * TSGgml_GlmLoadModel(const char * gguf_path, int n_gpu, int n_c
     }
     catch (const std::exception & e)
     {
-        fprintf(stderr, "[glm] load failed: %s\n", e.what());
+        tsg::report_load_refusal("[glm] load failed: %s\n", e.what());
         return nullptr;
     }
 }
@@ -5848,7 +5965,7 @@ TSG_EXPORT int TSGgml_GlmNPast(void * handle)
 TSG_EXPORT int TSGgml_GlmForward(void * handle, const int32_t * tokens, int n_tokens, float * logits_out)
 {
     glm_model * m = (glm_model *) handle;
-    if (!m || !m->active_slot || n_tokens <= 0) return 0;
+    if (!m || !m->active_slot || m->active_slot->kda_restore_failed || n_tokens <= 0) return 0;
 
     const int ub = m->n_ubatch > 0 ? m->n_ubatch : 512;
     int done = 0;
@@ -5932,6 +6049,11 @@ TSG_EXPORT int TSGgml_GlmForwardBatchedDecode(void * handle, int n, const int32_
     glm_model * m = (glm_model *) handle;
     if (!m || n < 2 || !slot_ids || !tokens || !positions || !logits_out) return 0;
     if (n > MAX_BATCHED_DECODE) return 0;
+    for (int i = 0; i < n; ++i)
+    {
+        auto it = m->slots.find(slot_ids[i]);
+        if (it == m->slots.end() || it->second->kda_restore_failed) return 0;
+    }
     // Tensor parallelism splits the batch's work across ranks a second time; the
     // per-sequence path already handles that case correctly, so the batched
     // graph stays single-rank rather than duplicating the reduction plumbing.
@@ -5950,24 +6072,48 @@ TSG_EXPORT int TSGgml_GlmForwardBatchedDecode(void * handle, int n, const int32_
     }
 }
 
-TSG_EXPORT void TSGgml_GlmReset(void * handle)
+TSG_EXPORT int TSGgml_GlmResetChecked(void * handle)
 {
     glm_model * m = (glm_model *) handle;
-    if (!m || !m->active_slot) return;
-    m->active_slot->n_past = 0;
-    // glm5next: a new conversation must not inherit the KDA recurrent state.
-    if (m->hp.g5n) slot_clear_recurrent(*m, *m->active_slot);
+    if (!m || !m->active_slot) return 0;
+    auto & slot = *m->active_slot;
+    slot.kda_restore_failed = true;
+    if (m->kda_snap.slot_id == slot.id) m->kda_snap.valid = false;
+    try
+    {
+        if (m->hp.g5n) slot_clear_recurrent(*m, slot);
+        slot.n_past = 0;
+        slot.kda_restore_failed = false;
+        return 1;
+    }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[glm] reset failed; slot remains unusable: %s\n", error.what());
+    }
+    catch (...)
+    {
+        fprintf(stderr, "[glm] reset failed with an unknown exception; slot remains unusable\n");
+    }
+    return 0;
+}
+
+TSG_EXPORT void TSGgml_GlmReset(void * handle)
+{
+    TSGgml_GlmResetChecked(handle);
 }
 
 TSG_EXPORT int TSGgml_GlmRewind(void * handle, int n_past)
 {
     glm_model * m = (glm_model *) handle;
-    if (!m || !m->active_slot || n_past < 0 || n_past > m->active_slot->n_past) return 0;
+    if (!m || !m->active_slot || m->active_slot->kda_restore_failed || n_past < 0 || n_past > m->active_slot->n_past) return 0;
     // The KDA recurrence cannot be rewound to an earlier position: a cached
     // prefix is reusable only when the new prompt EXTENDS it (no rewind), and
     // anything else must restart from zero with a cleared state.
     if (m->hp.g5n && n_past != m->active_slot->n_past && n_past != 0) return 0;
-    if (m->hp.g5n && n_past == 0) slot_clear_recurrent(*m, *m->active_slot);
+    if (m->hp.g5n && n_past == 0)
+    {
+        return TSGgml_GlmResetChecked(handle);
+    }
     m->active_slot->n_past = n_past;
     return 1;
 }
@@ -6032,7 +6178,7 @@ TSG_EXPORT int TSGgml_GlmSpecForward(void * handle, const int32_t * tokens, int 
                                      float * h_out, float * logits_out, int all_logits_rows)
 {
     glm_model * m = (glm_model *) handle;
-    if (!m || !m->active_slot || n_tokens <= 0) return 0;
+    if (!m || !m->active_slot || m->active_slot->kda_restore_failed || n_tokens <= 0) return 0;
 
     const int ub = m->n_ubatch > 0 ? m->n_ubatch : 512;
     const int64_t n_embd = m->hp.n_embd;
@@ -6090,6 +6236,269 @@ TSG_EXPORT int TSGgml_GlmMtpCatchUp(void * handle, const int32_t * tokens, int n
         done += take;
     }
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// glm5next: KDA recurrent-state snapshot / restore for speculative decoding
+// ---------------------------------------------------------------------------
+//
+// A verify batch over a speculative window advances every KDA layer's conv
+// tail and delta-net state by the whole window, and unlike an MLA row that
+// state cannot be rewound by position: after a partial rejection the only way
+// back to "the accepted prefix, and nothing else" is a copy of the state from
+// before the verify. The managed side takes that copy (capture) right before
+// each verify, and on a partial rejection restores it, rewinds to the captured
+// position and re-forwards the accepted prefix - the same contract Qwen 3.5's
+// GatedDeltaNet and Qwen 3.8's trunk honour (SpecVerifyPersistsAcceptedKv=false).
+//
+// The copies are device-to-device on the device that owns each layer's state;
+// nothing crosses the host. On GLM-5.3-Flash that is ~150 MB per capture.
+
+#if defined(TSG_GGML_TEST_HOOKS)
+static thread_local int glm_test_kda_stage = 0, glm_test_kda_kind = 0;
+// Keep fixture-only entry points separate from the production iOS export list.
+#ifndef TSG_TEST_EXPORT
+#define TSG_TEST_EXPORT TSG_EXPORT
+#endif
+TSG_TEST_EXPORT void TSGgml_GlmTestKdaSnapshotFault(int stage, int kind)
+{
+    glm_test_kda_stage = stage;
+    glm_test_kda_kind = kind;
+}
+#endif
+static void glm_test_kda_fault(int stage)
+{
+#if defined(TSG_GGML_TEST_HOOKS)
+    if (glm_test_kda_stage == stage)
+    {
+        glm_test_kda_stage = 0;
+        if (glm_test_kda_kind == 1) throw std::bad_alloc();
+        throw 17;
+    }
+#else
+    (void) stage;
+#endif
+}
+
+/// Version of the KDA snapshot API, so a managed build can tell a native
+/// library that predates it apart (and decline speculation on glm5next instead
+/// of failing mid-verify).
+TSG_EXPORT int TSGgml_GlmKdaStateApiVersion(void)
+{
+    return 1;
+}
+
+/// Make sure the snapshot arena mirrors the active slot's state tensors (same
+/// shapes, same buffer types). All slots share one arena because their state
+/// tensors are allocated identically; a shape mismatch (defensive) rebuilds it.
+static bool kda_snapshot_ensure(glm_model & m, glm_slot & slot)
+{
+    glm_model::kda_snapshot & snap = m.kda_snap;
+    bool fits = !snap.ctxs.empty();
+    for (int r = 0; r < m.tp && fits; r++)
+    {
+        if (snap.conv[r].size() != slot.kda_conv[r].size() || snap.ssm[r].size() != slot.kda_ssm[r].size())
+        { fits = false; break; }
+        for (size_t il = 0; il < slot.kda_conv[r].size() && fits; il++)
+        {
+            ggml_tensor * a = slot.kda_conv[r][il], * b = snap.conv[r][il];
+            ggml_tensor * c = slot.kda_ssm[r][il],  * d = snap.ssm[r][il];
+            if ((a == nullptr) != (b == nullptr) || (c == nullptr) != (d == nullptr)) { fits = false; break; }
+            if (a && (!ggml_are_same_shape(a, b) || a->type != b->type
+                      || ggml_backend_buffer_get_type(a->buffer) != ggml_backend_buffer_get_type(b->buffer)))
+            { fits = false; break; }
+            if (c && (!ggml_are_same_shape(c, d) || c->type != d->type
+                      || ggml_backend_buffer_get_type(c->buffer) != ggml_backend_buffer_get_type(d->buffer)))
+            { fits = false; break; }
+        }
+    }
+    if (fits) return true;
+    snap.release();
+
+    // Group the mirrors by buffer type (one context + one buffer each), so a
+    // layer-split model gets one arena per device and TP one per rank.
+    std::vector<ggml_backend_buffer_type_t> bufts;
+    std::vector<size_t> counts;
+    auto group_of = [&](ggml_tensor * t) -> size_t
+    {
+        ggml_backend_buffer_type_t bt = ggml_backend_buffer_get_type(t->buffer);
+        for (size_t i = 0; i < bufts.size(); i++) if (bufts[i] == bt) return i;
+        bufts.push_back(bt);
+        counts.push_back(0);
+        return bufts.size() - 1;
+    };
+    for (int r = 0; r < m.tp; r++)
+    {
+        for (ggml_tensor * t : slot.kda_conv[r]) if (t) counts[group_of(t)]++;
+        for (ggml_tensor * t : slot.kda_ssm[r])  if (t) counts[group_of(t)]++;
+    }
+    if (bufts.empty())
+        return true;                         // nothing recurrent to mirror
+
+    snap.ctxs.assign(bufts.size(), nullptr);
+    snap.bufs.assign(bufts.size(), nullptr);
+    for (size_t g = 0; g < bufts.size(); g++)
+    {
+        ggml_init_params ip = { (counts[g] + 4) * ggml_tensor_overhead(), nullptr, true };
+        snap.ctxs[g] = ggml_init(ip);
+        if (!snap.ctxs[g]) { snap.release(); return false; }
+    }
+    for (int r = 0; r < m.tp; r++)
+    {
+        snap.conv[r].assign(slot.kda_conv[r].size(), nullptr);
+        snap.ssm[r].assign(slot.kda_ssm[r].size(), nullptr);
+        for (size_t il = 0; il < slot.kda_conv[r].size(); il++)
+        {
+            if (ggml_tensor * t = slot.kda_conv[r][il])
+            {
+                snap.conv[r][il] = ggml_dup_tensor(snap.ctxs[group_of(t)], t);
+                ggml_format_name(snap.conv[r][il], "snap_kconv.%d.%d", r, (int) il);
+            }
+            if (ggml_tensor * t = slot.kda_ssm[r][il])
+            {
+                snap.ssm[r][il] = ggml_dup_tensor(snap.ctxs[group_of(t)], t);
+                ggml_format_name(snap.ssm[r][il], "snap_kssm.%d.%d", r, (int) il);
+            }
+        }
+    }
+    for (size_t g = 0; g < bufts.size(); g++)
+    {
+        snap.bufs[g] = ggml_backend_alloc_ctx_tensors_from_buft(snap.ctxs[g], bufts[g]);
+        if (!snap.bufs[g])
+        {
+            fprintf(stderr, "[glm] KDA snapshot arena allocation failed (%s)\n", ggml_backend_buft_name(bufts[g]));
+            snap.release();
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Wait for every backend so a device-to-device state copy neither races the
+/// graph that produced the state nor the graph that will consume it.
+static void kda_snapshot_sync(glm_model & m)
+{
+    for (int i = 0; i < m.n_backends; i++)
+        if (m.backends[i]) ggml_backend_synchronize(m.backends[i]);
+}
+
+/// Copy the active slot's KDA recurrent state into the snapshot arena and
+/// record the slot's position. Returns 1 on success. On glm-dsa proper (no
+/// recurrent state) only the position is recorded, so a restore is a rewind.
+static int glm_kda_state_capture(void * handle)
+{
+    glm_model * m = (glm_model *) handle;
+    if (!m || !m->active_slot) return 0;
+    glm_slot & slot = *m->active_slot;
+    glm_model::kda_snapshot & snap = m->kda_snap;
+    snap.valid = false;
+    glm_test_kda_fault(1);
+    if (m->hp.g5n)
+    {
+        if (!kda_snapshot_ensure(*m, slot)) return 0;
+        kda_snapshot_sync(*m);
+        for (int r = 0; r < m->tp; r++)
+        {
+            for (size_t il = 0; il < slot.kda_conv[r].size(); il++)
+            {
+                if (slot.kda_conv[r][il]) ggml_backend_tensor_copy(slot.kda_conv[r][il], snap.conv[r][il]);
+                if (slot.kda_ssm[r][il])  ggml_backend_tensor_copy(slot.kda_ssm[r][il],  snap.ssm[r][il]);
+            }
+        }
+        kda_snapshot_sync(*m);
+    }
+    snap.slot_id = slot.id;
+    snap.n_past = slot.n_past;
+    snap.valid = true;
+    return 1;
+}
+
+/// Copy the snapshot back into the active slot and rewind the slot to the
+/// captured position. Returns that position (>= 0), or -1 when there is no
+/// usable snapshot for the active slot (never taken, taken of another slot,
+/// invalidated by a reset/free, or the slot is already behind it).
+static int glm_kda_state_restore(void * handle)
+{
+    glm_model * m = (glm_model *) handle;
+    if (!m || !m->active_slot) return -1;
+    glm_slot & slot = *m->active_slot;
+    glm_model::kda_snapshot & snap = m->kda_snap;
+    if (!snap.valid || snap.slot_id != slot.id || snap.n_past > slot.n_past)
+    {
+        fprintf(stderr, "[glm] KDA state restore refused: no snapshot for slot %d at or before position %" PRId64 "\n",
+                slot.id, slot.n_past);
+        return -1;
+    }
+    if (m->hp.g5n)
+    {
+        // The arena was built against THIS slot's shapes (or an identical
+        // slot's). A mismatch means the slot was reallocated underneath the
+        // snapshot; a rebuilt arena would hold nothing, so refuse rather than
+        // restore zeros.
+        for (int r = 0; r < m->tp; r++)
+        {
+            if (snap.conv[r].size() != slot.kda_conv[r].size() ||
+                snap.ssm[r].size() != slot.kda_ssm[r].size() ||
+                slot.kda_ssm[r].size() != slot.kda_conv[r].size()) return -1;
+            for (size_t il = 0; il < slot.kda_conv[r].size(); il++)
+            {
+                ggml_tensor * a = slot.kda_conv[r][il], * b = snap.conv[r][il];
+                ggml_tensor * c = slot.kda_ssm[r][il],  * d = snap.ssm[r][il];
+                if ((a == nullptr) != (b == nullptr) || (c == nullptr) != (d == nullptr)) return -1;
+                if (a && !ggml_are_same_shape(a, b)) return -1;
+                if (c && !ggml_are_same_shape(c, d)) return -1;
+            }
+        }
+        kda_snapshot_sync(*m);
+        for (int r = 0; r < m->tp; r++)
+        {
+            for (size_t il = 0; il < slot.kda_conv[r].size(); il++)
+            {
+                if (slot.kda_conv[r][il])
+                {
+                    ggml_backend_tensor_copy(snap.conv[r][il], slot.kda_conv[r][il]);
+                    glm_test_kda_fault(2);
+                }
+                if (slot.kda_ssm[r][il])  ggml_backend_tensor_copy(snap.ssm[r][il],  slot.kda_ssm[r][il]);
+            }
+        }
+        kda_snapshot_sync(*m);
+    }
+    slot.n_past = snap.n_past;
+    return (int) snap.n_past;
+}
+
+// C ABI callers must receive a failure status even when arena allocation or
+// a backend state copy throws. A failed capture leaves live state untouched;
+// a failed restore may have copied only some layers and therefore poisons only
+// that slot until ResetChecked succeeds.
+TSG_EXPORT int TSGgml_GlmKdaStateCapture(void * handle)
+{
+    auto * m = (glm_model *) handle;
+    if (!m || !m->active_slot || m->active_slot->kda_restore_failed) return 0;
+    try { return glm_kda_state_capture(handle); }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[glm] KDA capture failed: %s\n", error.what());
+    }
+    catch (...) { fprintf(stderr, "[glm] KDA capture failed with an unknown exception\n"); }
+    m->kda_snap.valid = false;
+    return 0;
+}
+
+TSG_EXPORT int TSGgml_GlmKdaStateRestore(void * handle)
+{
+    auto * m = (glm_model *) handle;
+    if (!m || !m->active_slot || m->active_slot->kda_restore_failed) return -1;
+    try { return glm_kda_state_restore(handle); }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[glm] KDA restore failed; reset required: %s\n", error.what());
+    }
+    catch (...) { fprintf(stderr, "[glm] KDA restore failed with an unknown exception; reset required\n"); }
+    m->kda_snap.valid = false;
+    m->active_slot->kda_restore_failed = true;
+    return -1;
 }
 
 TSG_EXPORT void TSGgml_GlmFree(void * handle)

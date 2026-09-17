@@ -475,7 +475,11 @@ namespace TensorSharp.Models
             // Chunking the prefill through the fused path does NOT help: its
             // cross-token attention would round-trip the fresh K/V through the F16
             // cache, and for an all-fresh prefill that precision loss alone flips
-            // the router. CUDA accumulates in F32 throughout, so this is a no-op there.
+            // the router. This batch-size gate also applies on CUDA; accumulator
+            // type alone does not establish equivalence with single-token decode.
+            // Attention intermediates and quantized matrix kernels can depend on
+            // batch shape, so same-prefix logits must be compared when diagnosing
+            // a speculative/plain output difference.
             const int kFusedMoeVerifyMaxBatch = 20;
             bool fusedDenseOk = fusedCommon && _canUseFusedFullModelDecode;
             bool fusedMoeOk = fusedCommon && !_canUseFusedFullModelDecode && _numExperts > 0
@@ -999,18 +1003,8 @@ namespace TensorSharp.Models
             _swaVerifyBackup = null;
             if (backup == null)
                 return;
-            // Rows 0..acceptedRows are kept (row 0 is the token the window started
-            // from); rows acceptedRows+1..verifyRows were rejected and their slots
-            // must hold what they held before the verify. When the executor will
-            // re-forward the kept prefix instead of keeping the verify's rows
-            // (SpecVerifyPersistsAcceptedKv false), the kept rows attend the positions
-            // THEIR slots evicted too, so every saved row goes back: the re-forward
-            // then rewrites the kept rows' slots with the same K/V the verify wrote.
-            int firstRejected = SpecVerifyPersistsAcceptedKv
-                ? Math.Max(backup.FirstRow, acceptedRows + 1)
-                : backup.FirstRow;
-            int lastRow = Math.Min(backup.Rows - 1, verifyRows);
-            int count = lastRow - firstRejected + 1;
+            (int firstRejected, int count) = SwaSlotsToRestore(
+                backup.FirstRow, backup.Rows, acceptedRows, verifyRows, SpecVerifyPersistsAcceptedKv);
             if (count <= 0)
                 return;
             int skip = firstRejected - backup.FirstRow;   // rows of the backup to skip
@@ -1028,6 +1022,40 @@ namespace TensorSharp.Models
                 }
                 CopySwaSlots(layer, backup.StartPos + firstRejected, count, kSlice, vSlice, toBackup: false);
             }
+        }
+
+        /// <summary>
+        /// Which saved verify rows go back into the sliding-window ring once the accept
+        /// count is known, as (first verify row, row count).
+        ///
+        /// Rows 0..acceptedRows are kept (row 0 is the token the window started from);
+        /// rows acceptedRows+1..verifyRows were rejected and their slots must hold what
+        /// they held before the verify. When the executor will re-forward the kept
+        /// prefix instead of keeping the verify's rows (<paramref name="verifyKvKept"/>
+        /// false AND a partial acceptance), the kept rows attend the positions THEIR
+        /// slots evicted too, so every saved row goes back: the re-forward then rewrites
+        /// the kept rows' slots.
+        ///
+        /// A FULLY accepted window is never re-forwarded - <c>SpeculativeExecution</c>
+        /// rolls back only when <c>acceptedRows &lt; verifyRows</c> - so there is nothing
+        /// to restore, whatever <paramref name="verifyKvKept"/> says. Restoring anyway
+        /// (as this used to on dense Gemma 4 without PLE, where the verify's KV is not
+        /// kept on a partial acceptance) put the evicted positions p+i-W back into the
+        /// slots of committed rows p+1..p+K: every later token attended stale keys in
+        /// place of its own recent context. On gemma-4-12B that turned the second
+        /// verify past a 1,024-token window into rows 30-47 logits away from plain
+        /// decoding (AgentTurnBench spec prompt: divergence at token 10 of 192, on CUDA
+        /// and Metal alike).
+        /// </summary>
+        internal static (int FirstRow, int Count) SwaSlotsToRestore(
+            int backupFirstRow, int backupRows, int acceptedRows, int verifyRows, bool verifyKvKept)
+        {
+            bool reforwardsKeptPrefix = !verifyKvKept && acceptedRows < verifyRows;
+            int firstRejected = reforwardsKeptPrefix
+                ? backupFirstRow
+                : Math.Max(backupFirstRow, acceptedRows + 1);
+            int lastRow = Math.Min(backupRows - 1, verifyRows);
+            return (firstRejected, Math.Max(0, lastRow - firstRejected + 1));
         }
 
         /// <summary>
@@ -1136,24 +1164,25 @@ namespace TensorSharp.Models
         /// <summary>
         /// Gemma 4's verify (fused MoE/dense or per-op) writes attention KV for every
         /// token in the batch at its true position, and the model has no recurrent
-        /// state. So on partial acceptance the kept prefix's KV is already correct in
-        /// the live cache — the executor can skip the redundant re-forward and just
-        /// rewind the position. This is the dominant rollback cost on long contexts.
+        /// state. On partial acceptance the kept prefix's KV is already present in
+        /// the live cache, so the executor can skip re-forwarding it and rewind the
+        /// position. These are the verify kernel's results: batch-dependent rounding
+        /// can differ from sequential decode and can affect later greedy choices.
+        /// Cache validity does not imply bitwise equality with the no-spec path.
         /// Enabled for:
         /// <list type="bullet">
         /// <item>MoE Gemma 4 (e.g. 26B-A4B) on any backend — the manual-attention
         ///   verify makes the re-forward the dominant rollback cost.</item>
+        /// <item>PLE-equipped dense models (including the E-series).</item>
         /// <item>The pure-C# CUDA backend (dense too): there the per-op verify is
         ///   ~B single-token decodes, so a kept-prefix re-forward on every partial
         ///   acceptance is ~18% of decode wall time and the difference between MTP
-        ///   speculation being a net win vs a net loss. The kept prefix's KV is
-        ///   already correct (only the writing kernel differs from the no-spec decode
-        ///   path — a last-few-ULP difference that the greedy verify tolerates).</item>
+        ///   speculation being a net win vs a net loss.</item>
         /// </list>
-        /// Left OFF for the dense model on the ggml backends: there the fused
-        /// re-forward is cheap and refreshing the committed token's KV through the
-        /// decode kernel keeps spec output byte-identical to the no-spec path (the
-        /// dense exact-match validation). Escape hatch: TS_GMTP_NO_FAST_ROLLBACK=1.
+        /// Left OFF for dense models without PLE on the ggml backends. Re-forwarding
+        /// the kept prefix refreshes its KV, but a multi-row replay can itself use a
+        /// different kernel from sequential decode. It does not guarantee identical
+        /// output tokens. TS_GMTP_NO_FAST_ROLLBACK=1 forces replay for diagnostics.
         /// Honoured only on the linear trunk.
         /// </summary>
         public bool SpecVerifyPersistsAcceptedKv =>

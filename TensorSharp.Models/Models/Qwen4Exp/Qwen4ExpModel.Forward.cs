@@ -99,8 +99,8 @@ namespace TensorSharp.Models
 
                 if (UsesQsa(l))
                 {
-                    _idxKCache[l] = new Tensor(_allocator, DType.Float32, 1, initialSeqLen, _indexerHeadDim);
-                    InitializeCacheTensor(_idxKCache[l]);
+                    _idxKCache[l] = new Tensor(_allocator, kvDtype, 1, initialSeqLen, _indexerHeadDim);
+                    InitializeQsaCache(_idxKCache[l]);
                 }
             }
 
@@ -134,7 +134,7 @@ namespace TensorSharp.Models
                 GrowCache(ref _kCache[l], Config.NumKVHeads, newCapacity, Config.HeadDim, kvDtype);
                 GrowCache(ref _vCache[l], Config.NumKVHeads, newCapacity, Config.HeadDim, kvDtype);
                 if (_idxKCache[l] != null)
-                    GrowCache(ref _idxKCache[l], 1, newCapacity, _indexerHeadDim, DType.Float32);
+                    GrowQsaCache(l, newCapacity, kvDtype);
             }
             _kvCacheCapacity = newCapacity;
             // The KV tensors just moved: the pinned attention descriptors hold the
@@ -142,6 +142,7 @@ namespace TensorSharp.Models
             // per-layer and span alike - is stale. Dropping the array forces a refill
             // with the new pointers and, through the graph keys, a rebuild.
             _attnArgs = null;
+            _qsaArgs = null;
         }
 
         private void GrowCache(ref Tensor cache, int heads, int newLen, int dim, DType dtype)
@@ -182,13 +183,16 @@ namespace TensorSharp.Models
             {
                 if (_kCache[l] != null) SyncTensorHostCache(_kCache[l]);
                 if (_vCache[l] != null) SyncTensorHostCache(_vCache[l]);
-                if (_idxKCache[l] != null) SyncTensorHostCache(_idxKCache[l]);
+                if (_idxKCache[l] != null) SyncQsaCache(l);
             }
             _kvCacheHostStale = false;
         }
 
         private unsafe void InvalidateActiveSeqState()
         {
+            if (_idxKCache != null)
+                foreach (var t in _idxKCache)
+                    if (t != null) GgmlBasicOps.Qwen4ExpInvalidateSeqState(TensorComputePrimitives.GetStoragePointer(t));
             if (_gdnConvStateT != null)
                 foreach (var t in _gdnConvStateT)
                     if (t != null) GgmlBasicOps.Qwen4ExpInvalidateSeqState((IntPtr)GetFloatPtr(t));
@@ -199,6 +203,10 @@ namespace TensorSharp.Models
 
         protected override void ResetKVCacheCore()
         {
+            ReleaseMtpState(ActiveSpecOwner);
+            ReleaseSpecSnapshot();
+            _qsaPositionCount = 0;
+            unchecked { ++_specResetVersion; }
             _cacheSeqLen = 0;
             for (int l = 0; l < Config.NumLayers; l++)
             {
@@ -237,11 +245,20 @@ namespace TensorSharp.Models
                 // below then forces the rebuild that performs the re-seed.
                 InvalidateActiveSeqState();
                 GgmlBasicOps.Qwen4ExpResetFfnCache();
+                CountDecodeGraphReset();
             }
+            _specStateFailed = false;
+            // Host seeds zeroed and every entry re-armed: the host is the truth again.
+            _deviceStateAuthoritative = false;
+            // Reset invalidates QSA's native entry. There are no live KV rows
+            // to export when a larger first prompt immediately grows capacity.
+            _kvCacheHostStale = false;
         }
 
         protected override float[] ForwardCore(int[] tokens)
         {
+            if (_specStateFailed)
+                throw new InvalidOperationException("qwen4exp: the active conversation has failed speculative state; reset it before forwarding.");
             try
             {
                 return ForwardCoreInner(tokens);
@@ -251,6 +268,7 @@ namespace TensorSharp.Models
                 // A thrown forward must not leak this request's pending
                 // multimodal state into the NEXT sequence the engine runs (the
                 // per-sequence executor catches per-request errors and moves on).
+                if (HasQsa) _specStateFailed = true;
                 _pendingMRoPEPositions = null;
                 foreach (var (emb, _) in _visionEmbeddingsList) emb?.Dispose();
                 _visionEmbeddingsList.Clear();
@@ -264,7 +282,7 @@ namespace TensorSharp.Models
             int seqLen = tokens.Length;
             int startPos = _cacheSeqLen;
             EnsureCacheCapacity(startPos + seqLen);
-            WarnIfQsaBudgetExceeded(startPos + seqLen);
+            PrepareQsaHistory(startPos, seqLen);
 
             long tEmb = Stopwatch.GetTimestamp();
             Tensor embd = Embedding(tokens);           // [T, n_embd]
@@ -289,6 +307,11 @@ namespace TensorSharp.Models
             // back to the per-layer loop below.
             long tSpan = Stopwatch.GetTimestamp();
             bool spanDone = TryFusedTokenSpans(res, tokens, seqLen, startPos);
+            if (!spanDone && (_specForwardActive || HasQsa))
+            {
+                res.Dispose();
+                throw new InvalidOperationException("qwen4exp: speculative token span failed; reset this conversation before retrying.");
+            }
             if (spanDone) Q4eSpanTicks += Stopwatch.GetTimestamp() - tSpan;
             if (!spanDone && LayerSplitDegree > 1)
             {
@@ -442,6 +465,8 @@ namespace TensorSharp.Models
 
             if (_spanLogitsValid)
             {
+                if (_specForwardActive)
+                    CopySpecLastLogits(seqLen);
                 // The last span already produced the logits; the residual is dead.
                 res.Dispose();
                 _logitsBuffer = _spanLogits;
@@ -922,6 +947,7 @@ namespace TensorSharp.Models
                 if (!ok) { _fusedAttnUnsupported = true; return false; }
                 if (!_resOnDevice) InvalidateTensorDeviceCache(res);
                 _kvCacheHostStale = true;
+                _deviceStateAuthoritative = true;
                 return true;
             }
             catch (Exception ex)
@@ -935,6 +961,14 @@ namespace TensorSharp.Models
         // The fused attention kernel writes the KV cache on the device; the host
         // mirror is behind until something syncs it.
         private bool _kvCacheHostStale;
+
+        // True once a fused forward has seeded the native per-sequence state
+        // entries (GDN conv+ssm, PLE conv, QSA raw keys) of the ACTIVE holder from
+        // its host seeds. From then on those device entries are the truth and the
+        // host seeds are stale; a reset zeroes the seeds and re-arms the upload,
+        // which is the only way back to host-authoritative. Travels with the
+        // holder (PerSeqCache) and decides what a copy reads (RetainedCache).
+        private bool _deviceStateAuthoritative;
 
         private unsafe bool TryFillAttnArgs(int il, ref Qwen4ExpAttnArgs a)
         {
@@ -1134,29 +1168,13 @@ namespace TensorSharp.Models
             }
 
 
-            // NOTE: there used to be a "past the QSA budget, decline the whole
-            // token" guard here. It was worse than useless.
-            //
-            // QSA is not implemented (see AttentionLayer's doc comment): both this
-            // path and the per-layer fallback compute DENSE attention, above the
-            // budget and below it. So the guard changed no arithmetic - it existed
-            // only to route the token to the code that printed the one-shot
-            // warning, which now happens in ForwardCoreInner instead.
-            //
-            // What it DID do was switch code paths in the middle of a live
-            // sequence, and this architecture cannot survive that: the span kernel
-            // keeps the GDN conv/ssm state and the PLE n-gram conv history in
-            // DEVICE buffers written in place, while the per-layer fallback reads
-            // and writes the HOST arrays those buffers were seeded from at startup.
-            // Falling back mid-sequence therefore silently restarts every recurrent
-            // stream from its startup contents. Symptom: generation is fine for
-            // ~1940 tokens and then collapses into one repeated token forever, the
-            // moment the context crosses indexer_top_k + compress_ratio - 1.
+            // QSA stays inside the same span as recurrent state, including the
+            // first token crossing its sparse width. A fallback cannot reseed it.
             int totalLen = startPos + seqLen;
 
             try
             {
-                if (!EnsureFfnArgs() || !EnsureGdnArgs() || !EnsureAttnArgs())
+                if (!EnsureFfnArgs() || !EnsureGdnArgs() || !EnsureAttnArgs() || !EnsureQsaArgs())
                 {
                     _tokenGraphUnsupported = true;
                     return false;
@@ -1227,6 +1245,8 @@ namespace TensorSharp.Models
                 fixed (Qwen4ExpFfnArgs* fp = _ffnArgs)
                 fixed (Qwen4ExpGdnArgs* gp = _gdnArgs)
                 fixed (Qwen4ExpAttnArgs* ap = _attnArgs)
+                fixed (Qwen4ExpQsaArgs* qp = _qsaArgs)
+                fixed (int* qpositions = _qsaPositions)
                 fixed (byte* kp = _layerKinds)
                 fixed (ushort* mp = _attnMask)
                 {
@@ -1257,7 +1277,7 @@ namespace TensorSharp.Models
                             {
                                 fixed (Qwen4ExpHeadArgs* hp = _headArgs)
                                 fixed (float* lp = _spanLogits)
-                                { headPtr = (IntPtr)hp; logitsPtr = (IntPtr)lp; }
+                                { headPtr = (IntPtr)hp; logitsPtr = _specForwardActive ? _specLogitsOutput : (IntPtr)lp; }
                             }
                             IntPtr mropePtr = IntPtr.Zero, sectPtr = IntPtr.Zero;
                             if (useMrope)
@@ -1291,7 +1311,10 @@ namespace TensorSharp.Models
                                 ple: plePtr, pleLayer: pleLayerArg, pleEmb: pleEmbPtr,
                                 mropePos: mropePtr, mropeSections: sectPtr,
                                 ropePosition: useMrope ? -1 : startPos - _mropeCacheGap,
-                                device: DeviceForLayer(begin));
+                                device: DeviceForLayer(begin),
+                                hiddenOut: last && _specForwardActive ? _specHiddenOutput : IntPtr.Zero,
+                                logitsRows: last && _specForwardActive && _specAllLogitsRows ? seqLen : 1,
+                                qsa: (IntPtr)qp, qsaPositions: (IntPtr)qpositions, qsaPositionCount: _qsaPositionCount);
                             if (ok && last) _spanLogitsValid = true;
                             if (!ok)
                             {
@@ -1361,6 +1384,7 @@ namespace TensorSharp.Models
                     }
                 }
                 _kvCacheHostStale = true;
+                _deviceStateAuthoritative = true;
                 return true;
             }
             catch (InvalidOperationException)
@@ -1445,6 +1469,7 @@ namespace TensorSharp.Models
             if (_attnMask == null || _attnMask.Length < need)
                 _attnMask = new ushort[need];
             const ushort NegInfF16 = 0xFC00;
+            bool qsaMask = HasQsa && _qsaPositions != null;
             // ONE fixed block around the whole fill. Pinning per row ends the pin at
             // that statement and leaves the writes going through a pointer into an
             // array the GC is free to move.
@@ -1454,7 +1479,15 @@ namespace TensorSharp.Models
                 {
                     int limit = startPos + t;
                     ushort* row = m + (long)t * padded;
-                    for (int j = 0; j < padded; j++) row[j] = j <= limit ? (ushort)0 : NegInfF16;
+                    for (int j = 0; j < padded; j++)
+                    {
+                        // QSA media cells use the same T,H,W total order as the
+                        // pooled-key plan. Text reduces to the ordinary mask.
+                        bool visible = qsaMask
+                            ? j < totalLen && CompareQsaPositions(_qsaPositions, j, limit) <= 0
+                            : j <= limit;
+                        row[j] = visible ? (ushort)0 : NegInfF16;
+                    }
                 }
             }
             return padded;
@@ -1543,6 +1576,7 @@ namespace TensorSharp.Models
                     Config.Eps, cacheSlot: il, resResident: _resOnDevice);
                 if (!ok) { _fusedGdnUnsupported = true; return false; }
                 if (!_resOnDevice) InvalidateTensorDeviceCache(res);
+                _deviceStateAuthoritative = true;
                 return true;
             }
             catch (Exception ex)
@@ -1735,6 +1769,8 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeMtpHead();
+            ReleaseSpecSnapshot();
             DisposeAllFusedHolders();
             if (IsGgmlBackend)
                 GgmlBasicOps.Qwen4ExpReleaseAllSeqState();

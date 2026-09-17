@@ -74,6 +74,19 @@ namespace TensorSharp.Runtime
         int KVCacheTruncationGranularity => 1;
 
         /// <summary>
+        /// Whether a cache holding <paramref name="cachedTokenCount"/> tokens can
+        /// retain the requested prefix without losing history needed by later
+        /// attention. This side-effect-free check also applies to inactive retained
+        /// holders, so the scheduler can prefer an exact checkpoint before binding
+        /// one. A true result still requires TryTruncateKVCache at execution time.
+        /// </summary>
+        bool CanTruncateKVCache(int cachedTokenCount, int targetTokenCount)
+            => targetTokenCount >= 0 && targetTokenCount <= cachedTokenCount
+                && (targetTokenCount == cachedTokenCount
+                    || (SupportsKVCacheTruncation
+                        && targetTokenCount % Math.Max(1, KVCacheTruncationGranularity) == 0));
+
+        /// <summary>
         /// Whether this architecture exposes block-level snapshot / restore of its KV
         /// state through <see cref="TryExtractKVBlock"/> and <see cref="TryInjectKVBlock"/>.
         /// Required for the paged KV cache. Models with recurrent state should return
@@ -108,6 +121,33 @@ namespace TensorSharp.Runtime
         /// retention contract. Defaults to unbounded.
         /// </summary>
         int MaxReusablePrefixTokens => int.MaxValue;
+
+        /// <summary>
+        /// Whether a cache that already holds a media span (image, video pair, audio
+        /// clip) can be continued past it with the same result a fresh prefill gives.
+        /// True for models whose positions after a span are the plain token index
+        /// (Gemma 4 and every other absolute-position family), and for M-RoPE models
+        /// that carry the compressed position forward with the cache (Qwen 3.5 / 3.6
+        /// store the rope delta in every holder and checkpoint). A model returns false
+        /// when the state after a media turn is not the state a re-prefill of the same
+        /// history builds - for example compressed prompt positions with decode at the
+        /// absolute index. For such a model every prompt-reuse path stops at the first
+        /// media span, and reuse of the text BEFORE the span is unaffected.
+        /// </summary>
+        bool SupportsReuseAcrossMediaSpan => true;
+
+        /// <summary>
+        /// Whether a prompt of <paramref name="promptTokens"/> tokens whose media span
+        /// lies in the part still to prefill may continue a reused prefix, i.e. prefill
+        /// that media at a non-zero start position and still match a fresh prefill. True
+        /// by default, and true for every shipped model. A model that returns false has
+        /// such a turn reuse nothing past its public prefix
+        /// (SequenceState.SharedPrefixTokens): the prefill is cut there for the
+        /// shared-prefix checkpoint anyway, so cloning the checkpoint changes nothing, and
+        /// without a public prefix it prefills from zero. (Gemma 4 returned false past its
+        /// sliding window until its image chunks after a reused prefix were made exact.)
+        /// </summary>
+        bool CanPrefillMediaAfterReusedPrefix(int promptTokens) => true;
 
         /// <summary>
         /// Maximum context length (in tokens) this model can serve — its KV cache
@@ -199,6 +239,21 @@ namespace TensorSharp.Runtime
             string? architecture = null,
             List<ToolFunction>? tools = null,
             bool enableThinking = false);
+
+        /// <summary>
+        /// Render with the request's <c>reasoning_effort</c> level. The default
+        /// implementation ignores the level, which is right for every renderer whose
+        /// family has no such prompt line; <see cref="GgufPromptRenderer"/> forwards it.
+        /// </summary>
+        string Render(
+            string template,
+            List<ChatMessage> messages,
+            bool addGenerationPrompt,
+            string? architecture,
+            List<ToolFunction>? tools,
+            bool enableThinking,
+            string? reasoningEffort)
+            => Render(template, messages, addGenerationPrompt, architecture, tools, enableThinking);
     }
 
     public interface IOutputProtocolParser
@@ -257,6 +312,13 @@ namespace TensorSharp.Runtime
         /// The engine uses this to force the per-seq forward path for multimodal sequences,
         /// because the batched paged path doesn't currently know how to inject embeddings.</summary>
         bool HasPendingEmbeddings(string requestId);
+
+        /// <summary>The media spans prepared for <paramref name="requestId"/>, in prompt
+        /// order, with the content identity of each. The engine compares them
+        /// positionally when it continues a cached prefix (see
+        /// <see cref="Scheduling.PromptMediaSpans"/>). Call after any front trim.</summary>
+        IReadOnlyList<Scheduling.PromptMediaSpan> GetPreparedMediaSpans(string requestId)
+            => Array.Empty<Scheduling.PromptMediaSpan>();
 
         /// <summary>Discard the per-request bucket. Called when a request finishes (success,
         /// error, or abort).</summary>

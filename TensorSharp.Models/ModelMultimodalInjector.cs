@@ -10,8 +10,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using TensorSharp;
 using TensorSharp.Models.Architecture;
+using TensorSharp.Runtime;
+using TensorSharp.Runtime.Scheduling;
 
 namespace TensorSharp.Models
 {
@@ -19,6 +22,7 @@ namespace TensorSharp.Models
     {
         private readonly ModelBase _model;
         private readonly Dictionary<string, CachedEmbedding> _visionCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, CachedEmbedding> _videoFrameCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CachedEmbedding> _audioCache = new(StringComparer.OrdinalIgnoreCase);
 
         // Per-request buckets. "" is the default bucket used by direct
@@ -40,17 +44,38 @@ namespace TensorSharp.Models
         // means the request is text-only and standard scalar RoPE is fine.
         private readonly Dictionary<string, int[]> _mropePositionsByRequest = new();
 
-        // "Live view" into the bucket for the request currently being processed
-        // by ProcessPromptTokens. The model-specific Process*History helpers
-        // append to these. Reset to the default bucket between requests.
-        private List<PreparedEmbeddingSpan> _preparedVisionEmbeddings;
-        private List<PreparedEmbeddingSpan> _preparedAudioEmbeddings;
-        // RequestId currently being processed. Set at ProcessPromptTokens entry
-        // so the model-specific Process*History helpers (which don't take a
-        // requestId arg) can attach per-request state like the MRoPE position
-        // table to the right bucket. Single-threaded under the chat pipeline's
-        // GpuComputeLock so no races.
-        private string _currentRequestId;
+        // Encoders yield GpuComputeLock between blocks. Another request can
+        // prepare its prompt during that yield, so a shared "current request"
+        // would attach the first encoder's result to the second request. Keep
+        // this synchronous expansion's context local to its execution flow.
+        private readonly AsyncLocal<PreparationContext> _preparation = new();
+        private sealed record PreparationContext(string RequestId,
+            List<PreparedEmbeddingSpan> Vision, List<PreparedEmbeddingSpan> Audio)
+        {
+            // Embeddings this preparation obtained that are not yet in a bucket: an
+            // encoder may yield the GPU lock between two images, and another request's
+            // insert must not evict (and dispose) the first image's tensor meanwhile.
+            public List<CachedEmbedding> Pinned { get; } = new();
+        }
+
+        // The embedding cache is keyed by media CONTENT (MediaContentId), so an API
+        // client resending the same base64 image each turn encodes it once. It is bounded
+        // by bytes and evicted least-recently-used; an entry a prepared prompt still
+        // references is never evicted. TS_MM_EMBEDDING_CACHE_MB (default 512).
+        private static readonly long EmbeddingCacheBudgetBytes = ResolveEmbeddingCacheBudgetBytes();
+        private long _embeddingCacheBytes;
+        private long _embeddingUseClock;
+
+        private static long ResolveEmbeddingCacheBudgetBytes()
+        {
+            string raw = Environment.GetEnvironmentVariable("TS_MM_EMBEDDING_CACHE_MB");
+            return long.TryParse(raw, out long mb) && mb > 0 ? mb * 1024L * 1024L : 512L * 1024L * 1024L;
+        }
+        private List<PreparedEmbeddingSpan> _preparedVisionEmbeddings =>
+            _preparation.Value?.Vision ?? GetOrCreateBucket(_visionByRequest, "");
+        private List<PreparedEmbeddingSpan> _preparedAudioEmbeddings =>
+            _preparation.Value?.Audio ?? GetOrCreateBucket(_audioByRequest, "");
+        private string _currentRequestId => _preparation.Value?.RequestId ?? "";
 
         private sealed class CachedEmbedding : IDisposable
         {
@@ -62,6 +87,20 @@ namespace TensorSharp.Models
                 int tokenCount,
                 int extra0 = 0,
                 int extra1 = 0)
+                : this(fullPath, fileSize, lastWriteUtcTicks, embeddings, tokenCount, extra0, extra1, 0, 0)
+            {
+            }
+
+            public CachedEmbedding(
+                string fullPath,
+                long fileSize,
+                long lastWriteUtcTicks,
+                Tensor embeddings,
+                int tokenCount,
+                int extra0,
+                int extra1,
+                long secondFileSize,
+                long secondLastWriteUtcTicks)
             {
                 FullPath = fullPath;
                 FileSize = fileSize;
@@ -70,18 +109,33 @@ namespace TensorSharp.Models
                 TokenCount = tokenCount;
                 Extra0 = extra0;
                 Extra1 = extra1;
+                SecondFileSize = secondFileSize;
+                SecondLastWriteUtcTicks = secondLastWriteUtcTicks;
             }
 
             public string FullPath { get; }
+            /// <summary>What the embedding encodes, by content: the cache key and the
+            /// identity the engine compares for prompt reuse (PromptMediaSpan).</summary>
+            public string ContentId { get; set; }
+            public long LastUsed { get; set; }
+            public int PreparationPins { get; set; }
+            public long Bytes => Embeddings == null
+                ? 0
+                : TensorDimensionHelpers.ElementCount(Embeddings.Sizes) * Embeddings.ElementType.Size();
             public long FileSize { get; }
             public long LastWriteUtcTicks { get; }
             public Tensor Embeddings { get; }
             public int TokenCount { get; }
             public int Extra0 { get; }
             public int Extra1 { get; }
+            public long SecondFileSize { get; }
+            public long SecondLastWriteUtcTicks { get; }
 
             public bool Matches(long fileSize, long lastWriteUtcTicks) =>
                 FileSize == fileSize && LastWriteUtcTicks == lastWriteUtcTicks;
+
+            public bool MatchesPair(long firstSize, long firstTicks, long secondSize, long secondTicks) =>
+                Matches(firstSize, firstTicks) && SecondFileSize == secondSize && SecondLastWriteUtcTicks == secondTicks;
 
             public void Dispose()
             {
@@ -113,8 +167,6 @@ namespace TensorSharp.Models
         public ModelMultimodalInjector(ModelBase model)
         {
             _model = model;
-            _preparedVisionEmbeddings = GetOrCreateBucket(_visionByRequest, "");
-            _preparedAudioEmbeddings = GetOrCreateBucket(_audioByRequest, "");
         }
 
         private static string NormalizeRequestId(string requestId) => requestId ?? "";
@@ -145,20 +197,49 @@ namespace TensorSharp.Models
         public List<int> ProcessPromptTokens(List<ChatMessage> history, List<int> inputTokens, string requestId = null)
         {
             string key = NormalizeRequestId(requestId);
-            _preparedVisionEmbeddings = GetOrCreateBucket(_visionByRequest, key);
-            _preparedAudioEmbeddings = GetOrCreateBucket(_audioByRequest, key);
-            _currentRequestId = key;
-
-            _preparedVisionEmbeddings.Clear();
-            _preparedAudioEmbeddings.Clear();
-
-            if (history == null || history.Count == 0 || inputTokens == null || inputTokens.Count == 0)
-                return inputTokens;
-
-            return _model is IMultimodalPromptExpander expander
-                ? expander.ExpandMultimodalPrompt(this, history, inputTokens)
-                : inputTokens;
+            var previous = _preparation.Value;
+            var current = new PreparationContext(key,
+                GetOrCreateBucket(_visionByRequest, key), GetOrCreateBucket(_audioByRequest, key));
+            _preparation.Value = current;
+            try
+            {
+                current.Vision.Clear();
+                current.Audio.Clear();
+                if (history == null || history.Count == 0 || inputTokens == null || inputTokens.Count == 0)
+                    return inputTokens;
+                return _model is IMultimodalPromptExpander expander
+                    ? expander.ExpandMultimodalPrompt(this, history, inputTokens)
+                    : inputTokens;
+            }
+            finally
+            {
+                foreach (CachedEmbedding pinned in current.Pinned)
+                    pinned.PreparationPins--;
+                current.Pinned.Clear();
+                _preparation.Value = previous;
+            }
         }
+
+        public IReadOnlyList<PromptMediaSpan> GetPreparedMediaSpans(string requestId)
+        {
+            string key = NormalizeRequestId(requestId);
+            var spans = new List<PromptMediaSpan>();
+            lock (_bucketLock)
+            {
+                if (_visionByRequest.TryGetValue(key, out var vision))
+                    foreach (var span in vision)
+                        spans.Add(ToMediaSpan(span));
+                if (_audioByRequest.TryGetValue(key, out var audio))
+                    foreach (var span in audio)
+                        spans.Add(ToMediaSpan(span));
+            }
+            spans.Sort((a, b) => a.Start.CompareTo(b.Start));
+            return spans;
+        }
+
+        private static PromptMediaSpan ToMediaSpan(PreparedEmbeddingSpan span)
+            => new(span.PromptTokenStart, span.PromptTokenEndExclusive,
+                span.CacheEntry.ContentId ?? "path:" + span.CacheEntry.FullPath);
 
         public int ClampReusablePrefix(int reusablePrefixTokenCount, string requestId = null)
         {
@@ -262,6 +343,27 @@ namespace TensorSharp.Models
             return slice;
         }
 
+        /// <summary>The M-RoPE position delta of a request whose prompt has a position
+        /// table: the largest axis of its last row, plus one, minus the prompt length -
+        /// HF / SGLang <c>mrope_position_delta</c>. Every token past the prompt sits at
+        /// its KV index plus this. False for a text-only request (delta 0).</summary>
+        internal bool TryGetMRoPEPositionDelta(string requestId, out int delta)
+        {
+            delta = 0;
+            string key = NormalizeRequestId(requestId);
+            int[] full;
+            lock (_bucketLock)
+            {
+                if (!_mropePositionsByRequest.TryGetValue(key, out full) || full == null)
+                    return false;
+            }
+            int rows = full.Length / 3;
+            if (rows <= 0)
+                return false;
+            delta = Qwen35RopePositions.DeltaAfterRows(full, rows, rows);
+            return true;
+        }
+
         public bool HasPendingEmbeddings(string requestId)
         {
             string key = NormalizeRequestId(requestId);
@@ -314,15 +416,25 @@ namespace TensorSharp.Models
                         imageStd: model.VisionEncoder.ImageStd)
                     : new Gemma4ImageProcessor())
                 : null;
+            var videoProcessor = model.VisionEncoder != null
+                ? new Gemma4ImageProcessor(minTokens: Gemma4ImageProcessor.VideoSoftTokens,
+                    maxTokens: Gemma4ImageProcessor.VideoSoftTokens,
+                    imageMean: model.VisionEncoder.IsUnified ? model.VisionEncoder.ImageMean : null,
+                    imageStd: model.VisionEncoder.IsUnified ? model.VisionEncoder.ImageStd : null)
+                : null;
             int searchFrom = 0;
 
             foreach (var message in history)
             {
                 if (message.ImagePaths != null && model.VisionEncoder != null)
                 {
-                    foreach (var imagePath in message.ImagePaths)
+                    for (int imageIndex = 0; imageIndex < message.ImagePaths.Count; ++imageIndex)
                     {
-                        CachedEmbedding cached = GetOrCreateGemma4VisionEmbedding(model, imageProcessor, imagePath);
+                        string imagePath = message.ImagePaths[imageIndex];
+                        bool videoFrame = message.IsVideo && (message.ImageTimestamps?.Count != message.ImagePaths.Count
+                            || message.ImageTimestamps[imageIndex].HasValue);
+                        CachedEmbedding cached = GetOrCreateGemma4VisionEmbedding(model,
+                            videoFrame ? videoProcessor : imageProcessor, imagePath, videoFrame);
                         int tokenPosition = FindTokenPosition(inputTokens, imageStartId, searchFrom);
 
                         if (tokenPosition >= 0)
@@ -428,11 +540,35 @@ namespace TensorSharp.Models
         /// Shared Qwen-VL-family prompt processing: Qwen3.5-VL and Qwen3.8-Flash-Next
         /// use the same qwen3vl_merger tower, image-pad expansion and (T,H,W) IMRoPE
         /// position assignment.
+        ///
+        /// <para>A still image is one <c>&lt;|image_pad|&gt;</c> span. A sampled video
+        /// (frames with source times, see <see cref="QwenVideoFrames"/>) is one
+        /// <c>&lt;|video_pad|&gt;</c> span per temporal pair of frames: the pair is
+        /// merged by the tower's two temporal conv slices, and its span is positioned
+        /// like an image at the running position of that pair, so consecutive pairs
+        /// carry increasing temporal coordinates and the timestamp text between them
+        /// advances the stream. That is the Qwen3-VL <c>get_rope_index</c> rule, which
+        /// splits a video grid into per-pair (t = 1) entries.</para>
         /// </summary>
         internal List<int> ProcessQwenVLHistory(Qwen35VisionEncoder encoder, List<ChatMessage> history, List<int> inputTokens)
         {
-            var imagePaths = GetImagePathsInPromptOrder(history);
-            if (imagePaths.Count == 0)
+            var layouts = new List<(ChatMessage Message, List<QwenVideoFrames.Item> Items)>();
+            bool anyVideo = false;
+            if (history != null)
+            {
+                foreach (var message in history)
+                {
+                    if (message?.ImagePaths == null || message.ImagePaths.Count == 0)
+                        continue;
+                    var items = QwenVideoFrames.Layout(message);
+                    if (items.Count == 0)
+                        continue;
+                    layouts.Add((message, items));
+                    foreach (var item in items)
+                        anyVideo |= item.IsVideo;
+                }
+            }
+            if (layouts.Count == 0)
                 return inputTokens;
 
             // Returning the unexpanded <|image_pad|> token here makes the language
@@ -445,102 +581,67 @@ namespace TensorSharp.Models
                     "Qwen image input requires a loaded vision projector; no vision encoder is active.");
             }
 
-            int imagePadId = _model.Tokenizer.LookupToken("<|image_pad|>");
+            int imagePadId = _model.Tokenizer.LookupToken(QwenVideoFrames.ImagePad);
             if (imagePadId < 0)
             {
                 throw new InvalidOperationException(
                     "Qwen image input could not be expanded because the tokenizer has no <|image_pad|> token.");
             }
-
-            var processor = new Qwen35ImageProcessor(encoder.PatchSize, encoder.SpatialMergeSize);
-            var cachedEmbeddings = new CachedEmbedding[imagePaths.Count];
-            var tokenCounts = new int[imagePaths.Count];
-            for (int i = 0; i < imagePaths.Count; i++)
+            int videoPadId = anyVideo ? _model.Tokenizer.LookupToken(QwenVideoFrames.VideoPad) : -1;
+            if (anyVideo && videoPadId < 0)
             {
-                cachedEmbeddings[i] = GetOrCreateQwenVLVisionEmbedding(encoder, processor, imagePaths[i]);
-                tokenCounts[i] = cachedEmbeddings[i].TokenCount;
+                throw new InvalidOperationException(
+                    "Qwen video input could not be expanded because the tokenizer has no <|video_pad|> token.");
+            }
+            if (anyVideo && encoder.TemporalPatchSize != QwenVideoFrames.TemporalPatchSize)
+            {
+                throw new NotSupportedException(
+                    $"Qwen video input merges frames in pairs, but this vision projector's temporal patch size is " +
+                    $"{encoder.TemporalPatchSize} (no v.patch_embd.weight.1 slice); it cannot encode a video.");
             }
 
-            inputTokens = ChatTemplate.ExpandImageTokens(inputTokens, imagePadId, tokenCounts);
-
-            // Build the per-token (T,H,W) MRoPE position table for the entire
-            // expanded prompt. vLLM Qwen3.5 (MRotaryEmbedding.get_input_positions)
-            // assigns positions like this:
-            //  - text tokens get (k, k, k) where k is the running scalar position
-            //  - image tokens at merged grid coords (h, w) get
-            //      (text_pos, text_pos + h, text_pos + w)
-            //    where text_pos is the running scalar at the image's start;
-            //    after the image, the running scalar resumes at
-            //      max(H, W) + text_pos
-            //    so the next text token gets (next_k, next_k, next_k) with no
-            //    overlap. For static images T axis stays at text_pos.
-            int total = inputTokens.Count;
-            int[] thw = new int[3 * total];
-            int searchFrom = 0;
-            int textPos = 0;
-            int writeIdx = 0;
-            int imgIdx = 0;
-            while (writeIdx < total)
+            var processor = new Qwen35ImageProcessor(encoder.PatchSize, encoder.SpatialMergeSize);
+            var cachedEmbeddings = new List<CachedEmbedding>();
+            var spans = new List<QwenVLVisionSpan>();
+            foreach (var (message, items) in layouts)
             {
-                int imgStart = (imgIdx < imagePaths.Count)
-                    ? FindTokenPosition(inputTokens, imagePadId, searchFrom)
-                    : -1;
-                int textEnd = imgStart >= 0 ? imgStart : total;
-
-                // text run [writeIdx, textEnd) - collapse all three axes
-                for (int t = writeIdx; t < textEnd; t++)
+                foreach (var item in items)
                 {
-                    thw[3 * t + 0] = textPos;
-                    thw[3 * t + 1] = textPos;
-                    thw[3 * t + 2] = textPos;
-                    textPos++;
-                }
-
-                if (imgStart < 0) break;
-
-                int mergedH = cachedEmbeddings[imgIdx].Extra0;
-                int mergedW = cachedEmbeddings[imgIdx].Extra1;
-                int imgTokenCount = tokenCounts[imgIdx];
-                if (mergedH * mergedW != imgTokenCount)
-                {
-                    Console.WriteLine($"[qwen35-mrope] image {imgIdx} grid {mergedH}x{mergedW}={mergedH * mergedW} " +
-                                      $"≠ token count {imgTokenCount}; falling back to text-only positions");
-                    for (int t = imgStart; t < imgStart + imgTokenCount; t++)
+                    if (!item.IsVideo)
                     {
-                        thw[3 * t + 0] = textPos;
-                        thw[3 * t + 1] = textPos;
-                        thw[3 * t + 2] = textPos;
-                        textPos++;
+                        var cached = GetOrCreateQwenVLVisionEmbedding(encoder, processor, message.ImagePaths[item.ImageIndex]);
+                        cachedEmbeddings.Add(cached);
+                        spans.Add(new QwenVLVisionSpan(imagePadId, cached.TokenCount, cached.Extra0, cached.Extra1));
+                        continue;
+                    }
+
+                    // One clip is resized as a whole: the Qwen3-VL video processor fits
+                    // the padded frame count against a total-pixel budget, and every
+                    // pair of the clip shares that size (its frames come from one file).
+                    var groups = item.Groups!;
+                    string firstFrame = message.ImagePaths[groups[0].First];
+                    var (width, height) = Qwen35ImageProcessor.ReadImageDimensions(firstFrame);
+                    var (resizedH, resizedW) = processor.SmartResizeVideo(
+                        groups.Count * QwenVideoFrames.TemporalPatchSize, height, width);
+                    foreach (var group in groups)
+                    {
+                        var cached = GetOrCreateQwenVLVideoEmbedding(encoder, processor,
+                            message.ImagePaths[group.First], message.ImagePaths[group.Second], resizedH, resizedW);
+                        cachedEmbeddings.Add(cached);
+                        spans.Add(new QwenVLVisionSpan(videoPadId, cached.TokenCount, cached.Extra0, cached.Extra1));
                     }
                 }
-                else
-                {
-                    int imgBase = textPos;
-                    for (int h = 0; h < mergedH; h++)
-                    {
-                        for (int w = 0; w < mergedW; w++)
-                        {
-                            int t = imgStart + h * mergedW + w;
-                            thw[3 * t + 0] = imgBase;        // T axis: constant for a single image
-                            thw[3 * t + 1] = imgBase + h;    // H axis
-                            thw[3 * t + 2] = imgBase + w;    // W axis
-                        }
-                    }
-                    // After the image, the running scalar jumps past the
-                    // image's max H/W so subsequent text tokens don't alias
-                    // image positions.
-                    textPos = imgBase + Math.Max(mergedH, mergedW);
-                }
+            }
 
+            var padIds = new HashSet<int> { imagePadId };
+            if (videoPadId >= 0) padIds.Add(videoPadId);
+            var (expanded, thw, starts) = LayoutQwenVLPrompt(inputTokens, spans, padIds);
+            for (int i = 0; i < spans.Count; i++)
+            {
+                if (starts[i] < 0)
+                    continue;
                 _preparedVisionEmbeddings.Add(new PreparedEmbeddingSpan(
-                    cachedEmbeddings[imgIdx],
-                    imgStart,
-                    imgStart,
-                    imgStart + imgTokenCount));
-
-                writeIdx = imgStart + imgTokenCount;
-                searchFrom = imgStart + imgTokenCount;
-                imgIdx++;
+                    cachedEmbeddings[i], starts[i], starts[i], starts[i] + spans[i].TokenCount));
             }
 
             // Stash on the injector so QueuePromptEmbeddingsForSlice can push
@@ -551,7 +652,111 @@ namespace TensorSharp.Models
                 _mropePositionsByRequest[key] = thw;
             }
 
-            return inputTokens;
+            return expanded;
+        }
+
+        /// <summary>One vision span of a Qwen-VL prompt, in prompt order: which pad token
+        /// it expands, how many merged tokens it holds and its merged (H, W) grid.</summary>
+        internal readonly record struct QwenVLVisionSpan(int PadTokenId, int TokenCount, int MergedHeight, int MergedWidth);
+
+        /// <summary>
+        /// Expand each vision placeholder of a Qwen-VL prompt to its span's token count
+        /// and build the per-token (T,H,W) M-RoPE position table for the expanded
+        /// prompt. vLLM / HF Qwen3-VL (<c>get_rope_index</c>) assign positions like this:
+        /// <list type="bullet">
+        /// <item>text tokens get (k, k, k) where k is the running scalar position;</item>
+        /// <item>a vision span whose merged grid is H x W gets, at grid cell (h, w),
+        /// (base, base + h, base + w) where base is the running position at its start;
+        /// after the span the running position resumes at base + max(H, W), so the
+        /// following text never aliases a span position. A still image is one such
+        /// span; each temporal pair of a video is one, so consecutive pairs, separated
+        /// by their timestamp text, get increasing temporal ids.</item>
+        /// </list>
+        /// Returns the expanded tokens, the flat [3 * count] position table and each
+        /// span's start index in the expanded prompt (-1 for a span the prompt never
+        /// rendered a placeholder for). A placeholder of the wrong kind for the next
+        /// span throws: an image where the attachments say video, or the reverse, means
+        /// the prompt and the attachment list disagree and injecting would put pixels
+        /// under the wrong tokens.
+        /// </summary>
+        internal static (List<int> Tokens, int[] Positions, int[] SpanStarts) LayoutQwenVLPrompt(
+            List<int> inputTokens, IReadOnlyList<QwenVLVisionSpan> spans, IReadOnlySet<int> padTokenIds)
+        {
+            ArgumentNullException.ThrowIfNull(inputTokens);
+            ArgumentNullException.ThrowIfNull(spans);
+            ArgumentNullException.ThrowIfNull(padTokenIds);
+
+            var expanded = new List<int>(inputTokens.Count + 1024);
+            var positions = new List<int>(3 * (inputTokens.Count + 1024));
+            var starts = new int[spans.Count];
+            Array.Fill(starts, -1);
+            int spanIdx = 0;
+            int textPos = 0;
+
+            foreach (int token in inputTokens)
+            {
+                if (padTokenIds.Contains(token) && spanIdx < spans.Count)
+                {
+                    var span = spans[spanIdx];
+                    if (span.PadTokenId != token)
+                    {
+                        throw new InvalidOperationException(
+                            $"Qwen-VL prompt placeholder {spanIdx} is token {token} but attachment {spanIdx} expands " +
+                            $"token {span.PadTokenId}: the rendered prompt and the message attachments disagree " +
+                            "about which spans are images and which are video pairs.");
+                    }
+                    if (span.TokenCount <= 0)
+                        throw new InvalidOperationException($"Qwen-VL vision span {spanIdx} has no tokens.");
+
+                    starts[spanIdx] = expanded.Count;
+                    int mergedH = span.MergedHeight;
+                    int mergedW = span.MergedWidth;
+                    if (mergedH * mergedW != span.TokenCount)
+                    {
+                        Console.WriteLine($"[qwen-vl-mrope] span {spanIdx} grid {mergedH}x{mergedW}={mergedH * mergedW} " +
+                                          $"!= token count {span.TokenCount}; falling back to text-only positions");
+                        for (int t = 0; t < span.TokenCount; t++)
+                        {
+                            expanded.Add(token);
+                            positions.Add(textPos); positions.Add(textPos); positions.Add(textPos);
+                            textPos++;
+                        }
+                    }
+                    else
+                    {
+                        int spanBase = textPos;
+                        for (int h = 0; h < mergedH; h++)
+                        {
+                            for (int w = 0; w < mergedW; w++)
+                            {
+                                expanded.Add(token);
+                                positions.Add(spanBase);        // T axis: constant within one span
+                                positions.Add(spanBase + h);    // H axis
+                                positions.Add(spanBase + w);    // W axis
+                            }
+                        }
+                        // After the span, the running scalar jumps past its max H/W so
+                        // subsequent text tokens don't alias span positions.
+                        textPos = spanBase + Math.Max(mergedH, mergedW);
+                    }
+                    spanIdx++;
+                    continue;
+                }
+
+                // Text, or a placeholder beyond the attachment list (left as it is, the
+                // way ExpandImageTokens always has).
+                expanded.Add(token);
+                positions.Add(textPos); positions.Add(textPos); positions.Add(textPos);
+                textPos++;
+            }
+
+            if (spanIdx < spans.Count)
+            {
+                Console.WriteLine($"Warning: the prompt renders {spanIdx} Qwen-VL vision placeholder(s) for " +
+                                  $"{spans.Count} attachment span(s); the remaining span(s) are not injected.");
+            }
+
+            return (expanded, positions.ToArray(), starts);
         }
 
         internal List<int> ProcessMistral3History(Mistral3Model model, List<ChatMessage> history, List<int> inputTokens)
@@ -610,90 +815,81 @@ namespace TensorSharp.Models
 
         internal List<int> ProcessNemotronHistory(NemotronModel model, List<ChatMessage> history, List<int> inputTokens)
         {
-            if (model.VisionEncoder == null)
+            if (!history.Exists(message => message.ImagePaths?.Count > 0 || message.AudioPaths?.Count > 0))
                 return inputTokens;
-
+            // Audio without a loaded tower is a refusal, not a warning: a request
+            // that carried on would hand the model an unfilled <so_embedding>
+            // placeholder - a silent downgrade the request-level gates (OpenAI /
+            // Responses parsers, Web UI, CLI) already refuse through
+            // AudioInputSupport; this is the last line for callers that bypass them.
+            if (model.AudioEncoder == null && history.Exists(message => message?.AudioPaths is { Count: > 0 }))
+                throw new NotSupportedException(NemotronModel.AudioInputUnsupportedMessage);
             int imageTokenId = _model.Tokenizer.LookupToken("<image>");
             int imageStartId = _model.Tokenizer.LookupToken("<img>");
             int imageEndId = _model.Tokenizer.LookupToken("</img>");
             if (imageTokenId < 0) imageTokenId = 18;
             if (imageStartId < 0) imageStartId = 19;
             if (imageEndId < 0) imageEndId = 20;
-
-            int searchFrom = 0;
-            foreach (var message in history)
+            int audioTokenId = _model.Tokenizer.LookupToken("<so_embedding>");
+            int audioStartId = _model.Tokenizer.LookupToken("<so_start>");
+            int audioEndId = _model.Tokenizer.LookupToken("<so_end>");
+            var placements = PlanNemotronMedia(history, inputTokens, imageTokenId, audioTokenId);
+            int added = 0;
+            foreach (var placement in placements)
             {
-                if (message.ImagePaths != null && message.ImagePaths.Count > 0)
-                {
-                    foreach (var imagePath in message.ImagePaths)
+                if (placement.Audio && (audioStartId < 0 || audioEndId < 0))
+                    throw new NotSupportedException("Nemotron audio requires the <so_start> and <so_end> sentinel tokens, which this tokenizer does not define.");
+                if (!placement.Audio && model.VisionEncoder == null)
+                    throw new NotSupportedException("Nemotron image input requires a vision projector.");
+                CachedEmbedding cached = placement.Audio
+                    ? GetOrCreateCachedEmbedding(_audioCache, placement.Path, fullPath =>
                     {
-                        if (string.IsNullOrEmpty(imagePath))
-                            continue;
-
-                        CachedEmbedding cached = GetOrCreateNemotronVisionEmbedding(model, imagePath);
-                        int tokenPosition = FindTokenPosition(inputTokens, imageTokenId, searchFrom);
-                        if (tokenPosition < 0)
-                            continue;
-
-                        inputTokens = ExpandSingleTokenPlaceholder(
-                            inputTokens, tokenPosition, imageStartId, cached.TokenCount, imageEndId);
-
-                        // Insertion point is right after the start sentinel token.
-                        _preparedVisionEmbeddings.Add(new PreparedEmbeddingSpan(
-                            cached,
-                            tokenPosition + 1,
-                            tokenPosition,
-                            tokenPosition + cached.TokenCount + 2));
-
-                        searchFrom = tokenPosition + cached.TokenCount + 2;
-                    }
-                }
-
-                // Audio path: the chat template emits a `<so_embedding>` per uploaded
-                // audio file so the model "sees" the modality, but real inference is
-                // gated on a Parakeet audio mmproj that this distribution does not ship.
-                // The clip is still decoded and turned into its log-mel spectrogram so
-                // the frontend is exercised and the operator is told, once, why no audio
-                // inference will happen. (This used to live in the CLI, which meant the
-                // server silently ignored audio entirely; it belongs with the rest of
-                // the architecture's media handling.)
-                if (message.AudioPaths != null && message.AudioPaths.Count > 0)
-                    PreprocessNemotronAudioForVerification(message.AudioPaths[0]);
+                        float[] samples = NemotronAudioPreprocessor.DecodeAudioFile(fullPath);
+                        var (mel, frames, validFrames) = NemotronAudioPreprocessor.ComputeParakeetMelSpectrogram(samples);
+                        return CreateCachedEmbedding(fullPath, model.AudioEncoder.Encode(mel, frames, validFrames));
+                    })
+                    : GetOrCreateNemotronVisionEmbedding(model, placement.Path);
+                int position = checked(placement.Position + added);
+                inputTokens = ExpandSingleTokenPlaceholder(inputTokens, position,
+                    placement.Audio ? audioStartId : imageStartId, cached.TokenCount,
+                    placement.Audio ? audioEndId : imageEndId);
+                if (placement.Audio)
+                    for (int i = 0; i < cached.TokenCount; i++) inputTokens[position + 1 + i] = audioTokenId;
+                var span = new PreparedEmbeddingSpan(cached, position + 1, position, position + cached.TokenCount + 2);
+                (placement.Audio ? _preparedAudioEmbeddings : _preparedVisionEmbeddings).Add(span);
+                added = checked(added + cached.TokenCount + 1);
             }
-
             return inputTokens;
         }
 
-        private bool _warnedNemotronAudioUnsupported;
-
-        /// <summary>
-        /// Decode one audio clip and compute its Parakeet-style log-mel spectrogram,
-        /// then say plainly that no audio inference will run. Nemotron-H Omni's audio
-        /// tower needs a Parakeet <c>mmproj</c> that the public GGUFs do not ship, so
-        /// this exercises the frontend and refuses to pretend the modality worked.
-        /// Warns at most once per injector so a long conversation is not spammed.
-        /// </summary>
-        private void PreprocessNemotronAudioForVerification(string audioPath)
+        // Plan against the original tokens before expanding either modality. A
+        // manually placed audio marker may precede an image in the same turn.
+        // Independent cursors retain per-modality attachment order; sorting the
+        // positions makes every recorded insertion offset valid after expansion.
+        internal static IReadOnlyList<(int Position, bool Audio, string Path)> PlanNemotronMedia(
+            List<ChatMessage> history, List<int> tokens, int imageTokenId, int audioTokenId)
         {
-            if (string.IsNullOrEmpty(audioPath))
-                return;
-
-            try
+            var result = new List<(int Position, bool Audio, string Path)>();
+            int imageFrom = 0, audioFrom = 0;
+            foreach (var message in history)
             {
-                float[] samples = NemotronAudioPreprocessor.DecodeAudioFile(audioPath);
-                var (_, frames, validFrames) = NemotronAudioPreprocessor.ComputeParakeetMelSpectrogram(samples);
-                if (_warnedNemotronAudioUnsupported)
-                    return;
-                _warnedNemotronAudioUnsupported = true;
-                Console.Error.WriteLine(
-                    $"WARNING: Nemotron audio decoded ({(double)samples.Length / NemotronAudioPreprocessor.SampleRate:F1}s, " +
-                    $"{validFrames}/{frames} mel frames) but NOT used: audio inference needs a Parakeet audio mmproj " +
-                    "that the public Nemotron GGUFs do not ship. The clip was preprocessed for verification only.");
+                foreach (bool audio in new[] { false, true })
+                {
+                    var paths = audio ? message.AudioPaths : message.ImagePaths;
+                    if (paths == null) continue;
+                    foreach (string path in paths)
+                    {
+                        if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Nemotron media paths must not be empty.");
+                        int marker = audio ? audioTokenId : imageTokenId;
+                        int position = marker < 0 ? -1 : FindTokenPosition(tokens, marker, audio ? audioFrom : imageFrom);
+                        if (position < 0) throw new InvalidOperationException("Nemotron media attachment has no matching prompt placeholder.");
+                        result.Add((position, audio, path));
+                        if (audio) audioFrom = position + 1; else imageFrom = position + 1;
+                    }
+                }
             }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"WARNING: Nemotron audio preprocessing failed: {ex.Message}");
-            }
+            result.Sort((a, b) => a.Position.CompareTo(b.Position));
+            return result;
         }
 
         private CachedEmbedding GetOrCreateNemotronVisionEmbedding(NemotronModel model, string imagePath)
@@ -743,9 +939,9 @@ namespace TensorSharp.Models
         private CachedEmbedding GetOrCreateGemma4VisionEmbedding(
             Gemma4Model model,
             Gemma4ImageProcessor processor,
-            string imagePath)
+            string imagePath, bool videoFrame)
         {
-            return GetOrCreateCachedEmbedding(_visionCache, imagePath, fullPath =>
+            return GetOrCreateCachedEmbedding(videoFrame ? _videoFrameCache : _visionCache, imagePath, fullPath =>
             {
                 var (pixels, imageWidth, imageHeight) = processor.ProcessImage(fullPath);
                 Tensor embeddings = model.VisionEncoder.Encode(pixels, imageWidth, imageHeight);
@@ -797,6 +993,54 @@ namespace TensorSharp.Models
                 int mergedW = resizedWidth / processor.PatchSize / processor.MergeSize;
                 return CreateCachedEmbedding(fullPath, embeddings, mergedH, mergedW);
             });
+        }
+
+        /// <summary>
+        /// The embedding of one temporal pair of video frames, cached under both frame
+        /// paths and the clip's resized size (the size depends on the whole clip, so the
+        /// same two frames in a longer clip are a different entry). Both frames are
+        /// resized to the clip size; a pair that repeats the clip's last frame encodes
+        /// that frame twice, as the Qwen-VL processor pads an odd clip.
+        /// </summary>
+        private CachedEmbedding GetOrCreateQwenVLVideoEmbedding(
+            Qwen35VisionEncoder encoder,
+            Qwen35ImageProcessor processor,
+            string firstFramePath,
+            string secondFramePath,
+            int resizedHeight,
+            int resizedWidth)
+        {
+            string first = NormalizePath(firstFramePath);
+            string second = NormalizePath(secondFramePath);
+            string firstId = MediaContentId.OfFile(first) ?? "path:" + first;
+            string secondId = MediaContentId.OfFile(second) ?? "path:" + second;
+            string key = "vid2:" + firstId + ":" + secondId + ":" + resizedHeight + "x" + resizedWidth;
+            GetMediaVersion(first, out long firstSize, out long firstTicks);
+            GetMediaVersion(second, out long secondSize, out long secondTicks);
+            if (_videoFrameCache.TryGetValue(key, out var cached) &&
+                (cached.ContentId != null && !key.Contains("path:", StringComparison.Ordinal)
+                    || cached.MatchesPair(firstSize, firstTicks, secondSize, secondTicks)))
+            {
+                TouchAndPin(cached);
+                return cached;
+            }
+            if (cached != null)
+                RemoveCachedEmbedding(_videoFrameCache, key, cached);
+
+            float[] firstPixels = processor.ProcessImage(first, resizedHeight, resizedWidth);
+            float[] secondPixels = string.Equals(first, second, StringComparison.Ordinal)
+                ? firstPixels
+                : processor.ProcessImage(second, resizedHeight, resizedWidth);
+            Tensor embeddings = encoder.Encode(firstPixels, secondPixels, resizedHeight, resizedWidth);
+            int mergedH = resizedHeight / processor.PatchSize / processor.MergeSize;
+            int mergedW = resizedWidth / processor.PatchSize / processor.MergeSize;
+            var fresh = new CachedEmbedding(key, firstSize, firstTicks, embeddings, (int)embeddings.Sizes[0],
+                mergedH, mergedW, secondSize, secondTicks) { ContentId = key };
+            if (!key.Contains("path:", StringComparison.Ordinal)
+                && TryTakeRacedEntry(_videoFrameCache, key, fresh, out CachedEmbedding raced))
+                return raced;
+            AddCachedEmbedding(_videoFrameCache, key, fresh);
+            return fresh;
         }
 
         /// <summary>
@@ -896,6 +1140,42 @@ namespace TensorSharp.Models
             });
         }
 
+        /// <summary>
+        /// The prompt carries each image as rows of <c>[IMG]</c> separated by
+        /// <c>[IMG_BREAK]</c> and closed by <c>[IMG_END]</c>, but the encoder returns only
+        /// the <paramref name="rows"/> x <paramref name="cols"/> patch embeddings. The span
+        /// is injected row-for-row from its first position, so the embedding has to be laid
+        /// out exactly like the tokens: each row of patches followed by the break (or, for
+        /// the last row, end) marker's own token embedding - what llama.cpp's Pixtral graph
+        /// builds from <c>v.token_embd.img_break</c>. Before this the 391 patch rows of a
+        /// 23x17 image were copied contiguously over a 408-token span: every row after the
+        /// first slid one position further onto the markers, and the last 17 positions kept
+        /// the plain <c>[IMG]</c>/<c>[IMG_BREAK]</c> text embeddings.
+        /// </summary>
+        internal static unsafe Tensor LayOutMistral3ImageRows(Tensor patches, Tensor markers, int rows, int cols)
+        {
+            int dim = (int)patches.Sizes[1];
+            if (patches.Sizes[0] != (long)rows * cols)
+                throw new InvalidOperationException($"Mistral 3 image encoder returned {patches.Sizes[0]} patch rows for a {cols}x{rows} grid.");
+            if (markers.Sizes[0] != 2 || markers.Sizes[1] != dim)
+                throw new InvalidOperationException("Mistral 3 image layout needs the [IMG_BREAK] and [IMG_END] token embeddings.");
+
+            float[] patchData = patches.GetElementsAsFloat((int)patches.ElementCount());
+            float[] markerData = markers.GetElementsAsFloat((int)markers.ElementCount());
+            var laid = new float[(long)rows * (cols + 1) * dim];
+            for (int r = 0; r < rows; r++)
+            {
+                int dstRow = r * (cols + 1);
+                Array.Copy(patchData, (long)r * cols * dim, laid, (long)dstRow * dim, (long)cols * dim);
+                int marker = r == rows - 1 ? 1 : 0;
+                Array.Copy(markerData, (long)marker * dim, laid, (long)(dstRow + cols) * dim, dim);
+            }
+
+            var result = new Tensor(patches.Allocator, DType.Float32, rows * (cols + 1), dim);
+            result.SetElementsAsFloat(laid);
+            return result;
+        }
+
         private CachedEmbedding GetOrCreateMistral3VisionEmbedding(
             Mistral3Model model,
             Mistral3ImageProcessor processor,
@@ -904,9 +1184,14 @@ namespace TensorSharp.Models
             return GetOrCreateCachedEmbedding(_visionCache, imagePath, fullPath =>
             {
                 var (pixels, imageWidth, imageHeight) = processor.ProcessImage(fullPath);
-                Tensor embeddings = model.VisionEncoder.Encode(pixels, imageWidth, imageHeight);
                 int numRows = imageHeight / model.VisionEncoder.PatchSize / model.VisionEncoder.SpatialMergeSize;
                 int numCols = imageWidth / model.VisionEncoder.PatchSize / model.VisionEncoder.SpatialMergeSize;
+                using Tensor patches = model.VisionEncoder.Encode(pixels, imageWidth, imageHeight);
+                using Tensor markers = model.EmbedTokensForMultimodal(new[]
+                {
+                    Mistral3ImageProcessor.ImgBreakTokenId, Mistral3ImageProcessor.ImgEndTokenId,
+                });
+                Tensor embeddings = LayOutMistral3ImageRows(patches, markers, numRows, numCols);
                 return CreateCachedEmbedding(fullPath, embeddings, numRows, numCols);
             });
         }
@@ -919,13 +1204,125 @@ namespace TensorSharp.Models
             string fullPath = NormalizePath(path);
             GetMediaVersion(fullPath, out long fileSize, out long lastWriteUtcTicks);
 
-            if (cache.TryGetValue(fullPath, out var cached) && cached.Matches(fileSize, lastWriteUtcTicks))
-                return cached;
+            // Keyed by what the file CONTAINS, namespaced by the cache (image, video
+            // frame, audio: each is encoded differently). A file that cannot be hashed
+            // keeps the old path identity, still guarded by its size and write time.
+            string contentHash = MediaContentId.OfFile(fullPath);
+            string kind = ReferenceEquals(cache, _audioCache) ? "aud"
+                : ReferenceEquals(cache, _videoFrameCache) ? "vf" : "img";
+            string key = contentHash != null ? kind + ":" + contentHash : kind + ":path:" + fullPath;
 
-            cached?.Dispose();
+            if (cache.TryGetValue(key, out var cached)
+                && (contentHash != null || cached.Matches(fileSize, lastWriteUtcTicks)))
+            {
+                TouchAndPin(cached);
+                return cached;
+            }
+
+            if (cached != null)
+                RemoveCachedEmbedding(cache, key, cached);
             CachedEmbedding fresh = factory(fullPath);
-            cache[fullPath] = fresh;
+            if (contentHash != null && TryTakeRacedEntry(cache, key, fresh, out CachedEmbedding raced))
+                return raced;
+            fresh.ContentId = key;
+            AddCachedEmbedding(cache, key, fresh);
             return fresh;
+        }
+
+        /// <summary>
+        /// Every encoder yields the GPU compute lock between blocks, so another preparation
+        /// carrying the same media can encode and cache it while this one is still encoding.
+        /// Keep that entry (it may already be in a prepared prompt) and drop this copy;
+        /// overwriting it lost the entry without disposing it or releasing its bytes.
+        /// </summary>
+        private bool TryTakeRacedEntry(
+            Dictionary<string, CachedEmbedding> cache, string key, CachedEmbedding fresh, out CachedEmbedding raced)
+        {
+            if (!cache.TryGetValue(key, out raced))
+                return false;
+            fresh.Dispose();
+            TouchAndPin(raced);
+            return true;
+        }
+
+        private void TouchAndPin(CachedEmbedding entry)
+        {
+            entry.LastUsed = ++_embeddingUseClock;
+            PreparationContext context = _preparation.Value;
+            if (context != null)
+            {
+                entry.PreparationPins++;
+                context.Pinned.Add(entry);
+            }
+        }
+
+        private void AddCachedEmbedding(Dictionary<string, CachedEmbedding> cache, string key, CachedEmbedding entry)
+        {
+            // A path-identified entry that went stale while this one was encoding: release
+            // its bytes (and its tensor, unless a prepared prompt still uses it).
+            if (cache.TryGetValue(key, out CachedEmbedding displaced) && !ReferenceEquals(displaced, entry))
+                RemoveCachedEmbedding(cache, key, displaced);
+            cache[key] = entry;
+            _embeddingCacheBytes += entry.Bytes;
+            TouchAndPin(entry);
+            EvictEmbeddingsBeyondBudget();
+        }
+
+        private void RemoveCachedEmbedding(Dictionary<string, CachedEmbedding> cache, string key, CachedEmbedding entry)
+        {
+            cache.Remove(key);
+            _embeddingCacheBytes -= entry.Bytes;
+            if (!IsEmbeddingInUse(entry))
+                entry.Dispose();
+        }
+
+        /// <summary>Evict least-recently-used embeddings until the cache fits its byte
+        /// budget, skipping any a prepared prompt (or a preparation in progress) still
+        /// references. Callers hold the model's GPU compute lock, as every encoder does.</summary>
+        private void EvictEmbeddingsBeyondBudget()
+        {
+            while (_embeddingCacheBytes > EmbeddingCacheBudgetBytes)
+            {
+                Dictionary<string, CachedEmbedding> victimCache = null;
+                string victimKey = null;
+                CachedEmbedding victim = null;
+                foreach (var cache in new[] { _visionCache, _videoFrameCache, _audioCache })
+                {
+                    foreach (var pair in cache)
+                    {
+                        if (victim != null && pair.Value.LastUsed >= victim.LastUsed)
+                            continue;
+                        if (IsEmbeddingInUse(pair.Value))
+                            continue;
+                        victimCache = cache;
+                        victimKey = pair.Key;
+                        victim = pair.Value;
+                    }
+                }
+                if (victim == null)
+                    return;   // everything left is in use; the budget is exceeded for now
+                victimCache.Remove(victimKey);
+                _embeddingCacheBytes -= victim.Bytes;
+                victim.Dispose();
+            }
+        }
+
+        private bool IsEmbeddingInUse(CachedEmbedding entry)
+        {
+            if (entry.PreparationPins > 0)
+                return true;
+            lock (_bucketLock)
+            {
+                foreach (var bucket in _visionByRequest.Values)
+                    foreach (var span in bucket)
+                        if (ReferenceEquals(span.CacheEntry, entry))
+                            return true;
+                foreach (var bucket in _audioByRequest.Values)
+                    foreach (var span in bucket)
+                        if (ReferenceEquals(span.CacheEntry, entry))
+                            return true;
+            }
+            return false;
         }
 
         private static CachedEmbedding CreateCachedEmbedding(string fullPath, Tensor embeddings, int extra0 = 0, int extra1 = 0)
@@ -1189,9 +1586,14 @@ namespace TensorSharp.Models
         {
             ClearAllPreparedPromptState();
 
+            _embeddingCacheBytes = 0;
             foreach (var cached in _visionCache.Values)
                 cached.Dispose();
             _visionCache.Clear();
+
+            foreach (var cached in _videoFrameCache.Values)
+                cached.Dispose();
+            _videoFrameCache.Clear();
 
             foreach (var cached in _audioCache.Values)
                 cached.Dispose();

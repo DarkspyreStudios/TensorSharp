@@ -289,14 +289,10 @@ namespace
         ggml_tensor* k_attn = ggml_cont(sess.ctx, ggml_permute(sess.ctx, sess.k_in, 0, 2, 1, 3));
         ggml_tensor* v_attn = ggml_cont(sess.ctx, ggml_permute(sess.ctx, sess.v_in, 0, 2, 1, 3));
 
-        ggml_tensor* attn_out = ggml_flash_attn_ext(
-            sess.ctx, q_attn, k_attn, v_attn, sess.attn_mask, scale, 0.0f, 0.0f);
-
         if (has_sinks)
-        {
             sess.sinks_tensor = ggml_new_tensor_1d(sess.ctx, GGML_TYPE_F32, num_heads);
-            ggml_flash_attn_ext_add_sinks(attn_out, sess.sinks_tensor);
-        }
+        ggml_tensor* attn_out = flash_attn_ext_guarded(sess.ctx, "paged attention",
+            q_attn, k_attn, v_attn, sess.attn_mask, scale, 0.0f, 0.0f, sess.sinks_tensor);
 
         ggml_tensor* result = ggml_cpy(sess.ctx, attn_out, sess.attn_result);
         ggml_set_output(result);
@@ -314,6 +310,17 @@ namespace
             return false;
         }
 
+        // The kv_zero_covered_from tracking below relies on the K/V padding
+        // region [seq_len, bucket) starting out zero, but backend buffers are
+        // NOT zero-initialised (CPU is posix_memalign, CUDA is cudaMalloc, and
+        // both hand back memory a freed buffer just used). The mask only puts
+        // -inf on the padded keys; CUDA flash attention still forms q.k for
+        // them, and NaN + -inf = NaN poisons the whole softmax row. Nemotron
+        // 3.5 hit this after a long prompt's buffers were freed: the next
+        // batched prefill's first attention layer returned NaN for every row
+        // and the MoE router then had no finite logits. Clear once per build.
+        ggml_backend_buffer_clear(sess.buffer, 0);
+
         sess.num_q = num_q;
         sess.padded_kv_len_bucket = padded_kv_len_bucket;
         sess.num_heads = num_heads;
@@ -321,8 +328,8 @@ namespace
         sess.head_dim = head_dim;
         sess.scale_bits = float_bits(scale);
         sess.has_sinks = has_sinks;
-        // K/V buffer is zero-initialised by ggml_backend_alloc_ctx_tensors,
-        // so the entire padded range is already clean.
+        // The buffer was explicitly cleared above, so the entire padded
+        // range is already clean.
         sess.kv_zero_covered_from = 0;
         sess.valid = true;
         return true;
@@ -608,15 +615,11 @@ namespace
         ggml_tensor* k_attn = ggml_cont(ctx, ggml_permute(ctx, k_in, 0, 2, 1, 3));
         ggml_tensor* v_attn = ggml_cont(ctx, ggml_permute(ctx, v_in, 0, 2, 1, 3));
 
-        ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, q_attn, k_attn, v_attn,
-                                                   attn_mask, scale, 0.0f, 0.0f);
-
         ggml_tensor* sinks_tensor = nullptr;
         if (has_sinks)
-        {
             sinks_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, num_heads);
-            ggml_flash_attn_ext_add_sinks(attn_out, sinks_tensor);
-        }
+        ggml_tensor* attn_out = flash_attn_ext_guarded(ctx, "paged attention (device)",
+            q_attn, k_attn, v_attn, attn_mask, scale, 0.0f, 0.0f, sinks_tensor);
 
         ggml_tensor* result = ggml_cpy(ctx, attn_out, attn_result);
         ggml_set_output(result);

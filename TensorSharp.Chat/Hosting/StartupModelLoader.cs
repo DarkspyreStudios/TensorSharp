@@ -21,7 +21,10 @@ namespace TensorSharp.Server.Hosting
     /// <see cref="ModelService"/> before the host starts accepting requests.
     /// Throws when configuration is internally inconsistent (e.g. the requested
     /// backend isn't available) so the process fails fast rather than serving
-    /// 4xx/5xx responses for every request.
+    /// 4xx/5xx responses for every request. A load that is REFUSED (see
+    /// <see cref="ModelLoadRefusal"/>) is reported by the host through
+    /// <see cref="ReportRefusal"/>: one error line and
+    /// <see cref="HostExitCodes.ModelLoadRefused"/>, never an unhandled exception.
     /// </summary>
     public static class StartupModelLoader
     {
@@ -48,7 +51,7 @@ namespace TensorSharp.Server.Hosting
             }
 
             if (!BackendSelector.TryResolveSupportedBackend(options, configuredBackendInput, out string startupBackend, out string startupBackendError))
-                throw new InvalidOperationException(startupBackendError);
+                throw new ModelLoadRefusedException(startupBackendError);
 
             if (!File.Exists(options.StartupModelPath))
                 throw new FileNotFoundException($"Configured model file not found: {options.StartupModelPath}", options.StartupModelPath);
@@ -71,9 +74,9 @@ namespace TensorSharp.Server.Hosting
             // silently off. Promote it to a fail-fast startup error so the operator
             // sees exactly why MTP didn't engage instead of discovering it later.
             string mtpFatal = SpeculationStartupValidation.GetFatalActivationError(
-                modelService.DraftHeadActivationError);
+                modelService.DraftHeadActivationError, modelService.DraftHeadRefusedByModel);
             if (mtpFatal != null)
-                throw new InvalidOperationException(mtpFatal);
+                throw new ModelLoadRefusedException(mtpFatal);
 
             logger.LogInformation(LogEventIds.ModelLoadCompleted,
                 "Startup model loaded: {Model} architecture={Architecture} backend={Backend} mmproj={MmProj}",
@@ -101,6 +104,38 @@ namespace TensorSharp.Server.Hosting
         }
 
         /// <summary>
+        /// Report a refused startup load the way every host does: the stack trace goes to
+        /// the log at Debug only (<c>TENSORSHARP_LOG_LEVEL=Debug</c> shows it), then
+        /// <paramref name="releaseResources"/> runs, then exactly one line goes to
+        /// <paramref name="stderr"/>. Returns the exit code to leave with.
+        /// </summary>
+        /// <remarks>
+        /// The error line is written AFTER the release so it is the last thing on stderr
+        /// rather than being followed by teardown chatter, and a release that itself
+        /// fails cannot swallow it: that failure is written first, as its own line.
+        /// </remarks>
+        public static int ReportRefusal(Exception refusal, string reason, TextWriter stderr, ILogger logger,
+            Action releaseResources = null)
+        {
+            if (refusal == null) throw new ArgumentNullException(nameof(refusal));
+            if (stderr == null) throw new ArgumentNullException(nameof(stderr));
+
+            logger?.LogDebug(LogEventIds.ModelLoadFailed, refusal, "Startup model load refused");
+            try
+            {
+                releaseResources?.Invoke();
+            }
+            catch (Exception releaseEx)
+            {
+                stderr.WriteLine($"warning: releasing resources after the refused load failed: " +
+                    $"{releaseEx.GetType().Name}: {ModelLoadRefusal.ToSingleLine(releaseEx.Message)}");
+            }
+            stderr.WriteLine(ModelLoadRefusal.FormatErrorLine(reason ?? refusal.Message));
+            stderr.Flush();
+            return HostExitCodes.ModelLoadRefused;
+        }
+
+        /// <summary>
         /// Give the engine somewhere to keep the shared-prefix checkpoint between
         /// launches, or explain why it has nowhere.
         /// </summary>
@@ -121,8 +156,8 @@ namespace TensorSharp.Server.Hosting
             if (!options.PrefixCacheEnabled)
             {
                 logger.LogInformation(LogEventIds.HostConfiguration,
-                    "Prefix cache disabled (--no-prefix-cache): the first message of this process "
-                    + "will prefill the whole shared prompt, and nothing is kept between launches.");
+                    "Prefix cache disabled (--no-prefix-cache): runtime reuse, startup warmup, "
+                    + "and disk persistence are off.");
                 return;
             }
 
@@ -136,7 +171,7 @@ namespace TensorSharp.Server.Hosting
                 var store = new PrefixCheckpointFileStore(options.PrefixCacheDirectory, identity, logger);
                 modelService.EngineHost.PrefixCheckpointStore = store;
                 logger.LogInformation(LogEventIds.HostConfiguration,
-                    "Prefix cache: keeping shared-prefix checkpoints in {Directory} ({Bytes} bytes already there). "
+                    "Prefix cache persistence: keeping shared-prefix checkpoints in {Directory} ({Bytes} bytes already there). "
                     + "Turn it off with --no-prefix-cache; move it with TENSORSHARP_PREFIX_CACHE_DIR.",
                     store.Directory, store.TotalBytes());
             }

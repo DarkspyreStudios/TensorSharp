@@ -403,6 +403,24 @@ GGUF 宣称 1,048,576 token，但这并不意味着缓存放得下：78 层里�
 `MAX_CONTEXT` 则反过来：你指定的上下文是硬性要求，放得下就照办，放不下就带着数字拒绝，
 而不会在你背后悄悄缩小。
 
+在 `--tp N` 下，拒绝信息只会给出在该并行度下真正能让加载放得下的办法：一个放得下的
+`MAX_CONTEXT`、能容纳你所请求上下文的 `--n-cpu-moe` 数值，或者——当所有路由专家都放到系统
+内存后，每个 rank 复制的权重仍然太大时——改为不使用 `--tp` 运行。以下是在 2x A40 上用
+GLM-5.3-Flash UD-Q2_K_XL 实测的输出（行已截短）：
+
+```
+[glm] not enough VRAM for --tp 2: 52.5 GiB per rank of weights plus 5.5 GiB of KV and graphs
+      for a 65536-token context, against 41.2 GiB usable on the smallest rank. Re-run with
+      --n-cpu-moe 19 (keeps the routed experts of the first 19 layer(s) in system RAM).
+[glm] not enough VRAM for --tp 2: 6.4 GiB per rank of weights plus 62.3 GiB of KV and graphs
+      for a 1048576-token context, against 41.2 GiB usable on the smallest rank. Set
+      MAX_CONTEXT to 571904 or less.
+```
+
+过去这类拒绝一律以 "Lower MAX_CONTEXT (N tokens would fit) or add --n-cpu-moe N" 结尾，
+即使问题只是权重本身放不下、提示 "0 tokens would fit" 时也是如此。与所有被拒绝的加载一样，
+宿主随后会把原因作为 stderr 的最后一行再打印一次，并以退出码 2 退出（见 USAGE_zh-cn.md 的"退出码"）。
+
 ### 环境变量
 
 | 变量 | 默认值 | 含义 |
@@ -440,6 +458,13 @@ GGUF 宣称 1,048,576 token，但这并不意味着缓存放得下：78 层里�
 作答。历史轮次的思考内容始终不会带进提示，与模板 `clear_thinking` 的默认行为一致。工具调用回来的形式是
 `<tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>`，
 每个参数一个 XML 元素（用 `tojson` 渲染的值会被解析回数字 / 数组 / 对象）。
+
+生成遇到 `<|observation|>` 也会停止（即 GGUF 的 `tokenizer.ggml.eom_token_id`，
+llama.cpp 同样把它并入生成结束集合）：模型在工具调用之后紧接着写出它，不停下来的话
+模型会自己编造工具结果。提示使用 `glm4` / `chatglm-bpe` 预分词器切分，数字最多三位
+一组；若逐位切分，数字以模型训练时从未见过的形式输入，模型会把 `INV-472` 复述成
+`INV-4472`。切分结果与 token id 都与参考 `tokenizer.json` 做了比对
+（`Glm4TokenizerParityTests`）。
 
 
 ## GLM-5.3（`glm-dsa`）
@@ -528,9 +553,15 @@ GLM-5.3-Flash 是混合架构的后继者：320B 参数、288 个路由专家（
 | SwiGLU 截断 | 所有 FFN，上限 10 | 激活前 `up ∈ [−L, L]`、`gate ∈ (−∞, L]`——稠密层、共享专家、路由专家一视同仁 |
 | 视觉 | `mmproj-BF16.gguf`（GLM-OCR ViT） | 见下文 |
 
-KDA 递归状态（卷积尾部 + delta-net 状态，每序列约 150 MB）无法回退，所以只有当
+KDA 递归状态（卷积尾部 + delta-net 状态，每序列约 150 MB）无法按位置回退，所以只有当
 新 prompt **恰好扩展**缓存前缀时才复用——与 Qwen 3.5 / 3.6 GDN 家族相同的契约；`Reset`
-会连同位置计数一起清空该状态。
+会连同位置计数一起清空该状态。唯一精确的"回退"是投机解码的回滚：每次验证批次之前
+都会在设备上拍一份该状态的快照，窗口被部分拒绝时再拷回去（见[投机解码](#glm-53-flash-上的投机解码)）。
+
+原生执行器拒绝的 KV 回退（目标超过 slot 当前位置、glm5next 上除回到 0 或当前位置之外的任何回退，
+或 KDA 恢复失败的 slot），在 glm-dsa 与 glm5next 上都会作为拒绝返回给调用方：`TryTruncateKVCache`
+返回 false，引擎改为重新 prefill 而不复用；不可拒绝的 `TruncateKVCache` 会抛异常。过去它会在位置
+没有移动的情况下报告成功（`GlmTruncateRefusalTests`）。
 
 ### 原生本地张量并行
 
@@ -570,8 +601,58 @@ GLM-5.3-Flash 在默认的完整切分（head 与路由专家隐藏行都切）�
   （`TSGgml_GlmVisionEncoderF32`）；投影后的嵌入在原生执行器内覆盖
   `<|image|>` 占位行（`TSGgml_GlmQueueVisionRows`）——文本塔是 NoPE，
   完全不需要 MRoPE 记账。
-- **暂未支持**：NextN/MTP 投机（llama.cpp 同样 assert 其 glm5next MTP 图未实现；
-  `--spec` 打印提示后按标准解码服务）。
+- **投机解码**：无权重的 n-gram 草稿器（`--spec --spec-type ngram`），原生执行器与
+  托管 `cpu` 路径都支持；见下一节。checkpoint 自带的 NextN/MTP 块**未**构建
+  （llama.cpp 同样 assert 其 glm5next MTP 图未实现），因此只传 `--spec`——`auto` /
+  `draft-head`——会打印提示并按标准解码服务。
+
+### GLM-5.3-Flash 上的投机解码
+
+GLM-5.2 的投机路径是位置回退：MLA 行与 indexer key 都按位置存放，丢掉被拒的尾巴不花
+任何代价（`SpecVerifyPersistsAcceptedKv = true`）。glm5next 的 34 个 KDA 层各自携带一份
+递归状态，验证批次会把它整整推进一个窗口，没有任何位置运算能把它找回来。因此在这个
+架构上主干改用递归契约——与 Qwen 3.5 的 GatedDeltaNet、Qwen 3.8 的主干相同：
+
+1. 验证之前，执行器把每个 KDA 层的卷积尾部与 delta-net 状态（`--tp` 下每个 rank 各自的）
+   拷到它所在设备上的快照区（`TSGgml_GlmKdaStateCapture`；约 150 MB，设备内拷贝，
+   每个模型只有一块快照区，因为一步之内就完成快照与恢复），并记下位置；
+2. 验证是一张覆盖 `[last, d1..dK]` 的主干图，LM head 跑在每一行上
+   （`TSGgml_GlmSpecForward`，未改动）；
+3. 部分被拒时，把快照拷回去并把 slot 回退到记录的位置（`TSGgml_GlmKdaStateRestore`），
+   运行时再重跑已接受前缀，于是状态等于对这些 token 的普通解码
+   （`SpecVerifyPersistsAcceptedKv = false`）。回退到其它任何位置都会报错拒绝，而不是
+   悄悄保留已推进的状态（`SupportsKVCacheTruncation` 仍为 false）。
+
+超连接流就是残差流（按 token，不是携带状态），MLA 行按位置、池化 indexer key 按格存放，
+所以回滚只需恢复 KDA 状态，其余都会在被读到之前由重跑覆盖。托管 `cpu` 路径用主机数组
+做同样的事（`GlmDsaModel.Glm5NextSpeculative.cs`）。由于每多验证一行都要跑 KDA 扫描，
+而一次拒绝要付出恢复加重跑，主干默认偏好 3 的草稿窗口（`SpecPreferredDraftWindow`，
+与 Qwen 3.8 的实测一致）；`--spec-draft N` 仍然得到它要求的值。如果原生库早于快照 API
+（没有 `TSGgml_GlmKdaStateApiVersion` 导出），模型会报告投机无收益，从而在一开始就拒绝，
+而不是在验证中途失败。投机主干跟随已绑定的 slot（`SpecTrunkFollowsBoundCache`），
+因此服务端按 slot 服务的请求也能投机——这同时解除了 GLM-5.2 请求此前在那里遇到的
+一次性警告拒绝。
+
+在合成 KDA 夹具上已证明的事实（`Glm5NextSpeculativeRollbackTests`、
+`Glm5NextSpeculationEligibilityTests`，覆盖 `cpu` 与 `ggml_cpu`，
+`TS_TEST_GLM_CUDA=1` 时再加 `ggml_cuda`——保持默认的 cpu 后端 pin，因为执行器自己选择
+CUDA 设备）：n-gram 投机贪心与普通贪心逐 token
+一致，且确有草稿被提出、有窗口被部分拒绝；每个窗口末尾都必错的草稿器仍然得到普通
+解码的 token 流；回滚之后下一个 token 的 logits 在整个词表上与普通解码一致；验证各行
+等于逐 token 解码；托管与原生的 `SpecForward` 逐行一致，隐状态也一致。真实
+GLM-5.3-Flash checkpoint 上尚无投机解码实测，因此没有吞吐结论。
+
+C ABI 上的失败会被隔离而不是向外传播。抛异常的捕获（arena 分配、后端拷贝）返回失败并保持
+活动状态不变。只拷贝了部分层之后才抛异常的恢复会把该 slot 标记为不可用：forward、投机 forward、
+捕获、恢复与回退都会拒绝它，直到 `TSGgml_GlmResetChecked` 成功（`TSGgml_GlmReset` 与 glm5next
+回退到 0 现在都经过它，托管侧以 `GgmlGlmNative.ResetChecked` 调用）；其它 slot 照常运行。回滚测试
+套件中的 CUDA 行是 `[GlmNativeCudaFact]`（`TS_TEST_GLM_CUDA=1`），套件还在两个后端上检查 A/B/A
+绑定 slot 回滚；`Glm5NextNativeSnapshotBoundaryTests`（`TS_TEST_GLM_SNAPSHOT_BOUNDARY=1`，需要带
+测试钩子构建的原生库，其故障注入器 `TSGgml_GlmTestKdaSnapshotFault` 是 `TSG_TEST_EXPORT`，不进入
+iOS 导出列表）在 CPU 与 CUDA 上向捕获与恢复中途注入 `std::bad_alloc` 和非标准异常，并检查一次
+checked reset 能恢复完整词表的 logits。已记录的运行：
+[`glm5next-cuda-r4`](../validation/qualification-2026-09-16/glm5next-cuda-r4/README.md)
+（单张 A40 上原始 22/22 与扩展 26/26，无跳过）。
 
 ### 实测
 
@@ -597,6 +678,12 @@ llama.cpp 自己的 top-2 边距也只有约 0.13 logit，候选集完全相同�
 
 GLM-5.3-Flash 的模板始终思考：`<|system|>Reasoning Effort: Max` 无条件出现，生成提示
 总是以 `<think>` 开启，历史轮次保留思考内容（`clear_thinking` 默认 false）。
+由于提示无法关闭思考，`"think": false` 只决定客户端看到什么：回复在 `</think>` 之前
+都按思考内容解析，之后的部分才是答案。流式客户端仍会在生成时收到这段思考
+（`reasoning_content` / `thinking` 增量，与其他始终思考的系列一致），因此若
+`max_tokens` 全部耗在思考块内，答案为空。以 JSON 开头且从不闭合思考块的回复
+（即从第一个 token 起就受 `response_format` 语法约束的回复）本身就是答案。
+`response_format` 配合 `"think": true` 时，JSON 语法在 `</think>` 之后才生效。
 工具调用与 GLM-5.2 相同的 XML 元素形式。图像渲染为
 `<|begin_of_image|><|image|><|end_of_image|>`，宿主把 `<|image|>` 展开为合并
 patch 的 token 数。

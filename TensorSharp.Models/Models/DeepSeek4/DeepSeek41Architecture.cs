@@ -4,6 +4,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using TensorSharp.Models.Architecture;
+using TensorSharp.Runtime;
 
 namespace TensorSharp.Models
 {
@@ -50,13 +51,26 @@ namespace TensorSharp.Models
                     "--backend ggml_cpu or --backend cpu (portability/correctness only). " +
                     "TS_DSV41_ALLOW_NON_CUDA_GPU=1 additionally permits ggml_vulkan/ggml_metal, whose "
                     + "architecture-specific ops run on the CPU backend.");
+            // A q8_0/q4_0 cache cannot be honoured on any V4.1 executor; refuse it
+            // here, before the checkpoint is opened, instead of loading with F16
+            // caches while reporting the requested dtype (which is what happened).
+            DeepSeek4Architecture.RefuseBlockQuantizedKvCache("DeepSeek V4.1 Flash", v41: true);
             if (tpGroup != null)
                 throw new NotSupportedException(
                     "DeepSeek V4.1 uses a single-process native executor and does not support distributed tensor-parallel groups. " +
                     "Start without --tp-node-id/--tp-peers.");
-            if (!string.IsNullOrWhiteSpace(draftModelPath) ||
-                !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TS_DSV4_DSPARK")))
-                throw new NotSupportedException("DeepSeek V4.1 DSpark speculative decoding is not implemented; omit the draft model.");
+            if ((!string.IsNullOrWhiteSpace(draftModelPath) ||
+                 !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TS_DSV4_DSPARK"))) &&
+                backend != BackendType.GgmlCuda && backend != BackendType.GgmlCpu)
+                throw new NotSupportedException(
+                    "DeepSeek V4.1 DSpark requires the TensorSharp ggml executor (--backend ggml_cuda or ggml_cpu) " +
+                    "and a matching deepseek41-dspark drafter. Other executors do not implement the V4.1 draft graph.");
+            string draft = DeepSeek4Model.ResolveDsparkPath(draftModelPath);
+            if (draft != null)
+            {
+                using var file = GgufFile.OpenWithoutSiblingShards(draft);
+                ValidateDsparkArchitecture(file.GetString("general.architecture"));
+            }
 
             // Routed-MoE TP shards expert dimensions across GPUs, so the native
             // loader refuses it under cpu_only. Say so here instead, before a
@@ -124,6 +138,13 @@ namespace TensorSharp.Models
         internal static int ResolveRoutedMoeTensorParallelRanks(int requestedGpuCount)
             => ParseRoutedMoeTensorParallelRanks(Environment.GetEnvironmentVariable("TS_DSV41_TP"),
                 ResolveSelectedGpuCount(requestedGpuCount));
+
+        internal static void ValidateDsparkArchitecture(string architecture)
+        {
+            if (!string.Equals(architecture, "deepseek41-dspark", StringComparison.Ordinal))
+                throw new NotSupportedException(
+                    "DeepSeek V4.1 DSpark requires a deepseek41-dspark artifact; V4 and other draft architectures are incompatible.");
+        }
 
         internal static int ParseRoutedMoeTensorParallelRanks(string raw, int selectedGpuCount)
         {

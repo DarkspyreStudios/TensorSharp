@@ -30,9 +30,10 @@ namespace TensorSharp.Runtime.Scheduling
             int blockSize,
             SamplingConfig samplingConfig,
             object userTag = null,
-            string mediaFingerprint = null,
+            IReadOnlyList<PromptMediaSpan> mediaSpans = null,
             IReadOnlyList<int> cacheBreakpoints = null,
-            int sharedPrefixTokens = 0)
+            int sharedPrefixTokens = 0,
+            string cacheScope = null)
         {
             if (promptTokens == null) throw new ArgumentNullException(nameof(promptTokens));
             if (promptTokens.Count == 0) throw new ArgumentException("Prompt must be non-empty.", nameof(promptTokens));
@@ -65,10 +66,14 @@ namespace TensorSharp.Runtime.Scheduling
             Status = SequenceStatus.Waiting;
             SubmittedAt = DateTime.UtcNow;
             UserTag = userTag;
-            MediaFingerprint = string.IsNullOrEmpty(mediaFingerprint) ? null : mediaFingerprint;
-            // At least one prompt token has to follow the prefix, or there is nothing
-            // to forward from a clone of it.
-            SharedPrefixTokens = Math.Clamp(sharedPrefixTokens, 0, Math.Max(0, promptTokens.Count - 1));
+            MediaSpans = mediaSpans is { Count: > 0 }
+                ? new List<PromptMediaSpan>(mediaSpans)
+                : Array.Empty<PromptMediaSpan>();
+            CacheScope = string.IsNullOrEmpty(cacheScope) ? null : cacheScope;
+            // A startup warm-up may consist entirely of the public prefix. Its
+            // checkpoint serves a later, longer chat prompt. Admission separately
+            // leaves one token to forward when matching the current request.
+            SharedPrefixTokens = Math.Clamp(sharedPrefixTokens, 0, promptTokens.Count);
         }
 
         /// <summary>
@@ -133,14 +138,28 @@ namespace TensorSharp.Runtime.Scheduling
         public object UserTag { get; }
 
         /// <summary>
-        /// Stable identifier of the multimodal content (images/audio/video) baked
-        /// into this prompt's embeddings, or <c>null</c> for text-only prompts.
-        /// Mixed into the prefix-cache block hashes so two prompts that share
-        /// identical placeholder token IDs but carry <em>different</em> media never
-        /// adopt each other's K/V blocks (which would otherwise surface a stale
-        /// image/audio). Identical media still shares the cache.
+        /// Where the prompt's images, video frames and audio clips sit and what content
+        /// each one is, in prompt order; empty for a text-only prompt. Placeholder token
+        /// ids are identical for different media, so every prompt-reuse path compares
+        /// these positionally over the prefix it reuses (see
+        /// <see cref="PromptMediaSpans.ClampReusablePrefix"/>): text before the first
+        /// media span is always reusable, identical media is reusable across turns, and
+        /// a reused prefix never ends inside a span.
         /// </summary>
-        public string MediaFingerprint { get; }
+        public IReadOnlyList<PromptMediaSpan> MediaSpans { get; }
+
+        /// <summary>
+        /// The conversation this request belongs to, as an opaque hash (a Web UI session
+        /// and its new-chat epoch, or the conversation lineage the chat layer proved for
+        /// a stateless API request), or null for a caller that does not scope its
+        /// requests. State another scope produced - a retained holder, the live cache,
+        /// pooled blocks past the public prefix - is reused only up to
+        /// <see cref="SharedPrefixTokens"/>, and never moved away from its owner.
+        /// Radix gives a null scope a fresh identity for each request; callers that
+        /// want continuation reuse pass a stable conversation scope. The explicit
+        /// legacy mode retains its historical unscoped matching behavior.
+        /// </summary>
+        public string CacheScope { get; }
 
         public SequenceStatus Status { get; internal set; }
         public DateTime SubmittedAt { get; }
@@ -230,8 +249,13 @@ namespace TensorSharp.Runtime.Scheduling
 
         public void AdvanceComputedTokens(int n)
         {
+            int from = NumComputedTokens;
             NumComputedTokens += n;
             BlockTable.AdvanceTokens(n);
+            // Whatever path wrote these positions, a block that holds them is no longer
+            // known to be complete in the model's paged arrays; the batched path marks
+            // its own writes again right after advancing (BatchExecutor).
+            BlockTable.SetHoldsModelPagedKv(from, NumComputedTokens, false);
         }
 
         /// <summary>Set computed-token counter directly without touching the
@@ -242,6 +266,21 @@ namespace TensorSharp.Runtime.Scheduling
         internal void SetComputedTokensForPrefixAdoption(int n)
         {
             NumComputedTokens = n;
+            BlockTable.AdvanceTokens(n);
+        }
+
+        /// <summary>Move the computed-token counter BACK to <paramref name="n"/>,
+        /// keeping every allocated block. Used when a prefix the scheduler counted as
+        /// computed turns out, at execution, to be only partly materialized in the
+        /// model (a pooled inject that stopped at a block): the counter and the block
+        /// table's token count must describe what the model actually holds before
+        /// anything is forwarded on top of it.</summary>
+        internal void RevokeComputedTokensTo(int n)
+        {
+            if (n < 0 || n > NumComputedTokens)
+                throw new ArgumentOutOfRangeException(nameof(n));
+            NumComputedTokens = n;
+            BlockTable.ResetTokensKeepingBlocks();
             BlockTable.AdvanceTokens(n);
         }
 
@@ -315,7 +354,34 @@ namespace TensorSharp.Runtime.Scheduling
 
         public bool ShouldStopForLength() => OutputTokens.Count >= MaxNewTokens;
 
+        /// <summary>The prompt's full-block prefix-cache hashes, as the scheduler last
+        /// computed them (see <c>ContinuousBatchScheduler.GetPromptBlockHashes</c>).</summary>
+        internal PromptBlockHashes CachedPromptBlockHashes { get; set; }
+
         public override string ToString()
             => $"Seq({RequestId}, sn={Sn}, status={Status}, prompt={PromptTokens.Count}, out={OutputTokens.Count}, computed={NumComputedTokens})";
+    }
+
+    /// <summary>A sequence's prompt block hashes and the scheduler inputs they were
+    /// computed under (the sequence's own inputs are fixed at construction).</summary>
+    internal sealed class PromptBlockHashes
+    {
+        public PromptBlockHashes(string fingerprint, int blockSize, int promptTokens, IReadOnlyList<KvBlockHash> hashes)
+        {
+            Fingerprint = fingerprint;
+            BlockSize = blockSize;
+            PromptTokens = promptTokens;
+            Hashes = hashes;
+        }
+
+        public string Fingerprint { get; }
+        public int BlockSize { get; }
+        public int PromptTokens { get; }
+        public IReadOnlyList<KvBlockHash> Hashes { get; }
+
+        public bool Matches(string fingerprint, int blockSize, int promptTokens)
+            => blockSize == BlockSize
+               && promptTokens == PromptTokens
+               && string.Equals(fingerprint, Fingerprint, StringComparison.Ordinal);
     }
 }

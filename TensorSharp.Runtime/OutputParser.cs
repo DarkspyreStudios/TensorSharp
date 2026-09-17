@@ -249,6 +249,9 @@ namespace TensorSharp.Runtime
     /// </summary>
     public interface IOutputParser : IOutputProtocolParser
     {
+        /// <summary>Prime parser state when the prompt already opened a channel.
+        /// Call before the first generated piece, after Init.</summary>
+        void SetGenerationPromptSuffix(string? suffix) { }
     }
 
     // ========================================================================
@@ -432,8 +435,7 @@ namespace TensorSharp.Runtime
                             if (endIdx > _toolReportedChars)
                                 toolCallTextSb.Append(raw, _toolReportedChars, endIdx - _toolReportedChars);
                             _toolReportedChars = 0;
-                            var tc = ParseToolCall(raw);
-                            if (tc != null) toolCalls.Add(tc);
+                            toolCalls.AddRange(ParseToolCalls(raw));
                             _state = State.CollectingContent;
                             keepParsing = after.Length > 0;
                         }
@@ -442,8 +444,7 @@ namespace TensorSharp.Runtime
                             if (buf.Length > _toolReportedChars)
                                 toolCallTextSb.Append(buf, _toolReportedChars, buf.Length - _toolReportedChars);
                             _toolReportedChars = 0;
-                            var tc = ParseToolCall(buf);
-                            if (tc != null) toolCalls.Add(tc);
+                            toolCalls.AddRange(ParseToolCalls(buf));
                             _buffer.Clear();
                             _state = State.CollectingContent;
                         }
@@ -498,24 +499,37 @@ namespace TensorSharp.Runtime
             return null;
         }
 
-        private ToolCall? ParseToolCall(string raw)
+        /// <summary>
+        /// Calls in one <c>&lt;tool_call&gt;</c> body. The body is model output, so any
+        /// shape can arrive: the JSON object the prompt asks for, a JSON array of such
+        /// objects (Nemotron-H Reasoning-128K's own tool format is a list), or JSON that
+        /// is neither. An unexpected shape used to escape as an
+        /// InvalidOperationException from <c>GetProperty</c> and abort the whole
+        /// streamed response mid-flight; it now yields no call.
+        /// </summary>
+        private IEnumerable<ToolCall> ParseToolCalls(string raw)
         {
             raw = raw.Trim();
-            if (raw.Length == 0) return null;
+            if (raw.Length == 0) return Array.Empty<ToolCall>();
             try
             {
                 using var doc = JsonDocument.Parse(raw);
                 var root = doc.RootElement;
-                string? name = root.GetProperty("name").GetString();
-                if (string.IsNullOrEmpty(name)) return null;
-
-                var args = new Dictionary<string, object>();
-                if (root.TryGetProperty("arguments", out var argsEl) && argsEl.ValueKind == JsonValueKind.Object)
+                var calls = new List<ToolCall>();
+                if (root.ValueKind == JsonValueKind.Array)
                 {
-                    foreach (var prop in argsEl.EnumerateObject())
-                        args[prop.Name] = JsonElementToObject(prop.Value);
+                    foreach (var element in root.EnumerateArray())
+                    {
+                        var call = ToolCallFromJson(element);
+                        if (call != null) calls.Add(call);
+                    }
                 }
-                return new ToolCall { Name = name, Arguments = args, Index = _callIndex++ };
+                else
+                {
+                    var call = ToolCallFromJson(root);
+                    if (call != null) calls.Add(call);
+                }
+                return calls;
             }
             catch (JsonException)
             {
@@ -525,8 +539,29 @@ namespace TensorSharp.Runtime
                 //   </function>
                 // Dropping it silently loses the whole turn (the text was already
                 // consumed as a tool call), so fall back to that form here.
-                return ParseXmlToolCall(raw);
+                var call = ParseXmlToolCall(raw);
+                return call != null ? new[] { call } : Array.Empty<ToolCall>();
             }
+        }
+
+        private ToolCall? ToolCallFromJson(JsonElement element)
+        {
+            if (element.ValueKind != JsonValueKind.Object
+                || !element.TryGetProperty("name", out var nameEl)
+                || nameEl.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+            string? name = nameEl.GetString();
+            if (string.IsNullOrEmpty(name)) return null;
+
+            var args = new Dictionary<string, object>();
+            if (element.TryGetProperty("arguments", out var argsEl) && argsEl.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in argsEl.EnumerateObject())
+                    args[prop.Name] = JsonElementToObject(prop.Value);
+            }
+            return new ToolCall { Name = name, Arguments = args, Index = _callIndex++ };
         }
 
         /// <summary>
@@ -691,9 +726,24 @@ namespace TensorSharp.Runtime
         // into it rather than a consumption.
         private int _toolReportedChars;
 
+        // Position of the next completed call in this turn. Every other parser
+        // numbers its calls so a streaming client can pair the argument deltas of
+        // two parallel calls; Gemma 4's were all index 0, and a two-call turn
+        // collapsed into one call on the wire.
+        private int _callIndex;
+
         public bool HasThinkingSupport => true;
         public bool HasToolSupport => true;
         public bool AlwaysRequired => true;
+
+        public void SetGenerationPromptSuffix(string? suffix)
+        {
+            if (suffix?.EndsWith("<|channel>thought\n", StringComparison.Ordinal) == true)
+            {
+                _state = State.CollectingThinking;
+                _needsChannelNameStrip = false;
+            }
+        }
 
         public void Init(bool enableThinking, List<ToolFunction>? tools)
         {
@@ -702,6 +752,7 @@ namespace TensorSharp.Runtime
             _needsChannelNameStrip = false;
             _state = State.CollectingContent;
             _toolReportedChars = 0;
+            _callIndex = 0;
         }
 
         public ParsedOutput Add(string text, bool done)
@@ -864,8 +915,7 @@ namespace TensorSharp.Runtime
                             if (endIdx > _toolReportedChars)
                                 toolCallTextSb.Append(raw, _toolReportedChars, endIdx - _toolReportedChars);
                             _toolReportedChars = 0;
-                            var tc = ParseGemma4ToolCall(raw);
-                            if (tc != null) toolCalls.Add(tc);
+                            AcceptGemma4ToolCall(raw, toolCalls, contentSb);
                             _state = State.CollectingContent;
                             keepParsing = after.Length > 0;
                         }
@@ -874,8 +924,7 @@ namespace TensorSharp.Runtime
                             if (buf.Length > _toolReportedChars)
                                 toolCallTextSb.Append(buf, _toolReportedChars, buf.Length - _toolReportedChars);
                             _toolReportedChars = 0;
-                            var tc = ParseGemma4ToolCall(buf);
-                            if (tc != null) toolCalls.Add(tc);
+                            AcceptGemma4ToolCall(buf, toolCalls, contentSb);
                             _buffer.Clear();
                             _state = State.CollectingContent;
                         }
@@ -905,6 +954,27 @@ namespace TensorSharp.Runtime
             return result;
         }
 
+        /// <summary>
+        /// A completed call body either becomes a structured <see cref="ToolCall"/> or,
+        /// when its arguments cannot be read, is surfaced verbatim as CONTENT. Dropping
+        /// it produced an empty assistant message with <c>finish_reason=stop</c> and no
+        /// tool call: the client saw nothing at all and could not tell a refusal from a
+        /// parse failure. The raw text at least shows what the model wrote.
+        /// </summary>
+        private void AcceptGemma4ToolCall(string raw, List<ToolCall> toolCalls, StringBuilder contentSb)
+        {
+            var tc = ParseGemma4ToolCall(raw);
+            if (tc != null)
+            {
+                tc.Index = _callIndex++;
+                toolCalls.Add(tc);
+            }
+            else
+            {
+                contentSb.Append(raw);
+            }
+        }
+
         /// <summary>The call's tool name, once <c>call:NAME{</c> has been written.</summary>
         private static string? ToolCallNameFrom(string body)
         {
@@ -918,7 +988,9 @@ namespace TensorSharp.Runtime
         }
 
         private static readonly Regex GemmaQuotedStringRe = new(@"<\|""\|>(.*?)<\|""\|>", RegexOptions.Singleline);
-        private static readonly Regex GemmaBareKeyRe = new(@"([,{])(\w+):");
+        private static readonly Regex GemmaBareKeyRe = new(@"([,{]\s*)(\w+)\s*:");
+        // A JSON number exactly as RFC 8259 spells it; any other bare value is a string.
+        private static readonly Regex JsonNumberRe = new(@"^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$");
 
         // Tool names whose call bodies already failed to parse. The raw body
         // still reaches the client via ToolCallText, but the dropped structured
@@ -954,12 +1026,22 @@ namespace TensorSharp.Runtime
                 if (first)
                     Console.Error.WriteLine(
                         $"[Gemma4OutputParser] Tool call '{name}' has arguments that do not parse as JSON ({ex.Message}); " +
-                        "it is dropped from ToolCalls, so the tool will not run — the raw call text is still " +
-                        "delivered in ToolCallText. Reported once per tool name.");
+                        "it is dropped from ToolCalls, so the tool will not run — the raw call text is " +
+                        "delivered as content and in ToolCallText instead. Reported once per tool name.");
                 return null;
             }
         }
 
+        /// <summary>
+        /// Turn Gemma 4's call syntax into JSON: keys are bare identifiers, strings are
+        /// wrapped in <c>&lt;|"|&gt;</c> ... <c>&lt;|"|&gt;</c>, and - what this used to
+        /// miss - the model regularly writes a string value BARE when it looks like an
+        /// identifier (<c>{invoice_id:INV-472}</c>, <c>{path:src/main.py}</c>,
+        /// <c>{ids:[INV-1, INV-2]}</c>). Such a call parsed only by luck, and
+        /// <c>read_invoice{invoice_id:INV-472}</c> was dropped whole. A bare value that
+        /// is not a JSON number, <c>true</c>, <c>false</c> or <c>null</c> is quoted,
+        /// inside arrays included; numbers stay numbers.
+        /// </summary>
         internal static string Gemma4ArgsToJson(string s)
         {
             var quotedStrings = new List<string>();
@@ -970,6 +1052,7 @@ namespace TensorSharp.Runtime
             });
 
             text = GemmaBareKeyRe.Replace(text, "$1\"$2\":");
+            text = QuoteGemmaBareValues(text);
 
             for (int i = 0; i < quotedStrings.Count; i++)
             {
@@ -978,6 +1061,104 @@ namespace TensorSharp.Runtime
             }
 
             return text;
+        }
+
+        /// <summary>
+        /// Quote every bare scalar in VALUE position (after a <c>:</c> inside an object,
+        /// after <c>[</c> or <c>,</c> inside an array) that is not already a JSON scalar.
+        /// Placeholders (<c>\x00</c> i <c>\x00</c>, the strings the model quoted itself)
+        /// and real JSON strings pass through untouched.
+        /// </summary>
+        private static string QuoteGemmaBareValues(string text)
+        {
+            var sb = new StringBuilder(text.Length + 16);
+            var containers = new Stack<char>();
+            bool expectValue = false;
+            int i = 0;
+            while (i < text.Length)
+            {
+                char c = text[i];
+                if (expectValue)
+                {
+                    if (char.IsWhiteSpace(c)) { sb.Append(c); i++; continue; }
+                    expectValue = false;
+                    if (c == '{' || c == '[')
+                    {
+                        containers.Push(c);
+                        sb.Append(c);
+                        i++;
+                        expectValue = c == '[';
+                        continue;
+                    }
+                    if (c == '\x00' || c == '"')
+                    {
+                        i = CopyOpaque(text, i, sb);
+                        continue;
+                    }
+                    // A bare token runs to the next delimiter at this level.
+                    int start = i;
+                    while (i < text.Length && text[i] != ',' && text[i] != '}' && text[i] != ']')
+                        i++;
+                    string run = text.Substring(start, i - start);
+                    string token = run.TrimEnd();
+                    if (token.Length > 0)
+                    {
+                        bool scalar = token == "true" || token == "false" || token == "null"
+                                      || JsonNumberRe.IsMatch(token);
+                        sb.Append(scalar ? token : JsonSerializer.Serialize(token));
+                    }
+                    sb.Append(run, token.Length, run.Length - token.Length);
+                    continue;
+                }
+
+                switch (c)
+                {
+                    case '{':
+                    case '[':
+                        containers.Push(c);
+                        expectValue = c == '[';
+                        break;
+                    case '}':
+                    case ']':
+                        if (containers.Count > 0) containers.Pop();
+                        break;
+                    case ':':
+                        expectValue = containers.Count > 0 && containers.Peek() == '{';
+                        break;
+                    case ',':
+                        expectValue = containers.Count > 0 && containers.Peek() == '[';
+                        break;
+                    case '\x00':
+                    case '"':
+                        i = CopyOpaque(text, i, sb);
+                        continue;
+                }
+                sb.Append(c);
+                i++;
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Copy the placeholder or JSON string that starts at <paramref name="i"/>
+        /// and return the index just past it.</summary>
+        private static int CopyOpaque(string text, int i, StringBuilder sb)
+        {
+            if (text[i] == '\x00')
+            {
+                // Always exactly three chars: NUL, the string's index as a char, NUL.
+                int len = Math.Min(3, text.Length - i);
+                sb.Append(text, i, len);
+                return i + len;
+            }
+            int j = i + 1;
+            while (j < text.Length && text[j] != '"')
+            {
+                if (text[j] == '\\' && j + 1 < text.Length) j++;
+                j++;
+            }
+            j = Math.Min(j + 1, text.Length);
+            sb.Append(text, i, j - i);
+            return j;
         }
 
         private static int HoldBack(string buf, params string[] tags)
@@ -1742,6 +1923,19 @@ namespace TensorSharp.Runtime
                         break;
 
                     case MState.ParsingHeader:
+                        if (CannotBeHeader(buf))
+                        {
+                            // Headerless output. A structured-output grammar armed from
+                            // token 0 forbids the " to=user<|message|>" header, so the
+                            // model's first token is already the answer's "{". Waiting
+                            // for a <|message|> that can never come swallowed the whole
+                            // correct object: the stream delivered content null and the
+                            // json_schema path returned 422 on an empty string.
+                            _currentRecipient = null;
+                            _state = MState.ParsingContent;
+                            keepParsing = true;
+                            break;
+                        }
                         int headerEnd = buf.IndexOf(HeaderEndTag, StringComparison.Ordinal);
                         if (headerEnd >= 0)
                         {
@@ -1768,6 +1962,20 @@ namespace TensorSharp.Runtime
                                 _buffer.Clear();
                                 _state = MState.ParsingContent;
                             }
+                        }
+                        else
+                        {
+                            // The stream ended inside what was buffered as a header. A
+                            // real, unfinished header ("assistant to=self") carries no
+                            // text for anyone; anything else is text the model wrote
+                            // without framing and must not be dropped on the floor.
+                            if (!LooksLikeHeader(buf))
+                            {
+                                _currentRecipient = null;
+                                EmitContent(buf, contentSb, thinkingSb, toolTextSb);
+                            }
+                            _buffer.Clear();
+                            _state = MState.LookingForStart;
                         }
                         break;
 
@@ -1833,6 +2041,30 @@ namespace TensorSharp.Runtime
             if (end > 0)
                 _currentRecipient = rest.Substring(0, end);
         }
+
+        /// <summary>
+        /// A message header is routing text: optional <c>&lt;|start|&gt;</c>, the role
+        /// word and a <c>to=RECIPIENT</c>, before <c>&lt;|message|&gt;</c>. It therefore
+        /// opens (after whitespace) with a letter or a <c>&lt;</c> of a framing token.
+        /// Anything else - JSON's <c>{</c>/<c>[</c>/<c>"</c>, a digit - is body text
+        /// written with no header at all.
+        /// </summary>
+        internal static bool CannotBeHeader(string buf)
+        {
+            foreach (char c in buf)
+            {
+                if (char.IsWhiteSpace(c)) continue;
+                return !(char.IsLetter(c) || c == '<');
+            }
+            return false;
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex HeaderShape = new(
+            @"^\s*(<\|start\|>)?\s*(assistant)?\s*(to=[^\s<]*)?\s*(<\|?[a-z_|]*)?$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        /// <summary>True when <paramref name="buf"/> is (a prefix of) a routing header.</summary>
+        internal static bool LooksLikeHeader(string buf) => HeaderShape.IsMatch(buf);
 
         private bool IsThinking() => string.Equals(_currentRecipient, "self", StringComparison.Ordinal);
 
@@ -2007,6 +2239,20 @@ namespace TensorSharp.Runtime
         private readonly StringBuilder _buffer = new();
         private bool _thinkingEnabled;
         private int _callIndex;
+        private readonly bool _promptAlwaysOpensThinking;
+        private bool _sawThinkClose;
+        // The unrequested block has shown prose, so it is reasoning: stream it.
+        private bool _unrequestedBlockIsReasoning;
+
+        /// <param name="promptAlwaysOpensThinking">The family's generation prompt opens
+        /// <c>&lt;think&gt;</c> whatever the request asked for (GLM-5.3-Flash's published
+        /// template has no thinking-off shape), so the reply starts INSIDE the reasoning
+        /// block even under <c>think:false</c>. Parsing it as content would hand the
+        /// client the chain of thought and a literal <c>&lt;/think&gt;</c>.</param>
+        public GlmDsaOutputParser(bool promptAlwaysOpensThinking = false)
+        {
+            _promptAlwaysOpensThinking = promptAlwaysOpensThinking;
+        }
 
         public bool HasThinkingSupport => true;
         public bool HasToolSupport => true;
@@ -2017,7 +2263,55 @@ namespace TensorSharp.Runtime
             _buffer.Clear();
             _thinkingEnabled = enableThinking;
             _callIndex = 0;
-            _state = enableThinking ? State.Thinking : State.Content;
+            _sawThinkClose = false;
+            _unrequestedBlockIsReasoning = false;
+            _state = enableThinking || _promptAlwaysOpensThinking ? State.Thinking : State.Content;
+        }
+
+        private bool InUnrequestedBlock
+            => !_thinkingEnabled && _promptAlwaysOpensThinking && !_sawThinkClose;
+
+        /// <summary>Under think:false the always-open block is either the model's
+        /// reasoning (prose, closed by &lt;/think&gt;) or an answer a JSON grammar forced
+        /// from the first token (which can never write &lt;/think&gt;). Only a reply that
+        /// still looks like JSON is held back; prose streams as reasoning at once.</summary>
+        private bool HoldsUnrequestedBlock(string buf)
+        {
+            if (!InUnrequestedBlock || _unrequestedBlockIsReasoning)
+                return false;
+            string trimmed = buf.TrimStart();
+            if (trimmed.Length == 0 || trimmed[0] == '{' || trimmed[0] == '[')
+                return true;
+            _unrequestedBlockIsReasoning = true;
+            return false;
+        }
+
+        private int FindThinkingClose(string buf)
+        {
+            // A first-token JSON grammar can legitimately emit protocol markers
+            // inside string values. They are data, not the end of reasoning.
+            // The ambiguous JSON block remains buffered, so scan its entire prefix
+            // each time and preserve quote/escape state across streaming chunks.
+            string trimmed = buf.TrimStart();
+            if (!InUnrequestedBlock || _unrequestedBlockIsReasoning || trimmed.Length == 0
+                || (trimmed[0] != '{' && trimmed[0] != '['))
+                return buf.IndexOf(ThinkClose, StringComparison.Ordinal);
+
+            bool quoted = false, escaped = false;
+            for (int i = 0; i < buf.Length; i++)
+            {
+                char c = buf[i];
+                if (quoted)
+                {
+                    if (escaped) escaped = false;
+                    else if (c == '\\') escaped = true;
+                    else if (c == '"') quoted = false;
+                }
+                else if (c == '"') quoted = true;
+                else if (c == '<' && buf.AsSpan(i).StartsWith(ThinkClose, StringComparison.Ordinal))
+                    return i;
+            }
+            return -1;
         }
 
         public ParsedOutput Add(string text, bool done)
@@ -2040,7 +2334,7 @@ namespace TensorSharp.Runtime
                 {
                     case State.Thinking:
                     {
-                        int closeIdx = buf.IndexOf(ThinkClose, StringComparison.Ordinal);
+                        int closeIdx = FindThinkingClose(buf);
                         if (closeIdx >= 0)
                         {
                             thinkingSb.Append(buf, 0, closeIdx);
@@ -2048,12 +2342,26 @@ namespace TensorSharp.Runtime
                             _buffer.Clear();
                             _buffer.Append(after);
                             _state = State.Content;
+                            _sawThinkClose = true;
                             keepParsing = after.Length > 0;
                         }
                         else if (done)
                         {
-                            thinkingSb.Append(buf);
+                            // A reply that never closed a reasoning block the REQUEST did
+                            // not ask for (e.g. a JSON grammar enforced from the first
+                            // token) is the answer itself, not reasoning.
+                            if (InUnrequestedBlock && !_unrequestedBlockIsReasoning
+                                && (buf.TrimStart().StartsWith('{') || buf.TrimStart().StartsWith('[')))
+                                contentSb.Append(buf);
+                            else
+                                thinkingSb.Append(buf);
                             _buffer.Clear();
+                        }
+                        else if (HoldsUnrequestedBlock(buf))
+                        {
+                            // Hold the unrequested block until it closes (or generation
+                            // ends): only then is it known to be reasoning rather than a
+                            // grammar-constrained answer that skipped the block.
                         }
                         else
                         {

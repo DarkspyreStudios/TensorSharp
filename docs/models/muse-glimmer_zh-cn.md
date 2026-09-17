@@ -32,7 +32,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
   --mmproj models/mmproj-Muse-Glimmer-30B-Q8_0.gguf \
   --image photo.png --input question.txt --backend ggml_cuda --max-tokens 300
 
-# DFlash 投机解码（无损；输出与普通贪心 decode 一致）
+# DFlash 投机解码（每个 token 取自主干行；除浮点近平局外与普通贪心一致，见“输出一致性”）
 dotnet run --project TensorSharp.Cli -c Release -- \
   --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
   --draft-model models/dflash-kquant.gguf \
@@ -40,6 +40,10 @@ dotnet run --project TensorSharp.Cli -c Release -- \
 ```
 
 `--draft-model` 也可以用环境变量 `TS_MUSE_GLIMMER_DFLASH` 指定。
+
+### 结构化输出
+
+生成 prompt 停在 `<|start|>assistant`，因此正常回复以模型自己写的路由头开始（推理为 ` to=self<|message|>`，答案为 ` to=user<|message|>` 或 `<|message|>`）。使用 `response_format` 时 JSON 语法从第一个 token 起生效，模型会直接写出对象而没有任何头部。`MuseGlimmerOutputParser` 把不可能是头部开头的回复（JSON 的 `{`、`[`、`"` 或数字）视为答案内容，并在流结束时返回未加框架的文本而不是丢弃。此前解析器一直等待被语法排除的 `<|message|>`：流式响应返回 `content: null`，`json_schema` 在生成正确对象后返回 HTTP 422（2026-09-16 验证活动，B6）。非流式路径现在也对解析后的 content 而不是原始输出做校验。`response_format` 也可以与 `"think": true` 同时使用。模型先在 ` to=self<|message|>` 消息中推理，再以 `<|start|>assistant to=user<|message|>` 开始答案，因此协议把 `to=user<|message|>` 声明为 `ThinkingGrammarActivationTrigger`，语法在那里启用。此前该组合返回 HTTP 400（首次复测中每个 `--thinking` json 用例都是如此）。用 `validate_inference.py --thinking` 实测（json / json_schema / json_unicode，c1 与 c4，重复三次，Q4_K_XL，单张 RTX PRO 6000）：38/45，模型写出的 41 个答案头全部是 `to=user<|message|>`。7 个失败都停在 `max_tokens` 256：推理会先复述 prompt 再作答，而 Muse-Glimmer 没有声明可以提前关闭推理的思考预算结束 token。
 
 ## 1. 文本架构
 
@@ -514,6 +518,14 @@ TensorSharp 现在给 SWA 层分配 `pad(n_swa + chunk + 1, 256)` 行（默认�
 * **只有在融合内核可用时环才会启用**，因为逐算子注意力把缓存行当作绝对位置。
   如果环已启用而融合前向拒绝执行，逐算子路径会抛异常，而不是悄悄返回错误 logits。
   `TS_MUSE_GLIMMER_SWA_RING=0` 恢复统一尺寸。
+* **已回卷的环上，回退深度受余量限制。** 截断缓存只移动写入位置；被回卷覆盖的行
+  不会回来，而下一个 query 仍要回看新位置之前完整的一个窗口。因此自缓存上次清空以来序列长度
+  一旦超过过环，只有满足 `furthest - target <= rows - n_swa - 1` 时才接受回退，其中 `furthest`
+  是序列曾达到的最大长度（而不是当前长度：之前的回退可能已把它降回环大小以下）。默认分块下为
+  2303 个 token，覆盖引擎 16 token 的 live-cache 回退。更深的回退会被拒绝——
+  `CanTruncateKVCache`/`TryTruncateKVCache` 返回否，本轮改为重新 prefill，
+  `TruncateKVCache` 抛异常。尚未回卷的环、统一尺寸的缓存以及回退到 0 仍可回退到任意深度
+  （`KvBlockTransferRingTests`）。
 * **宽于 `rows - n_swa` 的前向会被拒绝。** 分块从构造上保证文本提示不会超，
   但多模态提示故意不分块（视觉行按绝对偏移注入），因此它是唯一可能提交超宽批次的
   路径 —— 那会把两个活跃位置映射到同一个环槽位，静默污染全部 39 个滑动窗口层。

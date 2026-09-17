@@ -13,6 +13,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -39,6 +40,7 @@
 #endif
 #include "ggml-cpu.h"
 #include "ggml-quants.h"
+#include "ggml_ops_flash_attn_guard.h"
 
 #if defined(_WIN32)
 #define TSG_EXPORT extern "C" __declspec(dllexport)
@@ -704,6 +706,17 @@ namespace tsg
     void set_last_error(const std::string& message);
     void clear_last_error();
 
+    // A whole-model loader declining a load (not enough VRAM, a --tp layout the
+    // devices cannot hold, a missing shard): print the line to stderr exactly as
+    // before AND keep it as the thread's last error, so the managed side can put
+    // the reason in the exception it throws instead of "see stderr". The hosts
+    // turn that exception into one error line and a documented exit code; a
+    // pointer at scrollback is useless once the process has exited.
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    void report_load_refusal(const char* format, ...);
+
     // --- VRAM allocation diagnostics (TS_GGML_LOG_VRAM=1) ---
     //
     // Logs each device-buffer allocation with a tag plus the device's current
@@ -739,6 +752,20 @@ namespace tsg
     bool ensure_backend();
     bool can_initialize_backend(int backend_type);
     bool backend_supports_op(ggml_tensor* op);
+
+    // ggml_flash_attn_ext for the active backend, or the explicit attention
+    // when the backend has no kernel for this exact shape (warned once per
+    // site). Use this instead of a bare ggml_flash_attn_ext in any graph that
+    // is computed directly on g_backend: see ggml_ops_flash_attn_guard.h.
+    inline ggml_tensor* flash_attn_ext_guarded(
+        ggml_context* ctx, const char* site,
+        ggml_tensor* q, ggml_tensor* k, ggml_tensor* v, ggml_tensor* mask,
+        float scale, float max_bias, float logit_softcap,
+        ggml_tensor* sinks = nullptr, ggml_prec prec = GGML_PREC_DEFAULT)
+    {
+        return tsg_flash_attn_ext_guarded(ctx, g_backend, site, q, k, v, mask,
+            scale, max_bias, logit_softcap, sinks, prec);
+    }
 
     // --- Tensor parallelism (ggml_ops_tensor_parallel.cpp) ---
 
@@ -1588,6 +1615,54 @@ struct TSGgmlQwen4ExpHeadArgs
     int vocab;
 };
 
+struct TSGgmlQwen4ExpMtpConfig
+{
+    void* enorm;
+    void* hnorm;
+    void* eh_proj;
+    long long eh_bytes;
+    int eh_type;
+    int n_embd, hc, hc_low_rank;
+    int head_dim, n_head, n_head_kv, n_rot;
+    int n_expert, n_expert_used, n_ff, n_ff_sh;
+    int capacity, device;
+    float eps, rope_base, rope_scale, attn_scale;
+    int rope_sections[4];
+};
+
+// Additive QSA descriptor. Existing attention/span descriptor ABIs stay intact.
+struct TSGgmlQwen4ExpQsaArgs
+{
+    void* k_proj;
+    void* q_proj;
+    void* k_norm;
+    void* q_norm;
+    void* cache;
+    long long k_bytes, q_bytes, cache_bytes;
+    int k_type, q_type, cache_type;
+    int head_dim, heads, ratio, top_k;
+    int rope_sections[4];
+};
+
+struct Q4eQsaInputs
+{
+    int ratio = 0;
+    ggml_tensor* cell_blocks = nullptr;
+    ggml_tensor* block_cells = nullptr;
+    ggml_tensor* block_positions = nullptr;
+    ggml_tensor* query_positions = nullptr;
+    ggml_tensor* bias = nullptr;
+};
+
+struct Q4eQsaGraph
+{
+    const TSGgmlQwen4ExpQsaArgs* args = nullptr;
+    const Q4eQsaInputs* inputs = nullptr;
+    ggml_tensor* cache = nullptr;
+    // Optional test-only outputs, never retained by production graphs.
+    std::vector<ggml_tensor*>* probes = nullptr;
+};
+
 // A weight binding resolved through the resident cache, remembered so a
 // REPLAY can re-resolve it. The cache can move or re-create a device copy
 // (large allocations elsewhere churn it), and a persisted graph would keep
@@ -1703,7 +1778,9 @@ ggml_tensor* q4e_nodes_attn(
     std::vector<ggml_tensor*>* kv_out = nullptr,
     std::vector<ggml_tensor*>* probe = nullptr,
     const std::int32_t* mrope_sections = nullptr,
-    Q4eAttnArenaIO* arena = nullptr);
+    Q4eAttnArenaIO* arena = nullptr,
+    ggml_tensor* owned_k = nullptr, ggml_tensor* owned_v = nullptr,
+    const Q4eQsaGraph* qsa = nullptr);
 
 // PLE half. `conv_hist` is the persistent history - [hc_dim, hist] for the
 // span (n_streams == 1), a [hc_dim, hist, n_streams] arena view for the arena

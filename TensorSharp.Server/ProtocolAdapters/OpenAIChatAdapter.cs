@@ -115,7 +115,8 @@ public sealed partial class OpenAIChatAdapter
         List<ChatMessage> messages;
         try
         {
-            messages = ChatMessageParser.ParseOpenAI(messagesEl, _uploads, openaiLogger, _svc.Architecture);
+            messages = ChatMessageParser.ParseOpenAI(messagesEl, _uploads, openaiLogger, _svc.Architecture,
+                _svc.IsAudioEncoderLoaded);
         }
         catch (UploadLimitExceededException ex)
         {
@@ -151,6 +152,38 @@ public sealed partial class OpenAIChatAdapter
             openaiTools = null;
         bool openaiThink = body.TryGetProperty("think", out var oaiThinkProp) && oaiThinkProp.GetBoolean();
         var requestedSkills = SkillSelectionParser.Parse(body);
+
+        // A block-diffusion model has no tool-call loop: nothing could feed a result
+        // back into a denoising turn, and it used to answer a "required" call with
+        // prose and finish_reason=stop. Refuse the contract up front instead.
+        bool toolChoiceRequested = !toolsDisabled && body.TryGetProperty("tool_choice", out var anyToolChoice)
+            && anyToolChoice.ValueKind != JsonValueKind.Null;
+        if (_svc.IsDiffusionModel && (openaiTools is { Count: > 0 } || toolChoiceRequested))
+        {
+            openaiLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                "/v1/chat/completions rejected: tools/tool_choice on a diffusion model (id={ChatcmplId})", requestId);
+            ctx.Response.StatusCode = 400;
+            await ctx.Response.WriteAsJsonAsync(new
+            {
+                error = new
+                {
+                    message = "The loaded model generates by block diffusion and has no tool-call channel; " +
+                              "remove tools and tool_choice from the request (only tool_choice \"none\" is accepted).",
+                    type = "invalid_request_error",
+                },
+            }).ConfigureAwait(false);
+            return;
+        }
+
+        if (!ReasoningEffortParser.TryParse(body, out string? reasoningEffort, out string? reasoningEffortError))
+        {
+            openaiLogger.LogWarning(LogEventIds.HttpRequestRejected,
+                "/v1/chat/completions rejected: {Error} (id={ChatcmplId})", reasoningEffortError, requestId);
+            ctx.Response.StatusCode = 400;
+            await ctx.Response.WriteAsJsonAsync(new { error = new { message = reasoningEffortError, type = "invalid_request_error" } }).ConfigureAwait(false);
+            return;
+        }
+        samplingConfig.ReasoningEffort = reasoningEffort;
 
         string lastOpenAiUserContent = LoggingExtensions.SanitizeForLog(
             messages.LastOrDefault(m => m.Role == "user")?.Content ?? string.Empty, 512);
@@ -215,15 +248,17 @@ public sealed partial class OpenAIChatAdapter
 
         var effectiveTools = skillPlan?.Tools ?? openaiTools;
         TensorSharp.Runtime.Grammar.DeepSeek41ToolGrammar? toolGrammar = null;
-        if (IsDeepSeek41(_svc.Architecture))
+        try
         {
-            try { toolGrammar = PrepareDeepSeek41ToolGrammar(body, openaiTools, effectiveTools, responseFormat); }
-            catch (Exception ex) when (ex is NotSupportedException or JsonException or ArgumentException)
-            {
-                ctx.Response.StatusCode = 400;
-                await ctx.Response.WriteAsJsonAsync(new { error = new { message = ex.Message, type = "invalid_request_error" } }).ConfigureAwait(false);
-                return;
-            }
+            ValidateClientToolChoice(body, openaiTools);
+            if (IsDeepSeek41(_svc.Architecture))
+                toolGrammar = PrepareDeepSeek41ToolGrammar(body, openaiTools, effectiveTools, responseFormat);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or JsonException or ArgumentException)
+        {
+            ctx.Response.StatusCode = 400;
+            await ctx.Response.WriteAsJsonAsync(new { error = new { message = ex.Message, type = "invalid_request_error" } }).ConfigureAwait(false);
+            return;
         }
         var inferenceMessages = StructuredOutputPrompt.Apply(messages, responseFormat);
         if (skillPlan != null)
@@ -384,7 +419,7 @@ public sealed partial class OpenAIChatAdapter
                 // question (see OutputParserFactory.GrammarActivationTrigger).
                 string? trigger = OutputParserFactory.GrammarActivationTrigger(_svc.Architecture, enableThinking);
                 if (trigger != null)
-                    constraint.ActivateAfter(trigger);
+                    constraint.ActivateAfter(trigger, skipLeadingWhitespace: true);
                 withGrammar.Grammar = constraint;
                 return withGrammar;
             }
@@ -539,6 +574,11 @@ public sealed partial class OpenAIChatAdapter
             string piece = update.Piece;
             if (!update.Done)
             {
+                if (update.RawGenerationSuffix != null)
+                {
+                    parser?.SetGenerationPromptSuffix(update.RawGenerationSuffix);
+                    if (string.IsNullOrEmpty(piece)) continue;
+                }
                 if (update.IsParsed)
                 {
                     // Pre-separated by the skills loop (see SkillChatLoop): content,
@@ -700,6 +740,7 @@ public sealed partial class OpenAIChatAdapter
         {
             var structParser = OutputParserFactory.Create(_svc.Architecture);
             structParser.Init(openaiThink, openaiTools);
+            structParser.SetGenerationPromptSuffix(update.RawGenerationSuffix);
             var parsed = structParser.Add(rawContent, true);
             rawContent = parsed.Content ?? "";
         }
@@ -800,7 +841,13 @@ public sealed partial class OpenAIChatAdapter
 
         if (responseFormat != null)
         {
-            var normalized = StructuredOutputValidator.NormalizeOutput(rawOutput, responseFormat);
+            // Validate the ANSWER, never the raw stream: a reasoning channel or a
+            // message frame around it holds text (and braces) that are not the
+            // structured output, exactly as the streaming path strips them first.
+            string structuredText = useParser || collector.IsParsed
+                ? collector.Resolve(_svc.Architecture, openaiThink, openaiTools).Content ?? ""
+                : rawOutput;
+            var normalized = StructuredOutputValidator.NormalizeOutput(structuredText, responseFormat);
             if (!normalized.IsValid)
             {
                 ctx.Response.StatusCode = 422;

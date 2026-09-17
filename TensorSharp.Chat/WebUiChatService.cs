@@ -270,6 +270,26 @@ namespace TensorSharp.Chat
         }
 
         /// <summary>
+        /// Bind session <paramref name="sessionId"/> to the host's saved conversation
+        /// <paramref name="conversationKey"/>, so every session opened for that
+        /// conversation continues its cached prompt state (one cache scope per
+        /// conversation instead of per session). For a host that owns conversation
+        /// identity and serves one user, such as TensorAgent. Returns false for an
+        /// unknown session or the shared default session.
+        /// </summary>
+        public bool BindSessionConversation(string sessionId, string conversationKey)
+        {
+            if (string.IsNullOrEmpty(sessionId)
+                || string.Equals(sessionId, SessionManager.DefaultSessionId, StringComparison.Ordinal))
+                return false;
+            ChatSession session = _sessions.GetSession(sessionId);
+            if (session == null || session.SharedAcrossConversations)
+                return false;
+            session.BindConversation(conversationKey);
+            return true;
+        }
+
+        /// <summary>
         /// <c>DELETE /api/sessions/{id}</c> — <c>{ ok = true, sessionId }</c>; 400 for
         /// the default session, 404 for an unknown one. Releases the session's
         /// execution workspace — its files, installed packages, everything its runs
@@ -382,7 +402,9 @@ namespace TensorSharp.Chat
         /// <c>POST /api/models/load</c> — <c>{ model, backend?, mmproj? }</c>. The model
         /// must be the hosted one (the guard resolves the file name against the startup
         /// path, so a client never needs a host path); 400 <c>{ ok = false, error }</c>
-        /// for a refused request, 500 with the same shape when the load itself fails.
+        /// for a refused request, 500 with the same shape when the load itself fails. A load
+        /// the model refuses (see <see cref="ModelLoadRefusal"/>) adds <c>refused = true</c>
+        /// and <c>loadedModel</c>: the previous model when it was restored, null for none.
         /// </summary>
         public Task<object> LoadModelAsync(JsonElement body, CancellationToken cancellationToken)
         {
@@ -425,6 +447,23 @@ namespace TensorSharp.Chat
                     model = _svc.LoadedModelName,
                     loadedMmProj = _svc.LoadedMmProjName,
                     architecture = _svc.Architecture,
+                });
+            }
+            catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string refusal))
+            {
+                // Refused (not enough VRAM, an unsupported dtype or --tp layout, a bad
+                // file): the lifecycle already logged the reason, restored the previous
+                // model if there was one, and the server keeps serving. Say which model
+                // is loaded now, null for none, so a client does not have to guess.
+                modelLoadLogger.LogWarning(LogEventIds.ModelLoadFailed,
+                    "Web UI model load refused: model={Model} backend={Backend}: {Reason}; loaded now: {Loaded}",
+                    modelName, backend, refusal, _svc.LoadedModelName ?? "(none)");
+                throw new WebUiRequestRejectedException(500, new
+                {
+                    ok = false,
+                    error = refusal,
+                    refused = true,
+                    loadedModel = _svc.LoadedModelName,
                 });
             }
             catch (Exception ex)
@@ -1810,12 +1849,19 @@ namespace TensorSharp.Chat
 
             var samplingConfig = SamplingConfigParser.ParseWebUi(body, _options.SamplingDefaults);
             bool uiThink = body.TryGetProperty("think", out var uiThinkProp) && uiThinkProp.GetBoolean();
+            // Same rule as the HTTP APIs (an explicit think:false renders GPT-OSS at
+            // low effort), so the startup warm-up - which goes through this surface with
+            // both think values - prepares the prefixes real requests will ask for.
+            if (!ReasoningEffortParser.TryParse(body, out string reasoningEffort, out string reasoningEffortError))
+                throw new WebUiRequestRejectedException(400, new { error = reasoningEffortError });
+            samplingConfig.ReasoningEffort = reasoningEffort;
             List<ToolFunction> uiTools = null;
             if (body.TryGetProperty("tools", out var uiToolsEl) && uiToolsEl.ValueKind == JsonValueKind.Array)
                 uiTools = ToolFunctionParser.ParseOllama(body);
 
             var messages = ChatMessageParser.ParseWebUi(messagesEl);
-            string audioInputError = ChatGenerationPipeline.UnsupportedAudioInputError(_svc.Architecture, messages);
+            string audioInputError = ChatGenerationPipeline.UnsupportedAudioInputError(_svc.Architecture, messages,
+                _svc.IsAudioEncoderLoaded);
             if (audioInputError != null)
                 throw new WebUiRequestRejectedException(400, new { error = audioInputError });
             var requestedSkills = SkillSelectionParser.Parse(body);
@@ -1890,7 +1936,7 @@ namespace TensorSharp.Chat
                     });
                 }
                 OnChatRequest?.Invoke(chatSession.Id, body);
-                await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, webUiLogger, cancellationToken))
+                await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, uiThink, webUiLogger, cancellationToken))
                     yield return frame;
                 yield break;
             }
@@ -2176,6 +2222,12 @@ namespace TensorSharp.Chat
                         continue;
                     }
 
+                    if (!update.Done && update.RawGenerationSuffix != null)
+                    {
+                        uiParser?.SetGenerationPromptSuffix(update.RawGenerationSuffix);
+                        if (string.IsNullOrEmpty(update.Piece)) continue;
+                    }
+
                     if (update.IsParsed)
                     {
                         sawParsedUpdate = true;
@@ -2225,6 +2277,11 @@ namespace TensorSharp.Chat
                     }
                     else
                     {
+                        // Unparsed text is answer text too. Without this every reply of
+                        // a model that needs no parser ended with the "ended this turn
+                        // without writing an answer" note, which the page then sent back
+                        // as part of the assistant's message on the next turn.
+                        sawContent = true;
                         yield return WebUiSseEvents.Token(piece);
                     }
                 }
@@ -2268,6 +2325,7 @@ namespace TensorSharp.Chat
                 var retryParser = useUiParser ? OutputParserFactory.Create(_svc.Architecture) : null;
                 retryParser?.Init(false, uiTools);
                 bool retryCompleted = false;
+                bool retrySawParsedUpdate = false;
                 IAsyncEnumerator<ChatStreamUpdate> retry = _svc
                     .ChatStreamWithSkillsAsync(chatSession, messages, maxTokens, cancellationToken,
                         samplingConfig, uiTools, false, skillPlan, webUiLogger)
@@ -2306,23 +2364,28 @@ namespace TensorSharp.Chat
                             turnKvReusedTokens = update.KvCacheReusedTokens;
                             turnTruncated = FinishReasonMapper.IsTruncated(update.FinishReason);
                             turnFinishReason = update.FinishReason;
-                        turnRepetitionExplained = update.RepetitionExplained;
+                            turnRepetitionExplained = update.RepetitionExplained;
                             continue;
                         }
-                        if (string.IsNullOrEmpty(update.Piece))
-                            continue;
-
-                        // The retry's whole purpose is to produce the answer the first
-                        // attempt reasoned itself out of, and this is where that answer is
-                        // streamed — so it has to count as content. Without this the user
-                        // read a complete answer followed by "The model ended this turn
-                        // without writing an answer", which is the placeholder accusing the
-                        // model of the very thing the retry had just fixed. Observed
-                        // 2026-09-10 on a turn that delivered a ten-slide deck and a
-                        // download link.
-                        sawContent = true;
-                        tokenCount++;
-                        yield return WebUiSseEvents.Token(update.Piece);
+                        retrySawParsedUpdate |= update.IsParsed;
+                        update = ParseRetryUpdate(update, retryParser);
+                        if (!string.IsNullOrEmpty(update.ThinkingPiece))
+                            yield return WebUiSseEvents.Thinking(update.ThinkingPiece);
+                        if (!string.IsNullOrEmpty(update.Piece))
+                        {
+                            // Only the separated answer counts as retry content; a
+                            // prompt-opened thought channel can exist with thinking off.
+                            sawContent = true;
+                            tokenCount++;
+                            yield return WebUiSseEvents.Token(update.Piece);
+                        }
+                        if (update.ParsedToolCalls is { Count: > 0 })
+                            yield return WebUiSseEvents.ToolCalls(update.ParsedToolCalls);
+                        if (update.ToolProgressPhase != null)
+                            yield return WebUiSseEvents.ToolProgress(
+                                update.ToolProgressPhase, update.ToolProgressName,
+                                update.ToolProgressPiece, update.ToolProgressSeconds,
+                                update.ToolProgressDetail);
                     }
                 }
                 finally
@@ -2333,7 +2396,7 @@ namespace TensorSharp.Chat
                 if (retryCompleted)
                 {
                     uiParser = retryParser;
-                    sawParsedUpdate = true;   // the retry streamed content directly
+                    sawParsedUpdate = retrySawParsedUpdate;
                 }
             }
 
@@ -2348,7 +2411,7 @@ namespace TensorSharp.Chat
         // ---- Chat for DiffusionGemma: live denoising preview -------------------
 
         private async IAsyncEnumerable<object> ChatStreamDiffusionAsync(
-            ChatSession chatSession, List<ChatMessage> messages, int maxTokens, ILogger webUiLogger,
+            ChatSession chatSession, List<ChatMessage> messages, int maxTokens, bool think, ILogger webUiLogger,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var sw = Stopwatch.StartNew();
@@ -2357,8 +2420,11 @@ namespace TensorSharp.Chat
             int finalTokenCount = 0;
             int turnPromptTokens = 0;
 
+            // The canvas text arrives with its channels already separated (the thought
+            // block is dropped unless the request asked for it), so the replace frames
+            // show the answer rather than Gemma's raw channel markup.
             IAsyncEnumerator<DiffusionStreamUpdate> stream = _svc
-                .DiffusionChatStreamAsync(chatSession, messages, maxTokens, cancellationToken)
+                .DiffusionChatStreamAsync(chatSession, messages, maxTokens, cancellationToken, think)
                 .GetAsyncEnumerator(cancellationToken);
             try
             {
@@ -2696,6 +2762,21 @@ namespace TensorSharp.Chat
         /// </summary>
         internal static bool HasParsedAnswerContent(ChatStreamUpdate update) =>
             update.IsParsed && !string.IsNullOrEmpty(update.Piece);
+
+        /// <summary>Separates raw retry output while preserving already-parsed skill updates.</summary>
+        internal static ChatStreamUpdate ParseRetryUpdate(ChatStreamUpdate update, IOutputParser parser)
+        {
+            if (update.Done || update.IsParsed)
+                return update;
+
+            if (update.RawGenerationSuffix != null)
+                parser?.SetGenerationPromptSuffix(update.RawGenerationSuffix);
+            if (parser == null)
+                return update;
+
+            var parsed = parser.Add(update.Piece ?? string.Empty, false);
+            return ChatStreamUpdate.Parsed(parsed.Content, parsed.Thinking, parsed.ToolCalls);
+        }
 
         /// <summary>
         /// The skill lookups the disclosure loop has performed since the last call, to be

@@ -287,9 +287,9 @@ else. Asking for offload on a combination that does not implement it prints a
 `[moe-offload] WARNING` and proceeds without saving VRAM, rather than failing
 quietly. Measured on gemma-4-26B-A4B (`--cpu-moe`, peak VRAM): `ggml_cuda`
 15244 → 5756 MiB; `cuda` 14261 → 14253 MiB (no-op, warns).
-| `--kv-cache-dtype <type>` | KV cache precision: `f32`, `f16`, `q8_0`, or `q4_0` (default: auto — the backend/model pick; env `KV_CACHE_DTYPE`). Half-precision / quantized KV caches reduce memory at the cost of small numerical drift; `q4_0` (~0.56 bytes/elem, ~1/7 of f32) is the most aggressive tier for very long (128K–256K) contexts where the KV cache dominates memory. Block-quantized caches (`q8_0`/`q4_0`) require the native GGML flash path. |
+| `--kv-cache-dtype <type>` | KV cache precision: `f32`, `f16`, `q8_0`, or `q4_0` (default: auto — the backend/model pick; env `KV_CACHE_DTYPE`). Half-precision / quantized KV caches reduce memory at the cost of small numerical drift; `q4_0` (~0.56 bytes/elem, ~1/7 of f32) is the most aggressive tier for very long (128K–256K) contexts where the KV cache dominates memory. Block-quantized caches (`q8_0`/`q4_0`) require the native GGML flash path; DeepSeek V4 / V4.1 refuse them at load (their executors keep F16 caches read by their own kernels) and report `f16` for an explicit `f32`. |
 | `--interactive` / `-i` / `--chat` | Start an interactive REPL chat session (turn-by-turn input/output) with KV cache reuse, slash commands, hot-swappable model/backend/projector, file attachments (image, audio, video, text) and live sampling tuning. See the **Interactive REPL commands** section below for the full list. |
-| `--no-prefix-cache` | Do not forward the shared part of the prompt before the first message. By default an interactive chat forwards its system block, tool declarations and skill catalog at startup so the first message continues from them instead of prefilling them (measured 18.5s → 0.3s on an agent configuration); the price is that the session takes that long to become ready. Unrelated to `--warmup-runs` |
+| `--no-prefix-cache` | Disable runtime prefix reuse and interactive system/tool prompt warmup. Radix caching is enabled by default for normal CLI generation, including interactive, JSONL, and skill/tool requests. Unrelated to `--warmup-runs`, which warms compute kernels. |
 | `--system <text>` | System prompt to seed the interactive session (overridden inside the REPL by `/system`) |
 | `--system-file <path>` | Read the initial system prompt from a UTF-8 text file (alternative to `--system`) |
 | `--think` | Enable thinking/reasoning mode (chain-of-thought). Opt-in on every family, GLM 5.x included: without it the GLM template closes the reasoning block immediately (`<think></think>`) so the model answers directly, and with it the prompt carries `Reasoning Effort: Max` and leaves the block open for the model to close. `/think on\|off` toggles it inside the REPL. |
@@ -361,11 +361,11 @@ script gets that error instead of watching a setting be ignored.
 
 | Option | Description |
 |---|---|
-| `--spec` / `--no-spec` | Enable speculative decoding (default off). `--spec` is the explicit opt-in for drafters embedded in the trunk checkpoint — GLM 5.2's NextN block, GLM-5.3's and Qwen 3.6's, with nothing extra to download — because loading them pages extra weights into VRAM; a drafter that ships as its own GGUF is enabled by `--draft-model` alone, and an explicit `--no-spec` vetoes either. The head drafts up to `--spec-draft` tokens and the trunk verifies them in one batched forward; every emitted token still comes from a trunk row, so the stream is the one plain decoding would have produced (argmax under a greedy config, in distribution under a sampler) and this is a speed path only. Engages on every single-sequence path (`--input`, `--input-jsonl`, `--multi-turn-jsonl`, `--interactive`). **Must be on the command line before the model loads**: for glm-dsa it is what tells the native loader to page the ~3 GiB NextN layer into VRAM, and that layer competes with the KV cache for the memory the context is sized against. Refused under `--tp N>1` on a checkpoint whose draft block borrows the trunk's LM head, which includes GLM 5.2 and GLM-5.3 — on those, speculation engages on the default layer split (no `--tp`). Env: `TS_SPEC` (legacy `TS_MTP_SPEC`, still read by the glm-dsa native loader; glm-dsa also honours `TS_GLM_MTP=1`/`0`, which overrides both, for A/B runs). |
+| `--spec` / `--no-spec` | Enable speculative decoding (default off). `--spec` is the explicit opt-in for drafters embedded in the trunk checkpoint — GLM 5.2's NextN block, GLM-5.3's and Qwen 3.6's, with nothing extra to download — because loading them pages extra weights into VRAM; a drafter that ships as its own GGUF is enabled by `--draft-model` alone, and an explicit `--no-spec` vetoes either. The head drafts up to `--spec-draft` tokens and the trunk verifies them in one batched forward; every emitted token still comes from a trunk row, so the stream is the one plain decoding would have produced (argmax under a greedy config, in distribution under a sampler) and this is a speed path only. "The one plain decoding would have produced" holds up to floating point: a multi-row verify and a one-row decode run different kernels, and a greedy token whose top two logits are closer than their disagreement can come out differently (measured and explained in [what greedy parity delivers](docs/speculative_decoding.md#what-greedy-parity-delivers)). Engages on every single-sequence path (`--input`, `--input-jsonl`, `--multi-turn-jsonl`, `--interactive`). **Must be on the command line before the model loads**: for glm-dsa it is what tells the native loader to page the ~3 GiB NextN layer into VRAM, and that layer competes with the KV cache for the memory the context is sized against. Refused under `--tp N>1` on a checkpoint whose draft block borrows the trunk's LM head, which includes GLM 5.2 and GLM-5.3 — on those, speculation engages on the default layer split (no `--tp`). Env: `TS_SPEC` (legacy `TS_MTP_SPEC`, still read by the glm-dsa native loader; glm-dsa also honours `TS_GLM_MTP=1`/`0`, which overrides both, for A/B runs). |
 | `--spec-type <name>` | Speculation **algorithm**: `auto` (default, use the checkpoint's own drafter), `draft-head`, `block`, or `ngram`. `ngram` needs no trained weights and works on every model — it drafts by finding where the last few tokens occurred earlier in the context and proposing what followed, so it is strong wherever the answer quotes its input (summarizing, editing, translating, repetitive structured output, agentic loops) and falls back to plain decode elsewhere. Measured 45.2 tok/s against 31.4 plain (1.44x) on Qwen3.5-9B (Q8_0, `ggml_metal`, M5 Pro) — a checkpoint that ships no draft head at all — with byte-identical output. Env: `TS_SPEC_TYPE`. See [Speculative Decoding in TensorSharp](docs/speculative_decoding.md). |
 | `--spec-draft <N>` | Maximum tokens drafted per speculative step (range 1-64, default `8`). Also sizes the native graph cache at load, so pass it alongside `--spec` rather than relying on the default. A block drafter additionally clamps it to its trained block size, which is also its default there — 5 for DSpark, 15 for Muse-Glimmer's DFlash, 7 for Qwen 3.8's DFlash2. On a **recurrent** trunk (Qwen 3.5/3.8's GatedDeltaNet layers) a narrow window is worth far more than a wide one: it bounds both the verify width and the rollback re-forward, and `--spec-draft 3` was 1.6x faster than the default on Qwen3.8-27B. On Qwen 3.5 under the GGML backends a typed value of 8 or more is also a known **correctness** bug — nine verify rows diverge from plain greedy — so stay at 7 or lower there; see [speculative decoding](docs/speculative_decoding.md). Env: `TS_SPEC_DRAFT` (or `TS_MTP_DRAFT`). |
 | `--spec-pmin <f>` | Draft-confidence gate in `[0, 1]`; drafting stops at the first token below it, and `0` means never gate. What the number MEANS is the algorithm's business, so each brings its own default: `0.15` for a per-token head (top-1 probability over its top-10 logits), `0.35` for a block drafter (the CUMULATIVE prefix probability — the product of the confidence head's per-position estimates, so the same number is far stricter; lower drafts further and rolls back more, higher falls back to plain decode more often), `0` for n-gram (where it scales the required match length instead). Env: `TS_SPEC_PMIN` (or `TS_MTP_PMIN`). |
-| `--draft-model <path>` | Speculative-decoding drafter GGUF, for every drafter that ships as its own file — DeepSeek V4's DSpark support module (see [DeepSeek V4](docs/models/deepseek4.md#dspark-speculative-decoding)), Muse-Glimmer's DFlash and Qwen 3.8's DFlash2 block drafters (see [Muse-Glimmer](docs/models/muse-glimmer.md#3-dflash-speculative-decoding); env `TS_MUSE_GLIMMER_DFLASH`), and Gemma 4's `gemma4-assistant` per-token head. The file's own `general.architecture` decides how it loads — you never pick a mechanism. Naming a file here enables speculation by itself; no `--spec` is needed beside it, and an explicit `--no-spec` vetoes it. The draft's hidden size must match the target (pair the 12B target with its 12B draft, not the 26B-A4B one); a mismatched, missing, or incomplete draft GGUF fails fast at startup. Qwen 3.6, GLM 5.2 and GLM-5.3 embed their NextN block in the trunk GGUF and need no such flag — they take `--spec` instead. A block drafter drafts a whole block per step and the trunk verifies it in one batched forward. Every emitted token is still drawn from a trunk row — with argmax under a greedy config, with the run's own sampler otherwise — so the output stream is unchanged either way. Block drafting engages on every single-sequence path (`--input`, `--multi-turn-jsonl`, `--interactive`) with `--backend cuda` or `--backend ggml_cuda`. Env: `TS_SPEC_DRAFT_MODEL`, `TS_DSV4_DSPARK`. |
+| `--draft-model <path>` | Speculative-decoding drafter GGUF, for every drafter that ships as its own file — DeepSeek V4's DSpark support module (see [DeepSeek V4](docs/models/deepseek4.md#dspark-speculative-decoding)), Muse-Glimmer's DFlash and Qwen 3.8's DFlash2 block drafters (see [Muse-Glimmer](docs/models/muse-glimmer.md#3-dflash-speculative-decoding); env `TS_MUSE_GLIMMER_DFLASH`), and Gemma 4's `gemma4-assistant` per-token head. The file's own `general.architecture` decides how it loads — you never pick a mechanism. Naming a file here enables speculation by itself; no `--spec` is needed beside it, and an explicit `--no-spec` vetoes it. The draft's hidden size must match the target (pair the 12B target with its 12B draft, not the 26B-A4B one); a mismatched, missing, or incomplete draft GGUF fails fast at startup. Qwen 3.6, GLM 5.2 and GLM-5.3 embed their NextN block in the trunk GGUF and need no such flag — they take `--spec` instead. A block drafter drafts a whole block per step and the trunk verifies it in one batched forward. Every emitted token is still drawn from a trunk row — with argmax under a greedy config, with the run's own sampler otherwise — so the output stream is unchanged either way, up to floating-point near-ties between the verify and decode kernels ([what greedy parity delivers](docs/speculative_decoding.md#what-greedy-parity-delivers)). Block drafting engages on every single-sequence path (`--input`, `--multi-turn-jsonl`, `--interactive`) with `--backend cuda` or `--backend ggml_cuda`. Env: `TS_SPEC_DRAFT_MODEL`, `TS_DSV4_DSPARK`. **Nemotron-H refuses it:** a DSpark drafter for Nemotron 3.5 Lightning is recognized but not attached, and `--spec`/`--spec-type ngram` serve plain decoding with a one-time warning, because that trunk's verify and decode kernels disagree and speculation would change the output (see [speculative decoding](docs/speculative_decoding.md#nemotron-h-refuses-speculation)). |
 | `--temperature <f>` | Sampling temperature (0 = greedy) |
 | `--top-k <N>` | Top-K filtering (0 = disabled) |
 | `--top-p <f>` | Nucleus sampling threshold (1.0 = disabled) |
@@ -687,13 +687,13 @@ of quietly losing a setting.
 | `--kv-cache-dtype <type>` | KV cache precision for the hosted model: `f32`, `f16`, `q8_0`, or `q4_0` (quantized caches trade small numerical drift for memory; see the CLI table above for the tier trade-offs). Default: auto — the backend/model pick. Env: `KV_CACHE_DTYPE`. |
 | `--continuous-batching` / `--no-continuous-batching` | Enable (default) or disable iteration-level paged-batching. When enabled the server admits / preempts sequences mid-batch and packs them into one forward pass on models that implement `IBatchedPagedModel`. `--no-continuous-batching` falls back to per-sequence KV-swap for every model. Alias: `--paged-batching` / `--no-paged-batching`. |
 | `--no-webui` | Do not serve the bundled web UI; `GET /` answers the plain liveness text instead. Every HTTP API endpoint, `/uploads` included, stays up. Env: `TS_NO_WEBUI` |
-| `--no-prefix-cache` | Do not prepare the prompt every conversation shares before serving, and do not keep it between launches. By default the server forwards that prompt once at startup and saves the result, so the first message of a process costs the same as any other (measured 21.8s → 0.7s on an agent configuration) |
+| `--no-prefix-cache` | Disable runtime radix prefix reuse, startup shared-prompt warmup, and persistence between launches. Caching is enabled by default; the server warms and saves the shared prompt so later launches can restore it. |
 | `--prefill-chunk-size <N>` | Maximum prefill tokens per request in a mixed prefill+decode step, so active streams get frequent GPU turns (default: `256`). Prefill-only batches still divide and consume the full device token budget. Env: `TS_SCHED_PREFILL_CHUNK`. |
-| `--spec` / `--no-spec` | Enable speculative decoding (default off). `--spec` is the explicit opt-in for drafters embedded in the trunk checkpoint (Qwen 3.6's, GLM 5.2's and GLM-5.3's NextN blocks), because loading them pages extra weights into VRAM; a drafter that ships as its own GGUF is enabled by `--draft-model` alone, and an explicit `--no-spec` vetoes either. Engages for solo (non-concurrent) sequences: the draft head proposes up to `--spec-draft` tokens per step and the trunk verifies them in one batched forward, with the request's own sampler (penalties included) driving both drafting and verification, so output matches standard decode. Engaged automatically only where profitable: Qwen 3.6 reports its embedded NextN block profitable on every backend, while Gemma 4's separate draft head engages on the ggml backends and on the direct `cuda` backend only. CPU / GGML CPU / MLX serve standard decode. Env: `TS_SPEC` (legacy `TS_MTP_SPEC`). |
+| `--spec` / `--no-spec` | Enable speculative decoding (default off). `--spec` is the explicit opt-in for drafters embedded in the trunk checkpoint (Qwen 3.6's, GLM 5.2's and GLM-5.3's NextN blocks), because loading them pages extra weights into VRAM; a drafter that ships as its own GGUF is enabled by `--draft-model` alone, and an explicit `--no-spec` vetoes either. Engages for solo (non-concurrent) sequences: the draft head proposes up to `--spec-draft` tokens per step and the trunk verifies them in one batched forward, with the request's own sampler (penalties included) driving both drafting and verification, so output matches standard decode up to floating-point near-ties between the verify and decode kernels ([what greedy parity delivers](docs/speculative_decoding.md#what-greedy-parity-delivers)). Engaged automatically only where profitable: Qwen 3.6 reports its embedded NextN block profitable on every backend, while Gemma 4's separate draft head engages on the ggml backends and on the direct `cuda` backend only. CPU / GGML CPU / MLX serve standard decode. GLM-5.3-Flash (`glm5next`) builds no draft head (its NextN block is not implemented), so `--spec` alone serves standard decode there; `--spec --spec-type ngram` engages the weight-free n-gram drafter, with the KDA recurrent state snapshotted before every verify and restored on a partial rejection (default window 3; see the [GLM card](docs/models/glm.md#speculative-decoding-on-glm-53-flash)). Env: `TS_SPEC` (legacy `TS_MTP_SPEC`). |
 | `--spec-type <name>` | Speculation algorithm: `auto` (default) / `draft-head` / `block` / `ngram`. `ngram` needs no trained weights and works on every model — it drafts by finding where the last few tokens occurred earlier in the context and proposing what followed, so it is strong wherever the answer quotes its input. Env: `TS_SPEC_TYPE`. |
 | `--spec-draft <N>` | Maximum tokens drafted per speculative step (default `8`; a block drafter clamps it to its trained block size, which is also its default there). On Qwen 3.5 under the GGML backends, keep a typed value at 7 or lower — nine verify rows are a known correctness bug. Env: `TS_SPEC_DRAFT` (or `TS_MTP_DRAFT`). |
 | `--spec-pmin <f>` | Draft-confidence gate in `[0, 1]`; drafting stops at the first token below it, and `0` means never gate. Default per algorithm — `0.15` for a per-token draft head (top-1 probability over its top-10 logits), `0.35` for a block drafter (the CUMULATIVE prefix probability, so far stricter), `0` for n-gram. Env: `TS_SPEC_PMIN` (or `TS_MTP_PMIN`). |
-| `--draft-model <path>` | Speculative-decoding draft model, for every drafter that ships as its own file: DeepSeek V4's DSpark support GGUF (see [DeepSeek V4](docs/models/deepseek4.md#dspark-speculative-decoding)), Muse-Glimmer's DFlash and Qwen 3.8's DFlash2 block drafters (see [Muse-Glimmer](docs/models/muse-glimmer.md#3-dflash-speculative-decoding), env `TS_MUSE_GLIMMER_DFLASH`), and Gemma 4's `gemma4-assistant` per-token head. The file's own `general.architecture` decides how it loads — the operator never picks a mechanism — and naming a file here enables speculation by itself, with an explicit `--no-spec` as the veto. The draft's hidden size must match the target (e.g. pair the 12B target with its 12B draft, not the 26B-A4B draft); a mismatched or incomplete draft fails fast at startup with a remediation hint. Qwen 3.6, GLM 5.2 and GLM-5.3 embed their NextN block in the trunk GGUF and need no such flag — they take `--spec` instead. A block drafter drafts a whole block per step and the trunk verifies it in one batched forward. Every emitted token is still drawn from a trunk row — with argmax under a greedy config, with the run's own sampler otherwise — so the output stream is unchanged either way. Block drafting engages with `--backend cuda` or `--backend ggml_cuda` (on the CLI, on every single-sequence path — `--input`, `--multi-turn-jsonl` and `--interactive`). One caveat under a penalized sampler: a block drafter proposes its whole block in one pass, so the repetition/presence/frequency penalties that verification applies are not applied to the proposal, and acceptance falls as the penalized history grows. A per-token head does not have that problem — its drafts are penalized with the same history. Env: `TS_SPEC_DRAFT_MODEL` (legacy `TS_MTP_DRAFT_MODEL`), `TS_DSV4_DSPARK`. |
+| `--draft-model <path>` | Speculative-decoding draft model, for every drafter that ships as its own file: DeepSeek V4's DSpark support GGUF (see [DeepSeek V4](docs/models/deepseek4.md#dspark-speculative-decoding)), Muse-Glimmer's DFlash and Qwen 3.8's DFlash2 block drafters (see [Muse-Glimmer](docs/models/muse-glimmer.md#3-dflash-speculative-decoding), env `TS_MUSE_GLIMMER_DFLASH`), and Gemma 4's `gemma4-assistant` per-token head. The file's own `general.architecture` decides how it loads — the operator never picks a mechanism — and naming a file here enables speculation by itself, with an explicit `--no-spec` as the veto. The draft's hidden size must match the target (e.g. pair the 12B target with its 12B draft, not the 26B-A4B draft); a mismatched or incomplete draft fails fast at startup with a remediation hint. Qwen 3.6, GLM 5.2 and GLM-5.3 embed their NextN block in the trunk GGUF and need no such flag — they take `--spec` instead. A block drafter drafts a whole block per step and the trunk verifies it in one batched forward. Every emitted token is still drawn from a trunk row — with argmax under a greedy config, with the run's own sampler otherwise — so the output stream is unchanged either way, up to floating-point near-ties between the verify and decode kernels ([what greedy parity delivers](docs/speculative_decoding.md#what-greedy-parity-delivers)). Block drafting engages with `--backend cuda` or `--backend ggml_cuda` (on the CLI, on every single-sequence path — `--input`, `--multi-turn-jsonl` and `--interactive`). One caveat under a penalized sampler: a block drafter proposes its whole block in one pass, so the repetition/presence/frequency penalties that verification applies are not applied to the proposal, and acceptance falls as the penalized history grows. A per-token head does not have that problem — its drafts are penalized with the same history. Env: `TS_SPEC_DRAFT_MODEL` (legacy `TS_MTP_DRAFT_MODEL`), `TS_DSV4_DSPARK`. **Nemotron-H refuses it:** an explicit `--draft-model` (such as Nemotron 3.5 Lightning's DSpark GGUF) stops server startup with the model's reason and says to drop the flag, and `--spec`/`--spec-type ngram` serve plain decoding with a one-time warning, because that trunk's verify and decode kernels disagree and speculation would change the output (see [speculative decoding](docs/speculative_decoding.md#nemotron-h-refuses-speculation)). |
 | `--paged-kv` / `--no-paged-kv` | Legacy compatibility flags for the removed per-session paged-KV manager. Current server KV state is engine-owned; use continuous-batching / `TS_SCHED_*` knobs for the engine. Aliases: `--paged-kv-cache` / `--no-paged-kv-cache`. |
 | `--paged-kv-block-size <N>` | Legacy standalone paged-KV block size. The current server engine uses `TS_SCHED_BLOCK_SIZE`. |
 | `--paged-kv-ram-mb <N>` | Legacy standalone paged-KV RAM-tier cap. |
@@ -738,6 +738,7 @@ did unconditionally.
 | `TENSORSHARP_LOG_LEVEL` | Minimum log level for both console and file loggers: `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical` (default: `Information`). Also honored by `TensorSharp.Cli`. |
 | `TENSORSHARP_LOG_DIR` | Directory the JSON-line file logger writes to (default: `<binDir>/logs`). Also honored by `TensorSharp.Cli`. |
 | `TENSORSHARP_LOG_FILE` | Set to `0` to disable the file logger and keep only the console output (default: enabled). Also honored by `TensorSharp.Cli`. |
+| `TENSORSHARP_UPLOAD_DIR` | Directory for uploaded media and extracted video frames (default: `<binDir>/uploads`); point it outside the application directory for read-only or pinned deployments. Server only. |
 | `TENSORSHARP_TP_DEGREE` | Multi-GPU degree — number of local GPUs to spread the model over (default: `1`). Fallback in `ModelBase.Create` when no `--tp` flag is passed; both `TensorSharp.Cli` and `TensorSharp.Server` expose it as `--tp <N>`. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. On the architectures that run a layer split instead of tensor parallelism (`qwen4exp`, DeepSeek V4) it is a device count, not a shard count. |
 | `TENSORSHARP_TP_DEVICES` | GPU ordinals the TP ranks map to, comma-separated (e.g. `0,2`; default `0..tp-1`). Used by TP on the GGML backends. |
 | `TS_Q4E_LAYER_SPLIT` | Explicit per-GPU layer counts for the Qwen 3.8 Flash Next (`qwen4exp`) multi-GPU layer split, comma-separated (e.g. `20,28`), replacing the automatic VRAM balance. Throws rather than silently ignoring a value it cannot honour. |
@@ -772,11 +773,12 @@ These can be set with either the `--paged-kv*` / `--continuous-batching` CLI fla
 | `TS_SCHED_SOLO_PREFILL_CHUNK` | Prefill chunk size for the fresh (start_pos = 0) part of a SOLO prompt — one uncontended request gets big fused-prefill chunks (default: `8192`). |
 | `TS_SCHED_NUM_BLOCKS` | Physical blocks in the engine block pool (default: `256`). |
 | `TS_SCHED_BLOCK_SIZE` | Tokens per block on the engine side (default: `256`). |
-| `TS_SCHED_PREFIX_CACHE` | `0` disables block-hash prefix sharing across requests. |
+| `TS_SCHED_PREFIX_CACHE` | `0` disables all prompt reuse across requests: pooled blocks, live-cache continuation, retained holders and shared-prefix checkpoints. Reuse is isolated per conversation either way: another conversation's state is shared only up to the system-prompt-and-tools prefix (see [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md#prompt-reuse-across-requests-conversation-scopes-and-media-identity)). Pooled blocks: a block written by a batched paged step is adopted in the model's paged storage (the request starts as a paged resident); a block with a pooled snapshot is restored into the linear cache; a block that has neither form a request can read is not adopted and re-prefills. |
 | `TS_SCHED_STOP_REPETITION` | `0` lets a generation that has locked into a loop run to its token limit instead of being stopped. |
 | `TS_SCHED_DECODE_QUANTUM` | Tokens before a sequence-switch is allowed (default: block size). |
 | `TS_RETAINED_FUSED_CACHE` | `1` (default) retains a finished request's fused holder so an exact-prefix continuation skips re-prefilling it, on models that advertise support (Gemma 4 K/V; Qwen 3.5/3.6 attention K/V plus GatedDeltaNet recurrent state). `0` disables it (VRAM cap / A-B). |
 | `TS_RETAINED_FUSED_CACHE_MAX` | LRU budget of retained fused holders (default: `4`); each pins a complete per-request continuation state. |
+| `TS_MM_EMBEDDING_CACHE_MB` | Byte budget of the image/audio embedding cache (default: `512`). Entries are keyed by media content (SHA-256), so an API client resending the same image every turn encodes it once; least-recently-used entries no in-flight prompt references are evicted past the budget. |
 | `TS_PREFIX_CHECKPOINTS` | `1` (default) checkpoints the model state at the end of the prompt every conversation shares — system prompt, tools, skills — and starts each **new** chat from a clone of it, so a new chat re-prefills only its own message. Gemma 4 and Qwen 3.5/3.6 on the GGML backends. `0` disables. |
 | `TS_PREFIX_CHECKPOINTS_MAX` | How many distinct shared prefixes stay checkpointed at once, LRU (default: `2`). Each holds one copy of that prefix's K/V and, on Qwen, its recurrent state. |
 | `TS_KV_INITIAL_TOKENS` | Tokens of K/V a cache is given when it is created — the primary cache at load and every per-request holder — before any request declares a budget. `0` (default) keeps the engine policy: the whole window when `MAX_CONTEXT` is explicit, otherwise a backend default. The cache still grows on demand, so a memory-constrained device sets this small because every kept holder is paid at this size, host copy and device mirror both. |
@@ -789,7 +791,10 @@ These can be set with either the `--paged-kv*` / `--continuous-batching` CLI fla
 | `TS_GPTOSS_PAGED_ATTN_MANAGED` | Use the managed (C#) paged-attention-with-sinks kernel inside GPT OSS batched path. |
 | `TS_NEMOTRON_BATCHED` | Set to `0` to force Nemotron-H onto the legacy per-sequence KV-swap path (default: batched/paged). |
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | Use the native Mamba2 batched step kernel inside Nemotron-H batched path. |
-| `TS_PAGED_ATTN_KERNEL` | Paged-attention dispatch kernel for `Mistral3Model.BatchedForward`: `native` (default), `tensor` (C# Tensor-based), or `managed` (pure C# scalar). |
+| `TS_NEMOTRON_ATTN_SCORE_BUDGET_MB` | Nemotron-H: largest attention score tensor (MiB) the materialized prefill fallback builds before it attends in query sub-chunks (default 1024). Not used by the GGML fused prefill kernel (F32/F16 cache), which switches to flash attention once the scores would be large. |
+| `TS_MAMBA2_PREFILL_CACHE_MB` | Nemotron-H: device memory (MiB) the cached native Mamba2 prefill graphs may hold, least recently used first out (default 1024). A graph larger than the budget serves its call and is released. |
+| `TS_PAGED_ATTN_KERNEL` | Paged-attention dispatch kernel for `Mistral3Model.BatchedForward` and `HunyuanDenseModel.BatchedForward`: `native` (default), `tensor` (C# Tensor-based), or `managed` (pure C# scalar). |
+| `TS_HUNYUAN_BATCHED` | Set to `0` to force Hunyuan Dense onto the per-sequence KV-snapshot swap path (default: batched/paged; a block-quantized KV cache always uses the snapshot path). |
 | `TS_MLX_PIPELINED_DECODE` | `1` (default) enables pipelined greedy decode on the MLX backend when the request is greedy, has no stop sequences, and the model supports device-side argmax / next-embedding lookup. Set to `0` to disable. CLI only. |
 | `TS_MLX_MLOCK_GGUF` | `1` (default) pins the GGUF mmap region in physical RAM via `mlock(2)` so model weights stay resident between forward passes. Set to `0` to skip (use if the process `memlock` rlimit is too low or you want the OS to manage paging). MLX backend only. |
 | `TS_MLX_FUSED_KV_WRITE` | `1` (default) uses a single multi-dim `slice_update` to write the per-token KV block. Set to `0` to revert to the per-head loop (A/B testing / regression isolation). |
@@ -1335,6 +1340,10 @@ offloaded prefill runs several times faster than llama.cpp's on the same files:
    expert range costs ~65 ms/GiB once and takes the transfer from 9.3 GB/s to
    55.6 GB/s on PCIe 5.0 x16. Disable with `TS_HOST_MOE_PIN=0`; bound it with
    `TS_HOST_MOE_PIN_MAX_MB` (default: 60% of the cgroup/host memory limit).
+   DeepSeek V4 / V4.1 are the exception: their loader multiplies offloaded experts
+   on the host at every batch size, nothing streams them, so it pins them only
+   when `TS_HOST_MOE_PIN=1` (see the
+   [V4.1 card](docs/models/deepseek41.md#load-time)).
 2. **Only the experts this batch routes to are sent**, grouped into consecutive
    runs — the same trick llama.cpp's scheduler plays with its used-expert bitset.
    At 512 tokens a large expert pool is only partly covered, and at the small
@@ -1757,19 +1766,53 @@ Quick reference for which environment variables (and matching CLI flags) gate ea
 
 | Feature | Default | Env vars | CLI equivalent |
 |---|---|---|---|
-| Continuous-batching engine (`InferenceEngine` + scheduler) | ON in `TensorSharp.Server` | `TS_SCHED_DISABLE_BATCHED=1` to force per-seq fallback | `--no-continuous-batching` / `--continuous-batching` |
+| Continuous-batching engine (`InferenceEngine` + scheduler) | ON in Server, CLI generation, and TensorAgent | `TS_SCHED_DISABLE_BATCHED=1` to force per-seq fallback | `--no-continuous-batching` / `--continuous-batching` |
 | Legacy per-session paged-KV manager | removed from Server request path | `TS_KV_PAGED_CACHE` (`0` / `1`), `TS_KV_BLOCK_SIZE` retained for compatibility / standalone tests | `--paged-kv` / `--no-paged-kv`, `--paged-kv-block-size N` |
 | Legacy paged-KV SSD spillover (standalone manager) | OFF | `TS_KV_CACHE_MAX_RAM_MB`, `TS_KV_CACHE_SSD_DIR`, `TS_KV_CACHE_MAX_SSD_MB` | `--paged-kv-ram-mb`, `--paged-kv-ssd-dir`, `--paged-kv-ssd-mb` |
 | Legacy paged-KV block quantization (standalone manager) | OFF (`0` = passthrough) | `TS_KV_PAGED_QUANT_BITS` (`0` / `2` / `4` / `8`) | `--paged-kv-quant-bits` |
-| Block-hash prefix sharing across requests | ON | `TS_SCHED_PREFIX_CACHE=0` to disable | — |
+| Radix KV prefix reuse | ON for supported models | `TS_SCHED_PREFIX_CACHE=0` disables reuse; `TS_PREFIX_CACHE_MODE=legacy` selects the compatibility path | `--no-prefix-cache` also disables warmup |
 | Scheduler tunables (per-step token budget, max in-flight seqs, prefill chunks, block pool size, decode quantum) | engine defaults | `TS_SCHED_MAX_BATCHED_TOKENS`, `TS_SCHED_MAX_RUNNING_SEQS`, `TS_SCHED_PREFILL_CHUNK`, `TS_SCHED_SOLO_PREFILL_CHUNK`, `TS_SCHED_NUM_BLOCKS`, `TS_SCHED_BLOCK_SIZE`, `TS_SCHED_DECODE_QUANTUM` | — |
+
+Radix keeps page snapshots, model-paged blocks, and model-owned continuation states
+in one prefix index. Reuse respects conversation scopes, explicit cache markers,
+media identities, and each model's resumable boundaries. Public prefix checkpoints
+remain eligible for disk persistence. Engine API callers should supply a stable
+`SequenceState.CacheScope` for conversation reuse; an unscoped request shares only
+its declared `SharedPrefixTokens` in Radix mode.
+
+Startup warmup makes the common system/developer messages and tool declarations
+available to new chats as a public prefix. Server warms its configured startup
+model before accepting requests, and TensorAgent warms after loading a model.
+Both attach a checkpoint store so models supporting export/import can restore
+the prefix on a later launch. Interactive CLI warms its shared prefix at startup;
+`/new` and `/reset` start a fresh conversation scope while retaining the engine's
+public cache. Independent CLI JSONL conversations also share only their declared
+system prefix. CLI caching is in memory and is rebuilt after the process exits.
+
+Reuse requires identical rendered tokens, including tool schemas, the chat
+template and thinking settings, and remains subject to cache budgets. The host
+declares shared prefixes of at least 64 tokens; CLI eager startup warmup uses
+the same minimum, but shorter CLI prefixes can be cached by actual requests.
+Copyable model checkpoints can preserve the exact boundary; page-only models
+reuse complete pages. Models
+without copyable checkpoints or reusable pages cannot share a system checkpoint
+across sessions. Models without export/import support cannot persist it across
+launches. `--warmup-runs` controls extra inference warmups; these can populate the
+same public cache but are not required for interactive startup prefix warmup.
+
+The old standalone `PagedKvCacheManager` remains available to the paged cache
+microbenchmark. Its `--paged-kv` flags do not enable or disable Radix. The CLI's
+normal generation now uses the shared scheduler; its reported prefill time is time
+to first token, including scheduling and sampling. The standalone model benchmark
+continues to measure its direct backend decode paths, including MLX pipelining.
 
 #### Per-model batched / paged forward (`IBatchedPagedModel.ForwardBatch`)
 
 | Model | Default state | Env var to flip default | Native-kernel sub-toggle |
 |---|---|---|---|
 | Mistral 3 | ON | — | `TS_PAGED_ATTN_KERNEL` = `native` (default) / `tensor` / `managed` |
-| Gemma 4 | ON | `TS_GEMMA4_BATCHED=0` to force legacy per-seq | — |
+| Hunyuan Dense | ON (off for a block-quantized KV cache) | `TS_HUNYUAN_BATCHED=0` to force the KV-snapshot swap path | `TS_PAGED_ATTN_KERNEL` = `native` (default) / `tensor` / `managed` |
+| Gemma 4 | ON | `TS_GEMMA4_BATCHED=0` to force legacy per-seq | `TS_GEMMA4_BATCHED_CAPS=0` forces the v1 gates of the token-batched fused decode kernel (PLE / shared-KV / wrapped-SWA models such as E2B/E4B then decode round-robin) |
 | Qwen 3.5 / 3.6 family | ON | `TS_QWEN35_BATCHED=0` to force legacy per-seq (or `--no-continuous-batching`) | `TS_QWEN35_BATCHED_GDN_NATIVE=1` enables native batched GDN kernel; `FUSED_ATTN_LAYER_MIN_SEQ_LEN=N` overrides fused-attention engage threshold (default 4096) |
 | GPT OSS | ON | `TS_GPTOSS_BATCHED=0` to force legacy per-seq | `TS_GPTOSS_PAGED_ATTN_MANAGED=1` forces the managed (C#) sinks softmax instead of the native paged-attention-with-sinks kernel |
 | Nemotron-H | ON | `TS_NEMOTRON_BATCHED=0` to force legacy per-seq | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` enables the native batched Mamba2 step (NEON SIMD + GCD parallelism) |
@@ -1999,7 +2042,7 @@ with `--sampling-precedence request` (see [Web Application](#web-application)).
 |---|---|---|
 | ASP.NET Core listener | `http://0.0.0.0:5000` | `--port` / `--host` / `--urls`, then `PORT` / `HOST`, then `ASPNETCORE_URLS` |
 | Text and born-digital PDF uploads | Full extracted content; the final rendered prompt must fit the loaded model context | — |
-| Video-frame extraction | 1 fps (time-based, no cap) | `VIDEO_SAMPLE_FPS`, `VIDEO_MAX_FRAMES` |
+| Video-frame extraction | 1 fps (time-based, no cap). An OpenAI `video_url` part (DeepSeek V4.1, Qwen 3.8 Flash Next) may set its own `fps` / `max_frames` and caps at 16 frames when `VIDEO_MAX_FRAMES` is unset; Qwen 3.8 merges the sampled frames in pairs with Qwen-VL temporal coordinates (see [its card](docs/models/qwen38-flash-next.md#video-input)) | `VIDEO_SAMPLE_FPS`, `VIDEO_MAX_FRAMES` |
 | DiffusionGemma Web UI denoising | 48 steps, max batch 2 | `DIFFUSION_STEPS`, `DIFFUSION_MAX_BATCH` |
 
 #### Logging (server + CLI)
@@ -2023,6 +2066,48 @@ These are read by `build-linux.sh` / `build-windows.ps1` / the auto-build during
 | Native build parallelism cap | all CPUs, bounded by RAM (~3 GB per `nvcc` job) | `TENSORSHARP_GGML_NATIVE_BUILD_PARALLEL_LEVEL` | — |
 | Native build CMake generator (Windows) | Ninja when available, else `Visual Studio NN` | `CMAKE_GENERATOR` | `-G <generator>` |
 | Visual Studio installation used by the native build (Windows) | auto-detected, including installs flagged incomplete | `TENSORSHARP_VS_INSTALL_DIR` | — |
+
+## Exit codes (CLI + Server)
+
+`TensorSharp.Cli` and `TensorSharp.Server` leave with the same documented codes, so
+a script or supervisor can tell "fix the command line" from "this model does not
+load here" from "this is a bug":
+
+| Code | Meaning | What stderr shows |
+|---|---|---|
+| `0` | Success: the run finished, `--help` / `--list-skills` printed, or the server shut down cleanly. | — |
+| `1` | Configuration error: an unknown or removed flag, a bad value, an unreadable `--config` file. | `Configuration error: <what is wrong>` |
+| `2` | Model load refused. | Exactly one line, the last one: `error: model load refused: <reason>` |
+| anything else | Not a refusal: a bug or a crash. An unhandled .NET exception prints its stack trace and, on Linux and macOS, exits `134` (SIGABRT); a process the OS killed reports its signal (`137` for an out-of-memory kill). | The stack trace. Report it. |
+
+**What counts as a refused load** (code `2`) is a decision the loader made on
+purpose, with a reason you can act on: not enough VRAM for the requested context
+or `--n-cpu-moe` (the message names the number that fits), a `--tp` layout the
+devices cannot hold, a KV cache dtype the architecture does not support (for
+example `KV_CACHE_DTYPE=q8_0` on DeepSeek V4.1), a backend the model or this
+machine does not support, a missing, truncated or non-GGUF model file, a missing
+sidecar (DeepSeek V4.1's `deepseek41.engram.bin`), or an explicit `--draft-model`
+that cannot be activated. The native loaders' own diagnostic lines (`[dsv4] ...`,
+`[glm] ...`) may still appear above the error line; the error line repeats the
+reason so it is readable on its own. Anything else that fails during a load — a
+`NullReferenceException`, a CUDA error, an out-of-memory abort — is not a refusal
+and keeps its stack trace. One exception: the DeepSeek V4/V4.1 and GLM native
+whole-model loaders report every load they abandon as a refusal, including a
+weight or cache allocation that failed on a device, with their `[dsv4]`/`[glm]`
+line as the reason.
+
+Before exiting with `2` the server releases what the refused load left behind
+(the model service and the ggml backend) and never opens its port. A refusal's
+stack trace is noise by design, so it is only logged at Debug:
+`TENSORSHARP_LOG_LEVEL=Debug` (both hosts) or `--log-level debug` (CLI) shows it.
+
+A load that a running server is asked for does not exit the process.
+`POST /api/models/load` answers `500` with
+`{ "ok": false, "error": "<reason>", "refused": true, "loadedModel": "<file>" }`;
+the model that was loaded before is restored and named in `loadedModel`, which is
+`null` when none could be. An OpenAI or Ollama request that has to reload the
+hosted model reports the same reason in that protocol's error shape, and the
+server keeps serving.
 
 ## Server Logging
 
@@ -2119,6 +2204,15 @@ curl http://localhost:5000/v1/skills
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "gemma-4-E4B-it-Q8_0.gguf", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 50}'
+
+# Reasoning effort (GPT-OSS / Harmony). The model always reasons before it
+# answers; reasoning_effort ("low" | "medium" | "high", default "medium",
+# anything else is HTTP 400) sets the Harmony "Reasoning:" system line, which is
+# the only lever over how long it reasons. An explicit "think": false with no
+# reasoning_effort renders at "low". Other families accept the field and ignore it.
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-oss-20b-Q8_0.gguf", "messages": [{"role": "user", "content": "What is 17 + 25?"}], "reasoning_effort": "low", "max_tokens": 256}'
 
 # Structured outputs (OpenAI response_format)
 #

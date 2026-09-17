@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp.Runtime.Paged;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 namespace TensorSharp.Runtime.Scheduling
 {
@@ -46,6 +47,12 @@ namespace TensorSharp.Runtime.Scheduling
         // is a valid prefix endpoint.
         private readonly bool _requiresPerBlockCapture;
 
+        // Whether a pooled prefix may extend past a media span (see
+        // IModelArchitecture.SupportsReuseAcrossMediaSpan).
+        private readonly bool _reuseAcrossMediaSpan;
+        // See IModelArchitecture.CanPrefillMediaAfterReusedPrefix; null means yes.
+        private readonly Func<int, bool> _canPrefillMediaAfterReusedPrefix;
+
         // Live-cache continuation hooks (wired by the engine to the executor). The
         // first computes how many leading prompt tokens can be served by continuing
         // the model's live KV cache (beyond the pooled-snapshot cap); the second
@@ -63,6 +70,7 @@ namespace TensorSharp.Runtime.Scheduling
         // their own holder. Null when unwired.
         private Func<SequenceState, int> _fusedContinuationLcp;
         private Func<SequenceState, int, bool> _fusedContinuationAdopt;
+        private PrefixCacheCoordinator _radixCache;
 
         private readonly LinkedList<SequenceState> _waiting = new();
         private readonly Dictionary<string, LinkedListNode<SequenceState>> _waitingIndex = new();
@@ -83,8 +91,12 @@ namespace TensorSharp.Runtime.Scheduling
             ILogger logger = null,
             bool supportsCrossSequenceKvReuse = true,
             int maxReusablePrefixTokens = int.MaxValue,
-            bool requiresPerBlockCapture = false)
+            bool requiresPerBlockCapture = false,
+            bool supportsReuseAcrossMediaSpan = true,
+            Func<int, bool> canPrefillMediaAfterReusedPrefix = null)
         {
+            _reuseAcrossMediaSpan = supportsReuseAcrossMediaSpan;
+            _canPrefillMediaAfterReusedPrefix = canPrefillMediaAfterReusedPrefix;
             _cfg = cfg ?? throw new ArgumentNullException(nameof(cfg));
             _pool = pool ?? throw new ArgumentNullException(nameof(pool));
             _logger = logger ?? NullLogger.Instance;
@@ -100,7 +112,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// <summary>Whether cross-sequence prefix-cache reuse is enabled for this
         /// model. False for models (e.g. Gemma 4 SWA) whose K/V snapshot cannot be
         /// faithfully restored into a different sequence.</summary>
-        private bool PrefixCachingActive => _cfg.EnablePrefixCaching && _crossSeqKvReuse;
+        private bool PrefixCachingActive => _cfg.EnablePrefixCaching && (_radixCache != null || _crossSeqKvReuse);
 
         /// <summary>Wire the live-cache continuation hooks (see the fields). Called
         /// once by the engine after the executor is constructed.</summary>
@@ -131,12 +143,21 @@ namespace TensorSharp.Runtime.Scheduling
         /// </summary>
         private int AlignSharedPrefixBoundary(SequenceState seq, int want)
         {
-            if (!_alignToSharedPrefix || want <= 0 || seq.SharedPrefixTokens <= 0 || seq.PrefixCheckpointTaken)
+            if (!_alignToSharedPrefix || want <= 0)
                 return want;
             int start = seq.NumComputedTokens;
-            int boundary = seq.SharedPrefixTokens;
-            if (boundary > start && start + want > boundary)
-                return boundary - start;
+            if (_radixCache != null && seq.CacheBreakpoints != null)
+            {
+                foreach (int breakpoint in seq.CacheBreakpoints)
+                    if (breakpoint > start && breakpoint <= seq.PromptTokens.Count && breakpoint < start + want)
+                        want = breakpoint - start;
+            }
+            if (seq.SharedPrefixTokens > 0 && !seq.PrefixCheckpointTaken)
+            {
+                int boundary = seq.SharedPrefixTokens;
+                if (boundary > start && start + want > boundary)
+                    return boundary - start;
+            }
             return want;
         }
 
@@ -148,20 +169,39 @@ namespace TensorSharp.Runtime.Scheduling
             _fusedContinuationAdopt = adopt;
         }
 
+        internal void AttachRadixCacheContinuation(
+            PrefixCacheCoordinator coordinator,
+            Func<SequenceState, int> computeLcp,
+            Func<SequenceState, int, bool> adopt)
+        {
+            _radixCache = coordinator;
+            _fusedContinuationLcp = computeLcp;
+            _fusedContinuationAdopt = adopt;
+        }
+
         // Why the executor's last live / retained lookup found nothing. Admission
         // owns the reuse decision end to end, so it is the only place that can say
         // truthfully what a request reused and, when it reused nothing, which of the
         // three mechanisms could have helped and why none did.
         private Func<string?>? _liveDeclineReason;
         private Func<string?>? _fusedDeclineReason;
+        private Func<string?>? _fusedAdoptionSource;
+        private Func<int>? _blockedByScopeTokens;
 
         /// <summary>Wire the executor's reuse diagnostics so admission can explain a
-        /// turn that reused nothing. Optional: without it the summary still reports
-        /// what was reused, just without the per-mechanism reasons.</summary>
-        public void AttachReuseDiagnostics(Func<string?> liveReason, Func<string?> fusedReason)
+        /// turn that reused nothing, name what served one that reused something, and
+        /// count what conversation scoping withheld. Optional: without it the summary
+        /// still reports what was reused, just without the per-mechanism detail.</summary>
+        public void AttachReuseDiagnostics(
+            Func<string?> liveReason,
+            Func<string?> fusedReason,
+            Func<string?>? fusedSource = null,
+            Func<int>? blockedByScopeTokens = null)
         {
             _liveDeclineReason = liveReason;
             _fusedDeclineReason = fusedReason;
+            _fusedAdoptionSource = fusedSource;
+            _blockedByScopeTokens = blockedByScopeTokens;
         }
 
         /// <summary>
@@ -183,17 +223,36 @@ namespace TensorSharp.Runtime.Scheduling
             int prompt = seq.PromptTokens.Count;
             if (prompt <= 0) return;
             int reused = seq.PrefixCacheReusedTokens;
+            int blocked = _blockedByScopeTokens?.Invoke() ?? 0;
+            string scope = seq.CacheScope == null
+                ? "unscoped"
+                : seq.CacheScope.Length <= 8 ? seq.CacheScope : seq.CacheScope.Substring(0, 8);
+
+            // Isolation at work, not a fault: another conversation's state matched past
+            // the public prefix and was not used. Debug, because on a multi-client host
+            // it is routine; it is the line that proves a leak is NOT happening.
+            if (blocked > 0)
+            {
+                _logger.LogDebug(
+                    "Prompt reuse for {RequestId}: blocked by scope - another conversation's state matched " +
+                    "{Blocked} more token(s) past the public prefix ({Public} tokens); scope {Scope}.",
+                    seq.RequestId, blocked, seq.SharedPrefixTokens, scope);
+            }
 
             if (reused > 0)
             {
+                string source = servedByLiveCache
+                    ? $"the model's live KV cache of this conversation ({reused} tokens)"
+                    : servedByRetainedState
+                        ? _fusedAdoptionSource?.Invoke() ?? $"retained model state ({reused} tokens)"
+                        : $"pooled prefix-cache blocks ({reused} tokens)";
                 _logger.LogInformation(
                     "Prompt reuse for {RequestId}: {Reused}/{Prompt} tokens ({Percent:F1}%) continue from " +
-                    "{Source}; {Prefill} token(s) to prefill.",
+                    "{Source}; {Prefill} token(s) to prefill; scope {Scope}.",
                     seq.RequestId, reused, prompt, 100.0 * reused / prompt,
-                    servedByLiveCache ? "the model's live KV cache"
-                        : servedByRetainedState ? "retained model state (a finished request's holder or a shared-prefix checkpoint)"
-                        : "pooled prefix-cache blocks",
-                    Math.Max(0, prompt - reused));
+                    source,
+                    Math.Max(0, prompt - reused),
+                    scope);
                 return;
             }
 
@@ -340,6 +399,11 @@ namespace TensorSharp.Runtime.Scheduling
             // vLLM and SGLang, every runnable decoder gets its one-token slot
             // before any long prompt is allowed to consume the remaining budget.
             var runningSnapshot = new List<SequenceState>(_runningOrder);
+            // Allocate in rank order (priority, then submission): a re-admitted
+            // preemption victim is appended to _runningOrder, and visiting it first
+            // would let it claim blocks an older sequence then cannot preempt back
+            // from (work already planned this step is never a victim).
+            runningSnapshot.Sort((a, b) => VictimRank(a).CompareTo(VictimRank(b)));
             var decodeSnapshot = new List<SequenceState>(runningSnapshot.Count);
             var prefillSnapshot = new List<SequenceState>(runningSnapshot.Count);
             foreach (var seq in runningSnapshot)
@@ -436,6 +500,21 @@ namespace TensorSharp.Runtime.Scheduling
                 if (output.PreemptedRequestIds.Contains(seq.RequestId))
                     break;
 
+                // Admit by capacity. A newcomer is admitted only when the free pool
+                // can hold its whole prompt on top of what the prompts already
+                // running still have to allocate. Admitting on the strength of its
+                // FIRST chunk alone let four 20k-token prompts start against a pool
+                // that holds three: they prefilled in parallel until the pool ran dry,
+                // then preempted each other's nearly finished prefills over and over
+                // (a request re-prefilled 15 times; waves took 700 s against 39 s
+                // solo). Waiting in the queue costs nothing; a preempted prefill costs
+                // all of its work. A lone request always fits (Submit checks it).
+                if (_running.Count > 0 && !HasPromptCapacityFor(seq))
+                {
+                    LogCapacityWait(seq);
+                    break;
+                }
+
                 // Try prefix cache lookup before allocating blocks (only for
                 // brand-new sequences; preempted ones already had their blocks
                 // freed and need a fresh re-prefill, no shortcut).
@@ -444,64 +523,89 @@ namespace TensorSharp.Runtime.Scheduling
                 string? liveDeclineReason = null;
                 if (seq.BlockTable.NumBlocks == 0 && _cfg.EnablePrefixCaching)
                 {
-                    // Live-cache continuation: when this is the SOLE sequence about to
-                    // run (nothing else running or already scheduled this step), the
-                    // model's live KV cache from the previous turn is still intact and
-                    // its prompt may extend it. Continuing from that live cache reuses
-                    // the whole conversation prefix - past the pooled-snapshot window
-                    // cap - with no corruption. Gated to the sole-sequence case so no
-                    // concurrent sequence can clobber the live cache before we run.
-                    if (_running.Count == 0
-                        && output.ScheduledWork.Count == 0
-                        && _liveContinuationLcp != null
-                        && _liveContinuationAdopt != null)
+                    if (_radixCache != null)
                     {
-                        int lcp = _liveContinuationLcp(seq);
-                        if (lcp > 0 && _liveContinuationAdopt(seq, lcp))
-                            plannedLiveContinuation = true;
-                        else
-                            liveDeclineReason = _liveDeclineReason?.Invoke() ?? "no usable live prefix";
-                    }
-                    else if (_liveContinuationLcp != null)
-                    {
-                        // Not even attempted. The sole-sequence gate is the usual
-                        // reason and it is invisible from the request's telemetry,
-                        // which just reports 0% reuse.
-                        liveDeclineReason =
-                            $"not attempted (another sequence holds the live cache: running={_running.Count}, "
-                            + $"scheduledThisStep={output.ScheduledWork.Count})";
-                        _logger.LogDebug(
-                            "Live-cache continuation not attempted for {RequestId}: running={Running} scheduledThisStep={Scheduled}.",
-                            seq.RequestId, _running.Count, output.ScheduledWork.Count);
-                    }
-
-                    // Retained fused-cache continuation: a finished concurrent
-                    // request's complete model-owned state remains alive; if this
-                    // prompt extends it exactly, continue from that holder without
-                    // reconstructing circular K/V (Gemma 4) or separating attention
-                    // K/V from recurrent GDN state (Qwen 3.5/3.6). Each retained holder
-                    // is independent ÔÇö no shared live cache to clobber ÔÇö so this is
-                    // NOT gated to the sole-sequence case and doesn't block co-admitting
-                    // other sequences this step. It restores multi-turn prefix reuse
-                    // after a concurrent fused round left nothing in the paged pool.
-                    if (!plannedLiveContinuation
-                        && _fusedContinuationLcp != null
-                        && _fusedContinuationAdopt != null)
-                    {
-                        int flcp = _fusedContinuationLcp(seq);
-                        if (flcp > 0 && _fusedContinuationAdopt(seq, flcp))
+                        _radixCache.PrimaryAvailable = _running.Count == 0 && output.ScheduledWork.Count == 0;
+                        int length = _fusedContinuationLcp(seq);
+                        if (length > 0 && _fusedContinuationAdopt(seq, length))
+                        {
                             plannedFusedContinuation = true;
+                            plannedLiveContinuation = _radixCache.RequiresSoleAdmission;
+                        }
+                        _logger.LogInformation(
+                            "Radix prompt reuse for {RequestId}: {Reused}/{Prompt} tokens; {Prefill} token(s) to prefill.",
+                            seq.RequestId, seq.PrefixCacheReusedTokens, seq.PromptTokens.Count,
+                            seq.PromptTokens.Count - seq.PrefixCacheReusedTokens);
                     }
+                    else
+                    {
+                        // Live-cache continuation: when this is the SOLE sequence about to
+                        // run (nothing else running or already scheduled this step), the
+                        // model's live KV cache from the previous turn is still intact and
+                        // its prompt may extend it. Continuing from that live cache reuses
+                        // the whole conversation prefix - past the pooled-snapshot window
+                        // cap - with no corruption. Gated to the sole-sequence case so no
+                        // concurrent sequence can clobber the live cache before we run.
+                        if (_running.Count == 0
+                            && output.ScheduledWork.Count == 0
+                            && _liveContinuationLcp != null
+                            && _liveContinuationAdopt != null)
+                        {
+                            int lcp = _liveContinuationLcp(seq);
+                            // A short live prefix on a pooled-capable model: take the live
+                            // cache unless the pooled blocks actually cover at least as much
+                            // (whole blocks only, one token left, and only if captured).
+                            int pooledCovers = lcp > 0 && PrefixCachingActive && lcp <= _maxReusablePrefixTokens
+                                ? PlanPrefixBlockAdoption(seq, logBacktrack: false, out _).Count * _cfg.BlockSize
+                                : 0;
+                            if (lcp > 0 && pooledCovers >= lcp)
+                                liveDeclineReason = $"pooled prefix-cache blocks cover {pooledCovers} tokens, at least the live match of {lcp}";
+                            else if (lcp > 0 && _liveContinuationAdopt(seq, lcp))
+                                plannedLiveContinuation = true;
+                            else
+                                liveDeclineReason = _liveDeclineReason?.Invoke() ?? "no usable live prefix";
+                        }
+                        else if (_liveContinuationLcp != null)
+                        {
+                            // Not even attempted. The sole-sequence gate is the usual
+                            // reason and it is invisible from the request's telemetry,
+                            // which just reports 0% reuse.
+                            liveDeclineReason =
+                                $"not attempted (another sequence holds the live cache: running={_running.Count}, "
+                                + $"scheduledThisStep={output.ScheduledWork.Count})";
+                            _logger.LogDebug(
+                                "Live-cache continuation not attempted for {RequestId}: running={Running} scheduledThisStep={Scheduled}.",
+                                seq.RequestId, _running.Count, output.ScheduledWork.Count);
+                        }
 
-                    if (!plannedLiveContinuation
-                        && !plannedFusedContinuation
-                        && PrefixCachingActive)
-                        AdoptPrefixBlocksCapped(seq);
+                        // Retained fused-cache continuation: a finished concurrent
+                        // request's complete model-owned state remains alive; if this
+                        // prompt extends it exactly, continue from that holder without
+                        // reconstructing circular K/V (Gemma 4) or separating attention
+                        // K/V from recurrent GDN state (Qwen 3.5/3.6). Each retained holder
+                        // is independent ÔÇö no shared live cache to clobber ÔÇö so this is
+                        // NOT gated to the sole-sequence case and doesn't block co-admitting
+                        // other sequences this step. It restores multi-turn prefix reuse
+                        // after a concurrent fused round left nothing in the paged pool.
+                        if (!plannedLiveContinuation
+                            && _fusedContinuationLcp != null
+                            && _fusedContinuationAdopt != null)
+                        {
+                            int flcp = _fusedContinuationLcp(seq);
+                            if (flcp > 0 && _fusedContinuationAdopt(seq, flcp))
+                                plannedFusedContinuation = true;
+                        }
 
-                    // Every mechanism has now had its turn, so the outcome is finally
-                    // knowable. Exactly one line, whatever happened.
-                    LogPromptReuseOutcome(
-                        seq, plannedLiveContinuation, plannedFusedContinuation, liveDeclineReason);
+                        if (!plannedLiveContinuation
+                            && !plannedFusedContinuation
+                            && PrefixCachingActive)
+                            AdoptPrefixBlocksCapped(seq);
+
+                        // Every mechanism has now had its turn, so the outcome is finally
+                        // knowable. Exactly one line, whatever happened.
+                        LogPromptReuseOutcome(
+                            seq, plannedLiveContinuation, plannedFusedContinuation, liveDeclineReason);
+                    }
                 }
 
                 int promptUncomputed = Math.Max(0, seq.PromptTokens.Count - seq.NumComputedTokens);
@@ -699,6 +803,7 @@ namespace TensorSharp.Runtime.Scheduling
             int delta = neededBlocks - currentBlocks;
             if (delta <= 0) return true;
 
+            _radixCache?.EnsureFreePages(delta);
             var newBlocks = _pool.AllocateNew(delta);
             if (newBlocks == null) return false;
             for (int i = 0; i < newBlocks.Length; i++)
@@ -749,15 +854,93 @@ namespace TensorSharp.Runtime.Scheduling
             return aligned > 0 ? aligned : want;
         }
 
-        /// <summary>Preempt the lowest-priority running sequence (other than
-        /// <paramref name="needyForBlocks"/>) and free its blocks, then retry
-        /// allocation. Returns true if successful.</summary>
+        private static int BlocksFor(int tokens, int blockSize)
+            => tokens <= 0 ? 0 : (tokens + blockSize - 1) / blockSize;
+
+        /// <summary>
+        /// Whether the free pool can hold <paramref name="candidate"/>'s whole prompt
+        /// after every running prompt has allocated the rest of its own. Decode growth
+        /// is not reserved: it arrives one token at a time and is served by preempting
+        /// the newest sequence, which re-prefills a prompt that was already admitted.
+        /// Prompt blocks the candidate would adopt from a running sequence are not
+        /// counted (see the body).
+        /// </summary>
+        private bool HasPromptCapacityFor(SequenceState candidate)
+        {
+            long outstanding = 0;
+            foreach (var running in _runningOrder)
+            {
+                int missing = BlocksFor(running.PromptTokens.Count, _cfg.BlockSize) - running.BlockTable.NumBlocks;
+                if (missing > 0) outstanding += missing;
+            }
+            int need = BlocksFor(candidate.PromptTokens.Count, _cfg.BlockSize) - candidate.BlockTable.NumBlocks;
+            if (_radixCache != null)
+                _radixCache.EnsureFreePages((int)Math.Min(_pool.NumBlocks, Math.Max(0, need + outstanding)));
+            long available = (long)_pool.NumFreeBlocks - outstanding;
+            if (available >= need)
+                return true;
+
+            // Prefix blocks another sequence is still using are shared on adoption
+            // and cost the pool nothing, so they do not count against the newcomer
+            // (without this, requests sharing a long system prompt or document ran one
+            // at a time once their prompts summed past the pool). An idle cached block
+            // sits in the free queue, so adopting it costs a free block like a new one.
+            // Only consulted when the cheap check fails, i.e. while a request waits.
+            if (_radixCache != null || !PrefixCachingActive || candidate.BlockTable.NumBlocks != 0)
+                return false;
+            _capacityPlanScratch.Clear();
+            FillPrefixBlockAdoptionPlan(candidate, logBacktrack: false, _capacityPlanScratch, out _);
+            foreach (var block in _capacityPlanScratch)
+                if (block.RefCount > 0) need--;
+            _capacityPlanScratch.Clear();
+            if (available < need)
+                return false;
+
+            // The discount is real only if admission ends up on the pooled path. A
+            // retained fused holder is tried first and the executor backs it with new
+            // blocks for its whole prefix (TryAdoptFusedContinuation), so a model with
+            // both kinds of reuse (Gemma 4) would be admitted on a discount it never
+            // takes. Asked last, and only when the discount is what admits the request.
+            if (_fusedContinuationLcp != null && _fusedContinuationAdopt != null
+                && _fusedContinuationLcp(candidate) > 0)
+                return false;
+            return true;
+        }
+
+        // HasPromptCapacityFor runs on every Schedule() while a request waits; its plan
+        // is only counted, so it reuses one list instead of allocating one per call.
+        private readonly List<KvBlock> _capacityPlanScratch = new();
+
+        private string _capacityWaitLoggedFor;
+
+        private void LogCapacityWait(SequenceState seq)
+        {
+            if (string.Equals(_capacityWaitLoggedFor, seq.RequestId, StringComparison.Ordinal))
+                return;
+            _capacityWaitLoggedFor = seq.RequestId;
+            _logger.LogInformation(
+                "KV block pool: {RequestId} ({PromptTokens} prompt tokens) waits for capacity; " +
+                "{Running} running request(s) still need their prompts' blocks ({Free}/{Total} blocks free). " +
+                "It is admitted when one of them finishes. Raise TS_SCHED_NUM_BLOCKS to run more at once.",
+                seq.RequestId, seq.PromptTokens.Count, _running.Count, _pool.NumFreeBlocks, _pool.NumBlocks);
+        }
+
+        /// <summary>Scheduling rank: higher priority first, then earlier submission.
+        /// A larger value is a better preemption victim.</summary>
+        private static long VictimRank(SequenceState s) => -(long)s.Priority * (1L << 40) + s.Sn;
+
+        /// <summary>Preempt the lowest-ranked running sequence that ranks BELOW
+        /// <paramref name="needyForBlocks"/> (lower priority, or the same priority and
+        /// submitted later) and free its blocks, then retry allocation. Returns true
+        /// if successful. A sequence never preempts one that outranks it: when the
+        /// needy sequence is itself the newest it simply waits a step with its blocks
+        /// intact, and the older sequences finish and free theirs. Letting the newest
+        /// preempt the oldest turned a full pool into a livelock of long prefills
+        /// preempting each other at 14-20k computed tokens.</summary>
         private bool TryPreemptForBlocks(SequenceState needyForBlocks, int extraTokens, SchedulerOutput output)
         {
-            // Find the candidate to preempt: highest sn (latest submission) and
-            // lowest priority, not the requester.
             SequenceState victim = null;
-            int victimScore = int.MinValue;
+            long victimRank = VictimRank(needyForBlocks);
             foreach (var s in _runningOrder)
             {
                 if (ReferenceEquals(s, needyForBlocks)) continue;
@@ -768,10 +951,10 @@ namespace TensorSharp.Runtime.Scheduling
                 if (output.ScheduledWork.Exists(
                         work => ReferenceEquals(work.Sequence, s)))
                     continue;
-                int score = -s.Priority * 1_000_000 + (int)(s.Sn & 0xfffff);
-                if (score > victimScore)
+                long rank = VictimRank(s);
+                if (rank > victimRank)
                 {
-                    victimScore = score;
+                    victimRank = rank;
                     victim = s;
                 }
             }
@@ -820,9 +1003,43 @@ namespace TensorSharp.Runtime.Scheduling
         private void AdoptPrefixBlocksCapped(SequenceState seq)
         {
             if (seq.BlockTable.NumBlocks > 0) return;
+            var adoptable = PlanPrefixBlockAdoption(seq, logBacktrack: true, out bool adoptInPagedStorage);
+            for (int i = 0; i < adoptable.Count; i++)
+            {
+                _pool.Touch(adoptable[i]);
+                seq.BlockTable.AppendBlock(adoptable[i]);
+            }
+
+            int adoptedTokens = adoptable.Count * _cfg.BlockSize;
+            if (adoptedTokens > 0)
+            {
+                seq.PrefixCacheReusedTokens = adoptedTokens;
+                seq.SetComputedTokensForPrefixAdoption(adoptedTokens);
+                // Set both ways: a preempted sequence re-admitted onto pool snapshots
+                // must not keep a stale paged-resident flag from its previous run.
+                seq.KvStateInPagedStorage = adoptInPagedStorage;
+            }
+        }
+
+        /// <summary>The pooled blocks <see cref="AdoptPrefixBlocksCapped"/> would adopt
+        /// for <paramref name="seq"/>, without touching refcounts or the block table.
+        /// <paramref name="adoptInPagedStorage"/> says where they are read from: the
+        /// model's paged arrays (blocks a batched paged step wrote) or pool snapshots.</summary>
+        private List<KvBlock> PlanPrefixBlockAdoption(SequenceState seq, bool logBacktrack, out bool adoptInPagedStorage)
+        {
+            var matching = new List<KvBlock>();
+            FillPrefixBlockAdoptionPlan(seq, logBacktrack, matching, out adoptInPagedStorage);
+            return matching;
+        }
+
+        /// <summary><see cref="PlanPrefixBlockAdoption"/> into a caller-owned, empty list.</summary>
+        private void FillPrefixBlockAdoptionPlan(
+            SequenceState seq, bool logBacktrack, List<KvBlock> matching, out bool adoptInPagedStorage)
+        {
+            adoptInPagedStorage = false;
             if (seq.PromptTokens.Count < _cfg.BlockSize) return;
 
-            var hashes = KvBlockHasher.ComputeBlockHashes(seq.PromptTokens, _cfg.BlockSize, EffectiveFingerprint(seq));
+            var hashes = GetPromptBlockHashes(seq);
             int maxAdoptableTokens = Math.Max(0, seq.PromptTokens.Count - 1);
             // An explicit boundary limits reuse as well as registration. Otherwise a
             // request that says "cache none" (empty/[0]) could still adopt blocks that
@@ -835,16 +1052,60 @@ namespace TensorSharp.Runtime.Scheduling
             // snapshot that the model can't faithfully reconstruct -> corrupt output.
             if (_maxReusablePrefixTokens != int.MaxValue)
                 maxAdoptableTokens = Math.Min(maxAdoptableTokens, _maxReusablePrefixTokens);
+            // A reused prefix never ends inside a media span (the block hashes already
+            // carry each span's content identity, so the spans before it match).
+            maxAdoptableTokens = PromptMediaSpans.ClampReusablePrefix(
+                maxAdoptableTokens, seq.MediaSpans, seq.MediaSpans, _reuseAcrossMediaSpan);
+            // Any adoption leaves the prompt's media to prefill at a non-zero position.
+            if (seq.MediaSpans.Count > 0 && _canPrefillMediaAfterReusedPrefix != null
+                && !_canPrefillMediaAfterReusedPrefix(seq.PromptTokens.Count))
+                maxAdoptableTokens = 0;
             int maxAdoptableBlocks = maxAdoptableTokens / _cfg.BlockSize;
 
-            var matching = new List<KvBlock>();
-            int lastRestorable = -1;
             for (int i = 0; i < hashes.Count && i < maxAdoptableBlocks; i++)
             {
                 if (!_pool.TryFindByHash(hashes[i], out var block))
                     break;
                 matching.Add(block);
-                if (block.IsRestorablePrefixEnd)
+            }
+
+            // Where the matched K/V actually lives decides how it can be adopted. A
+            // block written by a batched paged step (IBatchedPagedModel.ForwardBatch)
+            // exists only in the model's paged arrays - nothing was extracted into the
+            // pool - so it is served by adopting it IN PAGED STORAGE: the sequence starts
+            // as a paged resident and its first forward reads those slots directly.
+            // Restoring such a block into the linear cache instead injects bytes that
+            // were never captured, which is how a repeated Mistral 3 / Hy-MT2 prompt
+            // longer than one block turned into fluent garbage. A block with a pool
+            // snapshot keeps the linear restore it always had. Recurrent models keep
+            // state outside the paged arrays and media prompts are peeled onto the
+            // per-sequence path, so neither adopts paged-only blocks.
+            int pagedChain = 0;
+            while (pagedChain < matching.Count && matching[pagedChain].HoldsModelPagedKv)
+                pagedChain++;
+            int snapshotChain = 0;
+            while (snapshotChain < matching.Count
+                   && !(matching[snapshotChain].HoldsModelPagedKv && !matching[snapshotChain].HoldsSnapshotBytes))
+                snapshotChain++;
+            adoptInPagedStorage = !_requiresPerBlockCapture
+                && seq.MediaSpans.Count == 0
+                && pagedChain > snapshotChain;
+            int usableBlocks = adoptInPagedStorage ? pagedChain : snapshotChain;
+            if (usableBlocks < matching.Count)
+            {
+                if (logBacktrack)
+                    _logger.LogInformation(
+                    "Prefix cache matched {Matched} block(s) for {RequestId} but only {Usable} hold K/V this " +
+                    "request can read ({Where}); the rest of the prompt re-prefills.",
+                    matching.Count, seq.RequestId, usableBlocks,
+                    adoptInPagedStorage ? "model paged storage" : "pool snapshots");
+                matching.RemoveRange(usableBlocks, matching.Count - usableBlocks);
+            }
+
+            int lastRestorable = -1;
+            for (int i = 0; i < matching.Count; i++)
+            {
+                if (matching[i].IsRestorablePrefixEnd)
                     lastRestorable = i;
             }
 
@@ -859,23 +1120,13 @@ namespace TensorSharp.Runtime.Scheduling
                 // The cache MATCHED more than it can deliver; without this line
                 // the user sees kvCacheReusedTokens far below a warm cache's
                 // promise with no explanation.
-                _logger.LogInformation(
+                if (logBacktrack)
+                    _logger.LogInformation(
                     "Prefix cache matched {Matched} block(s) for {RequestId} but only {Adopted} are " +
                     "restorable (a recurrent checkpoint boundary caps adoption); the rest of the " +
                     "prompt re-prefills.",
                     matching.Count, seq.RequestId, adopted);
-            }
-            for (int i = 0; i < adopted; i++)
-            {
-                _pool.Touch(matching[i]);
-                seq.BlockTable.AppendBlock(matching[i]);
-            }
-
-            int adoptedTokens = adopted * _cfg.BlockSize;
-            if (adoptedTokens > 0)
-            {
-                seq.PrefixCacheReusedTokens = adoptedTokens;
-                seq.SetComputedTokensForPrefixAdoption(adoptedTokens);
+                matching.RemoveRange(adopted, matching.Count - adopted);
             }
         }
 
@@ -888,6 +1139,11 @@ namespace TensorSharp.Runtime.Scheduling
             int prevFull = previousTokens / _cfg.BlockSize;
             int curFull = seq.NumComputedTokens / _cfg.BlockSize;
             if (curFull <= prevFull) return;
+            if (_radixCache != null)
+            {
+                _radixCache.CapturePages(seq);
+                return;
+            }
 
             int allTokensCovered = curFull * _cfg.BlockSize;
             // Build hashes from prompt+output prefix that's now block-aligned.
@@ -933,6 +1189,11 @@ namespace TensorSharp.Runtime.Scheduling
         private void CacheFullBlocksForSequence(SequenceState seq)
         {
             if (!PrefixCachingActive) return;
+            if (_radixCache != null)
+            {
+                _radixCache.CapturePages(seq);
+                return;
+            }
             // Hash only over positions that actually exist in the token list.
             // A speculative step that hit a mid-batch stop can leave
             // NumComputedTokens ahead of NumTotalTokens (the dropped tail's
@@ -972,23 +1233,77 @@ namespace TensorSharp.Runtime.Scheduling
             var list = new List<int>(tokens);
             for (int i = 0; i < tokens; i++)
                 list.Add(seq.TokenAt(i));
-            return KvBlockHasher.ComputeBlockHashes(list, _cfg.BlockSize, EffectiveFingerprint(seq));
+            return ComputeHashesForTokens(seq, list, tokens);
+        }
+
+        private List<KvBlockHash> ComputeHashesForTokens(SequenceState seq, IReadOnlyList<int> tokens, int count)
+            => KvBlockHasher.ComputeBlockHashes(tokens, _cfg.BlockSize, _fingerprint, b => BlockSalt(seq, b));
+
+        /// <summary>Test hook: false recomputes the prompt's block hashes on every plan,
+        /// which is what every plan did before they were cached.</summary>
+        internal bool CachePromptBlockHashes { get; set; } = true;
+
+        /// <summary>Test hook: how many times the prompt's block hashes were computed.</summary>
+        internal int PromptBlockHashComputations { get; private set; }
+
+        internal IReadOnlyList<KvBlockHash> GetPromptBlockHashesForTest(SequenceState seq) => GetPromptBlockHashes(seq);
+
+        /// <summary>
+        /// The full-block hashes of <paramref name="seq"/>'s prompt, computed once per
+        /// sequence. A request waiting for capacity is planned on every
+        /// <see cref="Schedule"/> call, and hashing its prompt (SHA-256 per block, with
+        /// media and scope salts) is the whole cost of that plan for a long prompt; the
+        /// pool lookups that follow are cheap and are always redone, because the pool
+        /// changes between calls.
+        ///
+        /// <para>What the hashes depend on, and why each is covered: the prompt tokens,
+        /// media spans, cache scope and shared-prefix length are fixed when the sequence
+        /// is constructed (PromptTokens is copied from the caller's list there and nothing
+        /// edits it afterwards; its count is still checked as a guard); the fingerprint and block size belong
+        /// to the scheduler, and a sequence handed to another engine (a rebuilt one after
+        /// a model change) finds a different pair and hashes again. Preemption, pool
+        /// eviction and registration change which hashes are found, never the hashes.</para>
+        /// </summary>
+        private IReadOnlyList<KvBlockHash> GetPromptBlockHashes(SequenceState seq)
+        {
+            var cached = seq.CachedPromptBlockHashes;
+            if (CachePromptBlockHashes && cached != null
+                && cached.Matches(_fingerprint, _cfg.BlockSize, seq.PromptTokens.Count))
+                return cached.Hashes;
+
+            PromptBlockHashComputations++;
+            var hashes = ComputeHashesForTokens(seq, seq.PromptTokens, seq.PromptTokens.Count);
+            if (CachePromptBlockHashes)
+                seq.CachedPromptBlockHashes = new PromptBlockHashes(
+                    _fingerprint, _cfg.BlockSize, seq.PromptTokens.Count, hashes);
+            return hashes;
         }
 
         /// <summary>
-        /// The model fingerprint, additionally salted with the sequence's media
-        /// fingerprint when the prompt carries images/audio/video. This keeps the
-        /// prefix-cache block hashes content-aware: identical media reuses cached
-        /// K/V, but different media (sharing the same placeholder token IDs) can
-        /// never adopt a stale neighbour's blocks. Text-only sequences fall back to
-        /// the bare model fingerprint, so their hashes are unchanged.
+        /// What block <paramref name="blockIndex"/> of <paramref name="seq"/> is salted
+        /// with beyond its tokens, or null. Two things, each only where it applies:
+        /// <list type="bullet">
+        /// <item>its media: the content identity of every span overlapping the block.
+        /// Placeholder token ids are identical for any image, so without it two prompts
+        /// with different pictures would share K/V; blocks before the first span stay
+        /// unsalted, so a media prompt still shares its text-only leading blocks, and the
+        /// parent chain carries the salt into every later block.</item>
+        /// <item>its conversation: once a block extends past the request's public prefix
+        /// (<see cref="SequenceState.SharedPrefixTokens"/>, the system prompt and tool
+        /// declarations) it carries the request's <see cref="SequenceState.CacheScope"/>,
+        /// so another conversation shares the public blocks and nothing after them.</item>
+        /// </list>
         /// </summary>
-        private string EffectiveFingerprint(SequenceState seq)
+        private string BlockSalt(SequenceState seq, int blockIndex)
         {
-            string media = seq?.MediaFingerprint;
-            if (string.IsNullOrEmpty(media))
-                return _fingerprint;
-            return string.Concat(_fingerprint, "mm:", media);
+            int start = blockIndex * _cfg.BlockSize;
+            int end = start + _cfg.BlockSize;
+            string media = PromptMediaSpans.BlockSalt(seq.MediaSpans, start, end);
+            string scope = seq.CacheScope != null && end > seq.SharedPrefixTokens
+                ? "scope:" + seq.CacheScope
+                : null;
+            if (media == null) return scope;
+            return scope == null ? media : media + scope;
         }
     }
 }

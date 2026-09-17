@@ -18,37 +18,52 @@ using Xunit.Abstractions;
 namespace InferenceWeb.Tests;
 
 /// <summary>
+/// [ModelFact] for <see cref="Qwen3BatchedForwardTests"/>: the gate and the loader
+/// share <see cref="Qwen3BatchedForwardTests.FindModel"/>, so a model directory
+/// without a base Qwen3 / Bonsai-8B GGUF is a visible skip rather than a failure.
+/// </summary>
+[Xunit.Sdk.TraitDiscoverer("InferenceWeb.Tests.RequiresTraitDiscoverer", "InferenceWeb.Tests")]
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class Qwen3BatchedModelFactAttribute : FactAttribute, Xunit.Sdk.ITraitAttribute
+{
+    public string RequiresValue => "Models";
+
+    public Qwen3BatchedModelFactAttribute()
+        => Skip = TestGates.ModelSkip(Qwen3BatchedForwardTests.EnvModelDir)
+            ?? (Qwen3BatchedForwardTests.FindModel() == null
+                ? $"Requires a base Qwen3 or Bonsai-8B GGUF under {Qwen3BatchedForwardTests.EnvModelDir}."
+                : null);
+}
+
+/// <summary>
 /// Opt-in end-to-end checks for Qwen3/Bonsai-8B's real paged batching path.
 /// Set TS_TEST_MODEL_DIR to a directory containing the model to run them.
 /// </summary>
 [Trait("Requires", "Models")]
 public sealed class Qwen3BatchedForwardTests
 {
-    private const string EnvModelDir = "TS_TEST_MODEL_DIR";
+    internal const string EnvModelDir = "TS_TEST_MODEL_DIR";
     private readonly ITestOutputHelper _output;
 
     public Qwen3BatchedForwardTests(ITestOutputHelper output) => _output = output;
 
-    [Fact]
+    [Qwen3BatchedModelFact]
     public Task BatchSize1_MatchesSingleSequenceTop1() => RunSingleSequenceAsync();
 
-    [Fact]
+    [Qwen3BatchedModelFact]
     public Task BatchSize2_KeepsSequencesIndependent() => RunTwoSequencesAsync();
 
-    [Fact]
+    [Qwen3BatchedModelFact]
     public Task RetainedDecodeGraph_SurvivesTruncateAndResidencyRelease() =>
         RunDecodeGraphLifecycleAsync();
 
-    [Fact]
+    [Qwen3BatchedModelFact]
     public Task PerSequenceCache_GrowsReleasesAndReturnsToPrimary() =>
         RunPerSequenceGrowthLifecycleAsync();
 
     private async Task RunSingleSequenceAsync()
     {
         var model = await TryLoadModelAsync();
-        if (model is null)
-            return;
-
         try
         {
             int[] prompt = [1, 100, 200, 300, 400, 500];
@@ -73,9 +88,6 @@ public sealed class Qwen3BatchedForwardTests
     private async Task RunTwoSequencesAsync()
     {
         var model = await TryLoadModelAsync();
-        if (model is null)
-            return;
-
         try
         {
             int[] promptA = [1, 100, 200, 300];
@@ -112,9 +124,6 @@ public sealed class Qwen3BatchedForwardTests
     private async Task RunDecodeGraphLifecycleAsync()
     {
         var model = await TryLoadModelAsync();
-        if (model is null)
-            return;
-
         try
         {
             int[] prompt = [1, 100, 200, 300, 400, 500];
@@ -150,9 +159,6 @@ public sealed class Qwen3BatchedForwardTests
     private async Task RunPerSequenceGrowthLifecycleAsync()
     {
         var model = await TryLoadModelAsync();
-        if (model is null)
-            return;
-
         const string requestId = "bonsai-growth";
         try
         {
@@ -230,16 +236,20 @@ public sealed class Qwen3BatchedForwardTests
         };
     }
 
-    private async Task<Qwen3Model> TryLoadModelAsync()
+    /// <summary>The GGUF these tests load: TS_TEST_MODEL_DIR itself when it names a
+    /// file, else the first base Qwen3 / Bonsai-8B GGUF in that directory; null when
+    /// there is none. Shared with <see cref="Qwen3BatchedModelFactAttribute"/>.</summary>
+    internal static string FindModel()
     {
         string directory = Environment.GetEnvironmentVariable(EnvModelDir);
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
-        {
-            _output.WriteLine($"{EnvModelDir} is not set; skipping model-backed check.");
+        if (string.IsNullOrWhiteSpace(directory))
             return null;
-        }
-
-        string path = Directory.GetFiles(directory, "*.gguf")
+        if (File.Exists(directory))
+            return directory;
+        if (!Directory.Exists(directory))
+            return null;
+        return Directory.GetFiles(directory, "*.gguf")
+            .OrderBy(candidate => candidate, StringComparer.Ordinal)
             .FirstOrDefault(candidate =>
             {
                 string name = Path.GetFileName(candidate).ToLowerInvariant();
@@ -249,17 +259,22 @@ public sealed class Qwen3BatchedForwardTests
                 return !name.Contains("mmproj") &&
                     (baseQwen3 || name.Contains("bonsai-8b"));
             });
+    }
 
-        if (path is null)
-        {
-            _output.WriteLine("No base Qwen3 or Bonsai-8B GGUF found; skipping model-backed check.");
-            return null;
-        }
+    private async Task<Qwen3Model> TryLoadModelAsync()
+    {
+        string path = FindModel();
+        Assert.False(path is null, $"{EnvModelDir} names no base Qwen3 or Bonsai-8B GGUF (the gate should have skipped).");
 
         _output.WriteLine($"[bonsai-8b] loading {Path.GetFileName(path)}");
-        var backend = OperatingSystem.IsMacOS() ? BackendType.GgmlMetal : BackendType.GgmlCpu;
-        var model = ModelBase.Create(path, backend) as Qwen3Model;
+        // The pinned GGML backend: one backend per process (GgmlBackendTestInitializer).
+        var model = ModelBase.Create(path, TestGates.PinnedGgmlBackend) as Qwen3Model;
         Assert.NotNull(model);
+        string native = TestGates.MappedNativeGgmlOpsPath();
+        string nativeSha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(native))).ToLowerInvariant();
+        _output.WriteLine($"[bonsai-8b] native={native} sha256={nativeSha}");
+        string expectedNative = Environment.GetEnvironmentVariable("TS_TEST_QWEN3_EXPECTED_NATIVE_SHA256");
+        if (!string.IsNullOrEmpty(expectedNative)) Assert.Equal(expectedNative, nativeSha);
         await Task.Yield();
         return model;
     }

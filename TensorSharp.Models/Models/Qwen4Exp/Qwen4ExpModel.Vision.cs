@@ -28,6 +28,23 @@ namespace TensorSharp.Models
         // silently continue from unrewindable state.
         public override bool SupportsKVCacheTruncation => false;
 
+        /// <summary>
+        /// The resumable state of this family is more than attention K/V: GDN recurrent
+        /// and conv state, the PLE conv/n-gram history, the QSA indexer rows and (when a
+        /// drafter is attached) the shared MTP cache all travel inside a retained holder.
+        /// Every one of their geometries is part of the identity, plus the attention K/V
+        /// dtype. Only construction-time values are read, so the string never changes
+        /// during the model's life (see <see cref="KvStateFingerprints"/>).
+        /// </summary>
+        public override string KVStateFingerprint =>
+            $"qwen4exp|arch={Config.Architecture}|L={Config.NumLayers}|H={Config.NumHeads}|KV={Config.NumKVHeads}|D={Config.HeadDim}" +
+            $"|hc={_hc}x{_hcLowRank}" +
+            $"|gdn={KvStateFingerprints.Layout(_isRecurrent)}:k{_headKDim}v{_headVDim}nk{_numKHeads}nv{_numVHeads}c{_convKernel}" +
+            $"|ple={KvStateFingerprints.Layout(_isPle)}:n{_pleNgram}h{_pleHeads}d{_pleHeadDim}c{_pleConvKernel}" +
+            $"|qsa={KvStateFingerprints.Layout(_compressRatios)}:h{_indexerHeads}d{_indexerHeadDim}k{_indexerTopK}" +
+            $"|mtp={(_mtpPath != null ? _mtpLayer : -1)}" +
+            $"|dtype={_kvCacheDtype.ToShortString()}";
+
         public void LoadVisionEncoder(string mmProjPath)
         {
             VisionEncoder = new Qwen35VisionEncoder(mmProjPath, _allocator);
@@ -111,8 +128,9 @@ namespace TensorSharp.Models
             // The last prompt token is text, so its T component is the scalar
             // position stream; the next token continues at that + 1.
             int lastT = _pendingMRoPEPositions[3 * (seqLen - 1)];
-            _mropeCacheGap = (startPos + seqLen - 1) - lastT;
-            if (_mropeCacheGap < 0) _mropeCacheGap = 0;
+            // Video time coordinates can also lead the cache index. Preserve the
+            // signed offset so subsequent scalar text continues at lastT + 1.
+            _mropeCacheGap = checked((int)((long)startPos + seqLen - 1 - lastT));
         }
 
         private bool EnsureMropeSections()

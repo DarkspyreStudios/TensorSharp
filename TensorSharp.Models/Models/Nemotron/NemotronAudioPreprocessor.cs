@@ -64,7 +64,8 @@ namespace TensorSharp.Models
         private static float[] DecodeViaPlatform(string path)
         {
             TensorSharp.Models.Video.DecodedAudio raw = TensorSharp.Models.Media.MediaCodecs.Audio.Decode(path);
-            if (raw is not { ChannelCount: > 0, SampleCount: > 0 })
+            if (raw == null || raw.SampleRate <= 0 || raw.Channels == null ||
+                raw.Channels.Length == 0 || raw.Channels[0] == null || raw.Channels[0].Length == 0)
                 throw new InvalidDataException($"The platform audio decoder returned no samples for '{path}'.");
 
             // ToMono16k takes the interleaved layout the stream decoders produce.
@@ -74,6 +75,8 @@ namespace TensorSharp.Models
             for (int ch = 0; ch < channels; ch++)
             {
                 float[] plane = raw.Channels[ch];
+                if (plane == null || plane.Length != frames)
+                    throw new InvalidDataException("The platform audio decoder returned inconsistent channel lengths.");
                 for (int i = 0; i < frames; i++)
                     interleaved[(long)i * channels + ch] = plane[i];
             }
@@ -115,22 +118,29 @@ namespace TensorSharp.Models
 
         public static float[] DecodeWAV(byte[] data)
         {
+            ArgumentNullException.ThrowIfNull(data);
             if (data.Length < 12) throw new InvalidDataException("WAV file too short");
             if (data[0] != 'R' || data[1] != 'I' || data[2] != 'F' || data[3] != 'F' ||
                 data[8] != 'W' || data[9] != 'A' || data[10] != 'V' || data[11] != 'E')
                 throw new InvalidDataException("Not a WAV file");
 
-            int offset = 12;
+            uint riffSize = BitConverter.ToUInt32(data, 4);
+            if (riffSize < 4 || riffSize > data.Length - 8)
+                throw new InvalidDataException("WAV RIFF payload is truncated or invalid.");
+            int end = checked((int)riffSize + 8), offset = 12;
             ushort audioFormat = 0;
             int numChannels = 0, sampleRate = 0, bitsPerSample = 0;
             byte[] audioData = null;
             bool foundFmt = false;
 
-            while (offset + 8 <= data.Length)
+            while (offset + 8 <= end)
             {
                 string chunkId = System.Text.Encoding.ASCII.GetString(data, offset, 4);
-                int chunkSize = BitConverter.ToInt32(data, offset + 4);
-                int chunkEnd = Math.Min(offset + 8 + chunkSize, data.Length);
+                uint declaredSize = BitConverter.ToUInt32(data, offset + 4);
+                if (declaredSize > end - offset - 8)
+                    throw new InvalidDataException("WAV chunk is truncated or has an invalid size.");
+                int chunkSize = checked((int)declaredSize);
+                int chunkEnd = offset + 8 + chunkSize;
                 int dataStart = offset + 8;
                 int dataLen = chunkEnd - dataStart;
 
@@ -141,8 +151,12 @@ namespace TensorSharp.Models
                     numChannels = BitConverter.ToUInt16(data, dataStart + 2);
                     sampleRate = BitConverter.ToInt32(data, dataStart + 4);
                     bitsPerSample = BitConverter.ToUInt16(data, dataStart + 14);
-                    if (audioFormat == 0xFFFE && dataLen >= 26)
+                    if (audioFormat == 0xFFFE)
+                    {
+                        if (dataLen < 40 || BitConverter.ToUInt16(data, dataStart + 16) < 22)
+                            throw new InvalidDataException("WAV extensible format is truncated.");
                         audioFormat = BitConverter.ToUInt16(data, dataStart + 24);
+                    }
                     foundFmt = true;
                 }
                 else if (chunkId == "data")
@@ -158,8 +172,14 @@ namespace TensorSharp.Models
             if (!foundFmt) throw new InvalidDataException("WAV missing fmt chunk");
             if (audioData == null) throw new InvalidDataException("WAV missing data chunk");
             if (numChannels <= 0) throw new InvalidDataException("WAV invalid channel count");
+            if (sampleRate <= 0) throw new InvalidDataException("WAV invalid sample rate");
             if (audioFormat != 1 && audioFormat != 3)
                 throw new InvalidDataException($"Unsupported WAV format {audioFormat} (need PCM=1 or float=3)");
+            if ((audioFormat == 1 && bitsPerSample is not (8 or 16 or 24 or 32)) ||
+                (audioFormat == 3 && bitsPerSample != 32))
+                throw new InvalidDataException("Unsupported WAV sample format or bit depth.");
+            if (audioData.Length == 0 || audioData.Length % checked((bitsPerSample / 8) * numChannels) != 0)
+                throw new InvalidDataException("WAV samples do not contain complete nonempty channel frames.");
 
             float[] mono = DecodeWAVSamples(audioData, audioFormat, bitsPerSample, numChannels);
             if (sampleRate != SampleRate)
@@ -207,12 +227,15 @@ namespace TensorSharp.Models
                     }
                 }
                 mono[i] = (float)(sum / channels);
+                if (!float.IsFinite(mono[i])) throw new InvalidDataException("WAV contains non-finite samples.");
             }
             return mono;
         }
 
         private static float[] ToMono16k(ReadOnlySpan<float> interleaved, int srcSampleRate, int channels)
         {
+            if (srcSampleRate <= 0 || channels <= 0 || interleaved.IsEmpty || interleaved.Length % channels != 0)
+                throw new InvalidDataException("Decoded audio has invalid sample rate, channel count, or sample framing.");
             int totalFrames = interleaved.Length / channels;
             float[] mono = new float[totalFrames];
             for (int i = 0; i < totalFrames; i++)
@@ -222,6 +245,7 @@ namespace TensorSharp.Models
                 for (int ch = 0; ch < channels; ch++)
                     sum += interleaved[baseIdx + ch];
                 mono[i] = sum / channels;
+                if (!float.IsFinite(mono[i])) throw new InvalidDataException("Decoded audio contains non-finite samples.");
             }
             return srcSampleRate == SampleRate
                 ? mono
@@ -231,7 +255,7 @@ namespace TensorSharp.Models
         private static float[] ResampleLinear(float[] samples, int fromRate, int toRate)
         {
             if (fromRate <= 0 || toRate <= 0 || samples.Length == 0) return samples;
-            int n = (int)((double)samples.Length / fromRate * toRate);
+            int n = checked((int)((double)samples.Length / fromRate * toRate));
             if (n <= 1) return new float[] { samples.Length > 0 ? samples[0] : 0 };
             float[] outArr = new float[n];
             double srcSpan = samples.Length - 1;
@@ -255,6 +279,8 @@ namespace TensorSharp.Models
         {
             if (samples == null || samples.Length == 0)
                 throw new ArgumentException("Audio is empty", nameof(samples));
+            foreach (float sample in samples)
+                if (!float.IsFinite(sample)) throw new ArgumentException("Audio samples must be finite.", nameof(samples));
 
             int freqBins = NFFT / 2 + 1;
 
@@ -270,12 +296,13 @@ namespace TensorSharp.Models
 
             int winOffset = (NFFT - WinLength) / 2;
             int centerPad = NFFT / 2;
-            float[] result = new float[frames * MelBins];
+            float[] result = new float[checked(frames * MelBins)];
 
             // Threadable: each frame runs an independent FFT.
             Parallel.For(0, frames, frame =>
             {
                 Span<Complex> fftBuf = stackalloc Complex[NFFT];
+                fftBuf.Clear();
                 for (int i = 0; i < WinLength; i++)
                 {
                     int src = frame * HopLength + i + winOffset - centerPad;

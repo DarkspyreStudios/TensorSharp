@@ -37,13 +37,24 @@
 
 #include "ggml_ops_internal.h"
 #include "ggml_ops_dsv4_fused.h"
+#include "ggml_ops_matmul_precision.h"
+#include "ggml_ops_attention_precision.h"
+#include "ggml_ops_scheduler_alloc.h"
 #include "dsv41_engram.h"
 #include "dsv41_raw_gather.h"
 #include "dsv41_truncate.h"
+#include "dsv41_dspark.h"
+#include "ggml_ops_precision_policy.h"
+#include "dsv4_ubatch_plan.h"
+#include "dsv41_retention.h"
 #include "dsv41_engram_io.h"
 #include "dsv41_engram_advice.h"
+#include "dsv4_file_warm.h"
 #include "ggml_ops_deepseek41_vision.h"
 #include "ggml_ops_deepseek41_tp.h"
+#if defined(TSG_GGML_TEST_HOOKS)
+#include "ggml-impl.h"
+#endif
 
 #include "gguf.h"
 
@@ -239,7 +250,9 @@ struct dsv4_dspark
     int32_t markov_rank = 0;
     int32_t noise_token = 0;
     int32_t n_stages = 0;
-    std::vector<int32_t> target_layers;   // trunk blocks whose output feeds main_proj
+    int32_t n_expert = 0;
+    int32_t n_expert_used = 0;
+    std::vector<int32_t> target_layers;   // V4 outputs; V4.1 attention-input stream means
     int layer_base = 0;                   // index of stage 0 in dsv4_model::layers
     int dev = 0;                          // hosting device (the output head's)
 
@@ -257,8 +270,9 @@ struct dsv4_dspark
 struct dsv4_slot
 {
     std::vector<int32_t> engram_history;
-    // A failed V4.1 execution may have written only part of its shared-cache
-    // topology. Only a complete cache reset makes that sequence reusable.
+    // A failed execution may have written only part of its cache topology,
+    // including V4 pipelined/speculative forwards. The historical field name
+    // is retained, but both architectures require a complete reset for reuse.
     bool v41_failed = false;
     int id = 0;
     int32_t n_past = 0;
@@ -275,10 +289,13 @@ struct dsv4_slot
     // before this checkpoint - so keeping the boundary state is what makes that
     // rewind possible at all. Decode steps deliberately do not move it.
     int32_t cp_n_past = -1;
+    int32_t spec_begin = -1;
+    int32_t spec_end = -1;
     std::vector<dsv4_slot_layer> layers;
     // DSpark: one SWA ring per drafter stage, keyed by trunk position and fed
     // from the trunk's own hidden states (see build_dspark_ring_update).
     std::vector<ggml_tensor *> ds_k;
+    std::vector<ggml_tensor *> ds_k_cp;
     ggml_context * ctx[MAX_GPUS + 1] = {};
     ggml_backend_buffer_t buf[MAX_GPUS + 1] = {};
 
@@ -323,7 +340,26 @@ static void dsv41_test_fail(const char * stage, int64_t position)
     const char * minimum = std::getenv("TS_DSV41_TEST_FAIL_POSITION");
     if (configured && std::strcmp(configured, stage) == 0 &&
         position >= (minimum ? std::atoll(minimum) : 0))
+    {
+        const char * kind = std::getenv("TS_DSV41_TEST_FAIL_KIND");
+        if (kind && std::strcmp(kind, "unknown") == 0) throw 41;
+        if (kind && std::strcmp(kind, "bad_alloc") == 0) throw std::bad_alloc();
         throw std::runtime_error(std::string("Injected V4.1 execution failure after ") + stage);
+    }
+}
+
+// Used only by the model-free C ABI regression below. Interception is before
+// any model tensors are accessed, never in a production or real-fixture run.
+static thread_local int dsv4_test_boundary_failure = 0;
+static thread_local int dsv4_test_boundary_visits = 0;
+static thread_local int dsv4_test_boundary_stage = 0;
+static bool dsv4_test_boundary_fault(int stage = 0)
+{
+    if (!dsv4_test_boundary_failure || stage != dsv4_test_boundary_stage) return false;
+    ++dsv4_test_boundary_visits;
+    if (dsv4_test_boundary_failure == 1) throw std::bad_alloc();
+    if (dsv4_test_boundary_failure == 2) throw 41;
+    return true;
 }
 #endif
 
@@ -673,6 +709,25 @@ struct dsv4_model
 // GGUF loading
 // ---------------------------------------------------------------------------
 
+// A graph owns its scheduler arena and may capture addresses from multiple
+// slots. Scheduler destruction itself does not drain submitted work, so wait
+// before releasing an arena used by a V4 asynchronous prefill microbatch.
+static void dsv4_drop_slot_graphs(dsv4_model & model, int slot_id)
+{
+    for (auto it = model.graph_cache.begin(); it != model.graph_cache.end(); )
+    {
+        bool hit = (*it)->slot_id == slot_id;
+        for (const auto & slot : (*it)->bd)
+            if (slot.slot_id == slot_id) { hit = true; break; }
+        if (hit)
+        {
+            if ((*it)->sched) ggml_backend_sched_synchronize((*it)->sched);
+            it = model.graph_cache.erase(it);
+        }
+        else ++it;
+    }
+}
+
 static bool gguf_get_f32_key(gguf_context * ctx, const char * key, float * out)
 {
     int64_t id = gguf_find_key(ctx, key);
@@ -982,24 +1037,28 @@ struct load_job
 // to all GPUs proceed concurrently. Jobs are handed out in file order per
 // shard to keep the concurrent streams roughly sequential for readahead.
 //
-// Each chunk's page cache is released as soon as the chunk is on the device,
-// because THE LOADER NEVER READS THOSE BYTES AGAIN and leaving them cached is
-// what makes a large checkpoint load slowly. Measured on an 8xA40 box with a
-// 373.5 GiB cgroup limit, reading 221 GiB off the MooseFS mount with this
-// function's 16 threads:
-//
-//   keeping the pages  2.58 GiB/s overall, and the rate DECAYS as the cache
-//                      fills: 5.24 GiB/s for the first window, 0.38 GiB/s for
-//                      the last, with cgroup usage climbing to 228 GiB
-//   dropping each      6.25 GiB/s overall and FLAT: 8.8-9.1 GiB/s throughout,
-//   consumed chunk     with cgroup usage falling to 26 GiB
-//
-// A 415 GiB checkpoint cannot fit its streamed weights in that cgroup at all
-// (294.8 GiB of reads plus a 119.4 GiB host mapping), so without this the
-// kernel spends most of the load reclaiming page cache it was never going to
-// reuse. Cache the loader does NOT own is left alone: the host-resident experts
-// are served from their own mapping and are deliberately prefaulted below.
-static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_job> & jobs, int n_threads)
+// PAGE CACHE (TS_DSV4_LOAD_DROP_CACHE). The loader never reads an uploaded
+// chunk's bytes again, but it does read the host-mapped weights next (the expert
+// prefault, the Engram warm) and serves them from the page cache afterwards. When
+// the upload plus those mapped bytes cannot fit the host allowance (the cgroup
+// limit: page cache is charged to it), every later read competes with reclaim.
+// The seven-A40 lane is that case: 263.0 GiB uploaded, then 48.2 GiB of experts and
+// 103 GiB of Engram tables read through the mapping, 414 GiB into a 326.9 GiB
+// cgroup. Its load logged the expert prefault at 0.37 GiB/s and the Engram warm
+// at 0.33 GiB/s, while the same page walks measured 0.62-0.74 GiB/s on that VM
+// with the cgroup about half full. So by default each consumed chunk's page
+// cache is dropped exactly when upload + mapped + 8 GiB exceeds the allowance,
+// and kept otherwise (and whenever the allowance is unknown): an unconditional
+// drop would make every reload of a GPU-resident checkpoint cold. Dropping costs
+// 5.9-7.3 ms per resident 64 MiB chunk on that mount (POSIX_FADV_DONTNEED,
+// measured with GgmlOpsDsv4FileWarmBench --drop-cost), ~25-30 s of thread time
+// for 263 GiB. It cannot speed the upload itself, which already runs at the
+// storage rate; the benefit expected is on the later stages, and whether it
+// outweighs the drop cost is settled by comparing a cold load against =0.
+// TS_DSV4_LOAD_DROP_CACHE=0 never drops, =1 always drops. Cache the loader does
+// NOT own is left alone.
+static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_job> & jobs, int n_threads,
+                                 size_t mmap_weight_bytes)
 {
     std::sort(jobs.begin(), jobs.end(), [](const load_job & a, const load_job & b)
     {
@@ -1011,14 +1070,19 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
     if (n_threads < 1) n_threads = 1;
 
     std::atomic<bool> failed(false);
-    // Releasing each consumed chunk's page cache keeps the process's memory
-    // footprint down (measured: 39 GiB of page cache at the end of a load instead
-    // of ~330 GiB, which leaves room for the host experts the next phase pins).
-    // It did NOT make the load faster on the 8xA40 box - reads were 5374s of
-    // thread time with it and 5539s without, inside run-to-run spread - and each
-    // call costs real time on FUSE, so it is opt-in.
-    bool drop_cache = false;
-    if (const char * e = getenv("TS_DSV4_LOAD_DROP_CACHE")) drop_cache = atoi(e) != 0;
+    // See PAGE CACHE above: automatic unless TS_DSV4_LOAD_DROP_CACHE is set.
+    const bool drop_cache = [&]()
+    {
+        uint64_t upload_bytes = 0;
+        for (const load_job & j : jobs) upload_bytes += j.len;
+        const uint64_t allowance = dsv4_host_mem_allowance();
+        const tsg_dsv4::drop_cache_decision d = tsg_dsv4::decide_drop_cache(
+            getenv("TS_DSV4_LOAD_DROP_CACHE"), upload_bytes, mmap_weight_bytes, allowance);
+        if (upload_bytes > 0)
+            fprintf(stderr, "[dsv4] load page cache: %s\n",
+                    tsg_dsv4::describe_drop_cache(d, upload_bytes, mmap_weight_bytes, allowance).c_str());
+        return d.drop;
+    }();
 
     // Each thread walks ONE CONTIGUOUS RUN of the sorted job list instead of
     // taking every n_threads'th job from a shared cursor.
@@ -1201,6 +1265,391 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
     return !failed.load();
 }
 
+// TS_DSV4_LOAD_THREADS: reader threads for every whole-file pass of a load
+// (the weight upload, the host-expert prefault and the Engram warm).
+static int dsv4_load_thread_count()
+{
+    int load_threads = 16;
+    if (const char * e = getenv("TS_DSV4_LOAD_THREADS")) { int v = atoi(e); if (v > 0) load_threads = v; }
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw > 0 && load_threads > (int) hw) load_threads = (int) hw;
+    return load_threads;
+}
+
+// TS_DSV4_WARM_PREAD: whether the load-time warm passes read with pread (default)
+// or walk the mapping page by page (=0). See dsv4_file_warm.h.
+static bool dsv4_warm_pread()
+{
+    const char * value = getenv("TS_DSV4_WARM_PREAD");
+    bool invalid = false;
+    const bool pread_warm = tsg_dsv4::resolve_warm_pread(value, &invalid);
+    if (invalid)
+    {
+        static std::once_flag warned;
+        std::call_once(warned, [value]() {
+            fprintf(stderr, "[dsv4] TS_DSV4_WARM_PREAD=%s is not 0 or 1; warming with pread (the default)\n", value);
+        });
+    }
+    return pread_warm;
+}
+
+// Where a host tensor served from a shard mapping lives in its file: the shard
+// (= mapping) index, the file offset and the mapped address. False when the
+// tensor is not in one of the mappings (a private copy, e.g. on Windows).
+static bool dsv4_mapped_file_range(const dsv4_model & m, const ggml_tensor * t, tsg_dsv4::file_warm_range & out)
+{
+    if (t == nullptr || t->buffer == nullptr || t->data == nullptr) return false;
+    const auto found = std::find(m.mmap_bufs.begin(), m.mmap_bufs.end(), t->buffer);
+    if (found == m.mmap_bufs.end()) return false;
+    const size_t si = (size_t) (found - m.mmap_bufs.begin());
+    if (si >= m.mmap_addrs.size() || m.mmap_addrs[si] == nullptr) return false;
+    out.file = (int) si;
+    out.offset = (uint64_t) ((const char *) t->data - (const char *) m.mmap_addrs[si]);
+    out.bytes = ggml_nbytes(t);
+    out.mapped = t->data;
+    return true;
+}
+
+// Load stage: fault the mmapped host-resident weights (the cpu_moe experts) in
+// before the model serves. Returns false only on a load error.
+static bool dsv4_prefault_host_experts(dsv4_model & loaded, const shard_files & shards, int load_threads)
+{
+    dsv4_model * const m = &loaded;
+    const dsv4_hparams & hp = m->hp;
+    const int n_gpu = m->n_gpu;
+    // Warm the mmapped experts with the same parallelism the copy path had.
+    // Lazy faulting would make the first prompt pay for the whole read at
+    // single-stream storage speed, mid-generation. Only when they actually
+    // fit: warming 137 GiB into an 87 GiB allowance just evicts itself (and
+    // everything else) for nothing, so there lazy-on-demand IS the plan.
+    //
+    // The bytes are read with pread in 64 MiB blocks, one contiguous run of the
+    // expert ranges per thread (TS_DSV4_LOAD_THREADS), skipping blocks that
+    // mincore already reports resident. The page-touch walk this replaced
+    // faults 4 KiB at a time, and on a network filesystem every fault is a
+    // synchronous read capped at the mount's readahead: 129.7 s for 48.2 GiB on
+    // the seven-A40 lane. MADV_WILLNEED, POSIX_FADV_WILLNEED and readahead(2)
+    // are capped the same way there (0.20% of a range resident); do not retry
+    // them. TS_DSV4_WARM_PREAD=0 restores the walk exactly.
+    if (m->mmap_weight_bytes > 0)
+    {
+        const size_t allow = dsv4_host_mem_allowance();
+        const size_t headroom = (size_t) 8 * 1024 * 1024 * 1024;
+        if (allow == 0 || m->mmap_weight_bytes + headroom <= allow)
+        {
+            const auto t_warm = std::chrono::steady_clock::now();
+            std::vector<std::pair<const volatile char *, size_t>> ranges;
+            std::vector<tsg_dsv4::file_warm_range> file_ranges;
+            size_t warm_bytes = 0;
+            ggml_context * hctx = m->w_ctx[n_gpu];
+            for (ggml_tensor * t = ggml_get_first_tensor(hctx); t; t = ggml_get_next_tensor(hctx, t))
+            {
+                tsg_dsv4::file_warm_range range;
+                if (!dsv4_mapped_file_range(*m, t, range)) continue;
+                // Engram reads only 24 rows per token; prefaulting its entire
+                // hundred-billion-element table wastes I/O and evicts useful pages.
+                if (hp.v41 && strstr(t->name, ".engram_embd.") != nullptr) continue;
+                ranges.emplace_back((const volatile char *) t->data, ggml_nbytes(t));
+                file_ranges.push_back(range);
+                warm_bytes += ggml_nbytes(t);
+            }
+            if (!dsv4_warm_pread())
+            {
+                tsg_dsv4::touch_prefault_spans(ranges, load_threads);
+                fprintf(stderr, "[dsv4] prefaulted %.1f GiB of mmapped host experts in %.1fs (page-touch walk, TS_DSV4_WARM_PREAD=0)\n",
+                        warm_bytes / 1073741824.0,
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t_warm).count());
+                return true;
+            }
+            tsg_dsv4::file_warm_options options;
+            options.threads = load_threads;
+            // pread fills the page cache but not this process's page tables,
+            // which the walk also populated. The first prefill reads the experts
+            // densely, so each cached block is also mapped here (one read per
+            // page, minor faults only: ~0.005 s/GiB at 16 threads, measured).
+            options.populate = true;
+            const tsg_dsv4::file_warm_result r = tsg_dsv4::warm_file_ranges(shards.paths, file_ranges, options);
+            if (!r.ok)
+            {
+                fprintf(stderr, "[dsv4] prefaulting the mmapped host experts failed: %s\n", r.error.c_str());
+                return false;
+            }
+            fprintf(stderr, "[dsv4] prefaulted %.1f GiB of mmapped host experts in %.1fs "
+                            "(pread, %d threads: %.1f GiB read, %.1f GiB already resident)\n",
+                    warm_bytes / 1073741824.0,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_warm).count(),
+                    r.threads, r.bytes_read / 1073741824.0, r.bytes_resident / 1073741824.0);
+        }
+    }
+    return true;
+}
+
+// Load stage: optionally page-lock the offloaded experts.
+static void dsv4_pin_host_experts(dsv4_model & loaded, int n_cpu_moe)
+{
+    dsv4_model * const m = &loaded;
+    const dsv4_hparams & hp = m->hp;
+    // Page-locking the offloaded experts buys nothing here, so it is off unless
+    // TS_HOST_MOE_PIN=1 asks for it. build_moe_host assigns EVERY node of an
+    // offloaded layer's routed experts to the CPU backend (mul_mat_id up, gate
+    // and down, clamp, swiglu, mul and the expert adds), and
+    // ggml_backend_sched never overrides a user assignment, so its op_offload
+    // rule never streams the expert weights to a GPU: only [n_embd, n_tokens]
+    // activations cross the bus. A pinned expert is therefore never a DMA
+    // source. Registering them cost 20.4 s for 48.2 GiB on the seven-A40 lane
+    // (--n-cpu-moe 6) and made those pages unevictable inside the cgroup the
+    // page cache lives in. ggml_ops_moe.cpp, which really streams offloaded
+    // experts for the other MoE architectures, keeps pinning by default.
+    if (n_cpu_moe > 0 && !tsg_dsv4::dsv4_host_expert_pin_requested(getenv("TS_HOST_MOE_PIN")))
+    {
+        fprintf(stderr, "[dsv4] host experts of %d offloaded layer(s) run on the CPU backend and stay pageable "
+                        "(TS_HOST_MOE_PIN=1 registers them with the GPU driver)\n", n_cpu_moe);
+        return;
+    }
+    // Not when the mmapped experts outweigh the host allowance: registering
+    // faults the pages in at storage speed (minutes on a network FS) and
+    // every pinned page is one the kernel can no longer evict, which is
+    // exactly the headroom an over-committed page cache lives on. Failures
+    // (no budget, driver refusal) leave the pages pageable; see host_pin_range.
+    const bool experts_over_allowance = m->mmap_weight_bytes > 0 &&
+        [&]{ const size_t a = dsv4_host_mem_allowance();
+             return a > 0 && m->mmap_weight_bytes + (size_t) 8 * 1024 * 1024 * 1024 > a; }();
+    if (n_cpu_moe > 0 && !experts_over_allowance)
+    {
+        const auto t_pin = std::chrono::steady_clock::now();
+        std::size_t pinned = 0;
+        for (int il = 0; il < hp.n_layer; il++)
+        {
+            const dsv4_layer & L = m->layers[il];
+            if (!L.cpu_moe) continue;
+            for (ggml_tensor * t : { L.ffn_gate_exps, L.ffn_up_exps, L.ffn_down_exps })
+            {
+                if (t == nullptr || t->data == nullptr) continue;
+                if (tsg::host_pin_range(t->data, ggml_nbytes(t)))
+                    pinned += ggml_nbytes(t);
+            }
+        }
+        if (pinned > 0)
+        {
+            fprintf(stderr, "[dsv4] page-locked %.1f GiB of host experts in %.1fs (TS_HOST_MOE_PIN=1; they compute on the CPU backend, "
+                            "so this speeds up no transfer)\n",
+                    pinned / 1073741824.0,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pin).count());
+        }
+    }
+}
+
+// Load stage (V4.1): warm the host-mapped Engram tables, synchronously or on a
+// background thread, and apply the sparse-read mapping advice once warming is
+// done. Returns false only on a load error.
+static bool dsv4_warm_engram(dsv4_model & loaded, const shard_files & shards,
+                             bool engram_random_advice, bool engram_random_override)
+{
+    dsv4_model * const m = &loaded;
+    // Sparse-read advice turns off the kernel's readahead, which is exactly
+    // what a whole-table warm pass depends on, so this runs only once the
+    // warming (synchronous or background) is finished. Never alter another
+    // host tensor's entire shard, or an allocation that is not one of our
+    // mmaps.
+    dsv4_model * const model_ptr = m;
+    auto apply_engram_advice = [model_ptr, engram_random_advice, engram_random_override]()
+    {
+        if (!engram_random_advice)
+        {
+            if (!model_ptr->engram_on_device)
+                fprintf(stderr, "[dsv41] Engram mmap advice: default (%s)\n",
+                    engram_random_override ? "override=0" : "automatic: one I/O thread");
+            return;
+        }
+        size_t accepted = 0, unsupported = 0, skipped = 0, failed = 0;
+        for (const auto & layout : model_ptr->engram.layers)
+        {
+            const auto * table = model_ptr->layers[layout.id].engram_embd;
+            const auto found = std::find(model_ptr->mmap_bufs.begin(), model_ptr->mmap_bufs.end(), table->buffer);
+            if (!table->buffer || found == model_ptr->mmap_bufs.end()) { ++skipped; continue; }
+            const size_t index = size_t(found - model_ptr->mmap_bufs.begin());
+            const auto result = tsg_dsv41::advise_engram_random(model_ptr->mmap_addrs[index], model_ptr->mmap_sizes[index],
+                table->data, ggml_nbytes(table));
+            if (result.status == tsg_dsv41::mapped_advice_status::applied) ++accepted;
+            else if (result.status == tsg_dsv41::mapped_advice_status::unsupported) ++unsupported;
+            else if (result.status == tsg_dsv41::mapped_advice_status::empty) ++skipped;
+            else
+            {
+                ++failed;
+                fprintf(stderr, "[dsv41] Engram random advice was not applied to layer %d (error %d); continuing\n",
+                    layout.id, result.error);
+            }
+        }
+        fprintf(stderr, "[dsv41] Engram mmap advice: RANDOM (%s; accepted=%zu, unsupported=%zu, skipped=%zu, failed=%zu)\n",
+            engram_random_override ? "override=1" : "automatic: parallel I/O", accepted, unsupported, skipped, failed);
+    };
+    bool advice_deferred = false;
+
+    // A host-resident Engram table is read 24 scattered rows per token per
+    // table. Each row that is not page cache is one storage round trip, and
+    // on a network filesystem that is ~1 ms: input preparation for a
+    // 1024-token prefill chunk measured 1.44 s cold against 0.04-0.09 s
+    // warm on the eight-A40 VM's Q4_K_M checkpoint (prefill 201-255 ->
+    // 363-381 tok/s, decode 23-24 -> 29 tok/s).
+    //
+    // So warming is the default whenever the pages can actually STAY
+    // resident. It is minutes of I/O, so the automatic form runs on its own
+    // thread after the model is serving rather than holding up load;
+    // TS_DSV41_ENGRAM_WARM=1 keeps the documented synchronous behaviour and
+    // =0 turns warming off.
+    const char * warm_opt = m->engram_on_device ? nullptr : getenv("TS_DSV41_ENGRAM_WARM");
+    const int warm_mode = m->engram_on_device ? 0 : (warm_opt ? atoi(warm_opt) : -1);
+    if (warm_mode != 0)
+    {
+        size_t bytes = 0;
+        for (const auto & layout : m->engram.layers) bytes += ggml_nbytes(m->layers[layout.id].engram_embd);
+        const size_t headroom = (size_t) 8 * 1024 * 1024 * 1024;
+        const size_t allowance = dsv4_host_mem_allowance();
+        const size_t resident = std::max(bytes, m->mmap_weight_bytes);
+        const char * refused = nullptr;
+        if (allowance && (resident > allowance || allowance - resident < headroom))
+            refused = "host allowance lacks 8 GiB headroom";
+        else if (warm_mode < 0)
+        {
+            // Automatic only: an explicit =1 is the operator's call. Warming
+            // pages that the host will immediately evict costs the I/O and
+            // buys nothing, so require room for the whole table set now.
+            const size_t available = dsv4_host_mem_available();
+            if (available && available < bytes + headroom)
+                refused = "free host memory would not keep the tables cached";
+        }
+
+        // TS_DSV4_WARM_PREAD=0 keeps the page-touch walks (engram_io_pool::warm,
+        // 8 MiB chunks from a shared cursor) for both the synchronous and the
+        // background warm. A table that is not one of the mappings is a private
+        // copy already in memory, so the pread form has nothing to read for it.
+        const bool use_pread = refused == nullptr && dsv4_warm_pread();
+        const int pread_threads = dsv4_load_thread_count();
+        std::vector<tsg_dsv4::file_warm_range> table_ranges;
+        if (use_pread)
+        {
+            for (const auto & layout : m->engram.layers)
+            {
+                tsg_dsv4::file_warm_range range;
+                if (dsv4_mapped_file_range(*m, m->layers[layout.id].engram_embd, range)) table_ranges.push_back(range);
+            }
+        }
+
+        if (refused)
+        {
+            fprintf(stderr, "[dsv41] Engram warming skipped: %s\n", refused);
+        }
+        else if (warm_mode > 0 && use_pread)
+        {
+            // Same pread helper as the expert prefault: a whole table is one
+            // contiguous range of its shard, split into one run per thread.
+            // 311 s for the Q4_K_M tables with the page-touch walk below on the
+            // seven-A40 lane, where every fault was a 128 KiB synchronous read.
+            const auto start = std::chrono::steady_clock::now();
+            fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages with %d pread threads...\n",
+                bytes / 1073741824.0, pread_threads);
+            tsg_dsv4::file_warm_options options;
+            options.threads = pread_threads;
+            const tsg_dsv4::file_warm_result r = tsg_dsv4::warm_file_ranges(shards.paths, table_ranges, options);
+            if (!r.ok)
+            {
+                fprintf(stderr, "[dsv41] warming the Engram tables failed: %s\n", r.error.c_str());
+                return false;
+            }
+            fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (%d pread threads: %.2f GiB read, "
+                "%.2f GiB already resident)\n",
+                bytes / 1073741824.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                r.threads, r.bytes_read / 1073741824.0, r.bytes_resident / 1073741824.0);
+        }
+        else if (warm_mode > 0)
+        {
+            const auto start = std::chrono::steady_clock::now();
+            fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages with %u I/O threads...\n",
+                bytes / 1073741824.0, m->engram_io->threads());
+            for (const auto & layout : m->engram.layers)
+            {
+                auto * table = m->layers[layout.id].engram_embd;
+                m->engram_io->warm(table->data, ggml_nbytes(table));
+            }
+            fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (%u I/O threads)\n",
+                bytes / 1073741824.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                m->engram_io->threads());
+        }
+        else
+        {
+            // Its own pool, not m->engram_io: that one is what per-token
+            // lookups run on, and a warming submission holds it for the
+            // length of a slice.
+            std::vector<std::pair<void *, size_t>> ranges;
+            for (const auto & layout : m->engram.layers)
+            {
+                auto * table = m->layers[layout.id].engram_embd;
+                ranges.emplace_back(table->data, ggml_nbytes(table));
+            }
+            const unsigned warm_threads = use_pread ? (unsigned) pread_threads
+                                                    : std::min<unsigned>(16u, m->engram_io->threads());
+            fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages in the background with %u %s threads; "
+                "requests run at page-cache speed once it finishes (TS_DSV41_ENGRAM_WARM=0 disables)\n",
+                bytes / 1073741824.0, warm_threads, use_pread ? "pread" : "I/O");
+            dsv4_model * model = model_ptr;
+            advice_deferred = true;
+            std::vector<std::string> paths = shards.paths;
+            m->engram_warm_thread = std::thread([model, ranges, paths, table_ranges, use_pread, bytes, warm_threads,
+                                                 apply_engram_advice]() {
+                try
+                {
+                    const auto start = std::chrono::steady_clock::now();
+                    if (use_pread)
+                    {
+                        // The stop flag is checked before every 64 MiB block, so
+                        // a model freed mid-warm waits at most one block.
+                        tsg_dsv4::file_warm_options options;
+                        options.threads = (int) warm_threads;
+                        options.stop = &model->engram_warm_stop;
+                        const tsg_dsv4::file_warm_result r = tsg_dsv4::warm_file_ranges(paths, table_ranges, options);
+                        if (r.stopped) return;
+                        if (!r.ok)
+                            fprintf(stderr, "[dsv41] background Engram warming stopped: %s\n", r.error.c_str());
+                        else
+                            fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (background, %d pread threads: "
+                                "%.2f GiB read, %.2f GiB already resident)\n",
+                                bytes / 1073741824.0,
+                                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                                r.threads, r.bytes_read / 1073741824.0, r.bytes_resident / 1073741824.0);
+                        apply_engram_advice();
+                        return;
+                    }
+                    tsg_dsv41::engram_io_pool pool(warm_threads);
+                    // Slices keep the stop flag responsive: a model freed
+                    // mid-warm waits at most one slice, not one table.
+                    constexpr size_t slice = (size_t) 1024 * 1024 * 1024;
+                    for (const auto & range : ranges)
+                    {
+                        for (size_t off = 0; off < range.second; off += slice)
+                        {
+                            if (model->engram_warm_stop.load(std::memory_order_relaxed)) return;
+                            pool.warm((const char *) range.first + off, std::min(slice, range.second - off));
+                        }
+                    }
+                    fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (background, %u I/O threads)\n",
+                        bytes / 1073741824.0,
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
+                        warm_threads);
+                }
+                catch (const std::exception & e)
+                {
+                    fprintf(stderr, "[dsv41] background Engram warming stopped: %s\n", e.what());
+                }
+                // Readahead is no longer wanted: from here the table is read
+                // a few scattered rows at a time.
+                apply_engram_advice();
+            });
+        }
+    }
+    if (!advice_deferred) apply_engram_advice();
+    return true;
+}
+
 // The overlap compressors read a synthetic "before the first block" source
 // from the state rings' extra row: kv stays zero (buffer clear), the score
 // row must be -inf so the per-element softmax gives those slots zero weight.
@@ -1223,9 +1672,13 @@ static void dsv4_init_slot_state_rows(dsv4_slot & slot)
 static void dsv4_reset_slot(dsv4_slot & slot)
 {
     slot.n_past = 0;
+    slot.spec_begin = slot.spec_end = -1;
     slot.engram_history.clear();
     for (int d = 0; d <= MAX_GPUS; d++)
         if (slot.buf[d]) ggml_backend_buffer_clear(slot.buf[d], 0);
+#if defined(TSG_GGML_TEST_HOOKS)
+    dsv4_test_boundary_fault(1);
+#endif
     dsv4_init_slot_state_rows(slot);
     slot.v41_failed = false;
     // The shadow rings live in the same buffers and were just zeroed, so the
@@ -1246,9 +1699,15 @@ static void dsv4_copy_rewind_rings(dsv4_slot & slot, bool save)
             ggml_backend_tensor_copy(save ? live : shadow, save ? shadow : live);
         };
         move(C.raw_k, C.raw_k_cp);
+#if defined(TSG_GGML_TEST_HOOKS)
+        if (!save) dsv4_test_boundary_fault(2);
+#endif
         move(C.comp_state_kv, C.comp_state_kv_cp);
         move(C.comp_state_score, C.comp_state_score_cp);
     }
+    for (size_t i = 0; i < slot.ds_k_cp.size(); ++i)
+        ggml_backend_tensor_copy(save ? slot.ds_k[i] : slot.ds_k_cp[i],
+                                 save ? slot.ds_k_cp[i] : slot.ds_k[i]);
 }
 
 // Record the slot's state as the rewind checkpoint. Called at the end of every
@@ -1257,6 +1716,9 @@ static void dsv4_checkpoint_slot(const dsv4_model & m, dsv4_slot & slot)
 {
     if (!m.rewind_cp || slot.v41_failed) return;
     dsv4_copy_rewind_rings(slot, /*save*/ true);
+#if defined(TSG_GGML_TEST_HOOKS)
+    dsv41_test_fail("checkpoint", slot.n_past);
+#endif
     slot.cp_n_past = slot.n_past;
     // engram_history needs no shadow: it is indexed by absolute position and
     // hash_tokens only ever writes from the current head forward, so its first
@@ -1280,7 +1742,7 @@ static dsv4_slot * dsv4_slot_alloc(dsv4_model & m)
     for (int d = 0; d <= m.n_gpu; d++)
     {
         // 10 cache tensors per layer, plus the 3 rewind-checkpoint shadows.
-        ggml_init_params cp = { (size_t) (hp.n_layer * 13 + 32) * ggml_tensor_overhead(), nullptr, true };
+        ggml_init_params cp = { (size_t) (hp.n_layer * 13 + m.ds.n_stages * 2 + 32) * ggml_tensor_overhead(), nullptr, true };
         slot->ctx[d] = ggml_init(cp);
         if (!slot->ctx[d]) return nullptr;
     }
@@ -1288,11 +1750,18 @@ static dsv4_slot * dsv4_slot_alloc(dsv4_model & m)
     if (m.ds.loaded)
     {
         slot->ds_k.assign(m.ds.n_stages, nullptr);
+        if (m.rewind_cp) slot->ds_k_cp.assign(m.ds.n_stages, nullptr);
         for (int s = 0; s < m.ds.n_stages; s++)
         {
             slot->ds_k[s] = ggml_new_tensor_2d(slot->ctx[m.ds.dev], GGML_TYPE_F16,
                                                hp.n_embd_head, m.ring_raw);
             ggml_format_name(slot->ds_k[s], "cache_ds_k.%d.%d", slot->id, s);
+            if (m.rewind_cp)
+            {
+                slot->ds_k_cp[s] = ggml_new_tensor_2d(slot->ctx[m.ds.dev], GGML_TYPE_F16,
+                                                      hp.n_embd_head, m.ring_raw);
+                ggml_format_name(slot->ds_k_cp[s], "cp_ds_k.%d.%d", slot->id, s);
+            }
         }
     }
 
@@ -1320,8 +1789,8 @@ static dsv4_slot * dsv4_slot_alloc(dsv4_model & m)
                 C.lid_k = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, hp.indexer_head_size, rows);
                 if (ratio > 1)
                 {
-                    C.comp_state_kv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head, ratio + 1);
-                    C.comp_state_score = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head, ratio + 1);
+                    C.comp_state_kv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head, ratio + m.state_extra + 1);
+                    C.comp_state_score = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, head, ratio + m.state_extra + 1);
                 }
             }
             if (m.rewind_cp)
@@ -1498,7 +1967,23 @@ static bool dsv4_scan_dspark(dsv4_model & m, const char * dspark_path,
                    "deepseek4.dspark.n_layers", "deepseek4.dspark.layer_count" }, &ds.n_stages);
     ok &= kv_arr({ "dspark.target_layer_ids", "dspark.target_layers",
                    "deepseek4.dspark.target_layer_ids", "deepseek4.dspark.target_layers" }, ds.target_layers);
-    if (!ok || ds.block_size <= 0 || ds.n_stages <= 0 || ds.markov_rank <= 0 || ds.target_layers.empty())
+    ds.n_expert = m.hp.n_expert;
+    ds.n_expert_used = m.hp.n_expert_used;
+    if (m.hp.v41)
+    {
+        ok &= kv_u32({ "dspark.expert_count" }, &ds.n_expert);
+        ok &= kv_u32({ "dspark.expert_used_count" }, &ds.n_expert_used);
+    }
+    else
+    {
+        kv_u32({ "dspark.expert_count" }, &ds.n_expert);
+        kv_u32({ "dspark.expert_used_count" }, &ds.n_expert_used);
+    }
+    if (!ok || ds.block_size <= 0 || ds.block_size > 64 || ds.n_stages <= 0 || ds.n_stages > 16 ||
+        ds.markov_rank <= 0 || ds.target_layers.empty() || ds.noise_token < 0 || ds.noise_token >= m.hp.n_vocab ||
+        ds.n_expert <= 0 || ds.n_expert_used <= 0 || ds.n_expert_used > ds.n_expert ||
+        !std::is_sorted(ds.target_layers.begin(), ds.target_layers.end()) ||
+        std::adjacent_find(ds.target_layers.begin(), ds.target_layers.end()) != ds.target_layers.end())
     {
         fprintf(stderr, "[dsv4] %s is missing dspark.* metadata\n", dspark_path);
         gguf_free(g); if (meta) ggml_free(meta);
@@ -1520,10 +2005,13 @@ static bool dsv4_scan_dspark(dsv4_model & m, const char * dspark_path,
         if (ai >= 0 && gguf_get_kv_type(g, ai) == GGUF_TYPE_STRING)
             arch = gguf_get_val_str(g, ai);
     }
-    if (arch && strcmp(arch, "deepseek4-dspark") != 0 && strcmp(arch, "deepseek_v4_flash_dspark_draft") != 0)
+    const bool correct_arch = m.hp.v41
+        ? arch && strcmp(arch, "deepseek41-dspark") == 0
+        : !arch || strcmp(arch, "deepseek4-dspark") == 0 || strcmp(arch, "deepseek_v4_flash_dspark_draft") == 0;
+    if (!correct_arch)
     {
-        fprintf(stderr, "[dsv4] %s is a '%s' drafter, not a DeepSeek V4 DSpark one; DSpark drafters for other "
-                        "architectures use a different design and are not supported\n", dspark_path, arch);
+        fprintf(stderr, "[dsv4] %s has drafter architecture '%s', incompatible with target %s\n",
+                dspark_path, arch ? arch : "missing", m.hp.v41 ? "deepseek41" : "deepseek4");
         gguf_free(g); if (meta) ggml_free(meta);
         return false;
     }
@@ -1620,7 +2108,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     }
     if (n_gpu == 0)
     {
-        fprintf(stderr, "[dsv4] no GPU backend available; refusing CPU-only run for a %s\n", "250B model");
+        tsg::report_load_refusal( "[dsv4] no GPU backend available; refusing CPU-only run for a %s\n", "250B model");
         return nullptr;
     }
 
@@ -1692,7 +2180,9 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         const char * fe = getenv("TS_DSV4_FUSED");
         bool want_fused = !cpu_only && !(fe && atoi(fe) == 0);
 #ifdef TSG_GGML_USE_CUDA
-        if (want_fused)
+        // V4.1 precision is required even when optional elementwise fusion
+        // is disabled. Keep the TensorSharp CUDA executor for those matmuls.
+        if (want_fused || (!cpu_only && m->hp.v41))
         {
             bool all_ok = true;
             for (int d = 0; d < n_gpu; d++)
@@ -1700,7 +2190,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 m->ts_backends[d] = tsg_dsv4_fused_backend_init(m->backends[d]);
                 if (!m->ts_backends[d]) { all_ok = false; break; }
             }
-            m->fused = all_ok;
+            m->fused = all_ok && want_fused;
         }
 #else
         (void) want_fused;
@@ -1710,7 +2200,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         // unaffected -- both report the same buffer type. Index n_gpu is the CPU
         // backend, which host-resident routed experts are pinned to.
         for (int d = 0; d < n_gpu; d++)
-            m->dev_backends[d] = m->fused ? m->ts_backends[d] : m->backends[d];
+            m->dev_backends[d] = m->ts_backends[d] ? m->ts_backends[d] : m->backends[d];
         m->dev_backends[n_gpu] = cpu;
         int nb = 0;
         for (int d = 0; d < n_gpu; d++) m->sched_backends[nb++] = m->dev_backends[d];
@@ -1736,7 +2226,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     std::unique_ptr<ggml_context, decltype(&ggml_free)> metadata_tensors_owner(meta_ctx0, ggml_free);
     if (!g0)
     {
-        fprintf(stderr, "[dsv4] failed to open %s\n", gguf_path);
+        tsg::report_load_refusal( "[dsv4] failed to open %s\n", gguf_path);
         return nullptr;
     }
 
@@ -1811,8 +2301,6 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             throw std::runtime_error("TS_DSV41_TP requires deepseek41 and must equal its selected GPU count (2..8)");
     }
     auto key = [&](const char * suffix) { return arch + "." + suffix; };
-    if (hp.v41 && dspark_path && *dspark_path)
-        throw std::runtime_error("V4.1 requires a V4.1 DSpark implementation; V4 drafters are incompatible");
     bool ok = true;
     ok &= gguf_get_u32_key(g0, key("block_count").c_str(), &hp.n_layer);
     ok &= gguf_get_u32_key(g0, key("embedding_length").c_str(), &hp.n_embd);
@@ -1856,7 +2344,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 
     if (!ok || hp.n_layer <= 0 || (int) hp.compress_ratios.size() < hp.n_layer)
     {
-        fprintf(stderr, "[dsv4] missing/invalid deepseek4 metadata\n");
+        tsg::report_load_refusal( "[dsv4] missing/invalid deepseek4 metadata\n");
         return nullptr;
     }
     if (hp.v41)
@@ -1908,7 +2396,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         gguf_context * g = gguf_init_from_file(shards.paths[si].c_str(), sp);
         if (!g)
         {
-            fprintf(stderr, "[dsv4] failed to open shard %s\n", shards.paths[si].c_str());
+            tsg::report_load_refusal( "[dsv4] failed to open shard %s\n", shards.paths[si].c_str());
             return nullptr;
         }
         if (!dsv4_check_shard_complete(shards.paths[si].c_str(), g, meta))
@@ -1951,14 +2439,6 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         ggml_free(meta);
     }
 
-    size_t dspark_bytes = 0;
-    if (!dsv4_scan_dspark(*m, dspark_path, shards, sources, &dspark_bytes))
-        return nullptr;
-    // The drafter lands entirely on the output-head device, so it has to weigh
-    // on the split: counted as root bytes it pushes whole layers onto the
-    // earlier devices instead of overflowing the last one.
-    root_bytes += dspark_bytes;
-
     // --- vocab size from tok_embd ---
     // Its size is also where the split learns how the root bytes really land:
     // the embedding table on the first device, the output head and the whole
@@ -1966,16 +2446,40 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     size_t embd_bytes = 0;
     {
         auto it = sources.find("token_embd.weight");
-        if (it == sources.end()) { fprintf(stderr, "[dsv4] token_embd missing\n"); return nullptr; }
+        if (it == sources.end()) { tsg::report_load_refusal( "[dsv4] token_embd missing\n"); return nullptr; }
         hp.n_vocab = (int32_t) it->second.ne[1];
         embd_bytes = it->second.size;
     }
+    // Draft metadata includes a vocabulary-bounded noise token. Validate it
+    // only after the target embedding has established the real vocabulary.
+    size_t dspark_bytes = 0;
+    if (!dsv4_scan_dspark(*m, dspark_path, shards, sources, &dspark_bytes))
+        return nullptr;
+    // The drafter lands entirely on the output-head device, so it has to weigh
+    // on the split: counted as root bytes it pushes whole layers onto the
+    // earlier devices instead of overflowing the last one.
+    root_bytes += dspark_bytes;
     const size_t head_bytes = root_bytes - embd_bytes;
 
     // --- geometry ---
     m->n_ctx = n_ctx > 0 ? n_ctx : 16384;
-    m->n_ubatch = n_ubatch > 0 ? n_ubatch : 512;
-    m->ring_raw = pad64(hp.n_swa + m->n_ubatch, 256);
+    // tsg_dsv4_plan::UBATCH_AUTO (-1) lets the split below choose the prefill
+    // width from the candidates it can afford (accelerators only; the CPU
+    // device keeps the executor's 256). Any other value is the caller's width,
+    // used as given, with 0 or less meaning 512.
+    const bool ubatch_auto = n_ubatch == tsg_dsv4_plan::UBATCH_AUTO && !cpu_only;
+    m->n_ubatch = n_ubatch == tsg_dsv4_plan::UBATCH_AUTO ? 256 : n_ubatch > 0 ? n_ubatch : 512;
+    if (!ubatch_auto && m->ds.loaded && m->ds.block_size >= m->n_ubatch)
+        throw std::runtime_error("DSpark requires ubatch >= draft block size + 1");
+    // The owned CUDA precision paths compute a verify batch exactly like
+    // single-token decode only up to TSG_PRECISION_DECODE_COLUMNS rows. A
+    // wider drafter still works, but its accepted rows may be committed with
+    // last-bit differences that the cache quantization can turn into a
+    // full step, so the rewind/greedy parity fixtures would no longer hold.
+    if (m->ds.loaded && n_gpu > 0 && (int64_t) m->ds.block_size + 1 > TSG_PRECISION_DECODE_COLUMNS)
+        fprintf(stderr, "[dsv4] warning: DSpark verify batches of %d rows exceed the decode-class width %lld; "
+                        "speculative verify and single-token decode will not commit bit-identical cache rows on GPU\n",
+                m->ds.block_size + 1, (long long) TSG_PRECISION_DECODE_COLUMNS);
     // +1 so the masked scratch row (last row) used by non-boundary CSA/LID
     // decode steps never collides with a real compressed row.
     m->n_csa_rows = pad64(m->n_ctx / (hp.v41 ? 2 : CSA_RATIO) + 1, 256);
@@ -1987,7 +2491,8 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
     // of the state ring and aligning the target to the ratio is not enough;
     // that case is left refusing rather than half-proved. V4.1 compresses
     // disjoint blocks, so a target aligned to the widest ratio reads nothing
-    // the rewind dropped.
+    // the rewind dropped. The rewind span depends on the raw ring, so it is
+    // set once the split has fixed the prefill width.
     if (hp.v41)
     {
         int32_t align = 1;
@@ -1997,120 +2502,46 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             align = (int32_t) std::lcm((int64_t) align, (int64_t) r);
         }
         m->truncate_align = align;
-        // A query at the new head reads the raw window (new_head - n_swa,
-        // new_head]; the ring holds ring_raw consecutive positions, so this is
-        // how far the head may move back before one of those rows has been
-        // overwritten by an abandoned position.
-        m->rewind_span = std::max<int64_t>(0, m->ring_raw - hp.n_swa + 1);
         m->rewind_cp = true;
         if (const char * e = getenv("TS_DSV41_REWIND_CHECKPOINT")) m->rewind_cp = atoi(e) != 0;
     }
 
     // --- what a layer costs its device beyond its weights -----------------
     // The KV caches and compressor state rings are allocated on the layer's
-    // own device right after the weights, so the split has to price them:
-    // a device packed to the last byte of weights fails at slot allocation
-    // instead of at load, which reads as a runtime crash rather than a
-    // capacity problem.
-    const int64_t state_extra_est = m->ds.loaded ? m->ds.block_size : 0;
-    auto layer_cache_bytes = [&](int il) -> size_t
-    {
-        const int64_t head = hp.n_embd_head;
-        const int64_t idx  = hp.indexer_head_size;
-        size_t b = (size_t) (head * m->ring_raw * 2);                    // raw_k F16
-        const int ratio = hp.compress_ratios[il];
-        if (hp.v41)
-        {
-            if (std::find(hp.kv_sources.begin(), hp.kv_sources.end(), il) != hp.kv_sources.end())
-            {
-                const int64_t rows = ratio == 2 ? m->n_csa_rows : m->n_hca_rows;
-                b += (head + idx) * rows * 2;
-                if (ratio > 1) b += 2 * head * (ratio + 1) * 4;
-            }
-            if (m->rewind_cp)
-            {
-                // Rewind-checkpoint shadows: the raw ring, and the compressor
-                // state ring where the layer owns one.
-                b += (size_t) (head * m->ring_raw * 2);
-                if (ratio > 1
-                    && std::find(hp.kv_sources.begin(), hp.kv_sources.end(), il) != hp.kv_sources.end())
-                {
-                    b += (size_t) (2 * head * (ratio + 1) * 4);
-                }
-            }
-        }
-        else if (ratio == CSA_RATIO)
-        {
-            const int64_t st = 2 * CSA_RATIO + state_extra_est + 1;
-            b += (size_t) (head * m->n_csa_rows * 2);                    // csa_k F16
-            b += (size_t) (idx * m->n_csa_rows * 2);                     // lid_k F16
-            b += (size_t) (2 * (2 * head) * st * 4);                     // comp_state kv+score F32
-            b += (size_t) (2 * (2 * idx) * st * 4);                      // lid_state  kv+score F32
-        }
-        else if (ratio == HCA_RATIO)
-        {
-            const int64_t st = HCA_RATIO + state_extra_est + 1;
-            b += (size_t) (head * m->n_hca_rows * 2);                    // hca_k F16
-            b += (size_t) (2 * head * st * 4);                           // comp_state kv+score F32
-        }
-        return b + 13 * 256;   // ggml buffer alignment padding per tensor
-    };
+    // own device right after the weights, so the split prices them for each
+    // candidate width (the raw ring grows with the ubatch); see
+    // tsg_dsv4_plan::layer_cache_bytes.
+    tsg_dsv4_plan::cache_geometry cache_geometry;
+    cache_geometry.v41 = hp.v41;
+    cache_geometry.n_embd_head = hp.n_embd_head;
+    cache_geometry.indexer_head_size = hp.indexer_head_size;
+    cache_geometry.n_csa_rows = m->n_csa_rows;
+    cache_geometry.n_hca_rows = m->n_hca_rows;
+    cache_geometry.state_extra = m->ds.loaded ? m->ds.block_size : 0;
+    cache_geometry.rewind_cp = m->rewind_cp;
+    cache_geometry.compress_ratios = hp.compress_ratios;
+    cache_geometry.kv_sources = hp.kv_sources;
+    cache_geometry.csa_ratio = CSA_RATIO;
+    cache_geometry.hca_ratio = HCA_RATIO;
 
     // --- per-device VRAM budget -------------------------------------------
     // Free VRAM now, minus what the graph itself needs at run time (the
     // scheduler's compute buffers, which are sized from the largest ubatch
-    // graph and cannot be known before the model exists). Everything else the
-    // split accounts for exactly.
-    std::vector<size_t> dev_budget((size_t) n_gpu, 0);
+    // graph and cannot be known before the model exists). The reserve scales
+    // with the ubatch, so each candidate width gets its own budget; see
+    // tsg_dsv4_plan::estimate_reserve. Everything else the split accounts for
+    // exactly.
     std::vector<size_t> dev_free((size_t) n_gpu, 0);
+    long reserve_override_mb = -1;
+    if (const char * e = getenv("TS_DSV4_VRAM_RESERVE_MB")) { long v = atol(e); if (v >= 0) reserve_override_mb = v; }
+    // Per-device residents the split does not attribute to any layer.
+    size_t per_dev_fixed = 0;
+    if (m->fused) per_dev_fixed += (size_t) (2 * hp.n_rot * m->n_ctx * 4);   // rope cos/sin tables
+    for (int d = 0; d < n_gpu; d++)
     {
-        // The scheduler's compute buffers are sized from the largest ubatch graph
-        // and cannot be known before the model exists, so the split holds back a
-        // reserve. A flat 2 GiB was too small for this architecture once the
-        // weights nearly fill the cards: the lightning indexer's top-k runs an
-        // argsort over every visible compressed row, and CUB takes its workspace
-        // from the CUDA VMM pool at RUN time, not from any layer's budget. A
-        // 1024-token ubatch over a 64k context is ~768 MiB for that one transient
-        // alone, and a DeepSeek V4.1 Q4_K_M prefill of a 28k-token prompt aborted
-        // in argsort_f32_i32_cuda_cub with the flat reserve.
-        //
-        // So price the transients that scale: the indexer's scores and its sort
-        // workspace, and the hidden activations of one ubatch across the streams.
-        // TS_DSV4_VRAM_RESERVE_MB still overrides, including downward.
-        const int64_t comp_rows = m->n_ctx / (hp.v41 ? 1 : CSA_RATIO) + 1;
-        // The factor on the indexer term used to be 4, because the reserve also
-        // had to cover a graph cache capped by ENTRY COUNT: twelve prefill
-        // graphs of a few hundred MiB each is more than any headroom.
-        // dsv4_trim_graph_cache now bounds that cache by bytes, so the reserve
-        // covers one graph's compute buffers plus the run-time transients that
-        // never pass through a graph buffer (ggml-cuda takes CUB's segmented
-        // argsort workspace straight from the VMM pool).
-        //
-        // Measured on the eight-A40 VM, Q4_K_M, ubatch 1024, 64k context: the
-        // largest graph's compute buffers were 1,336 MiB on a device (1.7x the
-        // indexer term), and a 57,424-token prefill peaked with 1,522 MiB still
-        // free on the tightest device against a 3,072 MiB reserve. 1.25 lands
-        // just above that, and holding back more costs routed-expert offload --
-        // 5,240 MiB forced three CPU-MoE layers where 3,174 MiB needs one, worth
-        // 350 -> 480 prefill tok/s. TS_DSV4_VRAM_RESERVE_MB still overrides,
-        // including upward for a rig that wants more margin.
-        const double idx_mb = (double) m->n_ubatch * comp_rows * 4.0 * 3.0 / (1024.0 * 1024.0);
-        const double act_mb = (double) m->n_ubatch * hp.n_embd * 4.0 * (hp.hc_mult + 2) / (1024.0 * 1024.0);
-        size_t reserve_mb = (size_t) std::max(2048.0, 1.25 * idx_mb + act_mb + 2048.0);
-        if (const char * e = getenv("TS_DSV4_VRAM_RESERVE_MB")) { long v = atol(e); if (v >= 0) reserve_mb = (size_t) v; }
-        fprintf(stderr, "[dsv4] VRAM reserve: %zu MiB per device (indexer %.0f x1.25 + activations %.0f + 2048 headroom)\n",
-                reserve_mb, idx_mb, act_mb);
-        // Per-device residents the split does not attribute to any layer.
-        size_t per_dev_fixed = 0;
-        if (m->fused) per_dev_fixed += (size_t) (2 * hp.n_rot * m->n_ctx * 4);   // rope cos/sin tables
-        const size_t reserve = reserve_mb * 1024 * 1024 + per_dev_fixed;
-        for (int d = 0; d < n_gpu; d++)
-        {
-            size_t free_b = 0, total_b = 0;
-            ggml_backend_dev_memory(ggml_backend_get_device(m->backends[d]), &free_b, &total_b);
-            dev_free[d] = free_b;
-            dev_budget[d] = free_b > reserve ? free_b - reserve : 0;
-        }
+        size_t free_b = 0, total_b = 0;
+        ggml_backend_dev_memory(ggml_backend_get_device(m->backends[d]), &free_b, &total_b);
+        dev_free[d] = free_b;
     }
 
     // --- routed-expert CPU offload + layer -> device split -----------------
@@ -2147,7 +2578,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 const auto & gate = sources.at(prefix + "ffn_gate_exps.weight");
                 const auto & up = sources.at(prefix + "ffn_up_exps.weight");
                 const auto & down = sources.at(prefix + "ffn_down_exps.weight");
-                const auto strips = tsg_dsv41_tp::split(down.ne[0], ggml_blck_size(down.type), tp_ranks, il);
+                const auto strips = tsg_dsv41_tp::split_weights(down.ne[0], down.type, tp_ranks, il);
                 for (int d = 0; d < tp_ranks; ++d)
                     tp_bytes[il][d] = strips[d].count *
                         (ggml_row_size(gate.type, gate.ne[0]) * gate.ne[2] +
@@ -2164,8 +2595,8 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         // table instead of host page faults plus a CPU dequantize and an
         // upload. A table is tens of GiB, so it is only taken when it costs no
         // routed-expert offload the run was not already going to pay; the
-        // packer prices the tables through layer_cost while `engram_device` is
-        // set, and the decision is made just after the offload search below.
+        // packer prices the tables while `engram_device` is set, and
+        // tsg_dsv4_plan::plan_offload makes the decision for each width.
         bool engram_device = false;
         bool engram_device_forced = false;
         {
@@ -2215,95 +2646,91 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 throw std::runtime_error("TS_DSV41_ENGRAM_DEVICE=1 requires DeepSeek V4.1 on GPU devices; this run "
                     + std::string(hp.v41 ? "selected the CPU device" : "is not V4.1") + ".");
         }
-        auto layer_cost = [&](int il, int n_cpu) -> size_t
+        const bool engram_device_wanted = engram_device;
+
+        // Everything the packer prices for one prefill width: the raw ring
+        // (and the drafter's rings) grow with the ubatch, and so does the
+        // graph reserve held back from every device's budget.
+        auto costs_for = [&](int ubatch, tsg_dsv4_plan::reserve_estimate & reserve) -> tsg_dsv4_plan::split_costs
         {
-            size_t w = layer_bytes[il];
-            if (il < n_cpu || tp_ranks) w -= layer_exps_bytes[il];
-            if (engram_device) w += layer_engram_bytes[il];
-            return w + layer_cache_bytes(il);
+            const int64_t ring = tsg_dsv4_plan::ring_rows(hp.n_swa, ubatch);
+            tsg_dsv4_plan::split_costs c;
+            c.layer_bytes = layer_bytes;
+            c.layer_exps_bytes = layer_exps_bytes;
+            c.layer_engram_bytes = layer_engram_bytes;
+            c.layer_cache_bytes.resize((size_t) hp.n_layer);
+            for (int il = 0; il < hp.n_layer; ++il)
+                c.layer_cache_bytes[(size_t) il] = tsg_dsv4_plan::layer_cache_bytes(cache_geometry, il, ring);
+            c.tp_bytes = tp_bytes;
+            c.tp_ranks = tp_ranks;
+            c.fixed_bytes = fixed_bytes;
+            if (m->ds.loaded)
+                c.fixed_bytes[(size_t) n_gpu - 1] += (size_t) m->ds.n_stages *
+                    ((size_t) hp.n_embd_head * ring * sizeof(ggml_fp16_t) + 256) * (m->rewind_cp ? 2 : 1);
+            reserve = tsg_dsv4_plan::estimate_reserve(ubatch, m->n_ctx, hp.v41, hp.n_embd, hp.hc_mult, CSA_RATIO,
+                reserve_override_mb);
+            const size_t held = reserve.reserve_mb * 1024 * 1024 + per_dev_fixed;
+            c.dev_budget.resize((size_t) n_gpu);
+            for (int d = 0; d < n_gpu; d++)
+                c.dev_budget[(size_t) d] = dev_free[(size_t) d] > held ? dev_free[(size_t) d] - held : 0;
+            return c;
         };
 
-        // Layers stay in pipeline order, so every device takes one contiguous
-        // run: fill each device up to `frac` of its budget, and report whether
-        // all of them fit.
-        auto pack = [&](double frac, int n_cpu, std::vector<int> * out) -> bool
+        // --- prefill width -------------------------------------------------
+        // A resident routed-expert layer costs about the same per prefill
+        // chunk at any width (one Q4_K_M-shaped layer on an A40,
+        // GgmlOpsDsv4MoeWidthBench: 35.3-35.7 / 36.9-37.2 / 38.9-39.1 ms at
+        // 256 / 512 / 1024 tokens, so 3.6x cheaper per token at 1024; a host
+        // layer at 32 threads 0.44-0.46 against 0.34 ms a token). A wider chunk's
+        // graph reserve and raw ring cost VRAM, though, which can push one more
+        // layer's experts to the host, a cost every decoded token then pays.
+        // Automatic selection takes the widest candidate that needs no more host
+        // layers than 256 would (or than an explicit --n-cpu-moe the run pays
+        // anyway).
+        const std::vector<int> widths = tsg_dsv4_plan::ubatch_candidates(n_ubatch, !cpu_only,
+            m->ds.loaded ? m->ds.block_size : 0);
+        std::vector<tsg_dsv4_plan::split_costs> costs;
+        std::vector<tsg_dsv4_plan::reserve_estimate> reserves(widths.size());
+        std::vector<tsg_dsv4_plan::ubatch_candidate> candidates;
+        for (size_t i = 0; i < widths.size(); ++i)
         {
-            auto fixed = fixed_bytes;
-            if (tp_ranks)
-                for (int il = n_cpu; il < hp.n_layer; ++il)
-                    for (int d = 0; d < tp_ranks; ++d) fixed[d] += tp_bytes[il][d];
-            if (tp_ranks)
-                for (int d = 0; d < n_gpu; ++d)
-                    if (fixed[d] > (size_t) (dev_budget[d] * frac)) return false;
-            int dev = 0;
-            size_t used = fixed[0];
-            for (int il = 0; il < hp.n_layer; il++)
-            {
-                const size_t cost = layer_cost(il, n_cpu);
-                while (used + cost > (size_t) (dev_budget[dev] * frac))
-                {
-                    if (dev + 1 >= n_gpu) return false;
-                    used = fixed[++dev];
-                }
-                used += cost;
-                if (out) (*out)[il] = dev;
-            }
-            return true;
-        };
-
-        // How many leading layers have to give up their experts.
-        int need_cpu_moe = 0;
-        while (need_cpu_moe <= hp.n_layer && !pack(1.0, need_cpu_moe, nullptr)) need_cpu_moe++;
-        if (engram_device)
+            costs.push_back(costs_for(widths[i], reserves[i]));
+            tsg_dsv4_plan::ubatch_candidate candidate;
+            candidate.ubatch = widths[i];
+            candidate.offload = tsg_dsv4_plan::plan_offload(costs.back(), engram_device_wanted, n_cpu_moe_req);
+            candidates.push_back(candidate);
+        }
+        const tsg_dsv4_plan::ubatch_choice choice =
+            tsg_dsv4_plan::choose_ubatch(candidates, hp.n_layer, n_cpu_moe_req, engram_device_forced);
+        const size_t pick = (size_t) std::max(0, choice.index);
+        m->n_ubatch = widths[pick];
+        m->ring_raw = tsg_dsv4_plan::ring_rows(hp.n_swa, m->n_ubatch);
+        if (hp.v41)
         {
-            // `need_cpu_moe` above was priced WITH the tables on GPUs. Price the
-            // same model without them, and keep the tables on GPUs only when
-            // two things hold: they cost no routed-expert offload beyond what
-            // this run was going to pay anyway, and they still leave a little of
-            // every device's budget unspent.
-            //
-            // The first matters because paying for device tables with host
-            // expert matmuls on every token is a bad trade -- though an operator
-            // who already asked for --n-cpu-moe should not be refused a
-            // placement that fits inside it. The second matters because the
-            // packer prices ONE sequence slot's caches, and 60 GiB of tables
-            // would otherwise be allowed to consume exactly the headroom the
-            // next concurrent sequence needs.
-            constexpr double engram_device_margin = 0.95;
-            const int with_tables = need_cpu_moe;
-            engram_device = false;
-            int without_tables = 0;
-            while (without_tables <= hp.n_layer && !pack(1.0, without_tables, nullptr)) without_tables++;
-            const int already_paying = n_cpu_moe_req >= 0 ? std::max(n_cpu_moe_req, without_tables) : without_tables;
+            // A query at the new head reads the raw window (new_head - n_swa,
+            // new_head]; the ring holds ring_raw consecutive positions, so this
+            // is how far the head may move back before one of those rows has
+            // been overwritten by an abandoned position.
+            m->rewind_span = std::max<int64_t>(0, m->ring_raw - hp.n_swa + 1);
+        }
+        if (ubatch_auto)
+            fprintf(stderr, "[dsv4] prefill ubatch: %d (auto; %s)\n", m->n_ubatch, choice.reason.c_str());
+        else if (n_ubatch == tsg_dsv4_plan::UBATCH_AUTO)
+            fprintf(stderr, "[dsv4] prefill ubatch: %d (auto on the CPU device)\n", m->n_ubatch);
+        const tsg_dsv4_plan::split_costs & split = costs[pick];
+        const tsg_dsv4_plan::offload_plan & offload = candidates[pick].offload;
+        fprintf(stderr, "[dsv4] VRAM reserve: %zu MiB per device (indexer %.0f x1.25 + activations %.0f + 2048 headroom)\n",
+                reserves[pick].reserve_mb, reserves[pick].idx_mb, reserves[pick].act_mb);
 
-            const char * refused = nullptr;
-            if (with_tables > hp.n_layer)
-                refused = "they do not fit these devices even with every routed expert on the host";
-            else if (with_tables > already_paying)
-                refused = "they would cost routed-expert offload this run was not already paying";
-            else
-            {
-                // pack() prices the tables only while engram_device is set, so
-                // set it before asking whether the margin holds.
-                engram_device = true;
-                if (!pack(engram_device_margin, std::max(with_tables, n_cpu_moe_req < 0 ? 0 : n_cpu_moe_req), nullptr))
-                {
-                    engram_device = false;
-                    refused = "they would leave no headroom for a second concurrent sequence";
-                }
-            }
-
-            if (engram_device)
-                need_cpu_moe = with_tables;
-            else
-            {
-                need_cpu_moe = without_tables;
-                if (engram_device_forced)
-                    throw std::runtime_error(std::string("TS_DSV41_ENGRAM_DEVICE=1 does not fit on these devices: ") +
-                        refused + ". With host tables this model needs --n-cpu-moe " +
-                        std::to_string(without_tables) + ". Unset the option to choose automatically, or free VRAM.");
-                fprintf(stderr, "[dsv41] Engram tables stay host mappings: %s\n", refused);
-            }
+        int need_cpu_moe = offload.need_cpu_moe;
+        engram_device = offload.engram_device;
+        if (engram_device_wanted && !engram_device)
+        {
+            if (engram_device_forced)
+                throw std::runtime_error(std::string("TS_DSV41_ENGRAM_DEVICE=1 does not fit on these devices: ") +
+                    offload.engram_refused + ". With host tables this model needs --n-cpu-moe " +
+                    std::to_string(offload.without_tables) + ". Unset the option to choose automatically, or free VRAM.");
+            fprintf(stderr, "[dsv41] Engram tables stay host mappings: %s\n", offload.engram_refused);
         }
         m->engram_on_device = engram_device;
 
@@ -2320,19 +2747,15 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 // abort. Naming WHICH number would work is the whole value
                 // here: the operator cannot derive it from the model size,
                 // because what has to fit is the weights PLUS this context's
-                // KV caches.
+                // KV caches. With an automatic width this is the narrowest
+                // candidate's need: a wider one never needs fewer.
                 size_t free_total = 0;
                 for (int d = 0; d < n_gpu; d++) free_total += dev_free[d];
                 size_t would_free = 0;
                 for (int il = 0; il < need_cpu_moe && il < hp.n_layer; il++) would_free += layer_exps_bytes[il];
-                fprintf(stderr,
-                        "[dsv4] not enough VRAM: %.1f GiB of weights plus this context's KV caches against "
-                        "%.1f GiB free across %d device(s)%s. Re-run with --n-cpu-moe %d (moves the routed "
-                        "experts of the first %d layer(s), %.1f GiB, to system RAM) or --cpu-moe to offload "
-                        "every layer.\n",
-                        total_bytes / 1073741824.0, free_total / 1073741824.0, n_gpu,
-                        n_cpu_moe > 0 ? " at the requested offload" : "",
-                        need_cpu_moe, need_cpu_moe, would_free / 1073741824.0);
+                tsg::report_load_refusal("%s", tsg_dsv4_plan::not_enough_vram_message(
+                    total_bytes / 1073741824.0, free_total / 1073741824.0,
+                    n_gpu, n_cpu_moe > 0, need_cpu_moe, would_free / 1073741824.0).c_str());
                 return nullptr;
             }
         }
@@ -2341,7 +2764,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         {
             size_t free_total = 0;
             for (int d = 0; d < n_gpu; d++) free_total += dev_free[d];
-            fprintf(stderr, "[dsv4] model does not fit: %.1f GiB of weights (%.1f GiB of them routed experts) "
+            tsg::report_load_refusal( "[dsv4] model does not fit: %.1f GiB of weights (%.1f GiB of them routed experts) "
                     "against %.1f GiB free across %d device(s), even with every expert on the host. "
                     "Free VRAM, add devices, or use a smaller quantization.\n",
                     total_bytes / 1073741824.0,
@@ -2355,11 +2778,11 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         for (int it = 0; it < 40; it++)
         {
             const double mid = 0.5 * (lo + hi);
-            if (pack(mid, n_cpu_moe, nullptr)) hi = mid; else lo = mid;
+            if (tsg_dsv4_plan::pack(split, engram_device, mid, n_cpu_moe, nullptr)) hi = mid; else lo = mid;
         }
 
         std::vector<int> devs((size_t) hp.n_layer, 0);
-        if (pack(hi, n_cpu_moe, &devs))
+        if (tsg_dsv4_plan::pack(split, engram_device, hi, n_cpu_moe, &devs))
         {
             for (int il = 0; il < hp.n_layer; il++)
                 m->layers[il].device = devs[il];
@@ -2438,19 +2861,11 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
 
     if (m->ds.loaded)
     {
-        // The drafter runs where the output head lives: it consumes the last
-        // trunk blocks' hidden states and reuses the trunk's LM head.
+        // The drafter runs where the output head lives. Target feature rows
+        // are reduced on their producing devices and gathered by its graph;
+        // their much larger trunk layers need not share this device.
         m->ds.dev = dev_last;
         m->ds.layer_base = hp.n_layer;
-        for (int32_t tl : m->ds.target_layers)
-        {
-            if (m->layers[tl].device != dev_last)
-            {
-                fprintf(stderr, "[dsv4] DSpark needs target layer %d on the output-head device %d (it is on %d)\n",
-                        (int) tl, dev_last, m->layers[tl].device);
-                return nullptr;
-            }
-        }
         m->layers.resize(hp.n_layer + m->ds.n_stages);
         for (int s = 0; s < m->ds.n_stages; s++)
         {
@@ -2578,7 +2993,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             ((!m->moe_tp || !m->moe_tp->has_layer(il)) &&
              (!L.ffn_gate_exps || !L.ffn_down_exps || !L.ffn_up_exps)))
         {
-            fprintf(stderr, "[dsv4] layer %d incomplete\n", il);
+            tsg::report_load_refusal( "[dsv4] layer %d incomplete\n", il);
             return nullptr;
         }
     }
@@ -2599,6 +3014,14 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         {
             const std::string n = std::to_string(st);
             return DSW(d, "mtp." + n + "." + suffix, "dspark." + n + "." + suffix);
+        };
+        auto shape = [](ggml_tensor * tensor, std::initializer_list<int64_t> dims)
+        {
+            if (!tensor) return false;
+            int axis = 0;
+            for (int64_t n : dims) if (axis >= 4 || tensor->ne[axis++] != n) return false;
+            while (axis < 4) if (tensor->ne[axis++] != 1) return false;
+            return true;
         };
         for (int st = 0; st < ds.n_stages; st++)
         {
@@ -2628,10 +3051,26 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             L.ffn_gate_shexp = SW(d, st, "ffn_gate_shexp.weight");
             L.ffn_down_shexp = SW(d, st, "ffn_down_shexp.weight");
             L.ffn_up_shexp   = SW(d, st, "ffn_up_shexp.weight");
-            if (!L.attn_norm || !L.wq_a || !L.wq_b || !L.wkv || !L.wo_a || !L.wo_b ||
-                !L.ffn_gate_exps || !L.ffn_down_exps || !L.ffn_up_exps || !L.ffn_gate_inp)
+            const int64_t hc = hp.hc_mult, mix = hc * (hc + 2), dim = hp.n_embd, ff = hp.n_ff_exp;
+            if (!shape(L.attn_norm, {dim}) || !shape(L.ffn_norm, {dim}) ||
+                !shape(L.attn_q_a_norm, {hp.q_lora_rank}) || !shape(L.attn_kv_norm, {hp.n_embd_head}) ||
+                !shape(L.attn_sinks, {hp.n_head}) ||
+                !shape(L.wq_a, {dim, hp.q_lora_rank}) || !shape(L.wq_b, {hp.q_lora_rank, (int64_t) hp.n_embd_head * hp.n_head}) ||
+                !shape(L.wkv, {dim, hp.n_embd_head}) ||
+                (!shape(L.wo_a, {(int64_t) hp.n_embd_head * hp.n_head / hp.o_groups, (int64_t) hp.o_lora_rank * hp.o_groups}) &&
+                 !shape(L.wo_a, {(int64_t) hp.n_embd_head * hp.n_head / hp.o_groups, hp.o_lora_rank, hp.o_groups})) ||
+                !shape(L.wo_b, {(int64_t) hp.o_lora_rank * hp.o_groups, dim}) ||
+                !shape(L.hc_attn_fn, {dim * hc, mix}) || !shape(L.hc_ffn_fn, {dim * hc, mix}) ||
+                !shape(L.hc_attn_base, {mix}) || !shape(L.hc_ffn_base, {mix}) ||
+                !shape(L.hc_attn_scale, {3}) || !shape(L.hc_ffn_scale, {3}) ||
+                !shape(L.ffn_gate_inp, {dim, ds.n_expert}) || !shape(L.ffn_exp_probs_b, {ds.n_expert}) ||
+                !shape(L.ffn_gate_exps, {dim, ff, ds.n_expert}) || !shape(L.ffn_up_exps, {dim, ff, ds.n_expert}) ||
+                !shape(L.ffn_down_exps, {ff, dim, ds.n_expert}) ||
+                !shape(L.ffn_gate_shexp, {dim, ff * hp.n_expert_shared}) ||
+                !shape(L.ffn_up_shexp, {dim, ff * hp.n_expert_shared}) ||
+                !shape(L.ffn_down_shexp, {ff * hp.n_expert_shared, dim}))
             {
-                fprintf(stderr, "[dsv4] DSpark stage %d is incomplete\n", st);
+                tsg::report_load_refusal( "[dsv4] DSpark stage %d has missing/incompatible tensor dimensions\n", st);
                 return nullptr;
             }
         }
@@ -2639,18 +3078,26 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         ds.main_norm     = DSW(ds.dev, "mtp.0.main_norm.weight", "dspark.main_norm.weight");
         ds.main_proj     = DSW(ds.dev, "mtp.0.main_proj.weight", "dspark.main_proj.weight");
         ds.norm          = DSW(ds.dev, "mtp." + last + ".norm.weight", "dspark.norm.weight");
-        ds.hc_head_fn    = DSW(ds.dev, "mtp." + last + ".hc_head_fn.weight", "dspark.hc_head_fn.weight");
-        ds.hc_head_scale = DSW(ds.dev, "mtp." + last + ".hc_head_scale.weight", "dspark.hc_head_scale.weight");
-        ds.hc_head_base  = DSW(ds.dev, "mtp." + last + ".hc_head_base.weight", "dspark.hc_head_base.weight");
+        if (!hp.v41)
+        {
+            ds.hc_head_fn    = DSW(ds.dev, "mtp." + last + ".hc_head_fn.weight", "dspark.hc_head_fn.weight");
+            ds.hc_head_scale = DSW(ds.dev, "mtp." + last + ".hc_head_scale.weight", "dspark.hc_head_scale.weight");
+            ds.hc_head_base  = DSW(ds.dev, "mtp." + last + ".hc_head_base.weight", "dspark.hc_head_base.weight");
+        }
         ds.markov_w1     = DSW(ds.dev, "mtp." + last + ".markov_head.markov_w1.weight", "dspark.markov_w1.weight");
         ds.markov_w2     = DSW(ds.dev, "mtp." + last + ".markov_head.markov_w2.weight", "dspark.markov_w2.weight");
         ds.conf_proj     = DSW(ds.dev, "mtp." + last + ".confidence_head.proj.weight",
                                sources.count("dspark.conf_proj.weight") ? "dspark.conf_proj.weight"
                                                                        : "dspark.confidence_head.weight");
-        if (!ds.main_norm || !ds.main_proj || !ds.norm || !ds.hc_head_fn || !ds.markov_w1 ||
-            !ds.markov_w2 || !ds.conf_proj)
+        if (!shape(ds.main_norm, {hp.n_embd}) ||
+            !shape(ds.main_proj, {(int64_t) hp.n_embd * (int64_t) ds.target_layers.size(), hp.n_embd}) ||
+            !shape(ds.norm, {hp.n_embd}) ||
+            (!hp.v41 && (!ds.hc_head_fn || !ds.hc_head_scale || !ds.hc_head_base)) || !ds.markov_w1 ||
+            !shape(ds.markov_w1, {ds.markov_rank, hp.n_vocab}) ||
+            !shape(ds.markov_w2, {ds.markov_rank, hp.n_vocab}) ||
+            !shape(ds.conf_proj, {(int64_t) hp.n_embd + ds.markov_rank, 1}))
         {
-            fprintf(stderr, "[dsv4] DSpark heads are incomplete\n");
+            tsg::report_load_refusal( "[dsv4] DSpark heads are incomplete\n");
             return nullptr;
         }
         fprintf(stderr, "[dsv4] DSpark drafter on device %d: %d stage(s), block_size=%d, markov_rank=%d, "
@@ -2798,13 +3245,13 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             if (unallocated)
             {
                 m->w_buf[d] = ggml_backend_alloc_ctx_tensors(m->w_ctx[d], m->backends[d]);
-                if (!m->w_buf[d]) { fprintf(stderr, "[dsv4] weight alloc failed on device %d\n", d); return nullptr; }
+                if (!m->w_buf[d]) { tsg::report_load_refusal( "[dsv4] weight alloc failed on device %d\n", d); return nullptr; }
             }
         }
         if (ggml_get_first_tensor(m->c_ctx[d]) != nullptr)
         {
             m->c_buf[d] = ggml_backend_alloc_ctx_tensors(m->c_ctx[d], m->backends[d]);
-            if (!m->c_buf[d]) { fprintf(stderr, "[dsv4] cache alloc failed on device %d\n", d); return nullptr; }
+            if (!m->c_buf[d]) { tsg::report_load_refusal( "[dsv4] cache alloc failed on device %d\n", d); return nullptr; }
             ggml_backend_buffer_clear(m->c_buf[d], 0);
         }
     }
@@ -2815,10 +3262,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         size_t chunk = (size_t) 64 * 1024 * 1024;
         if (const char * e = getenv("TS_DSV4_LOAD_CHUNK_MB")) { long v = atol(e); if (v > 0) chunk = (size_t) v * 1024 * 1024; }
 
-        int load_threads = 16;
-        if (const char * e = getenv("TS_DSV4_LOAD_THREADS")) { int v = atoi(e); if (v > 0) load_threads = v; }
-        unsigned hw = std::thread::hardware_concurrency();
-        if (hw > 0 && load_threads > (int) hw) load_threads = (int) hw;
+        int load_threads = dsv4_load_thread_count();
 
         std::vector<load_job> jobs;
         size_t uploaded = 0;
@@ -2839,7 +3283,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 const size_t total = ggml_nbytes(t);
                 if (total != src.size)
                 {
-                    fprintf(stderr, "[dsv4] size mismatch for %s: tensor %zu vs file %zu\n", t->name, total, src.size);
+                    tsg::report_load_refusal( "[dsv4] size mismatch for %s: tensor %zu vs file %zu\n", t->name, total, src.size);
                     sizes_ok = false;
                     continue;
                 }
@@ -2849,106 +3293,11 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             }
         }
         if (!sizes_ok) return nullptr;
-        if (!dsv4_upload_parallel(shards, jobs, load_threads)) return nullptr;
+        if (!dsv4_upload_parallel(shards, jobs, load_threads, m->mmap_weight_bytes)) return nullptr;
 
-        // Warm the mmapped experts with the same parallelism the copy path had.
-        // Lazy faulting would make the first prompt pay for the whole read at
-        // single-stream storage speed, mid-generation. Only when they actually
-        // fit: warming 137 GiB into an 87 GiB allowance just evicts itself (and
-        // everything else) for nothing, so there lazy-on-demand IS the plan.
-        if (m->mmap_weight_bytes > 0)
-        {
-            const size_t allow = dsv4_host_mem_allowance();
-            const size_t headroom = (size_t) 8 * 1024 * 1024 * 1024;
-            if (allow == 0 || m->mmap_weight_bytes + headroom <= allow)
-            {
-                const auto t_warm = std::chrono::steady_clock::now();
-                std::vector<std::pair<const volatile char *, size_t>> ranges;
-                size_t warm_bytes = 0;
-                ggml_context * hctx = m->w_ctx[n_gpu];
-                for (ggml_tensor * t = ggml_get_first_tensor(hctx); t; t = ggml_get_next_tensor(hctx, t))
-                {
-                    if (t->buffer == nullptr ||
-                        std::find(m->mmap_bufs.begin(), m->mmap_bufs.end(), t->buffer) == m->mmap_bufs.end())
-                        continue;
-                    // Engram reads only 24 rows per token; prefaulting its entire
-                    // hundred-billion-element table wastes I/O and evicts useful pages.
-                    if (hp.v41 && strstr(t->name, ".engram_embd.") != nullptr) continue;
-                    ranges.emplace_back((const volatile char *) t->data, ggml_nbytes(t));
-                    warm_bytes += ggml_nbytes(t);
-                }
-                // Split each tensor into spans so the pool is sized by BYTES, not by
-                // tensor count: --n-cpu-moe 2 leaves 6 tensors, which capped the pool
-                // at 6 threads and made this 31 s for 16.4 GiB. Each thread still walks
-                // one contiguous span, which is what readahead wants.
-                const size_t warm_span = (size_t) 256 * 1024 * 1024;
-                std::vector<std::pair<const volatile char *, size_t>> spans;
-                for (const auto & r : ranges)
-                    for (size_t off = 0; off < r.second; off += warm_span)
-                        spans.emplace_back(r.first + off, std::min(warm_span, r.second - off));
-                std::atomic<size_t> r_cursor(0);
-                auto warm_worker = [&]()
-                {
-                    for (;;)
-                    {
-                        const size_t i = r_cursor.fetch_add(1, std::memory_order_relaxed);
-                        if (i >= spans.size()) break;
-                        const volatile char * p = spans[i].first;
-                        // MADV_WILLNEED here was measured and did NOT help on the MooseFS
-                        // mount (29.7 s against 27.7 s for the plain walk, i.e. inside the
-                        // run-to-run spread), so this stays a plain fault-in walk.
-                        for (size_t off = 0; off < spans[i].second; off += 4096)
-                            (void) p[off];
-                    }
-                };
-                std::vector<std::thread> warm_pool;
-                for (int i = 0; i < std::min<int>(load_threads, (int) spans.size()); i++) warm_pool.emplace_back(warm_worker);
-                for (auto & th : warm_pool) th.join();
-                fprintf(stderr, "[dsv4] prefaulted %.1f GiB of mmapped host experts in %.1fs\n",
-                        warm_bytes / 1073741824.0,
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t_warm).count());
-            }
-        }
+        if (!dsv4_prefault_host_experts(*m, shards, load_threads)) return nullptr;
 
-        // Page-lock the offloaded experts. DSV4 hands its offloaded layers to
-        // ggml_backend_sched, which — with op_offload on — sends their
-        // mul_mat_id back to the GPU for a prefill-sized batch and streams the
-        // weights over for that one graph. Those copies come out of a PAGEABLE
-        // host buffer, which cannot DMA: measured 9.3 GB/s against 55.6 GB/s
-        // once the range is registered (PCIe 5.0 x16). Registering costs
-        // ~65 ms/GiB, once, here rather than in the middle of the first prompt.
-        // Failures (no budget, driver refusal) are silent and simply leave the
-        // slower path in place — see host_pin_range.
-        //
-        // Not when the mmapped experts outweigh the host allowance: registering
-        // faults the pages in at storage speed (minutes on a network FS) and
-        // every pinned page is one the kernel can no longer evict, which is
-        // exactly the headroom an over-committed page cache lives on.
-        const bool experts_over_allowance = m->mmap_weight_bytes > 0 &&
-            [&]{ const size_t a = dsv4_host_mem_allowance();
-                 return a > 0 && m->mmap_weight_bytes + (size_t) 8 * 1024 * 1024 * 1024 > a; }();
-        if (n_cpu_moe > 0 && !experts_over_allowance)
-        {
-            const auto t_pin = std::chrono::steady_clock::now();
-            std::size_t pinned = 0;
-            for (int il = 0; il < hp.n_layer; il++)
-            {
-                const dsv4_layer & L = m->layers[il];
-                if (!L.cpu_moe) continue;
-                for (ggml_tensor * t : { L.ffn_gate_exps, L.ffn_up_exps, L.ffn_down_exps })
-                {
-                    if (t == nullptr || t->data == nullptr) continue;
-                    if (tsg::host_pin_range(t->data, ggml_nbytes(t)))
-                        pinned += ggml_nbytes(t);
-                }
-            }
-            if (pinned > 0)
-            {
-                fprintf(stderr, "[dsv4] page-locked %.1f GiB of host experts in %.1fs (streamed prefill DMAs at full link speed)\n",
-                        pinned / 1073741824.0,
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t_pin).count());
-            }
-        }
+        dsv4_pin_host_experts(*m, n_cpu_moe);
 
         auto t_end = std::chrono::steady_clock::now();
         double secs = std::chrono::duration<double>(t_end - t_start).count();
@@ -2983,155 +3332,14 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         }
     }
 
-    if (hp.v41)
-    {
-        // Sparse-read advice turns off the kernel's readahead, which is exactly
-        // what a whole-table warm pass depends on, so this runs only once the
-        // warming (synchronous or background) is finished. Never alter another
-        // host tensor's entire shard, or an allocation that is not one of our
-        // mmaps.
-        dsv4_model * const model_ptr = m.get();
-        auto apply_engram_advice = [model_ptr, engram_random_advice, engram_random_override]()
-        {
-            if (!engram_random_advice)
-            {
-                if (!model_ptr->engram_on_device)
-                    fprintf(stderr, "[dsv41] Engram mmap advice: default (%s)\n",
-                        engram_random_override ? "override=0" : "automatic: one I/O thread");
-                return;
-            }
-            size_t accepted = 0, unsupported = 0, skipped = 0, failed = 0;
-            for (const auto & layout : model_ptr->engram.layers)
-            {
-                const auto * table = model_ptr->layers[layout.id].engram_embd;
-                const auto found = std::find(model_ptr->mmap_bufs.begin(), model_ptr->mmap_bufs.end(), table->buffer);
-                if (!table->buffer || found == model_ptr->mmap_bufs.end()) { ++skipped; continue; }
-                const size_t index = size_t(found - model_ptr->mmap_bufs.begin());
-                const auto result = tsg_dsv41::advise_engram_random(model_ptr->mmap_addrs[index], model_ptr->mmap_sizes[index],
-                    table->data, ggml_nbytes(table));
-                if (result.status == tsg_dsv41::mapped_advice_status::applied) ++accepted;
-                else if (result.status == tsg_dsv41::mapped_advice_status::unsupported) ++unsupported;
-                else if (result.status == tsg_dsv41::mapped_advice_status::empty) ++skipped;
-                else
-                {
-                    ++failed;
-                    fprintf(stderr, "[dsv41] Engram random advice was not applied to layer %d (error %d); continuing\n",
-                        layout.id, result.error);
-                }
-            }
-            fprintf(stderr, "[dsv41] Engram mmap advice: RANDOM (%s; accepted=%zu, unsupported=%zu, skipped=%zu, failed=%zu)\n",
-                engram_random_override ? "override=1" : "automatic: parallel I/O", accepted, unsupported, skipped, failed);
-        };
-        bool advice_deferred = false;
-
-        // A host-resident Engram table is read 24 scattered rows per token per
-        // table. Each row that is not page cache is one storage round trip, and
-        // on a network filesystem that is ~1 ms: input preparation for a
-        // 1024-token prefill chunk measured 1.44 s cold against 0.04-0.09 s
-        // warm on the eight-A40 VM's Q4_K_M checkpoint (prefill 201-255 ->
-        // 363-381 tok/s, decode 23-24 -> 29 tok/s).
-        //
-        // So warming is the default whenever the pages can actually STAY
-        // resident. It is minutes of I/O, so the automatic form runs on its own
-        // thread after the model is serving rather than holding up load;
-        // TS_DSV41_ENGRAM_WARM=1 keeps the documented synchronous behaviour and
-        // =0 turns warming off.
-        const char * warm_opt = m->engram_on_device ? nullptr : getenv("TS_DSV41_ENGRAM_WARM");
-        const int warm_mode = m->engram_on_device ? 0 : (warm_opt ? atoi(warm_opt) : -1);
-        if (warm_mode != 0)
-        {
-            size_t bytes = 0;
-            for (const auto & layout : m->engram.layers) bytes += ggml_nbytes(m->layers[layout.id].engram_embd);
-            const size_t headroom = (size_t) 8 * 1024 * 1024 * 1024;
-            const size_t allowance = dsv4_host_mem_allowance();
-            const size_t resident = std::max(bytes, m->mmap_weight_bytes);
-            const char * refused = nullptr;
-            if (allowance && (resident > allowance || allowance - resident < headroom))
-                refused = "host allowance lacks 8 GiB headroom";
-            else if (warm_mode < 0)
-            {
-                // Automatic only: an explicit =1 is the operator's call. Warming
-                // pages that the host will immediately evict costs the I/O and
-                // buys nothing, so require room for the whole table set now.
-                const size_t available = dsv4_host_mem_available();
-                if (available && available < bytes + headroom)
-                    refused = "free host memory would not keep the tables cached";
-            }
-
-            if (refused)
-            {
-                fprintf(stderr, "[dsv41] Engram warming skipped: %s\n", refused);
-            }
-            else if (warm_mode > 0)
-            {
-                const auto start = std::chrono::steady_clock::now();
-                fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages with %u I/O threads...\n",
-                    bytes / 1073741824.0, m->engram_io->threads());
-                for (const auto & layout : m->engram.layers)
-                {
-                    auto * table = m->layers[layout.id].engram_embd;
-                    m->engram_io->warm(table->data, ggml_nbytes(table));
-                }
-                fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (%u I/O threads)\n",
-                    bytes / 1073741824.0, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
-                    m->engram_io->threads());
-            }
-            else
-            {
-                // Its own pool, not m->engram_io: that one is what per-token
-                // lookups run on, and a warming submission holds it for the
-                // length of a slice.
-                std::vector<std::pair<void *, size_t>> ranges;
-                for (const auto & layout : m->engram.layers)
-                {
-                    auto * table = m->layers[layout.id].engram_embd;
-                    ranges.emplace_back(table->data, ggml_nbytes(table));
-                }
-                const unsigned warm_threads = std::min<unsigned>(16u, m->engram_io->threads());
-                fprintf(stderr, "[dsv41] warming %.2f GiB of Engram pages in the background with %u I/O threads; "
-                    "requests run at page-cache speed once it finishes (TS_DSV41_ENGRAM_WARM=0 disables)\n",
-                    bytes / 1073741824.0, warm_threads);
-                dsv4_model * model = model_ptr;
-                advice_deferred = true;
-                m->engram_warm_thread = std::thread([model, ranges, bytes, warm_threads, apply_engram_advice]() {
-                    try
-                    {
-                        const auto start = std::chrono::steady_clock::now();
-                        tsg_dsv41::engram_io_pool pool(warm_threads);
-                        // Slices keep the stop flag responsive: a model freed
-                        // mid-warm waits at most one slice, not one table.
-                        constexpr size_t slice = (size_t) 1024 * 1024 * 1024;
-                        for (const auto & range : ranges)
-                        {
-                            for (size_t off = 0; off < range.second; off += slice)
-                            {
-                                if (model->engram_warm_stop.load(std::memory_order_relaxed)) return;
-                                pool.warm((const char *) range.first + off, std::min(slice, range.second - off));
-                            }
-                        }
-                        fprintf(stderr, "[dsv41] warmed %.2f GiB of Engram pages in %.2fs (background, %u I/O threads)\n",
-                            bytes / 1073741824.0,
-                            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(),
-                            warm_threads);
-                    }
-                    catch (const std::exception & e)
-                    {
-                        fprintf(stderr, "[dsv41] background Engram warming stopped: %s\n", e.what());
-                    }
-                    // Readahead is no longer wanted: from here the table is read
-                    // a few scattered rows at a time.
-                    apply_engram_advice();
-                });
-            }
-        }
-        if (!advice_deferred) apply_engram_advice();
-    }
+    if (hp.v41 && !dsv4_warm_engram(*m, shards, engram_random_advice, engram_random_override))
+        return nullptr;
 
     // primary sequence slot (slot 0) — the CLI / single-stream cache
     m->active_slot = dsv4_slot_alloc(*m);
     if (!m->active_slot)
     {
-        fprintf(stderr, "[dsv4] primary slot allocation failed\n");
+        tsg::report_load_refusal( "[dsv4] primary slot allocation failed\n");
         return nullptr;
     }
 
@@ -3198,6 +3406,18 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             ggml_free(pctx);
         }
         fprintf(stderr, "[dsv4] flash attention: %s\n", m->flash_attn ? "on" : "off");
+        if (hp.v41 && m->n_gpu > 0 && m->ts_backends[0])
+        {
+            // Probe the same gate attn_mha uses, at the widest shape it takes.
+            const bool sparse_prefill = tsg_dsv41_owned_sparse_capacity(TSG_PRECISION_DECODE_COLUMNS + 1,
+                TSG_DSV41_SPARSE_MIN_KEYS, hp.n_swa, hp.indexer_top_k, getenv("TS_DSV41_SPARSE_FA")) > 0;
+            fprintf(stderr, "[dsv4] V4.1 CUDA precision: TensorSharp F32 matmul; attention=%s\n",
+                m->flash_attn ? (sparse_prefill
+                    ? "TensorSharp F32 (streaming decode and verify; sparse prefill for queries>8, keys>=8192, "
+                      "window+top-k; tiled otherwise; TS_DSV41_SPARSE_FA=0 selects tiled)"
+                    : "TensorSharp F32 (streaming decode, tiled prefill; TS_DSV41_SPARSE_FA=0)") :
+                    "TensorSharp F32 decomposed (FA=0 or unavailable)");
+        }
     }
 
     m->logits.resize(hp.n_vocab);
@@ -3408,6 +3628,27 @@ struct graph_builder
         if (t->op != GGML_OP_NONE && !ggml_backend_supports_op(backend, t))
             return;
         ggml_backend_sched_set_tensor_backend(res.sched, t, backend);
+    }
+
+    void precise_matmul(ggml_tensor * t)
+    {
+        auto * backend = ggml_backend_sched_get_tensor_backend(res.sched, t);
+        if (t->src[0]->type == GGML_TYPE_F32 && t->src[1]->type == GGML_TYPE_F32 &&
+            (m.n_gpu == 0 || (backend && ggml_backend_is_cpu(backend))))
+        {
+            // Native CPU F32/F32 matmul already preserves both sources. Keep
+            // its optimized batching and established reduction order for
+            // CPU-only execution and explicitly offloaded expert projections.
+            ggml_prec_set_acc(t, GGML_PREC_F32);
+            ggml_prec_set_src(t, GGML_PREC_F32, 1);
+            return;
+        }
+        tsg_matmul_require_f32(ctx, t);
+        // A projection may already have a layer-placement hint from before
+        // the final precision pass. Route unsupported custom nodes to the
+        // CPU fallback instead of leaving them pinned to Metal or Vulkan.
+        if (backend && !ggml_backend_supports_op(backend, t))
+            ggml_backend_sched_set_tensor_backend(res.sched, t, m.dev_backends[m.n_gpu]);
     }
 
     ggml_tensor * new_input_i32(int64_t n, const char * name, int dev)
@@ -3665,10 +3906,16 @@ struct graph_builder
 
         ggml_tensor * feat = feats[0];
         for (size_t i = 1; i < feats.size(); i++)
+        {
             feat = ggml_concat(ctx, feat, feats[i], 0);          // [n_target*n_embd, nt]
+            pin(feat, ds.dev);
+        }
 
         ggml_tensor * mx = ggml_mul_mat(ctx, ds.main_proj, feat); // [n_embd, nt]
+        pin(mx, ds.dev);
         mx = rms(mx, ds.main_norm);
+        trace_v41(feat, 0, "dspark_features");
+        trace_v41(mx, 0, "dspark_main_normalized");
 
         float freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow;
         int n_ctx_orig;
@@ -3692,6 +3939,9 @@ struct graph_builder
                                   beta_fast, beta_slow);
             kv = ggml_concat(ctx, kv_nope, kv_pe, 0);
 
+            trace_v41(kv, st, "dspark_committed_prequant");
+            if (hp.v41) kv = v41_quant(kv, 0, ds.dev);
+            trace_v41(kv, st, "dspark_committed_quantized");
             ggml_tensor * kv2d = ggml_reshape_2d(ctx, kv, head, nt);
             ggml_build_forward_expand(gf,
                 ggml_set_rows(ctx, m.active_slot->ds_k[st], kv2d, raw_idxs));
@@ -3726,7 +3976,7 @@ struct graph_builder
         qr = rms(qr, L.attn_q_a_norm);
         ggml_tensor * q = ggml_mul_mat(ctx, L.wq_b, qr);
         q = ggml_reshape_3d(ctx, q, head, n_head, nt);
-        q = ggml_rms_norm(ctx, q, hp.rms_eps);
+        if (!hp.v41) q = ggml_rms_norm(ctx, q, hp.rms_eps);
         {
             ggml_tensor * q_nope = ggml_view_3d(ctx, q, n_nope, n_head, nt,
                     ggml_row_size(q->type, head), ggml_row_size(q->type, head) * n_head, 0);
@@ -3753,15 +4003,17 @@ struct graph_builder
         // [ring | block] keys. The block's own keys stay in the graph (they are
         // speculative, not committed), so they are concatenated rather than
         // written to the ring.
+        if (hp.v41) kv = v41_quant(kv, 0, m.ds.dev);
         ggml_tensor * ring = ggml_view_2d(ctx, m.active_slot->ds_k[st], head, m.ring_raw,
                                           m.active_slot->ds_k[st]->nb[1], 0);
         ring = ggml_reshape_3d(ctx, ring, head, 1, m.ring_raw);
         ggml_tensor * blk = ggml_cast(ctx, ggml_reshape_2d(ctx, kv, head, nt), GGML_TYPE_F16);
         blk = ggml_reshape_3d(ctx, blk, head, 1, nt);
         ggml_tensor * k_all = ggml_concat(ctx, ring, blk, 2);
+        if (hp.v41 && ggml_backend_is_cpu(m.backends[m.ds.dev])) k_all = ggml_cast(ctx, k_all, GGML_TYPE_F32);
 
         const float kq_scale = 1.0f / sqrtf((float) head);
-        ggml_tensor * out = attn_mha(q, k_all, res.inp.ds_mask, L.attn_sinks, kq_scale);
+        ggml_tensor * out = attn_mha(q, k_all, res.inp.ds_mask, L.attn_sinks, kq_scale, m.ds.dev);
 
         out = ggml_reshape_3d(ctx, out, head, n_head, nt);
         ggml_tensor * out_nope = ggml_view_3d(ctx, out, n_nope, n_head, nt,
@@ -3801,6 +4053,8 @@ struct graph_builder
         ggml_tensor * emb = ggml_get_rows(ctx, m.tok_embd, res.inp.ds_tokens);
         ggml_tensor * x = ggml_reshape_3d(ctx, emb, hp.n_embd, 1, nt);
         x = ggml_repeat_4d(ctx, x, hp.n_embd, hc, nt, 1);
+        pin(x, dev);
+        ggml_tensor * delayed_pre = nullptr;
 
         for (int st = 0; st < ds.n_stages; st++)
         {
@@ -3809,13 +4063,16 @@ struct graph_builder
             ggml_tensor * comb = nullptr;
 
             ggml_tensor * residual = x;
-            ggml_tensor * cur = build_hc_pre(x, L.hc_attn_fn, L.hc_attn_scale, L.hc_attn_base, &post, &comb, dev);
+            ggml_tensor * attn_pre = nullptr;
+            ggml_tensor * cur = build_hc_pre(x, L.hc_attn_fn, L.hc_attn_scale, L.hc_attn_base, &post, &comb, dev,
+                hp.v41 ? &attn_pre : nullptr, delayed_pre);
             cur = rms(cur, L.attn_norm);
             cur = build_dspark_attention(st, cur, res.inp.ds_pos);
             x = build_hc_post(cur, residual, post, comb);
 
             residual = x;
-            cur = build_hc_pre(x, L.hc_ffn_fn, L.hc_ffn_scale, L.hc_ffn_base, &post, &comb, dev);
+            cur = build_hc_pre(x, L.hc_ffn_fn, L.hc_ffn_scale, L.hc_ffn_base, &post, &comb, dev,
+                hp.v41 ? &delayed_pre : nullptr, attn_pre);
             ggml_build_forward_expand(gf, residual);
             ggml_build_forward_expand(gf, post);
             ggml_build_forward_expand(gf, comb);
@@ -3826,7 +4083,8 @@ struct graph_builder
         }
 
         // head: hc_head -> the drafter's norm -> the TRUNK's LM head
-        ggml_tensor * h = build_hc_head_w(x, ds.hc_head_fn, ds.hc_head_scale, ds.hc_head_base); // [n_embd, 1, nt]
+        ggml_tensor * h = hp.v41 ? build_hc_pre_op(x, delayed_pre)
+            : build_hc_head_w(x, ds.hc_head_fn, ds.hc_head_scale, ds.hc_head_base); // [n_embd, 1, nt]
         h = ggml_reshape_2d(ctx, h, hp.n_embd, nt);
         ggml_tensor * base = ggml_mul_mat(ctx, m.output, rms(h, ds.norm));   // [n_vocab, nt]
         ggml_mul_mat_set_prec(base, GGML_PREC_F32);
@@ -3863,6 +4121,13 @@ struct graph_builder
         res.ds_conf = conf;
         ggml_build_forward_expand(gf, toks);
         ggml_build_forward_expand(gf, conf);
+        if (hp.v41)
+            for (int i = 0; i < ggml_graph_n_nodes(gf); ++i)
+            {
+                ggml_tensor * node = ggml_graph_node(gf, i);
+                if ((node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) &&
+                    node->src[0]->type == GGML_TYPE_F32) precise_matmul(node);
+            }
     }
 
     // ---- compression ----
@@ -4029,27 +4294,51 @@ struct graph_builder
         ggml_tensor * cur;
         if (m.flash_attn)
         {
-            cur = ggml_flash_attn_ext(ctx, qp, kp, kp, kq_mask, kq_scale, 0.0f, 0.0f);
-            ggml_flash_attn_ext_add_sinks(cur, sinks);
-            ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
-            // V4.1 exposes at most the sliding window plus the selected
-            // compressed rows per query. CUDA can compact this existing mask
-            // and attend to its finite entries without duplicating K/V for
-            // every prefill token. Keep an explicit A/B switch until qualified.
-            const char * sparse_fa = hp.v41 ? getenv("TS_DSV41_SPARSE_FA") : nullptr;
-            // Dense tiles reuse K/V across prefill queries more efficiently
-            // at short contexts. Preserve that path below the measured
-            // crossover; upstream also checks device/kernel eligibility.
-            if (sparse_fa && atoi(sparse_fa) != 0 && (q->ne[2] == 1 || n_kv >= 16384))
-                ggml_flash_attn_ext_set_n_kv_max(cur, hp.n_swa + hp.indexer_top_k);
-            if (device >= 0) pin(cur, device);
+            const int attention_device = device >= 0 ? device : 0;
+            const bool owned_precision = hp.v41 && attention_device < m.n_gpu &&
+                m.ts_backends[attention_device] != nullptr;
+            if (owned_precision)
+            {
+                // ggml's CUDA FA narrows Q and softmax weights to F16 even
+                // with F32 accumulation. V4.1 quantization/routing can amplify
+                // those lost bits, so keep the complete attention path F32.
+                // Prefill chunks of more than the decode-class width over at
+                // least 8,192 keys attend to their compacted window + top-k
+                // rows (on by default; TS_DSV41_SPARSE_FA=0 restores tiled
+                // prefill). Verify and decode keep the split-key kernel. The
+                // gate and its measurements live in ggml_ops_precision_policy.h.
+                const int capacity = tsg_dsv41_owned_sparse_capacity(q->ne[2], n_kv, hp.n_swa, hp.indexer_top_k,
+                    getenv("TS_DSV41_SPARSE_FA"));
+                cur = tsg_attention_f32_on_backend(ctx, res.sched, m.dev_backends[attention_device],
+                    qp, kp, kp, kq_mask, sinks, kq_scale, capacity);
+            }
+            else
+            {
+                cur = ggml_flash_attn_ext(ctx, qp, kp, kp, kq_mask, kq_scale, 0.0f, 0.0f);
+                ggml_flash_attn_ext_add_sinks(cur, sinks);
+                ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
+                // V4.1 exposes at most the sliding window plus the selected
+                // compressed rows per query. CUDA can compact this existing mask
+                // and attend to its finite entries without duplicating K/V for
+                // every prefill token. Unlike the owned F32 branch above, this
+                // hint stays opt-in (=1): ggml's kernel narrows its operands to
+                // F16 (rel_l2 ~1e-3 against the F32 reference), and its gate is
+                // one query or >= 16,384 keys rather than > 8 queries at >= 8,192.
+                const char * sparse_fa = hp.v41 ? getenv("TS_DSV41_SPARSE_FA") : nullptr;
+                // Dense tiles reuse K/V across prefill queries more efficiently
+                // at short contexts. Preserve that path below the measured
+                // crossover; upstream also checks device/kernel eligibility.
+                if (sparse_fa && atoi(sparse_fa) != 0 && (q->ne[2] == 1 || n_kv >= 16384))
+                    ggml_flash_attn_ext_set_n_kv_max(cur, hp.n_swa + hp.indexer_top_k);
+                if (device >= 0) pin(cur, device);
+            }
             cur = ggml_reshape_2d(ctx, cur, cur->ne[0] * cur->ne[1], cur->ne[2] * cur->ne[3]);
         }
         else
         {
             ggml_tensor * kq = ggml_mul_mat(ctx, kp, qp);   // [n_kv, nt, n_head]
             ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-            if (hp.v41) ggml_prec_set_src(kq, GGML_PREC_F32, 1);
+            if (hp.v41) precise_matmul(kq);
             if (device >= 0) pin(kq, device);
 
             kq = ggml_soft_max_ext(ctx, kq, kq_mask, kq_scale, 0.0f);
@@ -4062,8 +4351,7 @@ struct graph_builder
             ggml_tensor * kqv = ggml_mul_mat(ctx, v, kq);  // [head, nt, n_head]
             if (hp.v41)
             {
-                ggml_prec_set_acc(kqv, GGML_PREC_F32);
-                ggml_prec_set_src(kqv, GGML_PREC_F32, 1);
+                precise_matmul(kqv);
             }
             if (device >= 0) pin(kqv, device);
 
@@ -4455,8 +4743,9 @@ struct graph_builder
     {
         const dsv4_layer & L = m.layers[il];
         const int dev = L.device;
-        const int64_t n_expert = hp.n_expert;
-        const int64_t n_used = hp.n_expert_used;
+        const bool is_draft = m.ds.loaded && il >= m.ds.layer_base;
+        const int64_t n_expert = is_draft ? m.ds.n_expert : hp.n_expert;
+        const int64_t n_used = is_draft ? m.ds.n_expert_used : hp.n_expert_used;
         const float clamp_limit = hp.swiglu_clamp_exp.empty() ? 0.0f : hp.swiglu_clamp_exp[il];
 
         ggml_tensor * logits = ggml_mul_mat(ctx, L.ffn_gate_inp, cur);   // [n_expert, nt]
@@ -4465,7 +4754,7 @@ struct graph_builder
         ggml_tensor * selected = nullptr;
         ggml_tensor * weights = nullptr;
 
-        if (m.fused && !res.image_tokens)
+        if (m.fused && (!res.image_tokens || is_draft))
         {
             if (il < hp.hash_layer_count)
                 selected = ggml_get_rows(ctx, L.ffn_gate_tid2eid, inp_tokens);   // I32 [n_used, nt]
@@ -4476,7 +4765,7 @@ struct graph_builder
             const float scale = (hp.expert_weights_scale != 0.0f && hp.expert_weights_scale != 1.0f)
                 ? hp.expert_weights_scale : 1.0f;
             weights = fused_node(TSG_DSV4_FUSED_MOE_WEIGHTS, GGML_TYPE_F32, 1, n_used, nt, 1,
-                    { logits, selected }, dev, hp.expert_weights_norm ? 1 : 0, 0, 0, 0, scale);
+                    { logits, selected }, dev, hp.expert_weights_norm && (!is_draft || n_used > 1) ? 1 : 0, 0, 0, 0, scale);
         }
         else
         {
@@ -4490,7 +4779,7 @@ struct graph_builder
             {
                 // The trained visual bias changes top-k selection only. The
                 // selected experts' normalized weights still use unbiased scores.
-                ggml_tensor * bias = res.image_tokens
+                ggml_tensor * bias = res.image_tokens && !is_draft
                     ? ggml_get_rows(ctx, m.vision->router_bias[il], res.inp.image_types[dev])
                     : L.ffn_exp_probs_b;
                 ggml_tensor * selection = ggml_add(ctx, probs, bias);
@@ -4500,7 +4789,7 @@ struct graph_builder
             ggml_tensor * probs3 = ggml_reshape_3d(ctx, probs, 1, n_expert, nt);
             weights = ggml_get_rows(ctx, probs3, selected);       // [1, n_used, nt]
 
-            if (hp.expert_weights_norm)
+            if (hp.expert_weights_norm && (!is_draft || n_used > 1))
             {
                 weights = ggml_reshape_2d(ctx, weights, n_used, nt);
                 ggml_tensor * sum = ggml_sum_rows(ctx, weights);
@@ -4923,8 +5212,7 @@ struct graph_builder
             if ((node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) &&
                 node->src[0]->type == GGML_TYPE_F32)
             {
-                ggml_prec_set_acc(node, GGML_PREC_F32);
-                ggml_prec_set_src(node, GGML_PREC_F32, 1);
+                precise_matmul(node);
             }
         }
     }
@@ -5174,6 +5462,13 @@ struct graph_builder
 
             if (hp.v41) inpL = build_engram(il, inpL);
             trace_v41(inpL, il, "engram_output");
+            if (hp.v41 && m.ds.loaded &&
+                std::find(m.ds.target_layers.begin(), m.ds.target_layers.end(), il) != m.ds.target_layers.end())
+            {
+                auto * feature = hc_mean(inpL);
+                pin(feature, dev);
+                ds_feats.push_back(feature);
+            }
             ggml_tensor * residual = inpL;
             ggml_tensor * post = nullptr;
             ggml_tensor * comb = nullptr;
@@ -5201,10 +5496,12 @@ struct graph_builder
             inpL = build_hc_post(cur, residual, post, comb);
             trace_v41(inpL, il, "output");
 
-            if (m.ds.loaded &&
+            if (!hp.v41 && m.ds.loaded &&
                 std::find(m.ds.target_layers.begin(), m.ds.target_layers.end(), il) != m.ds.target_layers.end())
             {
-                ds_feats.push_back(hc_mean(inpL));
+                auto * feature = hc_mean(inpL);
+                pin(feature, dev);
+                ds_feats.push_back(feature);
             }
         }
 
@@ -5239,8 +5536,7 @@ struct graph_builder
                 if ((node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) &&
                     node->src[0]->type == GGML_TYPE_F32)
                 {
-                    ggml_prec_set_acc(node, GGML_PREC_F32);
-                    ggml_prec_set_src(node, GGML_PREC_F32, 1);
+                    precise_matmul(node);
                 }
             }
         }
@@ -5356,11 +5652,9 @@ namespace
 // positions produce many distinct shapes. Four concurrent 10.8k-token prefills
 // on the eight-A40 box filled the twelve slots and ran device 1 out of memory.
 //
-// That is not a survivable error. ggml's allocator frees a buffer before
-// reallocating it, so a failed reserve leaves a null buffer behind and the
-// retry inside ggml_backend_sched_alloc_graph dereferences it -- the process
-// dies rather than the request failing. So the cache has to stay inside the
-// memory instead of discovering the limit.
+// Explicit checked reservation below lets an allocation failure reject the
+// graph safely. Trimming first also avoids unnecessary failures and allocation
+// churn when older entries can release enough memory for the next shape.
 //
 // The rule: before building a new entry, free least-recently-used entries
 // until every device has room for another entry as large as the largest one
@@ -5423,6 +5717,9 @@ static void dsv4_trim_graph_cache(dsv4_model & m)
 static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64_t p0, bool pipeline, bool * out_reuse,
                                               bool all_logits = false, int image_tokens = 0)
 {
+#if defined(TSG_GGML_TEST_HOOKS)
+    if (dsv4_test_boundary_fault()) return nullptr;
+#endif
     const dsv4_hparams & hp = m.hp;
     static const int perf_build = []() { const char * e = getenv("TS_DSV4_PERF"); return e ? atoi(e) : 0; }();
 
@@ -5479,12 +5776,11 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
 
     if (!reuse)
     {
-        // A failed V4.1 build must never become a reusable cache entry after
+        // A failed build must never become a reusable cache entry after
         // the caller resets its sequence. Keep ownership local until complete.
         auto pending = std::make_unique<graph_build_result>();
         graph_build_result & r = *pending;
         dsv4_trim_graph_cache(m);
-        if (!hp.v41) m.graph_cache.emplace_front(std::move(pending));
         const size_t meta_size = (size_t) 96 * 1024 * 1024;
         ggml_init_params gp = { meta_size, nullptr, true };
         r.ctx = ggml_init(gp);
@@ -5501,7 +5797,6 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
         if (!r.sched)
         {
             fprintf(stderr, "[dsv4] sched creation failed\n");
-            if (!hp.v41) m.graph_cache.pop_front();
             return nullptr;
         }
 
@@ -5511,10 +5806,9 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
         if (hp.v41) dsv41_test_fail("graph", p0);
 #endif
 
-        if (!ggml_backend_sched_alloc_graph(r.sched, r.gf))
+        if (!tsg_scheduler_alloc_graph(r.sched, r.gf))
         {
             fprintf(stderr, "[dsv4] sched_alloc_graph failed (nt=%" PRId64 ")\n", nt);
-            if (!hp.v41) m.graph_cache.pop_front();
             return nullptr;
         }
         dsv4_node_dump_attach(r.sched);
@@ -5583,7 +5877,7 @@ static graph_build_result * dsv4_acquire_graph(dsv4_model & m, int64_t nt, int64
                 nt, p0, line.c_str());
         }
         res_p = &r;
-        if (hp.v41) m.graph_cache.emplace_front(std::move(pending));
+        m.graph_cache.emplace_front(std::move(pending));
 
         while ((int) m.graph_cache.size() > m.graph_cache_cap)
             m.graph_cache.pop_back();
@@ -5679,7 +5973,7 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
                                 const float * image_embeddings = nullptr, int image_tokens = 0)
 {
     const dsv4_hparams & hp = m.hp;
-    if (hp.v41 && m.active_slot->v41_failed) return false;
+    if (m.active_slot->v41_failed) return false;
 #if defined(TSG_GGML_TEST_HOOKS)
     if (m.moe_tp) m.moe_tp->test_set_position(p0);
 #endif
@@ -5860,7 +6154,7 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
         }
     }
 
-    dsv41_slot_write_guard writes{hp.v41 ? m.active_slot : nullptr};
+    dsv41_slot_write_guard writes{m.active_slot};
     if (hp.v41)
     {
         std::vector<int32_t> hash_tokens;
@@ -5878,6 +6172,10 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
         dsv41_stage_engram(m, res, hashes.data(), nt, image_mask, image_tokens);
     }
     auto t_inputs = now();
+
+    // Both architectures can have partially written cache tensors once a
+    // graph is submitted, including a non-final asynchronous V4 microbatch.
+    writes.started = true;
 
 #ifdef TSG_GGML_USE_CUDA
     if (perf >= 3) tsg_dsv4_fused_counters_reset();
@@ -5966,6 +6264,9 @@ static bool dsv4_forward_ubatch(dsv4_model & m, const int32_t * tokens, int64_t 
 static graph_build_result * dsv4_acquire_batched_graph(
     dsv4_model & m, int n, const int32_t * slot_ids, const int32_t * positions, bool * out_reuse)
 {
+#if defined(TSG_GGML_TEST_HOOKS)
+    if (dsv4_test_boundary_fault()) return nullptr;
+#endif
     const dsv4_hparams & hp = m.hp;
 
     // V4.1 keeps the unfused compressor and its own ratios; the plan sizes and
@@ -6015,8 +6316,8 @@ static graph_build_result * dsv4_acquire_batched_graph(
     if (!reuse)
     {
         dsv4_trim_graph_cache(m);
-        m.graph_cache.emplace_front(new graph_build_result());
-        graph_build_result & r = *m.graph_cache.front();
+        auto pending = std::make_unique<graph_build_result>();
+        graph_build_result & r = *pending;
         // The per-slot attention forks are the only O(n) node cost, roughly
         // ~500 nodes/slot including the attn_cat concat chain; wide spans need
         // a bigger node table and metadata arena.
@@ -6033,15 +6334,11 @@ static graph_build_result * dsv4_acquire_batched_graph(
         if (!r.sched)
         {
             fprintf(stderr, "[dsv4] batched sched creation failed\n");
-            m.graph_cache.pop_front();
             return nullptr;
         }
 
-        // The V4.1 builder validates the shared sparse selection as it goes and
-        // throws if a layer publishes one its consumers cannot use. The entry is
-        // already in the cache under this signature, so a half-built graph left
-        // behind would be "reused" by the next call with the same shape. Drop it
-        // and let the caller fall back to per-slot forwards.
+        // Publish only a complete graph. Allocation/build exceptions also
+        // destroy the local pending entry before the caller can retry it.
         try
         {
             graph_builder gb(m, r, n, 0);
@@ -6050,19 +6347,19 @@ static graph_build_result * dsv4_acquire_batched_graph(
         catch (const std::exception & error)
         {
             fprintf(stderr, "[dsv4] batched graph build failed (n=%d): %s\n", n, error.what());
-            m.graph_cache.pop_front();
             return nullptr;
         }
 
-        if (!ggml_backend_sched_alloc_graph(r.sched, r.gf))
+        if (!tsg_scheduler_alloc_graph(r.sched, r.gf))
         {
             fprintf(stderr, "[dsv4] batched sched_alloc_graph failed (n=%d)\n", n);
-            m.graph_cache.pop_front();
             return nullptr;
         }
         for (int d = 0; d < m.n_gpu; d++)
             r.buffer_bytes[d] = ggml_backend_sched_get_buffer_size(r.sched, m.dev_backends[d]);
         res_p = &r;
+
+        m.graph_cache.emplace_front(std::move(pending));
 
         while ((int) m.graph_cache.size() > m.graph_cache_cap)
             m.graph_cache.pop_back();
@@ -6303,6 +6600,13 @@ static bool dsv4_forward_batched_decode(
         }
     }
 
+    if (!hp.v41)
+    {
+        // Input staging has not mutated V4 caches. Arm all slots only before
+        // compute; a graph-allocation decline remains safe for serial fallback.
+        writes.slots.reserve(n);
+        for (int i = 0; i < n; ++i) writes.slots.push_back(m.slots.at(slot_ids[i]).get());
+    }
     if (ggml_backend_sched_graph_compute(res.sched, res.gf) != GGML_STATUS_SUCCESS)
     {
         fprintf(stderr, "[dsv4] batched graph compute failed\n");
@@ -6329,6 +6633,9 @@ static bool dsv4_forward_batched_decode(
 static int dsv4_dspark_draft(dsv4_model & m, int32_t anchor_token, int64_t position,
                              int32_t * toks_out, float * conf_out)
 {
+#if defined(TSG_GGML_TEST_HOOKS)
+    if (dsv4_test_boundary_fault()) return 0;
+#endif
     const dsv4_dspark & ds = m.ds;
     if (!ds.loaded || position <= 0) return 0;
 
@@ -6353,8 +6660,8 @@ static int dsv4_dspark_draft(dsv4_model & m, int32_t anchor_token, int64_t posit
 
     if (!res_p)
     {
-        m.graph_cache.emplace_front(new graph_build_result());
-        graph_build_result & r = *m.graph_cache.front();
+        auto pending = std::make_unique<graph_build_result>();
+        graph_build_result & r = *pending;
         ggml_init_params gp = { (size_t) 32 * 1024 * 1024, nullptr, true };
         r.ctx = ggml_init(gp);
         r.gf = ggml_new_graph_custom(r.ctx, 8192, false);
@@ -6365,18 +6672,17 @@ static int dsv4_dspark_draft(dsv4_model & m, int32_t anchor_token, int64_t posit
         r.sched = ggml_backend_sched_new(m.sched_backends, m.sched_bufts, m.n_sched_backends, 8192, false, true);
         if (!r.sched)
         {
-            m.graph_cache.pop_front();
             return 0;
         }
         graph_builder gb(m, r, B, position);
         gb.build_dspark_draft();
-        if (!ggml_backend_sched_alloc_graph(r.sched, r.gf))
+        if (!tsg_scheduler_alloc_graph(r.sched, r.gf))
         {
             fprintf(stderr, "[dsv4] DSpark draft graph alloc failed\n");
-            m.graph_cache.pop_front();
             return 0;
         }
         res_p = &r;
+        m.graph_cache.emplace_front(std::move(pending));
     }
     graph_build_result & res = *res_p;
 
@@ -6437,13 +6743,15 @@ static int dsv4_dspark_draft(dsv4_model & m, int32_t anchor_token, int64_t posit
 TSG_EXPORT void * TSGgml_Dsv4LoadModelDspark(const char * gguf_path, int n_gpu, int n_ctx, int n_ubatch, int n_threads,
                                              const char * dspark_path, int n_cpu_moe, const char * backend_name)
 {
+    // A stale error from an earlier op must not be reported as this load's reason.
+    tsg::clear_last_error();
     try
     {
         return tsg_dsv4::dsv4_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads, dspark_path, n_cpu_moe, backend_name);
     }
     catch (const std::exception & e)
     {
-        fprintf(stderr, "[dsv4] DSpark load failed: %s\n", e.what());
+        tsg::report_load_refusal("[dsv4] DSpark load failed: %s\n", e.what());
         return nullptr;
     }
 }
@@ -6451,13 +6759,15 @@ TSG_EXPORT void * TSGgml_Dsv4LoadModelDspark(const char * gguf_path, int n_gpu, 
 TSG_EXPORT void * TSGgml_Dsv4LoadModel(const char * gguf_path, int n_gpu, int n_ctx, int n_ubatch, int n_threads,
                                        int n_cpu_moe, const char * backend_name)
 {
+    // A stale error from an earlier op must not be reported as this load's reason.
+    tsg::clear_last_error();
     try
     {
         return tsg_dsv4::dsv4_load(gguf_path, n_gpu, n_ctx, n_ubatch, n_threads, nullptr, n_cpu_moe, backend_name);
     }
     catch (const std::exception & e)
     {
-        fprintf(stderr, "[dsv4] load failed: %s\n", e.what());
+        tsg::report_load_refusal("[dsv4] load failed: %s\n", e.what());
         return nullptr;
     }
 }
@@ -6506,8 +6816,18 @@ TSG_TEST_EXPORT int TSGgml_Dsv4TestSharedPlacement(void * handle, int layer, int
         ggml_tensor * node = ggml_graph_node(graph.gf, i);
         // Scheduler copies can replace src[0], so its tensor name is the
         // stable identity after allocation. Copies include the original name.
-        if (node->op != GGML_OP_MUL_MAT || !node->src[0] ||
+        if (!node->src[0] ||
             (node->src[0] != weight && !strstr(node->src[0]->name, weight->name))) continue;
+        bool projection_op = node->op == GGML_OP_MUL_MAT;
+        if (node->op == GGML_OP_CUSTOM)
+        {
+            ggml_custom_op_params params;
+            memcpy(&params, node->op_params, sizeof(params));
+            const auto * descriptor = static_cast<const tsg_dsv4_fused_desc *>(params.userdata);
+            projection_op = descriptor && descriptor->magic == TSG_DSV4_FUSED_MAGIC
+                && descriptor->kind == TSG_MATMUL_F32;
+        }
+        if (!projection_op) continue;
         auto actual = ggml_backend_sched_get_tensor_backend(graph.sched, node);
         // The scheduler's backend for a device, which is the fused wrapper when
         // fused ops are available and the CUDA backend otherwise.
@@ -6518,6 +6838,35 @@ TSG_TEST_EXPORT int TSGgml_Dsv4TestSharedPlacement(void * handle, int layer, int
     }
     snprintf(description, (size_t) capacity, "projection not found");
     return -2;
+}
+// Numerical fixture seam: expose the committed drafter window in logical
+// position order. Read-only and absent from production builds.
+TSG_TEST_EXPORT int TSGgml_Dsv4TestLayerDevice(void * handle, int layer)
+{
+    auto * m = static_cast<tsg_dsv4::dsv4_model *>(handle);
+    if (!m || layer < 0 || layer >= m->hp.n_layer) return -1;
+    return m->layers[layer].device;
+}
+
+TSG_TEST_EXPORT int TSGgml_Dsv4TestDsparkReadRing(void * handle, int stage, int count, float * output)
+{
+    auto * m = static_cast<tsg_dsv4::dsv4_model *>(handle);
+    if (!m || !m->active_slot || !m->ds.loaded || !output || stage < 0 || stage >= m->ds.n_stages ||
+        count <= 0 || count > m->ring_raw || count > m->active_slot->n_past) return 0;
+    try
+    {
+        auto * ring = m->active_slot->ds_k[stage];
+        const int64_t width = m->hp.n_embd_head;
+        std::vector<ggml_fp16_t> row((size_t) width);
+        for (int i = 0; i < count; ++i)
+        {
+            const int64_t position = m->active_slot->n_past - count + i;
+            ggml_backend_tensor_get(ring, row.data(), (size_t) (position % m->ring_raw) * ring->nb[1], row.size() * sizeof(ggml_fp16_t));
+            for (int64_t j = 0; j < width; ++j) output[i * width + j] = ggml_fp16_to_fp32(row[(size_t) j]);
+        }
+        return 1;
+    }
+    catch (...) { return 0; }
 }
 #undef TSG_TEST_EXPORT
 #endif
@@ -6531,13 +6880,13 @@ TSG_EXPORT int TSGgml_Dsv4Forward(void * handle, const int32_t * tokens, int n_t
     auto * m = (tsg_dsv4::dsv4_model *) handle;
     tsg_dsv4::dsv4_slot * slot = m->active_slot;
 
+    if (slot->v41_failed)
+    {
+        fprintf(stderr, "[dsv4] sequence execution previously failed; reset or destroy the slot before reuse\n");
+        return -4;
+    }
     if (m->hp.v41)
     {
-        if (slot->v41_failed)
-        {
-            fprintf(stderr, "[dsv41] sequence execution previously failed; reset or destroy the slot before reuse\n");
-            return -4;
-        }
         // Validate the whole request before a first microbatch can mutate the
         // sequence, including invalid IDs in a later microbatch.
         for (int i = 0; i < n_tokens; ++i)
@@ -6553,60 +6902,65 @@ TSG_EXPORT int TSGgml_Dsv4Forward(void * handle, const int32_t * tokens, int n_t
     const bool perf = []() { const char * e = getenv("TS_DSV4_PERF"); return e && atoi(e) > 0; }();
     auto t0 = std::chrono::steady_clock::now();
 
-    m->pos_end_hint = (int64_t) slot->n_past + n_tokens;
-    if (m->moe_tp) m->moe_tp->begin_forward();
-
-    // Pre-acquire the first two chunk graphs (the pipelined pair) and the
-    // final chunk's graph so the pipelined prefill never stalls on a
-    // device-synchronizing arena allocation mid-flight.
-    if (!m->hp.v41 && n_tokens > m->n_ubatch)
-    {
-        tsg_dsv4::dsv4_acquire_graph(*m, m->n_ubatch, slot->n_past, m->n_gpu > 1, nullptr);
-        const int nt2 = std::min(m->n_ubatch, n_tokens - m->n_ubatch);
-        const bool last2 = (2 * m->n_ubatch >= n_tokens);
-        tsg_dsv4::dsv4_acquire_graph(*m, nt2, slot->n_past + m->n_ubatch, !last2 && m->n_gpu > 1, nullptr);
-        if (!last2)
-        {
-            const int last_nt = n_tokens - m->n_ubatch * ((n_tokens - 1) / m->n_ubatch);
-            tsg_dsv4::dsv4_acquire_graph(*m, last_nt, (int64_t) slot->n_past + (n_tokens - last_nt), false, nullptr);
-        }
-    }
-
-    int done = 0;
     try
     {
+        slot->spec_begin = slot->spec_end = -1;
+        m->pos_end_hint = (int64_t) slot->n_past + n_tokens;
+        if (m->moe_tp) m->moe_tp->begin_forward();
+
+        // Pre-acquisition allocates graph metadata and device arenas. It must
+        // share the C ABI error boundary with compute and checkpointing.
+        if (!m->hp.v41 && n_tokens > m->n_ubatch)
+        {
+            const int nt2 = std::min(m->n_ubatch, n_tokens - m->n_ubatch);
+            const bool last2 = (2 * m->n_ubatch >= n_tokens);
+            if (!tsg_dsv4::dsv4_acquire_graph(*m, m->n_ubatch, slot->n_past, m->n_gpu > 1, nullptr) ||
+                !tsg_dsv4::dsv4_acquire_graph(*m, nt2, slot->n_past + m->n_ubatch, !last2 && m->n_gpu > 1, nullptr))
+            {
+                slot->v41_failed = true;
+                return -3;
+            }
+            if (!last2)
+            {
+                const int last_nt = n_tokens - m->n_ubatch * ((n_tokens - 1) / m->n_ubatch);
+                if (!tsg_dsv4::dsv4_acquire_graph(*m, last_nt,
+                        (int64_t) slot->n_past + (n_tokens - last_nt), false, nullptr))
+                {
+                    slot->v41_failed = true;
+                    return -3;
+                }
+            }
+        }
+        int done = 0;
         while (done < n_tokens)
         {
             const int nt = std::min(m->n_ubatch, n_tokens - done);
             const bool last = (done + nt == n_tokens);
             if (!tsg_dsv4::dsv4_forward_ubatch(*m, tokens + done, nt, slot->n_past, last, last ? logits_out : nullptr))
             {
-                if (m->hp.v41) slot->v41_failed = true;
+                slot->v41_failed = true;
                 return -3;
             }
             slot->n_past += nt;
             done += nt;
         }
+
+        // Only multi-token calls publish prompt-boundary rewind checkpoints.
+        // A copy failure can leave a partial shadow, so it also requires reset.
+        if (n_tokens > 1) tsg_dsv4::dsv4_checkpoint_slot(*m, *slot);
     }
     catch (const std::exception & error)
     {
-        if (!m->hp.v41) throw;
         slot->v41_failed = true;
-        fprintf(stderr, "[dsv41] forward failed: %s\n", error.what());
+        fprintf(stderr, "[dsv4] forward failed: %s\n", error.what());
         return -3;
     }
     catch (...)
     {
-        if (!m->hp.v41) throw;
         slot->v41_failed = true;
-        fprintf(stderr, "[dsv41] forward failed with an unknown execution exception\n");
+        fprintf(stderr, "[dsv4] forward failed with an unknown execution exception\n");
         return -3;
     }
-
-    // A multi-token call is a prompt, so this is the boundary a later turn wants
-    // to rewind to (see dsv4_slot::cp_n_past). A single-token decode step is not,
-    // and must leave the checkpoint where the prompt left it.
-    if (n_tokens > 1) tsg_dsv4::dsv4_checkpoint_slot(*m, *slot);
 
     if (perf)
     {
@@ -6625,7 +6979,140 @@ TSG_EXPORT void TSGgml_Dsv4Reset(void * handle)
 {
     if (!handle) return;
     auto * m = (tsg_dsv4::dsv4_model *) handle;
-    tsg_dsv4::dsv4_reset_slot(*m->active_slot);
+    // Initializing compressor sentinel rows uses host scratch. If that fails
+    // under memory pressure, the void reset ABI cannot claim a usable cache.
+    const bool failed = m->active_slot->v41_failed;
+    m->active_slot->v41_failed = true;
+    try
+    {
+        // Failed requests must release their captured arenas before retrying
+        // under memory pressure. Normal reset keeps successful graph reuse.
+        if (failed) tsg_dsv4::dsv4_drop_slot_graphs(*m, m->active_slot->id);
+        tsg_dsv4::dsv4_reset_slot(*m->active_slot);
+    }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[dsv4] reset failed; slot remains unusable: %s\n", error.what());
+    }
+    catch (...)
+    {
+        fprintf(stderr, "[dsv4] reset failed with an unknown exception; slot remains unusable\n");
+    }
+}
+
+// Slot inspection never selects a different slot or mutates continuation state.
+// The legacy void Reset ABI remains available; managed ownership transfers use
+// this checked form for every architecture, including V4 with a DSpark drafter.
+TSG_EXPORT int TSGgml_Dsv4ResetChecked(void * handle)
+{
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    if (!m || !m->active_slot) return 0;
+    TSGgml_Dsv4Reset(handle);
+    return !m->active_slot->v41_failed && m->active_slot->n_past == 0;
+}
+
+// Slot inspection never selects a different slot or mutates continuation state.
+// Status: 1 = available V4.1 slot, 0 = unavailable; health is a separate output.
+TSG_EXPORT int TSGgml_Dsv4SlotStatus(void * handle, int slot_id,
+    int * head, int * checkpoint, int * healthy)
+{
+    if (!handle || !head || !checkpoint || !healthy) return 0;
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    if (!m->hp.v41 || m->ds.loaded) return 0;
+    auto found = m->slots.find(slot_id);
+    if (found == m->slots.end()) return 0;
+    const auto & slot = *found->second;
+    *head = slot.n_past;
+    *checkpoint = m->rewind_cp ? slot.cp_n_past : -1;
+    *healthy = !slot.v41_failed;
+    return 1;
+}
+
+TSG_EXPORT int TSGgml_Dsv4SlotCanReuse(void * handle, int slot_id, int cached_head, int target)
+{
+    int head = 0, checkpoint = -1, healthy = 0;
+    if (!TSGgml_Dsv4SlotStatus(handle, slot_id, &head, &checkpoint, &healthy) ||
+        !healthy || head != cached_head) return 0;
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    return dsv41_plan_truncate(target, head, checkpoint, m->rewind_span, m->truncate_align)
+        != dsv41_truncate_route::refuse;
+}
+
+TSG_EXPORT int TSGgml_Dsv4SlotReleaseGraphs(void * handle, int slot_id)
+{
+    if (!handle) return 0;
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    if (!m->hp.v41 || m->slots.find(slot_id) == m->slots.end()) return 0;
+    try { tsg_dsv4::dsv4_drop_slot_graphs(*m, slot_id); return 1; }
+    catch (...) { return 0; }
+}
+
+// Admission uses the actual full-context slot buffers, not prefix length. All
+// slots in this model have the same geometry. Charging every graph once is
+// conservative when some belong to active requests. This never trims a graph.
+TSG_EXPORT int TSGgml_Dsv4SlotCanRetain(void * handle, int slot_id,
+    int retained_count, uint64_t budget_per_device)
+{
+    int head = 0, checkpoint = -1, healthy = 0;
+    if (retained_count < 0 || !TSGgml_Dsv4SlotStatus(handle, slot_id, &head, &checkpoint, &healthy) ||
+        !healthy || head <= 0) return 0;
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    const auto & slot = *m->slots.find(slot_id)->second;
+    uint64_t reserve = 1024ULL * 1024 * 1024;
+    if (const char * e = getenv("TS_DSV4_GRAPH_CACHE_HEADROOM_MB"))
+    {
+        char * end = nullptr;
+        const long long mb = strtoll(e, &end, 10);
+        if (end != e && !*end && mb >= 0 && (uint64_t) mb <= UINT64_MAX / (1024 * 1024))
+            reserve = (uint64_t) mb * 1024 * 1024;
+    }
+    try
+    {
+        for (int d = 0; d <= m->n_gpu; ++d)
+        {
+            uint64_t bytes = slot.buf[d] ? ggml_backend_buffer_get_size(slot.buf[d]) : 0;
+            if (d == m->n_gpu)
+            {
+                uint64_t history = (uint64_t) m->n_ctx;
+                for (const auto & entry : m->slots)
+                    history = std::max(history, (uint64_t) entry.second->engram_history.capacity());
+                if (history > (UINT64_MAX - bytes) / sizeof(int32_t)) return 0;
+                bytes += history * sizeof(int32_t);
+            }
+            uint64_t graphs = 0, largest = 0;
+            for (const auto & graph : m->graph_cache)
+            {
+                const uint64_t n = graph->sched
+                    ? ggml_backend_sched_get_buffer_size(graph->sched, m->dev_backends[d]) : 0;
+                if (n > UINT64_MAX - graphs) return 0;
+                graphs += n;
+                largest = std::max(largest, n);
+            }
+            size_t free_bytes = 0, total_bytes = 0;
+            // n_gpu is also one for the explicitly selected CPU executor.
+            // Classify the actual device, not its position in that array.
+            ggml_backend_dev_t device = ggml_backend_get_device(m->dev_backends[d]);
+            if (!device) return 0;
+            const bool accelerator = ggml_backend_dev_type(device) != GGML_BACKEND_DEVICE_TYPE_CPU;
+            if (accelerator)
+            {
+                ggml_backend_dev_memory(device, &free_bytes, &total_bytes);
+                if (!total_bytes) return 0; // Unknown accelerator headroom must not authorize retention.
+            }
+            const bool fits = dsv41_retention_fits(bytes, graphs, largest, (uint64_t) retained_count,
+                budget_per_device, accelerator, free_bytes, reserve);
+            fprintf(stderr, "[dsv41 retain-admission] slot=%d device=%d accelerator=%d "
+                "cache_bytes=%llu all_graph_bytes=%llu largest_graph_bytes=%llu retained=%d "
+                "budget_bytes=%llu free_bytes=%llu reserve_bytes=%llu accepted=%d\n",
+                slot_id, d, accelerator, (unsigned long long) bytes,
+                (unsigned long long) graphs, (unsigned long long) largest, retained_count,
+                (unsigned long long) budget_per_device, (unsigned long long) free_bytes,
+                (unsigned long long) reserve, fits);
+            if (!fits) return 0;
+        }
+        return 1;
+    }
+    catch (...) { return 0; }
 }
 
 // Allocate a new sequence slot (own caches, shared weights). Returns the slot
@@ -6672,16 +7159,21 @@ TSG_EXPORT int TSGgml_Dsv4SlotFree(void * handle, int slot_id)
         fprintf(stderr, "[dsv4] refusing to free the active slot %d\n", slot_id);
         return -1;
     }
-    for (auto gi = m->graph_cache.begin(); gi != m->graph_cache.end(); )
+    try
     {
-        bool hit = (*gi)->slot_id == slot_id;
-        for (const auto & b : (*gi)->bd)
-            if (b.slot_id == slot_id) { hit = true; break; }
-        if (hit) gi = m->graph_cache.erase(gi);
-        else ++gi;
+        tsg_dsv4::dsv4_drop_slot_graphs(*m, slot_id);
+        m->slots.erase(it);
+        return 0;
     }
-    m->slots.erase(it);
-    return 0;
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[dsv4] slot free failed: %s\n", error.what());
+    }
+    catch (...)
+    {
+        fprintf(stderr, "[dsv4] slot free failed with an unknown exception\n");
+    }
+    return -1;
 }
 
 // TRUE token-batched decode: one token for each of `n` distinct slots in a
@@ -6698,7 +7190,9 @@ TSG_EXPORT int TSGgml_Dsv4ForwardBatchedDecode(
     if (!handle || n < 2 || n > tsg_dsv4::DSV4_MAX_BATCHED_SLOTS ||
         !slot_ids || !tokens || !positions || !logits_out) return -1;
     auto * m = (tsg_dsv4::dsv4_model *) handle;
-    if (!m->fused) return -2;
+    // The multi-slot graph has no DSpark feature-ring writes. Preserve each
+    // request's target/draft state by taking the per-slot path when attached.
+    if (!m->fused || m->ds.loaded) return -2;
 
     tsg_dsv4::dsv4_slot * slots[tsg_dsv4::DSV4_MAX_BATCHED_SLOTS];
     for (int i = 0; i < n; i++)
@@ -6708,9 +7202,9 @@ TSG_EXPORT int TSGgml_Dsv4ForwardBatchedDecode(
         slots[i] = it->second.get();
         if (slots[i]->n_past != positions[i]) return -2;
         if (positions[i] + 1 > m->n_ctx) return -2;
-        // A slot whose V4.1 caches are inconsistent must be reset before it
+        // A slot whose caches are inconsistent must be reset before it
         // can decode again; batching it would spread the failure.
-        if (m->hp.v41 && slots[i]->v41_failed) return -2;
+        if (slots[i]->v41_failed) return -2;
         for (int j = 0; j < i; j++)
             if (slot_ids[j] == slot_ids[i]) return -2;
     }
@@ -6725,6 +7219,11 @@ TSG_EXPORT int TSGgml_Dsv4ForwardBatchedDecode(
         fprintf(stderr, "[dsv4] batched decode failed: %s\n", e.what());
         return -3;
     }
+    catch (...)
+    {
+        fprintf(stderr, "[dsv4] batched decode failed with an unknown execution exception\n");
+        return -3;
+    }
 
     for (int i = 0; i < n; i++)
         slots[i]->n_past += 1;
@@ -6737,45 +7236,98 @@ TSG_EXPORT int TSGgml_Dsv4DsparkBlockSize(void * handle)
     return (m && m->ds.loaded) ? m->ds.block_size : 0;
 }
 
+// The prefill micro-batch the loaded model runs: the caller's explicit width,
+// or what the loader chose for n_ubatch = -1 (automatic). 0 without a model.
+TSG_EXPORT int TSGgml_Dsv4UBatch(void * handle)
+{
+    auto * m = (tsg_dsv4::dsv4_model *) handle;
+    return m ? m->n_ubatch : 0;
+}
+
 // Trunk forward with per-row logits (the speculative verify). Behaves exactly
 // like TSGgml_Dsv4Forward otherwise, including the drafter ring commit.
 TSG_EXPORT int TSGgml_Dsv4ForwardSpec(void * handle, const int32_t * tokens, int n_tokens, float * logits_out)
 {
     auto * m = (tsg_dsv4::dsv4_model *) handle;
-    if (!m || m->hp.v41 || !tokens || n_tokens <= 0) return 0;
+    if (!m || !m->active_slot || !tokens || !logits_out || n_tokens <= 0 ||
+        (m->hp.v41 && (!m->ds.loaded || n_tokens > m->ds.block_size + 1))) return 0;
     if (n_tokens > m->n_ubatch)
     {
         fprintf(stderr, "[dsv4] spec forward needs a single micro-batch (%d > %d)\n", n_tokens, m->n_ubatch);
         return 0;
     }
     tsg_dsv4::dsv4_slot & slot = *m->active_slot;
-    if (slot.n_past + n_tokens > m->n_ctx) return 0;
-
-    m->pos_end_hint = slot.n_past + n_tokens;
-    if (!tsg_dsv4::dsv4_forward_ubatch(*m, tokens, n_tokens, slot.n_past, true, logits_out, /*all_logits*/ true))
-        return 0;
-    slot.n_past += n_tokens;
-    return 1;
+    if (slot.v41_failed || (int64_t) slot.n_past + n_tokens > m->n_ctx) return 0;
+    if (m->hp.v41)
+        for (int i = 0; i < n_tokens; ++i)
+            if (tokens[i] < 0 || tokens[i] >= m->hp.n_vocab) return 0;
+    try
+    {
+        slot.spec_begin = slot.spec_end = -1;
+        m->pos_end_hint = (int64_t) slot.n_past + n_tokens;
+        if (m->moe_tp) m->moe_tp->begin_forward();
+        if (tsg_dsv4::dsv4_forward_ubatch(*m, tokens, n_tokens, slot.n_past, true, logits_out, /*all_logits*/ true))
+        {
+            slot.spec_begin = slot.n_past;
+            slot.n_past += n_tokens;
+            slot.spec_end = slot.n_past;
+            return 1;
+        }
+    }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[dsv4] speculative forward failed: %s\n", error.what());
+    }
+    catch (...)
+    {
+        fprintf(stderr, "[dsv4] speculative forward failed with an unknown execution exception\n");
+    }
+    slot.v41_failed = true;
+    return 0;
 }
 
 TSG_EXPORT int TSGgml_Dsv4DsparkDraft(void * handle, int anchor_token, int32_t * toks_out, float * conf_out)
 {
     auto * m = (tsg_dsv4::dsv4_model *) handle;
-    if (!m || !m->ds.loaded || !toks_out || !conf_out) return 0;
-    return tsg_dsv4::dsv4_dspark_draft(*m, anchor_token, m->active_slot->n_past, toks_out, conf_out);
+    if (!m || !m->active_slot || !m->ds.loaded || !toks_out || !conf_out) return 0;
+    if (anchor_token < 0 || anchor_token >= m->hp.n_vocab) return 0;
+    if (m->active_slot->v41_failed) return 0;
+    try
+    {
+        return tsg_dsv4::dsv4_dspark_draft(*m, anchor_token, m->active_slot->n_past, toks_out, conf_out);
+    }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[dsv4] DSpark draft failed: %s\n", error.what());
+    }
+    catch (...)
+    {
+        fprintf(stderr, "[dsv4] DSpark draft failed with an unknown execution exception\n");
+    }
+    // A failed draft does not commit trunk KV; its local pending graph is
+    // discarded on construction failure. A normal zero return is retryable.
+    return 0;
 }
 
 // Drop the KV of rejected speculative tokens. Nothing is restored: the rings
 // are sized so a rejected tail cannot alias a row a later pass reads, and the
-// compressed rows it wrote are recomputed before they become visible. V4 only:
-// it is the DSpark rollback ABI, its no-restore argument rests on
-// state_extra == DSpark's block size, and a V4.1 load has no drafter. A
+// compressed rows it wrote are recomputed before they become visible. V4.1
+// additionally restricts this to the last successful verify's retained prefix;
+// every compressor ring has state_extra == DSpark's block size. A
 // conversational rewind (any depth, from any position) is TSGgml_Dsv4Truncate.
 TSG_EXPORT int TSGgml_Dsv4Rewind(void * handle, int n_past)
 {
     auto * m = (tsg_dsv4::dsv4_model *) handle;
-    if (!m || m->hp.v41 || n_past < 0 || n_past > m->active_slot->n_past) return 0;
-    m->active_slot->n_past = n_past;
+    if (!m || !m->active_slot || m->active_slot->v41_failed || n_past < 0 || n_past > m->active_slot->n_past) return 0;
+    auto & slot = *m->active_slot;
+    if (m->hp.v41 && (!m->ds.loaded || !dsv41_dspark_can_rewind(
+        slot.spec_begin, slot.spec_end, slot.n_past, n_past, m->ds.block_size, m->rewind_span))) return 0;
+    slot.n_past = n_past;
+    if (m->hp.v41)
+    {
+        if ((int64_t) slot.engram_history.size() > n_past) slot.engram_history.resize((size_t) n_past);
+        if (slot.cp_n_past > n_past) slot.cp_n_past = -1;
+    }
     return 1;
 }
 
@@ -6796,8 +7348,9 @@ TSG_EXPORT int TSGgml_Dsv4TruncateAlign(void * handle)
 //
 // Returns 1 when the slot now holds exactly `n_past` positions and a forward
 // from there is identical to a fresh prefill of the same tokens; 0 when it
-// cannot, in which case NOTHING was mutated and the caller must Reset and
-// re-prefill. A refusal is normal, not an error: the raw sliding-window ring is
+// cannot. A normal eligibility refusal mutates nothing. An execution exception
+// while restoring/resetting instead latches the slot unusable and logs the
+// failure; both outcomes require the caller to Reset and re-prefill. The raw ring is
 // only ring_raw positions deep, so a rewind past the checkpoint's reach has no
 // correct answer (the dropped positions' K rows are gone, and recomputing one
 // needs its own equally-gone window).
@@ -6812,29 +7365,45 @@ TSG_EXPORT int TSGgml_Dsv4Truncate(void * handle, int n_past)
         n_past, slot->n_past, m->rewind_cp ? slot->cp_n_past : -1,
         m->rewind_span, m->truncate_align);
 
-    switch (route)
-    {
-        case dsv41_truncate_route::refuse:
-            return 0;
-        case dsv41_truncate_route::none:
-            return 1;
-        case dsv41_truncate_route::reset:
-            tsg_dsv4::dsv4_reset_slot(*slot);
-            return 1;
-        case dsv41_truncate_route::checkpoint:
-            tsg_dsv4::dsv4_copy_rewind_rings(*slot, /*save*/ false);
-            break;
-        case dsv41_truncate_route::live:
-            break;
-    }
+    if (route == dsv41_truncate_route::refuse) return 0;
+    if (route == dsv41_truncate_route::none) return 1;
 
-    slot->n_past = n_past;
-    // Indexed by absolute position and only ever written from the head forward,
-    // so dropping the tail is the whole of it. hash_tokens' contiguity guard
-    // wants size() == the next start position, which is exactly n_past.
-    if ((int32_t) slot->engram_history.size() > n_past)
-        slot->engram_history.resize((size_t) n_past);
-    return 1;
+    // Reset/restore may already have changed buffers when an allocation or
+    // backend exception is raised. Contain it at this C ABI as well as Reset.
+    tsg_dsv4::dsv41_slot_write_guard writes{slot};
+    try
+    {
+        writes.started = true;
+        if (route == dsv41_truncate_route::reset)
+        {
+            tsg_dsv4::dsv4_reset_slot(*slot);
+            writes.complete = true;
+            return 1;
+        }
+        if (route == dsv41_truncate_route::checkpoint)
+            tsg_dsv4::dsv4_copy_rewind_rings(*slot, /*save*/ false);
+        slot->spec_begin = slot->spec_end = -1;
+        slot->n_past = n_past;
+        // Engram history is indexed by absolute position; shrinking discards
+        // exactly the tail and restores the hasher's expected next position.
+        if ((int32_t) slot->engram_history.size() > n_past)
+            slot->engram_history.resize((size_t) n_past);
+        // A shadow beyond the new head contains tokens on the abandoned
+        // branch. Subsequent single-token decoding does not refresh it, so it
+        // must not later restore old rings alongside the new Engram history.
+        if (slot->cp_n_past > n_past) slot->cp_n_past = -1;
+        writes.complete = true;
+        return 1;
+    }
+    catch (const std::exception & error)
+    {
+        fprintf(stderr, "[dsv4] truncate failed; reset required: %s\n", error.what());
+    }
+    catch (...)
+    {
+        fprintf(stderr, "[dsv4] truncate failed with an unknown exception; reset required\n");
+    }
+    return 0;
 }
 
 TSG_EXPORT void TSGgml_Dsv4Free(void * handle)
@@ -6842,3 +7411,233 @@ TSG_EXPORT void TSGgml_Dsv4Free(void * handle)
     if (!handle) return;
     delete (tsg_dsv4::dsv4_model *) handle;
 }
+
+#if defined(TSG_GGML_TEST_HOOKS)
+// Model-free regression of the actual C entry points. A scoped acquisition
+// fault intercepts before tensor access, so no model, backend or GPU allocation
+// is needed. Real partial-compute/checkpoint recovery is tested separately by
+// eng/tests/dsv41-failure-state.py against its independent model oracle.
+#define TSG_TEST_EXPORT TSG_EXPORT
+static void dsv4_test_cached_graphs(tsg_dsv4::dsv4_model & model)
+{
+    for (int id : {0, 1, -1})
+    {
+        auto graph = std::make_unique<tsg_dsv4::graph_build_result>();
+        graph->slot_id = id;
+        if (id == -1)
+        {
+            graph->bd.resize(2);
+            graph->bd[0].slot_id = 0;
+            graph->bd[1].slot_id = 1;
+        }
+        model.graph_cache.push_back(std::move(graph));
+    }
+}
+static int dsv4_test_cached_owner_mask(const tsg_dsv4::dsv4_model & model)
+{
+    int mask = 0;
+    for (const auto & graph : model.graph_cache)
+        mask |= graph->slot_id == 0 ? 1 : graph->slot_id == 1 ? 2 : 4;
+    return mask;
+}
+TSG_TEST_EXPORT int TSGgml_Dsv4TestExecutionBoundary(int v41, int api, int failure, int * observed, int capacity)
+{
+    if (!observed || capacity < (api == 4 ? 14 : 11) || v41 < 0 || v41 > 1 || api < 0 || api > 4 ||
+        failure < 1 || failure > 3 || (v41 && (api == 1 || api == 3))) return -1;
+    using namespace tsg_dsv4;
+    struct intercept_scope
+    {
+        explicit intercept_scope(int kind)
+        {
+            dsv4_test_boundary_failure = kind;
+            dsv4_test_boundary_visits = 0;
+            dsv4_test_boundary_stage = 0;
+        }
+        ~intercept_scope() { dsv4_test_boundary_failure = 0; dsv4_test_boundary_stage = 0; }
+    } intercept(failure);
+    try
+    {
+        dsv4_model model;
+        model.hp.v41 = v41 != 0;
+        model.hp.n_vocab = 32;
+        model.n_ctx = 128;
+        model.n_ubatch = 3;
+        model.fused = true;
+        // Ordinary batched decode must reach the injected execution fault.
+        // A loaded draft head deliberately refuses that route before compute;
+        // mode 4 checks that separate refusal without weakening either gate.
+        model.ds.loaded = api == 3 || api == 4;
+        for (int id = 0; id < 2; ++id)
+        {
+            auto slot = std::make_unique<dsv4_slot>();
+            slot->id = id;
+            slot->n_past = 5;
+            model.slots.emplace(id, std::move(slot));
+        }
+        model.active_slot = model.slots.at(0).get();
+        dsv4_test_cached_graphs(model);
+        auto * original_active = model.active_slot;
+        auto * original_peer = model.slots.at(1).get();
+        if (api == 4)
+        {
+            original_active->engram_history.assign(5, 11);
+            original_peer->engram_history.assign(5, 22);
+        }
+        const auto original_history = original_active->engram_history;
+        const auto original_peer_history = original_peer->engram_history;
+        const bool original_head_loaded = model.ds.loaded;
+        std::vector<const graph_build_result *> original_graphs;
+        for (const auto & graph : model.graph_cache) original_graphs.push_back(graph.get());
+        const int32_t tokens[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+        const int32_t ids[2] = {0, 1}, positions[2] = {5, 5};
+        float scratch[64] = {};
+        int32_t drafted[8] = {};
+        if (api == 4)
+        {
+            std::fill(std::begin(scratch), std::end(scratch), 12345.0f);
+            std::fill(std::begin(drafted), std::end(drafted), 12345);
+        }
+        auto invoke = [&]()
+        {
+            switch (api)
+            {
+                case 0: return TSGgml_Dsv4Forward(&model, tokens, 8, scratch);
+                case 1: return TSGgml_Dsv4ForwardSpec(&model, tokens, 2, scratch);
+                case 2:
+                case 4: return TSGgml_Dsv4ForwardBatchedDecode(&model, 2, ids, tokens, positions, scratch);
+                default: return TSGgml_Dsv4DsparkDraft(&model, 1, drafted, scratch);
+            }
+        };
+        observed[0] = invoke();
+        observed[1] = model.active_slot->v41_failed;
+        observed[2] = model.active_slot->n_past;
+        observed[3] = model.slots.at(1)->v41_failed;
+        observed[4] = model.slots.at(1)->n_past;
+        observed[5] = invoke();
+        observed[6] = dsv4_test_boundary_visits;
+        if (api == 4)
+        {
+            // Capture refusal invariants before Reset can hide any mutation.
+            observed[11] = model.ds.loaded == original_head_loaded &&
+                !original_active->v41_failed && original_active->n_past == 5 &&
+                !original_peer->v41_failed && original_peer->n_past == 5 &&
+                original_active->engram_history == original_history &&
+                original_peer->engram_history == original_peer_history;
+            bool graphs_unchanged = model.graph_cache.size() == original_graphs.size();
+            if (graphs_unchanged)
+            {
+                size_t i = 0;
+                for (const auto & graph : model.graph_cache)
+                {
+                    graphs_unchanged = graphs_unchanged && graph.get() == original_graphs[i];
+                    ++i;
+                }
+            }
+            observed[12] = model.active_slot == original_active && model.slots.size() == 2 &&
+                model.slots.at(0).get() == original_active && model.slots.at(1).get() == original_peer &&
+                graphs_unchanged && dsv4_test_cached_owner_mask(model) == 7 &&
+                original_graphs[0]->slot_id == 0 && original_graphs[1]->slot_id == 1 &&
+                original_graphs[2]->slot_id == -1 && original_graphs[2]->bd.size() == 2 &&
+                original_graphs[2]->bd[0].slot_id == 0 && original_graphs[2]->bd[1].slot_id == 1;
+            observed[13] = std::all_of(std::begin(scratch), std::end(scratch),
+                    [](float value) { return value == 12345.0f; }) &&
+                std::all_of(std::begin(drafted), std::end(drafted),
+                    [](int32_t value) { return value == 12345; });
+        }
+        TSGgml_Dsv4Reset(&model);
+        observed[7] = model.active_slot->v41_failed;
+        observed[8] = model.active_slot->n_past;
+        observed[9] = (int) model.graph_cache.size();
+        observed[10] = dsv4_test_cached_owner_mask(model);
+        return 0;
+    }
+    catch (...)
+    {
+        // Fixture construction can fail, but an exception escaping the actual
+        // entry point is never reported as a successful boundary regression.
+        return -2;
+    }
+}
+
+TSG_TEST_EXPORT int TSGgml_Dsv4TestResetTruncateBoundary(int api, int failure, int * observed, int capacity)
+{
+    if (!observed || capacity < 16 || api < 0 || api > 5 || failure < 1 || failure > 2) return -1;
+    using namespace tsg_dsv4;
+    struct intercept_scope
+    {
+        ~intercept_scope() { dsv4_test_boundary_failure = 0; dsv4_test_boundary_stage = 0; }
+    } intercept;
+    try
+    {
+        dsv4_model model;
+        model.hp.v41 = api < 4;
+        model.ds.loaded = api == 5;
+        model.hp.n_vocab = 32;
+        model.n_ctx = 128;
+        model.n_ubatch = 3;
+        model.rewind_cp = true;
+        model.rewind_span = 0;
+        model.backends[0] = ggml_backend_cpu_init();
+        if (!model.backends[0]) return -2;
+        model.n_backends = 1;
+        auto owner = std::make_unique<dsv4_slot>();
+        auto * slot = owner.get();
+        model.slots.emplace(0, std::move(owner));
+        model.active_slot = slot;
+        dsv4_test_cached_graphs(model);
+        slot->n_past = 20;
+        slot->cp_n_past = 10;
+        slot->engram_history.assign(20, 1);
+        slot->layers.resize(1);
+        slot->ctx[0] = ggml_init({64 * 1024, nullptr, true});
+        if (!slot->ctx[0]) return -2;
+        auto & layer = slot->layers[0];
+        layer.raw_k = ggml_new_tensor_1d(slot->ctx[0], GGML_TYPE_F32, 4);
+        layer.raw_k_cp = ggml_new_tensor_1d(slot->ctx[0], GGML_TYPE_F32, 4);
+        slot->buf[0] = ggml_backend_alloc_ctx_tensors(slot->ctx[0], model.backends[0]);
+        if (!slot->buf[0]) return -2;
+        const float live[4] = {1, 2, 3, 4}, shadow[4] = {77, 78, 79, 80};
+        ggml_backend_tensor_set(layer.raw_k, live, 0, sizeof(live));
+        ggml_backend_tensor_set(layer.raw_k_cp, shadow, 0, sizeof(shadow));
+        auto first = [](ggml_tensor * tensor)
+        {
+            float value = 0;
+            ggml_backend_tensor_get(tensor, &value, 0, sizeof(value));
+            return (int) value;
+        };
+        // An ordinary out-of-range refusal must still leave all state intact.
+        observed[12] = TSGgml_Dsv4Truncate(&model, 21);
+        observed[13] = !slot->v41_failed && slot->n_past == 20 && slot->cp_n_past == 10 &&
+            slot->engram_history.size() == 20 && first(layer.raw_k) == 1 && first(layer.raw_k_cp) == 77;
+        dsv4_test_boundary_failure = failure;
+        dsv4_test_boundary_stage = api == 2 ? 2 : 1;
+        dsv4_test_boundary_visits = 0;
+        if (api == 0) { TSGgml_Dsv4Reset(&model); observed[0] = 0; }
+        else if (api >= 3) observed[0] = TSGgml_Dsv4ResetChecked(&model);
+        else observed[0] = TSGgml_Dsv4Truncate(&model, api == 1 ? 0 : 10);
+        observed[1] = slot->v41_failed;
+        observed[2] = slot->n_past;
+        observed[3] = first(layer.raw_k);
+        observed[4] = first(layer.raw_k_cp);
+        const int32_t token = 1;
+        float logits[32] = {};
+        observed[5] = TSGgml_Dsv4Forward(&model, &token, 1, logits);
+        observed[6] = TSGgml_Dsv4Truncate(&model, 0);
+        observed[7] = dsv4_test_boundary_visits;
+        dsv4_test_boundary_failure = 0;
+        if (!TSGgml_Dsv4ResetChecked(&model)) return -3;
+        observed[8] = slot->v41_failed;
+        observed[9] = slot->n_past;
+        observed[10] = first(layer.raw_k);
+        observed[11] = first(layer.raw_k_cp);
+        observed[14] = (int) model.graph_cache.size();
+        observed[15] = dsv4_test_cached_owner_mask(model);
+        return 0;
+    }
+    catch (...)
+    {
+        return -2;
+    }
+}
+#undef TSG_TEST_EXPORT
+#endif

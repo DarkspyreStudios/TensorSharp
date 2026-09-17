@@ -44,14 +44,15 @@ internal static class GgmlBackendTestInitializer
     [ModuleInitializer]
     internal static void Initialize()
     {
-        GgmlBackendType backend =
-            (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").Trim().ToLowerInvariant() switch
-            {
-                "metal" => GgmlBackendType.Metal,
-                "cuda" => GgmlBackendType.Cuda,
-                "vulkan" => GgmlBackendType.Vulkan,
-                _ => GgmlBackendType.Cpu,
-            };
+        // This explicit fixture records production prompt/tokenizer behavior
+        // without loading a native executor. The module initializer runs even
+        // when vstest selects only that fixture, before its identity guard.
+        if (Environment.GetEnvironmentVariable("TS_TEACHER_TOKEN_EXPORT") == "1")
+            return;
+
+        // Shared with TestGates.GgmlPinSkip, which skips tests that construct
+        // a different GGML backend than the one pinned here.
+        GgmlBackendType backend = TestGates.PinnedGgmlBackendType;
 
         // Best effort: a host without the native bridge built must still be able
         // to run the ~1200 tests that never touch GGML. The tests that DO touch

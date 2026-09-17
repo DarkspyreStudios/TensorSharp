@@ -51,6 +51,11 @@ namespace TensorSharp.Models
             public Tensor[] V;
             public int KvCapacity;
             public int CacheSeqLen;
+            // M-RoPE delta of this sequence: rope position = KV index + RopeDelta for
+            // every token past its prompt's position table (non-zero after an image).
+            // It travels with the rows it describes - swapped in and out with the
+            // holder, copied with a checkpoint, written into a checkpoint file.
+            public int RopeDelta;
             public bool KvHostDirty;
             // GDN recurrent state: host conv ring + write idx + device delta state.
             public float[][] ConvState;
@@ -70,6 +75,12 @@ namespace TensorSharp.Models
             // owned by the holder so a SequenceState.LastLogits reference stays
             // valid however the batch composition churns.
             public float[] Logits;
+            public bool Retired;
+            public bool DisposalStarted;
+            // The holder has been an active cache on a GPU backend, so its K/V and
+            // recurrent state have device copies besides the host bytes (the prefix
+            // cache's MeasureEndState charges both). Copies and imports start without.
+            public bool DeviceMirrored;
         }
 
         // Per-request fused-decode holders, keyed by RequestId.
@@ -168,6 +179,7 @@ namespace TensorSharp.Models
             DiscardArenaSlotForHolder(h);
             InvalidateHolderDeviceCopiesForReuse(h);
             h.CacheSeqLen = 0;
+            h.RopeDelta = 0;
             h.KvHostDirty = false;
             h.GdnHostDirty = false;
             h.FdStateResident = false;
@@ -236,6 +248,7 @@ namespace TensorSharp.Models
             V = _kvCacheV,
             KvCapacity = _kvCacheCapacity,
             CacheSeqLen = _cacheSeqLen,
+            RopeDelta = _ropeDelta,
             KvHostDirty = _kvCacheHostDirty,
             ConvState = _convState,
             ConvWriteIdx = _convStateWriteIdx,
@@ -244,6 +257,7 @@ namespace TensorSharp.Models
             FdStateResident = _fdStateResident,
             GdnHostDirty = _gdnStateHostDirty,
             ArenaStateResident = _arenaStateResident,
+            DeviceMirrored = KeepsDeviceKvMirrors,
         };
 
         private void LoadCacheHolder(Qwen35KvCacheHolder h)
@@ -259,6 +273,7 @@ namespace TensorSharp.Models
             _kvCacheV = h.V;
             _kvCacheCapacity = h.KvCapacity;
             _cacheSeqLen = h.CacheSeqLen;
+            _ropeDelta = h.RopeDelta;
             _kvCacheHostDirty = h.KvHostDirty;
             _convState = h.ConvState;
             _convStateWriteIdx = h.ConvWriteIdx;
@@ -295,52 +310,49 @@ namespace TensorSharp.Models
             int convDim = _convKernel - 1;
             DType kvDtype = _kvCacheDtype.ToDType();
 
-            var k = new Tensor[numLayers];
-            var v = new Tensor[numLayers];
-            var convState = new float[numLayers][];
-            var convWriteIdx = new int[numLayers];
-            var deltaState = new Tensor[numLayers];
-            int gdnCount = 0;
-            for (int l = 0; l < numLayers; l++)
+            // Construct the owner before acquiring tensors or unmanaged scratch.
+            // Every successful allocation is immediately reachable for rollback.
+            var holder = new Qwen35KvCacheHolder
             {
-                if (!_isRecurrent[l])
-                {
-                    k[l] = new Tensor(_allocator, kvDtype, Config.NumKVHeads, cap, Config.HeadDim);
-                    v[l] = new Tensor(_allocator, kvDtype, Config.NumKVHeads, cap, Config.HeadDim);
-                    InitializeCacheTensor(k[l]);
-                    InitializeCacheTensor(v[l]);
-                }
-                else
-                {
-                    convState[l] = new float[Math.Max(0, convDim) * qkvDim];
-                    convWriteIdx[l] = 0;
-                    deltaState[l] = AllocateGdnDeltaStateTensor(
-                        _allocator,
-                        _useMetalGdnInplaceState,
-                        _numVHeads,
-                        _headVDim,
-                        _headKDim);
-                    Ops.Fill(deltaState[l], 0);
-                    gdnCount++;
-                }
-            }
-            IntPtr convScratch = Marshal.AllocHGlobal(Math.Max(1, gdnCount) * Math.Max(1, convDim) * qkvDim * sizeof(float));
-
-            return new Qwen35KvCacheHolder
-            {
-                K = k,
-                V = v,
+                K = new Tensor[numLayers],
+                V = new Tensor[numLayers],
+                ConvState = new float[numLayers][],
+                ConvWriteIdx = new int[numLayers],
+                DeltaState = new Tensor[numLayers],
                 KvCapacity = cap,
-                CacheSeqLen = 0,
-                KvHostDirty = false,
-                ConvState = convState,
-                ConvWriteIdx = convWriteIdx,
-                DeltaState = deltaState,
-                ConvScratch = convScratch,
-                FdStateResident = false,
-                GdnHostDirty = false,
-                ArenaStateResident = false,
             };
+            bool complete = false;
+            try
+            {
+                int gdnCount = 0;
+                for (int l = 0; l < numLayers; l++)
+                {
+                    if (!_isRecurrent[l])
+                    {
+                        holder.K[l] = new Tensor(_allocator, kvDtype, Config.NumKVHeads, cap, Config.HeadDim);
+                        holder.V[l] = new Tensor(_allocator, kvDtype, Config.NumKVHeads, cap, Config.HeadDim);
+                        InitializeCacheTensor(holder.K[l]);
+                        InitializeCacheTensor(holder.V[l]);
+                    }
+                    else
+                    {
+                        holder.ConvState[l] = new float[checked(Math.Max(0, convDim) * qkvDim)];
+                        holder.DeltaState[l] = AllocateGdnDeltaStateTensor(
+                            _allocator, _useMetalGdnInplaceState, _numVHeads, _headVDim, _headKDim);
+                        Ops.Fill(holder.DeltaState[l], 0);
+                        gdnCount++;
+                    }
+                }
+                nint scratchBytes = checked((nint)((long)Math.Max(1, gdnCount)
+                    * Math.Max(1, convDim) * qkvDim * sizeof(float)));
+                holder.ConvScratch = Marshal.AllocHGlobal(scratchBytes);
+                complete = true;
+                return holder;
+            }
+            finally
+            {
+                if (!complete) DisposeHolder(holder);
+            }
         }
 
         /// <summary>Make <paramref name="requestId"/>'s KV + GDN state the model's
@@ -468,14 +480,21 @@ namespace TensorSharp.Models
         /// arena slot intentionally remains registered: it is keyed by the holder's
         /// stable storage pointer, so a later rebind can continue in place; normal
         /// arena eviction flushes it back to the same holder before retiring it.</summary>
-        public bool RetainSequenceCache(string requestId)
+        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+
+        /// <summary>The key-parameterised form of <see cref="RetainSequenceCache"/>: the finished
+        /// holder of <paramref name="requestId"/> is retained under <paramref name="key"/>
+        /// (the prefix cache's tree-minted payload key, or the request id itself).</summary>
+        public bool RetainSequenceCacheAs(string requestId, string key)
         {
-            if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
+            if (_fusedHolders == null || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(key))
                 return false;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
                 return false;
-            if (_retainedFusedHolders != null && _retainedFusedHolders.ContainsKey(requestId))
+            if (_retainedFusedHolders != null && _retainedFusedHolders.ContainsKey(key))
                 return false;
+            _retainedFusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
 
             if (string.Equals(_activeFusedKey, requestId, StringComparison.Ordinal))
             {
@@ -491,10 +510,8 @@ namespace TensorSharp.Models
                 }
             }
 
+            _retainedFusedHolders.Add(key, holder);
             _fusedHolders.Remove(requestId);
-            _retainedFusedHolders ??=
-                new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
-            _retainedFusedHolders.Add(requestId, holder);
             return true;
         }
 
@@ -510,13 +527,15 @@ namespace TensorSharp.Models
                 return false;
             if (!_retainedFusedHolders.TryGetValue(retainedRequestId, out var holder))
                 return false;
+            if (holder.Retired) return false;
 
             _fusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
             if (_fusedHolders.ContainsKey(newRequestId))
                 return false;
 
-            _retainedFusedHolders.Remove(retainedRequestId);
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
             _fusedHolders.Add(newRequestId, holder);
+            _retainedFusedHolders.Remove(retainedRequestId);
             return true;
         }
 
@@ -530,27 +549,46 @@ namespace TensorSharp.Models
             if (!_retainedFusedHolders.TryGetValue(requestId, out var holder))
                 return;
 
-            _retainedFusedHolders.Remove(requestId);
+            holder.Retired = true;
             RecycleHolder(holder);
+            _retainedFusedHolders.Remove(requestId);
         }
 
         private void RecycleHolder(Qwen35KvCacheHolder holder)
         {
             if (holder == null) return;
+            if (holder.DisposalStarted)
+            {
+                DisposeHolder(holder);
+                return;
+            }
             // The sequence is complete and not retained, so its device-only arena
             // state is no longer observable. Retire the mapping before this stable
             // pointer can be reassigned to another request.
             DiscardArenaSlotForHolder(holder);
-            // A parked holder is re-zeroed and re-seeded when it is next handed out
-            // (ResetHolderForReuse), so its Metal mirrors are dead weight from this
-            // moment on: evict them now rather than at reuse, which may be never.
-            // Metal only, exactly as at reuse -- CUDA keeps its mirrors and graphs.
+            // Retain stable pointers only while host and device headroom can
+            // support the idle set. Count limits alone let evicted conversations
+            // accumulate gigabytes of otherwise unobservable CUDA cache copies.
+            long? spare = GetCacheMemorySpareBytes();
+            long holderBytes = IdleHolderBytes(holder);
+            long pooledBytes = PooledHolderBytes();
+            bool memoryFits = CanPoolIdleCache(holderBytes, pooledBytes, 0, 1, spare);
+            if (!memoryFits)
+            {
+                DisposeHolder(holder);
+                TrimIdleMemory();
+                return;
+            }
+            // A parked Metal holder is re-zeroed and re-seeded at reuse, so its
+            // aliased state mirrors can be evicted now. CUDA retains them while
+            // the measured memory budget permits pointer/graph reuse.
             InvalidateHolderDeviceCopiesForReuse(holder);
             int poolMax = ExecutionOptions.FromEnvironment().KvHolderPoolMax;
             _holderPool ??= new List<Qwen35KvCacheHolder>(Math.Max(1, poolMax));
-            if (_holderPool.Count < poolMax)
+            if (CanPoolIdleCache(holderBytes, pooledBytes, _holderPool.Count, poolMax, spare))
             {
                 _holderPool.Add(holder);
+                holder.Retired = false;
             }
             else
             {
@@ -597,6 +635,7 @@ namespace TensorSharp.Models
             if (_retainedFusedHolders.ContainsKey(key)
                 || (_fusedHolders != null && _fusedHolders.ContainsKey(key)))
                 return false;
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
             // Three places can hold state newer than the host bytes the copy reads: the
             // native arena slot and the K/V device mirrors (EnsureKvCacheHostSynchronized
             // flushes and syncs both), the fused-decode conv scratch and delta mirrors
@@ -606,7 +645,16 @@ namespace TensorSharp.Models
             EnsureFusedDecodeStateHostSynchronized();
             DrainDeviceRecurrentState();
             var copy = DeepCopyHolder(SnapshotActiveCache());
-            _retainedFusedHolders.Add(key, copy);
+            bool published = false;
+            try
+            {
+                _retainedFusedHolders.Add(key, copy);
+                published = true;
+            }
+            finally
+            {
+                if (!published) DisposeHolder(copy);
+            }
             return true;
         }
 
@@ -627,9 +675,20 @@ namespace TensorSharp.Models
                 return false;
             // A checkpoint is never bound, so its host bytes stay the truth; a retained
             // conversation holder may be device-dirty and is re-keyed, never copied.
-            if (source.KvHostDirty || source.GdnHostDirty || source.ArenaStateResident)
+            if (source.KvHostDirty || source.GdnHostDirty || source.ArenaStateResident || source.FdStateResident || source.Retired)
                 return false;
-            _fusedHolders.Add(newRequestId, DeepCopyHolder(source));
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            var copy = DeepCopyHolder(source);
+            bool published = false;
+            try
+            {
+                _fusedHolders.Add(newRequestId, copy);
+                published = true;
+            }
+            finally
+            {
+                if (!published) DisposeHolder(copy);
+            }
             return true;
         }
 
@@ -645,7 +704,10 @@ namespace TensorSharp.Models
         public bool SupportsRetainedCacheSerialization => SupportsPrefixCheckpoints;
 
         private const uint CheckpointFileMagic = 0x51354B43;   // "Q5KC"
-        private const int CheckpointFileVersion = 1;
+        // 2: the M-RoPE delta follows the row count. A version-1 file names no delta,
+        // so it is refused (the prefix is prefilled and saved again in version 2)
+        // rather than restored as if its rows had none.
+        internal const int CheckpointFileVersion = 2;
 
         public unsafe bool TryExportRetainedCache(string key, System.IO.Stream destination)
         {
@@ -655,7 +717,7 @@ namespace TensorSharp.Models
             if (!_retainedFusedHolders.TryGetValue(key, out var h) || h.K == null)
                 return false;
             // Only host-authoritative state can be written: a checkpoint is never bound.
-            if (h.KvHostDirty || h.GdnHostDirty || h.ArenaStateResident || h.FdStateResident)
+            if (h.KvHostDirty || h.GdnHostDirty || h.ArenaStateResident || h.FdStateResident || h.Retired)
                 return false;
 
             int rows = Math.Max(0, Math.Min(h.CacheSeqLen, h.KvCapacity));
@@ -667,6 +729,7 @@ namespace TensorSharp.Models
             w.Write(KVStateFingerprint ?? string.Empty);
             w.Write(numLayers);
             w.Write(rows);
+            w.Write(h.RopeDelta);
             w.Write(Config.NumKVHeads);
             w.Write(Config.HeadDim);
             w.Write(_convKernel);
@@ -710,6 +773,7 @@ namespace TensorSharp.Models
             _retainedFusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
             if (_retainedFusedHolders.ContainsKey(key) || (_fusedHolders != null && _fusedHolders.ContainsKey(key)))
                 return false;
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
 
             var r = new System.IO.BinaryReader(source, System.Text.Encoding.UTF8, leaveOpen: true);
             if (r.ReadUInt32() != CheckpointFileMagic || r.ReadInt32() != CheckpointFileVersion)
@@ -718,7 +782,11 @@ namespace TensorSharp.Models
                 return false;
             int numLayers = r.ReadInt32();
             int rows = r.ReadInt32();
+            int ropeDelta = r.ReadInt32();
             if (numLayers != _kvCacheK.Length || rows < 0 || rows > _maxContextLength)
+                return false;
+            // A position never precedes zero: rows + delta is the next position.
+            if ((long)rows + ropeDelta < 0)
                 return false;
             if (r.ReadInt32() != Config.NumKVHeads || r.ReadInt32() != Config.HeadDim)
                 return false;
@@ -765,6 +833,7 @@ namespace TensorSharp.Models
                     }
                 }
                 h.CacheSeqLen = rows;
+                h.RopeDelta = ropeDelta;
                 h.KvHostDirty = false;
                 h.GdnHostDirty = false;
                 h.FdStateResident = false;
@@ -838,58 +907,70 @@ namespace TensorSharp.Models
             int rows = Math.Max(0, Math.Min(source.CacheSeqLen, source.KvCapacity));
             int cap = Math.Min(source.KvCapacity, CacheCapacityFor(rows));
             var dst = AllocateHolder(Math.Max(cap, 1));
-            int numLayers = Math.Min(source.K.Length, dst.K.Length);
-            for (int l = 0; l < numLayers; l++)
+            bool complete = false;
+            try
             {
-                bool recurrent = l < _isRecurrent.Length && _isRecurrent[l];
-                if (!recurrent)
+                int numLayers = Math.Min(source.K.Length, dst.K.Length);
+                for (int l = 0; l < numLayers; l++)
                 {
-                    if (source.K[l] != null && dst.K[l] != null)
+                    bool recurrent = l < _isRecurrent.Length && _isRecurrent[l];
+                    if (!recurrent)
                     {
-                        CopyCacheRows(source.K[l], dst.K[l], rows);
-                        InvalidateTensorDeviceCache(dst.K[l]);
+                        if (source.K[l] != null && dst.K[l] != null)
+                        {
+                            CopyCacheRows(source.K[l], dst.K[l], rows);
+                            InvalidateTensorDeviceCache(dst.K[l]);
+                        }
+                        if (source.V[l] != null && dst.V[l] != null)
+                        {
+                            CopyCacheRows(source.V[l], dst.V[l], rows);
+                            InvalidateTensorDeviceCache(dst.V[l]);
+                        }
+                        continue;
                     }
-                    if (source.V[l] != null && dst.V[l] != null)
+
+                    if (source.ConvState[l] != null && dst.ConvState[l] != null)
+                        Array.Copy(source.ConvState[l], dst.ConvState[l], Math.Min(source.ConvState[l].Length, dst.ConvState[l].Length));
+                    dst.ConvWriteIdx[l] = source.ConvWriteIdx[l];
+
+                    Tensor from = source.DeltaState[l];
+                    Tensor to = dst.DeltaState[l];
+                    if (from != null && to != null)
                     {
-                        CopyCacheRows(source.V[l], dst.V[l], rows);
-                        InvalidateTensorDeviceCache(dst.V[l]);
+                        long bytes = GdnDeltaStateBytes(from);
+                        if (bytes != GdnDeltaStateBytes(to))
+                            throw new InvalidOperationException("delta-state tensors differ in size");
+                        from.Storage.EnsureHostReadable();
+                        to.Storage.EnsureHostReadable();
+                        // The Metal in-place layout is a VIEW at an offset inside a backing
+                        // [attention output | state] storage: copy the state slice only,
+                        // through the offset pointer, and drop both of the copy's mirrors.
+                        Buffer.MemoryCopy((void*)GdnDeltaStatePointer(from), (void*)GdnDeltaStatePointer(to), bytes, bytes);
+                        if (IsGgmlBackend)
+                            InvalidateGdnDeltaStateDeviceCaches(to);
                     }
-                    continue;
                 }
-
-                if (source.ConvState[l] != null && dst.ConvState[l] != null)
-                    Array.Copy(source.ConvState[l], dst.ConvState[l], Math.Min(source.ConvState[l].Length, dst.ConvState[l].Length));
-                dst.ConvWriteIdx[l] = source.ConvWriteIdx[l];
-
-                Tensor from = source.DeltaState[l];
-                Tensor to = dst.DeltaState[l];
-                if (from != null && to != null)
-                {
-                    long bytes = GdnDeltaStateBytes(from);
-                    if (bytes != GdnDeltaStateBytes(to))
-                        throw new InvalidOperationException("delta-state tensors differ in size");
-                    from.Storage.EnsureHostReadable();
-                    to.Storage.EnsureHostReadable();
-                    // The Metal in-place layout is a VIEW at an offset inside a backing
-                    // [attention output | state] storage: copy the state slice only,
-                    // through the offset pointer, and drop both of the copy's mirrors.
-                    Buffer.MemoryCopy((void*)GdnDeltaStatePointer(from), (void*)GdnDeltaStatePointer(to), bytes, bytes);
-                    if (IsGgmlBackend)
-                        InvalidateGdnDeltaStateDeviceCaches(to);
-                }
+                dst.CacheSeqLen = source.CacheSeqLen;
+                dst.RopeDelta = source.RopeDelta;
+                dst.KvHostDirty = false;
+                dst.GdnHostDirty = false;
+                dst.FdStateResident = false;
+                dst.ArenaStateResident = false;
+                dst.Logits = null;
+                complete = true;
+                return dst;
             }
-            dst.CacheSeqLen = source.CacheSeqLen;
-            dst.KvHostDirty = false;
-            dst.GdnHostDirty = false;
-            dst.FdStateResident = false;
-            dst.ArenaStateResident = false;
-            dst.Logits = null;
-            return dst;
+            finally
+            {
+                if (!complete) DisposeHolder(dst);
+            }
         }
 
         private void DisposeHolder(Qwen35KvCacheHolder holder)
         {
             if (holder == null) return;
+            holder.Retired = true;
+            holder.DisposalStarted = true;
 
             // Persistent whole-model decode graphs capture the device addresses
             // backing this holder's K/V and recurrent-state mirrors.  Drop those
@@ -898,33 +979,42 @@ namespace TensorSharp.Models
             // freed device memory.  Releases are infrequent (one per completed
             // concurrent request), so rebuilding the surviving holders' graphs on
             // their next token is a small price for deterministic lifetime safety.
-            if (IsGgmlBackend)
+            // A batched release (DiscardRetainedCaches) resets once, before its
+            // first disposal, and suppresses the per-holder reset here.
+            if (IsGgmlBackend && _holderGraphResetSuppressed == 0)
             {
                 GgmlBasicOps.Qwen35ResetDecodeCache();
                 // Persistent fused prefill/spec verify graphs bind the same
                 // holder K/V and recurrent-state buffers. Release them before
                 // invalidating those host keys as well.
                 InvalidateVerifyCache();
+                CountDecodeGraphReset();
             }
 
             if (holder.K != null)
-                foreach (var t in holder.K)
+                for (int i = 0; i < holder.K.Length; i++)
                 {
+                    var t = holder.K[i];
                     InvalidateTensorDeviceCache(t);
                     t?.Dispose();
+                    holder.K[i] = null;
                 }
             if (holder.V != null)
-                foreach (var t in holder.V)
+                for (int i = 0; i < holder.V.Length; i++)
                 {
+                    var t = holder.V[i];
                     InvalidateTensorDeviceCache(t);
                     t?.Dispose();
+                    holder.V[i] = null;
                 }
             if (holder.DeltaState != null)
-                foreach (var t in holder.DeltaState)
+                for (int i = 0; i < holder.DeltaState.Length; i++)
                 {
+                    var t = holder.DeltaState[i];
                     if (IsGgmlBackend)
                         InvalidateGdnDeltaStateDeviceCaches(t);
                     t?.Dispose();
+                    holder.DeltaState[i] = null;
                 }
             if (holder.ConvScratch != IntPtr.Zero)
             {
@@ -946,6 +1036,7 @@ namespace TensorSharp.Models
                     recurrentSlot++;
                 }
                 Marshal.FreeHGlobal(holder.ConvScratch);
+                holder.ConvScratch = IntPtr.Zero;
             }
         }
 

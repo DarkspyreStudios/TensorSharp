@@ -458,9 +458,21 @@ namespace TensorSharp.Models
             _quantBackendReady = true;
         }
 
+        /// <summary>
+        /// Key prefix of this file's hyperparameters (<c>&lt;prefix&gt;.block_count</c>, ...)
+        /// when it differs from <see cref="ModelConfig.Architecture"/>. Null means the two
+        /// are the same, which is true of nearly every GGUF. A family served from a
+        /// generically labelled file (a Mistral 3 checkpoint converted as
+        /// <c>general.architecture = llama</c>) keeps its own protocol id in
+        /// <see cref="ModelConfig.Architecture"/>, so chat rendering, output parsing and
+        /// capability lookups still select the family, while the hyperparameters are read
+        /// under the prefix the converter actually wrote.
+        /// </summary>
+        protected string MetadataArchitecture { get; set; }
+
         protected void ParseBaseConfig()
         {
-            string arch = Config.Architecture;
+            string arch = MetadataArchitecture ?? Config.Architecture;
             Config.NumLayers = (int)_gguf.GetUint32($"{arch}.block_count");
             Config.HiddenSize = (int)_gguf.GetUint32($"{arch}.embedding_length");
             Config.NumHeads = (int)_gguf.GetUint32($"{arch}.attention.head_count");
@@ -488,7 +500,8 @@ namespace TensorSharp.Models
             if (!string.IsNullOrWhiteSpace(ctxEnv) && int.TryParse(ctxEnv, out int envCtx) && envCtx > 0)
                 explicitOverride = envCtx;
 
-            string architecture = Config?.Architecture
+            string architecture = MetadataArchitecture
+                ?? Config?.Architecture
                 ?? _gguf.GetString("general.architecture")
                 ?? string.Empty;
             int modelContextLength = ResolveModelContextLength(
@@ -1012,7 +1025,8 @@ namespace TensorSharp.Models
             IReadOnlyList<string> vocabTokens,
             int eosId,
             IEnumerable<int>? extraEosIds = null,
-            int? declaredEotId = null)
+            int? declaredEotId = null,
+            int? declaredEomId = null)
         {
             var ids = new HashSet<int>();
             if (eosId >= 0 && eosId < vocabTokens.Count)
@@ -1025,6 +1039,11 @@ namespace TensorSharp.Models
             }
             if (declaredEotId is int eotId && eotId >= 0 && eotId < vocabTokens.Count)
                 ids.Add(eotId);
+            // llama.cpp also folds tokenizer.ggml.eom_token_id (end of message) into the
+            // EOG set. GLM-5.x declares <|observation|> there: the turn ends after a tool
+            // call, and without it the model writes the tool result itself.
+            if (declaredEomId is int eomId && eomId >= 0 && eomId < vocabTokens.Count)
+                ids.Add(eomId);
 
             for (int id = 0; id < vocabTokens.Count; id++)
             {
@@ -1135,8 +1154,11 @@ namespace TensorSharp.Models
             int? declaredEotId = gguf.Metadata.ContainsKey("tokenizer.ggml.eot_token_id")
                 ? (int)gguf.GetUint32("tokenizer.ggml.eot_token_id")
                 : null;
+            int? declaredEomId = gguf.Metadata.ContainsKey("tokenizer.ggml.eom_token_id")
+                ? (int)gguf.GetUint32("tokenizer.ggml.eom_token_id")
+                : null;
             var eosIds = new List<int>(ResolveEogTokenIds(
-                vocabTokens, eosId, extraEos, declaredEotId));
+                vocabTokens, eosId, extraEos, declaredEotId, declaredEomId));
 
             // llama.cpp folds the declared end-of-turn control into the EOG set
             // for EVERY tokenizer type (llama_vocab::impl::load inserts
@@ -1156,6 +1178,11 @@ namespace TensorSharp.Models
             }
 
             var merges = gguf.GetStringArray("tokenizer.ggml.merges");
+            if (merges == null)
+                throw new System.IO.InvalidDataException(
+                    "GGUF tokenizer metadata is incomplete: tokenizer.ggml.model=" + tokenizerModel +
+                    " is a BPE vocabulary but the file carries no tokenizer.ggml.merges array. " +
+                    "Re-convert the checkpoint (or, for a synthetic fixture, add an empty merges array).");
             // tokenizer.ggml.model=gemma4 is an SPM-style BPE vocabulary,
             // not a unigram SentencePiece vocabulary.  It does not need a
             // tokenizer.ggml.pre entry: the model name selects its raw
@@ -2341,6 +2368,13 @@ namespace TensorSharp.Models
         /// <summary>See <see cref="IModelArchitecture.KVCacheTruncationGranularity"/>.</summary>
         public virtual int KVCacheTruncationGranularity => 1;
 
+        /// <summary>See <see cref="IModelArchitecture.CanTruncateKVCache"/>.</summary>
+        public virtual bool CanTruncateKVCache(int cachedTokenCount, int targetTokenCount)
+            => targetTokenCount >= 0 && targetTokenCount <= cachedTokenCount
+                && (targetTokenCount == cachedTokenCount
+                    || (SupportsKVCacheTruncation
+                        && targetTokenCount % Math.Max(1, KVCacheTruncationGranularity) == 0));
+
         protected virtual void TruncateKVCacheCore(int tokenCount)
         {
             Console.WriteLine($"[KV cache] Truncating from {_cacheSeqLen} to {tokenCount}");
@@ -2435,6 +2469,15 @@ namespace TensorSharp.Models
         /// (e.g. Gemma 4) override this with their window size.
         /// </summary>
         public virtual int MaxReusablePrefixTokens => int.MaxValue;
+
+        /// <summary>Whether a cache holding a media span can be continued past it
+        /// exactly (see <see cref="IModelArchitecture.SupportsReuseAcrossMediaSpan"/>).
+        /// True for absolute-position families and for M-RoPE models that store the
+        /// rope delta with the cache (Qwen 3.5 / 3.6).</summary>
+        public virtual bool SupportsReuseAcrossMediaSpan => true;
+
+        /// <summary>See <see cref="IModelArchitecture.CanPrefillMediaAfterReusedPrefix"/>.</summary>
+        public virtual bool CanPrefillMediaAfterReusedPrefix(int promptTokens) => true;
 
         /// <summary>
         /// Stable identifier tying snapshots to a specific (model, layer count,
@@ -2637,6 +2680,44 @@ namespace TensorSharp.Models
 
             if (_allocator is IDisposable allocatorDisposable)
                 allocatorDisposable.Dispose();
+        }
+
+        /// <summary>
+        /// The refusal a whole-model native executor's loader returned (a null handle),
+        /// after releasing what this partially constructed model already holds.
+        /// </summary>
+        /// <remarks>
+        /// The loaders free their own half-built state; the managed side still holds the
+        /// GGUF mapping and allocator the base constructor opened, and nothing else will
+        /// dispose an object whose constructor threw. The native loaders record their
+        /// refusal (not enough VRAM, a <c>--tp</c> layout that cannot fit, a missing
+        /// shard) as the thread's last error, so the exception carries the reason itself
+        /// rather than pointing at stderr, which a host that exits no longer shows.
+        /// </remarks>
+        /// <param name="family">Short family name for the fallback message.</param>
+        /// <param name="ggufPath">The model file being loaded.</param>
+        /// <param name="hintWithoutReason">Extra advice used only when the loader
+        /// recorded no reason.</param>
+        private protected ModelLoadRefusedException NativeLoadRefused(string family, string ggufPath,
+            string hintWithoutReason = null)
+        {
+            string reason = GgmlBasicOps.LastNativeError(null);
+            try
+            {
+                Dispose();
+            }
+            catch (Exception disposeEx)
+            {
+                Console.Error.WriteLine(
+                    $"[{family}] releasing the refused load also failed: {disposeEx.GetType().Name}: {disposeEx.Message}");
+            }
+
+            string file = System.IO.Path.GetFileName(ggufPath);
+            return string.IsNullOrWhiteSpace(reason)
+                ? new ModelLoadRefusedException(
+                    $"The native {family} loader declined {file}; its reason is the [{family}] line printed to stderr above." +
+                    (string.IsNullOrEmpty(hintWithoutReason) ? string.Empty : " " + hintWithoutReason))
+                : new ModelLoadRefusedException($"{reason.Trim()} (model: {file})");
         }
 
         /// <summary>

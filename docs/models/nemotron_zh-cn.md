@@ -10,8 +10,9 @@
 | 视觉编码器 | [`NemotronVisionEncoder`](../../TensorSharp.Models/Models/Nemotron/NemotronVisionEncoder.cs)（RADIO / v2_vl ViT） |
 | 图像处理器 | [`NemotronImageProcessor`](../../TensorSharp.Models/Models/Nemotron/NemotronImageProcessor.cs) |
 | 音频前端 | [`NemotronAudioPreprocessor`](../../TensorSharp.Models/Models/Nemotron/NemotronAudioPreprocessor.cs)（Parakeet 风格 log-mel） |
+| 音频编码器 | [`NemotronAudioEncoder`](../../TensorSharp.Models/Models/Nemotron/NemotronAudioEncoder.cs)（Parakeet/FastConformer + 声音投影器；需要任何公开仓库都不提供的配套 GGUF，见 §4.7） |
 | 示例模型 | Nemotron-H-8B-Reasoning-128K、Nemotron-H-47B-Reasoning-128K、Nemotron 3 Nano Omni |
-| 模态 | 文本、图像（Omni 版本配合 `mmproj`）。音频已经被预处理用于 Omni 发布版本，但推理需要一个尚未随这些 GGUF 一起发布的 Parakeet `mmproj`。 |
+| 模态 | 文本、图像（Omni 版本配合 `mmproj`）。只有加载了带 Parakeet 音频塔的配套 GGUF 时才支持音频（§4.7）；否则音频会被**拒绝**（HTTP 400 / CLI 错误，消息为 `NemotronModel.AudioInputUnsupportedMessage`）：公开的 Omni GGUF 不带音频塔，`mmproj` 里只有 RADIO 视觉塔（见 §4.6）。 |
 | 思维链模式 | 是（`<think> ... </think>`） |
 | 工具调用 | 是（`<tool_call>{...}</tool_call>`） |
 | 批处理 / 分页前向 | **默认启用** —— 设置 `TS_NEMOTRON_BATCHED=0` 可强制走旧的按序列 KV-swap 路径用于 A/B 对比。每槽位 Mamba2 conv + SSM 状态池，注意力层使用分页 K/V。可选的原生批处理 Mamba2 步内核（`TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1`）。详见 §11。 |
@@ -27,9 +28,11 @@
 | Nemotron-H-47B-Reasoning-128K | [bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF](https://huggingface.co/bartowski/nvidia_Nemotron-H-47B-Reasoning-128K-GGUF) | `nvidia_Nemotron-H-47B-Reasoning-128K-Q4_K_M.gguf`（28.188 GB） | —（仅文本） |
 | Nemotron 3 Nano Omni 30B-A3B | [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) | `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf`（23.927 GB） | `mmproj-BF16.gguf`（1.590 GB；同仓库）—— **图像输入必需** |
 
-Omni 的 `mmproj` 只启用**图像输入**。音频文件会被预处理（log-mel）用于校验，
-但真正的音频推理需要 Parakeet 音频 mmproj，而这些 GGUF 发行版并未附带
-（见 §4.6）。
+Omni 的 `mmproj` 只启用**图像输入**：它只包含 32 层 RADIO 视觉塔
+（`v.blk.*`、`v.patch_embd`、`v.position_embd`）和 `nemotron_v2_vl` 的 MLP
+投影器（`mm.model.mlp.*`），元数据只有 `clip.has_vision_encoder`，没有任何音频
+项；语言模型 GGUF 也只有 `<so_embedding>` 占位 token。因此只加载这些文件时，音频附件会在
+请求层被**拒绝**（HTTP 400），而不是被解码后丢弃（见 §4.6）；音频需要单独准备的配套 GGUF（§4.7）。
 
 这些转换仓库将 NVIDIA 对应的 Nemotron 仓库标记为上游。上游模型卡使用
 NVIDIA 特定条款（`other`）；两个 bartowski 转换仓库未声明许可证。再分发前请阅读 NVIDIA 基础模型条款。
@@ -62,7 +65,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --model models/NVIDIA
 
 ## 1. 来源与目标
 
-Nemotron-H 是 NVIDIA 的混合 **Mamba2 + Transformer** 系列。同一套 backbone 同时覆盖密集 `nemotron_h` 系（如 Nemotron-H-8B / 47B）与 MoE `nemotron_h_moe` 系。Omni 发布（Nemotron 3 Nano Omni）额外携带 RADIO / v2_vl 视觉编码器（通过 `mmproj` 提供）。TensorSharp 还为 Omni 系实现了 Parakeet 风格的音频预处理器，但真正的音频推理需要一个公开 GGUF 并未附带的 Parakeet 音频 mmproj（见 §4.6）—— 图像是唯一实际可用的额外模态。
+Nemotron-H 是 NVIDIA 的混合 **Mamba2 + Transformer** 系列。同一套 backbone 同时覆盖密集 `nemotron_h` 系（如 Nemotron-H-8B / 47B）与 MoE `nemotron_h_moe` 系。Omni 发布（Nemotron 3 Nano Omni）额外携带 RADIO / v2_vl 视觉编码器（通过 `mmproj` 提供）。TensorSharp 还为 Omni 系实现了 Parakeet 风格的音频预处理器及其音频塔（24 层 Parakeet/FastConformer 编码器加声音投影器，`NemotronAudioEncoder`），但这些权重不在任何公开 GGUF 里：只用公开文件时图像是唯一实际可用的额外模态，音频会被拒绝（见 §4.6）；由 NVIDIA 检查点转换得到的配套 GGUF 可以启用音频（见 §4.7）。
 
 它的核心特征：
 
@@ -256,7 +259,24 @@ Parakeet 风格 log-mel 频谱提取（镜像 ollama 的 `process_audio.go`）�
 - Slaney 风格 mel 滤波器组，128 bins，0..8 kHz。
 - `log(power + 2⁻²⁴)`，对有效（非 padding）帧做 per-mel 均值 / 方差归一化。
 
-聊天模板对每个上传音频文件发出一个 `<so_embedding>` token 让模型「看到」该模态，但真正的音频推理依赖 Parakeet 音频 mmproj —— 当前发行的公开 Nemotron-H 或 Nemotron Omni GGUF 都不带这个。音频片段仍会被解码并计算 log-mel 频谱以验证前端管线，并且每个会话只提示一次为什么不会进行音频推理。该逻辑位于 `ModelMultimodalInjector`，与该架构其余媒体处理放在一起，因此 CLI、交互式 REPL 与服务端行为一致；它此前只存在于 CLI 中，导致服务端会静默忽略音频。
+聊天模板对每个上传音频文件发出一个 `<so_embedding>` token，但没有任何东西能填充它：把 log-mel 帧变成 embedding 的 Parakeet/FastConformer 编码塔及其后面的投影器都不在公开的 Nemotron 3 Nano Omni GGUF 里。unsloth 仓库的 `mmproj-BF16.gguf` 恰好 390 个张量 —— 32 个 `v.blk.*` 视觉块、`v.patch_embd` / `v.position_embd` / `v.class_embd` 以及三个 `mm.model.mlp.*` 投影器张量 —— 元数据 `clip.has_vision_encoder=true`，没有任何音频键；401 个张量的语言模型 GGUF 同样没有音频张量。上游 llama.cpp 对同一检查点的回答是 "This model does not support audio input"；那边的音频需要社区分支加上带音频塔的统一 `mmproj`。
+
+因此除非从配套 GGUF 加载了音频塔（§4.7），TensorSharp 对该家族**拒绝**音频，而不是像以前那样解码音频、打印警告、然后当作没有音频继续生成（那样模型看到的是未填充的 `<so_embedding>`，只按文本作答）。一张表 `AudioInputSupport.UnsupportedReasonFor` 通过架构注册表按架构查找，覆盖全部别名（`nemotron_h`、`nemotron_h_moe`、`nemotron_h_omni`），并参考已加载模型的 `NemotronModel.IsAudioEncoderLoaded`，驱动每一个入口：
+
+- `/v1/chat/completions` 与 `/v1/responses` 在写入任何上传之前扫描整个请求，对任何 `input_audio` / `audio_url` 部分（包括畸形的、以及排在图像之后的）返回 **400** `invalid_request_error`，消息为 `NemotronModel.AudioInputUnsupportedMessage`；只有图像的请求仍正常解析。
+- Web UI 在打开流之前以同一消息返回 400。
+- CLI 在模型加载完成后、解码音频或生成任何一轮之前拒绝 `--audio`，REPL 的 `/audio` 拒绝挂载该文件。
+- `ModelMultimodalInjector.ProcessNemotronHistory` 对绕过上述关卡的调用者抛出带同一消息的 `NotSupportedException`。
+
+`NemotronAudioRefusalTests` 覆盖这些关卡（有无已加载的音频塔两种情况），`NemotronOmniMmprojContractTests`（由 `TS_TEST_NEMOTRON_MMPROJ` 门控）钉住公开 mmproj 只含视觉塔的布局；如果将来某个发行版在该文件里带上了音频塔，它会最先失败。
+
+### 4.7 音频塔（`NemotronAudioEncoder`，配套 GGUF）
+
+`NemotronAudioEncoder` 运行 NVIDIA 的 Parakeet/FastConformer 编码器（下采样卷积、相对位置注意力、卷积块）以及把输出投影到语言模型隐藏维度的 `sound_projection` MLP，每段音频单独编码，因此相邻音频的填充既不会改变它的长度，也不会泄漏进它的双向注意力。它读取一个**配套 GGUF**：保留官方 `sound_encoder.encoder.*` / `sound_projection.*` 张量名，超参数放在 `nemotron.audio.*`（`general.architecture=nemotron_audio`）。没有任何公开仓库提供这样的文件；从 NVIDIA BF16 检查点提取它的转换脚本与证据一起归档在 [`docs/validation/qualification-2026-09-16/nemotron-audio-cpu`](../validation/qualification-2026-09-16/nemotron-audio-cpu/README.md)（`reference-scripts/prepare.py`；`prepare_f32.py` 写出同样的权重并设置 `nemotron.audio.compute_bf16=false`）。
+
+加载看的是张量，而不是开关。`LoadProjectors` 把 `--mmproj` 路径交给两个塔：文件含 `v.*` 张量时才加载视觉编码器，含 `sound_projection.linear2.weight` 时才加载音频编码器（若 `TS_NEMOTRON_AUDIO_MMPROJ` 指定了文件，则改从该文件加载，这样视觉 mmproj 与音频配套文件可以同时使用）。编码器随后校验每个张量形状与 Parakeet 采样配置，投影宽度必须等于语言模型隐藏维度；残缺或不匹配的配套文件会以 `InvalidDataException` 使加载失败，而不是被继续使用。只有这之后 `IsAudioEncoderLoaded` 才会解除 §4.6 的拒绝，`ProcessNemotronHistory` 针对原始 prompt 规划每张图像和每段音频（`PlanNemotronMedia`，按模态保持附件顺序），把每个 `<so_embedding>` 展开为 `<so_start>` + N + `<so_end>`，并排队投影后的行。
+
+已确立的内容（仅 CPU；见证据 README）：Parakeet mel 前端在六段音频上与独立参考一致（`NemotronAudioInputTests`）；编码器与投影器在 8 与 128 mel 的小型 fixture 上、F32 与 BF16 计算、托管与 GGML CPU 路径下都与官方 Transformers 模块一致（`NemotronAudioEncoderTests`）；两段音频的注入与切片排队保持精确的行以及各请求独立的保留（`NemotronAudioInjectorTests`）。在官方训练好的配套权重上，显式 F32 计算配置 8,064 个输出值全部一致；原始 BF16 计算配置仍然**失败**（容差不变下 3,794/8,064，第一处差异是第 0 层的 BF16 舍入边界）。语音回答质量、GPU 执行与延迟均未经过验证。
 
 ## 5. 参数与配置
 
@@ -340,8 +360,9 @@ blk.{L}.ffn_down_shexp.weight
 
 - **Per-layer 派发表**（`_layerPrefixes`、`_layerWeightNames`）避免热循环里的字符串拼接。
 - **MoE prefill** 仍然 per token 迭代。每 token 用批量 MoE GPU kernel（`MoEExpertsForward`），所以一次派发跑完所有被选 expert，但 token 循环还是托管 C# —— 见下方优化机会。
-- **Attention prefill** 走标准托管循环。Nemotron-H 还没有融合 prefill attention kernel，因为 attention 层没有 RoPE，得分张量也比较小（不需要 SWA 窗口的 machinery）。
+- **Attention prefill** 在有界工作集内让每个 prompt chunk 与已驻留的 K/V 做注意力。GGML 后端且 cache 为 F32 / F16 时走融合 prefill kernel（`GgmlBasicOps.FusedPrefillAttention` / `FusedPrefillAttentionF16KV`），它直接读取分组 cache，得分张量较大时切换到 `ggml_flash_attn_ext`。其他情况（非 GGML 后端、块量化 cache）按 query 子块计算，使单个 `[heads, rows, context]` 得分张量不超过 `TS_NEMOTRON_ATTN_SCORE_BUDGET_MB`（默认 1024）。此前每层都物化整个 `[heads, chunk, context]` 得分张量：8B 上 32k prompt 深处的 4,096 token chunk 向 ggml-cuda 申请 37 GB（47B 在 8k 时 12.5 GB），所有长请求都以 HTTP 500 失败。同一份代码也服务 `nemotron_h_moe`（Nemotron 3.5、Nemotron 3 Nano Omni）。
 - **Mamba2 prefill** 顺序处理 token（按 `seqLen` 循环）跑 SSM scan；分块并行扫描在优化清单上。
+- **Mamba2 prefill 计算图**（`TSGgml_NemotronMamba2PrefillF32`）按 chunk 长度缓存，计算图的所有中间张量都驻留在缓存的 buffer 中：8B 上 4,096 token 的 chunk 约 2.7 GB，47B 上约 5.5 GB。缓存受字节预算 `TS_MAMBA2_PREFILL_CACHE_MB`（默认 1024）约束，按最近最少使用淘汰；大于整个预算的计算图只服务当次调用后即释放。此前每种不同的 chunk 长度都会永久保留，47B 处理完 32k prompt 后设备内存耗尽，下一个并发 decode 步骤分配失败并返回 HTTP 500。
 - **多模态 prefill** 支持按 prompt chunk 切片已准备好的图像 / 音频 embedding span，因此长图像 prompt 不再必须作为一个超大的 forward pass 执行。
 - **多模态 warmup** 在加载 Nemotron `mmproj` 的服务器启动阶段运行一次小的视觉编码和 image-token prefill，把 Metal pipeline 初始化从第一个真实图像请求前移；设置 `TS_NEMOTRON_MULTIMODAL_WARMUP=0` 可关闭。
 
@@ -403,6 +424,13 @@ Nemotron-H 是所有批处理移植里最复杂的，因为它结合了**三种�
 - 按序列的注意力派发使用 `ManagedPagedAttention.Forward`（纯 C# 在线
   softmax 内核）作为正确性参考；同时通过 `GgmlBasicOps` 接入了原生分页
   内核路径。
+- 原生主机数组内核（`TSGgml_PagedAttentionForward`）按形状桶缓存一份计算图和
+  后端缓冲，并把 K/V 填充到桶长。构建会话时现在会清零该缓冲：后端缓冲本身不保证为零，
+  而 CUDA flash attention 仍会读取被 `-inf` 掩码的填充 key，因此被释放缓冲留下的
+  NaN（例如一个长提示结束之后）会让下一次批处理 prefill 的每一行都变成 NaN。
+  Nemotron 3.5 随后在 `TryMoEPrefillBatchedByExpert` 中抛出
+  `IndexOutOfRangeException`（NaN 行没有 top-k），整个 4 序列步失败。
+  现在 MoE 路由器会按层和行号报告非有限值的行。
 
 ### Mamba2 层 —— 每槽位 conv + SSM 状态池
 
@@ -416,6 +444,14 @@ Nemotron-H 是所有批处理移植里最复杂的，因为它结合了**三种�
   标志。
 
 槽位在首次访问时分配，序列在引擎中被回收时释放。
+
+**驻留在设备上的递归状态。** 原生单 token Mamba2 decode kernel 在 token 之间把每个序列的 conv/SSM 状态留在设备上（每层每 token 下载约 2 MB 的代价超过 kernel 省下的时间），所以 decode 之后 host 数组是过期的。所有读取 host 状态的地方都会先通过 `TSGgml_NemotronMamba2DecodeReadState`（`SyncMamba2HostState`）把设备状态拷回：继续同一序列的托管 / 原生多 token forward、按块 KV 快照、第二个请求到达时把单序列 owner 迁移进槽位池、原生批处理步，以及投机解码快照。此前它们读到的都是第一个 decode token 之前的状态，因此并发请求（会在按序列路径和批处理路径之间交接序列）的贪心输出与单独服务同一请求时不同——8B 在并发 4 时出现 `101`、`1000000...` 以及重复循环。旧的单序列路径使用独立的 decode cache 槽位（`LegacyMamba2Slot`），批处理序列占用 slot 0 时不会再覆盖它的设备状态。若原生库早于该导出函数，decode kernel 会改为每个 token 下载状态（结果正确、速度较慢），并在 stderr 提示一次。
+
+**并发交接。** 另外三个缺陷让并发批次中的请求回答与单独服务时不同（8B 上 `17 + 25` 被回答成 `18`、`35`、空回答或其他 prompt 的内容），均与 kernel 数值无关：
+
+- *分页池扩容清空了在用的 K/V。* `EnsureNemoPagedBuffers` 扩容 block 池时复用了外层按层数组，新 buffer 在拷贝读取旧 buffer 之前就替换了它。在首次引入更大 block id 的那一步（新请求的 prefill，或刚迁移进来的单序列 owner）中 decode 的序列都会对全零做注意力。现在扩容时新建外层数组，与 Qwen 3、Qwen 3.5、Gemma 4、Mistral 3 的移植一致。
+- *所有权切换时借用的 logits。* 单独前向一个序列的步骤会让它借用模型可复用的 logits buffer，直到它采样。若新请求先取得所有权，其 `Forward` 会改写该 buffer，被换出的 owner 于是从新请求的 logits 中采样下一个 token。`BatchExecutor.EnsureOwnership` 现在给被换出的 owner 一份自己的拷贝。此问题与模型无关，也正是 `TS_NEMOTRON_BATCHED=0` 在并发下出错的原因。
+- *未清零的分页注意力 session。* `TSGgml_PagedAttentionForward` 按 query 数与 2 的幂 K/V bucket 缓存计算图，只上传前 `seq_len` 行，bucket 其余部分被 mask。session 假定其 backend buffer 初始为零，但 cudaMalloc 并不保证；CUDA flash attention kernel 会先为被 mask 的 key 计算 `q.k` 再加上 `-inf` mask：残留且溢出的 key 得到 `inf + -inf = NaN`，整行变为 NaN。现在 session 构建时清零其 buffer（所有使用原生分页 kernel 的模型共用）。这被作为 47B 在 32k prompt 之后某个批次一直解码出 `<unk>` 的可能原因修复；合成复现无法迫使分配器交还脏内存，因此两者的关联尚未证实。
 
 **原生批处理 Mamba2 步内核** —— `TSGgml_NemotronMamba2BatchedStepF32`
 （[`ggml_ops_mamba2.cpp`](../../TensorSharp.GGML.Native/ggml_ops_mamba2.cpp)）
@@ -441,6 +477,8 @@ Nemotron-H 是所有批处理移植里最复杂的，因为它结合了**三种�
 
 - 文本 prompt 上与旧路径**100% 贪心一致**
   （[`NemotronBatchedCorrectnessTests`](../../InferenceWeb.Tests/NemotronBatchedCorrectnessTests.cs)）。
+- 在按序列路径（`TS_NEMOTRON_BATCHED=0`）上，并发请求（同时到达、在第一个请求已在 decode 时加入、以及四客户端 worker pool）与单独服务每个请求得到完全相同的贪心 token：该路径使用相同的 kernel，并把状态换入换出。批处理路径上，把同一历史回放到单序列 forward 时，所选的每个 token 都是接近最高分的 token。批处理路径不保证逐 token 完全一致：批处理步骤使用不同的 kernel（分页 F32 注意力而非 F16 cache、依赖批次组成的量化 matmul），在 8B 上与单序列 logits 只相差 max|dlogit| 0.3-1.4，前两名候选落在该范围内的 prompt 可能翻转。decode 之后继续同一序列的多 token forward 与从头 prefill 一致，在扩容分页池的步骤中 decode 的序列也保留其历史
+  （[`NemotronHServingRegressionTests`](../../InferenceWeb.Tests/NemotronHServingRegressionTests.cs)，需要 `TS_TEST_NEMOTRON_H_DIR` 与 `TS_TEST_GGML_BACKEND=cuda|metal`）。
 - 多模态 prompt 的正确性已被结构性验证（在移除多模态预检拒绝后纯文本仍
   100%），但缺少本地 audio/image fixture 用于端到端验证。
 
@@ -462,10 +500,26 @@ GgmlMetal、进程内 legacy-vs-batched 切换；详见
 在 class-load 时捕获环境变量 —— 测试在运行时设置 `TS_NEMOTRON_BATCHED=1`
 实际无法切换路径。现在改为方法 getter（与 Qwen 3.5 的写法一致）。
 
+### 投机解码被拒绝
+
+Nemotron-H 不做投机解码：`--draft-model` 不会挂载 DSpark/DFlash 草稿器（Nemotron 3.5
+Lightning 的 `NVFP4-DSpark` GGUF 会被识别并报告“未挂载”；服务器在 `--draft-model` 指定它时会在启动阶段失败并提示去掉该参数），`--spec` 或
+`--spec-type ngram` 也只提供普通解码，并打印一次警告。原因是正确性：投机输出必须与普通贪心解码一致，
+而在这个主干上，多 token verify 与单 token decode 使用不同的注意力内核（基于展开缓存的主机端注意力 vs.
+flash-attention decode 内核）和不同的 MoE 内核（按专家批处理 vs. 逐 token 内核）。在 `nemotron_h_moe`
+（A40，`ggml_cuda`）上实测：单行投机步与 `Forward` 的 logits 相差 0.16-1.1，verify 各行相差 0.2-0.8，
+足以翻转低置信度的贪心选择（2026-09-16 验证中每个单序列 DSpark 请求都发生了偏离）。Mamba-2 的快照 / 回滚是精确的。
+把注意力和 MoE 逐行运行可以让 verify 精确，但 4 行需要 116 ms，而一个 decode 步只要 28 ms（另加每个 DSpark 块 70 ms），
+因此精确的 verify 无法快过普通解码。详见 [投机解码](../speculative_decoding.md#nemotron-h-refuses-speculation)。
+
 ## 12. 输出解析器与聊天模板
 
-- `ChatMlOutputParser` 解析 `<think> ... </think>` 思维链与 `<tool_call>{...}</tool_call>` 工具调用。
-- 聊天模板使用 ChatML 格式（`<|im_start|>` / `<|im_end|>`）。多模态占位符包括 `<image>`（之后展开为 `<img>` + N 个 token + `</img>`）与 `<so_embedding>`（音频）。
+- `ChatMlOutputParser` 解析 `<think> ... </think>` 思维链与 `<tool_call>{...}</tool_call>` 工具调用。单个 `<tool_call>` 内的 JSON 调用对象列表同样被接受（Reasoning-128K checkpoint 自身的工具格式就是列表，模型会退回到该格式），其他任何 JSON 形状的调用体不产生调用。此前这样的调用体会让解析器抛出异常并中断流式 HTTP 响应。
+- `response_format` 可以与 `"think": true` 同时使用。开启思考时 prompt 在 assistant 标记后预置 `<think>\n`（Nemotron 3.5 的 GGUF 模板也是如此），因此 JSON 语法在推理期间保持休眠，并在模型输出 `</think>` 后启用（`ThinkingGrammarActivationTrigger`）。此前该组合返回 HTTP 400。`</think>` 同时是该家族的 `ThinkingBudgetEndToken`：Nemotron 3.5 / Omni 的词表中它是单个 token，达到 `TS_THINKING_BUDGET`（输出额度不少于 512 token 时为 75%）时会输出它，受约束的答案在原有 `max_tokens` 内继续。Nemotron-H Reasoning-128K 的 GGUF 用多个 token 拼出 `</think>`，因此保留带说明的 `thinking_budget` 停止。在 Nemotron 3.5 Lightning IQ4_XS（Metal）上实测：`max_tokens` 为 256 时推理就用完了全部额度（content 为空，`finish_reason=length`）；为 1024 时 json / json_schema / json_unicode 在 c1 全部通过，json_schema / json_unicode 在 c4 为 4/4。json 在 c4 为 1/4：四个请求中有三个是在针对另一个 prompt 推理（"User says: Mars"），这是另行跟踪的批量 prefill 损坏问题。
+- `</think>` 与 JSON 之间的空白属于前导部分（`GrammarConstraint.ActivateAfter(trigger, skipLeadingWhitespace: true)`，仅 `response_format` 使用）。Nemotron-H 8B Reasoning-128K 的词表把 `</think>\n\n` 切成 `</think` + `>\n\n`；JSON 根不能以换行开头，于是该 token 被屏蔽，模型改写 `</think}`，触发词始终不匹配，整个回复都停留在推理中（content 为 null，`json_schema` 返回 HTTP 422）。在 Nemotron-H 8B Q4_K_M（RTX PRO 6000，`--thinking`，c1 与 c4，重复三次，`max_tokens` 256）上实测：修复前有 10 个回复写出 `</think}`，修复后没有；json_schema 由 4/15 升至 15/15，json 由 13/15 升至 14/15。json_unicode 仍为 0/15，因为仅推理就用满 256 token；`max_tokens` 为 1024 时为 5/5（c1 + c4）。在 1024 下 json c4 为 0/4（对象缺少 `moons`，或在针对另一个 prompt 推理），json_schema c4 为 2/4（两个请求在 768 token 处触发带说明的 `thinking_budget` 停止）。
+- 同一架构名下有两种轮次格式，由 GGUF 内嵌的 `tokenizer.chat_template` 决定渲染哪一种（`ChatTemplate.IsNemotronHReasoningTemplate`）：
+  - **Nemotron-H 8B/47B Reasoning-128K** 训练时使用 `<SPECIAL_10>System\n{system}\n<SPECIAL_11>User\n{user}\n<SPECIAL_11>Assistant\n`（EOS 为 `<SPECIAL_11>`）。推理开关是 system prompt 中的 `{'reasoning': True}` / `{'reasoning': False}`，生成提示随之打开（`<think>\n`）或关闭（`<think></think>`）推理块。`RenderNemotronHReasoning` 根据请求的 `think` 标志加入该标记，除非 system prompt 已经带有。官方模板没有工具语法，因此工具以 JSON `<tool_call>` 约定声明在 system prompt 中，工具结果作为包裹在 `<tool_response>` 中的 user 轮次返回。这些 checkpoint 过去被当作 ChatML 渲染：模型把 `<|im_start|>` 当普通文本，回答里出现 `</think>`、自编的 `<|im_start|>user` 轮次和 `<unk>` 循环。
+  - **Nemotron 3 Nano / Omni**（以及其他所有 `nemotron_h*` 模板）使用 ChatML（`<|im_start|>` / `<|im_end|>`）。多模态占位符包括 `<image>`（之后展开为 `<img>` + N 个 token + `</img>`）与 `<so_embedding>`（音频）。
 
 ## 13. 优化机会
 
@@ -482,6 +536,6 @@ GgmlMetal、进程内 legacy-vs-batched 切换；详见
 - **Per-token MoE 批处理** —— 即使有 `MoEExpertsForward`，per-token 托管循
   环仍是外层驱动。能在单次派发处理多 token 的批量 kernel 对长 prompt 帮助
   很大。
-- **音频 mmproj 支持** —— 音频前端已经接好，但推理需要尚未在当前 GGUF 中
-  发布的 Parakeet 音频 projector。届时只需把它接入 Gemma 4 同款的
-  `_pendingAudioEmbeddings` 注入路径，少量代码即可。
+- **音频塔** —— `NemotronAudioEncoder` 以托管 CPU 路径运行在配套 GGUF 上（§4.7）；
+  公开 GGUF 仍然不带音频塔，所以除非加载了该配套文件，音频会被拒绝。待完成：训练权重上的
+  BF16 计算一致性、GPU/原生编码器计算图、语音输入验收与延迟验证。

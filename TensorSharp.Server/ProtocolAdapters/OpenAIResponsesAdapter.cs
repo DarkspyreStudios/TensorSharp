@@ -126,7 +126,8 @@ public sealed class OpenAIResponsesAdapter
         List<ChatMessage> messages;
         try
         {
-            messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _uploads, logger, _svc.Architecture);
+            messages = ChatMessageParser.ParseResponsesInput(inputEl, instructions, _uploads, logger, _svc.Architecture,
+                _svc.IsAudioEncoderLoaded);
         }
         catch (UploadLimitExceededException ex)
         {
@@ -141,7 +142,24 @@ public sealed class OpenAIResponsesAdapter
             return;
         }
         var tools = ToolFunctionParser.ParseOpenAIResponses(body);
+        // Same contract as /v1/chat/completions: a block-diffusion model has no
+        // tool-call loop, so tools are refused up front rather than answered with prose.
+        if (_svc.IsDiffusionModel && tools is { Count: > 0 })
+        {
+            logger.LogWarning(LogEventIds.HttpRequestRejected, "/v1/responses rejected: tools on a diffusion model");
+            await WriteErrorAsync(ctx, 400,
+                "The loaded model generates by block diffusion and has no tool-call channel; remove tools from the request.")
+                .ConfigureAwait(false);
+            return;
+        }
         bool enableThinking = body.TryGetProperty("reasoning", out var reasoningEl) && reasoningEl.ValueKind == JsonValueKind.Object;
+        // `reasoning.effort` is the Responses API spelling of reasoning_effort.
+        if (!ReasoningEffortParser.TryParse(body, out string? reasoningEffort, out string? reasoningEffortError))
+        {
+            await WriteErrorAsync(ctx, 400, reasoningEffortError!).ConfigureAwait(false);
+            return;
+        }
+        samplingConfig.ReasoningEffort = reasoningEffort;
         var requestedSkills = SkillSelectionParser.Parse(body);
 
         string requestId = OpenAIResponsesFactory.NewResponseId();
@@ -398,6 +416,7 @@ public sealed class OpenAIResponsesAdapter
             (enableThinking || (tools != null && tools.Count > 0) || OutputParserFactory.IsAlwaysRequired(_svc.Architecture));
 
         IOutputParser? parser = null;
+        string? generationSuffix = null;
         if (useParser)
         {
             parser = OutputParserFactory.Create(_svc.Architecture);
@@ -440,6 +459,12 @@ public sealed class OpenAIResponsesAdapter
         {
             if (!update.Done)
             {
+                if (update.RawGenerationSuffix != null)
+                {
+                    generationSuffix = update.RawGenerationSuffix;
+                    parser?.SetGenerationPromptSuffix(generationSuffix);
+                    if (string.IsNullOrEmpty(update.Piece)) continue;
+                }
                 if (update.IsParsed)
                 {
                     // Pre-separated by the skills loop: the tool markup our parser
@@ -491,7 +516,15 @@ public sealed class OpenAIResponsesAdapter
 
         if (bufferForStructured)
         {
-            var normalized = StructuredOutputValidator.NormalizeOutput(buffer!.ToString(), responseFormat);
+            string raw = buffer!.ToString();
+            if (!sawParsedUpdate && generationSuffix != null)
+            {
+                var structuredParser = OutputParserFactory.Create(_svc.Architecture);
+                structuredParser.Init(enableThinking, tools);
+                structuredParser.SetGenerationPromptSuffix(generationSuffix);
+                raw = structuredParser.Add(raw, true).Content;
+            }
+            var normalized = StructuredOutputValidator.NormalizeOutput(raw, responseFormat);
             if (!normalized.IsValid)
             {
                 await SseWriter.WriteNamedEventAsync(ctx.Response, "response.failed",

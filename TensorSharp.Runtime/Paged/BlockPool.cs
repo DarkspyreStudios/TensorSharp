@@ -83,6 +83,10 @@ namespace TensorSharp.Runtime.Paged
                 block.RefCount = 1;
                 block.Used = 0;
                 block.IsRestorablePrefixEnd = true;
+                // A new owner rewrites the block from position 0 on whichever path it
+                // takes; neither the previous paged K/V nor its snapshot describes it.
+                block.HoldsModelPagedKv = false;
+                block.HoldsSnapshotBytes = false;
                 result[i] = block;
             }
             return result;
@@ -103,7 +107,10 @@ namespace TensorSharp.Runtime.Paged
                     throw new InvalidOperationException($"Double-free of block {b.Id}");
                 b.RefCount--;
                 if (b.RefCount == 0)
+                {
                     _freeQueue.Enqueue(b);
+                    ReleaseUncachedStorage(b);
+                }
             }
         }
 
@@ -115,7 +122,20 @@ namespace TensorSharp.Runtime.Paged
                 throw new InvalidOperationException($"Double-free of block {block.Id}");
             block.RefCount--;
             if (block.RefCount == 0)
+            {
                 _freeQueue.Enqueue(block);
+                ReleaseUncachedStorage(block);
+            }
+        }
+
+        private void ReleaseUncachedStorage(KvBlock block)
+        {
+            // Radix owns a reference while it caches a page. Once its final
+            // reference is gone, no content-hash entry keeps the slab alive.
+            if (block.ContentHash != null) return;
+            _storage.ReleaseSlab(block.Id);
+            block.HoldsSnapshotBytes = false;
+            block.HoldsModelPagedKv = false;
         }
 
         /// <summary>Promote a block from "being written" to "full and hashed".
@@ -151,6 +171,7 @@ namespace TensorSharp.Runtime.Paged
                 _hashIndex.Unregister(hash, block);
                 block.ContentHash = null;
                 block.IsRestorablePrefixEnd = true;
+                block.HoldsSnapshotBytes = false;
                 // Drop the slab too - the new owner will rewrite it on first
                 // capture, and keeping the stale bytes alive wastes memory.
                 _storage.ReleaseSlab(block.Id);

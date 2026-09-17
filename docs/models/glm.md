@@ -495,6 +495,26 @@ pick therefore drops much further:
 if it fits and refused with the numbers if it does not, rather than quietly
 shrunk under you.
 
+Under `--tp N` the refusal names only remedies that would actually make the load
+fit on that rank count: a `MAX_CONTEXT` that fits, the `--n-cpu-moe` value that
+fits the context you asked for, or, when even every routed expert in system RAM
+leaves the replicated weights too large for one rank, running without `--tp`.
+Measured on 2x A40 with GLM-5.3-Flash UD-Q2_K_XL (lines shortened):
+
+```
+[glm] not enough VRAM for --tp 2: 52.5 GiB per rank of weights plus 5.5 GiB of KV and graphs
+      for a 65536-token context, against 41.2 GiB usable on the smallest rank. Re-run with
+      --n-cpu-moe 19 (keeps the routed experts of the first 19 layer(s) in system RAM).
+[glm] not enough VRAM for --tp 2: 6.4 GiB per rank of weights plus 62.3 GiB of KV and graphs
+      for a 1048576-token context, against 41.2 GiB usable on the smallest rank. Set
+      MAX_CONTEXT to 571904 or less.
+```
+
+It used to end every such refusal with "Lower MAX_CONTEXT (N tokens would fit) or
+add --n-cpu-moe N", including "0 tokens would fit" when the weights alone were
+the problem. Like every refused load, the host then prints the reason once more
+as its last stderr line and exits with code 2 (USAGE.md, "Exit codes").
+
 ### Environment knobs
 
 | Variable | Default | Meaning |
@@ -534,6 +554,15 @@ dropped from the prompt, matching the template's `clear_thinking` default. Tool 
 `<tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>`,
 one XML element per argument (values that were rendered with `tojson` are parsed
 back into numbers / arrays / objects).
+
+Generation also stops on `<|observation|>` (the GGUF's
+`tokenizer.ggml.eom_token_id`, which llama.cpp folds into its end-of-generation
+set): the model writes it right after a tool call, and without the stop it went
+on to invent the tool result. Prompts are split with the `glm4` / `chatglm-bpe`
+pre-tokenizer, which keeps digit runs of up to three; splitting every digit
+instead fed numbers to the model in a shape it was never trained on, and it
+quoted `INV-472` back as `INV-4472`. The split and the token ids are checked
+against the reference `tokenizer.json` (`Glm4TokenizerParityTests`).
 
 ## GLM-5.3 (`glm-dsa`)
 
@@ -631,9 +660,19 @@ architectural changes layered on top:
 | Vision | `mmproj-BF16.gguf` (GLM-OCR ViT) | see below |
 
 The KDA recurrent state (conv tail + delta-net state, ~150 MB per sequence)
-cannot be rewound, so a cached prefix is only reused when the new prompt
-extends it exactly — the same contract as the Qwen 3.5 / 3.6 GDN family — and
-`Reset` wipes the state along with the position counter.
+cannot be rewound by position, so a cached prefix is only reused when the new
+prompt extends it exactly — the same contract as the Qwen 3.5 / 3.6 GDN family —
+and `Reset` wipes the state along with the position counter. The one exact
+"rewind" is a speculative rollback: a device-resident snapshot of the state is
+taken before every verify batch and copied back when part of the window is
+rejected (see [speculative decoding](#speculative-decoding-on-glm-53-flash)).
+
+A KV rewind the native executor refuses (a target past the slot's head, any
+glm5next rewind other than to 0 or to the head, or a slot whose KDA restore
+failed) reaches the caller as a refusal on both glm-dsa and glm5next:
+`TryTruncateKVCache` returns false, so the engine re-prefills instead of reusing,
+and the non-refusable `TruncateKVCache` throws. It used to report success with
+the head unmoved (`GlmTruncateRefusalTests`).
 
 ### Native local tensor parallelism
 
@@ -681,8 +720,80 @@ expert once on rank 0. `TS_GLM_TP_FUSED=0` forces the fallback for diagnostics.
   `<|image|>` placeholder rows inside the native executor
   (`TSGgml_GlmQueueVisionRows`) — the text tower is NoPE, so image tokens
   need no MRoPE bookkeeping.
-- **Not yet**: NextN/MTP speculation (llama.cpp asserts its glm5next MTP graph
-  unimplemented too; `--spec` prints a notice and serves standard decode).
+- **Speculative decoding**: the weight-free n-gram drafter
+  (`--spec --spec-type ngram`), on the native executor and on the managed
+  `cpu` path alike; see the next section. The checkpoint's own NextN/MTP block
+  is **not** built (llama.cpp asserts its glm5next MTP graph unimplemented too),
+  so `--spec` alone — `auto` / `draft-head` — prints a notice and serves
+  standard decode.
+
+### Speculative decoding on GLM-5.3-Flash
+
+GLM-5.2's speculative path is a position rewind: MLA rows and indexer keys are
+per-position, so a rejected tail is dropped for free
+(`SpecVerifyPersistsAcceptedKv = true`). glm5next's 34 KDA layers each carry a
+recurrent state that a verify batch advances by the WHOLE window, and no
+position arithmetic brings it back. So on this architecture the trunk honours
+the recurrent contract instead — the one Qwen 3.5's GatedDeltaNet and Qwen 3.8's
+trunk use:
+
+1. before the verify, the executor copies every KDA layer's conv tail and
+   delta-net state (every rank under `--tp`) into a snapshot arena on the device
+   that owns it (`TSGgml_GlmKdaStateCapture`; ~150 MB, device-to-device, one
+   arena per model because a step snapshots and restores within itself) and
+   remembers the position;
+2. the verify is one trunk graph over `[last, d1..dK]` with the LM head on every
+   row (`TSGgml_GlmSpecForward`, unchanged);
+3. on a partial rejection the snapshot is copied back and the slot rewound to
+   the captured position (`TSGgml_GlmKdaStateRestore`), and the runtime
+   re-forwards the accepted prefix, so the state equals a plain decode of exactly
+   those tokens (`SpecVerifyPersistsAcceptedKv = false`). A rewind to any other
+   position is refused with an error rather than silently keeping the advanced
+   state (`SupportsKVCacheTruncation` stays false).
+
+The hyper-connection streams are the residual stream (per token, not a carried
+state), MLA rows are per-position and pooled-indexer keys per cell, so the KDA
+state is the only thing a rollback restores; the re-forward rewrites the rest
+before anything reads it. The managed `cpu` path does the same with host arrays
+(`GlmDsaModel.Glm5NextSpeculative.cs`). Because every extra verify row runs the
+KDA scan and a rejection pays a restore plus a re-forward, the trunk prefers a
+draft window of 3 by default (`SpecPreferredDraftWindow`, as Qwen 3.8 measured);
+`--spec-draft N` still gets exactly what it asks for. A native library that
+predates the snapshot API (no `TSGgml_GlmKdaStateApiVersion` export) makes the
+model report speculation unprofitable, so it is declined up front rather than
+failing mid-verify. The speculative trunk follows the bound slot
+(`SpecTrunkFollowsBoundCache`), so the server's slot-served requests speculate
+too — this also lifts the warn-once decline GLM-5.2 requests used to hit there.
+
+What is proven on the synthetic KDA fixture (`Glm5NextSpeculativeRollbackTests`,
+`Glm5NextSpeculationEligibilityTests`, on `cpu` and `ggml_cpu`, plus `ggml_cuda`
+under `TS_TEST_GLM_CUDA=1` — with the default cpu backend pin, because the
+executor picks its CUDA devices itself): n-gram speculative greedy equals plain
+greedy with drafts proposed and windows partially rejected; a drafter that is
+wrong at the end of every window still yields the plain stream; after the
+rollbacks the next token's logits equal a plain decode's over the whole
+vocabulary; the verify rows equal the sequential decode's; and the managed and
+native `SpecForward` agree row for row, hidden states included. No speculation
+run on the real GLM-5.3-Flash checkpoint exists yet, so there is no throughput
+verdict for it.
+
+Failures at the C ABI are contained rather than propagated. A capture that
+throws (arena allocation, a backend copy) returns failure and leaves the live
+state untouched. A restore that throws after copying only some layers marks
+that slot unusable: forward, speculative forward, capture, restore and rewind
+all refuse it until `TSGgml_GlmResetChecked` (which `TSGgml_GlmReset` and a
+glm5next rewind to 0 now go through, and which the managed side calls as
+`GgmlGlmNative.ResetChecked`) succeeds; other slots keep running. The CUDA rows
+of the rollback suite are `[GlmNativeCudaFact]` facts (`TS_TEST_GLM_CUDA=1`),
+the suite also checks A/B/A bound-slot rollback on both backends, and
+`Glm5NextNativeSnapshotBoundaryTests` (`TS_TEST_GLM_SNAPSHOT_BOUNDARY=1`, a
+native library built with test hooks, whose fault injector
+`TSGgml_GlmTestKdaSnapshotFault` is a `TSG_TEST_EXPORT` kept out of the iOS
+export list) injects `std::bad_alloc` and a non-standard exception into capture
+and mid-restore on CPU and CUDA and checks that a checked reset recovers the
+full-vocabulary logits. Recorded runs:
+[`glm5next-cuda-r4`](../validation/qualification-2026-09-16/glm5next-cuda-r4/README.md)
+(original 22/22 and expanded 26/26 on one A40, no skips).
 
 ### Measured
 
@@ -708,8 +819,16 @@ own top-2 margin at a flip point is ~0.13 logits with the same candidate set).
 
 GLM-5.3-Flash's template always reasons: the `<|system|>Reasoning Effort: Max`
 line is unconditional, the generation prompt always opens `<think>`, and past
-turns keep their reasoning (`clear_thinking` defaults to false). Tool calls
-use the same XML element form as GLM-5.2. Images render as
+turns keep their reasoning (`clear_thinking` defaults to false). Because the
+prompt cannot turn reasoning off, `"think": false` only decides what the client
+sees: the reply is parsed as reasoning up to `</think>` and only what follows is
+the answer. Streaming clients still receive that reasoning as it is generated
+(`reasoning_content` / `thinking` deltas, as for other always-reasoning
+families), so a `max_tokens` budget spent entirely inside the block ends with an
+empty answer. A reply that starts as JSON and never closes the block (a
+`response_format` grammar enforced from the first token) is the answer itself.
+`response_format` with `"think": true` arms the JSON grammar after `</think>`.
+Tool calls use the same XML element form as GLM-5.2. Images render as
 `<|begin_of_image|><|image|><|end_of_image|>`, and the host expands
 `<|image|>` to the merged-patch token count.
 

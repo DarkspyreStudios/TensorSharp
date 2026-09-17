@@ -44,6 +44,13 @@ namespace TensorSharp.Models
             public int GlobalCapacity;
             public int SeqLen;
             public bool HostDirty;
+            // Cleanup may fail after releasing some tensors. Keep the remaining
+            // resources owned, but never expose that holder as reusable state.
+            public bool Retired;
+            // The holder has been an active cache on a GPU backend, so its K/V
+            // has device copies besides the host bytes (the prefix cache's
+            // MeasureEndState charges both). Copies and imports start without.
+            public bool DeviceMirrored;
         }
 
         // Per-request fused-decode cache holders, keyed by RequestId.
@@ -117,6 +124,7 @@ namespace TensorSharp.Models
             GlobalCapacity = _kvCacheGlobalCapacity,
             SeqLen = _cacheSeqLen,
             HostDirty = _kvCacheHostDirty,
+            DeviceMirrored = KeepsDeviceKvMirrors,
         };
 
         private void LoadCacheHolder(Gemma4KvCacheHolder h)
@@ -134,21 +142,20 @@ namespace TensorSharp.Models
 
         private Gemma4KvCacheHolder CreateFreshHolder()
         {
+            // Once the prefix cache owns reuse, take a released holder from its pool.
+            if (TryTakePooledHolder(out var pooled))
+                return pooled;
             // AllocateKvCacheArrays zero-fills: the token-batched fused-decode
             // kernel reads a FIXED 256-padded attention window over each holder's
             // cache, and positions beyond the written length are masked (-inf)
             // but must still be finite or the softmax is poisoned.
-            AllocateKvCacheArrays(_initialGlobalCacheLength,
-                out var k, out var v, out var sizes, out _);
-            return new Gemma4KvCacheHolder
+            var holder = new Gemma4KvCacheHolder
             {
-                K = k,
-                V = v,
-                Sizes = sizes,
                 GlobalCapacity = _initialGlobalCacheLength,
-                SeqLen = 0,
-                HostDirty = false,
             };
+            AllocateKvCacheArrays(_initialGlobalCacheLength,
+                out holder.K, out holder.V, out holder.Sizes, out _);
+            return holder;
         }
 
         /// <summary>Make <paramref name="requestId"/>'s KV cache the model's
@@ -285,6 +292,14 @@ namespace TensorSharp.Models
             }
 
             _fusedHolders.Remove(requestId);
+            if (_prefixCacheSink != null)
+            {
+                // Prefix-cache mode (DEC-24): park the allocation instead of freeing
+                // it, so releasing one request does not reset every running
+                // request's captured decode graphs.
+                RecycleOrDisposeHolders(new[] { holder }, dispose: false);
+                return;
+            }
             DisposeHolder(holder);
 
             // A captured token-batched decode graph binds this request's KV buffers;
@@ -294,6 +309,7 @@ namespace TensorSharp.Models
             {
                 GgmlBasicOps.Gemma4ResetBatchedDecodeCache();
                 GgmlBasicOps.Gemma4ResetMoEBatchedDecodeCache();
+                CountDecodeGraphReset();
             }
         }
 
@@ -303,13 +319,21 @@ namespace TensorSharp.Models
         /// executor before <see cref="OnSequenceReleased"/>, which then no-ops for the
         /// (already-moved) holder so its buffers are NOT freed. Returns true when a
         /// holder was retained.</summary>
-        public bool RetainSequenceCache(string requestId)
+        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+
+        /// <summary>The key-parameterised form of <see cref="RetainSequenceCache"/>: the finished
+        /// holder of <paramref name="requestId"/> is retained under <paramref name="key"/>
+        /// (the prefix cache's tree-minted payload key, or the request id itself).</summary>
+        public bool RetainSequenceCacheAs(string requestId, string key)
         {
-            if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
+            if (_fusedHolders == null || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(key))
                 return false;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
                 return false;
-            CbTrace($"RetainSequenceCache({requestId})");
+            CbTrace($"RetainSequenceCache({requestId} as {key})");
+            _retainedFusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
+            if (_retainedFusedHolders.ContainsKey(key)) return false;
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
 
             if (string.Equals(_activeFusedKey, requestId, StringComparison.Ordinal))
             {
@@ -325,9 +349,8 @@ namespace TensorSharp.Models
                 }
             }
 
+            _retainedFusedHolders.Add(key, holder);
             _fusedHolders.Remove(requestId);
-            _retainedFusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
-            _retainedFusedHolders[requestId] = holder;
             return true;
         }
 
@@ -344,10 +367,12 @@ namespace TensorSharp.Models
                 return false;
             if (!_retainedFusedHolders.TryGetValue(retainedRequestId, out var holder))
                 return false;
-
-            _retainedFusedHolders.Remove(retainedRequestId);
+            if (holder.Retired) return false;
             _fusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
-            _fusedHolders[newRequestId] = holder;
+            if (_fusedHolders.ContainsKey(newRequestId)) return false;
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            _fusedHolders.Add(newRequestId, holder);
+            _retainedFusedHolders.Remove(retainedRequestId);
             return true;
         }
 
@@ -359,13 +384,8 @@ namespace TensorSharp.Models
                 return;
             if (!_retainedFusedHolders.TryGetValue(requestId, out var holder))
                 return;
-            _retainedFusedHolders.Remove(requestId);
             DisposeHolder(holder);
-            if (IsGgmlBackend)
-            {
-                GgmlBasicOps.Gemma4ResetBatchedDecodeCache();
-                GgmlBasicOps.Gemma4ResetMoEBatchedDecodeCache();
-            }
+            _retainedFusedHolders.Remove(requestId);
         }
 
         // ---- Shared-prefix checkpoints (IBatchedPagedModel) ----
@@ -386,11 +406,24 @@ namespace TensorSharp.Models
             if (_retainedFusedHolders.ContainsKey(key)
                 || (_fusedHolders != null && _fusedHolders.ContainsKey(key)))
                 return false;
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
             // The device copy may be newer than the host bytes the copy reads.
             EnsureKvCacheHostSynchronized();
             var copy = DeepCopyHolder(SnapshotActiveCache());
-            _retainedFusedHolders[key] = copy;
-            CbTrace($"TryCheckpointActiveCache({key}) seqLen={copy.SeqLen}");
+            bool published = false;
+            try
+            {
+                _retainedFusedHolders.Add(key, copy);
+                published = true;
+            }
+            finally
+            {
+                if (!published) DisposeHolder(copy);
+            }
+            // Diagnostics must not turn a completed ownership transfer into a
+            // reported failure, including failure while formatting the message.
+            try { CbTrace($"TryCheckpointActiveCache({key}) seqLen={copy.SeqLen}"); }
+            catch { }
             return true;
         }
 
@@ -411,10 +444,22 @@ namespace TensorSharp.Models
                 return false;
             // A checkpoint is never bound, so its host bytes stay the truth. A retained
             // conversation holder can be device-dirty and is re-keyed, never copied.
-            if (source.HostDirty)
+            if (source.HostDirty || source.Retired)
                 return false;
-            _fusedHolders[newRequestId] = DeepCopyHolder(source);
-            CbTrace($"TryCloneRetainedCache({retainedKey} -> {newRequestId}) seqLen={source.SeqLen}");
+            _fusedHolders.EnsureCapacity(checked(_fusedHolders.Count + 1));
+            var copy = DeepCopyHolder(source);
+            bool published = false;
+            try
+            {
+                _fusedHolders.Add(newRequestId, copy);
+                published = true;
+            }
+            finally
+            {
+                if (!published) DisposeHolder(copy);
+            }
+            try { CbTrace($"TryCloneRetainedCache({retainedKey} -> {newRequestId}) seqLen={source.SeqLen}"); }
+            catch { }
             return true;
         }
 
@@ -440,7 +485,7 @@ namespace TensorSharp.Models
             if (!SupportsPrefixCheckpoints || destination == null || string.IsNullOrEmpty(key)
                 || _retainedFusedHolders == null)
                 return false;
-            if (!_retainedFusedHolders.TryGetValue(key, out var h) || h.K == null || h.HostDirty)
+            if (!_retainedFusedHolders.TryGetValue(key, out var h) || h.K == null || h.HostDirty || h.Retired)
                 return false;
 
             int rows = Math.Max(0, Math.Min(h.SeqLen, h.GlobalCapacity));
@@ -476,6 +521,7 @@ namespace TensorSharp.Models
             _retainedFusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
             if (_retainedFusedHolders.ContainsKey(key) || (_fusedHolders != null && _fusedHolders.ContainsKey(key)))
                 return false;
+            _retainedFusedHolders.EnsureCapacity(checked(_retainedFusedHolders.Count + 1));
 
             var r = new System.IO.BinaryReader(source, System.Text.Encoding.UTF8, leaveOpen: true);
             if (r.ReadUInt32() != CheckpointFileMagic || r.ReadInt32() != CheckpointFileVersion)
@@ -496,16 +542,16 @@ namespace TensorSharp.Models
                 : CacheCapacityFor(rows));
             if (rows > globalCap)
                 return false;
-            AllocateKvCacheArrays(globalCap, out var k, out var v, out var sizes, out _);
             var holder = new Gemma4KvCacheHolder
             {
-                K = k,
-                V = v,
-                Sizes = sizes,
                 GlobalCapacity = globalCap,
                 SeqLen = seqLen,
                 HostDirty = false,
             };
+            AllocateKvCacheArrays(globalCap, out holder.K, out holder.V, out holder.Sizes, out _);
+            var k = holder.K;
+            var v = holder.V;
+            var sizes = holder.Sizes;
             bool ok = false;
             try
             {
@@ -592,46 +638,73 @@ namespace TensorSharp.Models
             // copied whole. A copy grows on demand like any holder.
             int rows = Math.Max(0, Math.Min(source.SeqLen, source.GlobalCapacity));
             int globalCap = Math.Max(1, Math.Min(source.GlobalCapacity, CacheCapacityFor(rows)));
-            AllocateKvCacheArrays(globalCap, out var k, out var v, out var sizes, out _);
-            var seen = new HashSet<Tensor>();
-            for (int l = 0; l < Config.NumLayers; l++)
+            var copy = new Gemma4KvCacheHolder
             {
-                if (_kvDonorMap.ContainsKey(l)) continue;   // aliases another layer's tensors
-                bool local = IsLocalLayer(l);
-                if (source.K[l] != null && k[l] != null && seen.Add(source.K[l]))
-                {
-                    if (local) CopyCacheTensorBytes(source.K[l], k[l]);
-                    else CopyCacheRows(source.K[l], k[l], rows);
-                    InvalidateTensorDeviceCache(k[l]);
-                }
-                if (source.V != null && source.V[l] != null && v[l] != null && seen.Add(source.V[l]))
-                {
-                    if (local) CopyCacheTensorBytes(source.V[l], v[l]);
-                    else CopyCacheRows(source.V[l], v[l], rows);
-                    InvalidateTensorDeviceCache(v[l]);
-                }
-            }
-            return new Gemma4KvCacheHolder
-            {
-                K = k,
-                V = v,
-                Sizes = sizes,
                 GlobalCapacity = globalCap,
                 SeqLen = source.SeqLen,
-                HostDirty = false,
             };
+            AllocateKvCacheArrays(globalCap, out copy.K, out copy.V, out copy.Sizes, out _);
+            bool complete = false;
+            try
+            {
+                var seen = new HashSet<Tensor>();
+                for (int l = 0; l < Config.NumLayers; l++)
+                {
+                    if (_kvDonorMap.ContainsKey(l)) continue;
+                    bool local = IsLocalLayer(l);
+                    if (source.K[l] != null && copy.K[l] != null && seen.Add(source.K[l]))
+                    {
+                        if (local) CopyCacheTensorBytes(source.K[l], copy.K[l]);
+                        else CopyCacheRows(source.K[l], copy.K[l], rows);
+                        InvalidateTensorDeviceCache(copy.K[l]);
+                    }
+                    if (source.V != null && source.V[l] != null && copy.V[l] != null && seen.Add(source.V[l]))
+                    {
+                        if (local) CopyCacheTensorBytes(source.V[l], copy.V[l]);
+                        else CopyCacheRows(source.V[l], copy.V[l], rows);
+                        InvalidateTensorDeviceCache(copy.V[l]);
+                    }
+                }
+                complete = true;
+                return copy;
+            }
+            finally
+            {
+                if (!complete) DisposeHolder(copy);
+            }
         }
 
         private void DisposeHolder(Gemma4KvCacheHolder holder)
         {
-            if (holder?.K == null) return;
-            var disposed = new HashSet<Tensor>();
-            for (int l = 0; l < Config.NumLayers; l++)
+            if (holder == null) return;
+            holder.Retired = true;
+            // A batched release (DiscardRetainedCaches) resets once, before its
+            // first disposal, and suppresses the per-holder reset here.
+            if (IsGgmlBackend && _holderGraphResetSuppressed == 0)
             {
-                if (_kvDonorMap.ContainsKey(l)) continue; // donor layers alias another layer
-                if (holder.K[l] != null && disposed.Add(holder.K[l])) holder.K[l].Dispose();
-                if (holder.V != null && holder.V[l] != null && disposed.Add(holder.V[l])) holder.V[l].Dispose();
+                GgmlBasicOps.Gemma4ResetBatchedDecodeCache();
+                GgmlBasicOps.Gemma4ResetMoEBatchedDecodeCache();
+                CountDecodeGraphReset();
             }
+            DisposeKvCacheArrays(holder.K, holder.V);
+        }
+
+        // No HashSet allocation on the memory-pressure cleanup path. Clear every
+        // alias only after that tensor was released; a retry can see remaining ones.
+        private void DisposeKvCacheArrays(Tensor[] k, Tensor[] v)
+        {
+            void Release(Tensor tensor)
+            {
+                if (tensor == null) return;
+                InvalidateTensorDeviceCache(tensor);
+                tensor.Dispose();
+                if (k != null) for (int i = 0; i < k.Length; i++)
+                    if (ReferenceEquals(k[i], tensor)) k[i] = null;
+                if (v != null) for (int i = 0; i < v.Length; i++)
+                    if (ReferenceEquals(v[i], tensor)) v[i] = null;
+            }
+            if (k != null) for (int i = 0; i < k.Length; i++) Release(k[i]);
+            if (v != null) for (int i = 0; i < v.Length; i++) Release(v[i]);
         }
 
         /// <summary>Free every per-request fused cache holder (and the saved
@@ -660,6 +733,7 @@ namespace TensorSharp.Models
                 _retainedFusedHolders.Clear();
                 _retainedFusedHolders = null;
             }
+            DisposeHolderPool();
             if (_primaryHolder != null)
             {
                 // If a fused holder is active, the primary snapshot owns distinct

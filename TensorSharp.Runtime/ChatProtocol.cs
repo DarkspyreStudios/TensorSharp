@@ -11,12 +11,21 @@ using System.Text;
 namespace TensorSharp.Runtime
 {
     /// <summary>Everything a chat renderer is given for one prompt.</summary>
+    /// <param name="ReasoningEffort">The request's <c>reasoning_effort</c> level, or null
+    /// for the family's default. See <see cref="Runtime.ReasoningEffort"/>.</param>
+    /// <param name="GgufTemplate">The chat template embedded in the model file, or null
+    /// when there is none (or the caller has none to give). One architecture name can
+    /// ship more than one turn format - <c>nemotron_h</c> covers both the ChatML Nemotron 3
+    /// Nano/Omni checkpoints and the <c>&lt;SPECIAL_10&gt;</c>/<c>&lt;SPECIAL_11&gt;</c>
+    /// Nemotron-H Reasoning-128K ones - so a renderer may need it to pick the format.</param>
     public sealed record ChatRenderRequest(
         List<ChatMessage> Messages,
         bool AddGenerationPrompt,
         string? Architecture,
         List<ToolFunction>? Tools,
-        bool EnableThinking);
+        bool EnableThinking,
+        string? ReasoningEffort = null,
+        string? GgufTemplate = null);
 
     /// <summary>
     /// Whether a family may reuse a past TOOL-CALLING round's exact generated tokens
@@ -147,9 +156,41 @@ namespace TensorSharp.Runtime
         /// </summary>
         public string? ThinkingGrammarActivationTrigger { get; init; }
 
+        /// <summary>
+        /// True when this family's prompt carries the request's
+        /// <see cref="ChatRenderRequest.ReasoningEffort"/> (Harmony's
+        /// <c>Reasoning: low|medium|high</c> system line). Families that do not render
+        /// it ignore the value, and it then stays out of the shared-prefix key so an
+        /// explicit <c>think:false</c> and an absent one keep sharing one checkpoint.
+        /// </summary>
+        public bool RendersReasoningEffort { get; init; }
+
         /// <summary>Trained single token that may close this family's open
         /// reasoning channel at its budget. Null retains the host's hard stop.</summary>
         public string? ThinkingBudgetEndToken { get; init; }
+
+        /// <summary>
+        /// Trained single token with which the MODEL opens its reasoning channel
+        /// mid-reply, or null when only the prompt ever opens it. With it declared the
+        /// budget counts from the opener instead of from the first generated token, and
+        /// it also caps a channel the model opens although the request turned thinking
+        /// OFF (see <c>ChatGenerationPipeline.UnrequestedThinkingBudgetFor</c>): that
+        /// channel is hidden from the client, and Gemma 4 E4B otherwise spent a whole
+        /// 256-token turn in it after a tool result and answered nothing.
+        /// </summary>
+        public string? ThinkingBudgetOpenToken { get; init; }
+
+        /// <summary>
+        /// Prompt tail after which, with thinking off, the
+        /// <see cref="ThinkingBudgetEndToken"/> is masked while no channel is open, or
+        /// null. Gemma 4's templates continue the model's own turn straight after
+        /// <c>&lt;tool_response|&gt;</c> with no channel framing, and E4B there writes
+        /// its answer, closes a channel it never opened and writes the answer again; a
+        /// stream has already delivered the first copy by the time the stray close
+        /// arrives, so the client got both. Scoped to that boundary because masking
+        /// costs the device-argmax fast path.
+        /// </summary>
+        public string? SuppressUnopenedThinkingEndAfter { get; init; }
 
         /// <summary>
         /// Text the GENERATION PROMPT appends after the assistant role marker that
@@ -291,6 +332,12 @@ namespace TensorSharp.Runtime
             {
                 throw new InvalidOperationException(
                     $"Chat protocol '{Id}' says its parser is always required but supplies none.");
+            }
+            if ((ThinkingBudgetOpenToken != null || SuppressUnopenedThinkingEndAfter != null) && ThinkingBudgetEndToken == null)
+            {
+                throw new InvalidOperationException(
+                    $"Chat protocol '{Id}' declares a reasoning-channel opener or stray-close policy without the " +
+                    "channel's end token.");
             }
         }
     }

@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Xunit;
 using Xunit.Abstractions;
 using Xunit.Sdk;
@@ -19,12 +21,14 @@ namespace InferenceWeb.Tests
 #pragma warning disable RS0030
         private static readonly Lazy<bool> CudaAvailable = new(() =>
         {
+            if (Environment.GetEnvironmentVariable("TS_TEACHER_TOKEN_EXPORT") == "1") return false;
             try { return TensorSharp.Cuda.CudaBackend.IsAvailable(); }
             catch { return false; }
         });
 
         private static readonly Lazy<bool> MlxAvailable = new(() =>
         {
+            if (Environment.GetEnvironmentVariable("TS_TEACHER_TOKEN_EXPORT") == "1") return false;
             try { return TensorSharp.MLX.MlxBackend.IsAvailable(); }
             catch { return false; }
         });
@@ -41,6 +45,7 @@ namespace InferenceWeb.Tests
         // without every encoder; probe once by actually writing a tiny clip.
         private static readonly Lazy<bool> VideoWritable = new(() =>
         {
+            if (Environment.GetEnvironmentVariable("TS_TEACHER_TOKEN_EXPORT") == "1") return false;
             string dir = Path.Combine(Path.GetTempPath(), "ts-video-gate-" + Guid.NewGuid().ToString("N"));
             try { return VideoFixture.TryWrite(Path.Combine(dir, "probe.mp4"), frames: 4) != null; }
             catch { return false; }
@@ -49,6 +54,53 @@ namespace InferenceWeb.Tests
 
         public static string VideoSkip =>
             VideoWritable.Value ? null : "Requires an OpenCV build that can encode video.";
+
+        /// <summary>
+        /// The GGML backend <see cref="GgmlBackendTestInitializer"/> pins for this
+        /// process, from <c>TS_TEST_GGML_BACKEND</c> (default cpu). One place, so the
+        /// initializer, the gates below and tests that follow the pin agree.
+        /// </summary>
+        public static TensorSharp.GGML.GgmlBackendType PinnedGgmlBackendType =>
+            (Environment.GetEnvironmentVariable("TS_TEST_GGML_BACKEND") ?? "cpu").Trim().ToLowerInvariant() switch
+            {
+                "metal" => TensorSharp.GGML.GgmlBackendType.Metal,
+                "cuda" => TensorSharp.GGML.GgmlBackendType.Cuda,
+                "vulkan" => TensorSharp.GGML.GgmlBackendType.Vulkan,
+                _ => TensorSharp.GGML.GgmlBackendType.Cpu,
+            };
+
+        /// <summary>The pinned GGML backend as the model-level <see cref="BackendType"/>.</summary>
+        public static BackendType PinnedGgmlBackend => PinnedGgmlBackendType switch
+        {
+            TensorSharp.GGML.GgmlBackendType.Metal => BackendType.GgmlMetal,
+            TensorSharp.GGML.GgmlBackendType.Cuda => BackendType.GgmlCuda,
+            TensorSharp.GGML.GgmlBackendType.Vulkan => BackendType.GgmlVulkan,
+            _ => BackendType.GgmlCpu,
+        };
+
+        /// <summary>
+        /// Skip reason for a test that constructs <paramref name="required"/> in a
+        /// process pinned to another GGML backend, or null to run. The native bridge
+        /// allows one GGML backend per process, so such a test can only ever fail
+        /// with "A different GGML backend was already initialized"; it belongs to
+        /// the lane that pins its backend. Non-GGML backends never conflict.
+        /// </summary>
+        public static string GgmlPinSkip(BackendType required)
+        {
+            if (required is not (BackendType.GgmlCpu or BackendType.GgmlMetal or BackendType.GgmlCuda or BackendType.GgmlVulkan))
+                return null;
+            BackendType pinned = PinnedGgmlBackend;
+            if (required == pinned)
+                return null;
+            string name = required switch
+            {
+                BackendType.GgmlMetal => "metal",
+                BackendType.GgmlCuda => "cuda",
+                BackendType.GgmlVulkan => "vulkan",
+                _ => "cpu",
+            };
+            return $"Requires TS_TEST_GGML_BACKEND={name}: this test constructs {required}, and this process pins {pinned} (one GGML backend per process).";
+        }
 
         /// <summary>
         /// Skip reason for weight-gated tests, or null to run. The env var may
@@ -70,7 +122,57 @@ namespace InferenceWeb.Tests
         }
 
         /// <summary>
-        /// First GGUF in <paramref name="dir"/> whose name contains
+        /// File name of the GGML native library on this OS, for tests that pin the
+        /// mapped module's identity (Windows loads GgmlOps.dll; Linux and macOS load
+        /// the lib-prefixed .so/.dylib).
+        /// </summary>
+        public static string NativeGgmlOpsFileName =>
+            OperatingSystem.IsWindows() ? "GgmlOps.dll"
+            : OperatingSystem.IsMacOS() ? "libGgmlOps.dylib"
+            : "libGgmlOps.so";
+
+        public static bool IsNativeGgmlOps(string path)
+            => string.Equals(Path.GetFileName(path), NativeGgmlOpsFileName, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Identify the actual loaded library after native execution. macOS
+        /// Process.Modules omits dlopen-loaded libraries, so query dyld's mapped
+        /// image table there. Never substitute an unobserved on-disk candidate.
+        /// </summary>
+        public static string MappedNativeGgmlOpsPath()
+        {
+            IEnumerable<string> paths;
+            if (OperatingSystem.IsMacOS())
+                paths = MacMappedImagePaths();
+            else
+            {
+                using var process = Process.GetCurrentProcess();
+                paths = process.Modules.Cast<ProcessModule>().Select(module => module.FileName).ToArray();
+            }
+            string[] matches = paths.Where(IsNativeGgmlOps).Distinct(StringComparer.Ordinal).ToArray();
+            if (matches.Length != 1)
+                throw new InvalidOperationException($"Expected one mapped {NativeGgmlOpsFileName}; observed {matches.Length}: {string.Join(", ", matches)}");
+            return matches[0];
+        }
+
+        private static IEnumerable<string> MacMappedImagePaths()
+        {
+            uint count = DyldImageCount();
+            for (uint index = 0; index < count; ++index)
+            {
+                string path = Marshal.PtrToStringUTF8(DyldGetImageName(index));
+                if (!string.IsNullOrEmpty(path)) yield return path;
+            }
+        }
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "_dyld_image_count")]
+        private static extern uint DyldImageCount();
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "_dyld_get_image_name")]
+        private static extern IntPtr DyldGetImageName(uint index);
+
+        /// <summary>
+        /// An explicit model file, or the first GGUF in <paramref name="dir"/> whose name contains
         /// <paramref name="contains"/> (case-insensitive; '|' separates
         /// accepted alternatives, e.g. "gpt-oss|gpt_oss"), skipping companion
         /// files (mmproj / assistant drafts). Shared by the attributes and the
@@ -94,6 +196,9 @@ namespace InferenceWeb.Tests
 
         private static IEnumerable<string> MatchingGgufs(string dir, string contains)
         {
+            // ModelSkip accepts an explicit file without applying the directory
+            // name filter. Keep the loader aligned with that discovery contract.
+            if (File.Exists(dir)) return new[] { dir };
             string[] alternatives = contains.ToLowerInvariant().Split('|');
             return Directory.GetFiles(dir, "*.gguf").Where(p =>
             {
@@ -134,6 +239,14 @@ namespace InferenceWeb.Tests
             Skip = TestGates.CudaSkip
                 ?? (modelEnvVar == null ? null : TestGates.ModelSkip(modelEnvVar, ggufContains));
         }
+
+        /// <summary>The GGML backend the test constructs; skips unless the process pins it (<see cref="TestGates.GgmlPinSkip"/>).</summary>
+        public BackendType GgmlBackend
+        {
+            get => _ggmlBackend;
+            set { _ggmlBackend = value; Skip ??= TestGates.GgmlPinSkip(value); }
+        }
+        private BackendType _ggmlBackend;
     }
 
     /// <summary>[Theory] variant of <see cref="CudaFactAttribute"/>.</summary>
@@ -209,6 +322,14 @@ namespace InferenceWeb.Tests
 
         public ModelFactAttribute(string envVar, string ggufContains = null)
             => Skip = TestGates.ModelSkip(envVar, ggufContains);
+
+        /// <summary>The GGML backend the test constructs; skips unless the process pins it (<see cref="TestGates.GgmlPinSkip"/>).</summary>
+        public BackendType GgmlBackend
+        {
+            get => _ggmlBackend;
+            set { _ggmlBackend = value; Skip ??= TestGates.GgmlPinSkip(value); }
+        }
+        private BackendType _ggmlBackend;
     }
 
     /// <summary>[Theory] variant of <see cref="ModelFactAttribute"/>.</summary>
@@ -220,5 +341,13 @@ namespace InferenceWeb.Tests
 
         public ModelTheoryAttribute(string envVar, string ggufContains = null)
             => Skip = TestGates.ModelSkip(envVar, ggufContains);
+
+        /// <summary>The GGML backend the test constructs; skips unless the process pins it (<see cref="TestGates.GgmlPinSkip"/>).</summary>
+        public BackendType GgmlBackend
+        {
+            get => _ggmlBackend;
+            set { _ggmlBackend = value; Skip ??= TestGates.GgmlPinSkip(value); }
+        }
+        private BackendType _ggmlBackend;
     }
 }

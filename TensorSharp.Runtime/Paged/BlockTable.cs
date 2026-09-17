@@ -63,6 +63,10 @@ namespace TensorSharp.Runtime.Paged
             _blocks.Add(block);
         }
 
+        // Reserve metadata before a model transfers native cache ownership.
+        // This does not acquire blocks or change the committed-token count.
+        internal void EnsureBlockCapacity(int blockCount) => _blocks.EnsureCapacity(blockCount);
+
         /// <summary>Mark <paramref name="newTokens"/> additional tokens as
         /// committed. Called by the executor after each forward.</summary>
         public void AdvanceTokens(int newTokens)
@@ -72,6 +76,17 @@ namespace TensorSharp.Runtime.Paged
             if (neededBlocks > _blocks.Count)
                 throw new InvalidOperationException(
                     $"AdvanceTokens({newTokens}) wants {neededBlocks} blocks but only {_blocks.Count} are allocated.");
+        }
+
+        /// <summary>Set <see cref="KvBlock.HoldsModelPagedKv"/> on every block that
+        /// covers a position in [<paramref name="fromToken"/>, <paramref name="toToken"/>).</summary>
+        internal void SetHoldsModelPagedKv(int fromToken, int toToken, bool value)
+        {
+            if (toToken <= fromToken || fromToken < 0)
+                return;
+            int last = Math.Min(_blocks.Count - 1, (toToken - 1) / _blockSize);
+            for (int b = fromToken / _blockSize; b <= last; b++)
+                _blocks[b].HoldsModelPagedKv = value;
         }
 
         /// <summary>Truncate the sequence back to <paramref name="newTokenCount"/>.

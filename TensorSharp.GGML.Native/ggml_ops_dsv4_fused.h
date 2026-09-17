@@ -47,6 +47,16 @@ enum tsg_dsv4_fused_kind : int32_t
     // src[0] pooled F32 scores, src[1] I32 top-k block IDs.
     // dst F16 [nKV,nt] additive mask (0/-inf), i0=block size.
     TSG_DSV41_CANDIDATE_MASK     = 14,
+    TSG_MATMUL_F32              = 15,
+    TSG_MATMUL_ID_F32           = 16,
+    TSG_ATTN_F32_PARTIAL        = 17,
+    TSG_ATTN_F32_FINISH         = 18,
+    TSG_ATTN_F32_SOFTMAX        = 19,
+    TSG_ATTN_MASK_COMPACT       = 20,
+    TSG_MATMUL_Q8_F32           = 21,
+    // Indexed Q2_K/Q4_K gate/up strip; i0=unsplit rows, i1=first row.
+    TSG_MATMUL_ID_QUANT_STRIP   = 22,
+    TSG_MATMUL_ID_QUANT_PAIR    = 23,
 };
 
 #define TSG_DSV4_FUSED_MAGIC 0x5453445356344655ull  // "TSDSV4FU"

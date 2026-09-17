@@ -265,7 +265,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | `--n-cpu-moe <N>` / `-ncmoe <N>` | 把前 N 层的路由 MoE 权重留在系统内存里并在 CPU 上做乘法；注意力、norm、路由器与始终活跃的共享专家仍留在加速器上（等价于 llama.cpp 的 `--n-cpu-moe`）。正是它让 35B-A3B 这类 MoE 能与长上下文 KV 缓存一起塞进 12–16 GB 的显卡。传 `all` 表示所有层。默认：所有架构（含 DeepSeek V4 与 GLM 5.x）都是 0 —— 装不下的模型会在加载时被拒绝并告知需要卸载多少层，而不会被悄悄卸载（环境变量 `TS_N_CPU_MOE`）。详见[混合专家 CPU 卸载](#混合专家-cpu-卸载--n-cpu-moe)。 |
 | `--cpu-moe` / `-cmoe` | `--n-cpu-moe all` 的简写。默认：关闭（环境变量 `TS_CPU_MOE`）。 |
 | `--cpu-moe-threads <N>` | 主机侧专家矩阵乘的工作线程数。默认：在核数多于 8 的主机上取本进程实际可用 CPU 并行度（`hardware_concurrency`，再受调度亲和性掩码与 cgroup CPU 配额约束）的**一半**，低于 8 时取「全部减一」。另一半并非浪费——加速器提交线程，以及 `TensorSharp.Server` 里的 Kestrel 与调度器，同样需要可被调度，而 .NET 自己的线程池是按机器 CPU 数而不是 cgroup 配额来定的。把它设到接近配额是悬崖而不是缓坡：在 95 CPU 配额下，托管的 26B MoE 在 64 线程时实测 20.7 tok/s，71 线程时只剩 8.2。独占机器上可以调高（环境变量 `TS_CPU_MOE_THREADS`）。 |
-| `--kv-cache-dtype <type>` | KV 缓存精度：`f32`（默认）、`f16`、`q8_0` 或 `q4_0`。量化 / 半精度 KV 缓存以微小数值漂移换取内存节省；`q4_0`（约 0.56 字节/元素，约为 f32 的 1/7）是最激进的档位，面向 KV 缓存占主导内存的超长（128K–256K）上下文。块量化缓存（`q8_0`/`q4_0`）需要原生 GGML flash 路径。 |
+| `--kv-cache-dtype <type>` | KV 缓存精度：`f32`（默认）、`f16`、`q8_0` 或 `q4_0`。量化 / 半精度 KV 缓存以微小数值漂移换取内存节省；`q4_0`（约 0.56 字节/元素，约为 f32 的 1/7）是最激进的档位，面向 KV 缓存占主导内存的超长（128K–256K）上下文。块量化缓存（`q8_0`/`q4_0`）需要原生 GGML flash 路径；DeepSeek V4 / V4.1 会在加载时拒绝它们（其执行器的 cache 固定为 F16，由自己的内核读取），显式的 `f32` 会按 `f16` 报告。 |
 | `--tp <N>` | 多卡度 —— 单个进程内把模型摊到几张 GPU 上（默认：`1`）。到底走哪一种多卡模式由架构决定，而不是由你决定：实现了张量并行的走**张量并行**（在层*内部*切权重），Qwen 3.8 Flash Next（`qwen4exp`）与 DeepSeek V4 走**按层切分**（整层落在单卡 —— 买的是容量，不是速度）。GLM 5.x 不传此参数时按层切分；在 GGML GPU 后端上，传入它则为 GLM-5.2、GLM-5.3 与 GLM-5.3-Flash 一律选择原生本地单进程 TP（在 GLM-5.3 上这只是一个被接受的模式，而不是已验证的配置——各 rank 会复制 cache——而且只要 `--tp N>1`，`--spec` 就会被拒绝，投机只在默认的按层切分下生效）。两种模式都不支持的架构会在 stderr 上明确说明并只用一张卡。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。详见[张量并行与分布式推理](#张量并行与分布式推理)。 |
 | `--tp-node-id <N>` | 多节点分布式张量并行中本节点的 0 起始编号。必须与 `--tp-peers` 一起使用。 |
 | `--tp-peers <list>` | 集群中所有节点的 `host:port` 列表（逗号分隔，例如 `192.168.1.10:9500,192.168.1.11:9500`）。所有节点必须使用完全相同的列表。必须与 `--tp-node-id` 一起使用。 |
@@ -332,11 +332,11 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 
 | 参数 | 说明 |
 |---|---|
-| `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（GLM 5.2 的 NextN 块、GLM-5.3 的同款，以及 Qwen 3.6 的，无需额外下载任何文件）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。草稿头每步最多起草 `--spec-draft` 个 token，主干用一次批量前向完成验证；每个输出 token 仍然取自主干的某一行，因此得到的 token 流与普通 decode 本该产生的完全一致（贪心配置下为 argmax，带采样器时同分布），这纯粹是一条加速路径。在所有单序列路径（`--input`、`--input-jsonl`、`--multi-turn-jsonl`、`--interactive`）上生效。**必须在模型加载之前就出现在命令行上**：对 glm-dsa 而言，正是它告诉原生加载器把约 3 GiB 的 NextN 层调入显存，而这一层要与 KV 缓存争抢上下文长度所依据的那块内存。若权重的草稿块复用主干的 LM head（GLM 5.2 与 GLM-5.3 即是如此），在 `--tp N>1` 下会被拒绝——在它们上面，投机只在默认的按层切分（不传 `--tp` 时）下生效。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC` 仍被 glm-dsa 的原生加载器读取；glm-dsa 还认 `TS_GLM_MTP=1`/`0`，它会覆盖上述两者，便于 A/B 对比）。 |
+| `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（GLM 5.2 的 NextN 块、GLM-5.3 的同款，以及 Qwen 3.6 的，无需额外下载任何文件）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。草稿头每步最多起草 `--spec-draft` 个 token，主干用一次批量前向完成验证；每个输出 token 仍然取自主干的某一行，因此得到的 token 流与普通 decode 本该产生的完全一致（贪心配置下为 argmax，带采样器时同分布），这纯粹是一条加速路径。“完全一致”是在浮点意义下成立的：多行验证与单行 decode 走不同的 kernel，若某个贪心 token 的前两名 logit 之差小于两者的偏差，就可能得到不同的 token（实测与原因见[贪心一致性的实际含义](docs/speculative_decoding.md#what-greedy-parity-delivers)）。在所有单序列路径（`--input`、`--input-jsonl`、`--multi-turn-jsonl`、`--interactive`）上生效。**必须在模型加载之前就出现在命令行上**：对 glm-dsa 而言，正是它告诉原生加载器把约 3 GiB 的 NextN 层调入显存，而这一层要与 KV 缓存争抢上下文长度所依据的那块内存。若权重的草稿块复用主干的 LM head（GLM 5.2 与 GLM-5.3 即是如此），在 `--tp N>1` 下会被拒绝——在它们上面，投机只在默认的按层切分（不传 `--tp` 时）下生效。GLM-5.3-Flash（`glm5next`）不构建草稿头（其 NextN 块未实现），因此只传 `--spec` 会按标准解码服务；`--spec --spec-type ngram` 启用无权重的 n-gram 草稿器，KDA 递归状态在每次验证前拍快照、部分被拒时恢复（默认窗口 3；见 [GLM 卡片](docs/models/glm_zh-cn.md#glm-53-flash-上的投机解码)）。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC` 仍被 glm-dsa 的原生加载器读取；glm-dsa 还认 `TS_GLM_MTP=1`/`0`，它会覆盖上述两者，便于 A/B 对比）。 |
 | `--spec-type <name>` | 投机**算法**：`auto`（默认，使用检查点自带的草稿器）、`draft-head`、`block` 或 `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它的做法是在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强（摘要、改写、翻译、重复性的结构化输出、Agent 循环），其他场景则退回普通 decode。在 Qwen3.5-9B（Q8_0、`ggml_metal`、M5 Pro）这个完全不带草稿头的检查点上实测 45.2 tok/s，对比普通解码的 31.4 tok/s（1.44x），输出逐字节一致。环境变量：`TS_SPEC_TYPE`。参见 [TensorSharp 的投机解码](docs/speculative_decoding.md)。 |
 | `--spec-draft <N>` | 每个投机步最多起草的 token 数（取值 1-64，默认 `8`）。它同时决定加载时原生计算图缓存的大小，因此请与 `--spec` 一并显式传入，而不要依赖默认值。块级草稿器还会把它夹到自己训练时的块大小以内，且在那里默认即为该块大小：DSpark 为 5，Muse-Glimmer 的 DFlash 为 15，Qwen 3.8 的 DFlash2 为 7。在**递归**主干（Qwen 3.5/3.8 的 GatedDeltaNet 层）上，窄窗口远比宽窗口划算：它同时限制验证宽度与回滚重算，`--spec-draft 3` 在 Qwen3.8-27B 上比默认值快 1.6 倍。另外，在 GGML 后端上对 Qwen 3.5 显式传入 8 或更大是一个已知的**正确性**缺陷——验证批达到九行时会偏离普通贪心解码——因此在那里请保持 7 或更小；见[投机解码](docs/speculative_decoding.md)。环境变量：`TS_SPEC_DRAFT`（或 `TS_MTP_DRAFT`）。 |
 | `--spec-pmin <f>` | 草稿置信度门限，取值 `[0, 1]`；遇到第一个低于该值的 token 即停止起草，`0` 表示从不设门限。这个数字*意味着什么*由算法自己决定，因此各算法带各自的默认值：逐 token 草稿头为 `0.15`（其 top-10 logits 上的 top-1 概率），块级草稿器为 `0.35`——后者的门限是**累积**前缀概率，即置信度头各位置估计值的乘积，因此同一个数字要严格得多（调低会起草更远、回滚更多，调高则更早退回普通 decode），n-gram 为 `0`（在那里它转而缩放所需的匹配长度）。环境变量：`TS_SPEC_PMIN`（或 `TS_MTP_PMIN`）。 |
-| `--draft-model <path>` | 投机解码草稿 GGUF，适用于所有以独立文件发布的草稿器——DeepSeek V4 的 DSpark 支持模块（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）、Muse-Glimmer 的 DFlash 与 Qwen 3.8 的 DFlash2 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md#3-dflash-投机解码)，环境变量 `TS_MUSE_GLIMMER_DFLASH`），以及 Gemma 4 的 `gemma4-assistant` 逐 token 草稿头。文件自己的 `general.architecture` 决定它如何加载——你从不需要挑选机制。在这里给出文件本身就会启用投机：不需要再加 `--spec`，显式的 `--no-spec` 则会否决它。草稿模型的隐藏维度必须与目标一致（12B 目标配它自己的 12B 草稿，而不是 26B-A4B 那个）；草稿 GGUF 不匹配、缺失或不完整会在启动时立即失败。Qwen 3.6、GLM 5.2 与 GLM-5.3 把 NextN 块内嵌在主干 GGUF 里，不需要这个参数——它们用 `--spec`。块级草稿器每步起草一整块 token，主干用一次批量前向验证。每个输出 token 仍然取自主干的某一行——贪心配置下用 argmax，否则用本次运行自己的采样器——因此两种情况下输出流都保持不变。块级起草在所有单序列路径（`--input`、`--multi-turn-jsonl`、`--interactive`）上生效，需要 `--backend cuda` 或 `--backend ggml_cuda`。环境变量：`TS_SPEC_DRAFT_MODEL`、`TS_DSV4_DSPARK`。 |
+| `--draft-model <path>` | 投机解码草稿 GGUF，适用于所有以独立文件发布的草稿器——DeepSeek V4 的 DSpark 支持模块（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）、Muse-Glimmer 的 DFlash 与 Qwen 3.8 的 DFlash2 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md#3-dflash-投机解码)，环境变量 `TS_MUSE_GLIMMER_DFLASH`），以及 Gemma 4 的 `gemma4-assistant` 逐 token 草稿头。文件自己的 `general.architecture` 决定它如何加载——你从不需要挑选机制。在这里给出文件本身就会启用投机：不需要再加 `--spec`，显式的 `--no-spec` 则会否决它。草稿模型的隐藏维度必须与目标一致（12B 目标配它自己的 12B 草稿，而不是 26B-A4B 那个）；草稿 GGUF 不匹配、缺失或不完整会在启动时立即失败。Qwen 3.6、GLM 5.2 与 GLM-5.3 把 NextN 块内嵌在主干 GGUF 里，不需要这个参数——它们用 `--spec`。块级草稿器每步起草一整块 token，主干用一次批量前向验证。每个输出 token 仍然取自主干的某一行——贪心配置下用 argmax，否则用本次运行自己的采样器——因此两种情况下输出流都保持不变，仅在验证与 decode kernel 的浮点差异足以翻转的近平局处可能不同（见[贪心一致性的实际含义](docs/speculative_decoding.md#what-greedy-parity-delivers)）。块级起草在所有单序列路径（`--input`、`--multi-turn-jsonl`、`--interactive`）上生效，需要 `--backend cuda` 或 `--backend ggml_cuda`。环境变量：`TS_SPEC_DRAFT_MODEL`、`TS_DSV4_DSPARK`。**Nemotron-H 会拒绝：**Nemotron 3.5 Lightning 的 DSpark 草稿器能被识别但不会挂载，`--spec`/`--spec-type ngram` 也只提供普通解码并打印一次警告，因为该主干的 verify 与 decode 内核结果不一致，投机会改变输出（见 [投机解码](docs/speculative_decoding.md#nemotron-h-refuses-speculation)）。 |
 | `--temperature <f>` | 采样温度（0 = 贪心） |
 | `--top-k <N>` | Top-K 过滤（0 = 关闭） |
 | `--top-p <f>` | Nucleus 采样阈值（1.0 = 关闭） |
@@ -643,11 +643,11 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `--no-webui` | 不提供内置 Web UI；`GET /` 改为返回纯文本存活探测。所有 HTTP API 端点（含 `/uploads`）照常可用。环境变量：`TS_NO_WEBUI` |
 | `--no-prefix-cache` | 不在对外服务之前准备所有会话共享的那段提示词，也不在两次启动之间保留它。默认情况下服务端会在启动时把这段提示词前向一次并保存结果，于是一个进程的第一条消息与其他消息代价相同（在一个 agent 配置上实测 21.8s → 0.7s） |
 | `--prefill-chunk-size <N>` | 混合 prefill+decode 步中每个请求的 prefill 上限，使活跃输出流更频繁地轮到 GPU（默认：`256`）；仅有 prefill 时仍会公平用满设备 token 预算。环境变量：`TS_SCHED_PREFILL_CHUNK`。 |
-| `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（Qwen 3.6、GLM 5.2 与 GLM-5.3 的 NextN 块）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。仅对单序列（无并发）请求生效：草稿头每步最多提议 `--spec-draft` 个 token，主干网络用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，输出与标准 decode 一致。仅在有收益处自动启用：Qwen 3.6 的内嵌 NextN 块在所有后端上都被认为有收益，而 Gemma 4 的独立草稿头只在各 ggml 后端与 Direct `cuda` 后端上启用；CPU / GGML CPU / MLX 走标准 decode。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC`）。 |
+| `--spec` / `--no-spec` | 启用投机解码（默认关闭）。`--spec` 是内嵌在主干检查点里的草稿器（Qwen 3.6、GLM 5.2 与 GLM-5.3 的 NextN 块）的显式开关——因为加载它们要把额外的权重调入显存；以独立 GGUF 发布的草稿器只需 `--draft-model` 即可启用，显式的 `--no-spec` 则对两者都是否决。仅对单序列（无并发）请求生效：草稿头每步最多提议 `--spec-draft` 个 token，主干网络用一次批量前向完成验证；起草与验证均由该请求自己的采样器（含惩罚项）驱动，输出与标准 decode 一致（验证与 decode kernel 的浮点差异足以翻转的近平局处除外，见[贪心一致性的实际含义](docs/speculative_decoding.md#what-greedy-parity-delivers)）。仅在有收益处自动启用：Qwen 3.6 的内嵌 NextN 块在所有后端上都被认为有收益，而 Gemma 4 的独立草稿头只在各 ggml 后端与 Direct `cuda` 后端上启用；CPU / GGML CPU / MLX 走标准 decode。GLM-5.3-Flash（`glm5next`）不构建草稿头（其 NextN 块未实现），因此只传 `--spec` 会按标准解码服务；`--spec --spec-type ngram` 启用无权重的 n-gram 草稿器，KDA 递归状态在每次验证前拍快照、部分被拒时恢复（默认窗口 3）。环境变量：`TS_SPEC`（旧写法 `TS_MTP_SPEC`）。 |
 | `--spec-type <name>` | 投机算法：`auto`（默认）/ `draft-head` / `block` / `ngram`。`ngram` 不需要任何训练权重，对所有模型都能用——它在上文里找最近几个 token 曾经出现过的位置，把当时紧随其后的内容拿来当草稿，因此凡是答案大量引用输入的场景都很强。环境变量：`TS_SPEC_TYPE`。 |
 | `--spec-draft <N>` | 每个投机步最多起草的 token 数（默认 `8`；块级草稿器会把它夹到自己训练时的块大小以内，在那里默认也是该块大小）。在 GGML 后端上对 Qwen 3.5 显式传入的值请保持 7 或更小——九行验证批是一个已知的正确性缺陷。环境变量：`TS_SPEC_DRAFT`（或 `TS_MTP_DRAFT`）。 |
 | `--spec-pmin <f>` | 草稿置信度门限，取值 `[0, 1]`；遇到第一个低于该值的 token 即停止起草，`0` 表示从不设门限。默认值按算法选择：逐 token 草稿头为 `0.15`（其 top-10 logits 上的 top-1 概率），块级草稿器为 `0.35`——后者的门限是**累积**前缀概率，因此同一个数字要严格得多，n-gram 为 `0`。环境变量：`TS_SPEC_PMIN`（或 `TS_MTP_PMIN`）。 |
-| `--draft-model <path>` | 投机解码草稿模型，适用于所有以独立文件发布的草稿器：DeepSeek V4 的 DSpark 支持 GGUF（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）、Muse-Glimmer 的 DFlash 与 Qwen 3.8 的 DFlash2 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)，环境变量 `TS_MUSE_GLIMMER_DFLASH`），以及 Gemma 4 的 `gemma4-assistant` 逐 token 草稿头。文件自己的 `general.architecture` 决定它如何加载——操作者从不需要挑选机制；在这里给出文件本身就会启用投机，不需要再加 `--spec`，显式的 `--no-spec` 则会否决它。草稿的隐藏维度必须与目标一致（例如 12B 目标配 12B 草稿，而非 26B-A4B 草稿）；草稿不匹配或不完整会在启动时立即失败并给出修复提示。Qwen 3.6、GLM 5.2 与 GLM-5.3 将 NextN 块内嵌在主干 GGUF 中，不需要这个参数——它们用 `--spec`。块级草稿器每步起草一整块 token，主干用一次批量前向验证，因此贪心输出保持不变；在 `cuda` 与 `ggml_cuda` 后端上对单序列请求生效。服务端的每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。环境变量：`TS_SPEC_DRAFT_MODEL`（旧写法 `TS_MTP_DRAFT_MODEL`）、`TS_DSV4_DSPARK`。 |
+| `--draft-model <path>` | 投机解码草稿模型，适用于所有以独立文件发布的草稿器：DeepSeek V4 的 DSpark 支持 GGUF（见 [DeepSeek V4](docs/models/deepseek4_zh-cn.md#dspark-投机解码)）、Muse-Glimmer 的 DFlash 与 Qwen 3.8 的 DFlash2 块级草稿器（见 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)，环境变量 `TS_MUSE_GLIMMER_DFLASH`），以及 Gemma 4 的 `gemma4-assistant` 逐 token 草稿头。文件自己的 `general.architecture` 决定它如何加载——操作者从不需要挑选机制；在这里给出文件本身就会启用投机，不需要再加 `--spec`，显式的 `--no-spec` 则会否决它。草稿的隐藏维度必须与目标一致（例如 12B 目标配 12B 草稿，而非 26B-A4B 草稿）；草稿不匹配或不完整会在启动时立即失败并给出修复提示。Qwen 3.6、GLM 5.2 与 GLM-5.3 将 NextN 块内嵌在主干 GGUF 中，不需要这个参数——它们用 `--spec`。块级草稿器每步起草一整块 token，主干用一次批量前向验证，因此贪心输出保持不变（浮点近平局处除外，见[贪心一致性的实际含义](docs/speculative_decoding.md#what-greedy-parity-delivers)）；在 `cuda` 与 `ggml_cuda` 后端上对单序列请求生效。服务端的每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。环境变量：`TS_SPEC_DRAFT_MODEL`（旧写法 `TS_MTP_DRAFT_MODEL`）、`TS_DSV4_DSPARK`。**Nemotron-H 会拒绝：**显式的 `--draft-model`（例如 Nemotron 3.5 Lightning 的 DSpark GGUF）会让服务器启动失败，报出模型给出的原因并提示去掉该参数；`--spec`/`--spec-type ngram` 也只提供普通解码并打印一次警告，因为该主干的 verify 与 decode 内核结果不一致，投机会改变输出（见 [投机解码](docs/speculative_decoding.md#nemotron-h-refuses-speculation)）。 |
 | `--paged-kv` / `--no-paged-kv` | 已移除的按会话分页 KV 管理器的兼容参数。当前服务端 KV 状态由引擎持有；请使用连续批处理 / `TS_SCHED_*` 开关调节引擎。别名：`--paged-kv-cache` / `--no-paged-kv-cache`。 |
 | `--paged-kv-block-size <N>` | 旧的独立分页 KV 块大小。当前引擎使用 `TS_SCHED_BLOCK_SIZE`。 |
 | `--paged-kv-ram-mb <N>` | 旧的独立分页 KV RAM 层上限。 |
@@ -690,6 +690,7 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `TENSORSHARP_LOG_LEVEL` | 控制台与文件日志的最低输出级别：`Trace`、`Debug`、`Information`、`Warning`、`Error`、`Critical`（默认：`Information`）。`TensorSharp.Cli` 同样识别该变量。 |
 | `TENSORSHARP_LOG_DIR` | JSON-line 文件日志的写入目录（默认：`<binDir>/logs`）。`TensorSharp.Cli` 同样识别该变量。 |
 | `TENSORSHARP_LOG_FILE` | 设为 `0` 可关闭文件日志，仅保留控制台输出（默认：开启）。`TensorSharp.Cli` 同样识别该变量。 |
+| `TENSORSHARP_UPLOAD_DIR` | 上传媒体与抽取出的视频帧的存放目录（默认：`<binDir>/uploads`）；只读或固定版本的部署可将其指向应用目录之外。仅服务端识别。 |
 | `TENSORSHARP_TP_DEGREE` | 多卡度 —— 把模型摊到本机多少张 GPU 上（默认：`1`）。当未传 `--tp` 参数时作为 `ModelBase.Create` 的兜底来源；`TensorSharp.Cli` 与 `TensorSharp.Server` 都提供了 `--tp <N>` 参数。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。在改走按层切分而非张量并行的架构（`qwen4exp`、DeepSeek V4）上，它只是个设备数，而不是切分度。 |
 | `TENSORSHARP_TP_DEVICES` | 各 rank 使用的 GPU 序号（逗号分隔，例如 `0,2`；默认 `0..tp-1`）。用于 GGML 后端上的 TP。 |
 | `TS_Q4E_LAYER_SPLIT` | Qwen 3.8 Flash Next（`qwen4exp`）多卡按层切分时每张 GPU 分到的层数（逗号分隔，例如 `20,28`），用于取代自动的显存均衡。给出无法满足的值时会直接抛错，而不是静默忽略。 |
@@ -724,11 +725,12 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `TS_SCHED_SOLO_PREFILL_CHUNK` | SOLO（无争用）prompt 全新部分（start_pos = 0）的 prefill 分块大小——单个无争用请求会以大分块走融合 prefill 路径（默认：`8192`）。 |
 | `TS_SCHED_NUM_BLOCKS` | 引擎块池的物理块数（默认：`256`）。 |
 | `TS_SCHED_BLOCK_SIZE` | 引擎侧每块的 token 数（默认：`256`）。 |
-| `TS_SCHED_PREFIX_CACHE` | `0` 关闭跨请求的块级哈希前缀共享。 |
+| `TS_SCHED_PREFIX_CACHE` | `0` 关闭跨请求的全部提示复用：池化块、live cache 续接、保留的 holder 和共享前缀检查点。无论开关如何，复用都按会话隔离：另一个会话的状态只共享到系统提示词加工具声明前缀为止（见 [docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING_zh-cn.md)）。池化块方面：由批处理分页步写入的块在模型自己的分页存储中被复用（请求一开始就是分页驻留）；带池化快照的块被恢复到线性 cache；两种可读形式都没有的块不会被复用，改为重新 prefill。 |
 | `TS_SCHED_STOP_REPETITION` | `0` 允许陷入重复循环的生成继续跑到 token 上限，而不是被提前结束。 |
 | `TS_SCHED_DECODE_QUANTUM` | 在允许切换序列前的 token 数（默认与 block size 相同）。 |
 | `TS_RETAINED_FUSED_CACHE` | `1`（默认）在请求结束后保留其融合 holder，使前缀完全一致的续写不必重新 prefill；仅对声明支持的模型有效（Gemma 4 的 K/V；Qwen 3.5/3.6 的注意力 K/V 加 GatedDeltaNet 递归状态）。`0` 关闭（用于限制显存或做 A/B）。 |
 | `TS_RETAINED_FUSED_CACHE_MAX` | 保留的融合 holder 的 LRU 预算（默认 `4`）；每个都钉住一份完整的按请求续写状态。 |
+| `TS_MM_EMBEDDING_CACHE_MB` | 图像/音频嵌入缓存的字节预算（默认 `512`）。条目以媒体内容（SHA-256）为键，因此 API 客户端每轮重发同一张图片只编码一次；超出预算后淘汰没有被进行中提示引用的最近最少使用条目。 |
 | `TS_PREFIX_CHECKPOINTS` | `1`（默认）在所有会话共享的那段提示词末尾——系统提示词、工具、技能——对模型状态做 checkpoint，并让每个**新**会话从它的副本开始，因此新会话只需重新 prefill 自己的那条消息。适用于 GGML 后端上的 Gemma 4 与 Qwen 3.5/3.6。`0` 关闭。 |
 | `TS_PREFIX_CHECKPOINTS_MAX` | 同时保留 checkpoint 的不同共享前缀数量，按 LRU 淘汰（默认 `2`）。每个都持有该前缀的一份 K/V，Qwen 上还包括递归状态。 |
 | `TS_KV_INITIAL_TOKENS` | 缓存创建时（加载时的主缓存，以及每个按请求的 holder）在任何请求声明预算之前先分配多少 token 的 K/V。`0`（默认）沿用引擎策略：显式设置 `MAX_CONTEXT` 时取整个窗口，否则取后端默认值。缓存仍会按需增长，因此内存受限的设备应把它设小——每个保留的 holder 都要按这个大小付费，主机副本与设备镜像各一份。 |
@@ -741,7 +743,10 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `TS_GPTOSS_PAGED_ATTN_MANAGED` | 在 GPT OSS 批处理路径中使用托管 (C#) 的带 sinks 分页注意力内核。 |
 | `TS_NEMOTRON_BATCHED` | 设为 `0` 强制 Nemotron-H 走旧的按序列 KV-swap 路径（默认走批处理 / 分页）。 |
 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE` | 在 Nemotron-H 批处理路径中使用原生 Mamba2 批处理步骤内核。 |
-| `TS_PAGED_ATTN_KERNEL` | `Mistral3Model.BatchedForward` 选择的分页注意力派发内核：`native`（默认）、`tensor`（基于 C# Tensor）或 `managed`（纯 C# 标量）。 |
+| `TS_NEMOTRON_ATTN_SCORE_BUDGET_MB` | Nemotron-H：物化 prefill 回退路径在改为按 query 子块计算前允许构建的最大注意力得分张量（MiB，默认 1024）。GGML 融合 prefill kernel（F32 / F16 cache）不受此预算约束，得分张量较大时会切换到 flash attention。 |
+| `TS_MAMBA2_PREFILL_CACHE_MB` | Nemotron-H：缓存的原生 Mamba2 prefill 计算图可占用的设备内存（MiB，按最近最少使用淘汰，默认 1024）。大于预算的计算图只服务当次调用，随后释放。 |
+| `TS_PAGED_ATTN_KERNEL` | `Mistral3Model.BatchedForward` 与 `HunyuanDenseModel.BatchedForward` 选择的分页注意力派发内核：`native`（默认）、`tensor`（基于 C# Tensor）或 `managed`（纯 C# 标量）。 |
+| `TS_HUNYUAN_BATCHED` | 设为 `0` 强制 Hunyuan Dense 走按序列的 KV 快照换入换出路径（默认走批处理 / 分页；块量化 KV cache 始终走快照路径）。 |
 | `TS_MLX_PIPELINED_DECODE` | 默认 `1`，当请求为贪心采样、没有 stop 序列且模型支持 device-side argmax / 下一 token embedding 查找时，在 MLX 后端启用流水化贪心 decode。设为 `0` 可关闭。仅 CLI。 |
 | `TS_MLX_MLOCK_GGUF` | 默认 `1`，通过 `mlock(2)` 把 GGUF mmap 区域钉在物理内存，避免前向之间被换出。设为 `0` 关闭（适用于进程 `memlock` rlimit 太低、或希望让 OS 自行管理分页的情况）。仅 MLX 后端。 |
 | `TS_MLX_FUSED_KV_WRITE` | 默认 `1`，使用单次多维 `slice_update` 写入每个 token 的 KV block。设为 `0` 回退到按 head 的循环（A/B 测试 / 隔离回归用）。 |
@@ -1207,6 +1212,9 @@ llama.cpp 快数倍的原因：
    中转。对专家区间调用 `cudaHostRegister` 一次性花费约 65 ms/GiB，却把 PCIe 5.0
    x16 上的传输从 9.3 GB/s 提升到 55.6 GB/s。用 `TS_HOST_MOE_PIN=0` 关闭，用
    `TS_HOST_MOE_PIN_MAX_MB` 设上限（默认为 cgroup/主机内存上限的 60%）。
+   DeepSeek V4 / V4.1 是例外：它们的加载器在任何批大小下都在主机上计算被卸载的专家，
+   没有任何流式传输，因此只有设置 `TS_HOST_MOE_PIN=1` 时才会锁页（见
+   [V4.1 卡片](docs/models/deepseek41_zh-cn.md#加载时间)）。
 2. **只发送这一批实际路由到的专家**，并按连续区段分组——和 llama.cpp 调度器用
    已用专家位图玩的是同一个把戏。512 token 时较大的专家池只会被部分覆盖，而在投机
    验证与轻负载服务产生的小批下，这项节省相当可观。`TS_HOST_MOE_EXPERT_FILTER=0`
@@ -1575,7 +1583,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gg
 | 模型 | 默认状态 | 切换默认的环境变量 | 原生内核子开关 |
 |---|---|---|---|
 | Mistral 3 | 启用 | — | `TS_PAGED_ATTN_KERNEL` = `native`（默认）/ `tensor` / `managed` |
-| Gemma 4 | 启用 | `TS_GEMMA4_BATCHED=0` 强制走旧的按序列路径 | — |
+| Hunyuan Dense | 启用（块量化 KV cache 时关闭） | `TS_HUNYUAN_BATCHED=0` 强制走 KV 快照换入换出路径 | `TS_PAGED_ATTN_KERNEL` = `native`（默认）/ `tensor` / `managed` |
+| Gemma 4 | 启用 | `TS_GEMMA4_BATCHED=0` 强制走旧的按序列路径 | `TS_GEMMA4_BATCHED_CAPS=0` 强制 token 批量融合 decode 内核的 v1 门控（PLE / 共享 KV / 已回绕 SWA 的模型如 E2B/E4B 改为轮询 decode） |
 | Qwen 3.5 / 3.6 系列 | 启用 | `TS_QWEN35_BATCHED=0` 强制走旧的按序列路径（或 `--no-continuous-batching`） | `TS_QWEN35_BATCHED_GDN_NATIVE=1` 启用原生批处理 GDN 内核；`FUSED_ATTN_LAYER_MIN_SEQ_LEN=N` 覆盖融合注意力启用阈值（默认 4096） |
 | GPT OSS | 启用 | `TS_GPTOSS_BATCHED=0` 强制走旧的按序列路径 | `TS_GPTOSS_PAGED_ATTN_MANAGED=1` 强制使用托管 (C#) sinks softmax，而非原生带 sinks 的分页注意力内核 |
 | Nemotron-H | 启用 | `TS_NEMOTRON_BATCHED=0` 强制走旧的按序列路径 | `TS_NEMOTRON_MAMBA2_BATCHED_NATIVE=1` 启用原生批处理 Mamba2 步（NEON SIMD + GCD 并行） |
@@ -1796,7 +1805,7 @@ shell 能够到达 PATH 上的每一个解释器——于是手上还拿着旧�
 |---|---|---|
 | ASP.NET Core 监听 | `http://0.0.0.0:5000` | `--port` / `--host` / `--urls`，其次 `PORT` / `HOST`，再次 `ASPNETCORE_URLS` |
 | 文本及原生数字 PDF 上传 | 保留全部提取内容；最终渲染的提示词必须能放入已加载模型的上下文 | — |
-| 视频帧抽取 | 1 fps（基于时间，不限制） | `VIDEO_SAMPLE_FPS`、`VIDEO_MAX_FRAMES` |
+| 视频帧抽取 | 1 fps（基于时间，不限制）。OpenAI 的 `video_url` part（DeepSeek V4.1、Qwen 3.8 Flash Next）可自带 `fps` / `max_frames`，`VIDEO_MAX_FRAMES` 未设置时上限 16 帧；Qwen 3.8 把采样到的帧两两合并并使用 Qwen-VL 时间轴坐标（见[模型卡](docs/models/qwen38-flash-next_zh-cn.md#视频输入)） | `VIDEO_SAMPLE_FPS`、`VIDEO_MAX_FRAMES` |
 | DiffusionGemma Web UI 去噪 | 48 步，最大 batch 2 | `DIFFUSION_STEPS`、`DIFFUSION_MAX_BATCH` |
 
 #### 日志（服务端 + CLI）
@@ -1820,6 +1829,36 @@ shell 能够到达 PATH 上的每一个解释器——于是手上还拿着旧�
 | 原生构建并行度上限 | 使用全部 CPU，并按内存容量限制（`nvcc` 每任务约 3 GB） | `TENSORSHARP_GGML_NATIVE_BUILD_PARALLEL_LEVEL` | — |
 | 原生构建使用的 CMake 生成器（Windows） | 有 Ninja 时优先使用，否则用 `Visual Studio NN` | `CMAKE_GENERATOR` | `-G <生成器>` |
 | 原生构建使用的 Visual Studio 安装（Windows） | 自动检测，包含被标记为"不完整"的安装 | `TENSORSHARP_VS_INSTALL_DIR` | — |
+
+## 退出码（CLI + Server）
+
+`TensorSharp.Cli` 与 `TensorSharp.Server` 使用同一套有文档约定的退出码，脚本或进程守护程序据此
+即可区分"命令行写错了"、"这个模型在这台机器上加载不了"和"这是个 bug"：
+
+| 退出码 | 含义 | stderr 输出 |
+|---|---|---|
+| `0` | 成功：运行结束、`--help` / `--list-skills` 已打印，或服务端正常关闭。 | — |
+| `1` | 配置错误：未知或已移除的参数、非法取值、无法读取的 `--config` 文件。 | `Configuration error: <错误说明>` |
+| `2` | 模型加载被拒绝。 | 恰好一行，且是最后一行：`error: model load refused: <原因>` |
+| 其他任何值 | 不是拒绝，而是 bug 或崩溃。未处理的 .NET 异常会打印堆栈，并在 Linux 和 macOS 上以 `134`（SIGABRT）退出；被操作系统杀掉的进程返回对应信号（内存不足被杀为 `137`）。 | 堆栈信息，请提交问题报告。 |
+
+**什么算"加载被拒绝"**（退出码 `2`）：加载器有意做出的、给出可操作原因的决定——显存不足以容纳
+请求的上下文或 `--n-cpu-moe` 设置（消息会给出放得下的数值）、设备装不下的 `--tp` 布局、架构不支持的
+KV 缓存类型（例如 DeepSeek V4.1 上的 `KV_CACHE_DTYPE=q8_0`）、模型或本机不支持的后端、缺失/截断/
+不是 GGUF 的模型文件、缺失的附属文件（DeepSeek V4.1 的 `deepseek41.engram.bin`），或者显式指定却无法
+启用的 `--draft-model`。原生加载器自己的诊断行（`[dsv4] ...`、`[glm] ...`）仍可能出现在错误行之前；
+错误行会重复原因，单独读也能看懂。加载过程中其他任何失败——`NullReferenceException`、CUDA 错误、
+内存不足导致的中止——都不算拒绝，会保留堆栈信息。唯一的例外：DeepSeek V4/V4.1 与 GLM 的原生整模型加载器
+放弃的每一次加载都按拒绝报告，包括在设备上分配权重或缓存失败，原因即它们的 `[dsv4]`/`[glm]` 那一行。
+
+以 `2` 退出之前，服务端会先释放被拒绝的加载留下的资源（模型服务与 ggml 后端），并且不会打开端口。
+拒绝的堆栈本来就是噪音，所以只在 Debug 级别记录：`TENSORSHARP_LOG_LEVEL=Debug`（两个宿主都适用）
+或 `--log-level debug`（CLI）即可看到。
+
+运行中的服务端收到的加载请求被拒绝时，进程不会退出。`POST /api/models/load` 返回 `500` 和
+`{ "ok": false, "error": "<原因>", "refused": true, "loadedModel": "<文件>" }`；之前已加载的模型会被恢复，
+并写在 `loadedModel` 中，恢复不了时为 `null`。需要重新加载托管模型的 OpenAI 或 Ollama 请求会以该协议的
+错误格式返回同样的原因，服务端继续提供服务。
 
 ## 服务端日志
 
@@ -1912,6 +1951,14 @@ curl http://localhost:5000/v1/skills
 curl -X POST http://localhost:5000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "gemma-4-E4B-it-Q8_0.gguf", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 50}'
+
+# 推理强度（GPT-OSS / Harmony）。模型总是先推理再作答；reasoning_effort
+# （"low" | "medium" | "high"，默认 "medium"，其他值返回 HTTP 400）设置 Harmony
+# 的 "Reasoning:" system 行，这是控制推理长度的唯一开关。显式 "think": false 且
+# 未指定 reasoning_effort 时按 "low" 渲染。其他模型系列接受该字段但忽略它。
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-oss-20b-Q8_0.gguf", "messages": [{"role": "user", "content": "What is 17 + 25?"}], "reasoning_effort": "low", "max_tokens": 256}'
 
 # 结构化输出（OpenAI response_format）
 curl -X POST http://localhost:5000/v1/chat/completions \

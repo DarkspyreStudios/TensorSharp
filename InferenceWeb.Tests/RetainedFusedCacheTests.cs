@@ -42,6 +42,293 @@ public class RetainedFusedCacheTests
     private const int Cap = 16;         // sliding-window cap (pooled reuse ceiling)
     private const int PeakToken = 3;    // greedy argmax always lands here
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void AdoptionMetadataOutOfMemory_KeepsRetainedOwnerAndPoolUntilRetry(bool rewind, bool afterBlockReservation)
+    {
+        WithRetentionSettings(() =>
+        {
+            var model = new FusedStubModel { SupportsExactFusedCacheReuse = true, SupportsPrefixCheckpoints = false };
+            var executor = NewRetentionExecutor(model);
+            PrimeFinishedHolder(executor, model, "source", 1, 128);
+            Assert.True(executor.TryRetainReleasedFusedCache("source"));
+            int reused = rewind ? 104 : 128;
+            var prompt = Enumerable.Repeat(1, reused).Concat(Enumerable.Repeat(2, 8)).ToList();
+            var next = new SequenceState("next", prompt, 4, BlockSize, SamplingConfig.Greedy);
+            var reserve = executor.ReserveRetainedAdoptionMetadata;
+            var pool = ExecutorPool(executor);
+            int free = pool.NumFreeBlocks;
+            executor.ReserveRetainedAdoptionMetadata = (seq, count) =>
+            {
+                Assert.True(count > 8, "fixture must require block-table growth");
+                if (afterBlockReservation) seq.BlockTable.EnsureBlockCapacity(count);
+                throw new OutOfMemoryException("controlled adoption metadata allocation");
+            };
+
+            Assert.False(executor.TryAdoptFusedContinuation(next, reused));
+            Assert.Equal(0, model.RebindCalls);
+            Assert.True(model.HasRetainedHolder("source"));
+            Assert.False(model.HasFusedSequenceCache("next"));
+            Assert.Single(RetainedMetadata(executor));
+            Assert.Equal(free, pool.NumFreeBlocks);
+            Assert.Equal(0, next.BlockTable.NumBlocks);
+            Assert.Equal(0, next.NumComputedTokens);
+            Assert.Equal(0, next.PrefixCacheReusedTokens);
+            Assert.Empty(PendingRetainedTruncations(executor));
+
+            executor.ReserveRetainedAdoptionMetadata = reserve;
+            Assert.True(executor.TryAdoptFusedContinuation(next, reused));
+            Assert.Equal(1, model.RebindCalls);
+            Assert.False(model.HasRetainedHolder("source"));
+            Assert.True(model.HasFusedSequenceCache("next"));
+            Assert.Empty(RetainedMetadata(executor));
+            Assert.Equal(reused, next.NumComputedTokens);
+            Assert.Equal(reused, next.PrefixCacheReusedTokens);
+            Assert.Equal(free - reused / BlockSize, pool.NumFreeBlocks);
+            if (rewind) Assert.Equal(reused, PendingRetainedTruncations(executor)["next"]);
+            else Assert.Empty(PendingRetainedTruncations(executor));
+            executor.DiscardReleasedFusedCacheBookkeeping("next");
+            model.OnSequenceReleased("next");
+            pool.Free(next.BlockTable.Clear());
+            Assert.Equal(free, pool.NumFreeBlocks);
+            Assert.False(model.HasFusedSequenceCache("next"));
+            Assert.Empty(PendingRetainedTruncations(executor));
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RetentionMetadataOutOfMemory_DeclinesBeforeChangingNativeOwnership(bool reusedId)
+    {
+        WithRetentionSettings(() =>
+        {
+            var model = new FusedStubModel();
+            var executor = NewRetentionExecutor(model);
+            const string key = "allocation-owner";
+            if (reusedId)
+            {
+                PrimeFinishedHolder(executor, model, key, 1);
+                Assert.True(executor.TryRetainReleasedFusedCache(key));
+            }
+            PrimeFinishedHolder(executor, model, key, 5);
+            int transfers = model.RetainCalls;
+            executor.AllocateRetainedCacheTokens = _ => throw new OutOfMemoryException("controlled metadata allocation");
+
+            Assert.False(executor.TryRetainReleasedFusedCache(key));
+            Assert.Equal(transfers, model.RetainCalls);
+            Assert.True(model.HasFusedSequenceCache(key));
+            Assert.Equal(reusedId, model.HasRetainedHolder(key));
+            Assert.Equal(reusedId ? 1 : 0, RetainedMetadata(executor).Length);
+            Assert.Empty(model.DiscardedRetainedRequestIds);
+            if (reusedId) Assert.All(RetainedMetadata(executor)[0].Tokens, token => Assert.Equal(1, token));
+
+            // The normal release hook still owns the active request, while a
+            // previous same-id retained cache remains independently tracked.
+            model.OnSequenceReleased(key);
+            Assert.False(model.HasFusedSequenceCache(key));
+            Assert.Equal(reusedId, model.HasRetainedHolder(key));
+            executor.Reset();
+            Assert.False(model.HasRetainedHolder(key));
+        });
+    }
+
+    [Theory]
+    [InlineData("same-id")]
+    [InlineData("budget")]
+    [InlineData("trim")]
+    public void RetentionDiscardFailure_PreservesMetadataAndOwnerUntilSuccessfulRetry(string operation)
+    {
+        WithRetentionSettings(() =>
+        {
+            var model = new FusedStubModel();
+            var executor = NewRetentionExecutor(model);
+            PrimeFinishedHolder(executor, model, "old", 1);
+            Assert.True(executor.TryRetainReleasedFusedCache("old"));
+            string nextKey = operation == "same-id" ? "old" : "new";
+            var next = PrimeFinishedHolder(executor, model, nextKey, 5);
+            if (operation == "trim") Assert.True(executor.TryRetainReleasedFusedCache(nextKey));
+            if (operation == "budget") Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", "1");
+            model.ThrowOnDiscardKey = "old";
+
+            if (operation == "trim") Assert.Throws<InvalidOperationException>(() => executor.TrimIdleMemory());
+            else Assert.Throws<InvalidOperationException>(() => executor.TryRetainReleasedFusedCache(nextKey));
+            Assert.True(model.HasRetainedHolder("old"));
+            Assert.Equal(operation == "same-id" ? 1 : 2, RetainedMetadata(executor).Length);
+            Assert.All(RetainedMetadata(executor)[0].Tokens, token => Assert.Equal(1, token));
+            Assert.Empty(model.DiscardedRetainedRequestIds);
+            Assert.Equal(operation == "same-id" ? 1 : 2, model.RetainCalls);
+            Assert.Equal(operation == "same-id", model.HasFusedSequenceCache(nextKey));
+
+            model.ThrowOnDiscardKey = null;
+            if (operation == "same-id")
+            {
+                TrackFinishedHolder(executor, next);
+                Assert.True(executor.TryRetainReleasedFusedCache(nextKey));
+            }
+            else Assert.Contains("evicted 1 retained holder", executor.TrimIdleMemory());
+            Assert.Equal(new[] { "old" }, model.DiscardedRetainedRequestIds);
+            Assert.Single(RetainedMetadata(executor));
+            Assert.All(RetainedMetadata(executor)[0].Tokens, token => Assert.Equal(5, token));
+            Assert.True(model.HasRetainedHolder(nextKey));
+            executor.Reset();
+            Assert.Empty(RetainedMetadata(executor));
+            Assert.False(model.HasRetainedHolder(nextKey));
+        });
+    }
+
+    private static void WithRetentionSettings(Action body)
+    {
+        string enabled = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE");
+        string budget = Environment.GetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX");
+        try
+        {
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", "1");
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", "4");
+            body();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE", enabled);
+            Environment.SetEnvironmentVariable("TS_RETAINED_FUSED_CACHE_MAX", budget);
+        }
+    }
+
+    private static BatchExecutor NewRetentionExecutor(FusedStubModel model)
+    {
+        var cfg = Config();
+        var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, model.ComputeKVBlockByteSize(cfg.BlockSize));
+        var scheduler = new ContinuousBatchScheduler(cfg, pool, model.KVStateFingerprint, NullLogger.Instance);
+        return new BatchExecutor(model, pool, scheduler, NullLogger.Instance);
+    }
+
+    private static SequenceState PrimeFinishedHolder(BatchExecutor executor, FusedStubModel model, string key, int token, int length = 32)
+    {
+        var seq = new SequenceState(key, Enumerable.Repeat(token, length).ToList(), 1, BlockSize, SamplingConfig.Greedy);
+        var pool = ExecutorPool(executor);
+        var blocks = pool.AllocateNew((length + BlockSize - 1) / BlockSize) ?? throw new InvalidOperationException("test block pool exhausted");
+        foreach (var block in blocks) seq.BlockTable.AppendBlock(block);
+        Assert.True(model.BindSequenceCache(key));
+        model.Forward(seq.PromptTokens.ToArray());
+        model.RestorePrimaryCache();
+        seq.AdvanceComputedTokens(length);
+        seq.Status = SequenceStatus.FinishedLengthCapped;
+        TrackFinishedHolder(executor, seq);
+        return seq;
+    }
+
+    private static BlockPool ExecutorPool(BatchExecutor executor)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        return (BlockPool)typeof(BatchExecutor).GetField("_pool", flags)!.GetValue(executor)!;
+    }
+
+    private static Dictionary<string, int> PendingRetainedTruncations(BatchExecutor executor)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        return (Dictionary<string, int>)typeof(BatchExecutor).GetField("_pendingRetainedFusedTruncations", flags)!.GetValue(executor)!;
+    }
+
+    private static void TrackFinishedHolder(BatchExecutor executor, SequenceState seq)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var tracked = (Dictionary<string, SequenceState>)typeof(BatchExecutor).GetField("_fusedSeqById", flags)!.GetValue(executor)!;
+        tracked[seq.RequestId] = seq;
+    }
+
+    private static (string Key, int[] Tokens)[] RetainedMetadata(BatchExecutor executor)
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var entries = (System.Collections.IEnumerable)typeof(BatchExecutor).GetField("_retainedFused", flags)!.GetValue(executor)!;
+        return entries.Cast<object>().Select(entry => (
+            (string)entry.GetType().GetField("RequestId")!.GetValue(entry)!,
+            (int[])entry.GetType().GetField("Tokens")!.GetValue(entry)!)).ToArray();
+    }
+
+    [Theory]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    public async Task SlotAwareRetainedRewind_AlignsLongSuffixOrDeclinesWithoutInflatedReuse(
+        bool enabled, bool rejectQuery, bool refuseExecution)
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel(supportsCrossSequenceKvReuse: false,
+                refuseTruncationAtExecution: refuseExecution)
+            {
+                SupportsPrefixCheckpoints = false, SupportsExactFusedCacheReuse = enabled,
+                ExactQueryHeadOffset = rejectQuery ? 1 : 0, KVCacheTruncationGranularity = 2,
+            };
+            var gate = new ComputeGate();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance) { ComputeGate = gate };
+            async Task<InferenceCompletion[]> Round(string name, bool follow)
+            {
+                SequenceState Request(int branch)
+                {
+                    var prompt = Enumerable.Repeat(branch, 65).ToList();
+                    if (follow) prompt.AddRange(Enumerable.Repeat(PeakToken + 1, 4));
+                    return new SequenceState(name + branch, prompt, follow ? 4 : 32, BlockSize, SamplingConfig.Greedy);
+                }
+                gate.Close();
+                long held = engine.StepsHeldByGate;
+                var a = engine.SubmitRequest(Request(1));
+                using (var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                    while (engine.StepsHeldByGate == held) await Task.Delay(1, timeout.Token);
+                var b = engine.SubmitRequest(Request(2));
+                gate.Open();
+                var da = DrainAsync(a); var db = DrainAsync(b);
+                await Task.WhenAll(da, db);
+                return new[] { (await da).completion, (await db).completion };
+            }
+            await Round("slot-first-", false);
+            Assert.True(model.HasRetainedHolder("slot-first-1"));
+            Assert.True(model.HasRetainedHolder("slot-first-2"));
+            var completed = await Round("slot-next-", true);
+            int expected = enabled && !rejectQuery && !refuseExecution ? 64 : 0;
+            foreach (var item in completed)
+            {
+                Assert.Equal(SequenceStatus.FinishedLengthCapped, item.Status);
+                Assert.Equal(expected, item.PrefixCacheReusedTokens);
+                Assert.Equal(69, item.PromptTokenCount);
+            }
+            if (enabled)
+                Assert.Contains(model.ExactQueries, q => q.Retained && q.Target == 64 && q.Cached - q.Target > 16);
+            else Assert.Empty(model.ExactQueries);
+            if (expected > 0) Assert.All(model.TruncationTargets, target => Assert.Equal(64, target));
+            else Assert.Empty(model.TruncationTargets);
+            Assert.Equal(enabled && !rejectQuery && refuseExecution ? 2 : 0, model.ExecutionTruncationRefusals);
+            foreach (string request in new[] { "slot-next-1", "slot-next-2" })
+                Assert.Contains(model.ForwardCalls, call => call.RequestId == request && call.Start == expected);
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SlotAwareLiveRewind_UsesActualHolderBeyondTheDefaultLimit(bool enabled)
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel(supportsCrossSequenceKvReuse: false)
+            { SupportsPrefixCheckpoints = false, SupportsExactFusedCacheReuse = enabled,
+              KVCacheTruncationGranularity = 2 };
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+            await DrainAsync(engine.SubmitRequest(new SequenceState("live-first",
+                Enumerable.Repeat(1, 65).ToList(), 32, BlockSize, SamplingConfig.Greedy)));
+            var prompt = Enumerable.Repeat(1, 65).Concat(Enumerable.Repeat(PeakToken + 1, 4)).ToList();
+            var follow = await DrainAsync(engine.SubmitRequest(new SequenceState("live-next",
+                prompt, 4, BlockSize, SamplingConfig.Greedy)));
+            Assert.Equal(enabled ? 64 : 0, follow.completion.PrefixCacheReusedTokens);
+            if (enabled) Assert.Contains(model.ExactQueries, q => !q.Retained && q.Target == 64 && q.Cached - q.Target > 16);
+            else Assert.Empty(model.ExactQueries);
+        });
+    }
+
     [Fact]
     public async Task ConcurrentRound_ThenParallelFollowUps_ReuseFullPrefix()
     {
@@ -114,6 +401,75 @@ public class RetainedFusedCacheTests
         Assert.Equal(0, a.PrefixCacheReusedTokens);
         Assert.Equal(0, b.PrefixCacheReusedTokens);
         Assert.Empty(model.TruncationTargets);
+    }
+
+    [Fact]
+    public async Task WrappedRetainedHolder_RejectsUnsafeOmittedTailBeforeBinding()
+    {
+        var model = new FusedStubModel(
+            peakIsEos: true,
+            supportsCrossSequenceKvReuse: false,
+            refuseWrappedRewind: true);
+        var (a, b) = await RunTwoRoundsAsync(
+            retentionEnabled: true,
+            followUpSuffixToken: PeakToken + 1,
+            createModel: () => model);
+
+        Assert.Equal(0, a.PrefixCacheReusedTokens);
+        Assert.Equal(0, b.PrefixCacheReusedTokens);
+        Assert.Empty(model.TruncationTargets);
+    }
+
+    [Fact]
+    public async Task RetainedRewindRefusedAtExecution_ReprefillsAndRetractsReuse()
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel(
+                peakIsEos: true,
+                supportsCrossSequenceKvReuse: false,
+                refuseTruncationAtExecution: true) { SupportsPrefixCheckpoints = false };
+            var gate = new ComputeGate();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance) { ComputeGate = gate };
+
+            async Task<InferenceCompletion[]> RunPair(string round, bool appendSuffix)
+            {
+                SequenceState Request(int branch)
+                {
+                    var prompt = Enumerable.Repeat(branch, PromptLen).ToList();
+                    if (appendSuffix) prompt.AddRange(Enumerable.Repeat(PeakToken + 1, SuffixLen));
+                    return new SequenceState(round + branch, prompt, 4, BlockSize, SamplingConfig.Greedy);
+                }
+                gate.Close();
+                long holds = engine.StepsHeldByGate;
+                var a = engine.SubmitRequest(Request(1));
+                using (var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                    while (engine.StepsHeldByGate == holds) await Task.Delay(1, timeout.Token);
+                var b = engine.SubmitRequest(Request(2));
+                gate.Open();
+                var ra = DrainAsync(a);
+                var rb = DrainAsync(b);
+                await Task.WhenAll(ra, rb);
+                return new[] { (await ra).completion, (await rb).completion };
+            }
+
+            await RunPair("dynamic-first-", appendSuffix: false);
+            Assert.True(model.HasRetainedHolder("dynamic-first-1"));
+            Assert.True(model.HasRetainedHolder("dynamic-first-2"));
+            var second = await RunPair("dynamic-follow-", appendSuffix: true);
+            Assert.Equal(2, model.ExecutionTruncationRefusals);
+            Assert.Empty(model.TruncationTargets);
+            foreach (var completion in second)
+            {
+                Assert.Equal(SequenceStatus.FinishedStopped, completion.Status);
+                Assert.Equal("eos", completion.FinishReason);
+                Assert.Equal(0, completion.PrefixCacheReusedTokens);
+                Assert.Equal(PromptLen + SuffixLen, completion.PromptTokenCount);
+            }
+            foreach (string requestId in new[] { "dynamic-follow-1", "dynamic-follow-2" })
+                Assert.Contains(model.ForwardCalls, call => call.RequestId == requestId
+                    && call.Start == 0 && call.Count == PromptLen + SuffixLen);
+        });
     }
 
     [Fact]
@@ -241,12 +597,12 @@ public class RetainedFusedCacheTests
     }
 
     [Fact]
-    public async Task DifferentMediaFingerprint_DoesNotReusePlaceholderIdenticalRetainedHolder()
+    public async Task DifferentMediaAtTheStart_DoesNotReusePlaceholderIdenticalRetainedHolder()
     {
         var (a, b) = await RunTwoRoundsAsync(
             retentionEnabled: true,
-            firstRoundMediaFingerprint: "image-set-a",
-            followUpMediaFingerprint: "image-set-b");
+            firstRoundMedia: ImageAt(0, "img:a"),
+            followUpMedia: ImageAt(0, "img:b"));
 
         Assert.Equal(0, a.PrefixCacheReusedTokens);
         Assert.Equal(0, b.PrefixCacheReusedTokens);
@@ -313,6 +669,157 @@ public class RetainedFusedCacheTests
     // Longer than the live-cache rewind allowance (16), so a new chat cannot be
     // served by rewinding the previous chat's live cache and must use the checkpoint.
     private const int FirstMessageLen = 20;
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PrefixMetadataAllocationFailure_DoesNotCreateAnUntrackedModelCopy(bool fromStore)
+    {
+        await WithCheckpointsOnAsync(() =>
+        {
+            var model = new FusedStubModel();
+            var executor = NewRetentionExecutor(model);
+            try
+            {
+                var seq = NewChat("prefix-allocation", 5);
+                if (fromStore)
+                {
+                    var store = new MemoryCheckpointStore();
+                    store.Save(model.KVStateFingerprint + "|prefix-checkpoint-v1", SharedPrefix().ToArray(), stream =>
+                    {
+                        using var writer = new System.IO.BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
+                        writer.Write(0x53545542u);
+                        writer.Write(SharedPrefixLen);
+                    });
+                    executor.PrefixCheckpointStore = store;
+                }
+                else
+                {
+                    model.BindSequenceCache(seq.RequestId);
+                    model.Forward(seq.PromptTokens.Take(SharedPrefixLen).ToArray());
+                    AdvancePrefixCheckpointFixture(executor, seq);
+                }
+                executor.AllocateRetainedCacheTokens = _ => throw new OutOfMemoryException("controlled prefix metadata allocation");
+                if (fromStore) Assert.Equal(0, executor.ComputeFusedContinuationLcp(seq));
+                else InvokePrefixMethod(executor, "MaybeCheckpointSharedPrefix", seq);
+                Assert.Empty(PrefixMetadata(executor));
+                Assert.Empty(model.Checkpoints);
+                Assert.Equal(0, model.Imports);
+
+                executor.AllocateRetainedCacheTokens = n => new int[n];
+                if (fromStore) Assert.Equal(SharedPrefixLen, executor.ComputeFusedContinuationLcp(seq));
+                else
+                {
+                    var retry = NewChat("prefix-allocation-retry", 6);
+                    AdvancePrefixCheckpointFixture(executor, retry);
+                    InvokePrefixMethod(executor, "MaybeCheckpointSharedPrefix", retry);
+                }
+                var entry = Assert.Single(PrefixMetadata(executor));
+                Assert.True(model.HasRetainedHolder(entry.Key));
+                Assert.Equal(SharedPrefix().ToArray(), entry.Tokens);
+            }
+            finally { executor.Reset(); }
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ExistingPrefixRefresh_ReusesItsOwnershipNode()
+    {
+        await WithCheckpointsOnAsync(() =>
+        {
+            var model = new FusedStubModel();
+            var executor = NewRetentionExecutor(model);
+            try
+            {
+                var seq = PrimePrefixCheckpoint(executor, model, "first", 1);
+                object node = PrefixFirstNode(executor);
+                executor.AllocateRetainedCacheTokens = _ => throw new OutOfMemoryException("refresh must not allocate metadata");
+                var identical = NewChat("same-prefix", 5);
+                AdvancePrefixCheckpointFixture(executor, identical);
+                InvokePrefixMethod(executor, "MaybeCheckpointSharedPrefix", identical);
+                Assert.Same(node, PrefixFirstNode(executor));
+                Assert.Single(model.Checkpoints);
+                Assert.True(model.HasRetainedHolder(Assert.Single(PrefixMetadata(executor)).Key));
+            }
+            finally { executor.Reset(); }
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task PrefixDiscardFailure_RetainsOwnershipUntilSuccessfulRetry()
+    {
+        await WithCheckpointsOnAsync(() =>
+        {
+            var model = new FusedStubModel();
+            var executor = NewRetentionExecutor(model);
+            try
+            {
+                PrimePrefixCheckpoint(executor, model, "first", 1);
+                string old = Assert.Single(PrefixMetadata(executor)).Key;
+                model.ThrowOnDiscardKey = old;
+                Assert.Throws<InvalidOperationException>(() => PrimePrefixCheckpoint(executor, model, "second", 2));
+                Assert.Equal(2, PrefixMetadata(executor).Length);
+                Assert.All(PrefixMetadata(executor), entry => Assert.True(model.HasRetainedHolder(entry.Key)));
+                Assert.Empty(model.DiscardedRetainedRequestIds);
+                model.ThrowOnDiscardKey = null;
+                InvokePrefixMethod(executor, "EvictPrefixCheckpointsBeyondBudget", model);
+                Assert.Single(PrefixMetadata(executor));
+                Assert.False(model.HasRetainedHolder(old));
+                Assert.Equal(new[] { old }, model.DiscardedRetainedRequestIds);
+            }
+            finally { model.ThrowOnDiscardKey = null; executor.Reset(); }
+            return Task.CompletedTask;
+        }, budget: "1");
+    }
+
+    private static SequenceState PrimePrefixCheckpoint(BatchExecutor executor, FusedStubModel model, string id, int token)
+    {
+        var seq = new SequenceState(id, Enumerable.Repeat(token, SharedPrefixLen + FirstMessageLen).ToList(),
+            1, BlockSize, SamplingConfig.Greedy, sharedPrefixTokens: SharedPrefixLen);
+        model.BindSequenceCache(id);
+        model.Forward(seq.PromptTokens.Take(SharedPrefixLen).ToArray());
+        AdvancePrefixCheckpointFixture(executor, seq);
+        InvokePrefixMethod(executor, "MaybeCheckpointSharedPrefix", seq);
+        return seq;
+    }
+
+    private static void AdvancePrefixCheckpointFixture(BatchExecutor executor, SequenceState seq)
+    {
+        var blocks = ExecutorPool(executor).AllocateNew(SharedPrefixLen / BlockSize)
+            ?? throw new InvalidOperationException("prefix fixture block pool exhausted");
+        foreach (var block in blocks) seq.BlockTable.AppendBlock(block);
+        seq.AdvanceComputedTokens(SharedPrefixLen);
+    }
+
+    private static object PrefixList(BatchExecutor executor) => typeof(BatchExecutor).GetField("_prefixCheckpoints",
+        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(executor)!;
+
+    private static object PrefixFirstNode(BatchExecutor executor)
+    {
+        object list = PrefixList(executor);
+        return list.GetType().GetProperty("First")!.GetValue(list)!;
+    }
+
+    private static (string Key, int[] Tokens)[] PrefixMetadata(BatchExecutor executor) =>
+        ((System.Collections.IEnumerable)PrefixList(executor)).Cast<object>().Select(entry => (
+            (string)entry.GetType().GetField("RequestId")!.GetValue(entry)!,
+            (int[])entry.GetType().GetField("Tokens")!.GetValue(entry)!)).ToArray();
+
+    private static void InvokePrefixMethod(BatchExecutor executor, string name, object argument)
+    {
+        try
+        {
+            typeof(BatchExecutor).GetMethod(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .Invoke(executor, new[] { argument });
+        }
+        catch (System.Reflection.TargetInvocationException ex) when (ex.InnerException != null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw;
+        }
+    }
 
     private static List<int> SharedPrefix() => Enumerable.Repeat(1, SharedPrefixLen).ToList();
 
@@ -783,6 +1290,67 @@ public class RetainedFusedCacheTests
     }
 
     [Fact]
+    public async Task UnsafeLongerRetainedMatch_DoesNotHideExactCheckpointOrConsumeConversation()
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel(refuseWrappedRewind: true);
+            var gate = new ComputeGate();
+            gate.Close();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance) { ComputeGate = gate };
+            var firstHandle = engine.SubmitRequest(NewChat("wrapped-a", firstToken: 7));
+            using (var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (engine.StepsHeldByGate == 0) await Task.Delay(1, timeout.Token);
+            var partnerHandle = engine.SubmitRequest(NewChat("wrapped-b", firstToken: 8));
+            gate.Open();
+            var firstTask = DrainAsync(firstHandle);
+            var partnerTask = DrainAsync(partnerHandle);
+            await Task.WhenAll(firstTask, partnerTask);
+            var first = await firstTask;
+            // Completion is published before the worker's release notification.
+            // Observe retention only once that existing lifecycle hook has run.
+            using (var timeout = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5)))
+                while (!model.WasReleased("wrapped-a") || !model.WasReleased("wrapped-b"))
+                    await Task.Delay(1, timeout.Token);
+            Assert.True(model.HasRetainedHolder("wrapped-a"));
+            Assert.Single(model.Checkpoints);
+
+            // Match the entire first prompt but drop its output tail. The match
+            // is 20 tokens longer than the exact checkpoint, exceeding the old
+            // scheduler's 16-token preference allowance for an exact copy.
+            // This unsafe candidate must not prevent choosing that checkpoint.
+            var changed = SharedPrefix();
+            changed.AddRange(Enumerable.Repeat(7, FirstMessageLen));
+            changed.AddRange(Enumerable.Repeat(PeakToken + 1, SuffixLen));
+            int clonesBefore = model.Clones;
+            var rewritten = await DrainAsync(engine.SubmitRequest(new SequenceState(
+                "wrapped-rewrite", changed, 4, BlockSize, SamplingConfig.Greedy,
+                sharedPrefixTokens: SharedPrefixLen)));
+            Assert.Equal(SequenceStatus.FinishedLengthCapped, rewritten.completion.Status);
+            Assert.Equal(SharedPrefixLen, rewritten.completion.PrefixCacheReusedTokens);
+            Assert.Equal(clonesBefore + 1, model.Clones);
+            Assert.Empty(model.TruncationTargets);
+            Assert.True(model.HasRetainedHolder("wrapped-a"));
+
+            // The rejected candidate remains useful for an exact continuation.
+            // This ensures the fix does not disable retention or discard a
+            // valid conversation just because another request could not rewind it.
+            var exact = SharedPrefix();
+            exact.AddRange(Enumerable.Repeat(7, FirstMessageLen));
+            exact.AddRange(first.output);
+            int exactPrefix = exact.Count;
+            exact.AddRange(Enumerable.Repeat(PeakToken + 2, SuffixLen));
+            var continuation = await DrainAsync(engine.SubmitRequest(new SequenceState(
+                "wrapped-a-next", exact, 4, BlockSize, SamplingConfig.Greedy,
+                sharedPrefixTokens: SharedPrefixLen)));
+            Assert.Equal(SequenceStatus.FinishedLengthCapped, continuation.completion.Status);
+            Assert.Equal(exactPrefix, continuation.completion.PrefixCacheReusedTokens);
+            Assert.Equal(clonesBefore + 1, model.Clones);
+            Assert.Empty(model.TruncationTargets);
+        });
+    }
+
+    [Fact]
     public async Task NoSharedPrefix_OrCheckpointsSwitchedOff_TakesNoCheckpoint()
     {
         await WithCheckpointsOnAsync(async () =>
@@ -988,11 +1556,35 @@ public class RetainedFusedCacheTests
     }
 
     [Fact]
-    public async Task SingleStream_DifferentMediaFingerprint_DoesNotReusePlaceholderIdenticalLiveCache()
+    public async Task WrappedLiveCache_UnsafeRewindReprefillsWithoutTruncating()
+    {
+        var model = new FusedStubModel(
+            supportsCrossSequenceKvReuse: false,
+            supportsRetainedFusedCache: false,
+            refuseWrappedRewind: true) { SupportsPrefixCheckpoints = false };
+        using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+        var prefix = Enumerable.Repeat(1, PromptLen).ToList();
+        var first = await DrainAsync(engine.SubmitRequest(new SequenceState(
+            "wrapped-live", prefix, 4, BlockSize, SamplingConfig.Greedy)));
+        Assert.Equal(4, first.output.Count);
+        var changed = new List<int>(prefix);
+        changed.AddRange(first.output.Take(2));
+        changed.AddRange(Enumerable.Repeat(PeakToken + 1, SuffixLen));
+        var next = await DrainAsync(engine.SubmitRequest(new SequenceState(
+            "wrapped-live-rewrite", changed, 4, BlockSize, SamplingConfig.Greedy)));
+
+        Assert.Equal(SequenceStatus.FinishedLengthCapped, next.completion.Status);
+        Assert.Equal(0, next.completion.PrefixCacheReusedTokens);
+        Assert.Empty(model.TruncationTargets);
+        Assert.Equal(Enumerable.Repeat(PeakToken, 4), next.output);
+    }
+
+    [Fact]
+    public async Task SingleStream_DifferentMediaAtTheStart_DoesNotReusePlaceholderIdenticalLiveCache()
     {
         var completion = await RunSingleStreamContinuationAsync(
-            firstRoundMediaFingerprint: "image-set-a",
-            followUpMediaFingerprint: "image-set-b");
+            firstRoundMedia: ImageAt(0, "img:a"),
+            followUpMedia: ImageAt(0, "img:b"));
 
         Assert.Equal(0, completion.PrefixCacheReusedTokens);
     }
@@ -1016,12 +1608,15 @@ public class RetainedFusedCacheTests
     }
 
     private const int PromptLen = 24;   // > Cap so only the live holder can reuse it
+
+    private static IReadOnlyList<PromptMediaSpan> ImageAt(int start, string contentId, int length = 8)
+        => new[] { new PromptMediaSpan(start, start + length, contentId) };
     private const int Round1NewTokens = 24;
     private const int SuffixLen = 4;
 
     private async Task<InferenceCompletion> RunSingleStreamContinuationAsync(
-        string firstRoundMediaFingerprint = null,
-        string followUpMediaFingerprint = null,
+        IReadOnlyList<PromptMediaSpan> firstRoundMedia = null,
+        IReadOnlyList<PromptMediaSpan> followUpMedia = null,
         IReadOnlyList<int> firstRoundCacheBreakpoints = null,
         IReadOnlyList<int> followUpCacheBreakpoints = null)
     {
@@ -1030,7 +1625,7 @@ public class RetainedFusedCacheTests
 
         var prompt1 = Enumerable.Repeat(1, PromptLen).ToList();
         var seq1 = new SequenceState("single-1", prompt1, Round1NewTokens, BlockSize,
-            SamplingConfig.Greedy, mediaFingerprint: firstRoundMediaFingerprint,
+            SamplingConfig.Greedy, mediaSpans: firstRoundMedia,
             cacheBreakpoints: firstRoundCacheBreakpoints);
         var (_, out1) = await DrainAsync(engine.SubmitRequest(seq1));
 
@@ -1038,7 +1633,7 @@ public class RetainedFusedCacheTests
         prompt2.AddRange(out1);
         prompt2.AddRange(Enumerable.Repeat(PeakToken, SuffixLen));
         var seq2 = new SequenceState("single-2", prompt2, 8, BlockSize,
-            SamplingConfig.Greedy, mediaFingerprint: followUpMediaFingerprint,
+            SamplingConfig.Greedy, mediaSpans: followUpMedia,
             cacheBreakpoints: followUpCacheBreakpoints);
         var (completion, _) = await DrainAsync(engine.SubmitRequest(seq2));
         return completion;
@@ -1048,8 +1643,8 @@ public class RetainedFusedCacheTests
         bool retentionEnabled,
         int? followUpCacheBoundary = null,
         int? firstRoundCacheBoundary = null,
-        string firstRoundMediaFingerprint = null,
-        string followUpMediaFingerprint = null,
+        IReadOnlyList<PromptMediaSpan> firstRoundMedia = null,
+        IReadOnlyList<PromptMediaSpan> followUpMedia = null,
         int followUpSuffixToken = PeakToken,
         Func<FusedStubModel> createModel = null,
         Microsoft.Extensions.Logging.ILogger logger = null)
@@ -1074,10 +1669,10 @@ public class RetainedFusedCacheTests
                 ? new List<int> { firstRoundCacheBoundary.Value }
                 : null;
             var seqA1 = new SequenceState("A1", promptA, Round1NewTokens, BlockSize,
-                SamplingConfig.Greedy, mediaFingerprint: firstRoundMediaFingerprint,
+                SamplingConfig.Greedy, mediaSpans: firstRoundMedia,
                 cacheBreakpoints: firstRoundBoundaries);
             var seqB1 = new SequenceState("B1", promptB, Round1NewTokens, BlockSize,
-                SamplingConfig.Greedy, mediaFingerprint: firstRoundMediaFingerprint,
+                SamplingConfig.Greedy, mediaSpans: firstRoundMedia,
                 cacheBreakpoints: firstRoundBoundaries);
 
             // Submit BOTH before draining so the engine admits them together (N=2)
@@ -1102,10 +1697,10 @@ public class RetainedFusedCacheTests
                 ? new List<int> { followUpCacheBoundary.Value }
                 : null;
             var seqA2 = new SequenceState("A2", followA, 8, BlockSize,
-                SamplingConfig.Greedy, mediaFingerprint: followUpMediaFingerprint,
+                SamplingConfig.Greedy, mediaSpans: followUpMedia,
                 cacheBreakpoints: followUpBoundaries);
             var seqB2 = new SequenceState("B2", followB, 8, BlockSize,
-                SamplingConfig.Greedy, mediaFingerprint: followUpMediaFingerprint,
+                SamplingConfig.Greedy, mediaSpans: followUpMedia,
                 cacheBreakpoints: followUpBoundaries);
             var hA2 = engine.SubmitRequest(seqA2);
             var hB2 = engine.SubmitRequest(seqB2);
@@ -1161,7 +1756,11 @@ public class RetainedFusedCacheTests
                             && e.Message.Contains($"Prompt reuse for {requestId}:"))
                 .ToList();
             Assert.Single(reuseLines);
-            Assert.Contains("retained model state", reuseLines[0].Message);
+            // Names the actual source: this conversation's own holder, not the public
+            // shared-prefix checkpoint (the old line said "a finished request's holder or
+            // a shared-prefix checkpoint", which could not tell a leak from a clone).
+            Assert.Contains("a retained holder of this conversation", reuseLines[0].Message);
+            Assert.DoesNotContain("shared-prefix checkpoint", reuseLines[0].Message);
             int reused = requestId == "A2" ? a.PrefixCacheReusedTokens : b.PrefixCacheReusedTokens;
             int prompt = requestId == "A2" ? a.PromptTokenCount : b.PromptTokenCount;
             Assert.Contains($"{reused}/{prompt} tokens", reuseLines[0].Message);
@@ -1228,6 +1827,417 @@ public class RetainedFusedCacheTests
         }
     }
 
+    // ---------------------------------------------------------------------------
+    // Conversation scopes: state of another conversation is reused only up to the
+    // public prefix (SequenceState.SharedPrefixTokens) and never moved away from it.
+    // repro-cross-session.md 2-B / 2-D, SYNTHESIS Q11 (ii).
+    // ---------------------------------------------------------------------------
+
+    private static SequenceState Scoped(
+        string id, List<int> prompt, string scope, int sharedPrefix = SharedPrefixLen,
+        IReadOnlyList<PromptMediaSpan> media = null, int maxNew = 4)
+        => new(id, prompt, maxNew, BlockSize, SamplingConfig.Greedy,
+            mediaSpans: media, sharedPrefixTokens: sharedPrefix, cacheScope: scope);
+
+    private static List<int> Concat(params IEnumerable<int>[] parts)
+    {
+        var all = new List<int>();
+        foreach (var part in parts) all.AddRange(part);
+        return all;
+    }
+
+    /// <summary>
+    /// F1/WF1: a new conversation replays conversation A's whole transcript plus its own
+    /// question. It used to adopt A's retained holder (758/776 on Qwen) and MOVE it, so
+    /// A's real next turn re-prefilled everything past the system prompt (536/780).
+    /// </summary>
+    [Fact]
+    public async Task AnotherConversationsRetainedHolder_IsNotAdopted_AndItsOwnerKeepsIt()
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+            await DrainAsync(engine.SubmitRequest(Scoped("warm", Concat(SharedPrefix(), Enumerable.Repeat(5, FirstMessageLen)), "W")));
+            var a1Prompt = Concat(SharedPrefix(), Enumerable.Repeat(7, FirstMessageLen));
+            var a1 = await DrainAsync(engine.SubmitRequest(Scoped("A1", a1Prompt, "A")));
+            Assert.Equal(SharedPrefixLen, a1.completion.PrefixCacheReusedTokens);
+            // Retention runs on the engine thread just after the completion is signalled.
+            Assert.True(System.Threading.SpinWait.SpinUntil(() => model.HasRetainedHolder("A1"), 5000));
+
+            var replay = Concat(a1Prompt, a1.output, Enumerable.Repeat(9, SuffixLen));
+            var b1 = await DrainAsync(engine.SubmitRequest(Scoped("B1", replay, "B")));
+
+            Assert.Equal(SharedPrefixLen, b1.completion.PrefixCacheReusedTokens);
+            Assert.True(model.HasRetainedHolder("A1"));
+
+            var a2 = await DrainAsync(engine.SubmitRequest(Scoped("A2", replay, "A")));
+            Assert.Equal(replay.Count - SuffixLen, a2.completion.PrefixCacheReusedTokens);
+        });
+    }
+
+    /// <summary>
+    /// R2: a different conversation whose long first message differs only in its last
+    /// token used to rewind into another conversation's holder (419/426 on Gemma) and
+    /// take it. A rewind into another scope's tail is not allowed at all.
+    /// </summary>
+    [Fact]
+    public async Task AnotherConversationsHolder_IsNeverRewoundInto()
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+            await DrainAsync(engine.SubmitRequest(Scoped("warm", Concat(SharedPrefix(), Enumerable.Repeat(5, FirstMessageLen)), "W")));
+            var r1Prompt = Concat(SharedPrefix(), Enumerable.Repeat(7, FirstMessageLen));
+            await DrainAsync(engine.SubmitRequest(Scoped("R1", r1Prompt, "R1")));
+            // Retention runs on the engine thread just after the completion is signalled.
+            Assert.True(System.Threading.SpinWait.SpinUntil(() => model.HasRetainedHolder("R1"), 5000));
+
+            var r2Prompt = Concat(SharedPrefix(), Enumerable.Repeat(7, FirstMessageLen - 1), new[] { 8 });
+            var r2 = await DrainAsync(engine.SubmitRequest(Scoped("R2", r2Prompt, "R2")));
+
+            Assert.Equal(SharedPrefixLen, r2.completion.PrefixCacheReusedTokens);
+            Assert.True(model.HasRetainedHolder("R1"));
+            Assert.Empty(model.TruncationTargets);
+        });
+    }
+
+    [Fact]
+    public async Task AnotherConversationsLiveCache_IsNotContinued_ButItsOwnNextTurnIs()
+    {
+        async Task<int> SecondTurnReuse(string secondScope)
+        {
+            var model = new FusedStubModel();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+            var prompt1 = Enumerable.Repeat(1, PromptLen).ToList();
+            var first = await DrainAsync(engine.SubmitRequest(Scoped("A1", prompt1, "A", sharedPrefix: 0, maxNew: Round1NewTokens)));
+            var prompt2 = Concat(prompt1, first.output, Enumerable.Repeat(PeakToken, SuffixLen));
+            var second = await DrainAsync(engine.SubmitRequest(Scoped("next", prompt2, secondScope, sharedPrefix: 0)));
+            return second.completion.PrefixCacheReusedTokens;
+        }
+
+        Assert.Equal(0, await SecondTurnReuse("B"));
+        Assert.Equal(PromptLen + Round1NewTokens, await SecondTurnReuse("A"));
+    }
+
+    /// <summary>
+    /// A new chat of another conversation on a model with no shared-prefix checkpoint
+    /// (DeepSeek V4.1's native slots rewind exactly but cannot be copied): the live cache
+    /// the previous conversation left is rewound to this request's PUBLIC prefix, which is
+    /// the system prompt both requests rendered token for token. Refusing it outright
+    /// re-prefilled the whole system prompt of every new chat, and bought no isolation:
+    /// the new request overwrites that primary cache either way, and nothing past the
+    /// public prefix is reused.
+    /// </summary>
+    [Theory]
+    [InlineData("A", SharedPrefixLen + FirstMessageLen)]
+    [InlineData("B", SharedPrefixLen)]
+    public async Task AnotherConversationsLiveCache_StillServesThePublicPrefix_OnAModelWithoutCheckpoints(
+        string secondScope, int expectedReuse)
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel(supportsCrossSequenceKvReuse: false)
+            { SupportsPrefixCheckpoints = false, SupportsExactFusedCacheReuse = true, KVCacheTruncationGranularity = 2 };
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+            var a1Prompt = Concat(SharedPrefix(), Enumerable.Repeat(7, FirstMessageLen));
+            await DrainAsync(engine.SubmitRequest(Scoped("A1", a1Prompt, "A", maxNew: 32)));
+
+            // The same user message in the same conversation continues past it; another
+            // conversation shares only the system prompt.
+            var next = Concat(SharedPrefix(), Enumerable.Repeat(7, FirstMessageLen), Enumerable.Repeat(9, SuffixLen));
+            var second = await DrainAsync(engine.SubmitRequest(Scoped("next", next, secondScope)));
+
+            Assert.Equal(expectedReuse, second.completion.PrefixCacheReusedTokens);
+            Assert.Contains(model.ForwardCalls, call => call.Start == expectedReuse && call.Count == next.Count - expectedReuse);
+        });
+    }
+
+    /// <summary>
+    /// A3 -> B1 -> A4: conversation A ran on the primary cache; a new chat B arrived and
+    /// ran on the fused path, which used to drop A's live state (A4 reused 584 of 740).
+    /// A's finished state is now kept as its own retained holder when that happens.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InterleavedNewChat_KeepsTheLiveConversationsReuse(bool scoped)
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel();
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+
+            var prompt = Concat(SharedPrefix(), Enumerable.Repeat(7, FirstMessageLen));
+            var turn = await DrainAsync(engine.SubmitRequest(Scoped("A1", prompt, scoped ? "A" : null)));
+            for (int t = 2; t <= 3; t++)
+            {
+                prompt = Concat(prompt, turn.output, Enumerable.Repeat(PeakToken + 1, SuffixLen));
+                turn = await DrainAsync(engine.SubmitRequest(Scoped("A" + t, prompt, scoped ? "A" : null)));
+                Assert.Equal(prompt.Count - SuffixLen, turn.completion.PrefixCacheReusedTokens);
+            }
+
+            var b1 = await DrainAsync(engine.SubmitRequest(Scoped("B1", Concat(SharedPrefix(), Enumerable.Repeat(8, FirstMessageLen)), scoped ? "B" : null)));
+            Assert.Equal(SharedPrefixLen, b1.completion.PrefixCacheReusedTokens);
+
+            prompt = Concat(prompt, turn.output, Enumerable.Repeat(PeakToken + 1, SuffixLen));
+            var a4 = await DrainAsync(engine.SubmitRequest(Scoped("A4", prompt, scoped ? "A" : null)));
+            // An unscoped caller keeps the old behaviour: no donation, the checkpoint only.
+            Assert.Equal(scoped ? prompt.Count - SuffixLen : SharedPrefixLen, a4.completion.PrefixCacheReusedTokens);
+        });
+    }
+
+    /// <summary>
+    /// Isolation property: across random interleavings of conversations - new chats with
+    /// colliding first messages, follow-up turns, replays of another conversation's whole
+    /// transcript, several submitted at once - a request whose scope no earlier request
+    /// had reuses at most its public prefix.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
+    [InlineData(8)]
+    public async Task RandomInterleavings_ANewScopeNeverReusesPastItsPublicPrefix(int seed)
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var rng = new Random(seed);
+            var model = new FusedStubModel(forwardDelayMs: 0);
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+            var transcripts = new List<(string Scope, List<int> Tokens)>();
+            var seenScopes = new HashSet<string>(StringComparer.Ordinal);
+            int nextScope = 0, nextRequest = 0, checkedNewScopes = 0;
+
+            for (int step = 0; step < 14; step++)
+            {
+                int group = 1 + rng.Next(3);
+                var batch = new List<(SequenceState Seq, int Transcript, bool NewScope)>();
+                var busy = new HashSet<int>();
+                for (int g = 0; g < group; g++)
+                {
+                    int action = transcripts.Count == 0 ? 0 : rng.Next(3);
+                    if (action == 1)
+                    {
+                        int t = rng.Next(transcripts.Count);
+                        if (!busy.Add(t)) continue;
+                        var prompt = Concat(transcripts[t].Tokens, Enumerable.Repeat(1 + rng.Next(2), SuffixLen));
+                        batch.Add((Scoped($"r{nextRequest++}", prompt, transcripts[t].Scope), t, false));
+                    }
+                    else
+                    {
+                        string scope = "s" + nextScope++;
+                        List<int> prompt = action == 2
+                            // A replay of someone else's transcript under a new scope.
+                            ? Concat(transcripts[rng.Next(transcripts.Count)].Tokens, Enumerable.Repeat(1 + rng.Next(2), SuffixLen))
+                            // A new chat; first messages collide on purpose.
+                            : Concat(SharedPrefix(), Enumerable.Repeat(7 + rng.Next(2), FirstMessageLen));
+                        transcripts.Add((scope, prompt));
+                        batch.Add((Scoped($"r{nextRequest++}", prompt, scope), transcripts.Count - 1, true));
+                    }
+                }
+
+                var handles = batch.Select(b => DrainAsync(engine.SubmitRequest(b.Seq))).ToList();
+                await Task.WhenAll(handles);
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    var (seq, t, isNew) = batch[i];
+                    var (completion, output) = await handles[i];
+                    if (isNew && seenScopes.Add(seq.CacheScope))
+                    {
+                        checkedNewScopes++;
+                        Assert.True(completion.PrefixCacheReusedTokens <= seq.SharedPrefixTokens,
+                            $"seed {seed}: new scope {seq.CacheScope} ({seq.RequestId}) reused " +
+                            $"{completion.PrefixCacheReusedTokens} > public prefix {seq.SharedPrefixTokens}");
+                    }
+                    seenScopes.Add(seq.CacheScope);
+                    transcripts[t] = (transcripts[t].Scope, Concat(seq.PromptTokens, output));
+                }
+            }
+            Assert.True(checkedNewScopes > 3);
+        });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Media identity: reuse is checked positionally over the reused prefix, by
+    // content. repro-image-turn.md 1-A / 1-D, SYNTHESIS Q11 (iii).
+    // ---------------------------------------------------------------------------
+
+    [Fact]
+    public async Task AnImageTurn_ContinuesTheTextBeforeTheImageFromTheLiveCache()
+    {
+        var model = new FusedStubModel();
+        using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+        var prompt1 = Enumerable.Repeat(1, PromptLen).ToList();
+        var first = await DrainAsync(engine.SubmitRequest(Scoped("t1", prompt1, "A", sharedPrefix: 0, maxNew: Round1NewTokens)));
+
+        var history = Concat(prompt1, first.output);
+        var prompt2 = Concat(history, Enumerable.Repeat(6, 8), Enumerable.Repeat(PeakToken, SuffixLen));
+        var image = ImageAt(history.Count, "img:photo");
+        var second = await DrainAsync(engine.SubmitRequest(Scoped("t2-image", prompt2, "A", sharedPrefix: 0, media: image)));
+
+        Assert.Equal(history.Count, second.completion.PrefixCacheReusedTokens);
+    }
+
+    /// <summary>
+    /// Gemma 4 on a wrapped sliding window: an image prefilled after a reused prefix did
+    /// not match a cold prefill, so a model that says it cannot do that gets no reuse for
+    /// such a turn (and keeps it where it can, within the window).
+    /// </summary>
+    [Theory]
+    [InlineData(1000, true)]
+    [InlineData(40, false)]
+    public async Task MediaAfterTheReusedPrefix_IsReusedOnlyWhereTheModelCanPrefillItExactly(int limit, bool reused)
+    {
+        var model = new FusedStubModel(mediaAfterReuseMaxPromptTokens: limit);
+        using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+        var prompt1 = Enumerable.Repeat(1, PromptLen).ToList();
+        var first = await DrainAsync(engine.SubmitRequest(Scoped("t1", prompt1, "A", sharedPrefix: 0, maxNew: Round1NewTokens)));
+        var history = Concat(prompt1, first.output);
+        var prompt2 = Concat(history, Enumerable.Repeat(6, 8), Enumerable.Repeat(PeakToken, SuffixLen));
+        var second = await DrainAsync(engine.SubmitRequest(Scoped("t2-image", prompt2, "A", sharedPrefix: 0,
+            media: ImageAt(history.Count, "img:photo"))));
+
+        Assert.Equal(reused ? history.Count : 0, second.completion.PrefixCacheReusedTokens);
+    }
+
+    /// <summary>
+    /// A new chat whose image follows the shared system prompt. Its prefill is cut at the
+    /// public prefix anyway (so the prefix can be checkpointed), which puts the image after
+    /// position P with or without reuse; a model that cannot prefill media after a reused
+    /// prefix must still clone the checkpoint rather than re-prefill the system prompt for
+    /// the same computation.
+    /// </summary>
+    [Fact]
+    public async Task MediaAfterTheSharedPrefix_StillClonesTheCheckpoint_WhenMediaAfterReuseIsRefused()
+    {
+        await WithCheckpointsOnAsync(async () =>
+        {
+            var model = new FusedStubModel(mediaAfterReuseMaxPromptTokens: 40);
+            using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+            await DrainAsync(engine.SubmitRequest(Scoped("chat-1", NewChat("unused", firstToken: 7).PromptTokens.ToList(), "A")));
+            Assert.Single(model.Checkpoints);
+
+            var prompt = Concat(SharedPrefix(), Enumerable.Repeat(6, 8), Enumerable.Repeat(8, FirstMessageLen));
+            var image = await DrainAsync(engine.SubmitRequest(
+                Scoped("chat-2", prompt, "B", media: ImageAt(SharedPrefixLen, "img:photo"))));
+
+            Assert.Equal(SharedPrefixLen, image.completion.PrefixCacheReusedTokens);
+        });
+    }
+
+    private async Task<int> ReuseAfterAnImageTurnAsync(string sameOrOtherImage, bool modelContinuesPastMedia)
+    {
+        var model = new FusedStubModel(
+            supportsReuseAcrossMediaSpan: modelContinuesPastMedia,
+            supportsKvCacheTruncation: modelContinuesPastMedia);
+        using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+        var prompt1 = Concat(Enumerable.Repeat(1, 4), Enumerable.Repeat(6, 8), Enumerable.Repeat(1, 12));
+        var first = await DrainAsync(engine.SubmitRequest(
+            Scoped("t1", prompt1, "A", sharedPrefix: 0, media: ImageAt(4, "img:photo"), maxNew: Round1NewTokens)));
+
+        var prompt2 = Concat(prompt1, first.output, Enumerable.Repeat(PeakToken, SuffixLen));
+        var second = await DrainAsync(engine.SubmitRequest(
+            Scoped("t2", prompt2, "A", sharedPrefix: 0, media: ImageAt(4, sameOrOtherImage))));
+        return second.completion.PrefixCacheReusedTokens;
+    }
+
+    /// <summary>OpenAI clients resend the image with every turn; the same content at the
+    /// same place is the same cache, and a different picture is not.</summary>
+    [Fact]
+    public async Task TheSameImageResent_ContinuesPastIt_AndADifferentImageDoesNot()
+    {
+        Assert.Equal(PromptLen + Round1NewTokens, await ReuseAfterAnImageTurnAsync("img:photo", modelContinuesPastMedia: true));
+        Assert.Equal(0, await ReuseAfterAnImageTurnAsync("img:another", modelContinuesPastMedia: true));
+    }
+
+    /// <summary>Qwen 3.5 (M-RoPE, decode at absolute positions) cannot continue a cache
+    /// past an image exactly, so its reuse stops at the first span.</summary>
+    [Fact]
+    public async Task AModelThatCannotContinuePastMedia_StopsAtTheFirstSpan()
+    {
+        Assert.Equal(0, await ReuseAfterAnImageTurnAsync("img:photo", modelContinuesPastMedia: false));
+    }
+
+    /// <summary>
+    /// The media clamps are model limits a user sees as a slow turn (Qwen 3.5 re-prefills
+    /// from the image on every later turn; Gemma 4 prefills a long image turn from zero),
+    /// so each is reported once as a warning instead of only at Debug.
+    /// </summary>
+    [Fact]
+    public async Task MediaReuseLimits_AreWarnedOnce()
+    {
+        var logger = new WarningRecorder();
+        var model = new FusedStubModel(supportsReuseAcrossMediaSpan: false, supportsKvCacheTruncation: false);
+        using (var engine = new InferenceEngine(model, Config(), logger))
+        {
+            var prompt = Concat(Enumerable.Repeat(1, 4), Enumerable.Repeat(6, 8), Enumerable.Repeat(1, 12));
+            for (int turn = 1; turn <= 3; turn++)
+            {
+                var result = await DrainAsync(engine.SubmitRequest(
+                    Scoped("q" + turn, prompt, "A", sharedPrefix: 0, media: ImageAt(4, "img:photo"), maxNew: Round1NewTokens)));
+                prompt = Concat(prompt, result.output, Enumerable.Repeat(PeakToken, SuffixLen));
+            }
+        }
+        Assert.Single(logger.Warnings, w => w.Contains("stops at the first image/audio span", StringComparison.Ordinal));
+
+        logger = new WarningRecorder();
+        model = new FusedStubModel(mediaAfterReuseMaxPromptTokens: 40);
+        using (var engine = new InferenceEngine(model, Config(), logger))
+        {
+            var prompt1 = Enumerable.Repeat(1, PromptLen).ToList();
+            var first = await DrainAsync(engine.SubmitRequest(Scoped("g1", prompt1, "A", sharedPrefix: 0, maxNew: Round1NewTokens)));
+            var history = Concat(prompt1, first.output);
+            var prompt2 = Concat(history, Enumerable.Repeat(6, 8), Enumerable.Repeat(PeakToken, SuffixLen));
+            var second = await DrainAsync(engine.SubmitRequest(Scoped("g2", prompt2, "A", sharedPrefix: 0,
+                media: ImageAt(history.Count, "img:photo"))));
+            Assert.Equal(0, second.completion.PrefixCacheReusedTokens);
+        }
+        Assert.Single(logger.Warnings, w => w.Contains("prefills from zero instead", StringComparison.Ordinal));
+    }
+
+    private sealed class WarningRecorder : Microsoft.Extensions.Logging.ILogger
+    {
+        private readonly List<string> _warnings = new();
+        public List<string> Warnings { get { lock (_warnings) return new List<string>(_warnings); } }
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+            TState state, Exception exception, Func<TState, Exception, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+                lock (_warnings) _warnings.Add(formatter(state, exception));
+        }
+    }
+
+    /// <summary>
+    /// Gemma 4 turns of 512 tokens or fewer: the live cache used to be refused as "within
+    /// the pooled reuse cap", and the pooled path could return at most whole blocks, so a
+    /// short turn reused 0 or 256 tokens of what the live cache held.
+    /// </summary>
+    [Fact]
+    public async Task AShortLiveCacheWithinTheSlidingWindow_IsContinued()
+    {
+        var model = new FusedStubModel();
+        using var engine = new InferenceEngine(model, Config(), NullLogger.Instance);
+        var prompt1 = Enumerable.Repeat(1, 6).ToList();
+        var first = await DrainAsync(engine.SubmitRequest(Scoped("short-1", prompt1, "A", sharedPrefix: 0, maxNew: 4)));
+        var history = Concat(prompt1, first.output);
+        Assert.True(history.Count < Cap);
+
+        var prompt2 = Concat(history, Enumerable.Repeat(PeakToken + 1, SuffixLen));
+        var second = await DrainAsync(engine.SubmitRequest(Scoped("short-2", prompt2, "A", sharedPrefix: 0)));
+
+        Assert.Equal(history.Count, second.completion.PrefixCacheReusedTokens);
+    }
+
     private static async Task<(InferenceCompletion completion, List<int> output)> DrainAsync(InferenceRequestHandle handle)
     {
         var output = new List<int>();
@@ -1272,7 +2282,7 @@ public class RetainedFusedCacheTests
     /// re-keyed. Forward only tracks a per-holder token count; logits always peak at
     /// <see cref="PeakToken"/> so greedy decode is deterministic.
     /// </summary>
-    private sealed class FusedStubModel : IModelArchitecture, IBatchedPagedModel, ISpeculativeTarget
+    private sealed class FusedStubModel : IModelArchitecture, IBatchedPagedModel, ISpeculativeTarget, IExactFusedCacheReuse
     {
         private sealed class Holder { public int SeqLen; }
 
@@ -1319,6 +2329,8 @@ public class RetainedFusedCacheTests
         private readonly int _maxReusablePrefixTokens;
         private readonly bool _supportsRetainedFusedCache;
         private readonly bool _batchedFusedDecodeSucceeds;
+        private readonly bool _refuseWrappedRewind;
+        private readonly bool _refuseTruncationAtExecution;
         private string _activeKey;            // null => primary active
         private Holder _primary = new();
 
@@ -1339,8 +2351,16 @@ public class RetainedFusedCacheTests
             int maxReusablePrefixTokens = Cap,
             bool supportsRetainedFusedCache = true,
             bool batchedFusedDecodeSucceeds = false,
-            bool periodicPeak = false)
+            bool periodicPeak = false,
+            bool refuseWrappedRewind = false,
+            bool refuseTruncationAtExecution = false,
+            bool supportsReuseAcrossMediaSpan = true,
+            int mediaAfterReuseMaxPromptTokens = int.MaxValue)
         {
+            SupportsReuseAcrossMediaSpan = supportsReuseAcrossMediaSpan;
+            _mediaAfterReuseMaxPromptTokens = mediaAfterReuseMaxPromptTokens;
+            _refuseWrappedRewind = refuseWrappedRewind;
+            _refuseTruncationAtExecution = refuseTruncationAtExecution;
             _periodicPeak = periodicPeak;
             Tokenizer = new StubTokenizer(peakIsEos);
             _forwardDelayMs = forwardDelayMs;
@@ -1371,6 +2391,35 @@ public class RetainedFusedCacheTests
         public IMultimodalInjector MultimodalInjector => null;
         public IBackendExecutionPlan ExecutionPlan => null;
         public bool SupportsKVCacheTruncation => _supportsKvCacheTruncation;
+        public bool CanTruncateKVCache(int cachedTokenCount, int targetTokenCount)
+            => targetTokenCount >= 0 && targetTokenCount <= cachedTokenCount
+                && (targetTokenCount == cachedTokenCount
+                    || (_supportsKvCacheTruncation
+                        && (!_refuseWrappedRewind || cachedTokenCount <= Cap || targetTokenCount == 0)));
+        public bool SupportsExactFusedCacheReuse { get; set; }
+        public int KVCacheTruncationGranularity { get; set; } = 1;
+        public int ExactQueryHeadOffset { get; set; }
+        public List<(bool Retained, int Cached, int Target)> ExactQueries { get; } = new();
+        public bool CanReuseLivePrefix(int cachedTokenCount, int targetTokenCount)
+        {
+            ExactQueries.Add((false, cachedTokenCount, targetTokenCount));
+            return Active.SeqLen + ExactQueryHeadOffset == cachedTokenCount
+                && CanTruncateKVCache(cachedTokenCount, targetTokenCount)
+                && (targetTokenCount == cachedTokenCount || targetTokenCount % KVCacheTruncationGranularity == 0);
+        }
+        public bool CanReuseRetainedPrefix(string key, int cachedTokenCount, int targetTokenCount)
+        {
+            ExactQueries.Add((true, cachedTokenCount, targetTokenCount));
+            return _retained.TryGetValue(key, out var holder) && holder.SeqLen + ExactQueryHeadOffset == cachedTokenCount
+                && CanTruncateKVCache(cachedTokenCount, targetTokenCount)
+                && (targetTokenCount == cachedTokenCount || targetTokenCount % KVCacheTruncationGranularity == 0);
+        }
+        public bool HasRetainedHolder(string requestId) => _retained.ContainsKey(requestId);
+        public int RetainCalls { get; private set; }
+        public int RebindCalls { get; private set; }
+        public string ThrowOnDiscardKey { get; set; }
+        public int ExecutionTruncationRefusals { get; private set; }
+        public List<(string RequestId, int Start, int Count)> ForwardCalls { get; } = new();
         public List<int> TruncationTargets { get; } = new();
         public int SuccessfulBatchedFusedDecodeCalls { get; private set; }
 
@@ -1382,6 +2431,7 @@ public class RetainedFusedCacheTests
         {
             if (_forwardDelayMs > 0)
                 System.Threading.Thread.Sleep(_forwardDelayMs);
+            ForwardCalls.Add((_activeKey, Active.SeqLen, tokens.Length));
             Active.SeqLen += tokens.Length;
             var logits = new float[VocabSize];
             logits[PeakAt(Active.SeqLen)] = 10.0f;
@@ -1389,11 +2439,23 @@ public class RetainedFusedCacheTests
         }
 
         public void ResetKVCache() => Active.SeqLen = 0;
+        public bool TryTruncateKVCache(int tokenCount)
+        {
+            if (_refuseTruncationAtExecution && tokenCount < Active.SeqLen)
+            {
+                ExecutionTruncationRefusals++;
+                return false;
+            }
+            TruncateKVCache(tokenCount);
+            return true;
+        }
         public void TruncateKVCache(int tokenCount)
         {
             if (!_supportsKvCacheTruncation)
                 throw new InvalidOperationException("non-truncatable fused holder was truncated");
             TruncationTargets.Add(tokenCount);
+            if (!CanTruncateKVCache(Active.SeqLen, tokenCount))
+                throw new InvalidOperationException("unsafe wrapped fused holder was truncated");
             Active.SeqLen = Math.Min(Active.SeqLen, tokenCount);
         }
         public void Dispose() { }
@@ -1403,6 +2465,9 @@ public class RetainedFusedCacheTests
         public bool SupportsKVStateSnapshot => true;
         public bool SupportsCrossSequenceKvReuse => _supportsCrossSequenceKvReuse;
         public int MaxReusablePrefixTokens => _maxReusablePrefixTokens;
+        public bool SupportsReuseAcrossMediaSpan { get; }
+        private readonly int _mediaAfterReuseMaxPromptTokens;
+        public bool CanPrefillMediaAfterReusedPrefix(int promptTokens) => promptTokens <= _mediaAfterReuseMaxPromptTokens;
         public string KVStateFingerprint => "fused-stub";
         public bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
@@ -1479,6 +2544,7 @@ public class RetainedFusedCacheTests
 
         public bool RetainSequenceCache(string requestId)
         {
+            RetainCalls++;
             if (!_holders.TryGetValue(requestId, out var h)) return false;
             if (string.Equals(_activeKey, requestId, StringComparison.Ordinal)) _activeKey = null;
             _holders.Remove(requestId);
@@ -1488,6 +2554,7 @@ public class RetainedFusedCacheTests
 
         public bool TryRebindRetainedCache(string retainedRequestId, string newRequestId)
         {
+            RebindCalls++;
             if (!_retained.TryGetValue(retainedRequestId, out var h)) return false;
             _retained.Remove(retainedRequestId);
             _holders[newRequestId] = h;
@@ -1496,6 +2563,8 @@ public class RetainedFusedCacheTests
 
         public void DiscardRetainedCache(string requestId)
         {
+            if (requestId == ThrowOnDiscardKey)
+                throw new InvalidOperationException("controlled native discard refusal");
             if (!_retained.Remove(requestId)) return;
             lock (_lifecycleLock)
                 _discardedRetainedRequestIds.Add(requestId);

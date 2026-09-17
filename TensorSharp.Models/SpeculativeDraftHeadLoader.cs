@@ -55,6 +55,14 @@ namespace TensorSharp.Models
             if (draftPath == null)
                 return true;
 
+            // A trunk that refuses speculation for correctness refuses every
+            // drafter too; say so instead of loading weights nothing may use.
+            if (model is ISpeculativeTarget { SpeculationRefusal: { } refusal })
+            {
+                error = $"--draft-model '{Path.GetFileName(draftPath)}' is not attached: {refusal}";
+                return false;
+            }
+
             // Block drafters have to participate in model construction so their
             // weights are included in device placement/layer splitting. If the
             // factory already produced a usable one (DSpark or DFlash), the
@@ -73,6 +81,20 @@ namespace TensorSharp.Models
             {
                 error = $"Draft-head model file not found: {draftPath}";
                 return false;
+            }
+
+            if (model is Qwen4ExpModel qwen4Exp)
+            {
+                try
+                {
+                    qwen4Exp.LoadMtpDraftWeights(draftPath);
+                    return qwen4Exp.HasDraftHead;
+                }
+                catch (Exception ex)
+                {
+                    error = $"Failed to load Qwen4Exp shared MTP head '{Path.GetFileName(draftPath)}': {ex.Message}";
+                    return false;
+                }
             }
 
             // A DFlash / DFlash2 drafter is architecture-agnostic on this side: any

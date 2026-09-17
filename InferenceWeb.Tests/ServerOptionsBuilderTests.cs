@@ -206,6 +206,26 @@ public class ServerOptionsBuilderTests : IDisposable
     }
 
     [Fact]
+    public void NoPrefixCache_DisablesRuntimeReuseAndStartupPersistence()
+    {
+        _env.Set("TS_SCHED_PREFIX_CACHE", "1");
+        string[] args = { "--no-prefix-cache" };
+
+        Assert.True(ServerOptionsBuilder.ApplyPrefixCacheCliFlag(args));
+        Assert.False(SchedulerConfig.FromEnvironment().EnablePrefixCaching);
+        Assert.False(ServerOptionsBuilder.Build(args, _baseDir).PrefixCacheEnabled);
+    }
+
+    [Fact]
+    public void NoPrefixCache_AbsentPreservesRuntimeEnvironment()
+    {
+        _env.Set("TS_SCHED_PREFIX_CACHE", "1");
+
+        Assert.False(ServerOptionsBuilder.ApplyPrefixCacheCliFlag(Array.Empty<string>()));
+        Assert.True(SchedulerConfig.FromEnvironment().EnablePrefixCaching);
+    }
+
+    [Fact]
     public void ApplyPagedKvCacheCliFlags_NoPagedKvFlag_DisablesEnabledEnvVar()
     {
         _env.Set("TS_KV_PAGED_CACHE", "1");
@@ -1052,6 +1072,19 @@ public class ServerOptionsBuilderTests : IDisposable
         Assert.Contains("embedding_length_out", msg);
     }
 
+    [Fact]
+    public void SpeculationStartupValidation_ModelRefusal_SaysToDropTheFlagNotToSwapTheDraft()
+    {
+        // Nemotron-H refuses every drafter: suggesting "the draft GGUF that matches
+        // this target" would send the operator after a file that cannot exist.
+        string reason = "--draft-model 'x-DSpark.gguf' is not attached: " + NemotronModel.SpeculationRefusalReason;
+        string msg = SpeculationStartupValidation.GetFatalActivationError(reason, refusedByModel: true);
+        Assert.Contains(reason, msg);
+        Assert.Contains("refuses it", msg);
+        Assert.Contains("drop --draft-model", msg);
+        Assert.DoesNotContain("embedding_length_out", msg);
+    }
+
     // ---- Listen address (--port / --host / --urls) -------------------------
     // The ambient environment can carry PORT / HOST / ASPNETCORE_URLS (container
     // platforms inject them), so every test here clears all three first and then
@@ -1244,6 +1277,33 @@ public class ServerOptionsBuilderTests : IDisposable
         Assert.Equal(500L * 1024 * 1024, options.UploadMaxFileBytes);
         Assert.Equal(0, options.UploadQuotaBytes);
         Assert.Null(options.UploadTtl);
+    }
+
+    [Fact]
+    public void Build_UploadDirectoryCanLiveOutsideApplication()
+    {
+        string application = Path.Combine(_baseDir, "application");
+        string uploads = Path.Combine(_baseDir, "runtime-media");
+        Directory.CreateDirectory(application);
+        _env.Set("TENSORSHARP_UPLOAD_DIR", uploads);
+
+        var options = ServerOptionsBuilder.Build(Array.Empty<string>(), application);
+
+        Assert.Equal(uploads, options.UploadDirectory);
+        Assert.True(Directory.Exists(uploads));
+        Assert.False(Directory.Exists(Path.Combine(application, "uploads")));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void Build_BlankUploadDirectoryKeepsApplicationDefault(string? configured)
+    {
+        _env.Set("TENSORSHARP_UPLOAD_DIR", configured);
+        var options = ServerOptionsBuilder.Build(Array.Empty<string>(), _baseDir);
+        Assert.Equal(Path.Combine(_baseDir, "uploads"), options.UploadDirectory);
+        Assert.True(Directory.Exists(options.UploadDirectory));
     }
 
     [Fact]

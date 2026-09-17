@@ -9,16 +9,184 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 #include "ggml_ops_internal.h"
 #include "ggml-impl.h"
+#include "ggml_ops_qwen4exp_qsa.h"
+#include "ggml_ops_matmul_precision.h"
+#include "ggml_ops_dsv4_fused.h"
+#include "ggml_ops_precision_policy.h"
+#ifdef TSG_GGML_USE_CUDA
+#include "ggml-cuda.h"
+#endif
 #include <cstdlib>
 #include <cstdio>
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 #include <unordered_map>
 
 using namespace tsg;
+
+namespace
+{
+    // ------------------------------------------------------------------------
+    // Verify-width rows run the one-token kernels (CUDA and CPU).
+    //
+    // A speculative verify and the replay of its accepted prefix forward
+    // 2..TSG_PRECISION_DECODE_COLUMNS tokens through one span graph (so does a
+    // prefill that short), and every row that graph commits - logits, attention
+    // K/V, QSA keys, GDN and PLE state - must equal what the same tokens leave
+    // behind decoded one at a time. Otherwise a speculative stream is only plain
+    // greedy up to floating-point differences, and a committed block is not the
+    // state a plain decode would have continued from.
+    //
+    // ggml-cuda picks kernels by batch width, and at these widths several picks
+    // are not row-invariant. Measured on an A40 against one-row graphs with
+    // tests/qwen4exp_row_kernel_probe.cpp (max |difference| at 4 rows):
+    //   * F32 projections: mul_mat_vec_f up to 3 columns, then the tensor-core
+    //     mul_mat_f or cuBLAS (TF32) path - router logits move by 2.6e-3;
+    //   * F16 / BF16 projections: mul_mat_vec_f at 1 column, a half-precision
+    //     path from 2 - 1.1e-3 / 5.9e-3 (BF16 is the QSA indexer projection);
+    //   * routed experts: the single-token MMVQ kernel at 1 row, the multi-token
+    //     MoE kernel from 2 - 4.8e-7;
+    //   * flash attention: one query against several - 2.9e-5.
+    // Quantized dense projections (MMVQ) size their reduction by column count in
+    // groups (1-4 and 5-8 columns on the A40 table) and match a single column
+    // within the first group; GDN, SSM conv, norms, softmax, top-k and the
+    // elementwise kernels are computed per row. The fixture's non-flash attention
+    // additionally narrows V x probabilities to F16 in cuBLAS from 2 rows.
+    // Through 48 layers of MoE and QSA routing this is not last-bit noise: on
+    // Qwen3.8-Flash-Next UD-Q2_K_XL every 2-4 row verify row differed from its
+    // decode step by up to 2.5 in logits and 4-6 of 48 rows flipped the greedy
+    // token.
+    //
+    // So while such a graph is built (g_q4e_row_kernels.rows != 0):
+    //   * float projections with an even input width move the tokens onto the
+    //     broadcast (channel) axis: one mul_mat_vec_f launch whose every channel
+    //     is a one-column reduction (an odd width is not a mul_mat_vec_f case, so
+    //     its rows go to cuBLAS one at a time, as the one-token graph's do);
+    //   * the qualified A40 quantized projections run in blocks of at most four
+    //     rows; other devices/types use one-column reductions on the broadcast axis;
+    //   * routed experts and attention are expanded one row at a time, each
+    //     attention row over exactly the KV window and mask row its one-token
+    //     graph reads (the windows join the replay key).
+    // One-token (decode) and wider (prefill) graphs keep their kernels. Measured
+    // on the model above over three A40s: every verify row bit-identical at 2-4
+    // rows; a 4-row verify 29.4 -> 32.7 ms; decode steps and prefill unchanged.
+    //
+    // Allocation-dependent fusions. ggml-cuda fuses the MoE weighted reduction
+    // and RMS norm * weight -> RoPE only if the fused destination does not
+    // overlap an input's memory, and whether it does depends on which freed
+    // blocks the allocator reused - on the graph's width. The fused and the
+    // separate kernels differ in the last bits (FMA), so a one-token and a
+    // four-token graph could round the same row differently. Graphs of up to
+    // TSG_PRECISION_DECODE_COLUMNS tokens therefore keep those inputs allocated
+    // (graph outputs), which makes both fusions unconditional there.
+    // CPU uses the same row construction: ARM F16 reductions also depend on
+    // graph width. The QSA fixture's committed-row test differed by up to 0.0032
+    // before enabling it on CPU and is bit-exact at widths 1..8 afterwards.
+    // ------------------------------------------------------------------------
+    struct Q4eRowKernels
+    {
+        int rows = 0;                     // tokens of the verify-width graph being built; 0 = off
+        int n_kv = 0;                     // live KV rows once that graph has written its tokens
+        bool keep_fusion_inputs = false;  // graph of at most TSG_PRECISION_DECODE_COLUMNS tokens
+    };
+    thread_local Q4eRowKernels g_q4e_row_kernels;
+
+    // MMVQ's single-column reduction is architecture- and type-dependent. Turing
+    // K-quants use two warps at width 1 and four at widths 2..4; GB10 can double
+    // the width-1 reduction. Only the measured A40 types may share a four-row
+    // group. Everything else keeps ncols_dst=1 via the broadcast axis.
+    bool q4e_qualified_mmvq_group(ggml_type type)
+    {
+#ifdef TSG_GGML_USE_CUDA
+#ifdef TSG_GGML_TEST_HOOKS
+        static const bool force_channels = [] {
+            const char* e = std::getenv("TS_Q4E_TEST_MMVQ_CHANNELS");
+            return e != nullptr && e[0] == '1';
+        }();
+        if (force_channels) return false;
+#endif
+        const char* device = ggml_backend_dev_description(ggml_backend_get_device(g_backend));
+        if (device == nullptr || std::strcmp(device, "NVIDIA A40") != 0) return false;
+        return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K
+            || type == GGML_TYPE_Q6_K || type == GGML_TYPE_Q8_0;
+#else
+        (void)type;
+        return false;
+#endif
+    }
+
+    bool q4e_float_type(ggml_type type)
+    {
+        return type == GGML_TYPE_F32 || type == GGML_TYPE_F16 || type == GGML_TYPE_BF16;
+    }
+
+    // Keep a fusion input's memory from being reused inside its graph.
+    void q4e_keep_fusion_input(ggml_tensor* t)
+    {
+        if (!g_q4e_row_kernels.keep_fusion_inputs || t == nullptr) return;
+        while (t->view_src != nullptr) t = t->view_src;
+        if (t->op != GGML_OP_NONE) ggml_set_output(t);
+    }
+
+    ggml_tensor* q4e_mul_mat(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x)
+    {
+        const int rows = g_q4e_row_kernels.rows;
+        if (rows < 2 || x->ne[1] != rows || x->ne[2] != 1 || x->ne[3] != 1)
+            return ggml_mul_mat(ctx, w, x);
+        if (!ggml_is_contiguous(x)) x = ggml_cont(ctx, x);
+        const bool grouped_quant = ggml_is_quantized(w->type) && q4e_qualified_mmvq_group(w->type);
+        if ((q4e_float_type(w->type) && w->ne[0] % 2 == 0)
+            || (ggml_is_quantized(w->type) && !grouped_quant))
+        {
+            // Both MMVF and MMVQ take one column at any channel count.
+            ggml_tensor* y = ggml_mul_mat(ctx, w, ggml_reshape_3d(ctx, x, x->ne[0], 1, rows));
+            return ggml_reshape_2d(ctx, y, y->ne[0], rows);
+        }
+        // An odd-width float matrix is not a mul_mat_vec_f case: its one-token
+        // graph calls cuBLAS with one column, which a batched call does not
+        // reproduce. Qualified quantized projections share MMVQ's reduction group.
+        const int group = grouped_quant ? 4 : 1;
+        if (rows <= group) return ggml_mul_mat(ctx, w, x);
+        ggml_tensor* out = nullptr;
+        for (int start = 0; start < rows; start += group)
+        {
+            const int count = std::min(group, rows - start);
+            ggml_tensor* part = ggml_view_2d(ctx, x, x->ne[0], count, x->nb[1], (std::size_t)start * x->nb[1]);
+            // A cuBLAS row gets its own buffer, as the one-token graph's input has.
+            if (group == 1) part = ggml_cont(ctx, part);
+            part = ggml_mul_mat(ctx, w, part);
+            out = out ? ggml_concat(ctx, out, part, 1) : part;
+        }
+        return out;
+    }
+
+    ggml_tensor* q4e_mul_mat_id(ggml_context* ctx, ggml_tensor* w, ggml_tensor* x, ggml_tensor* ids)
+    {
+        const int rows = g_q4e_row_kernels.rows;
+        if (rows < 2 || x->ne[2] != rows || x->ne[3] != 1 || ids->ne[1] != rows)
+            return ggml_mul_mat_id(ctx, w, x, ids);
+        ggml_tensor* out = nullptr;
+        for (int r = 0; r < rows; ++r)
+        {
+            ggml_tensor* xr = ggml_view_3d(ctx, x, x->ne[0], x->ne[1], 1, x->nb[1], x->nb[2],
+                    (std::size_t)r * x->nb[2]);
+            if (!ggml_is_contiguous(xr)) xr = ggml_cont(ctx, xr);
+            ggml_tensor* ir = ggml_view_2d(ctx, ids, ids->ne[0], 1, ids->nb[1], (std::size_t)r * ids->nb[1]);
+            ggml_tensor* y = ggml_mul_mat_id(ctx, w, xr, ir);
+            out = out ? ggml_concat(ctx, out, y, 2) : y;
+        }
+        return out;
+    }
+}
+
+#include "ggml_ops_qwen4exp_qsa.inc"
 
 // ============================================================================
 // Qwen3.8-Flash-Next (qwen4exp) fused layers.
@@ -76,7 +244,12 @@ namespace
         const void* sig3 = nullptr;
         const void* sig4 = nullptr;      // head descriptor, or null
         const void* sig5 = nullptr;      // PLE descriptor, or null
+        const void* qsa_sig = nullptr;
+        std::vector<Q4eQsaInputs> qsa_inputs;
+        ggml_backend_t precise_backend = nullptr;
         ggml_tensor* logits = nullptr;
+        int logits_rows = 1;
+        bool export_hidden = false;
         ggml_tensor* ple_emb_in = nullptr;
         int layer_begin = -1;
         int layer_end = -1;
@@ -116,20 +289,29 @@ namespace
         ggml_tensor* pos = nullptr;
         ggml_tensor* kv_idx = nullptr;
         int n_kv = -1;
+        // Span only: the attention window of every row of a verify-width graph
+        // (see Q4eRowKernels); empty (count 0) for any other graph. Two graphs with
+        // the same padded window can still split their rows across a pad
+        // boundary at different rows, so all of them are part of the key.
+        std::array<int, TSG_PRECISION_DECODE_COLUMNS> row_kv{};
+        int row_kv_count = 0;
+        bool row_scope = false;
 
         // Drop the graph but KEEP the recurrent state: a shape change does this.
         void reset_graph()
         {
+            if (precise_backend) { ggml_backend_synchronize(precise_backend); ggml_backend_free(precise_backend); precise_backend = nullptr; }
+            qsa_sig = nullptr; qsa_inputs.clear();
             if (alloc) { ggml_gallocr_free(alloc); alloc = nullptr; }
             if (ctx) { ggml_free(ctx); ctx = nullptr; }
             graph = nullptr; res_in = nullptr; res_out = nullptr;
             conv_in = conv_out = ssm_in = ssm_out = nullptr;
             valid = false; n_tokens = 0; hc_dim = 0; sig = nullptr; res_resident = -1;
             sig2 = nullptr; sig3 = nullptr; sig4 = nullptr; sig5 = nullptr;
-            logits = nullptr; ple_emb_in = nullptr;
+            logits = nullptr; logits_rows = 1; export_hidden = false; ple_emb_in = nullptr;
             layer_begin = -1; layer_end = -1; kv_capacity = -1; first_ffn_only = 0;
             use_mrope = 0;
-            mask = nullptr; pos = nullptr; kv_idx = nullptr; n_kv = -1;
+            mask = nullptr; pos = nullptr; kv_idx = nullptr; n_kv = -1; row_kv_count = 0; row_scope = false;
             span_copies.clear(); rebinds.clear(); gdn_probe.clear();
             span_masks.clear(); span_pos.clear(); span_kvidx.clear();
         }
@@ -272,6 +454,36 @@ namespace
     // TS_Q4E_SPAN_REBUILD=1 disables the span replay path entirely - every call
     // rebuilds the graph. Diagnosis only: separates a wrong-graph bug from a
     // wrong-replay one.
+    // Q4eRowKernels applies to CPU and CUDA span graphs. A test-hook build can turn CUDA off
+    // - TS_Q4E_TEST_BATCHED_VERIFY=1 at start-up, or TSGgml_Qwen4ExpTestBatchedVerify
+    // at run time - to measure the batched kernels it replaces in one process.
+#ifdef TSG_GGML_TEST_HOOKS
+    std::atomic<int> g_q4e_test_batched_verify{-1};
+#endif
+
+    bool q4e_row_kernels_enabled()
+    {
+        if (ggml_backend_is_cpu(g_backend)) return true;
+#ifdef TSG_GGML_USE_CUDA
+        if (!ggml_backend_is_cuda(g_backend)) return false;
+#ifdef TSG_GGML_TEST_HOOKS
+        int batched = g_q4e_test_batched_verify.load(std::memory_order_relaxed);
+        if (batched < 0)
+        {
+            static const bool from_environment = []{
+                const char* e = std::getenv("TS_Q4E_TEST_BATCHED_VERIFY");
+                return e != nullptr && e[0] == '1';
+            }();
+            batched = from_environment ? 1 : 0;
+        }
+        if (batched) return false;
+#endif
+        return true;
+#else
+        return false;
+#endif
+    }
+
     bool q4e_span_force_rebuild()
     {
         static const bool v = []{
@@ -385,6 +597,83 @@ namespace
         }
         fprintf(stderr, "%c", 10);
     }
+
+#ifdef TSG_GGML_TEST_HOOKS
+    // TS_Q4E_NODE_DUMP=<dir> (test-hook builds only): every span graph is
+    // rebuilt, every node is flagged OUTPUT, and after the compute each node's
+    // value is written to <dir>/<call>_T<T>_p<position>_r<logits rows>_kv<n_kv>.bin
+    // together with its op, shape and source node indices, so an offline diff
+    // can name the first node whose inputs agree and whose output does not.
+    // Diagnosis only: OUTPUT flags change what ggml-cuda may fuse, so the dump
+    // describes the unfused kernels.
+    const char* q4e_node_dump_dir()
+    {
+        static const char* v = []() -> const char* {
+            const char* e = std::getenv("TS_Q4E_NODE_DUMP");
+            return (e != nullptr && *e != 0) ? e : nullptr;
+        }();
+        return v;
+    }
+
+    void q4e_node_dump(ggml_cgraph* graph, int T, int position, int logits_rows, int n_kv)
+    {
+        static int call = 0;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%05d_T%d_p%d_r%d_kv%d.bin", q4e_node_dump_dir(), call++, T, position,
+                 logits_rows, n_kv);
+        FILE* file = fopen(path, "wb");
+        if (file == nullptr) return;
+        const int n = ggml_graph_n_nodes(graph);
+        std::unordered_map<const ggml_tensor*, int> index;
+        for (int i = 0; i < n; ++i) index[ggml_graph_node(graph, i)] = i;
+        std::vector<float> values;
+        std::vector<char> raw;
+        for (int i = 0; i < n; ++i)
+        {
+            ggml_tensor* t = ggml_graph_node(graph, i);
+            int32_t header[4] = { 0x444e3451, i, (int32_t)t->op, (int32_t)t->type };
+            int64_t ne[4] = { t->ne[0], t->ne[1], t->ne[2], t->ne[3] };
+            int32_t src[GGML_MAX_SRC];
+            for (int s = 0; s < GGML_MAX_SRC; ++s)
+            {
+                auto it = t->src[s] ? index.find(t->src[s]) : index.end();
+                src[s] = t->src[s] == nullptr ? -2 : (it == index.end() ? -1 : it->second);
+            }
+            char name[64] = {};
+            snprintf(name, sizeof(name), "%s", t->name);
+            values.clear();
+            const bool readable = t->buffer != nullptr && ggml_is_contiguous(t)
+                && t->op != GGML_OP_VIEW && t->op != GGML_OP_RESHAPE && t->op != GGML_OP_PERMUTE
+                && t->op != GGML_OP_TRANSPOSE && t->op != GGML_OP_NONE;
+            if (readable && (t->type == GGML_TYPE_F32 || t->type == GGML_TYPE_F16
+                             || t->type == GGML_TYPE_I32 || t->type == GGML_TYPE_I64))
+            {
+                const int64_t count = ggml_nelements(t);
+                raw.resize(ggml_nbytes(t));
+                ggml_backend_tensor_get(t, raw.data(), 0, raw.size());
+                values.resize((std::size_t)count);
+                for (int64_t k = 0; k < count; ++k)
+                {
+                    switch (t->type)
+                    {
+                        case GGML_TYPE_F32: std::memcpy(&values[k], raw.data() + k * 4, 4); break;
+                        case GGML_TYPE_F16: { ggml_fp16_t h; std::memcpy(&h, raw.data() + k * 2, 2); values[k] = ggml_fp16_to_fp32(h); } break;
+                        case GGML_TYPE_I32: { int32_t v; std::memcpy(&v, raw.data() + k * 4, 4); values[k] = (float)v; } break;
+                        default: { int64_t v; std::memcpy(&v, raw.data() + k * 8, 8); values[k] = (float)v; } break;
+                    }
+                }
+            }
+            const int64_t count = (int64_t)values.size();
+            fwrite(header, sizeof(header), 1, file);
+            fwrite(ne, sizeof(ne), 1, file);
+            fwrite(src, sizeof(src), 1, file);
+            fwrite(name, sizeof(name), 1, file);
+            fwrite(&count, sizeof(count), 1, file);
+            if (count) fwrite(values.data(), sizeof(float), values.size(), file);
+        }
+        fclose(file);
+    }
+#endif
 
     int q4e_pad_kv(int n_kv, int kv_capacity, bool use_flash)
     {
@@ -557,7 +846,10 @@ void Q4eBinder::add(ggml_tensor* tgt, void* data, std::size_t bytes,
                     ggml_backend_buffer_usage usage)
 {
             if (tgt == nullptr || data == nullptr) return;
-            if (bytes >= 4096)
+            // Mutable KV must survive graph rebuilds even in small models. Its
+            // host seed may be stale after the first forward, so a graph-local
+            // fallback would silently replace live cache rows with that seed.
+            if (bytes >= 4096 || usage == GGML_BACKEND_BUFFER_USAGE_ANY)
             {
                 bool needs_upload = false;
                 if (try_bind_cached_tensor(g_backend, dev, tgt, data, bytes, needs_upload, usage))
@@ -572,6 +864,8 @@ void Q4eBinder::add(ggml_tensor* tgt, void* data, std::size_t bytes,
                     if (ggml_backend_tensor_alloc(buf, tgt, data) == GGML_STATUS_SUCCESS)
                         return;
                 }
+                if (usage == GGML_BACKEND_BUFFER_USAGE_ANY)
+                    throw std::runtime_error("qwen4exp: could not persist mutable cache buffer");
                 // A weight this size normally cache-binds; falling through here means
                 // the resident cache could not take it (VRAM pressure). It will live
                 // in the graph's own allocation instead - flagged below - and that is
@@ -652,9 +946,9 @@ ggml_tensor* q4e_nodes_ffn(
     xn = ggml_reshape_2d(ctx, xn, hc_dim, T);
     xn = ggml_mul(ctx, xn, w_norm);
 
-    ggml_tensor* lo = ggml_mul_mat(ctx, w_down, xn);
+    ggml_tensor* lo = q4e_mul_mat(ctx, w_down, xn);
     lo = ggml_silu(ctx, ggml_scale(ctx, lo, 1.0f / (float)hc));
-    ggml_tensor* gate = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_up, lo));
+    ggml_tensor* gate = ggml_sigmoid(ctx, q4e_mul_mat(ctx, w_up, lo));
 
     ggml_tensor* gated = ggml_mul(ctx, xn, gate);
     gated = ggml_reshape_3d(ctx, gated, n_embd, hc, T);
@@ -671,12 +965,12 @@ ggml_tensor* q4e_nodes_ffn(
     }
     mixed = ggml_scale(ctx, mixed, 1.0f / (float)hc);
 
-    ggml_tensor* inject = ggml_mul_mat(ctx, w_inject, xn);   // [hc, T]
+    ggml_tensor* inject = q4e_mul_mat(ctx, w_inject, xn);   // [hc, T]
 
     // ---- routed experts ---------------------------------------------------
     // Softmax over every expert, top-k, then renormalise the selected
     // weights - llama.cpp's build_moe_ffn with norm_w.
-    ggml_tensor* logits = ggml_mul_mat(ctx, w_router, mixed);      // [n_expert, T]
+    ggml_tensor* logits = q4e_mul_mat(ctx, w_router, mixed);      // [n_expert, T]
     ggml_tensor* probs = ggml_soft_max(ctx, logits);
     // ggml_argsort_top_k, not ggml_top_k: this is the exact node shape llama.cpp's
     // build_moe_ffn emits, and ggml-cuda's topk_moe fusion matches on the node
@@ -688,13 +982,15 @@ ggml_tensor* q4e_nodes_ffn(
     w_sel = ggml_reshape_2d(ctx, w_sel, n_expert_used, T);
     ggml_tensor* w_sum = ggml_sum_rows(ctx, w_sel);                // [1, T]
     w_sel = ggml_div(ctx, w_sel, w_sum);
+    q4e_keep_fusion_input(w_sel);
     w_sel = ggml_reshape_3d(ctx, w_sel, 1, n_expert_used, T);
 
     ggml_tensor* moe_in = ggml_reshape_3d(ctx, mixed, n_embd, 1, T);
-    ggml_tensor* e_up = ggml_mul_mat_id(ctx, w_up_e, moe_in, sel);      // [n_ff, n_used, T]
-    ggml_tensor* e_gate = ggml_mul_mat_id(ctx, w_gate_e, moe_in, sel);
+    ggml_tensor* e_up = q4e_mul_mat_id(ctx, w_up_e, moe_in, sel);      // [n_ff, n_used, T]
+    ggml_tensor* e_gate = q4e_mul_mat_id(ctx, w_gate_e, moe_in, sel);
     ggml_tensor* par = ggml_mul(ctx, ggml_silu(ctx, e_gate), e_up);
-    ggml_tensor* experts = ggml_mul_mat_id(ctx, w_down_e, par, sel);    // [n_embd, n_used, T]
+    ggml_tensor* experts = q4e_mul_mat_id(ctx, w_down_e, par, sel);    // [n_embd, n_used, T]
+    q4e_keep_fusion_input(experts);   // weighted-reduction fusion inputs: see Q4eRowKernels
     experts = ggml_mul(ctx, experts, w_sel);
 
     ggml_tensor* moe_out = ggml_view_2d(ctx, experts, n_embd, T,
@@ -707,10 +1003,10 @@ ggml_tensor* q4e_nodes_ffn(
     }
 
     // ---- shared expert, behind its own sigmoid scalar ---------------------
-    ggml_tensor* sg = ggml_mul_mat(ctx, w_sh_g, mixed);
-    ggml_tensor* su = ggml_mul_mat(ctx, w_sh_u, mixed);
-    ggml_tensor* sh = ggml_mul_mat(ctx, w_sh_d, ggml_mul(ctx, ggml_silu(ctx, sg), su));
-    ggml_tensor* s_gate = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_sh_gi, mixed)); // [1, T]
+    ggml_tensor* sg = q4e_mul_mat(ctx, w_sh_g, mixed);
+    ggml_tensor* su = q4e_mul_mat(ctx, w_sh_u, mixed);
+    ggml_tensor* sh = q4e_mul_mat(ctx, w_sh_d, ggml_mul(ctx, ggml_silu(ctx, sg), su));
+    ggml_tensor* s_gate = ggml_sigmoid(ctx, q4e_mul_mat(ctx, w_sh_gi, mixed)); // [1, T]
     ggml_tensor* ffn_out = ggml_add(ctx, moe_out, ggml_mul(ctx, sh, s_gate));
 
     // ---- hyper-connection scatter ----------------------------------------
@@ -786,8 +1082,8 @@ ggml_tensor* q4e_nodes_gdn(
     xn = ggml_reshape_2d(ctx, xn, hc_dim, T);
     xn = ggml_mul(ctx, xn, w_norm);
 
-    ggml_tensor* lo = ggml_silu(ctx, ggml_scale(ctx, ggml_mul_mat(ctx, w_down, xn), 1.0f / (float)hc));
-    ggml_tensor* gt = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_up, lo));
+    ggml_tensor* lo = ggml_silu(ctx, ggml_scale(ctx, q4e_mul_mat(ctx, w_down, xn), 1.0f / (float)hc));
+    ggml_tensor* gt = ggml_sigmoid(ctx, q4e_mul_mat(ctx, w_up, lo));
     ggml_tensor* gated = ggml_reshape_3d(ctx, ggml_mul(ctx, xn, gt), n_embd, hc, T);
 
     ggml_tensor* mixed = ggml_cont(ctx, ggml_view_2d(ctx, gated, n_embd, T,
@@ -799,13 +1095,13 @@ ggml_tensor* q4e_nodes_gdn(
                 ggml_row_size(gated->type, n_embd) * c));
     }
     mixed = ggml_scale(ctx, mixed, 1.0f / (float)hc);
-    ggml_tensor* inject = ggml_mul_mat(ctx, w_inject, xn);
+    ggml_tensor* inject = q4e_mul_mat(ctx, w_inject, xn);
 
     // ---- projections ----
-    ggml_tensor* qkv = ggml_mul_mat(ctx, w_qkv, mixed);        // [conv_dim, T]
-    ggml_tensor* z = ggml_mul_mat(ctx, w_gate, mixed);         // [value_dim, T]
-    ggml_tensor* beta_raw = ggml_mul_mat(ctx, w_beta, mixed);  // [n_v_heads, T]
-    ggml_tensor* alpha_raw = ggml_mul_mat(ctx, w_alpha, mixed);
+    ggml_tensor* qkv = q4e_mul_mat(ctx, w_qkv, mixed);        // [conv_dim, T]
+    ggml_tensor* z = q4e_mul_mat(ctx, w_gate, mixed);         // [value_dim, T]
+    ggml_tensor* beta_raw = q4e_mul_mat(ctx, w_beta, mixed);  // [n_v_heads, T]
+    ggml_tensor* alpha_raw = q4e_mul_mat(ctx, w_alpha, mixed);
 
     // ---- causal depthwise conv over the ring history ----
     // conv_state is [hist, conv_dim]; qkv transposed is [T, conv_dim].
@@ -868,7 +1164,7 @@ ggml_tensor* q4e_nodes_gdn(
     ggml_tensor* normed = ggml_mul(ctx, ggml_rms_norm(ctx, ggml_cont(ctx, core), eps), w_ssmnorm);
     ggml_tensor* zg = ggml_sigmoid(ctx, ggml_reshape_3d(ctx, z, head_v_dim, n_v_heads, T));
     ggml_tensor* out2 = ggml_reshape_2d(ctx, ggml_mul(ctx, normed, zg), value_dim, T);
-    ggml_tensor* proj = ggml_mul_mat(ctx, w_out, out2);        // [n_embd, T]
+    ggml_tensor* proj = q4e_mul_mat(ctx, w_out, out2);        // [n_embd, T]
 
     // ---- hyper-connection scatter ----
     ggml_tensor* wsc = ggml_reshape_3d(ctx, ggml_scale(ctx,
@@ -923,7 +1219,7 @@ ggml_tensor* q4e_nodes_attn(
     std::vector<ggml_tensor*>* kv_out,
     std::vector<ggml_tensor*>* probe,
     const int32_t* mrope_sections,
-    Q4eAttnArenaIO* arena)
+    Q4eAttnArenaIO* arena, ggml_tensor* owned_k, ggml_tensor* owned_v, const Q4eQsaGraph* qsa)
 {
     const int hc_dim = hc * n_embd;
     const int q_dim = head_dim * n_head;
@@ -944,16 +1240,18 @@ ggml_tensor* q4e_nodes_attn(
     ggml_tensor* v_cache  = nullptr;
     if (arena == nullptr)
     {
-        k_cache = ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
-        v_cache = ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
+        k_cache = owned_k != nullptr ? owned_k
+            : ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
+        v_cache = owned_v != nullptr ? owned_v
+            : ggml_new_tensor_3d(ctx, (ggml_type)a->kv_type, head_dim, kv_capacity, n_head_kv);
     }
 
     // ---- hyper-connection mixer ----
     ggml_tensor* res3 = ggml_reshape_3d(ctx, res_in, n_embd, hc, T);
     ggml_tensor* xn = ggml_mul(ctx,
             ggml_reshape_2d(ctx, ggml_rms_norm(ctx, res3, eps), hc_dim, T), w_norm);
-    ggml_tensor* lo = ggml_silu(ctx, ggml_scale(ctx, ggml_mul_mat(ctx, w_down, xn), 1.0f / (float)hc));
-    ggml_tensor* gt = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_up, lo));
+    ggml_tensor* lo = ggml_silu(ctx, ggml_scale(ctx, q4e_mul_mat(ctx, w_down, xn), 1.0f / (float)hc));
+    ggml_tensor* gt = ggml_sigmoid(ctx, q4e_mul_mat(ctx, w_up, lo));
     ggml_tensor* gated = ggml_reshape_3d(ctx, ggml_mul(ctx, xn, gt), n_embd, hc, T);
     ggml_tensor* mixed = ggml_cont(ctx, ggml_view_2d(ctx, gated, n_embd, T,
             ggml_row_size(gated->type, n_embd) * hc, 0));
@@ -961,20 +1259,28 @@ ggml_tensor* q4e_nodes_attn(
         mixed = ggml_add(ctx, mixed, ggml_view_2d(ctx, gated, n_embd, T,
                 ggml_row_size(gated->type, n_embd) * hc, ggml_row_size(gated->type, n_embd) * c));
     mixed = ggml_scale(ctx, mixed, 1.0f / (float)hc);
-    ggml_tensor* inject = ggml_mul_mat(ctx, w_inject, xn);
+    ggml_tensor* inject = q4e_mul_mat(ctx, w_inject, xn);
+
+    if (qsa != nullptr)
+        mask = q4e_nodes_qsa_mask(ctx, graph, bnd, *qsa, mixed, mask, kv_idx,
+            n_embd, T, n_kv_pad, n_rot, rope_base, rope_freq_scale, eps);
 
     // ---- q | gate, interleaved per head ----
-    ggml_tensor* qg = ggml_mul_mat(ctx, wq, mixed);                 // [q_dim*2, T]
+    ggml_tensor* qg = q4e_mul_mat(ctx, wq, mixed);                 // [q_dim*2, T]
     const std::size_t esz = ggml_element_size(qg);
     ggml_tensor* q = ggml_view_3d(ctx, qg, head_dim, n_head, T,
             esz * head_dim * 2, esz * head_dim * 2 * n_head, 0);
     ggml_tensor* gate = ggml_cont(ctx, ggml_view_3d(ctx, qg, head_dim, n_head, T,
             esz * head_dim * 2, esz * head_dim * 2 * n_head, esz * head_dim));
 
-    q = ggml_mul(ctx, ggml_rms_norm(ctx, ggml_cont(ctx, q), eps), q_norm_w);
-    ggml_tensor* k = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, wk, mixed), head_dim, n_head_kv, T);
+    // RMS norm * weight -> RoPE fusion inputs: see Q4eRowKernels.
+    q = ggml_cont(ctx, q);
+    q4e_keep_fusion_input(q);
+    q = ggml_mul(ctx, ggml_rms_norm(ctx, q, eps), q_norm_w);
+    ggml_tensor* k = ggml_reshape_3d(ctx, q4e_mul_mat(ctx, wk, mixed), head_dim, n_head_kv, T);
+    q4e_keep_fusion_input(k);
     k = ggml_mul(ctx, ggml_rms_norm(ctx, k, eps), k_norm_w);
-    ggml_tensor* v = ggml_reshape_3d(ctx, ggml_mul_mat(ctx, wv, mixed), head_dim, n_head_kv, T);
+    ggml_tensor* v = ggml_reshape_3d(ctx, q4e_mul_mat(ctx, wv, mixed), head_dim, n_head_kv, T);
 
     // Partial rotary over the first n_rot dims. IMRoPE reduces to NEOX when every
     // position component is equal, which it is for text - so text graphs keep the
@@ -1020,9 +1326,9 @@ ggml_tensor* q4e_nodes_attn(
                 (std::size_t)arena->cap * kv_row_bytes,
                 (std::size_t)arena->rows_per_slot * kv_row_bytes, 0);
         ggml_tensor* q_4d = ggml_reshape_4d(ctx, q, head_dim, 1, n_head, T);
-        arena->fa = ggml_flash_attn_ext(ctx, q_4d, k_view, v_view, mask,
-                                        attn_scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(arena->fa, GGML_PREC_F32);
+        arena->fa = flash_attn_ext_guarded(ctx, "Qwen4Exp arena decode", q_4d, k_view, v_view, mask,
+                                        attn_scale, 0.0f, 0.0f,
+            nullptr, GGML_PREC_F32);
         attn = ggml_reshape_3d(ctx, arena->fa, head_dim, n_head, T);
     }
     else
@@ -1041,16 +1347,46 @@ ggml_tensor* q4e_nodes_attn(
 
     // ---- attention ----
     ggml_tensor* q_attn = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));  // [hd, T, nH]
-    if (use_flash)
+    if (g_q4e_row_kernels.rows == T && T > 1)
+    {
+        // Verify-width graph: row r attends exactly what a one-token graph at its
+        // position reads - its own padded key window and its own mask row - with
+        // the same kernel, a single query.
+        for (int r = 0; r < T; ++r)
+        {
+            const int nk = q4e_pad_kv(g_q4e_row_kernels.n_kv - T + r + 1, kv_capacity, use_flash);
+            ggml_tensor* kr = ggml_view_3d(ctx, k_cache, head_dim, nk, n_head_kv, k_cache->nb[1], k_cache->nb[2], 0);
+            ggml_tensor* vr = ggml_view_3d(ctx, v_cache, head_dim, nk, n_head_kv, v_cache->nb[1], v_cache->nb[2], 0);
+            ggml_tensor* mr = ggml_cont(ctx, ggml_view_2d(ctx, mask, nk, 1, mask->nb[1], (std::size_t)r * mask->nb[1]));
+            ggml_tensor* qr = ggml_cont(ctx, ggml_view_3d(ctx, q_attn, head_dim, 1, n_head,
+                    q_attn->nb[1], q_attn->nb[2], (std::size_t)r * q_attn->nb[1]));
+            ggml_tensor* ar = nullptr;
+            if (use_flash)
+            {
+                ar = flash_attn_ext_guarded(ctx, "Qwen4Exp verify-row attention", qr, kr, vr, mr,
+                    attn_scale, 0.0f, 0.0f, nullptr, GGML_PREC_F32);
+            }
+            else
+            {
+                ggml_tensor* scores = ggml_mul_mat(ctx, kr, qr);
+                ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+                ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mr, attn_scale, 0.0f);
+                ggml_tensor* v_perm = ggml_cont(ctx, ggml_permute(ctx, vr, 1, 0, 2, 3));
+                ar = ggml_cont(ctx, ggml_permute(ctx, ggml_mul_mat(ctx, v_perm, probs), 0, 2, 1, 3));
+            }
+            attn = attn ? ggml_concat(ctx, attn, ar, 2) : ar;
+        }
+    }
+    else if (use_flash)
     {
         // One fused kernel in place of mul_mat -> soft_max -> cont(permute(V)) ->
         // mul_mat -> cont(permute). It never materialises the [n_kv, T, n_head]
         // scores and never copies the whole V window. This is also what llama.cpp
         // runs here. Result lands as [hd, nH, T] - already the layout the gate and
         // the output projection want.
-        attn = ggml_flash_attn_ext(ctx, q_attn, k_full, v_full, mask,
-                                   attn_scale, 0.0f, 0.0f);
-        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        attn = flash_attn_ext_guarded(ctx, "Qwen4Exp attention", q_attn, k_full, v_full, mask,
+                                   attn_scale, 0.0f, 0.0f,
+            nullptr, GGML_PREC_F32);
     }
     else
     {
@@ -1070,7 +1406,7 @@ ggml_tensor* q4e_nodes_attn(
 
     // qwen4exp gates the attention output before the output projection.
     attn = ggml_mul(ctx, attn, ggml_sigmoid(ctx, gate));
-    ggml_tensor* proj = ggml_mul_mat(ctx, wo, ggml_reshape_2d(ctx, attn, q_dim, T));
+    ggml_tensor* proj = q4e_mul_mat(ctx, wo, ggml_reshape_2d(ctx, attn, q_dim, T));
 
     // ---- hyper-connection scatter ----
     ggml_tensor* wsc = ggml_reshape_3d(ctx, ggml_scale(ctx,
@@ -1094,8 +1430,10 @@ ggml_tensor* q4e_nodes_attn(
     // the graph rather than a weights binding. (Arena mode owns no cache pair.)
     if (arena == nullptr)
     {
-        bnd.add(k_cache, a->k_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
-        bnd.add(v_cache, a->v_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
+        if (owned_k == nullptr)
+            bnd.add(k_cache, a->k_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
+        if (owned_v == nullptr)
+            bnd.add(v_cache, a->v_cache, (std::size_t)a->kv_bytes, GGML_BACKEND_BUFFER_USAGE_ANY);
         if (kv_out != nullptr) { kv_out->push_back(k_cache); kv_out->push_back(v_cache); }
     }
 
@@ -1137,7 +1475,7 @@ ggml_tensor* q4e_nodes_ple(
         return ggml_mul(ctx, nx, w);
     };
 
-    ggml_tensor* keyn = gnorm(ggml_mul_mat(ctx, w_key, ple_emb_in), w_nk);   // [hc_dim, TT]
+    ggml_tensor* keyn = gnorm(q4e_mul_mat(ctx, w_key, ple_emb_in), w_nk);   // [hc_dim, TT]
     ggml_tensor* qryn = gnorm(res_in, w_nq);
 
     // Per-stream dot, scaled, signed-sqrt, sigmoid: the PLE gate.
@@ -1149,7 +1487,7 @@ ggml_tensor* q4e_nodes_ple(
             1e-6f, 3.0e38f));
     ggml_tensor* gate = ggml_sigmoid(ctx, ggml_mul(ctx, sg, mag));            // [1, hc, TT]
 
-    ggml_tensor* val  = ggml_mul_mat(ctx, w_value, ple_emb_in);               // [n_embd, TT]
+    ggml_tensor* val  = q4e_mul_mat(ctx, w_value, ple_emb_in);               // [n_embd, TT]
     ggml_tensor* v3   = ggml_repeat_4d(ctx,
             ggml_reshape_3d(ctx, val, n_embd, 1, TT), n_embd, hc, TT, 1);
     ggml_tensor* gated = ggml_reshape_2d(ctx, ggml_mul(ctx, v3, gate), hc_dim2, TT);
@@ -1245,8 +1583,8 @@ ggml_tensor* q4e_nodes_head(
     ggml_tensor* xnf = ggml_mul(ctx,
             ggml_reshape_2d(ctx, ggml_rms_norm(ctx, res3f, eps), hc_dim, T), w_fnorm);
     ggml_tensor* lof = ggml_silu(ctx, ggml_scale(ctx,
-            ggml_mul_mat(ctx, w_fdown, xnf), 1.0f / (float)hc));
-    ggml_tensor* gtf = ggml_sigmoid(ctx, ggml_mul_mat(ctx, w_fup, lof));
+            q4e_mul_mat(ctx, w_fdown, xnf), 1.0f / (float)hc));
+    ggml_tensor* gtf = ggml_sigmoid(ctx, q4e_mul_mat(ctx, w_fup, lof));
     ggml_tensor* gatedf = ggml_reshape_3d(ctx, ggml_mul(ctx, xnf, gtf), n_embd, hc, T);
     ggml_tensor* mixedf = ggml_cont(ctx, ggml_view_2d(ctx, gatedf, n_embd, T,
             ggml_row_size(gatedf->type, n_embd) * hc, 0));
@@ -1256,7 +1594,7 @@ ggml_tensor* q4e_nodes_head(
                 ggml_row_size(gatedf->type, n_embd) * c));
     mixedf = ggml_scale(ctx, mixedf, 1.0f / (float)hc);
 
-    ggml_tensor* logits = ggml_mul_mat(ctx, w_head, mixedf);                  // [vocab, T]
+    ggml_tensor* logits = q4e_mul_mat(ctx, w_head, mixedf);                  // [vocab, T]
 
     bnd.add(w_fnorm, a->hc_norm, (std::size_t)hc_dim * sizeof(float));
     bnd.add(w_fdown, a->hc_down, (std::size_t)a->hc_down_bytes);
@@ -1763,7 +2101,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpAttnBlock(
 // TSGgmlQwen4ExpPleArgs / TSGgmlQwen4ExpHeadArgs live in ggml_ops_internal.h
 // (shared with the arena kernel).
 
-TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
+static int q4e_token_span_impl(
     const TSGgmlQwen4ExpFfnArgs* ffn,
     const TSGgmlQwen4ExpGdnArgs* gdn,
     const TSGgmlQwen4ExpAttnArgs* attn,
@@ -1780,7 +2118,8 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
     const TSGgmlQwen4ExpHeadArgs* head, void* logits_out,
     const TSGgmlQwen4ExpPleArgs* ple, int ple_layer, const void* ple_emb,
     const int* mrope_pos, const int* mrope_sections, int rope_position,
-    int device)
+    int device, void* hidden_out, int logits_rows,
+    const TSGgmlQwen4ExpQsaArgs* qsa, const int32_t* qsa_positions, int qsa_position_count)
 {
     try
     {
@@ -1789,6 +2128,13 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             || layer_end > kQwen4ExpMaxSlots)
         {
             set_last_error("qwen4exp token span: bad args.");
+            return 0;
+        }
+        if (n_tokens <= 0 || n_embd <= 0 || hc <= 0
+            || (logits_rows != 1 && logits_rows != n_tokens)
+            || (hidden_out != nullptr && head == nullptr))
+        {
+            set_last_error("qwen4exp token span: invalid speculative output shape.");
             return 0;
         }
         // LAYER SPLIT: run this span's layers on their own GPU. Everything the
@@ -1852,6 +2198,57 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             n_kv_pad = q4e_pad_kv(n_kv, kv_capacity, use_flash);
         }
         const std::size_t mask_bytes = (std::size_t)n_kv_pad * T * sizeof(uint16_t);
+        std::map<int, Q4eQsaPlan> qsa_plans;
+        if (qsa != nullptr)
+        {
+            if (!qsa_positions || n_kv <= 0 || T > n_kv || qsa_position_count != n_kv || position < 0 || position > n_kv - T)
+                throw std::invalid_argument("qwen4exp QSA: incomplete position history");
+            for (int il = layer_begin; il < layer_end; ++il)
+            {
+                const auto& a = qsa[il];
+                if (!a.ratio) continue;
+                if (kinds[il] != 0 || first_ffn_only || a.ratio < 1 || a.ratio > 64
+                    || a.top_k <= 0 || a.top_k > INT32_MAX - a.ratio || a.head_dim < n_rot || a.head_dim > 4096
+                    || a.heads <= 0 || a.heads > 1024 || n_rot <= 0
+                    || !std::isfinite(eps) || eps <= 0 || !std::isfinite(rope_base) || rope_base <= 0
+                    || !std::isfinite(rope_freq_scale) || rope_freq_scale <= 0
+                    || !a.k_proj || !a.q_proj || !a.k_norm || !a.q_norm || !a.cache
+                    || (a.cache_type != GGML_TYPE_F32 && a.cache_type != GGML_TYPE_F16))
+                    throw std::invalid_argument("qwen4exp QSA: invalid descriptor");
+                auto matrix_valid = [&](int type, long long bytes, int64_t rows) {
+                    if (type < 0 || type >= GGML_TYPE_COUNT || bytes <= 0 || rows <= 0) return false;
+                    const auto* tr = ggml_get_type_traits((ggml_type)type);
+                    if (!tr->type_size || !tr->blck_size || n_embd % tr->blck_size
+                        || (type != GGML_TYPE_F32 && type != GGML_TYPE_F16 && type != GGML_TYPE_BF16
+                            && !(tr->is_quantized && tr->to_float))) return false;
+                    return (uint64_t)bytes == (uint64_t)(n_embd / tr->blck_size) * tr->type_size * rows;
+                };
+                if (!matrix_valid(a.k_type, a.k_bytes, a.head_dim)
+                    || !matrix_valid(a.q_type, a.q_bytes, (int64_t)a.head_dim * a.heads)
+                    || a.cache_bytes != (int64_t)ggml_row_size((ggml_type)a.cache_type, a.head_dim) * kv_capacity)
+                    throw std::invalid_argument("qwen4exp QSA: invalid storage size/type");
+                int64_t section_sum = 0;
+                for (int section : a.rope_sections) { if (section < 0) throw std::invalid_argument("qwen4exp QSA: negative rotary section"); section_sum += section; }
+                if (section_sum <= 0 || section_sum > n_rot || n_rot % 2)
+                    throw std::invalid_argument("qwen4exp QSA: invalid rotary sections");
+                if (!qsa_plans.count(a.ratio))
+                    qsa_plans.emplace(a.ratio, q4e_qsa_plan(qsa_positions, n_kv, n_kv_pad, position, T, a.ratio));
+            }
+        }
+        auto upload_qsa = [&](const std::vector<Q4eQsaInputs>& inputs) {
+            for (const auto& in : inputs)
+            {
+                const auto& plan = qsa_plans.at(in.ratio);
+                auto put = [](ggml_tensor* t, const auto& values) {
+                    // Selection inputs are unused below the sparse width; no buffer then.
+                    if (t && t->buffer) ggml_backend_tensor_set(t, values.data(), 0, values.size() * sizeof(values[0]));
+                };
+                put(in.cell_blocks, plan.cell_blocks); put(in.block_cells, plan.block_cells);
+                put(in.block_positions, plan.block_positions); put(in.query_positions, plan.query_positions);
+                put(in.bias, plan.bias);
+            }
+        };
+
 
         Qwen4ExpFfnCache* slot = (cache_slot >= 0 && cache_slot < kQwen4ExpSpanSlots)
             ? &g_q4e_span[cache_slot] : nullptr;
@@ -1863,16 +2260,36 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
 
         // Replay: same span, same shape, same descriptors, same padded window - and
         // every cache-bound weight still where the graph believes it is.
-        if (!q4e_span_force_rebuild()
+        const bool q4e_dump_nodes =
+#ifdef TSG_GGML_TEST_HOOKS
+            q4e_node_dump_dir() != nullptr;
+#else
+            false;
+#endif
+        // Verify-width graphs run the one-token kernels; see Q4eRowKernels. Their
+        // attention rows read per-row windows, which join the replay key.
+        const bool row_scope = q4e_row_kernels_enabled() && T <= TSG_PRECISION_DECODE_COLUMNS;
+        const bool verify_rows = row_scope && T >= 2;
+        std::array<int, TSG_PRECISION_DECODE_COLUMNS> row_kv{};
+        const int row_kv_count = verify_rows && has_attn ? T : 0;
+        for (int r = 0; r < row_kv_count; ++r)
+            row_kv[r] = q4e_pad_kv(n_kv - T + r + 1, kv_capacity, use_flash);
+        struct RowKernelScope { ~RowKernelScope() { g_q4e_row_kernels = Q4eRowKernels{}; } } row_kernel_scope;
+        if (!q4e_span_force_rebuild() && !q4e_dump_nodes
             && slot->valid
+            && slot->row_scope == row_scope && slot->row_kv_count == row_kv_count
+            && std::equal(row_kv.begin(), row_kv.begin() + row_kv_count, slot->row_kv.begin())
             && q4e_refresh_bindings(slot, ggml_backend_get_device(g_backend))
             && slot->n_tokens == T && slot->hc_dim == hc_dim
             && slot->sig == (const void*)ffn && slot->sig2 == (const void*)gdn
             && slot->sig3 == (const void*)attn
+            && slot->qsa_sig == (const void*)qsa
             && slot->layer_begin == layer_begin && slot->layer_end == layer_end
             && slot->kv_capacity == kv_capacity && slot->n_kv == n_kv_pad
             && slot->first_ffn_only == first_ffn_only
             && slot->sig4 == (const void*)head
+            && slot->logits_rows == logits_rows
+            && slot->export_hidden == (hidden_out != nullptr)
             && slot->sig5 == (const void*)(has_ple ? ple : nullptr)
             && slot->use_mrope == (use_mrope ? 1 : 0))
         {
@@ -1885,6 +2302,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             for (std::size_t i = 0; i < slot->span_pos.size(); ++i)
                 q4e_set_attn_indices(slot->span_pos[i], slot->span_kvidx[i], T, position,
                         use_mrope ? (const int32_t*)mrope_pos : nullptr, rope_position);
+            upload_qsa(slot->qsa_inputs);
             q4e_note(3, false);
             if (q4e_span_trace() && !slot->span_copies.empty() && T == 1)
             {
@@ -1903,7 +2321,7 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
                 }
                 fprintf(stderr, "%c", 10);
             }
-            if (graph_compute_profiled(g_backend, slot->graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS)
+            if (graph_compute_profiled(slot->precise_backend ? slot->precise_backend : g_backend, slot->graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS)
             {
                 slot->reset_graph();
                 set_last_error("qwen4exp token span: replay failed.");
@@ -1911,10 +2329,14 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             }
             if (slot->logits != nullptr)
             {
+                if (!slot->span_copies.empty())
+                    tsg::sync_backend(g_backend);
                 for (const auto& c : slot->span_copies)
                     ggml_backend_tensor_copy(c.first, c.second);
                 ggml_backend_tensor_get(slot->logits, logits_out, 0,
-                        (std::size_t)head->vocab * sizeof(float));
+                        (std::size_t)head->vocab * logits_rows * sizeof(float));
+                if (hidden_out != nullptr)
+                    ggml_backend_tensor_get(slot->res_out, hidden_out, 0, res_bytes);
                 q4e_trace_state(slot, "replay", position);
                 return 1;
             }
@@ -1935,16 +2357,28 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             return 1;
         }
         slot->reset_graph();
+        g_q4e_row_kernels.keep_fusion_inputs = row_scope;
+        if (verify_rows)
+        {
+            g_q4e_row_kernels.rows = T;
+            g_q4e_row_kernels.n_kv = n_kv;
+        }
 
         const double t0 = q4e_phase_log() ? q4e_now_ms() : 0.0;
         const int n_layers = layer_end - layer_begin;
+        // A verify-width graph expands experts and attention once per row.
+        const std::size_t tensors_per_layer = 256 + (verify_rows ? (std::size_t)48 * T : 0);
+        const int graph_size = verify_rows ? 4 * kQwen4ExpSpanGraphSize : kQwen4ExpSpanGraphSize;
         ggml_init_params ip{};
-        ip.mem_size = ggml_tensor_overhead() * ((std::size_t)n_layers * 256 + 1024)
-                    + ggml_graph_overhead_custom(kQwen4ExpSpanGraphSize, false);
+        ip.mem_size = ggml_tensor_overhead() * ((std::size_t)n_layers * tensors_per_layer + 1024)
+                    + ggml_graph_overhead_custom(graph_size, false);
         ip.mem_buffer = nullptr;
         ip.no_alloc = true;
         ggml_context* ctx = ggml_init(ip);
         if (ctx == nullptr) { set_last_error("qwen4exp token span: ggml_init failed."); return 0; }
+        // Keep local ownership until the complete graph is published below.
+        // Binder/vector/state setup can throw after ggml_init or allocation.
+        std::unique_ptr<ggml_context, decltype(&ggml_free)> owned_ctx(ctx, ggml_free);
 
         ggml_tensor* res_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc_dim, T);
         ggml_set_input(res_in);
@@ -1976,10 +2410,32 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             ggml_set_input(ple_emb_in);
         }
 
-        ggml_cgraph* graph = ggml_new_graph_custom(ctx, kQwen4ExpSpanGraphSize, false);
+        ggml_cgraph* graph = ggml_new_graph_custom(ctx, graph_size, false);
         if (q4e_graph_uid_enabled()) graph->uid = q4e_next_graph_uid();
 
         Q4eBinder binder{ggml_backend_get_device(g_backend)};
+        slot->qsa_inputs.reserve(qsa_plans.size());
+        for (const auto& item : qsa_plans)
+        {
+            Q4eQsaInputs in;
+            in.ratio = item.first;
+            const int blocks = (n_kv_pad + in.ratio - 1) / in.ratio;
+            in.cell_blocks = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_kv_pad);
+            in.block_cells = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t)in.ratio * blocks);
+            in.block_positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t)4 * blocks);
+            in.query_positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, (int64_t)4 * T);
+            in.bias = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, blocks, T);
+            for (auto* t : {in.cell_blocks, in.block_cells, in.block_positions, in.query_positions, in.bias}) ggml_set_input(t);
+            slot->qsa_inputs.push_back(in);
+        }
+#ifdef TSG_GGML_USE_CUDA
+        if (!qsa_plans.empty() && ggml_backend_is_cuda(g_backend))
+        {
+            slot->precise_backend = tsg_dsv4_fused_backend_init(g_backend);
+            if (!slot->precise_backend) throw std::runtime_error("qwen4exp QSA: precise backend creation failed");
+        }
+#endif
+
 
         const std::size_t conv_dim = (std::size_t)(head_k_dim * n_k_heads) * 2
                                    + (std::size_t)(head_v_dim * n_v_heads);
@@ -2091,6 +2547,24 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
                 // ---- attention half (expands its own KV write first) ----
                 bool fa_here = use_flash && (attn_seen < q4e_span_fa_max());
                 ++attn_seen;
+                Q4eQsaGraph qsa_graph;
+                if (qsa != nullptr && qsa[il].ratio > 0)
+                {
+                    const auto& a = qsa[il];
+                    qsa_graph.args = &a;
+                    for (const auto& in : slot->qsa_inputs) if (in.ratio == a.ratio) qsa_graph.inputs = &in;
+                    auto* state = q4e_seq_state(a.cache, (size_t)a.cache_bytes);
+                    if (!state) throw std::runtime_error("qwen4exp QSA: cache allocation failed");
+                    qsa_graph.cache = ggml_new_tensor_2d(ctx, (ggml_type)a.cache_type, a.head_dim, kv_capacity);
+                    ggml_set_input(qsa_graph.cache);
+                    if (ggml_backend_tensor_alloc(state->buf, qsa_graph.cache, ggml_backend_buffer_get_base(state->buf)) != GGML_STATUS_SUCCESS)
+                        throw std::runtime_error("qwen4exp QSA: cache binding failed");
+                    if (!state->ready)
+                    {
+                        binder.upload_list.push_back({qsa_graph.cache, a.cache, (size_t)a.cache_bytes});
+                        seeded_states.push_back(state);
+                    }
+                }
                 res = q4e_nodes_attn(ctx, graph, binder, &attn[il], res,
                         mask, pos, kv_idx,
                         n_embd, hc, hc_low_rank, T,
@@ -2098,7 +2572,8 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
                         n_rot, rope_base, rope_freq_scale, attn_scale, eps, fa_here,
                         &kv_tensors,
                         (q4e_span_trace() && attn_seen == 1 && T == 1) ? &probe_nodes : nullptr,
-                        use_mrope ? (const int32_t*)mrope_sections : nullptr);
+                        use_mrope ? (const int32_t*)mrope_sections : nullptr, nullptr, nullptr, nullptr,
+                        qsa_graph.args ? &qsa_graph : nullptr);
                 ggml_build_forward_expand(graph, res);
             }
             if (q4e_span_trace()) { ggml_set_output(res); trace_res.push_back(res); }
@@ -2113,7 +2588,6 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
 
         if (failed)
         {
-            ggml_free(ctx);
             set_last_error(std::string("qwen4exp token span: ") + (fail_what ? fail_what : "build") + " failed.");
             return 0;
         }
@@ -2123,13 +2597,16 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
         ggml_tensor* logits = nullptr;
         if (head != nullptr)
         {
-            // ---- final mixer on the LAST token only, then the LM head ----
-            // (q4e_nodes_head, shared with the arena kernel, which runs it
-            // with T = n_slots since every slot's token is "last".)
-            ggml_tensor* last = ggml_view_2d(ctx, res_out, hc_dim, 1,
-                    res_out->nb[1], (std::size_t)(T - 1) * res_out->nb[1]);
-            logits = q4e_nodes_head(ctx, binder, head, ggml_cont(ctx, last),
-                    n_embd, hc, hc_low_rank, 1, eps);
+            // Verification needs all rows. Ordinary decode/prefill retains its
+            // original last-row head and does not keep the wide residual alive.
+            ggml_tensor* head_input = res_out;
+            if (logits_rows == 1)
+                head_input = ggml_cont(ctx, ggml_view_2d(ctx, res_out, hc_dim, 1,
+                        res_out->nb[1], (std::size_t)(T - 1) * res_out->nb[1]));
+            logits = q4e_nodes_head(ctx, binder, head, head_input,
+                    n_embd, hc, hc_low_rank, logits_rows, eps);
+            if (hidden_out != nullptr)
+                ggml_set_output(res_out);
             ggml_set_output(logits);
             ggml_build_forward_expand(graph, logits);
         }
@@ -2138,12 +2615,16 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             ggml_set_output(res_out);
         }
 
+#ifdef TSG_GGML_TEST_HOOKS
+        if (q4e_dump_nodes)
+            for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) ggml_set_output(ggml_graph_node(graph, i));
+#endif
         const double t_pregal = q4e_phase_log() ? q4e_now_ms() : 0.0;
         ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(g_backend));
+        std::unique_ptr<std::remove_pointer_t<ggml_gallocr_t>, decltype(&ggml_gallocr_free)>
+            owned_alloc(alloc, ggml_gallocr_free);
         if (alloc == nullptr || !ggml_gallocr_alloc_graph(alloc, graph))
         {
-            if (alloc) ggml_gallocr_free(alloc);
-            ggml_free(ctx);
             set_last_error("qwen4exp token span: failed to allocate graph tensors.");
             return 0;
         }
@@ -2174,11 +2655,11 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             q4e_set_attn_indices(slot->span_pos[i], slot->span_kvidx[i], T, position,
                     use_mrope ? (const int32_t*)mrope_pos : nullptr, rope_position);
 
+        upload_qsa(slot->qsa_inputs);
         const double t_up = q4e_phase_log() ? q4e_now_ms() : 0.0;
         q4e_note(3, true);
-        if (graph_compute_profiled(g_backend, graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS)
+        if (graph_compute_profiled(slot->precise_backend ? slot->precise_backend : g_backend, graph, kQwen4ExpSpanKernel) != GGML_STATUS_SUCCESS)
         {
-            ggml_gallocr_free(alloc); ggml_free(ctx);
             set_last_error("qwen4exp token span: graph compute failed.");
             return 0;
         }
@@ -2197,9 +2678,21 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
         for (const auto& c : slot->span_copies)
             ggml_backend_tensor_copy(c.first, c.second);
         if (logits != nullptr)
-            ggml_backend_tensor_get(logits, logits_out, 0, (std::size_t)head->vocab * sizeof(float));
+        {
+            ggml_backend_tensor_get(logits, logits_out, 0,
+                    (std::size_t)head->vocab * logits_rows * sizeof(float));
+            if (hidden_out != nullptr)
+                ggml_backend_tensor_get(res_out, hidden_out, 0, res_bytes);
+        }
         else
             ggml_backend_tensor_get(res_out, res_data, 0, res_bytes);
+#ifdef TSG_GGML_TEST_HOOKS
+        if (q4e_dump_nodes)
+        {
+            tsg::sync_backend(g_backend);
+            q4e_node_dump(graph, T, position, logits_rows, n_kv);
+        }
+#endif
         q4e_trace_probe(slot, "build", position);
         q4e_trace_state(slot, "build", position);
 
@@ -2270,15 +2763,18 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
             fprintf(stderr, "\n");
         }
 
-        slot->ctx = ctx; slot->graph = graph; slot->alloc = alloc;
+        slot->ctx = owned_ctx.release(); slot->graph = graph; slot->alloc = owned_alloc.release();
         slot->res_in = res_in; slot->res_out = res_out;
         slot->n_tokens = T; slot->hc_dim = hc_dim;
         slot->sig = (const void*)ffn; slot->sig2 = (const void*)gdn; slot->sig3 = (const void*)attn;
+        slot->qsa_sig = (const void*)qsa;
         slot->sig4 = (const void*)head; slot->logits = logits;
+        slot->logits_rows = logits_rows; slot->export_hidden = hidden_out != nullptr;
         slot->sig5 = (const void*)(has_ple ? ple : nullptr);
         slot->ple_emb_in = ple_emb_in;
         slot->layer_begin = layer_begin; slot->layer_end = layer_end;
         slot->kv_capacity = kv_capacity; slot->n_kv = n_kv_pad;
+        slot->row_kv = row_kv; slot->row_kv_count = row_kv_count; slot->row_scope = row_scope;
         slot->first_ffn_only = first_ffn_only;
         slot->use_mrope = use_mrope ? 1 : 0;
         slot->rebinds = std::move(binder.cached);
@@ -2290,6 +2786,83 @@ TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(
     { set_last_error(std::string("qwen4exp token span: ") + e.what()); return 0; }
     catch (...)
     { set_last_error("qwen4exp token span: unknown error."); return 0; }
+}
+
+// The original export keeps its ABI and last-row behavior. Speculation uses
+// the versioned export so old applications never pass an uninitialized tail.
+#define Q4E_SPAN_PARAMETERS \
+    const TSGgmlQwen4ExpFfnArgs* ffn, const TSGgmlQwen4ExpGdnArgs* gdn, \
+    const TSGgmlQwen4ExpAttnArgs* attn, const unsigned char* kinds, \
+    int layer_begin, int layer_end, void* res_data, const void* mask_data, \
+    int n_embd, int hc, int hc_low_rank, int n_tokens, \
+    int head_k_dim, int head_v_dim, int n_k_heads, int n_v_heads, int d_conv, \
+    int head_dim, int n_head, int n_head_kv, int kv_capacity, int n_kv, int position, \
+    int n_rot, float rope_base, float rope_freq_scale, float attn_scale, \
+    int n_expert, int n_expert_used, int n_ff, int n_ff_sh, \
+    float eps, int cache_slot, int first_ffn_only, \
+    const TSGgmlQwen4ExpHeadArgs* head, void* logits_out, \
+    const TSGgmlQwen4ExpPleArgs* ple, int ple_layer, const void* ple_emb, \
+    const int* mrope_pos, const int* mrope_sections, int rope_position, int device
+#define Q4E_SPAN_ARGUMENTS \
+    ffn, gdn, attn, kinds, layer_begin, layer_end, res_data, mask_data, \
+    n_embd, hc, hc_low_rank, n_tokens, head_k_dim, head_v_dim, n_k_heads, n_v_heads, d_conv, \
+    head_dim, n_head, n_head_kv, kv_capacity, n_kv, position, \
+    n_rot, rope_base, rope_freq_scale, attn_scale, n_expert, n_expert_used, n_ff, n_ff_sh, \
+    eps, cache_slot, first_ffn_only, head, logits_out, ple, ple_layer, ple_emb, \
+    mrope_pos, mrope_sections, rope_position, device
+
+#ifdef TSG_GGML_TEST_HOOKS
+// Test hook: 1 builds verify-width span graphs with ggml-cuda's batched kernels
+// (no Q4eRowKernels), 0 with the one-token kernels, -1 back to the environment.
+// Graphs built the other way are rebuilt on their next call.
+TSG_TEST_EXPORT void TSGgml_Qwen4ExpTestBatchedVerify(int batched)
+{
+    g_q4e_test_batched_verify.store(batched < 0 ? -1 : (batched ? 1 : 0), std::memory_order_relaxed);
+}
+#endif
+
+TSG_EXPORT int TSGgml_Qwen4ExpTokenSpan(Q4E_SPAN_PARAMETERS)
+{
+    return q4e_token_span_impl(Q4E_SPAN_ARGUMENTS, nullptr, 1, nullptr, nullptr, 0);
+}
+
+TSG_EXPORT int TSGgml_Qwen4ExpTokenSpanEx(
+    Q4E_SPAN_PARAMETERS, void* hidden_out, int logits_rows)
+{
+    return q4e_token_span_impl(Q4E_SPAN_ARGUMENTS, hidden_out, logits_rows, nullptr, nullptr, 0);
+}
+TSG_EXPORT int TSGgml_Qwen4ExpTokenSpanQsa(
+    Q4E_SPAN_PARAMETERS, void* hidden_out, int logits_rows,
+    const TSGgmlQwen4ExpQsaArgs* qsa, const int32_t* positions, int position_count)
+{
+    return q4e_token_span_impl(Q4E_SPAN_ARGUMENTS, hidden_out, logits_rows, qsa, positions, position_count);
+}
+#undef Q4E_SPAN_ARGUMENTS
+#undef Q4E_SPAN_PARAMETERS
+
+// Copy the authoritative indexer cache before managed growth. The source key
+// stays owned until ReleaseSeqState drops every graph which can reference it.
+TSG_EXPORT int TSGgml_Qwen4ExpCopyQsaCache(const void* key, void* destination, long long bytes, int device)
+{
+    try
+    {
+        if (!key || !destination || bytes <= 0) throw std::invalid_argument("qwen4exp QSA: invalid cache copy");
+        tsg::ScopedRank rank(q4e_resolve_device(device));
+        auto* state = q4e_seq_state_find(key);
+        if (!state || !state->ready || state->bytes != (size_t)bytes)
+            throw std::invalid_argument("qwen4exp QSA: missing or mismatched cache copy source");
+        ggml_init_params params{ggml_tensor_overhead() * 4, nullptr, true};
+        std::unique_ptr<ggml_context, decltype(&ggml_free)> ctx(ggml_init(params), ggml_free);
+        if (!ctx) throw std::bad_alloc();
+        auto* tensor = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I8, bytes);
+        if (ggml_backend_tensor_alloc(state->buf, tensor, ggml_backend_buffer_get_base(state->buf)) != GGML_STATUS_SUCCESS)
+            throw std::runtime_error("qwen4exp QSA: cache copy binding failed");
+        tsg::sync_backend(g_backend);
+        ggml_backend_tensor_get(tensor, destination, 0, (size_t)bytes);
+        return 1;
+    }
+    catch (const std::exception& e) { set_last_error(e.what()); return 0; }
+    catch (...) { set_last_error("qwen4exp QSA: cache copy failed"); return 0; }
 }
 
 // Copy the residual to / from the device-resident buffer. The op-by-op attention
@@ -2444,4 +3017,187 @@ TSG_EXPORT void TSGgml_Qwen4ExpReleaseSeqState(const void* const* keys, int n)
     }
     if (freed)
         TSGgml_Qwen4ExpResetFfnCache();
+}
+
+namespace
+{
+    struct Q4eStateSnapshotEntry
+    {
+        const void* key = nullptr;
+        int device = 0;
+        ggml_backend_buffer_t source = nullptr;
+        ggml_backend_buffer_t saved = nullptr;
+        ggml_context* ctx = nullptr;
+        ggml_tensor* live_tensor = nullptr;
+        ggml_tensor* saved_tensor = nullptr;
+        std::size_t bytes = 0;
+        bool ready = false;
+
+        ~Q4eStateSnapshotEntry()
+        {
+            if (saved) ggml_backend_buffer_free(saved);
+            if (ctx) ggml_free(ctx);
+        }
+
+        void prepare(std::size_t required)
+        {
+            if (bytes == required && saved != nullptr) return;
+            if (saved) { ggml_backend_buffer_free(saved); saved = nullptr; }
+            if (ctx) { ggml_free(ctx); ctx = nullptr; }
+            bytes = 0;
+            if (required == 0 || required % sizeof(float) != 0)
+                throw std::runtime_error("qwen4exp state snapshot: invalid state byte count");
+            ggml_init_params ip{};
+            ip.mem_size = 2 * ggml_tensor_overhead();
+            ip.no_alloc = true;
+            ctx = ggml_init(ip);
+            if (ctx == nullptr) throw std::bad_alloc();
+            live_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, required / sizeof(float));
+            saved_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, required / sizeof(float));
+            auto buft = ggml_backend_get_default_buffer_type(g_backend);
+            saved = ggml_backend_buft_alloc_buffer(buft,
+                    ggml_backend_buft_get_alloc_size(buft, saved_tensor));
+            if (saved == nullptr) throw std::bad_alloc();
+            if (ggml_backend_tensor_alloc(saved, saved_tensor,
+                    ggml_backend_buffer_get_base(saved)) != GGML_STATUS_SUCCESS)
+                throw std::runtime_error("qwen4exp state snapshot: saved buffer binding failed");
+            bytes = required;
+        }
+
+        void bind_live(ggml_backend_buffer_t buffer)
+        {
+            // Metadata only; this tensor does not own the source allocation.
+            // A snapshot never outlives its managed holder, and restore checks
+            // the exact allocation identity before binding or writing it.
+            live_tensor->buffer = nullptr;
+            live_tensor->data = nullptr;
+            live_tensor->extra = nullptr;
+            if (ggml_backend_tensor_alloc(buffer, live_tensor,
+                    ggml_backend_buffer_get_base(buffer)) != GGML_STATUS_SUCCESS)
+                throw std::runtime_error("qwen4exp state snapshot: live buffer binding failed");
+        }
+    };
+
+    struct Q4eStateSnapshot
+    {
+        std::vector<std::unique_ptr<Q4eStateSnapshotEntry>> entries;
+        const void* attn_base = nullptr;
+        const void* gdn_base = nullptr;
+        const void* ple_base = nullptr;
+        bool captured = false;
+    };
+}
+
+TSG_EXPORT void* TSGgml_Qwen4ExpStateSnapshotCreate(
+    const void* const* keys, const int* devices, int count,
+    const void* attn_base, const void* gdn_base, const void* ple_base)
+{
+    try
+    {
+        set_last_error("");
+        if (count < 0 || count > kQwen4ExpMaxSlots + 1
+            || (count != 0 && (keys == nullptr || devices == nullptr)))
+            throw std::invalid_argument("qwen4exp state snapshot: invalid keys");
+        auto snapshot = std::make_unique<Q4eStateSnapshot>();
+        snapshot->entries.reserve(count);
+        snapshot->attn_base = attn_base;
+        snapshot->gdn_base = gdn_base;
+        snapshot->ple_base = ple_base;
+        const int device_count = tsg::g_device_count.load(std::memory_order_acquire);
+        for (int i = 0; i < count; ++i)
+        {
+            if (keys[i] == nullptr || devices[i] < 0 || devices[i] >= device_count)
+                throw std::invalid_argument("qwen4exp state snapshot: invalid key/device");
+            auto entry = std::make_unique<Q4eStateSnapshotEntry>();
+            entry->key = keys[i];
+            entry->device = devices[i];
+            snapshot->entries.push_back(std::move(entry));
+        }
+        return snapshot.release();
+    }
+    catch (const std::exception& e) { set_last_error(e.what()); return nullptr; }
+    catch (...) { set_last_error("qwen4exp state snapshot: creation failed"); return nullptr; }
+}
+
+TSG_EXPORT int TSGgml_Qwen4ExpSpecApiVersion()
+{
+    return 2; // v1 snapshot/MTP; v2 adds QSA span and authoritative indexer export.
+}
+
+TSG_EXPORT int TSGgml_Qwen4ExpStateSnapshotCapture(void* handle)
+{
+    auto* snapshot = static_cast<Q4eStateSnapshot*>(handle);
+    if (snapshot == nullptr) { set_last_error("qwen4exp state snapshot: null handle"); return 0; }
+    snapshot->captured = false;
+    try
+    {
+        set_last_error("");
+        for (auto& entry : snapshot->entries)
+        {
+            tsg::ScopedRank rank(entry->device);
+            if (!ensure_backend()) return 0;
+            // Batched decode may own the latest state until its slot is flushed.
+            tsg_q4earena::on_external_touch(entry->key);
+            auto* live = q4e_seq_state_find(entry->key);
+            entry->source = live != nullptr ? live->buf : nullptr;
+            entry->ready = live != nullptr && live->ready;
+            if (!entry->ready) continue; // the unchanged host seed remains authoritative
+            entry->prepare(live->bytes);
+            entry->bind_live(live->buf);
+            tsg::sync_backend(g_backend);
+            ggml_backend_tensor_copy(entry->live_tensor, entry->saved_tensor);
+        }
+        snapshot->captured = true;
+        return 1;
+    }
+    catch (const std::exception& e) { set_last_error(e.what()); return 0; }
+    catch (...) { set_last_error("qwen4exp state snapshot: capture failed"); return 0; }
+}
+
+TSG_EXPORT int TSGgml_Qwen4ExpStateSnapshotRestore(void* handle)
+{
+    auto* snapshot = static_cast<Q4eStateSnapshot*>(handle);
+    if (snapshot == nullptr || !snapshot->captured)
+    { set_last_error("qwen4exp state snapshot: no completed capture"); return 0; }
+    try
+    {
+        set_last_error("");
+        // Validate every allocation before changing any state. A freed/replaced
+        // holder is never silently recreated from a stale snapshot.
+        for (auto& entry : snapshot->entries)
+        {
+            tsg::ScopedRank rank(entry->device);
+            auto* live = q4e_seq_state_find(entry->key);
+            if (entry->ready && (live == nullptr || live->buf != entry->source
+                    || live->bytes != entry->bytes))
+                throw std::runtime_error("qwen4exp state snapshot: holder allocation changed");
+        }
+        bool reseed = false;
+        for (auto& entry : snapshot->entries)
+        {
+            tsg::ScopedRank rank(entry->device);
+            tsg_q4earena::on_external_touch(entry->key);
+            auto* live = q4e_seq_state_find(entry->key);
+            if (!entry->ready)
+            {
+                if (live != nullptr) { live->ready = false; reseed = true; }
+                continue;
+            }
+            entry->bind_live(live->buf);
+            tsg::sync_backend(g_backend);
+            ggml_backend_tensor_copy(entry->saved_tensor, entry->live_tensor);
+            live->ready = true;
+        }
+        if (reseed)
+            q4e_drop_holder_graphs(snapshot->attn_base, snapshot->gdn_base, snapshot->ple_base);
+        return 1;
+    }
+    catch (const std::exception& e) { set_last_error(e.what()); return 0; }
+    catch (...) { set_last_error("qwen4exp state snapshot: restore failed"); return 0; }
+}
+
+TSG_EXPORT void TSGgml_Qwen4ExpStateSnapshotFree(void* handle)
+{
+    try { delete static_cast<Q4eStateSnapshot*>(handle); }
+    catch (...) { set_last_error("qwen4exp state snapshot: release failed"); }
 }

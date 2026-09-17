@@ -79,22 +79,13 @@ namespace TensorSharp.Runtime
                 Id = "gemma4",
                 Architectures = new[] { "gemma4" },
                 Render = r => ChatTemplate.RenderGemma4(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking),
-                AppendMediaPlaceholders = (msg, sb) =>
-                {
-                    if (msg.IsVideo && msg.ImagePaths != null)
-                        sb.Append("<|video>");
-                    if (msg.ImagePaths != null)
-                        foreach (var _ in msg.ImagePaths) sb.Append("<|image>");
-                    if (msg.AudioPaths != null)
-                        foreach (var _ in msg.AudioPaths) sb.Append("<|audio>");
-                },
+                AppendMediaPlaceholders = ChatTemplate.AppendGemma4MediaPlaceholders,
                 CapsVideoFrames = true,
                 CreateOutputParser = () => new Gemma4OutputParser(),
                 OutputParserAlwaysRequired = true,
-                // Thinking-disabled adds an empty <|channel>thought<channel|> block to
-                // the generation prompt so the model skips reasoning; the template does
-                // not re-emit it for past assistant messages, but the cache holds it.
-                AssistantGenerationSuffix = thinking => thinking ? null : "<|channel>thought\n<channel|>",
+                // The publisher template owns channel priming. Ordinary model turns
+                // have no additional suffix; explicitly recorded older suffixes remain
+                // authoritative when replaying their raw generated tokens.
                 // The template can re-render an in-turn tool round's thinking channel
                 // from `reasoning`, and needs `tool_calls` present to render that round's
                 // tool RESULT. The KV renderer's canonical-template replay hook keeps
@@ -116,6 +107,22 @@ namespace TensorSharp.Runtime
                 // tokens is safe THERE and only there. The renderer decides per prompt by
                 // checking what the active template actually produced.
                 ToolCallRawSplicing = ToolCallRawSplicing.WhenTemplateLosesTheRound,
+                // With thinking on, the reply is `<|channel>thought\n...<channel|>` and
+                // then the answer (after a tool result the template primes the opener
+                // itself). The channel's own close is where a structured-output grammar
+                // may start enforcing; without a trigger response_format + think=true
+                // could only be refused.
+                ThinkingGrammarActivationTrigger = "<channel|>",
+                // The model opens its thought channel itself (only a tool-result
+                // continuation with thinking on is primed open), so the budget counts
+                // from `<|channel>` and closes with `<channel|>`. With thinking off no
+                // Gemma 4 template primes anything after a tool result, and priming a
+                // closed `<|channel>thought\n<channel|>` there was measured to make E4B
+                // write its reasoning unmarked into the answer - so the prompt stays as
+                // the template renders it and the sampler bounds what the model does.
+                ThinkingBudgetEndToken = "<channel|>",
+                ThinkingBudgetOpenToken = "<|channel>",
+                SuppressUnopenedThinkingEndAfter = "<tool_response|>",
             });
 
             // ---- Qwen -------------------------------------------------------
@@ -186,18 +193,28 @@ namespace TensorSharp.Runtime
                 ToolCallRawSplicing = ToolCallRawSplicing.Always,
             });
 
-            // Qwen3.8-Flash-Next uses generic ChatML framing with Qwen-VL vision
-            // placeholders.
+            // Qwen3.8 Flash Next uses ChatML reasoning and the Qwen XML-style
+            // function-call body, with Qwen-VL vision placeholders.
             Register(new ChatProtocol
             {
                 Id = "qwen4exp",
                 Architectures = new[] { "qwen4exp" },
-                // qwen4exp appends `<think>` to the generation prompt UNCONDITIONALLY -
-                // the model always reasons - so the cache always holds it, whatever the
-                // thinking flag says.
-                AssistantGenerationSuffix = _ => "<think>\n",
+                CreateOutputParser = () => new Qwen35OutputParser(),
+                // The published template emits the closed, empty block when
+                // enable_thinking=false. Cache replay must restore that exact suffix.
+                AssistantGenerationSuffix = thinking => thinking
+                    ? "<think>\n" : "<think>\n\n</think>\n\n",
                 EmitsEmptyThinkBlockForPastTurns = _ => true,
+                // role=tool renders independently of the assistant tool_calls field.
+                ToolCallRawSplicing = ToolCallRawSplicing.Always,
+                ThinkingGrammarActivationTrigger = "</think>",
                 AppendMediaPlaceholders = AppendQwenVisionPads,
+                // A `video_url` part is sampled into timed frames (fps / max_frames
+                // in the part, VIDEO_SAMPLE_FPS / VIDEO_MAX_FRAMES defaults), each a
+                // full image's worth of tokens, so long clips are capped like Gemma 4
+                // and DeepSeek V4.1. The frames render as the Qwen3-VL video layout
+                // (see QwenVideoFrames) and the injector merges them in temporal pairs.
+                CapsVideoFrames = true,
             });
 
             // ---- GPT-OSS / Harmony -----------------------------------------
@@ -205,7 +222,8 @@ namespace TensorSharp.Runtime
             {
                 Id = "harmony",
                 Architectures = new[] { "gptoss", "gpt-oss" },
-                Render = r => ChatTemplate.RenderHarmony(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking),
+                Render = r => ChatTemplate.RenderHarmony(
+                    r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking, r.ReasoningEffort),
                 // The embedded template relies on recursive macros, namespace(),
                 // strftime_now and list slicing - especially on the tool-rendering path
                 // - which the lightweight Jinja engine does not fully support.
@@ -213,6 +231,39 @@ namespace TensorSharp.Runtime
                 CreateOutputParser = () => new HarmonyOutputParser(),
                 OutputParserAlwaysRequired = true,
                 GrammarActivationTrigger = "final<|message|>",
+                // GPT-OSS reasons in the analysis channel first whether or not the
+                // request asked for thinking, and the final channel opens with exactly
+                // this header either way. With only the unconditional trigger declared,
+                // the structured-output check read "no delayed trigger for thinking" and
+                // refused every response_format request that also set think=true, though
+                // the grammar arms at the very same place in both modes.
+                ThinkingGrammarActivationTrigger = "final<|message|>",
+                // The system message's `Reasoning: low|medium|high` line is the only
+                // lever over how long GPT-OSS reasons (see ReasoningEffort).
+                RendersReasoningEffort = true,
+            });
+
+            // DiffusionGemma writes Gemma 4's channel syntax: an answer may open with
+            // the `<|channel>thought\n` primer, or close a thought block the prompt
+            // opened with a bare `<channel|>`, before the reply. It had no protocol
+            // entry, so no parser ran over the denoised text and OpenAI answers began
+            // with the literal channel marker (38/39 JSON checks failed in the release
+            // campaign). The GGUF template keeps rendering the prompt - there is
+            // deliberately no Render here - and tool calls are refused at the adapter:
+            // a block-diffusion turn has no tool-call loop to feed a result back into.
+            Register(new ChatProtocol
+            {
+                Id = "diffusion-gemma",
+                Architectures = new[] { "diffusion-gemma", "diffusion_gemma" },
+                CreateOutputParser = () => new Gemma4OutputParser(),
+                OutputParserAlwaysRequired = true,
+                // The denoising pipeline renders every prompt with tools: null, so a
+                // declaration never reaches the model. Gemma4OutputParser CAN read a
+                // call back, and without this flag registering it flipped
+                // SkillCapabilities.ToolsRendered to true: --code-exec and skills
+                // discovery began offering the shell / skills_read tools, leasing a
+                // workspace and running the skills loop for every diffusion request.
+                RendersToolDeclarations = false,
             });
 
             // ---- Others -----------------------------------------------------
@@ -239,6 +290,14 @@ namespace TensorSharp.Runtime
                 // channel, so an unparsed stream shows the raw tags and the whole chain
                 // of thought as if it were the answer.
                 OutputParserAlwaysRequired = true,
+                // With thinking off no trigger: a grammar from token 0 makes the model
+                // write the object with no header (MuseGlimmerOutputParser reads that as
+                // the answer). With thinking on the reply is " to=self<|message|>...",
+                // then "<|start|>assistant to=user<|message|>" and the answer - every
+                // answer header in the 2026-09-16 --thinking run (65/65) had that
+                // recipient - so the grammar arms after it. Without a trigger
+                // response_format + think=true could only be refused (HTTP 400).
+                ThinkingGrammarActivationTrigger = "to=user<|message|>",
             });
 
             Register(new ChatProtocol
@@ -318,17 +377,39 @@ namespace TensorSharp.Runtime
                         foreach (var _ in msg.ImagePaths)
                             sb.Append("<|begin_of_image|><|image|><|end_of_image|>");
                 },
-                CreateOutputParser = () => new GlmDsaOutputParser(),
+                // The published template opens <think> unconditionally, so the reply
+                // is parsed as reasoning first even under think:false.
+                CreateOutputParser = () => new GlmDsaOutputParser(promptAlwaysOpensThinking: true),
                 OutputParserAlwaysRequired = true,
+                // response_format under think:true arms the grammar after the reasoning
+                // block closes, as for the other always-reasoning families.
+                ThinkingGrammarActivationTrigger = "</think>",
             });
 
             Register(new ChatProtocol
             {
                 Id = "nemotron_h",
                 Architectures = new[] { "nemotron_h", "nemotron_h_moe", "nemotron_h_omni" },
-                Render = r => ChatTemplate.RenderNemotron(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking),
+                // Two turn formats share this architecture name: ChatML (Nemotron 3
+                // Nano / Omni) and <SPECIAL_10>System / <SPECIAL_11>User|Assistant
+                // (Nemotron-H 8B/47B Reasoning-128K). The embedded template says which
+                // one the checkpoint was trained on.
+                Render = r => ChatTemplate.IsNemotronHReasoningTemplate(r.GgufTemplate)
+                    ? ChatTemplate.RenderNemotronHReasoning(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking)
+                    : ChatTemplate.RenderNemotron(r.Messages, r.AddGenerationPrompt, r.Tools, r.EnableThinking),
                 PreferOwnRenderer = _ => true,
                 CreateOutputParser = () => new ChatMlOutputParser(),
+                // Thinking on primes `<think>\n` after the assistant marker (thinking off
+                // renders the closed `<think></think>`), so the answer starts after the
+                // model's own `</think>` - the same boundary the Nemotron 3.5 GGUF
+                // template uses. The JSON grammar arms there.
+                ThinkingGrammarActivationTrigger = "</think>",
+                // Nemotron 3.5 / Omni vocabularies carry `</think>` as one token, so the
+                // thinking budget closes the block and the answer (and an armed grammar)
+                // follows inside max_tokens. The Nemotron-H Reasoning-128K GGUFs spell it
+                // in several tokens; WithThinkingBudget then declines and the generic
+                // explained stop stays in place.
+                ThinkingBudgetEndToken = "</think>",
             });
 
             Register(new ChatProtocol
@@ -365,11 +446,11 @@ namespace TensorSharp.Runtime
             });
         }
 
+        // One <|vision_start|><|image_pad|><|vision_end|> per still image; sampled
+        // video frames (frames with a source time) render as the Qwen3-VL video
+        // layout, one <|video_pad|> block per temporal pair. QwenVideoFrames is the
+        // single definition of that grouping, shared with the injector.
         private static void AppendQwenVisionPads(ChatMessage msg, System.Text.StringBuilder sb)
-        {
-            if (msg.ImagePaths != null)
-                foreach (var _ in msg.ImagePaths)
-                    sb.Append("<|vision_start|><|image_pad|><|vision_end|>");
-        }
+            => QwenVideoFrames.AppendPlaceholders(msg, sb);
     }
 }

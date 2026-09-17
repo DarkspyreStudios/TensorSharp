@@ -19,13 +19,28 @@ stream is compared against plain greedy token for token.
 | `json` | grammar-constrained JSON, plain vs n-gram |
 | `conc` | N concurrent requests on one engine, then a solo request after them |
 
-`--spec-engine ngram|auto` enables speculation on every engine the bench builds
-(the way a server with the setting on runs), so the `conc` rows measure
+`--spec-engine ngram|auto` enables speculation on ordinary scenario engines.
+The explicitly labeled plain controls in `spec`, `json`, `newchat` and `image`
+always disable it, so they remain independent comparison controls. The `conc` rows measure
 concurrency WITH speculation: the planner keeps a multi-sequence step plain and
 the interesting cost is the transitions. `--conc-stagger <ms>` spaces the
 submissions of a concurrent round so later requests arrive while earlier ones
 already decode (and speculate); `--conc 1,2,4` includes a solo round as the
-reference.
+reference. Concurrent rows aggregate the actual per-request speculative counters;
+zero counters do not establish speculative engagement.
+
+`--conc-gate` holds the engine's compute gate closed until a whole concurrent round
+is queued, so the first scheduler step sees every request. Without it the
+submissions race the engine thread: one run may prefill the first request alone on
+the solo fused path and the rest a step later, another may admit all of them
+together. Different batches run different kernels, which agree only up to
+floating-point near-ties, so greedy tokens of an ungated concurrent round can change
+from run to run without a defect. Gated rows record `ArrivalOrderFixed: true`. It
+cannot be combined with `--conc-stagger`. For a determinism investigation run the
+engine with `TS_CB_DEBUG=1`: each step prints the requests it scheduled and a
+fingerprint of their logits (top two tokens, margin, hash), so two runs can be
+diffed step by step (see
+[Output identity under concurrency](../../docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md#output-identity-under-concurrency)).
 
 ```
 dotnet build benchmarks/AgentTurnBench -c Release
@@ -46,6 +61,9 @@ it adds a diagnostic synchronization and should be disabled for throughput compa
 The run fails when any multi-token input took more prefill steps
 than `ceil(fresh / chunk) + 2`, or when a grammar-constrained answer the model
 finished is not valid JSON.
+Plain/speculative stream mismatches remain visible in the notes and require
+investigation; they do not fail this batching check. A `PASS` line alone is not
+evidence of identical speculative outputs.
 
 Compare runs made with the same model, arguments, and environment:
 
@@ -61,7 +79,14 @@ With `--out`, each warm-up pass is saved separately as
 `--warmup 0` continues to measure the first workload after kernel initialization.
 
 The comparison requires identical output token IDs, request rows, prompt/cache
-counts, and finish reasons. It reports prefill/decode throughput and TTFT changes,
+counts, and finish reasons. One exception: in a concurrent row with more than one
+request whose arrival order was not fixed on both sides (no `ArrivalOrderFixed: true`,
+which includes results written before the flag existed), a token difference is
+printed as `TOKENS INFORMATIONAL` instead of failing, because different batch
+compositions legitimately flip near-ties. Request lengths, finish reasons and the
+other fields stay required. Pass `--require-concurrent-identity` to fail on those
+differences too, or benchmark both runs with `--conc-gate`, whose rows are always
+compared token for token. It reports prefill/decode throughput and TTFT changes,
 and fails on output differences, benchmark errors, missing data, or a regression
 above the threshold. Decode throughput is omitted when there are no tokens after
 the first. For repeated measurements, add `--baseline-repeat before2.json` and
@@ -75,6 +100,76 @@ decode-rate exception only when every corresponding median token delivery and
 median `TotalMs` is no later. Every repeat must contain a complete, valid timeline;
 older results and concurrent aggregates retain the strict throughput check. Raw
 metric changes remain visible, and prefill/TTFT checks still apply.
+
+For a speculative mismatch, `--spec-diagnostic --spec-new 96 --out diagnostic.json`
+replays the same `spec` prompt through the public model and speculative trunk.
+It records the actual verify/rollback windows, full-distribution errors, and the
+top-two logit margins until the first greedy mismatch. The two mismatching logit
+rows are also saved as `.plain_logits.f32` and `.spec_logits.f32` beside the JSON.
+This diagnostic disables timing-based draft parking to make proposal windows
+repeatable; its timings and outputs do not replace the scheduler benchmark.
+
+The first mismatch alone cannot tell a near-tie from a broken cache, because every
+row after it compares different prefixes. `--spec-diagnostic-teacher-force` keeps
+the speculative run on the plain token path past a mismatch, so all `--spec-new`
+rows stay same-prefix comparisons; the JSON `summary` and the
+`SPEC_DIAGNOSTIC_PHASE` / `SPEC_DIAGNOSTIC_FLIP` lines report the logit error by row
+class (verify row 0, later verify rows, plain steps, and whether a rollback or a
+verified-prefix commit preceded the row) and every argmax flip with both margins.
+A bounded error with flips only at small margins is kernel arithmetic; an error
+that jumps after a verify or a rollback (tens of logits) is a cache or state bug.
+The other switches pick the prompt and drafter:
+
+| switch | effect |
+| --- | --- |
+| `--spec-diagnostic-prompt <text>` | one user message, no system prompt (the server's `decode` shape) |
+| `--spec-diagnostic-json` | the `json` scenario prompt, both runs drawn through the JSON-object grammar |
+| `--spec-diagnostic-newchat` | the `newchat` scenario's chat B prompt, on the linear trunk |
+| `--spec-diagnostic-speculator auto` | the checkpoint's own drafter instead of n-gram (pass `--draft-model` where it is a separate file) |
+| `--spec-diagnostic-window N` | draft window (default 7) |
+| `--spec-diagnostic-rowcheck` | after the prompt, the same next-token rows through a one-row spec forward, 2..window+1-row verifies, a kept-prefix re-forward, a decode after a committed verify and a plain two-token forward, each against the one-row decode; then exits. The prompt plus the window must stay under the model's sliding window (the checks rewind the cache, which cannot restore an evicted slot), so pair it with `--spec-diagnostic-prompt`; a longer prompt is refused |
+
+```
+dotnet benchmarks/AgentTurnBench/bin/Release/net10.0/AgentTurnBench.dll \
+    --model gemma-4-12B-it-qat-UD-Q4_K_XL.gguf --backend ggml_cuda --chunk 1024 \
+    --spec-diagnostic --spec-diagnostic-teacher-force --spec-new 192 --out 12b-spec.json
+```
+
+For a longer measurement window, use `--warmup 3 --measure-passes 20` with a
+focused scenario list such as `--scenarios long,tool`. The model loads once;
+each pass repeats the same scenario and cache-reset behavior. Every measured
+pass is retained as `<out>.measureN.json`, with process CPU time, allocation
+and GC collection deltas in `<out>.series.json`. The default one-pass output
+format is unchanged. Summarize within each process before comparing independent
+process runs: passes in the same process share runtime and device state and
+must not be counted as independent process repeats.
+
+For interleaved process runs, `abba.sh` rotates the arm order between paired
+rounds. Supply the baseline twice to measure a baseline-versus-baseline noise
+floor, then summarize the median pass in each process:
+
+```bash
+benchmarks/AgentTurnBench/abba.sh results/abba 6 \
+  "--model /models/model.gguf --backend ggml_cuda --scenarios short,tool,conc --conc 1,4 --measure-passes 3" \
+  base=/work/base candidate=/work/candidate control=/work/base
+python3 benchmarks/AgentTurnBench/abba_summary.py results/abba \
+  --baseline base --candidate candidate --control control
+```
+
+Use a fresh output directory and reserve the device for the whole run. The
+runner writes `run-plan.json` before starting, records each process exit code in
+`runs.txt`, and returns nonzero if any process fails. The summary rejects missing
+processes, partial pass sets, failed passes, missing workload rows, and incomplete
+runner logs. Older directories without a run plan cannot certify the requested
+number of runs. Each arm runs from a private copy of its build output, with the
+native library from the specified repository; `name=managed-repo:native-repo`
+selects a different native build. `arm-identities.json` records repository paths
+and assembly/native SHA-256 hashes. Original build outputs are preserved.
+Run `compare.py` separately for token identity and workload shape;
+the summary's performance verdict does not establish numerical correctness.
+
+`python3 -m unittest discover -s benchmarks/AgentTurnBench -p 'test_abba.py'`
+checks this failure reporting without loading a model.
 
 ## What it measured (2026-09-09, Apple M5 Pro, ggml_metal, chunk 1024)
 

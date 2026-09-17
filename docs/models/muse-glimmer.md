@@ -31,7 +31,7 @@ dotnet run --project TensorSharp.Cli -c Release -- \
   --mmproj models/mmproj-Muse-Glimmer-30B-Q8_0.gguf \
   --image photo.png --input question.txt --backend ggml_cuda --max-tokens 300
 
-# DFlash speculative decoding (lossless; output is identical to plain greedy)
+# DFlash speculative decoding (every token from a trunk row; plain greedy up to near-ties, see section 3)
 dotnet run --project TensorSharp.Cli -c Release -- \
   --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
   --draft-model models/dflash-kquant.gguf \
@@ -39,6 +39,31 @@ dotnet run --project TensorSharp.Cli -c Release -- \
 ```
 
 `--draft-model` can also be supplied as `TS_MUSE_GLIMMER_DFLASH`.
+
+### Structured output
+
+The generation prompt ends at `<|start|>assistant`, so a normal reply begins
+with its own routing header (` to=self<|message|>` for reasoning,
+` to=user<|message|>` or `<|message|>` for the answer). With
+`response_format` the JSON grammar enforces from the first token, so the model
+writes the object with no header at all. `MuseGlimmerOutputParser` treats a
+reply that cannot start a header (JSON's `{`, `[`, `"`, a digit) as answer
+content, and at the end of the stream it returns unframed text instead of
+dropping it. Before, it waited for a `<|message|>` that the grammar made
+impossible: the stream delivered `content: null` and `json_schema` returned
+HTTP 422 after generating the correct object (campaign 2026-09-16, B6). The
+non-streaming path now also validates the parsed content, not the raw stream.
+`response_format` also combines with `"think": true`. The model reasons in a
+` to=self<|message|>` message and then opens its answer with
+`<|start|>assistant to=user<|message|>`, so the protocol declares
+`to=user<|message|>` as `ThinkingGrammarActivationTrigger` and the grammar arms
+there. Before, the combination was refused with HTTP 400 (every `--thinking`
+json case on the first re-run). Measured with `validate_inference.py --thinking`
+(json / json_schema / json_unicode, c1 and c4, three repeats, Q4_K_XL on one
+RTX PRO 6000): 38/45, and every answer header written (41) was `to=user<|message|>`.
+The seven failures all ended at `max_tokens` 256: the reasoning restates the
+prompt before it answers, and Muse-Glimmer declares no thinking-budget end
+token that could close it early.
 
 ## 1. Text architecture
 
@@ -463,6 +488,17 @@ continuations across the A/B envs on the same binary) before it was kept.
   arms when the fused kernel is available; if the fused forward declines while
   the ring is armed, the per-op path throws rather than returning quietly wrong
   logits. `TS_MUSE_GLIMMER_SWA_RING=0` restores uniform sizing.
+* **A rewind on a wrapped ring is bounded by its slack.** Truncating the cache
+  only moves the head; rows the wrap overwrote do not come back, and the next
+  query still attends a whole window behind the new head. So once a sequence
+  has been longer than the ring since the cache was last emptied, a rewind is
+  accepted only while `furthest - target <= rows - n_swa - 1`, where `furthest`
+  is the longest the sequence got (not its current length, which an earlier
+  rewind may have brought back under the ring size). That is 2303 tokens at the
+  default chunk, which covers the engine's 16-token live-cache rewind. A deeper one is refused
+  — `CanTruncateKVCache`/`TryTruncateKVCache` say no and the turn re-prefills,
+  `TruncateKVCache` throws. An unwrapped ring, a uniform cache and a drop to 0
+  rewind to any depth, as before (`KvBlockTransferRingTests`).
 * **The padded KV window is materialized on CUDA only where ggml's own
   flash-attention VEC kernel would be selected** — that kernel misreads a
   truncated-prefix K/V view (all 16 query heads sharing a KV head return the

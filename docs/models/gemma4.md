@@ -498,9 +498,9 @@ whole-model kernel that MTP verification uses (§12): all layers run in a
 single GGML graph dispatch with activations device-resident, instead of one
 graph per layer. `CanUseWholeModelPrefillVerify()` gates the path — dense
 models only, including E-series in-kernel PLE and shared-KV donor layers, with
-multimodal chunks eligible at `startPos == 0` via the kernel's
+multimodal chunks eligible at any start position via the kernel's
 bidirectional-span mask (`TS_G4_MM_PREFILL=0` reverts multimodal to the per-op
-path). SWA-wrapped chunks at `startPos > 0` stay on the fused path through the
+path; see [Image and audio turns after a reused prefix](#image-and-audio-turns-after-a-reused-prefix)). SWA-wrapped chunks at `startPos > 0` stay on the fused path through the
 kernel's in-kernel swaPrev gather (`TS_G4_VERIFY_SWAPREV=0` disables).
 All-MoE variants (e.g. 26B-A4B) have a sibling fused path,
 `CanUseWholeModelMoEPrefillVerify()` / `TryFusedMoEModelVerify()`. Set
@@ -513,6 +513,95 @@ The scheduler feeds a solo (uncontended) prompt to this path in big chunks
 capped by `TS_SCHED_SOLO_PREFILL_CHUNK` (default 8192). See
 [`docs/perf/gemma4-prefill-cuda-graph-design.md`](../perf/gemma4-prefill-cuda-graph-design.md)
 for the measured design.
+
+### Image and audio turns after a reused prefix
+
+An image, video frame or audio clip enters the prompt as a span of soft tokens that
+attend to each other in both directions. The prefill kernels encode that as one byte
+per chunk token (`is_except`): a soft-token query also reads the chunk's soft-token
+keys ahead of it, while every query reads the keys before it causally, inside its
+sliding window on local layers. When a conversation continues its cache into an image
+turn, the image chunk starts at a non-zero position P, after the text the earlier turns
+left behind.
+
+Until this change the fused kernels (dense `TSGgml_Gemma4ModelVerify`, MoE
+`TSGgml_Gemma4MoEModelVerify`) applied the soft-token clause only at P = 0, because they
+compared a key's buffer index with the chunk's bytes. The gates therefore sent a media
+chunk at P > 0 to the per-op path, which was slower (E4B/Metal, a 457-token image turn
+reusing 179 tokens: 1.25 s to first token instead of 0.64 s cold) and, once the ring had
+wrapped, wrong: its mask read the buffer index as the absolute position, but past the
+window the gathered window starts at P - 511, not 0. Phase 0 had to make such a turn
+reuse nothing past its public prefix (`CanPrefillMediaAfterReusedPrefix`).
+
+Every buffer the fused kernels attend keeps the chunk as its last N real keys: the chunk
+alone at P = 0, the global cache `[0, P + N)`, an unwrapped sliding-window cache, or the
+previous window gathered from a wrapped ring prepended to the chunk. A key's chunk index
+is therefore its buffer index minus the number of real keys before the chunk, and the row
+builders in `gemma4_mm_mask.h` apply that offset. At P = 0 and for text chunks they
+produce the same rows as before. The per-op path shifts the absolute soft-token positions
+into the frame of its key buffer (`ShiftPositions`), as the tensor-parallel per-op path
+already did; the tensor-parallel fused verify passes the chunk mask at any P too (its dense
+variant used to run a media chunk at P > 0 with no soft-token mask at all).
+
+So Gemma 4 no longer overrides `CanPrefillMediaAfterReusedPrefix`: an image turn reuses
+the conversation's text at any prompt length, and the image chunk runs on the fused
+graph. Measured on E4B (Q8_0, Metal, M5 Pro) with the IMG conversations (text, text,
+image, text; greedy; median of two rounds; the Web UI column is time to first token, the
+OpenAI column wall time for the whole non-streamed request):
+
+| Image turn 3 | 6db6dbf6 | Phase 0 | this change |
+|---|---|---|---|
+| Web UI, 457-token prompt: reused / time to first token | 0 / 0.64 s | 179 / 1.25 s | 179 / **0.57 s** |
+| OpenAI, 457-token prompt: reused / wall | 0 / 1.80 s | 179 / 2.09 s | 179 / **1.46 s** |
+| Web UI, 889-token prompt (past the window): reused / time to first token | 0 / 0.85 s | 0 / 0.90 s | 611 / **0.62 s** |
+| OpenAI, 946-token prompt (past the window): reused / wall | 0 / 1.86 s | 0 / 1.60 s | 668 / **1.29 s** |
+
+Every reply in those runs (24 short-conversation and 16 long-conversation turns) is the
+same text as the Phase 0 head's and as this change's with the prefix cache off
+(`TS_SCHED_PREFIX_CACHE=0`), and text-only turns keep their reuse and timing
+(`AgentTurnBench --scenarios short,long,tool`, two runs each: within 0.5% of 6db6dbf6 and
+of the Phase 0 head on every row, identical tokens).
+
+On CUDA (E4B Q8_0, A40, one round) the image turn gets the same reuse and runs faster
+too: Web UI 449-token prompt 1.10 s (6db6dbf6) / 2.85 s (Phase 0) / **0.93 s**, OpenAI
+1.45 / 2.49 / **0.98 s**; past the window, Web UI 893 tokens reusing 615: 1.10 / 1.12 /
+**0.91 s**, OpenAI 870 tokens reusing 592: 2.05 / 1.06 / **0.87 s**. There, however, a
+turn continued from a cache is not token-for-token the cold reply on any build: on text
+turns and image turns alike, and on 6db6dbf6 as well, the greedy reply after a reused
+prefix leaves the cold one after a few dozen to a few hundred characters, because
+prefilling the same tokens in two chunks instead of one moves the logits by 0.65 to 0.8
+on E4B with these kernels (the text control of the test below). With identical prompts,
+the Phase 0 head's image-turn reply equals this change's in the short conversation, where
+both reuse the same prefix, and differs past the window, where the Phase 0 head prefilled
+from zero.
+
+Coverage: the native `gemma4-multimodal-mask-after-reused-prefix` test keeps a verbatim
+copy of the old rows, checks they are unchanged at P = 0 and for text, and checks that a
+chunk at P > 0 sees exactly what the same queries see in a cold prefill in every buffer
+layout (the old start-position gate fails 1,102 of its 1,200 media cases).
+`Gemma4MediaAfterReusedPrefixExactnessTests` (model-gated, `TS_TEST_MODEL_DIR`) prefills a
+text turn and then an image or audio turn with and without reuse, inside and past the
+window, on the fused and the per-op path. Its tolerance is twice the larger of two noise
+estimates measured in the same row: the same split with the media left out, and the cold
+media prefill on the other path. On Metal (E4B, E2B) both estimates are about 0.02 logits,
+the fused greedy streams are identical and the prefill logits agree within 0.026, while on
+the Phase 0 head they differed by 3.2 for an image and 2.0 to 7.1 for audio past the window
+(per-op path: 3.2). On CUDA (E4B, 12B, 26B-A4B) the estimates are 0.35 to 1.4 (2.7 for
+12B's short text control), every row passes, and the Phase 0 head's long-prefix rows
+differ by 3.3 to 3.8 (image) and 2.1 (audio), above the tolerances measured for the same
+rows here (1.3 to 2.8); the greedy streams there are compared only up to the first
+near-tie within the noise, which is usually the first token or two. The per-op path's
+greedy stream is not compared token for token: it is not reproducible against itself (four
+identical cold prefills flipped a near-tie at decode step 16). `Gemma4SoftTokenMaskTests`
+pins the two position conversions.
+
+Two limits carry over from the cold path. The mask marks soft tokens, not which media item
+they belong to, so two images prefilled in the same chunk attend to each other in both
+directions. A conversation that sent an image in an earlier turn prefilled that image in
+its own chunk, where it could not see a later image; a cold prefill of the whole history
+lets it, so a reply after two images can differ between the two. And a chunk
+boundary that falls inside a span, which the scheduler's 256-token contention chunks can
+cause, splits its bidirectional attention.
 
 ### In-kernel PLE gather
 
@@ -530,6 +619,19 @@ pre-sized to the whole prompt (`PrepareForPrefill(totalPromptTokens)`). At
 size copies nothing — this eliminates the incremental doubling grows that
 each re-copied and device↔host round-tripped the whole global cache (a
 measured ~7% at 64k). GGML GPU backends only, clamped to the model context.
+
+### Global caches shorter than 256 rows or not a multiple of 256
+
+ggml-cuda runs the 512-dim global layers only on its grouped-query flash
+kernel, which needs a KV window that is a multiple of 256 rows. The window is
+padded to 256 but never past the allocated cache, so a cache that has grown to
+16 rows (`TS_KV_INITIAL_TOKENS=8`) or that is capped at a length like 4000
+(`MAX_CONTEXT=4000`, past 3840 tokens) used to abort the process in
+`ggml-cuda/fattn.cu`. Those global layers now run as explicit attention with the
+same result and a one-time `has no flash-attention kernel` warning, and return
+to the kernel once the cache length is a multiple of 256 again; the default
+cache sizes never take this path. See
+[Flash attention on shapes a backend has no kernel for](../../DEVELOPMENT.md#flash-attention-on-shapes-a-backend-has-no-kernel-for).
 
 ### Fused per-layer prefill (`Gemma4LayerPrefill`)
 
@@ -612,6 +714,92 @@ layers. `AttentionDecodeCircular()` traverses the circular buffer for read.
 SWA layers therefore allocate `slidingWindow` slots regardless of context
 length — the resident set is bounded.
 
+### Token-batched fused decode for concurrent requests (`Gemma4ModelDecodeBatchedEx`)
+
+With N >= 2 requests in flight the engine does not round-robin N single-token
+graphs: `Gemma4Model.TryForwardBatchedFusedDecode` decodes one token for every
+sequence in ONE fused graph (`TSGgml_Gemma4ModelDecodeBatchedEx` in
+[`ggml_ops_gemma4_batched.cpp`](../../TensorSharp.GGML.Native/ggml_ops_gemma4_batched.cpp)),
+so every weight is loaded once per step and applied to N tokens. Decode is
+bandwidth-bound, which is where the aggregate throughput comes from. Each
+sequence keeps its own per-request KV holder; the kernel takes the holders as a
+`[layer * N + seq]` pointer array, runs the projections / FFN / LM head over
+`[hidden, N]`, and runs one single-row flash-attention per sequence over a
+direct view of that sequence's cache window.
+
+The v1 kernel covered dense models without per-layer embeddings, without
+shared-KV layers and only while every sequence fitted its SWA ring, so the
+E2B/E4B checkpoints (PLE dim 256, 18 KV-donor layers, a 512-slot ring most
+chats outgrow) always declined and the server logged "The model declined the
+default batched fused-decode path ... concurrency stays near 1x". The `Ex`
+entry closes those three gaps:
+
+- **PLE per row.** The per-layer embeddings are gathered *inside* the graph
+  from the resident quantized `per_layer_token_embd` table with one
+  `get_rows` over the N token ids (plus the `per_layer_model_proj` projection,
+  its RMSNorm and the `1/sqrt(2)` combine, exactly as the single-token decode
+  and `ComputePLE`), and injected per layer as a strided `[ple_dim, N]` column
+  slice. When the in-kernel form is unavailable (`CanGatherPleInKernel` false:
+  an unsupported `get_rows` type or a scaled projection) the caller uploads
+  `ComputePLE`'s rows instead, so the PLE term is never dropped.
+- **KV-donor layers.** `kv_source_arr[l]` names the layer whose cache layer
+  `l` attends. A shared layer runs the Q-only projection and reads the donor's
+  per-sequence window and mask; it writes nothing.
+- **SWA wrap.** A local layer whose sequence is past its ring writes at
+  `pos % cache_size` and reads the whole ring flat with every slot valid; decode
+  softmax is permutation-invariant over keys, so the rotation needs no concat.
+  Global (linear) layers must still fit their cache; the round-robin fallback
+  grows them and the next step re-enters the batched path.
+
+The native side reports what it supports through
+`TSGgml_Gemma4BatchedDecodeCapabilities()` (bits: PLE, KV donor, SWA wrap).
+The managed gate keeps the v1 restriction for every bit the loaded native
+library lacks, so an older `libGgmlOps` (no probe symbol) behaves exactly as
+before, and `TSGgml_Gemma4ModelDecodeBatched` keeps its v1 ABI as a thin
+wrapper. `TS_GEMMA4_BATCHED_CAPS=0` forces the v1 gates for an A/B.
+
+CUDA-graph capture is unchanged: every per-step input (hidden rows,
+positions, per-(layer, seq) `set_rows` write rows, per-layer F16 masks, the
+PLE token ids or uploaded PLE rows) is a graph input refreshed with
+`ggml_backend_tensor_set`, and the graph lives in its own context and own-slot
+buffer, so a recurring request set replays a captured graph at stable
+addresses. The MoE batched kernel (`TSGgml_Gemma4MoEModelDecodeBatched`) keeps
+its no-PLE / no-donor scope.
+
+**Verified** ([`Gemma4BatchedFusedDecodeParityTests`](../../InferenceWeb.Tests/Gemma4BatchedFusedDecodeParityTests.cs),
+`TS_TEST_GGML_BACKEND=cuda`, gemma-4-E4B-it-Q8_0): for 2, 3 and 4 concurrent
+sequences, one of them prefilled past the 512-token SWA ring, the 12-step greedy
+continuations of the batched path equal the round-robin single-token decodes
+token for token, and every step ran on the batched kernel.
+
+**Measured** (gemma-4-E4B-it-Q8_0, NVIDIA A40, ggml_cuda, f16 KV, prefill
+chunk 512, 4 running sequences; the round-robin column forces the v1 gates with
+`TS_GEMMA4_BATCHED_CAPS=0`, everything else identical):
+
+| Workload | Round-robin (before) | Token-batched (after) | Ratio |
+|---|---:|---:|---:|
+| AgentTurnBench `conc`, 1 request (decode tok/s) | 68.8 | 68.5 | 1.0× |
+| AgentTurnBench `conc`, 2 concurrent (aggregate decode tok/s) | 65.1 | 99.0 | 1.5× |
+| AgentTurnBench `conc`, 4 concurrent (aggregate decode tok/s) | 66.5 | 148.7 | 2.2× |
+| `validate_inference.py` `decode` (512 new tokens), concurrency 1 (end-to-end tok/s) | 76.8 | 77.7 | 1.0× |
+| `validate_inference.py` `decode`, concurrency 4 (aggregate end-to-end tok/s) | 70.3 | 148.6 | 2.1× |
+| `validate_inference.py` `decode_8k` (8k prompt), concurrency 1 | 63.8 | 64.3 | 1.0× |
+| `validate_inference.py` `decode_8k`, concurrency 4 | 59.0 | 101.7 | 1.7× |
+
+The `validate_inference.py` rows compare the server built from this tree
+against the server built from the previous commit; their solo (concurrency 1)
+outputs are byte-identical. What "token for token" does and does not mean
+here: the AgentTurnBench `conc` streams (`compare.py`, identical output token
+ids required) and the 12-step in-process parity test match the round-robin
+decode exactly, but over hundreds of greedy tokens a low-margin token can flip
+(`ParityHarness --batched` at 256 steps: one of the sequences in each 2/3/4-way
+set diverged), and the pre-existing v1 kernel does the same on gemma-4-12B
+(no PLE, no shared KV) under the identical run — batching changes GEMM shapes
+and therefore rounding, the caveat already documented for the GLM batched
+decode. Through the HTTP server at concurrency 4 even two round-robin runs
+differ (10/16 identical cases), because prefill/decode interleaving is
+scheduling-dependent, so parity has to be judged in-process.
+
 ## 10. Memory and KV cache strategy
 
 - **SWA layers**: capacity `_slidingWindow` slots, circular write/read via
@@ -624,6 +812,20 @@ length — the resident set is bounded.
   GGUF file is `MemoryMappedFile` + `QuantizedWeight.CreateExternalView`).
   Direct CUDA uploads quantized blobs to device memory once and frees the host
   copy.
+
+### Retained holders: the one-block minimum
+
+A finished concurrent request's per-request holder is kept for its conversation's next
+turn only when it holds at least one scheduler block (256 tokens by default), by the same
+executor rule Qwen 3.5 uses (`BatchExecutor.TryRetainReleasedFusedCache` and
+`DonateFinishedLiveCacheToRetained`). A shorter conversation re-prefills its whole prompt on
+every turn that runs beside another request; one that runs alone continues from the live
+cache, which has no minimum. Holders do not need the block granularity (they are matched
+token by token and adoption reserves ceil(lcp / BlockSize) placeholder blocks), but lowering
+the minimum failed its exactness validation on Qwen 3.5 on Metal, with a cause not yet
+identified; see [Qwen 3.5, Retained holders: the one-block
+minimum](qwen35.md#retained-holders-the-one-block-minimum). Shorter Gemma 4 holders were not
+validated, so the minimum stays here as well.
 
 ## 11. Batched / paged forward (continuous batching)
 
@@ -715,7 +917,7 @@ exists for batch-1 workloads.
 
 ## 12. MTP speculative decoding (gemma4-assistant draft head)
 
-Gemma 4 supports lossless **multi-token-prediction (MTP) speculative decoding**
+Gemma 4 supports **multi-token-prediction (MTP) speculative decoding**
 for solo (non-concurrent) sequences on both hosts. Unlike Qwen 3.6,
 whose NextN block is embedded in the trunk GGUF, the Gemma 4 draft head ships as
 a **separate small `gemma4-assistant` GGUF** loaded with `--draft-model`
@@ -799,6 +1001,30 @@ flag list and the other algorithms — `--spec-type ngram` in particular needs n
 draft GGUF at all and so runs on a Gemma 4 checkpoint with no assistant file
 beside it.
 
+### 12.4 Greedy parity
+
+Every emitted token is drawn from a trunk row, so speculation cannot change
+which prefix a token is conditioned on, only the kernel that computed its row.
+Two consequences, both measured with `AgentTurnBench --spec-diagnostic
+--spec-diagnostic-teacher-force`:
+
+* **Fixed:** on the dense checkpoints without per-layer embeddings (12B measured; 31B takes the same path)
+  under the ggml and CPU backends, a fully accepted verify past the sliding
+  window used to put the evicted positions back over its committed rows, so the
+  next verify was 30-47 logits off and 12B streams diverged from plain greedy
+  within ten tokens. `SpecOnVerifyAccepted` now restores slots only for a window
+  the executor re-forwards; 12B spec and checkpoint-clone streams on an A40 are
+  identical to plain greedy again, and n-gram acceptance on the spec prompt went
+  from 57% to 89%.
+* **Tolerance:** a K+1-row verify and a one-row decode are different kernels. On
+  `ggml_cuda` their rows differ by 0.5 logits median on E4B (whose BF16
+  per-layer-embedding projection is batch-shape dependent in ggml-cuda) and 1.7-2.2
+  on 12B/26B-QAT; on Metal 0.003 (E4B) and 0.15 (12B); on `ggml_cpu`, 0. A greedy
+  token whose top-two margin is inside that error can differ: over 512 prose
+  tokens on E4B that happened 4-5 times, every one at a margin under 0.25.
+
+Details and the full table: [What greedy parity delivers](../speculative_decoding.md#what-greedy-parity-delivers).
+
 ## 13. Output parser and chat template
 
 `Gemma4OutputParser` understands two structural framings:
@@ -807,10 +1033,60 @@ beside it.
   the final answer.
 - **Tool calling** — `<|tool_call>call:function_name{...args...}<tool_call|>`
   blocks, which `OutputParser` extracts into structured tool calls regardless
-  of the surrounding content.
+  of the surrounding content. The arguments use Gemma's own syntax (bare keys,
+  strings wrapped in `<|"|>`), and the model regularly writes a string value
+  bare when it looks like an identifier — `call:read_invoice{invoice_id:INV-472}`,
+  `{path:src/main.py}`, `{ids:[INV-1, INV-2]}`. The converter quotes every bare
+  value that is not a JSON number / `true` / `false` / `null` (inside arrays
+  too; numbers stay numbers). A call whose arguments still do not parse is
+  surfaced verbatim as content rather than as an empty message, and each call
+  in a multi-call turn carries its own `index` so streaming clients can pair
+  the argument deltas.
 
 Chat template falls back to the hardcoded Gemma 4 template when the GGUF does
 not ship a Jinja2 one.
+
+### Thought channel with thinking off
+
+No Gemma 4 template primes anything after a tool result when thinking is off:
+the canonical E2B/E4B template and the 12B/26B/DiffusionGemma templates all
+end the prompt at `<tool_response|>` and let the model continue its own turn
+(the larger templates prime a closed `<|channel>thought\n<channel|>` only for a
+fresh `<|turn>model`). The renderer keeps that prompt. Priming the closed block
+after a tool result anyway was measured on E4B (Metal, Q8_0, skills preamble)
+and made it worse: the model wrote its reasoning unmarked, closed the block
+again and only then answered, so the reasoning reached `content`.
+
+What E4B does at that boundary (campaign 2026-09-16, B10) is handled while
+sampling instead, from the protocol's `ThinkingBudgetOpenToken` /
+`ThinkingBudgetEndToken` / `SuppressUnopenedThinkingEndAfter`:
+
+- **A channel the model opens with thinking off is capped.** The budget counts
+  from `<|channel>` and closes the channel with `<channel|>` at the first line
+  break past a quarter of `max_tokens` (at most 64 tokens, hard stop at twice
+  that). The parser hides the thought, the answer follows. Before this the
+  `agentic` final turn spent all 256 tokens in the channel and returned empty
+  content. Closing at exactly 16 or 64 tokens (mid-sentence) was also measured:
+  the model then leaked reasoning or turned the cut-off sentence into a tool
+  call. At the first line break past 16, 32, 48 and 64 tokens it answered
+  correctly every time.
+- **After a tool result, a `<channel|>` with no open channel is masked.** E4B
+  wrote the answer, closed a channel it never opened, and wrote the answer
+  again. A stream had already sent the first copy, so the client got both. With
+  the close masked the model ends the turn after the first copy. Masking needs
+  host logits, so these requests do not use the device-argmax path. The mask is
+  limited to that boundary: elsewhere a stray close still splits reasoning from
+  the answer in the parser.
+- With thinking on, the same budget counts from the model's `<|channel>` (or from
+  the first token when the prompt primed `<|channel>thought\n` after a tool
+  result) and closes it at exactly `TS_THINKING_BUDGET`. Before, Gemma 4 had no
+  trained end token declared, and the generic hard stop looked for `</think>`,
+  which Gemma never writes. `TS_THINKING_BUDGET=0` disables both caps.
+
+`response_format` combines with `"think": true`: the JSON grammar stays dormant
+through the thought channel and arms after `<channel|>`
+(`ThinkingGrammarActivationTrigger`). With thinking off it enforces from the
+first token, which also excludes `<|channel>`.
 
 ## 13a. Tensor parallelism
 

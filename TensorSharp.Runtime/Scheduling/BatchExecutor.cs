@@ -12,6 +12,7 @@ using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp.Runtime.Paged;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 
 using TensorSharp.Runtime.Speculative;
 
@@ -72,6 +73,104 @@ namespace TensorSharp.Runtime.Scheduling
         private string? _lastLiveDeclineReason;
         private string? _lastFusedDeclineReason;
 
+        // What the last successful TryAdoptFusedContinuation matched (a public
+        // shared-prefix checkpoint or a holder of the request's own conversation), and
+        // how many more tokens state of ANOTHER conversation would have covered past the
+        // public prefix had scopes not been enforced. Read by the scheduler's one
+        // admission line; reset at the start of each admission lookup.
+        private string? _lastFusedAdoptionSource;
+        private int _lastLiveBlockedByScopeTokens;
+        private int _lastFusedBlockedByScopeTokens;
+
+        /// <summary>A holder or live cache of scope <paramref name="owner"/> may serve a
+        /// request of scope <paramref name="requester"/> past the public prefix only when
+        /// they are the same conversation. An unscoped side (an engine-level caller that
+        /// does not scope its requests) matches every scope.</summary>
+        internal static bool ScopeAllows(string owner, string requester)
+            => owner == null || requester == null || string.Equals(owner, requester, StringComparison.Ordinal);
+
+        /// <summary>Whether a cache of <paramref name="cachedLen"/> tokens matching
+        /// <paramref name="lcp"/> of <paramref name="seq"/>'s prompt could have been continued
+        /// (an exact extension, or a rewind the model accepts) - so a scope refusal of it
+        /// is a real saving withheld, not a coincidental shared first few tokens.</summary>
+        private bool IsPlausibleContinuation(int cachedLen, int lcp, SequenceState seq)
+        {
+            if (lcp <= seq.SharedPrefixTokens || lcp <= 0)
+                return false;
+            int rewind = cachedLen - Math.Min(lcp, seq.PromptTokens.Count - 1);
+            return rewind <= 0
+                || (rewind <= MaxLiveContinuationRewindTokens
+                    && _model.CanTruncateKVCache(cachedLen, cachedLen - rewind));
+        }
+
+        /// <summary>A scope for logs: the first eight characters of the already-hashed
+        /// scope, never a session id.</summary>
+        internal static string DescribeScope(string scope)
+            => scope == null ? "unscoped" : scope.Length <= 8 ? scope : scope.Substring(0, 8);
+
+        /// <summary>The media check of every reuse path: <paramref name="lcp"/> matching
+        /// tokens of <paramref name="seq"/> against a cache whose media is
+        /// <paramref name="cachedSpans"/>, clamped to the first media span that differs,
+        /// is cut, or (for a model that cannot continue past media) exists.</summary>
+        private int ClampReuseToMedia(int lcp, SequenceState seq, IReadOnlyList<PromptMediaSpan> cachedSpans)
+        {
+            int clamped = PromptMediaSpans.ClampReusablePrefix(
+                lcp, seq.MediaSpans, cachedSpans, _model.SupportsReuseAcrossMediaSpan);
+            if (!_model.SupportsReuseAcrossMediaSpan && !_mediaSpanReuseClampWarned
+                && clamped < PromptMediaSpans.ClampReusablePrefix(lcp, seq.MediaSpans, cachedSpans))
+            {
+                // A model limit, not a content difference: say so once, because every
+                // turn after an image now re-prefills from that image.
+                _mediaSpanReuseClampWarned = true;
+                _logger.LogWarning(
+                    "Prompt reuse stops at the first image/audio span on this model: it cannot continue a cached " +
+                    "prefix past media exactly (M-RoPE decode positions), so every turn after an attachment " +
+                    "re-prefills from that attachment (this request: {Clamped} of {Matched} matching tokens kept). " +
+                    "Text before the first attachment is still reused. Reported once.",
+                    clamped, lcp);
+            }
+            // Media still to prefill after the reused prefix: only where the model can
+            // prefill it at a non-zero position exactly.
+            if (clamped > 0 && !_model.CanPrefillMediaAfterReusedPrefix(seq.PromptTokens.Count))
+            {
+                foreach (var span in seq.MediaSpans)
+                {
+                    if (span.End <= clamped)
+                        continue;
+                    // Except up to the public prefix: while checkpoints are in use the
+                    // scheduler ends a prefill chunk there (AlignSharedPrefixBoundary), so
+                    // the media is prefilled after position P whether or not anything is
+                    // reused, and cloning the checkpoint is the same computation. Refusing
+                    // it re-prefilled the system prompt for an identical reply (Gemma 4
+                    // E4B, Metal: 1163 reused -> 0, time to first token 1.51 s -> 1.84 s).
+                    int kept = seq.SharedPrefixTokens > 0 && ModelSupportsPrefixCheckpoints()
+                        ? Math.Min(clamped, seq.SharedPrefixTokens)
+                        : 0;
+                    if (!_mediaAfterReusedPrefixWarned)
+                    {
+                        _mediaAfterReusedPrefixWarned = true;
+                        if (kept == 0)
+                            _logger.LogWarning(
+                                "A {Prompt}-token prompt whose attachment follows a reusable {Clamped}-token prefix " +
+                                "prefills from zero instead: this model cannot prefill media after a reused prefix " +
+                                "exactly at this length. Reported once.",
+                                seq.PromptTokens.Count, clamped);
+                        else
+                            _logger.LogWarning(
+                                "A {Prompt}-token prompt whose attachment follows a reusable {Clamped}-token prefix " +
+                                "reuses only its {Kept}-token public prefix instead: this model cannot prefill media " +
+                                "after a longer reused prefix exactly at this length. Reported once.",
+                                seq.PromptTokens.Count, clamped, kept);
+                    }
+                    return kept;
+                }
+            }
+            return clamped;
+        }
+
+        private bool _mediaSpanReuseClampWarned;
+        private bool _mediaAfterReusedPrefixWarned;
+
         // ---- Retained fused-cache continuation (cross-request prefix reuse) ----
         // The per-sequence fused path (concurrent N>=2 decode) keeps each request's
         // complete continuation state in its own holder and never writes the shared
@@ -88,15 +187,27 @@ namespace TensorSharp.Runtime.Scheduling
         {
             public string RequestId;   // model holder key (retained, not active)
             public int[] Tokens;       // full prompt+output tokens the holder's K/V covers
-            public string MediaFingerprint; // prevents placeholder-identical media cross-reuse
+            // Where the holder's media sits and what it is; compared positionally over
+            // the reused prefix, since placeholder token ids are identical for any media.
+            public IReadOnlyList<PromptMediaSpan> MediaSpans = Array.Empty<PromptMediaSpan>();
+            // The conversation that produced the holder (SequenceState.CacheScope). A
+            // request of another scope never adopts, rewinds or moves it; the public
+            // prefix it shares is served by the shared-prefix checkpoint instead.
+            public string Scope;
             // A shared-prefix checkpoint: cloned on adoption rather than re-keyed, and
-            // never removed by that adoption. Its tokens are text-only by construction
-            // (the chat layer marks the prefix before any media), so no fingerprint
-            // gate applies to it.
+            // never removed by that adoption. Its tokens are the system/developer
+            // prompt and tool declarations only, text-only by construction (the chat
+            // layer marks the prefix before any media), so it is public: any scope may
+            // clone it, up to its own public boundary.
             public bool IsPrefixCheckpoint;
         }
         // Most-recently-retained at the tail; evict from the head.
         private readonly LinkedList<RetainedFusedCache> _retainedFused = new();
+        // Allocation is separable from ownership transfer, including under memory
+        // pressure. The internal allocator also permits deterministic OOM coverage.
+        internal Func<int, int[]> AllocateRetainedCacheTokens { get; set; }
+            = static length => new int[length];
+        internal Action<SequenceState, int> ReserveRetainedAdoptionMetadata { get; set; }
 
         // ---- Shared-prefix checkpoints (see IBatchedPagedModel.SupportsPrefixCheckpoints) ----
         // The model's complete state at the end of the prompt prefix every conversation
@@ -224,10 +335,27 @@ namespace TensorSharp.Runtime.Scheduling
             _scheduler = scheduler ?? throw new ArgumentNullException(nameof(scheduler));
             _blockSize = pool.BlockSize;
             _logger = logger ?? NullLogger.Instance;
+            ReserveRetainedAdoptionMetadata = (seq, count) =>
+            {
+                seq.BlockTable.EnsureBlockCapacity(count);
+                _pendingRetainedFusedTruncations.EnsureCapacity(_pendingRetainedFusedTruncations.Count + 1);
+            };
         }
 
         public IModelArchitecture Model => _model;
         public SequenceState CurrentOwner => _currentOwner;
+        internal PrefixCacheCoordinator RadixCache { get; private set; }
+        public bool RadixPrefixCacheEnabled => RadixCache != null;
+
+        internal void InitializeRadixCache(SchedulerConfig configuration)
+        {
+            if (!configuration.EnablePrefixCaching || configuration.PrefixCacheMode != PrefixCacheMode.Tree
+                || _model is not IPrefixCacheModel prefixModel) return;
+            PrefixCacheCapabilities capabilities = prefixModel.GetPrefixCacheCapabilities();
+            if (capabilities.Readiness != PrefixCacheMode.Tree) return;
+            RadixCache = new PrefixCacheCoordinator(_model, _pool, _scheduler, capabilities, _logger);
+            _scheduler.AttachRadixCacheContinuation(RadixCache, ComputeFusedContinuationLcp, TryAdoptFusedContinuation);
+        }
 
         /// <summary>Execute one scheduler step. Path selection is centralised
         /// in <see cref="ExecutionPlanner"/>: the executor snapshots the
@@ -255,6 +383,13 @@ namespace TensorSharp.Runtime.Scheduling
             // ggml_metal_synchronize aborts the process.
             lock (_model.GpuComputeLock)
             {
+                if (RadixCache != null)
+                {
+                    RadixCache.Drain();
+                    RadixCache.InvalidatePrimary();
+                    foreach (var work in output.ScheduledWork)
+                        _fusedSeqById[work.Sequence.RequestId] = work.Sequence;
+                }
                 // The scheduler freed the previous owner's blocks during
                 // FinishSequence / PreemptSequence, but our _currentOwner
                 // reference outlives that. Without this reset, the next
@@ -289,6 +424,8 @@ namespace TensorSharp.Runtime.Scheduling
 
                 if (plan.SpeculationUnprofitable)
                     WarnSpeculationUnprofitableOnce();
+                if (plan.SpeculationRefusal != null)
+                    WarnSpeculationRefusedOnce(plan.SpeculationRefusal);
                 LogPlanTransition(plan);
 
                 for (int i = 0; i < plan.Candidates.Count; i++)
@@ -318,7 +455,11 @@ namespace TensorSharp.Runtime.Scheduling
                     }
                     var results = TryExecutePath(plan.Candidates[i], output, options);
                     if (results != null)
+                    {
+                        if (_cbDebug)
+                            TraceStepResults(plan.Candidates[i], output, results);
                         return results;
+                    }
                 }
 
                 // Unreachable: the planner always terminates the chain with a
@@ -326,6 +467,54 @@ namespace TensorSharp.Runtime.Scheduling
                 // fallback so a planner bug degrades to correctness, not loss.
                 return ExecuteStepPerSequence(output);
             }
+        }
+
+        private long _cbStepIndex;
+
+        /// <summary>TS_CB_DEBUG=1 step trace: the path that served the step, every
+        /// scheduled sequence (request, prefill/decode, tokens forwarded, computed
+        /// tokens after the step) and a fingerprint of the logits it left behind: the
+        /// top two tokens with their margin and a hash of the whole row. Two runs of
+        /// the same workload can then be diffed step by step, telling a different
+        /// batch composition from the same composition producing different logits.</summary>
+        private void TraceStepResults(ExecutionPathKind path, SchedulerOutput output, List<SequenceStepResult> results)
+        {
+            var sb = new StringBuilder();
+            sb.Append("[cb] step#").Append(_cbStepIndex++).Append(' ').Append(path)
+              .Append(" scheduled=").Append(output.ScheduledWork.Count).Append(" served=").Append(results.Count);
+            foreach (var r in results)
+            {
+                var seq = r.Sequence;
+                sb.Append(" | ").Append(seq?.RequestId).Append(r.IsPrefill ? ":P" : ":D")
+                  .Append(" fwd=").Append(r.TokensForwarded)
+                  .Append(" computed=").Append(seq?.NumComputedTokens)
+                  .Append(" in=").Append(r.SampledToken);
+                if (r.Error != null) sb.Append(" error=").Append(r.Error.GetType().Name);
+                sb.Append(' ').Append(DescribeLogits(seq?.LastLogits));
+            }
+            // The step has already committed; a failing diagnostic writer must not
+            // turn it into a failed step.
+            try { Console.Error.WriteLine(sb.ToString()); }
+            catch (Exception) { }
+        }
+
+        internal static string DescribeLogits(float[] logits)
+        {
+            if (logits == null || logits.Length < 2) return "logits=<none>";
+            int top1 = logits[0] >= logits[1] ? 0 : 1, top2 = 1 - top1;
+            ulong hash = 14695981039346656037UL;
+            for (int i = 0; i < logits.Length; i++)
+            {
+                float v = logits[i];
+                if (i >= 2)
+                {
+                    if (v > logits[top1]) { top2 = top1; top1 = i; }
+                    else if (v > logits[top2]) top2 = i;
+                }
+                hash = (hash ^ (uint)BitConverter.SingleToInt32Bits(v)) * 1099511628211UL;
+            }
+            return string.Create(System.Globalization.CultureInfo.InvariantCulture,
+                $"top1={top1}:{logits[top1]:R} top2={top2}:{logits[top2]:R} margin={logits[top1] - logits[top2]:R} hash={hash:x16}");
         }
 
         /// <summary>Request-side features of this step (the planner input that
@@ -722,12 +911,31 @@ namespace TensorSharp.Runtime.Scheduling
                 ClearLinearOwner();
         }
 
+        /// <summary>Give <paramref name="seq"/> its own copy of logits it may be
+        /// borrowing from the model's reusable output buffer.</summary>
+        private static void DetachBorrowedLogits(SequenceState seq)
+        {
+            if (seq?.LastLogits != null)
+                seq.LastLogits = (float[])seq.LastLogits.Clone();
+        }
+
         private void ClearLinearOwner()
         {
             _currentOwner = null;
             _ownerTokensInModel = 0;
             _ownerForwardedTokens = 0;
             _liveCacheValid = false;
+        }
+
+        private bool _speculationRefusedWarned;
+
+        private void WarnSpeculationRefusedOnce(string reason)
+        {
+            if (_speculationRefusedWarned) return;
+            _speculationRefusedWarned = true;
+            _logger.LogWarning(
+                "Speculative decoding was requested but the loaded model refuses it: {Reason} "
+                + "Every request is served with plain decoding.", reason);
         }
 
         private void WarnSpeculationUnprofitableOnce()
@@ -901,6 +1109,10 @@ namespace TensorSharp.Runtime.Scheduling
                 }
                 seq.LastLogits = perSeqLogits[s];
                 seq.AdvanceComputedTokens(inputTokens.Length);
+                // These positions now live in the model's paged arrays, not in pool
+                // storage: a later sequence adopting these blocks must read them there.
+                seq.BlockTable.SetHoldsModelPagedKv(
+                    seq.NumComputedTokens - inputTokens.Length, seq.NumComputedTokens, true);
                 // In the batched path the model owns its own K/V layout
                 // (paged storage referenced by slotMapping/block tables), so
                 // the executor does NOT need to extract/inject between
@@ -1027,6 +1239,12 @@ namespace TensorSharp.Runtime.Scheduling
                 _ownerTokensInModel = 0;
                 _ownerForwardedTokens = 0;
             }
+            // A conversation that FINISHED on the primary cache is still resident there.
+            // Keep it as a retained holder of its own conversation before the fused path
+            // takes the model over; dropping it cost that conversation's next turn its
+            // whole reuse whenever another chat arrived in between (measured: A3 -> B1 ->
+            // A4 reused 584 of 740 instead of ~727).
+            DonateFinishedLiveCacheToRetained(fused);
             // The per-request caches make the single shared live-cache tracking
             // meaningless; drop any claim so a later same-session N==1 turn
             // re-establishes it cleanly from the primary cache.
@@ -1218,9 +1436,23 @@ namespace TensorSharp.Runtime.Scheduling
                         // positions this turn's prompt does not contain.
                         if (!_model.TryTruncateKVCache(retainedTruncationTarget))
                         {
-                            throw new InvalidOperationException(
-                                $"Retained fused cache for {seq.RequestId} needed a rewind to " +
-                                $"{retainedTruncationTarget} tokens that the model declined.");
+                            _logger.LogInformation(
+                                "Retained fused cache for {RequestId} could not rewind to {Tokens}; " +
+                                "re-prefilling its prompt from the beginning.",
+                                seq.RequestId, retainedTruncationTarget);
+                            _model.ResetKVCache();
+                            seq.ClearLiveCacheContinuation();
+                            seq.PrefixCheckpointTaken = false;
+                            // The scheduled chunk describes the old suffix. Let
+                            // the next step plan from zero, including any shared
+                            // checkpoint boundary, using the reserved blocks.
+                            results.Add(new SequenceStepResult
+                            {
+                                Sequence = seq,
+                                TokensForwarded = 0,
+                                IsPrefill = true,
+                            });
+                            continue;
                         }
                     }
 
@@ -1252,7 +1484,7 @@ namespace TensorSharp.Runtime.Scheduling
                     // its first forward. (Injection READS the shared blocks into
                     // this request's own cache; it never writes them.)
                     if (freshCache && seq.NumComputedTokens > 0)
-                        InjectAllBlocks(seq, seq.NumComputedTokens);
+                        InjectPrefixOrRecompute(seq, seq.NumComputedTokens);
 
                     // A solo decode step on the bound holder may speculate (see
                     // TrySpeculativeFusedDecode); a mixed step keeps every request
@@ -2201,6 +2433,7 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 _liveCacheValid = false;
                 seq.KvStateInPagedStorage = true;
+                seq.BlockTable.SetHoldsModelPagedKv(prevComputed, seq.NumComputedTokens, true);
                 int prevFullBlocks = prevComputed / _blockSize;
                 _scheduler.OnBlocksCommitted(seq, prevFullBlocks * _blockSize);
             }
@@ -2237,6 +2470,7 @@ namespace TensorSharp.Runtime.Scheduling
         public int ComputeLiveContinuationLcp(SequenceState seq)
         {
             _lastLiveDeclineReason = null;
+            _lastLiveBlockedByScopeTokens = 0;
             if (seq == null)
                 return 0;
             if (!_liveCacheValid || _liveCacheSeq == null || _liveCacheLen <= 0)
@@ -2247,14 +2481,7 @@ namespace TensorSharp.Runtime.Scheduling
             // the boundary selected by the client.
             if (_liveCacheSeq.CacheBreakpoints != null || seq.CacheBreakpoints != null)
                 return LiveContinuationDeclined(seq, "the source or target request has an explicit cache boundary");
-            // Multimodal placeholders can render to identical token IDs while
-            // carrying different image/audio embeddings. Their K/V is reusable
-            // only when the prepared media fingerprint is identical as well.
-            if (!string.Equals(
-                    _liveCacheSeq.MediaFingerprint,
-                    seq.MediaFingerprint,
-                    StringComparison.Ordinal))
-                return LiveContinuationDeclined(seq, "the request media fingerprint differs from the live cache");
+
             // Only worth it when the pooled path cannot already reuse the full
             // prefix. Models that opt out of cross-sequence snapshots have an
             // effective pooled cap of zero, but continuing their still-live
@@ -2272,15 +2499,37 @@ namespace TensorSharp.Runtime.Scheduling
 
             int liveLen = Math.Min(_liveCacheLen, _liveCacheSeq.NumTotalTokens);
 
-            if (liveLen <= cap)
-                return LiveContinuationDeclined(seq,
-                    $"live prefix {liveLen} within the pooled reuse cap {cap}");
+            // No "live prefix within the pooled cap" refusal any more: the pooled path
+            // adopts whole blocks, must leave a token, and only has blocks captured before
+            // a sliding-window ring wrapped, so a short Gemma 4 turn got 0 or 256 tokens
+            // where the live cache held all of them. The scheduler prefers pooled blocks
+            // only when they actually cover at least as much (see its admission).
 
             // Longest common prefix between the new prompt and what the cache holds.
             int lcp = 0;
             int limit = Math.Min(liveLen, seq.PromptTokens.Count);
             while (lcp < limit && seq.PromptTokens[lcp] == _liveCacheSeq.TokenAt(lcp))
                 lcp++;
+
+            // The live cache is one conversation's state. Another conversation may share
+            // only its public prefix: never the owner's private tail. Rewinding the cache
+            // to that prefix hands over nothing private (those tokens are this request's
+            // own system prompt, matched token for token) and takes nothing from the
+            // owner that this request's own prefill on the primary cache would not
+            // overwrite anyway. It is the only public reuse a model without shared-prefix
+            // checkpoints has (DeepSeek V4.1's native slots rewind exactly but cannot be
+            // copied); where a checkpoint exists, the rules below still prefer it.
+            if (!ScopeAllows(_liveCacheSeq.CacheScope, seq.CacheScope))
+            {
+                if (IsPlausibleContinuation(liveLen, lcp, seq))
+                    _lastLiveBlockedByScopeTokens = Math.Max(
+                        0, Math.Min(lcp, seq.PromptTokens.Count - 1) - seq.SharedPrefixTokens);
+                if (seq.SharedPrefixTokens <= 0 || lcp < seq.SharedPrefixTokens)
+                    return LiveContinuationDeclined(seq,
+                        $"the live cache belongs to another conversation (scope {DescribeScope(_liveCacheSeq.CacheScope)}); " +
+                        "only the public prefix is shared across conversations, and this prompt does not reproduce it");
+                lcp = seq.SharedPrefixTokens;
+            }
 
             if (seq.PromptTokens.Count <= lcp)
             {
@@ -2303,8 +2552,27 @@ namespace TensorSharp.Runtime.Scheduling
                     return LiveContinuationDeclined(seq, "prompt is a single token the cache already holds");
             }
 
+            // Media is compared by content and position over the reused prefix only:
+            // text before an image is reusable whatever follows it, and the prefix may
+            // not end inside a span. A clamp below the cache's end becomes a rewind,
+            // which the rules below accept or refuse like any other.
+            int mediaClamped = ClampReuseToMedia(lcp, seq, _liveCacheSeq.MediaSpans);
+            if (mediaClamped < lcp)
+            {
+                _logger.LogDebug(
+                    "Live-cache continuation for {RequestId}: media spans limit the reusable prefix from {Lcp} to {Clamped} tokens.",
+                    seq.RequestId, lcp, mediaClamped);
+                lcp = mediaClamped;
+                if (lcp <= 0)
+                    return LiveContinuationDeclined(seq,
+                        "the prompt's first media span differs from the live cache's (or the model cannot continue past media)");
+            }
+
+            var exactReuse = _model as IExactFusedCacheReuse;
+            if (exactReuse?.SupportsExactFusedCacheReuse != true) exactReuse = null;
             if (lcp == liveLen)
-                return liveLen;   // exact prefix: continue with no rewind at all
+                return exactReuse == null || exactReuse.CanReuseLivePrefix(liveLen, lcp)
+                    ? liveLen : LiveContinuationDeclined(seq, "native live holder is failed or its head differs");
 
             // A rewind has to land where the model can put its head - DeepSeek V4.1 only
             // stops on a compression-block boundary. Align DOWN before measuring the
@@ -2323,7 +2591,7 @@ namespace TensorSharp.Runtime.Scheduling
             // The cache holds tokens the prompt does not reproduce. Continuing means
             // rewinding past them, which is only sound when the model can rewind.
             int rewind = liveLen - lcp;
-            if (rewind > MaxLiveContinuationRewindTokens)
+            if (exactReuse == null && rewind > MaxLiveContinuationRewindTokens)
             {
                 return LiveContinuationDeclined(seq,
                     $"prompt diverges from the live cache at token {lcp} of {liveLen}, which would need a " +
@@ -2337,25 +2605,16 @@ namespace TensorSharp.Runtime.Scheduling
                     $"prompt diverges from the live cache at token {lcp} of {liveLen} and this model cannot " +
                     "rewind its KV state (recurrent layers have no reverse)");
             }
-            if (lcp <= cap)
+            if (exactReuse != null ? !exactReuse.CanReuseLivePrefix(liveLen, lcp)
+                                   : !_model.CanTruncateKVCache(liveLen, lcp))
                 return LiveContinuationDeclined(seq,
-                    $"matched prefix {lcp} (after a {rewind}-token rewind) is within the pooled reuse cap {cap}");
-            // On a circular (sliding-window) cache a rewind is not exact: the slots the
-            // discarded tokens overwrote still hold them, and the next tokens attend
-            // to those stale keys until they are written over. Measured on Gemma 4
-            // E2B, a 15-token rewind changed a greedy answer from its fifth token on.
-            // When a retained holder or a shared-prefix checkpoint can serve this
-            // prompt with NO rewind, that exact state wins; the rewind stays the
-            // fallback for prompts nothing else can serve.
-            // "Covers the prompt" allows the exact state to be a few tokens SHORTER than
-            // the live match: re-forwarding those is cheap, and it is exact. After the
-            // warm-up the live cache matches four tokens more (the user-turn header)
-            // than the checkpoint taken at the end of the system prompt; without this
-            // allowance the lossy rewind won over the exact copy by four tokens.
-            // And never INSIDE the shared prefix: the state below that boundary is what
-            // gets checkpointed and cloned into every later chat, so it has to come from
-            // a clean prefill, not from a rewind that left stale keys in the ring.
-            if (cap != int.MaxValue && lcp < seq.SharedPrefixTokens)
+                    $"rewinding the live cache from {liveLen} to {lcp} would lose required history");
+
+            // The eligibility check above rejects loss of required history.
+            // Prefer a nearby exact checkpoint when available, including one a
+            // few control tokens shorter than the live match. Keep the shared
+            // prefix itself independent of any conversation-tail rewind.
+            if (exactReuse == null && cap != int.MaxValue && lcp < seq.SharedPrefixTokens)
             {
                 return LiveContinuationDeclined(seq,
                     $"prompt diverges from the live cache at token {lcp} of {liveLen}, inside the shared prefix " +
@@ -2389,11 +2648,9 @@ namespace TensorSharp.Runtime.Scheduling
         /// reported ~95%, and why an Agent Skills lookup reused nothing at all.
         /// </para>
         /// <para>
-        /// It is deliberately small rather than unbounded. On a sliding-window model
-        /// the KV cache is circular, so a rewind is only faithful close to the head;
-        /// and a long rewind is a sign the prompt genuinely diverges (an edited turn, a
-        /// changed system prompt) where a clean re-prefill is the correct answer rather
-        /// than a cheaper wrong one.
+        /// This is a matching limit, not a guarantee that the model can restore
+        /// those rows. CanTruncateKVCache independently rejects unsafe depths;
+        /// wrapped Gemma caches need an exact checkpoint or a re-prefill.
         /// </para>
         /// </summary>
         private const int MaxLiveContinuationRewindTokens = 16;
@@ -2429,6 +2686,26 @@ namespace TensorSharp.Runtime.Scheduling
         /// <summary>Why the last <see cref="ComputeFusedContinuationLcp"/> found no
         /// usable retained holder or shared-prefix checkpoint, or null when it did.</summary>
         public string? LastFusedContinuationDeclineReason => _lastFusedDeclineReason;
+
+        /// <summary>What served the last successful retained adoption: a public
+        /// shared-prefix checkpoint or a holder of the request's own conversation.</summary>
+        public string? LastFusedAdoptionSource => _lastFusedAdoptionSource;
+
+        /// <summary>How many more prompt tokens past the public prefix another
+        /// conversation's live cache or retained holder matched in the last admission
+        /// lookups, which scope isolation did not let this request reuse; 0 when none.
+        /// Reading it clears it, so a later admission that skips the live lookup does not
+        /// report this one's count.</summary>
+        public int LastBlockedByScopeTokens
+        {
+            get
+            {
+                int blocked = Math.Max(_lastLiveBlockedByScopeTokens, _lastFusedBlockedByScopeTokens);
+                _lastLiveBlockedByScopeTokens = 0;
+                _lastFusedBlockedByScopeTokens = 0;
+                return blocked;
+            }
+        }
 
         /// <summary>Render the few tokens either side of <paramref name="center"/> as
         /// "id:piece" so a prefix divergence names the actual text that differs.
@@ -2526,7 +2803,7 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>Whether shared-prefix checkpoints are in use for this model, so the
         /// scheduler ends prefill chunks at the boundary the chat layer marked.</summary>
-        public bool PrefixCheckpointsSupported => ModelSupportsPrefixCheckpoints();
+        public bool PrefixCheckpointsSupported => RadixCache != null ? RadixCache.CheckpointsSupported : ModelSupportsPrefixCheckpoints();
 
         /// <summary>
         /// After a prefill step: if this sequence has just reached the end of its shared
@@ -2537,6 +2814,11 @@ namespace TensorSharp.Runtime.Scheduling
         /// </summary>
         private void MaybeCheckpointSharedPrefix(SequenceState seq)
         {
+            if (RadixCache != null)
+            {
+                RadixCache.CaptureCheckpoint(seq);
+                return;
+            }
             if (seq == null || seq.PrefixCheckpointTaken || seq.SharedPrefixTokens <= 0)
                 return;
             if (seq.NumComputedTokens != seq.SharedPrefixTokens)
@@ -2550,8 +2832,9 @@ namespace TensorSharp.Runtime.Scheduling
                 return; // an explicit cache policy is served by the pooled path only
 
             int n = seq.SharedPrefixTokens;
-            foreach (var existing in _prefixCheckpoints)
+            for (var node = _prefixCheckpoints.First; node != null; node = node.Next)
             {
+                var existing = node.Value;
                 if (existing.Tokens.Length != n) continue;
                 bool same = true;
                 for (int i = 0; i < n && same; i++)
@@ -2559,18 +2842,40 @@ namespace TensorSharp.Runtime.Scheduling
                 if (same)
                 {
                     // Keep the most recently confirmed prefix at the tail (LRU).
-                    _prefixCheckpoints.Remove(existing);
-                    _prefixCheckpoints.AddLast(existing);
+                    _prefixCheckpoints.Remove(node);
+                    _prefixCheckpoints.AddLast(node);
                     return;
                 }
             }
 
-            string key = $"{_checkpointKeyPrefix}{++_prefixCheckpointSerial}";
+            LinkedListNode<RetainedFusedCache> prepared;
+            try
+            {
+                // Prepare both the record and its list node before the model owns
+                // a new checkpoint. Publication after success must not allocate.
+                var tokens = AllocateRetainedCacheTokens(n);
+                for (int i = 0; i < n; i++) tokens[i] = seq.PromptTokens[i];
+                prepared = new LinkedListNode<RetainedFusedCache>(new RetainedFusedCache
+                {
+                    RequestId = $"{_checkpointKeyPrefix}{++_prefixCheckpointSerial}",
+                    Tokens = tokens,
+                    IsPrefixCheckpoint = true,
+                });
+            }
+            catch (OutOfMemoryException)
+            {
+                return; // The optional copy has not changed model ownership.
+            }
+            string key = prepared.Value.RequestId;
             var sw = Stopwatch.StartNew();
             bool taken;
             try
             {
                 taken = fused.TryCheckpointActiveCache(key);
+            }
+            catch (OutOfMemoryException)
+            {
+                return; // The model rolls back an unpublished copy.
             }
             catch (Exception ex)
             {
@@ -2588,22 +2893,14 @@ namespace TensorSharp.Runtime.Scheduling
                 return;
             }
 
-            var tokens = new int[n];
-            for (int i = 0; i < n; i++) tokens[i] = seq.PromptTokens[i];
-            _prefixCheckpoints.AddLast(new RetainedFusedCache
-            {
-                RequestId = key,
-                Tokens = tokens,
-                MediaFingerprint = null,
-                IsPrefixCheckpoint = true,
-            });
+            _prefixCheckpoints.AddLast(prepared);
 
             EvictPrefixCheckpointsBeyondBudget(fused);
             _logger.LogInformation(
                 "Shared-prefix checkpoint {Key} taken at {Tokens} tokens for {RequestId} in {Ms:F0} ms " +
                 "({Count} kept); a new chat that starts with this prefix will continue from a copy of it.",
                 key, n, seq.RequestId, sw.Elapsed.TotalMilliseconds, _prefixCheckpoints.Count);
-            SavePrefixCheckpointToStore(fused, key, tokens);
+            SavePrefixCheckpointToStore(fused, key, prepared.Value.Tokens);
         }
 
         /// <summary>Longest reusable prefix from a retained fused holder, or 0 when
@@ -2619,7 +2916,16 @@ namespace TensorSharp.Runtime.Scheduling
         public int ComputeFusedContinuationLcp(SequenceState seq)
         {
             _lastFusedDeclineReason = null;
+            _lastFusedAdoptionSource = null;
+            _lastFusedBlockedByScopeTokens = 0;
             if (seq == null) return 0;
+            if (RadixCache != null)
+            {
+                int reused = RadixCache.ComputeReusablePrefix(seq);
+                _lastFusedBlockedByScopeTokens = RadixCache.LastBlockedByScope;
+                _lastFusedDeclineReason = reused > 0 ? null : "no resumable radix prefix";
+                return reused;
+            }
             if (!ModelUsesRetainableFusedCache())
             {
                 _lastFusedDeclineReason =
@@ -2640,7 +2946,10 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 _lastFusedDeclineReason =
                     $"none of the {_retainedFused.Count} retained holder(s) and " +
-                    $"{_prefixCheckpoints.Count} checkpoint(s) is a prefix of this prompt";
+                    $"{_prefixCheckpoints.Count} checkpoint(s) is a usable prefix of this prompt" +
+                    (_lastFusedBlockedByScopeTokens > 0
+                        ? " (another conversation's holder matched; only the public prefix is shared across conversations)"
+                        : string.Empty);
             }
             return lcp;
         }
@@ -2652,8 +2961,12 @@ namespace TensorSharp.Runtime.Scheduling
         /// </summary>
         public IPrefixCheckpointStore PrefixCheckpointStore
         {
-            get => Volatile.Read(ref _checkpointStore);
-            set => Volatile.Write(ref _checkpointStore, value);
+            get => RadixCache != null ? RadixCache.CheckpointStore : Volatile.Read(ref _checkpointStore);
+            set
+            {
+                if (RadixCache != null) RadixCache.CheckpointStore = value;
+                else Volatile.Write(ref _checkpointStore, value);
+            }
         }
 
         private IPrefixCheckpointStore _checkpointStore;
@@ -2700,8 +3013,8 @@ namespace TensorSharp.Runtime.Scheduling
             while (_prefixCheckpoints.Count > budget)
             {
                 var victim = _prefixCheckpoints.First.Value;
-                _prefixCheckpoints.RemoveFirst();
                 fused.DiscardRetainedCache(victim.RequestId);
+                _prefixCheckpoints.RemoveFirst();
             }
         }
 
@@ -2727,16 +3040,23 @@ namespace TensorSharp.Runtime.Scheduling
             if (_storeLookupsToSkip.Contains(prefixHash))
                 return;
 
-            var tokens = new int[n];
-            for (int i = 0; i < n; i++) tokens[i] = seq.PromptTokens[i];
             System.IO.Stream payload = null;
             var sw = Stopwatch.StartNew();
             try
             {
+                var tokens = AllocateRetainedCacheTokens(n);
+                for (int i = 0; i < n; i++) tokens[i] = seq.PromptTokens[i];
+                var prepared = new LinkedListNode<RetainedFusedCache>(new RetainedFusedCache
+                {
+                    RequestId = $"{_checkpointKeyPrefix}{++_prefixCheckpointSerial}",
+                    Tokens = tokens,
+                    IsPrefixCheckpoint = true,
+                });
+                _storeLookupsToSkip.EnsureCapacity(checked(_storeLookupsToSkip.Count + 1));
                 if (!store.TryOpen(CheckpointModelFingerprint, tokens, out payload) || payload == null)
                     return;
                 long bytes = payload.CanSeek ? payload.Length - payload.Position : -1;
-                string key = $"{_checkpointKeyPrefix}{++_prefixCheckpointSerial}";
+                string key = prepared.Value.RequestId;
                 if (!fused.TryImportRetainedCache(key, payload))
                 {
                     _storeLookupsToSkip.Add(prefixHash);
@@ -2745,18 +3065,17 @@ namespace TensorSharp.Runtime.Scheduling
                         n);
                     return;
                 }
-                _prefixCheckpoints.AddLast(new RetainedFusedCache
-                {
-                    RequestId = key,
-                    Tokens = tokens,
-                    MediaFingerprint = null,
-                    IsPrefixCheckpoint = true,
-                });
+                _prefixCheckpoints.AddLast(prepared);
                 EvictPrefixCheckpointsBeyondBudget(fused);
                 _logger.LogInformation(
                     "Shared-prefix checkpoint {Key} restored from disk for {RequestId}: {Tokens} tokens, {MB:F0} MB in {Ms:F0} ms; " +
                     "this and every later chat that starts with this prefix continue from a copy of it.",
                     key, seq.RequestId, n, bytes / 1048576.0, sw.Elapsed.TotalMilliseconds);
+            }
+            catch (OutOfMemoryException)
+            {
+                // No allocating log/skip-set update while handling memory pressure.
+                // Any completed import was already published through its ready node.
             }
             catch (Exception ex)
             {
@@ -2815,6 +3134,15 @@ namespace TensorSharp.Runtime.Scheduling
         /// the scheduler at admission.</summary>
         public bool TryAdoptFusedContinuation(SequenceState seq, int lcp)
         {
+            if (RadixCache != null)
+            {
+                // Reserve rewind metadata before materialization transfers ownership.
+                _pendingRetainedFusedTruncations.EnsureCapacity(_pendingRetainedFusedTruncations.Count + 1);
+                bool adopted = RadixCache.TryAdopt(seq, lcp,
+                    (sequence, tokens) => _pendingRetainedFusedTruncations[sequence.RequestId] = tokens);
+                _lastFusedAdoptionSource = RadixCache.LastSource;
+                return adopted;
+            }
             if (seq == null || lcp <= 0) return false;
             if (seq.BlockTable.NumBlocks != 0) return false;
             if (_model is not IBatchedPagedModel fused) return false;
@@ -2822,7 +3150,15 @@ namespace TensorSharp.Runtime.Scheduling
             var match = FindRetainedFusedMatch(seq, out int matchedLcp);
             if (match == null || matchedLcp != lcp) return false;
 
-            int neededBlocks = (lcp + _blockSize - 1) / _blockSize;
+            // Resolve the existing LRU node and reserve every mutable metadata
+            // container before the model rekeys/clones a native holder. Neither
+            // list publication nor a pending rewind may allocate after transfer.
+            var matchedNode = match.IsPrefixCheckpoint
+                ? _prefixCheckpoints.Find(match) : _retainedFused.Find(match);
+            if (matchedNode == null) return false;
+            int neededBlocks = (int)(((long)lcp + _blockSize - 1) / _blockSize);
+            try { ReserveRetainedAdoptionMetadata(seq, neededBlocks); }
+            catch (OutOfMemoryException) { return false; }
             var blocks = _pool.AllocateNew(neededBlocks);
             if (blocks == null)
             {
@@ -2866,8 +3202,8 @@ namespace TensorSharp.Runtime.Scheduling
                     _logger.LogWarning(
                         "Shared-prefix checkpoint {Key} could not be cloned for {RequestId}; discarding it.",
                         match.RequestId, seq.RequestId);
-                    _prefixCheckpoints.Remove(match);
                     fused.DiscardRetainedCache(match.RequestId);
+                    _prefixCheckpoints.Remove(matchedNode);
                     _storeLookupsToSkip.Add(PrefixHash(seq, Math.Min(match.Tokens.Length, seq.PromptTokens.Count)));
                 }
                 return false;
@@ -2878,13 +3214,16 @@ namespace TensorSharp.Runtime.Scheduling
 
             seq.SetComputedTokensForPrefixAdoption(lcp);
             seq.PrefixCacheReusedTokens = lcp;
+            _lastFusedAdoptionSource = match.IsPrefixCheckpoint
+                ? $"a shared-prefix checkpoint (public, {lcp} tokens)"
+                : $"a retained holder of this conversation ({lcp} tokens, scope {DescribeScope(match.Scope ?? seq.CacheScope)})";
             if (match.IsPrefixCheckpoint)
             {
                 // Its own prefix is now covered; nothing to checkpoint again, and the
                 // copy the request holds is exactly the state after those tokens.
                 seq.PrefixCheckpointTaken = true;
-                _prefixCheckpoints.Remove(match);
-                _prefixCheckpoints.AddLast(match);   // most recently used at the tail
+                _prefixCheckpoints.Remove(matchedNode);
+                _prefixCheckpoints.AddLast(matchedNode);   // most recently used; no new node allocation
                 _logger.LogInformation(
                     "Shared-prefix checkpoint {Key} cloned for {RequestId}: {Tokens} prompt tokens continue from the copy.",
                     match.RequestId, seq.RequestId, lcp);
@@ -2895,7 +3234,7 @@ namespace TensorSharp.Runtime.Scheduling
             // The rebound holder is now this request's active fused cache; the
             // fused path's BindSequenceCache finds it (fresh==false) and continues
             // from it without injecting from the (empty) reserved blocks.
-            _retainedFused.Remove(match);
+            _retainedFused.Remove(matchedNode);
             return true;
         }
 
@@ -2908,8 +3247,7 @@ namespace TensorSharp.Runtime.Scheduling
                 return false;
             foreach (var entry in RetainedCandidates())
             {
-                if (!entry.IsPrefixCheckpoint
-                    && !string.Equals(entry.MediaFingerprint, seq.MediaFingerprint, StringComparison.Ordinal))
+                if (!IsCandidateVisibleTo(entry, seq))
                     continue;
                 int len = entry.Tokens.Length;
                 if (len < minimum || len >= seq.PromptTokens.Count)
@@ -2917,11 +3255,19 @@ namespace TensorSharp.Runtime.Scheduling
                 bool exact = true;
                 for (int i = 0; i < len && exact; i++)
                     exact = seq.PromptTokens[i] == entry.Tokens[i];
-                if (exact)
+                if (exact && ClampReuseToMedia(len, seq, entry.MediaSpans) == len)
                     return true;
             }
             return false;
         }
+
+        /// <summary>Whether <paramref name="seq"/> may use <paramref name="entry"/> at all:
+        /// a checkpoint is public but serves a scoped request only up to that request's
+        /// own public boundary, and a holder serves only its own conversation.</summary>
+        private static bool IsCandidateVisibleTo(RetainedFusedCache entry, SequenceState seq)
+            => entry.IsPrefixCheckpoint
+                ? seq.CacheScope == null || entry.Tokens.Length <= seq.SharedPrefixTokens
+                : ScopeAllows(entry.Scope, seq.CacheScope);
 
         private IEnumerable<RetainedFusedCache> RetainedCandidates()
         {
@@ -2947,11 +3293,6 @@ namespace TensorSharp.Runtime.Scheduling
             bool circular = _model.MaxReusablePrefixTokens != int.MaxValue;
             foreach (var entry in RetainedCandidates())
             {
-                // A checkpoint's tokens are text-only by construction; a retained
-                // conversation holder may hold media and must match on it.
-                if (!entry.IsPrefixCheckpoint
-                    && !string.Equals(entry.MediaFingerprint, seq.MediaFingerprint, StringComparison.Ordinal))
-                    continue;
                 int len = entry.Tokens.Length;
                 // NB: no `len <= cap` skip. The fused path writes nothing to the shared
                 // pool, so a retained holder is the only reuse source for a concurrent
@@ -2962,15 +3303,53 @@ namespace TensorSharp.Runtime.Scheduling
                 while (lcp < limit && seq.PromptTokens[lcp] == entry.Tokens[lcp])
                     lcp++;
 
+                if (!IsCandidateVisibleTo(entry, seq))
+                {
+                    // Another conversation's holder (or a checkpoint longer than this
+                    // request's own public prefix): never adopted, rewound or moved.
+                    // Record what it would have added past the public prefix - what
+                    // isolation costs this request - for the admission log.
+                    // Counted only when it would plausibly have been adopted: a whole
+                    // checkpoint, or a holder the prompt extends (within a rewind).
+                    bool plausible = entry.IsPrefixCheckpoint
+                        ? lcp == len
+                        : IsPlausibleContinuation(len, lcp, seq);
+                    if (plausible && lcp > 0)
+                    {
+                        int wouldReuse = Math.Min(lcp, seq.PromptTokens.Count - 1);
+                        _lastFusedBlockedByScopeTokens = Math.Max(
+                            _lastFusedBlockedByScopeTokens, wouldReuse - seq.SharedPrefixTokens);
+                    }
+                    continue;
+                }
+
                 if (seq.PromptTokens.Count <= lcp) continue;   // no new suffix to forward
+                // A checkpoint is text-only but the PROMPT may carry media inside its
+                // length; a holder may carry media of its own. Either way the reused
+                // prefix stops at the first span that is not the same content at the
+                // same place, and the rewind rules below judge the result.
+                lcp = ClampReuseToMedia(lcp, seq, entry.MediaSpans);
+                if (lcp <= 0) continue;
+                var exactReuse = _model as IExactFusedCacheReuse;
+                if (exactReuse?.SupportsExactFusedCacheReuse != true) exactReuse = null;
+                if (exactReuse != null && !entry.IsPrefixCheckpoint && lcp < len)
+                {
+                    int align = Math.Max(1, _model.KVCacheTruncationGranularity);
+                    lcp -= lcp % align;
+                    if (lcp <= 0) continue;
+                }
                 int rewind = len - lcp;
                 // A checkpoint is adopted whole or not at all: the prompt must extend
                 // exactly the tokens it was taken after.
                 if (entry.IsPrefixCheckpoint && rewind > 0)
                     continue;
-                if (rewind > 0
+                if (exactReuse != null && !entry.IsPrefixCheckpoint)
+                {
+                    if (!exactReuse.CanReuseRetainedPrefix(entry.RequestId, len, lcp)) continue;
+                }
+                else if (rewind > 0
                     && (rewind > MaxLiveContinuationRewindTokens
-                        || !_model.SupportsKVCacheTruncation))
+                        || !_model.CanTruncateKVCache(len, lcp)))
                     continue;
                 if (rewind == 0)
                 {
@@ -2982,13 +3361,10 @@ namespace TensorSharp.Runtime.Scheduling
                 }
             }
 
-            // On a circular cache a rewound holder is not exact (see
-            // ComputeLiveContinuationLcp), so an exact state wins whenever it covers
-            // the prompt to within the rewind allowance — the same rule the live path
-            // applies. Not unconditionally: a conversation holder that needs a
-            // one-token EOS rewind must still beat a checkpoint at the system prompt,
-            // or every follow-up turn would re-forward the whole conversation from the
-            // clone. Elsewhere the longest match wins as before.
+            // Among eligible candidates, prefer an exact nearby checkpoint on
+            // circular caches, matching the live path. A conversation holder
+            // with a permitted rewind can still beat a much shorter system
+            // checkpoint. Elsewhere the longest match wins.
             bool preferExact = bestExact != null
                 && (bestRewound == null
                     || (circular ? exactLcp >= rewoundLcp - MaxLiveContinuationRewindTokens
@@ -3016,6 +3392,7 @@ namespace TensorSharp.Runtime.Scheduling
             _pendingRetainedFusedTruncations.Remove(requestId);
             _fusedSeqById.Remove(requestId);
             DisposeFusedSpecContext(requestId);
+            RadixCache?.ReleaseRequest(requestId);
         }
 
         /// <summary>Remove stale retained metadata (and its model holder) before a
@@ -3033,14 +3410,24 @@ namespace TensorSharp.Runtime.Scheduling
                 var next = node.Next;
                 if (string.Equals(node.Value.RequestId, requestId, StringComparison.Ordinal))
                 {
-                    _retainedFused.Remove(node);
                     found = true;
+                    break;
                 }
                 node = next;
             }
 
-            if (found)
-                fused.DiscardRetainedCache(requestId);
+            if (!found) return;
+            // A failed native disposal still owns storage. Keep its metadata so
+            // cleanup can be retried instead of orphaning an untracked holder.
+            fused.DiscardRetainedCache(requestId);
+            node = _retainedFused.First;
+            while (node != null)
+            {
+                var next = node.Next;
+                if (string.Equals(node.Value.RequestId, requestId, StringComparison.Ordinal))
+                    _retainedFused.Remove(node);
+                node = next;
+            }
         }
 
         /// <summary>Called by the engine when a sequence leaves the scheduler, BEFORE
@@ -3056,8 +3443,33 @@ namespace TensorSharp.Runtime.Scheduling
             DisposeFusedSpecContext(requestId);
             _pendingRetainedFusedTruncations.Remove(requestId);
             if (!_fusedSeqById.TryGetValue(requestId, out var seq))
+            {
+                RadixCache?.ReleaseRequest(requestId);
                 return false;
+            }
             _fusedSeqById.Remove(requestId);
+
+            if (RadixCache != null)
+            {
+                try
+                {
+                    bool cleanFinish = seq.Status is SequenceStatus.FinishedStopped or SequenceStatus.FinishedLengthCapped
+                        || (seq.Status == SequenceStatus.FinishedAborted && seq.Error == null
+                            && seq.NumComputedTokens >= seq.NumTotalTokens);
+                    bool primary = _liveCacheValid && ReferenceEquals(_liveCacheSeq, seq)
+                        && !(_model is IBatchedPagedModel holder && holder.HasFusedSequenceCache(requestId));
+                    bool retained = cleanFinish && RadixCache.RetainFinished(seq, primary);
+                    if (retained && primary)
+                    {
+                        _liveCacheValid = false;
+                        _currentOwner = null;
+                        _ownerTokensInModel = 0;
+                        _ownerForwardedTokens = 0;
+                    }
+                    return retained;
+                }
+                finally { RadixCache.ReleaseRequest(seq); }
+            }
 
             if (!ModelUsesRetainableFusedCache()) return false;
             if (_model is not IBatchedPagedModel fused) return false;
@@ -3089,6 +3501,10 @@ namespace TensorSharp.Runtime.Scheduling
             // Retain any non-trivial fused conversation: the fused path contributes
             // nothing to the shared pool, so retention is the only cross-request reuse
             // source for it (not just the >window case). The LRU budget bounds VRAM.
+            // The one-block minimum is not a holder requirement (matching is per token);
+            // lowering it failed exactness validation on Metal, see docs/models/qwen35.md
+            // "Retained holders: the one-block minimum". Keep it and the one in
+            // DonateFinishedLiveCacheToRetained in step.
             if (len < _blockSize) return false;
 
             // Request ids are unique only while in flight. If a caller reuses one
@@ -3097,27 +3513,120 @@ namespace TensorSharp.Runtime.Scheduling
             // both metadata entries would let an old token match rebind the new,
             // unrelated holder.
             if (!fused.HasFusedSequenceCache(requestId)) return false;
+            LinkedListNode<RetainedFusedCache> prepared;
+            int budget;
+            try
+            {
+                // Nothing may allocate between successful native transfer and
+                // publication in the LRU. Prepare the record AND list node now.
+                budget = ExecutionOptions.FromEnvironment().RetainedFusedCacheBudget;
+                var tokens = AllocateRetainedCacheTokens(len);
+                for (int i = 0; i < len; i++) tokens[i] = seq.TokenAt(i);
+                prepared = new LinkedListNode<RetainedFusedCache>(new RetainedFusedCache
+                {
+                    RequestId = requestId,
+                    Tokens = tokens,
+                    MediaSpans = seq.MediaSpans,
+                    Scope = seq.CacheScope,
+                });
+            }
+            catch (OutOfMemoryException)
+            {
+                // The request still owns its native holder; ordinary release is
+                // responsible for freeing it. Avoid allocating a diagnostic here.
+                return false;
+            }
             DiscardRetainedFusedCacheWithRequestId(fused, requestId);
             if (!fused.RetainSequenceCache(requestId)) return false;
+            PublishRetainedHolder(fused, prepared, budget);
+            return true;
+        }
 
-            var tokens = new int[len];
-            for (int i = 0; i < len; i++) tokens[i] = seq.TokenAt(i);
-            _retainedFused.AddLast(new RetainedFusedCache
-            {
-                RequestId = requestId,
-                Tokens = tokens,
-                MediaFingerprint = seq.MediaFingerprint,
-            });
+        private void PublishRetainedHolder(
+            IBatchedPagedModel fused, LinkedListNode<RetainedFusedCache> prepared, int budget)
+        {
+            _retainedFused.AddLast(prepared);
 
             // Evict oldest holders beyond the budget (frees their VRAM).
-            int budget = ExecutionOptions.FromEnvironment().RetainedFusedCacheBudget;
             while (_retainedFused.Count > budget)
             {
                 var victim = _retainedFused.First.Value;
-                _retainedFused.RemoveFirst();
                 fused.DiscardRetainedCache(victim.RequestId);
+                _retainedFused.RemoveFirst();
             }
-            return true;
+        }
+
+        /// <summary>
+        /// Before a fused step takes the model over, keep the state of a request that
+        /// finished cleanly on the primary (N=1) cache as a retained holder of its own
+        /// conversation, exactly as if it had finished on the fused path: zero copy (the
+        /// primary arrays move into a holder and the model gets a fresh primary). Only
+        /// for models whose retained holders are complete per-request state; the native
+        /// slot families (exact-reuse models) keep today's behaviour.
+        /// </summary>
+        private void DonateFinishedLiveCacheToRetained(IBatchedPagedModel fused)
+        {
+            if (RadixCache != null) return;
+            SequenceState live = _liveCacheSeq;
+            if (!_liveCacheValid || live == null || _currentOwner != null)
+                return;
+            // Only a conversation can continue. An unscoped caller (a benchmark, the CLI)
+            // keeps today's behaviour: the donation moves the primary into a holder and
+            // allocates a fresh primary, a cost worth paying only for a known next turn.
+            if (live.CacheScope == null)
+                return;
+            if (_model is IExactFusedCacheReuse exact && exact.SupportsExactFusedCacheReuse)
+                return;
+            bool cleanStop = live.Status == SequenceStatus.FinishedAborted
+                && live.Error == null
+                && live.NumComputedTokens >= live.NumTotalTokens;
+            if (live.Status != SequenceStatus.FinishedStopped
+                && live.Status != SequenceStatus.FinishedLengthCapped
+                && !cleanStop)
+                return;
+            if (live.CacheBreakpoints != null || !ModelUsesRetainableFusedCache())
+                return;
+            int len = Math.Min(_liveCacheLen, live.NumTotalTokens);
+            if (len < _blockSize || fused.HasFusedSequenceCache(live.RequestId))
+                return;
+            foreach (var entry in _retainedFused)
+                if (string.Equals(entry.RequestId, live.RequestId, StringComparison.Ordinal))
+                    return;
+
+            LinkedListNode<RetainedFusedCache> prepared;
+            int budget;
+            try
+            {
+                budget = ExecutionOptions.FromEnvironment().RetainedFusedCacheBudget;
+                var tokens = AllocateRetainedCacheTokens(len);
+                for (int i = 0; i < len; i++) tokens[i] = live.TokenAt(i);
+                prepared = new LinkedListNode<RetainedFusedCache>(new RetainedFusedCache
+                {
+                    RequestId = live.RequestId,
+                    Tokens = tokens,
+                    MediaSpans = live.MediaSpans,
+                    Scope = live.CacheScope,
+                });
+            }
+            catch (OutOfMemoryException)
+            {
+                return;
+            }
+
+            fused.AdoptPrimaryCacheToFused(live.RequestId);
+            if (!fused.HasFusedSequenceCache(live.RequestId))
+                return;   // the primary was not the active cache; nothing was moved
+            if (!fused.RetainSequenceCache(live.RequestId))
+            {
+                // Adopted but not retainable: release it as a finished request would be.
+                fused.OnSequenceReleased(live.RequestId);
+                return;
+            }
+            PublishRetainedHolder(fused, prepared, budget);
+            _logger.LogDebug(
+                "Live cache of finished request {RequestId} ({Tokens} tokens, scope {Scope}) kept as a retained holder " +
+                "before a fused step took the model over.",
+                live.RequestId, len, DescribeScope(live.CacheScope));
         }
 
         /// <summary>Ensure the model's K/V state belongs to <paramref name="seq"/>.
@@ -3138,6 +3647,15 @@ namespace TensorSharp.Runtime.Scheduling
             // MTP draft head's cache and pending hidden state.
             _specCtx = null;
 
+            // A step that forwarded the outgoing owner alone let it BORROW the
+            // model's logits buffer (see ExecuteStepPerSequence), on the promise
+            // that it samples before the next Forward. The incoming sequence's
+            // Forward breaks that promise: the owner would later sample its next
+            // token from another request's logits. Seen as the first request of
+            // a concurrent burst answering with nothing, or with another prompt's
+            // content. Detach it here, once per ownership change.
+            DetachBorrowedLogits(_currentOwner);
+
             // Live-cache continuation: the new sequence's prompt extends exactly the
             // tokens still resident in the model's live KV cache (planned by the
             // scheduler via TryAdoptLiveCache). Keep the cache as-is and continue
@@ -3148,13 +3666,13 @@ namespace TensorSharp.Runtime.Scheduling
             {
                 if (_currentOwner == null
                     && _liveCacheValid
-                    && _liveCacheSeq?.CacheBreakpoints == null
+                    && _liveCacheSeq != null
+                    && _liveCacheSeq.CacheBreakpoints == null
                     && seq.CacheBreakpoints == null
-                    && string.Equals(
-                        _liveCacheSeq?.MediaFingerprint,
-                        seq.MediaFingerprint,
-                        StringComparison.Ordinal)
+                    && (ScopeAllows(_liveCacheSeq.CacheScope, seq.CacheScope)
+                        || seq.NumComputedTokens <= seq.SharedPrefixTokens)
                     && seq.NumComputedTokens > 0
+                    && ClampReuseToMedia(seq.NumComputedTokens, seq, _liveCacheSeq.MediaSpans) == seq.NumComputedTokens
                     && _liveCacheLen >= seq.NumComputedTokens
                     && (_liveCacheLen == seq.NumComputedTokens || _model.SupportsKVCacheTruncation))
                 {
@@ -3252,7 +3770,7 @@ namespace TensorSharp.Runtime.Scheduling
                 }
                 else
                 {
-                    InjectAllBlocks(seq, seq.NumComputedTokens);
+                    InjectPrefixOrRecompute(seq, seq.NumComputedTokens);
                     _ownerTokensInModel = seq.NumComputedTokens;
                 }
             }
@@ -3338,14 +3856,15 @@ namespace TensorSharp.Runtime.Scheduling
         /// </summary>
         public string TrimIdleMemory()
         {
+            if (RadixCache != null) return RadixCache.TrimIdleMemory();
             int evicted = 0;
             if (_model is IBatchedPagedModel fused)
             {
                 while (_retainedFused.Count > 1)
                 {
                     var victim = _retainedFused.First.Value;
-                    _retainedFused.RemoveFirst();
                     fused.DiscardRetainedCache(victim.RequestId);
+                    _retainedFused.RemoveFirst();
                     evicted++;
                 }
             }
@@ -3418,6 +3937,12 @@ namespace TensorSharp.Runtime.Scheduling
                 int tokensInBlock = Math.Min(_blockSize, tokensInModel - startToken);
                 var block = seq.BlockTable.Blocks[b];
 
+                // Cached radix pages are immutable. An ownership swap only needs
+                // to refresh the request's private tail, never shared full slabs.
+                if (tokensInBlock == _blockSize && block.HoldsSnapshotBytes
+                    && RadixCache != null && RadixCache.Tree.TryGetBlockOwner(block, out _))
+                    continue;
+
                 // A recurrent full block was captured at the exact Forward
                 // boundary where it first became available. Re-extracting it on
                 // a later owner swap would overwrite that checkpoint with the
@@ -3452,16 +3977,21 @@ namespace TensorSharp.Runtime.Scheduling
                 var slab = _pool.Storage.GetSpan(block.Id);
                 dst.CopyTo(slab);
                 block.Used = tokensInBlock;
+                block.HoldsSnapshotBytes = tokensInBlock == _blockSize;
             }
         }
 
         /// <summary>Inject all blocks for <paramref name="seq"/> into the model's
-        /// fresh KV state. Called when swapping in.</summary>
-        private void InjectAllBlocks(SequenceState seq, int tokensToInject)
+        /// fresh KV state. Called when swapping in. Returns how many leading tokens
+        /// were actually injected: <paramref name="tokensToInject"/> on success, less
+        /// when a block could not be read or the model refused it (the model then
+        /// holds exactly the blocks before it, per the TryInjectKVBlock contract).</summary>
+        private int InjectAllBlocks(SequenceState seq, int tokensToInject)
         {
-            if (!_model.SupportsKVStateSnapshot || !_model.SupportsCrossSequenceKvReuse) return;
-            if (tokensToInject <= 0) return;
+            if (tokensToInject <= 0) return 0;
+            if (!_model.SupportsKVStateSnapshot || !_model.SupportsCrossSequenceKvReuse) return 0;
 
+            int injected = 0;
             int blocks = seq.BlockTable.NumBlocks;
             for (int b = 0; b < blocks; b++)
             {
@@ -3479,7 +4009,7 @@ namespace TensorSharp.Runtime.Scheduling
                     _logger.LogWarning(
                         "Inject would underflow for sequence {RequestId} block {Block}: have {Have} need {Need}",
                         seq.RequestId, b, src.Length, expectedBytes);
-                    return;
+                    break;
                 }
                 var slice = src[..(int)expectedBytes];
                 if (!_model.TryInjectKVBlock(startToken, tokensInBlock, slice))
@@ -3487,9 +4017,116 @@ namespace TensorSharp.Runtime.Scheduling
                     _logger.LogWarning(
                         "Inject failed for sequence {RequestId} block {Block} at {Start}",
                         seq.RequestId, b, startToken);
-                    return;
+                    break;
+                }
+                injected = startToken + tokensInBlock;
+            }
+            return injected;
+        }
+
+        /// <summary>
+        /// Make the model hold <paramref name="seq"/>'s first <paramref name="tokens"/>
+        /// computed tokens from its blocks (radix design M0e, D10/P16).
+        ///
+        /// <para>An inject that stops early used to be silent: the sequence kept its
+        /// claimed <see cref="SequenceState.NumComputedTokens"/>, so the next forward
+        /// appended at the model's real head while every position after it was
+        /// numbered as if the whole prefix were there, and
+        /// <see cref="SequenceState.PrefixCacheReusedTokens"/> still reported the
+        /// promised reuse. A materialization failure is now a MISS, never a partial
+        /// state: the reuse accounting drops to what was materialized, the request is
+        /// reset to that length, and the lost tail is forwarded again right here, so
+        /// the model and the step's already-planned work agree again. The re-forward
+        /// is done in place rather than left to the next schedule because the
+        /// scheduler still treats a sequence whose prompt is computed as a decoder
+        /// and would never re-forward generated tokens (D7, M0d).</para>
+        /// </summary>
+        private void InjectPrefixOrRecompute(SequenceState seq, int tokens)
+        {
+            int injected = InjectAllBlocks(seq, tokens);
+            if (injected >= tokens)
+                return;
+
+            int usable = LastRestorableInjectedLength(seq, injected);
+            if (usable < injected)
+            {
+                // A per-block-capture (recurrent) model restores its running state from
+                // the LAST injected block, which is only a real checkpoint at a
+                // restorable endpoint. Rebuild from the deepest one, or from nothing.
+                _model.ResetKVCache();
+                if (usable > 0 && InjectAllBlocks(seq, usable) < usable)
+                {
+                    _model.ResetKVCache();
+                    usable = 0;
                 }
             }
+            else if (usable == 0)
+            {
+                _model.ResetKVCache();
+            }
+
+            _logger.LogWarning(
+                "Materializing the cached prefix of {RequestId} stopped at {Materialized} of {Claimed} tokens; " +
+                "reuse is corrected to {Reused} and the remaining {Recompute} tokens are forwarded again.",
+                seq.RequestId, usable, tokens, Math.Min(seq.PrefixCacheReusedTokens, usable), tokens - usable);
+
+            seq.PrefixCacheReusedTokens = Math.Min(seq.PrefixCacheReusedTokens, usable);
+            seq.RevokeComputedTokensTo(usable);
+            RecomputeLostTail(seq, tokens);
+        }
+
+        /// <summary>The injected length a model can actually resume from. Attention-only
+        /// models resume at any injected block end; a per-block-capture model only at a
+        /// block whose payload was captured at its own endpoint.</summary>
+        private int LastRestorableInjectedLength(SequenceState seq, int injected)
+        {
+            if (injected <= 0 || !_model.RequiresPerBlockCapture)
+                return Math.Max(0, injected);
+            // A shortfall always stops at a block start, so every injected block is full.
+            for (int b = injected / _blockSize - 1; b >= 0; b--)
+            {
+                if (seq.BlockTable.Blocks[b].IsRestorablePrefixEnd)
+                    return (b + 1) * _blockSize;
+            }
+            return 0;
+        }
+
+        /// <summary>Forward <paramref name="seq"/>'s tokens from its (just revoked)
+        /// computed count up to <paramref name="target"/>, in scheduler-sized chunks,
+        /// without sampling. The logits the sequence will sample from next are kept.</summary>
+        private void RecomputeLostTail(SequenceState seq, int target)
+        {
+            int start = seq.NumComputedTokens;
+            if (start >= target)
+                return;
+            // The logits a decoder samples from next may be the model's own buffer
+            // (borrowed on a single-work step), which the forwards below overwrite.
+            float[] pendingLogits = seq.LastLogits != null ? (float[])seq.LastLogits.Clone() : null;
+            float[] lastLogits = null;
+            int chunk = Math.Max(1, _scheduler.Config.MaxNumBatchedTokens);
+            int promptTokens = seq.PromptTokens.Count;
+            while (start < target)
+            {
+                int n = Math.Min(chunk, target - start);
+                // Never mix prompt and generated tokens in one forward, as the planned
+                // steps never do: a prompt slice queues its media embeddings and M-RoPE
+                // position table for exactly its prompt tokens, so a forward that ran on
+                // into generated tokens would carry a position table shorter than itself.
+                if (start < promptTokens)
+                    n = Math.Min(n, promptTokens - start);
+                var tokens = new int[n];
+                for (int i = 0; i < n; i++)
+                    tokens[i] = seq.TokenAt(start + i);
+                if (_model.MultimodalInjector != null && start < promptTokens)
+                {
+                    _model.MultimodalInjector.QueuePromptEmbeddingsForSlice(
+                        start, Math.Min(n, promptTokens - start), seq.RequestId);
+                }
+                lastLogits = _model.Forward(tokens);
+                seq.AdvanceComputedTokens(n);
+                start += n;
+            }
+            seq.LastLogits = pendingLogits ?? (lastLogits != null ? (float[])lastLogits.Clone() : null);
         }
 
         /// <summary>For each newly-full block, extract its content into the
@@ -3518,6 +4155,7 @@ namespace TensorSharp.Runtime.Scheduling
                     break;
                 dst.CopyTo(_pool.Storage.GetSpan(block.Id));
                 block.Used = _blockSize;
+                block.HoldsSnapshotBytes = true;
                 block.IsRestorablePrefixEnd = !_model.RequiresPerBlockCapture
                     || (b == fullBlocksNow - 1 && seq.NumComputedTokens % _blockSize == 0);
                 captured++;
@@ -3558,6 +4196,8 @@ namespace TensorSharp.Runtime.Scheduling
         /// <summary>Reset internal state. Called by the engine on model reload.</summary>
         public void Reset()
         {
+            SetSpeculation(Speculation);
+            RadixCache?.Reset();
             _currentOwner = null;
             _ownerTokensInModel = 0;
             _ownerForwardedTokens = 0;

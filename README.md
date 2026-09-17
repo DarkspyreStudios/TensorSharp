@@ -8,17 +8,25 @@
 
 **Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus Qwen-Image-Edit image editing and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills and a bounded, in-process model-to-tool loop for sandboxed file and shell work.
 
-## Building Inference Engines and Agentic Runtimes from Scratch
+## Supported model families at a glance
 
-<p align="center">
-  <a href="https://www.amazon.com/dp/B0HJQ4VQ31">
-    <img src="website/assets/building-inference-engines-cover.jpg" alt="Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent" width="220">
-  </a>
-</p>
+- **Text, reasoning, and multimodal LLMs:** [DeepSeek V4 Flash](docs/models/deepseek4.md) / [V4.1 Flash](docs/models/deepseek41.md), [GLM 5.x](docs/models/glm.md), [Gemma 4](docs/models/gemma4.md), [Qwen 3.5 / 3.6](docs/models/qwen35.md), [Qwen 3.8 Flash Next](docs/models/qwen38-flash-next.md), [Bonsai (Qwen family)](docs/models/bonsai.md), [GPT OSS](docs/models/gptoss.md), [Nemotron-H](docs/models/nemotron.md), [Mistral 3](docs/models/mistral3.md), [Hunyuan Dense](docs/models/hunyuan-dense.md), and [Muse-Glimmer](docs/models/muse-glimmer.md).
+- **Text diffusion:** [DiffusionGemma](docs/models/diffusiongemma.md).
+- **Image editing and video generation:** [Qwen-Image-Edit](docs/models/qwenimage.md), [MiniMax-H3 (video + stereo audio)](docs/models/minimax-h3.md), and [Wan 2.1 / 2.2](docs/models/wan.md).
+- **Text and code embeddings:** BERT / XLM-R encoders — [Snowflake Arctic Embed L v2.0 and all-MiniLM-L6-v2](docs/embeddings.md).
 
-**[Building Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent](https://www.amazon.com/dp/B0HJQ4VQ31)** introduces building inference engines and agentic runtimes from scratch with TensorSharp and TensorAgent. Using Qwen dense and mixture-of-experts (MoE) models, it connects model architecture, inference execution, and agentic applications. Read it alongside the source to explore how the pieces fit together.
+Backend, modality, feature support, and validation coverage vary by model. See the [model cards](docs/models/README.md), [embedding guide](docs/embeddings.md), and [full architecture matrix](#supported-model-architectures) for details.
 
-**[Explore the books and their repository reading paths](docs/BOOK.md)** · **[Buy on Amazon](https://www.amazon.com/dp/B0HJQ4VQ31)**
+## Learn with the books
+
+| Qwen inference and agentic runtimes | Gemma 4 and multimodal inference |
+|---|---|
+| <a href="https://www.amazon.com/dp/B0HJQ4VQ31"><img src="website/assets/building-llm-inference-engines-cover.jpg" alt="Building LLM Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent" width="190"></a> | <a href="https://www.amazon.com/dp/B0H9P44QZZ"><img src="website/assets/from-tensors-to-tokens-cover.jpg" alt="From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B" width="190"></a> |
+| **[Building LLM Inference Engines and Agentic Runtimes from Scratch: Qwen Dense and MoE Models with TensorSharp and TensorAgent](https://www.amazon.com/dp/B0HJQ4VQ31)** | **[From Tensors to Tokens: Building a Multimodal LLM Inference Engine from Scratch with TensorSharp and Gemma 4 E4B](https://www.amazon.com/dp/B0H9P44QZZ)** |
+| Build Qwen dense/MoE inference and controlled agent workflows in C#. Follow tensors, tokenization, attention, expert routing, quantization, and caching through GPU acceleration, multimodal execution, tools, skills, sandboxed code, and desktop/mobile deployment with TensorSharp and TensorAgent. | Build a multimodal inference engine in C#/.NET with Gemma 4 E4B, from tensors, GGUF model loading, quantization, and tokenization to text, image, video, and audio execution. Connect correctness checks and serving optimizations to the running TensorSharp code. |
+| **[Buy on Amazon](https://www.amazon.com/dp/B0HJQ4VQ31)** | **[Buy on Amazon](https://www.amazon.com/dp/B0H9P44QZZ)** |
+
+**[Explore both books and their repository reading paths](docs/BOOK.md)**
 
 ## Highlights
 
@@ -130,6 +138,13 @@ dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNat
 
 > The server binds `0.0.0.0:5000` by default (change it with `--port` / `--host`, or the `PORT` / `HOST` environment variables; on macOS port 5000 is taken by the AirPlay Receiver) with no built-in auth or TLS — keep it behind a firewall or an authenticated HTTPS reverse proxy. For image/video/audio add the companion [`mmproj-gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/mmproj-gemma-4-E4B-it-Q8_0.gguf) with `--mmproj`.
 
+TensorSharp.Server, TensorSharp.Cli, and TensorAgent use the shared engine's Radix
+KV prefix cache by default for supported models. It reuses public prompt prefixes
+and each conversation's private state, respecting model and media boundaries.
+Set `TS_SCHED_PREFIX_CACHE=0` to disable runtime prefix reuse, or
+`TS_PREFIX_CACHE_MODE=legacy` to select the compatibility path for diagnosis.
+Server and CLI `--no-prefix-cache` also disable prefix reuse and startup warmup.
+
 Both executables print their full option reference — description, default, range, and an example per flag — when started with no arguments or with `--help`:
 
 ```bash
@@ -218,7 +233,7 @@ See the [performance guide and detailed fast lanes](docs/PROJECT_STATUS.md#make-
 | Qwen 3.5 / 3.6 family | `qwen35`, `qwen35moe`, `qwen3next` | Qwen3.5-9B (hybrid Attn+Recurrent), Qwen3.5/3.6-35B-A3B (MoE) | Image | Yes | Yes | Yes on Qwen 3.6 (embedded NextN) | [qwen35.md](docs/models/qwen35.md) |
 | Bonsai (Qwen family) | `qwen3` (8B), `qwen35` (27B) | Bonsai-8B (36-layer dense GQA), Bonsai-27B (48 GatedDeltaNet + 16 full-attention layers), both Q1_0 | Text only | 27B yes; 8B template emits a fixed empty think block | Yes | — | [bonsai.md](docs/models/bonsai.md) |
 | GPT OSS | `gptoss`, `gpt-oss` | gpt-oss-20b (MoE) | Text only | Yes (always) | Yes | — | [gptoss.md](docs/models/gptoss.md) |
-| Nemotron-H | `nemotron_h`, `nemotron_h_moe` | Nemotron-H-8B/47B (Hybrid SSM-Transformer, MoE), Nemotron 3 Nano Omni, Nemotron 3.5 Lightning 30B-A3B (23 Mamba-2 + 23 MoE + 6 attention) | Image (Omni) | Yes | Yes | Nemotron 3.5 Lightning: DSpark block drafting (separate drafter GGUF) | [nemotron.md](docs/models/nemotron.md) |
+| Nemotron-H | `nemotron_h`, `nemotron_h_moe` | Nemotron-H-8B/47B (Hybrid SSM-Transformer, MoE), Nemotron 3 Nano Omni, Nemotron 3.5 Lightning 30B-A3B (23 Mamba-2 + 23 MoE + 6 attention) | Image (Omni) | Yes | Yes | No (refused: verify and decode kernels differ, so speculation would change the output) | [nemotron.md](docs/models/nemotron.md) |
 | Mistral 3 | `mistral3` | Mistral-Small-3.1-24B-Instruct | Image | No | No | — | [mistral3.md](docs/models/mistral3.md) |
 | Hunyuan Dense | `hunyuan-dense` | Tencent dense Hunyuan decoders, e.g. Hy-MT2 (GQA with per-head QK-norm applied *after* NeoX RoPE, SwiGLU) | Text only | No | No | — | [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
 | Muse-Glimmer | `muse-glimmer`, `muse_glimmer` | Muse-Glimmer-30B (interleaved SWA + NoPE full layers, attention output gate) | Image | Yes | Yes (ATEM) | Yes (DFlash block drafter, separate GGUF) | [muse-glimmer.md](docs/models/muse-glimmer.md) |
@@ -256,7 +271,7 @@ New here? The sections above are all you need to get running. Everything else is
 
 | Doc | What's inside |
 |---|---|
-| [Book guide: Building Inference Engines and Agentic Runtimes from Scratch](docs/BOOK.md) | Qwen dense and MoE models with TensorSharp and TensorAgent, plus book introductions, Amazon purchase links, and companion repository guides |
+| [TensorSharp and TensorAgent book guide](docs/BOOK.md) | Building LLM Inference Engines and Agentic Runtimes from Scratch, plus From Tensors to Tokens: introductions, Amazon links, and repository reading paths |
 | [Model Downloads](MODEL_DOWNLOADS.md) | Per-model `huggingface-cli` download + run quick reference (quant tiers, projectors, companions) |
 | [Usage](USAGE.md) | Full CLI reference (options, interactive REPL, JSONL batch), server hosting, logging, HTTP API examples, backends, and the env-var matrix |
 | [Features](FEATURES.md) | Deep dives on continuous batching, speculative decoding, tool calling, thinking mode, multimodal, MoE, KV codecs, and more |

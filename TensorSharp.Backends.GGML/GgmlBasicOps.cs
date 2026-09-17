@@ -1538,6 +1538,10 @@ namespace TensorSharp.GGML
         /// <see cref="GgmlNative.HasBackendFailure"/>. Sticky until <see cref="RecreateBackend"/>.</summary>
         public static bool HasBackendFailure() => GgmlNative.HasBackendFailure();
 
+        /// <summary>Graph builds that ran an attention as explicit ops because the backend
+        /// has no flash-attention kernel for its shape. See <see cref="GgmlNative.FlashAttnFallbackCount"/>.</summary>
+        public static long FlashAttnFallbackCount() => GgmlNative.FlashAttnFallbackCount();
+
         /// <summary>
         /// Throw the GPU backend away and build a new one. Clears
         /// <see cref="HasBackendFailure"/>; the loaded model must be released first.
@@ -2318,13 +2322,16 @@ namespace TensorSharp.GGML
         /// GDN state is re-seeded so the next fused decode rebuilds).</summary>
         public static void Qwen35ResetDecodeCache() => GgmlNative.Qwen35ResetDecodeCache();
 
+        /// <summary>See <see cref="GgmlNative.Qwen35RopePositionAbi"/>.</summary>
+        public static int Qwen35RopePositionAbi() => GgmlNative.Qwen35RopePositionAbi();
+
         /// <summary>Qwen3.5/3.8 slot-stable arena token-batched decode (one fused
         /// graph for N sequences; see ggml_ops_qwen35_batched_arena.cpp). Returns
         /// 1 on success, 0 on a safe pre-compute decline, and -1 when graph
         /// execution may have partially mutated recurrent state.</summary>
         public static int Qwen35ArenaDecodeBatchedStatus(
             Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
-            int[] tokenIds, int[] positions,
+            int[] tokenIds, int[] positions, int[] ropePositions,
             IntPtr[] kCaches, IntPtr[] vCaches,
             IntPtr[] convStates, IntPtr[] deltaStates,
             int[] gdnHostAuth, int[] cacheSizes,
@@ -2340,7 +2347,7 @@ namespace TensorSharp.GGML
             IntPtr tokenEmbd, int tokenEmbdType,
             long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
             IntPtr sampled, bool wantLogits)
-            => GgmlNative.Qwen35ArenaDecodeBatchedStatus(layers, numLayers, nSeqs, tokenIds, positions,
+            => GgmlNative.Qwen35ArenaDecodeBatchedStatus(layers, numLayers, nSeqs, tokenIds, positions, ropePositions,
                 kCaches, vCaches, convStates, deltaStates, gdnHostAuth, cacheSizes,
                 numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType,
                 convKernel, headKDim, headVDim, numKHeads, numVHeads,
@@ -2355,7 +2362,7 @@ namespace TensorSharp.GGML
         /// failure cannot be mistaken for a safe runtime decline.</summary>
         public static bool TryQwen35ArenaDecodeBatched(
             Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
-            int[] tokenIds, int[] positions,
+            int[] tokenIds, int[] positions, int[] ropePositions,
             IntPtr[] kCaches, IntPtr[] vCaches,
             IntPtr[] convStates, IntPtr[] deltaStates,
             int[] gdnHostAuth, int[] cacheSizes,
@@ -2372,7 +2379,7 @@ namespace TensorSharp.GGML
             long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
             IntPtr sampled, bool wantLogits)
             => Qwen35ArenaStatusAsBool(Qwen35ArenaDecodeBatchedStatus(
-                layers, numLayers, nSeqs, tokenIds, positions,
+                layers, numLayers, nSeqs, tokenIds, positions, ropePositions,
                 kCaches, vCaches, convStates, deltaStates, gdnHostAuth, cacheSizes,
                 numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType,
                 convKernel, headKDim, headVDim, numKHeads, numVHeads,
@@ -2501,7 +2508,7 @@ namespace TensorSharp.GGML
         public static bool Qwen35ModelDecode(
             Qwen35LayerDecodeArgs[] layers, int numLayers,
             bool reseedState,
-            IntPtr hidden, int hiddenSize, int position,
+            IntPtr hidden, int hiddenSize, int position, int ropePositionDelta,
             int numHeads, int numKvHeads, int headDim, int cacheSize,
             int ropeNDims, int ropeMode, int kvCacheType,
             int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
@@ -2515,7 +2522,7 @@ namespace TensorSharp.GGML
         {
             return GgmlNative.Qwen35ModelDecode(
                 layers, numLayers, reseedState,
-                hidden, hiddenSize, position,
+                hidden, hiddenSize, position, ropePositionDelta,
                 numHeads, numKvHeads, headDim, cacheSize,
                 ropeNDims, ropeMode, kvCacheType,
                 convKernel, headKDim, headVDim, numKHeads, numVHeads,
@@ -2538,7 +2545,7 @@ namespace TensorSharp.GGML
             int tokenId,
             IntPtr tokenEmbedding, int tokenEmbeddingType,
             long tokenEmbeddingNe0, long tokenEmbeddingNe1, long tokenEmbeddingBytes,
-            int hiddenSize, int position,
+            int hiddenSize, int position, int ropePositionDelta,
             int numHeads, int numKvHeads, int headDim, int cacheSize,
             int ropeNDims, int ropeMode, int kvCacheType,
             int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
@@ -2554,7 +2561,7 @@ namespace TensorSharp.GGML
                 tokenId,
                 tokenEmbedding, tokenEmbeddingType,
                 tokenEmbeddingNe0, tokenEmbeddingNe1, tokenEmbeddingBytes,
-                hiddenSize, position,
+                hiddenSize, position, ropePositionDelta,
                 numHeads, numKvHeads, headDim, cacheSize,
                 ropeNDims, ropeMode, kvCacheType,
                 convKernel, headKDim, headVDim, numKHeads, numVHeads,
@@ -2593,7 +2600,7 @@ namespace TensorSharp.GGML
             IntPtr captureData = default, int[] captureLayers = null, int captureCount = 0,
             int stateSnapshots = 1, IntPtr stateSnapshotsUsed = default,
             bool deviceStateCurrent = false, bool deferStateDownload = false,
-            long ownerId = 0)
+            long ownerId = 0, int ropePositionDelta = 0)
         {
             return GgmlNative.Qwen35ModelVerify(
                 layers, numLayers, hidden, hiddenSize, startPos, numTokens,
@@ -2607,7 +2614,7 @@ namespace TensorSharp.GGML
                 lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
                 finalNorm, normedOut, nLogitRows, mropePos, mropeSections,
                 tpDegree, tpPlanOut, captureData, captureLayers, captureCount, stateSnapshots,
-                stateSnapshotsUsed, deviceStateCurrent, deferStateDownload, ownerId);
+                stateSnapshotsUsed, deviceStateCurrent, deferStateDownload, ownerId, ropePositionDelta);
         }
 
         /// <summary>Commit one recurrent-state snapshot into the live device state
@@ -3133,7 +3140,8 @@ namespace TensorSharp.GGML
             int ropePosition = -1,
             // GPU this span's layers live on (layer split). -1 / 0 = the current
             // rank, which is the only rank on a single-GPU run.
-            int device = 0)
+            int device = 0, IntPtr hiddenOut = default, int logitsRows = 1,
+            IntPtr qsa = default, IntPtr qsaPositions = default, int qsaPositionCount = 0)
         {
             return GgmlNative.Qwen4ExpTokenSpan(ffn, gdn, attn, kinds, layerBegin, layerEnd,
                 resData, maskData, nEmbd, hc, hcLowRank, nTokens,
@@ -3142,8 +3150,11 @@ namespace TensorSharp.GGML
                 nRot, ropeBase, ropeFreqScale, attnScale,
                 nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly,
                 head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition,
-                device);
+                device, hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount);
         }
+
+        public static bool Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device)
+            => GgmlNative.Qwen4ExpCopyQsaCache(key, destination, bytes, device);
 
         public static void Qwen4ExpResetFfnCache() => GgmlNative.Qwen4ExpResetFfnCache();
 
@@ -3152,6 +3163,38 @@ namespace TensorSharp.GGML
         public static void Qwen4ExpReleaseAllSeqState() => GgmlNative.Qwen4ExpReleaseAllSeqState();
 
         public static void Qwen4ExpReleaseSeqState(IntPtr[] keys) => GgmlNative.Qwen4ExpReleaseSeqState(keys);
+
+        public static IntPtr Qwen4ExpStateSnapshotCreate(IntPtr[] keys, int[] devices,
+            IntPtr attn, IntPtr gdn, IntPtr ple)
+            => GgmlNative.Qwen4ExpStateSnapshotCreate(keys, devices, attn, gdn, ple);
+        public static bool Qwen4ExpSpecApiAvailable()
+        {
+            try { return GgmlNative.TSGgml_Qwen4ExpSpecApiVersion() >= 1; }
+            catch (EntryPointNotFoundException) { return false; }
+            catch (DllNotFoundException) { return false; }
+        }
+        public static bool Qwen4ExpQsaApiAvailable()
+        {
+            try { return GgmlNative.TSGgml_Qwen4ExpSpecApiVersion() >= 2; }
+            catch (EntryPointNotFoundException) { return false; }
+            catch (DllNotFoundException) { return false; }
+        }
+        public static bool Qwen4ExpStateSnapshotCapture(IntPtr handle)
+            => GgmlNative.TSGgml_Qwen4ExpStateSnapshotCapture(handle) != 0;
+        public static IntPtr Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config,
+            ref Qwen4ExpAttnArgs attn, ref Qwen4ExpFfnArgs ffn, ref Qwen4ExpHeadArgs head)
+            => GgmlNative.TSGgml_Qwen4ExpMtpCreate(ref config, ref attn, ref ffn, ref head);
+        public static bool Qwen4ExpMtpForward(IntPtr handle, IntPtr embedding, IntPtr previous,
+            int count, int position, int ropePosition, IntPtr mrope3, IntPtr hiddenOut, IntPtr logitsOut)
+            => GgmlNative.TSGgml_Qwen4ExpMtpForward(handle, embedding, previous,
+                count, position, ropePosition, mrope3, hiddenOut, logitsOut) != 0;
+        public static void Qwen4ExpMtpFree(IntPtr handle) => GgmlNative.TSGgml_Qwen4ExpMtpFree(handle);
+        public static bool Qwen4ExpMtpCopyKv(IntPtr handle, IntPtr k, IntPtr v, long bytes)
+            => GgmlNative.TSGgml_Qwen4ExpMtpCopyKv(handle, k, v, bytes) != 0;
+        public static bool Qwen4ExpStateSnapshotRestore(IntPtr handle)
+            => GgmlNative.TSGgml_Qwen4ExpStateSnapshotRestore(handle) != 0;
+        public static void Qwen4ExpStateSnapshotFree(IntPtr handle)
+            => GgmlNative.TSGgml_Qwen4ExpStateSnapshotFree(handle);
 
         public static void GatedDeltaNetChunked(
             Tensor q, Tensor k, Tensor v, Tensor z,
@@ -3383,6 +3426,27 @@ namespace TensorSharp.GGML
         public static void NemotronMamba2DecodeClear(ulong modelKey) =>
             GgmlNative.NemotronMamba2DecodeClear(modelKey);
 
+        /// <summary>
+        /// Copy the device-resident recurrent state that <see cref="NemotronMamba2Decode"/>
+        /// keeps for <paramref name="stateKey"/> back into the host arrays. Returns false when
+        /// the native library has no entry for the key (the host arrays are authoritative).
+        /// Throws <see cref="EntryPointNotFoundException"/> against a native library that
+        /// predates the export.
+        /// </summary>
+        public static unsafe bool NemotronMamba2DecodeReadState(ulong stateKey, float[] convState, float[] ssmState)
+        {
+            if (stateKey == 0)
+                throw new ArgumentException("stateKey must be non-zero.", nameof(stateKey));
+            ArgumentNullException.ThrowIfNull(convState);
+            ArgumentNullException.ThrowIfNull(ssmState);
+            fixed (float* convPtr = convState)
+            fixed (float* ssmPtr = ssmState)
+            {
+                return GgmlNative.NemotronMamba2DecodeReadState(
+                    stateKey, (IntPtr)convPtr, convState.Length, (IntPtr)ssmPtr, ssmState.Length);
+            }
+        }
+
         public static void Gemma4ModelDecode(
             IntPtr hiddenData, int hiddenSize, int numLayers,
             IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
@@ -3505,6 +3569,101 @@ namespace TensorSharp.GGML
                 logitsData, vocabSize,
                 lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
                 finalNormData, logitSoftcap);
+        }
+
+        /// <summary>Capability bits of the native token-batched dense decode kernel
+        /// (<c>TSGgml_Gemma4BatchedDecodeCapabilities</c>).</summary>
+        [Flags]
+        public enum Gemma4BatchedDecodeCaps
+        {
+            None = 0,
+            /// <summary>Per-layer embeddings (uploaded or gathered in-kernel per row).</summary>
+            Ple = 1,
+            /// <summary>KV-donor (shared-KV) layers via a kv_source map.</summary>
+            KvDonor = 2,
+            /// <summary>Local (SWA) layers past their ring: write pos % cache, read flat.</summary>
+            SwaWrap = 4,
+        }
+
+        /// <summary>What the native token-batched dense decode supports beyond its
+        /// v1 scope (PLE, KV-donor layers, SWA wrap). <see cref="Gemma4BatchedDecodeCaps.None"/>
+        /// on a native build that predates the probe.</summary>
+        public static Gemma4BatchedDecodeCaps Gemma4BatchedDecodeCapabilities()
+            => (Gemma4BatchedDecodeCaps)GgmlNative.Gemma4BatchedDecodeCapabilities();
+
+        /// <summary>Extended token-batched dense decode: <see cref="Gemma4ModelDecodeBatched"/>
+        /// plus the KV-donor map (<paramref name="kvSourceArr"/>) and per-row PLE,
+        /// gathered in-kernel from the quantized table over <paramref name="pleTokenIds"/>
+        /// (preferred) or uploaded through <paramref name="pleData"/>
+        /// ([nSeqs][numLayers*pleDim] F32). Returns false when the kernel declines
+        /// (a global layer's cache is too small) so the caller falls back.</summary>
+        public static bool Gemma4ModelDecodeBatchedEx(
+            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
+            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
+            IntPtr[] oArr, IntPtr[] postAttnNormArr,
+            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
+            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
+            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
+            float[] ropeBaseArr, float[] layerScalarArr,
+            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
+            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
+            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
+            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
+            int numHeads, int[] positions,
+            float eps, int slidingWindow,
+            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
+            int[] ropeNDimsArr,
+            int kvCacheType,
+            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
+            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
+            IntPtr logitsData, int vocabSize,
+            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
+            IntPtr finalNormData, float logitSoftcap,
+            int[] kvSourceArr,
+            IntPtr pleData, int pleDim,
+            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
+            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
+            IntPtr[] plePostNormArr,
+            IntPtr pleTokenEmbdData = default, int pleTokenEmbdType = 0,
+            long pleTokenEmbdNe0 = 0, long pleTokenEmbdNe1 = 0, long pleTokenEmbdBytes = 0,
+            int[] pleTokenIds = null,
+            IntPtr pleModelProjData = default, int pleModelProjType = 0,
+            long pleModelProjNe0 = 0, long pleModelProjNe1 = 0, long pleModelProjBytes = 0,
+            IntPtr pleModelProjNormData = default)
+        {
+            return GgmlNative.Gemma4ModelDecodeBatchedEx(
+                hiddenData, hiddenSize, numLayers, nSeqs,
+                attnNormArr, qkvArr, qNormArr, kNormArr,
+                oArr, postAttnNormArr,
+                ffnNormArr, guArr, downArr, postFfnNormArr,
+                kCacheArr, vCacheArr,
+                headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr,
+                ropeBaseArr, layerScalarArr,
+                qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr,
+                oTypeArr, oNe0Arr, oNe1Arr, oBytesArr,
+                guTypeArr, guNe0Arr, guNe1Arr, guBytesArr,
+                downTypeArr, downNe0Arr, downNe1Arr, downBytesArr,
+                numHeads, positions,
+                eps, slidingWindow,
+                ropeFreqFactors, ropeFreqFactorsLen,
+                ropeNDimsArr,
+                kvCacheType,
+                kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr,
+                vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr,
+                logitsData, vocabSize,
+                lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes,
+                finalNormData, logitSoftcap,
+                kvSourceArr,
+                pleData, pleDim,
+                pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr,
+                pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr,
+                plePostNormArr,
+                pleTokenEmbdData, pleTokenEmbdType,
+                pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes,
+                pleTokenIds,
+                pleModelProjData, pleModelProjType,
+                pleModelProjNe0, pleModelProjNe1, pleModelProjBytes,
+                pleModelProjNormData);
         }
 
         /// <summary>Fused multi-token speculative verify. Returns false when the

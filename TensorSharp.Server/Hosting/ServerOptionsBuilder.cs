@@ -100,7 +100,11 @@ public static class ServerOptionsBuilder
             defaultMaxTokens = DefaultMaxTokensFallback;
         }
 
-        string uploadDirectory = Path.Combine(baseDirectory, "uploads");
+        // Keep mutable media outside a pinned/read-only application deployment
+        // when configured, just as logs and prefix checkpoints can be relocated.
+        string? uploadDirectory = Environment.GetEnvironmentVariable("TENSORSHARP_UPLOAD_DIR");
+        if (string.IsNullOrWhiteSpace(uploadDirectory))
+            uploadDirectory = Path.Combine(baseDirectory, "uploads");
         Directory.CreateDirectory(uploadDirectory);
 
         string? logDirectory = Environment.GetEnvironmentVariable("TENSORSHARP_LOG_DIR");
@@ -780,6 +784,16 @@ public static class ServerOptionsBuilder
             }
         }
         return changed;
+    }
+
+    /// <summary>Disable scheduler prefix reuse when the host's prefix-cache opt-out
+    /// is present. Startup preparation and persistence use the same parsed flag.</summary>
+    public static bool ApplyPrefixCacheCliFlag(string[] args)
+    {
+        if (args == null || !args.Any(a => string.Equals(a, "--no-prefix-cache", StringComparison.OrdinalIgnoreCase)))
+            return false;
+        Environment.SetEnvironmentVariable("TS_SCHED_PREFIX_CACHE", "0");
+        return true;
     }
 
     /// <summary>
