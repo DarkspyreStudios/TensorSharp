@@ -108,3 +108,6 @@ TensorAgent/python-runtime/
 
 # Claude Code session state and agent worktrees
 .claude/
+
+# Generated validation evidence stays local; keep reusable tools and fixtures elsewhere.
+/docs/validation/

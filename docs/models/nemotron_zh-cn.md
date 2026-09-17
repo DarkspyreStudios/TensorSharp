@@ -272,7 +272,7 @@ Parakeet 风格 log-mel 频谱提取（镜像 ollama 的 `process_audio.go`）�
 
 ### 4.7 音频塔（`NemotronAudioEncoder`，配套 GGUF）
 
-`NemotronAudioEncoder` 运行 NVIDIA 的 Parakeet/FastConformer 编码器（下采样卷积、相对位置注意力、卷积块）以及把输出投影到语言模型隐藏维度的 `sound_projection` MLP，每段音频单独编码，因此相邻音频的填充既不会改变它的长度，也不会泄漏进它的双向注意力。它读取一个**配套 GGUF**：保留官方 `sound_encoder.encoder.*` / `sound_projection.*` 张量名，超参数放在 `nemotron.audio.*`（`general.architecture=nemotron_audio`）。没有任何公开仓库提供这样的文件；从 NVIDIA BF16 检查点提取它的转换脚本与证据一起归档在 [`docs/validation/qualification-2026-09-16/nemotron-audio-cpu`](../validation/qualification-2026-09-16/nemotron-audio-cpu/README.md)（`reference-scripts/prepare.py`；`prepare_f32.py` 写出同样的权重并设置 `nemotron.audio.compute_bf16=false`）。
+`NemotronAudioEncoder` 运行 NVIDIA 的 Parakeet/FastConformer 编码器（下采样卷积、相对位置注意力、卷积块）以及把输出投影到语言模型隐藏维度的 `sound_projection` MLP，每段音频单独编码，因此相邻音频的填充既不会改变它的长度，也不会泄漏进它的双向注意力。它读取一个**配套 GGUF**：保留官方 `sound_encoder.encoder.*` / `sound_projection.*` 张量名，超参数放在 `nemotron.audio.*`（`general.architecture=nemotron_audio`）。没有任何公开仓库提供这样的文件；从 NVIDIA BF16 检查点提取它的转换脚本保存在 [`eng/nemotron-audio`](../../eng/nemotron-audio/README.md)（`prepare.py`；`prepare_f32.py` 写出同样的权重并设置 `nemotron.audio.compute_bf16=false`）。
 
 加载看的是张量，而不是开关。`LoadProjectors` 把 `--mmproj` 路径交给两个塔：文件含 `v.*` 张量时才加载视觉编码器，含 `sound_projection.linear2.weight` 时才加载音频编码器（若 `TS_NEMOTRON_AUDIO_MMPROJ` 指定了文件，则改从该文件加载，这样视觉 mmproj 与音频配套文件可以同时使用）。编码器随后校验每个张量形状与 Parakeet 采样配置，投影宽度必须等于语言模型隐藏维度；残缺或不匹配的配套文件会以 `InvalidDataException` 使加载失败，而不是被继续使用。只有这之后 `IsAudioEncoderLoaded` 才会解除 §4.6 的拒绝，`ProcessNemotronHistory` 针对原始 prompt 规划每张图像和每段音频（`PlanNemotronMedia`，按模态保持附件顺序），把每个 `<so_embedding>` 展开为 `<so_start>` + N + `<so_end>`，并排队投影后的行。
 

@@ -97,7 +97,7 @@ public sealed class EmbeddingTokenizerTests
     {
         using var file = new GgufFile(Environment.GetEnvironmentVariable("TENSORSHARP_SNOWFLAKE_EMBED_MODEL")!);
         ITokenizer tokenizer = EmbeddingTokenizer.Create(file);
-        using var reference = JsonDocument.Parse(System.IO.File.ReadAllText(ValidationFile("snowflake-tokenization.json")));
+        using var reference = JsonDocument.Parse(System.IO.File.ReadAllText(FixtureFile("snowflake-tokenization.json")));
         foreach (var item in reference.RootElement.EnumerateArray())
             AssertTokens(tokenizer, item.GetProperty("text").GetString()!, item.GetProperty("tokens"));
         AssertHuggingFace(tokenizer, "snowflake");
@@ -112,7 +112,7 @@ public sealed class EmbeddingTokenizerTests
 
     private static void AssertHuggingFace(ITokenizer tokenizer, string model)
     {
-        using var reference = JsonDocument.Parse(System.IO.File.ReadAllText(ValidationFile("huggingface-tokenization.json")));
+        using var reference = JsonDocument.Parse(System.IO.File.ReadAllText(FixtureFile("huggingface-tokenization.json")));
         foreach (var item in reference.RootElement.GetProperty(model).GetProperty("cases").EnumerateArray())
             // Exported GGUF semantics are authoritative where the upstream HF
             // tokenizer differs; the fixture retains both IDs and the reason.
@@ -127,12 +127,12 @@ public sealed class EmbeddingTokenizerTests
         Assert.True(ids.SequenceEqual(actual), $"Text {JsonSerializer.Serialize(text)}\nExpected: [{string.Join(',', ids)}]\nActual: [{string.Join(',', actual)}]");
     }
 
-    private static string ValidationFile(string name)
+    private static string FixtureFile(string name)
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory != null; directory = directory.Parent)
         {
             if (System.IO.File.Exists(Path.Combine(directory.FullName, "TensorSharp.slnx")))
-                return Path.Combine(directory.FullName, "docs", "validation", "embeddings-2026-09", name);
+                return Path.Combine(directory.FullName, "InferenceWeb.Tests", "Fixtures", "EmbeddingTokenizer", name);
         }
         throw new DirectoryNotFoundException("TensorSharp source tree is required for tokenizer reference fixtures.");
     }

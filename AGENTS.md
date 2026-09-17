@@ -7,3 +7,10 @@
 - Validate native changes against an unchanged upstream checkout. Record the
   dependency revision, actual test coverage, and benchmark limitations; do not
   count skipped or unavailable model/device scenarios as passing validation.
+
+# Validation artifacts
+
+- Keep generated validation logs, reports, and snapshots in ignored `docs/validation/`
+  or `artifacts/`; do not force-add them to Git.
+- Store reusable validation tools in `eng/` and required test fixtures in the
+  relevant test project, outside the generated evidence directories.

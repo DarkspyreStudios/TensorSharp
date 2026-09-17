@@ -373,9 +373,9 @@ leak into its bidirectional attention. It reads a **companion GGUF** that keeps
 the official `sound_encoder.encoder.*` / `sound_projection.*` tensor names with
 `nemotron.audio.*` hyperparameters (`general.architecture=nemotron_audio`).
 No public repository ships such a file; the conversion scripts that extract it
-from NVIDIA's BF16 checkpoint are archived with the evidence in
-[`docs/validation/qualification-2026-09-16/nemotron-audio-cpu`](../validation/qualification-2026-09-16/nemotron-audio-cpu/README.md)
-(`reference-scripts/prepare.py`; `prepare_f32.py` writes the same weights with
+from NVIDIA's BF16 checkpoint are in
+[`eng/nemotron-audio`](../../eng/nemotron-audio/README.md)
+(`prepare.py`; `prepare_f32.py` writes the same weights with
 `nemotron.audio.compute_bf16=false`).
 
 Loading follows the tensors, not a flag. `LoadProjectors` hands the `--mmproj`
