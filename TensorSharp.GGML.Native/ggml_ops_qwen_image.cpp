@@ -966,7 +966,7 @@ TSG_EXPORT int TSGgml_QwenImageJointAttn(const TSGgmlQwenImageJointAttnDesc* d)
         ggml_tensor* k_attn = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
         ggml_tensor* v_attn = ggml_cont(ctx, ggml_permute(ctx, v, 0, 2, 1, 3));
         ggml_tensor* scores = ggml_mul_mat(ctx, k_attn, q_attn);  // [total, total, heads]
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, nullptr, scale, 0.0f);
         ggml_tensor* v_perm = ggml_cont(ctx, ggml_permute(ctx, v_attn, 1, 0, 2, 3)); // [total, hd, heads]
         ggml_tensor* attn = ggml_mul_mat(ctx, v_perm, probs);    // [hd, total, heads]
@@ -1187,7 +1187,7 @@ ggml_tensor* qi_attention(ggml_context* ctx, ggml_tensor* q_attn, ggml_tensor* k
         // already bounds K/V into F16-safe range, and softmax·V is a convex combination
         // (|out| <= max|V/S|), so F16 accumulation cannot overflow there.
         static const bool f16acc = []{ const char* e = std::getenv("TS_QWEN_DIT_FLASH_F16ACC"); return e != nullptr && e[0] == '1'; }();
-        if (!f16acc) ggml_flash_attn_ext_set_prec(faop, GGML_PREC_F32);
+        if (!f16acc) ggml_prec_set_acc(faop, GGML_PREC_F32);
         // Only take the flash path if the active backend actually supports this op on
         // this GPU — else an unsupported op runs anyway and crashes (illegal access).
         // The decode/verify kernels guard the same way and fall back to materialized.
@@ -1203,7 +1203,7 @@ ggml_tensor* qi_attention(ggml_context* ctx, ggml_tensor* q_attn, ggml_tensor* k
         // fall through to the materialized path below
     }
     ggml_tensor* scores = ggml_mul_mat(ctx, k_attn, q_attn);
-    ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+    ggml_prec_set_acc(scores, GGML_PREC_F32);
     ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, nullptr, scale, 0.0f);
     ggml_tensor* v_perm = ggml_cont(ctx, ggml_permute(ctx, v_attn, 1, 0, 2, 3));
     ggml_tensor* attn = ggml_mul_mat(ctx, v_perm, probs);

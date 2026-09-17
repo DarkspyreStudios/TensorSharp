@@ -86,7 +86,7 @@ namespace
             {
                 ggml_tensor* fa = ggml_flash_attn_ext(ctx, query, k_window, v_window, mask,
                     1.0f / std::sqrt(static_cast<float>(head_dim)), 0.0f, 0.0f);
-                ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+                ggml_prec_set_acc(fa, GGML_PREC_F32);
                 ggml_format_name(fa, "attention_%d", i);
                 require(ggml_backend_supports_op(backend, fa), "Backend does not support test attention shape.");
                 attention.push_back(fa);

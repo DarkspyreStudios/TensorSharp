@@ -1307,7 +1307,7 @@ ggml_tensor* build_vision_attention(
             q_c = ggml_cont(ctx, q_c);
 
         ggml_tensor* scores = ggml_mul_mat(ctx, k_cont, q_c); // [rows(kv), len, heads]
-        ggml_mul_mat_set_prec(scores, GGML_PREC_F32);
+        ggml_prec_set_acc(scores, GGML_PREC_F32);
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, nullptr, attn_scale, 0.0f);
         ggml_tensor* out_c = ggml_mul_mat(ctx, vt, probs);    // [hd, len, heads]
         out = out == nullptr ? out_c : ggml_concat(ctx, out, out_c, 1);
@@ -2790,14 +2790,14 @@ int fused_ple_block_quant_f32_impl(
         ? ggml_reshape_2d(context.value, contiguous_residual, hidden, 1)
         : contiguous_residual;
     ggml_tensor* gate = ggml_mul_mat(context.value, inp_gate_binding.tensor, res_2d); // [ple_dim, rows]
-    ggml_mul_mat_set_prec(gate, GGML_PREC_F32);
+    ggml_prec_set_acc(gate, GGML_PREC_F32);
     ggml_tensor* gate_gelu = ggml_gelu(context.value, gate);
     ggml_tensor* glu = ggml_mul(context.value, gate_gelu, pli_binding.tensor);        // [ple_dim, rows]
     ggml_tensor* glu_2d = (rows == 1)
         ? ggml_reshape_2d(context.value, glu, ple_dim, 1)
         : glu;
     ggml_tensor* ple_proj = ggml_mul_mat(context.value, proj_binding.tensor, glu_2d); // [hidden, rows]
-    ggml_mul_mat_set_prec(ple_proj, GGML_PREC_F32);
+    ggml_prec_set_acc(ple_proj, GGML_PREC_F32);
     ggml_tensor* normed = ggml_rms_norm(context.value, ple_proj, eps);
     ggml_tensor* scaled = ggml_mul(context.value, normed, post_norm_tensor);
     ggml_tensor* scaled_flat = ggml_reshape_1d(context.value, scaled, static_cast<int64_t>(rows) * hidden);

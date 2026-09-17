@@ -3401,7 +3401,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
             ggml_tensor * k = ggml_new_tensor_4d(pctx, GGML_TYPE_F16, hp.n_embd_head, 256, 1, 1);
             ggml_tensor * mask = ggml_new_tensor_4d(pctx, GGML_TYPE_F16, 256, 1, 1, 1);
             ggml_tensor * fa = ggml_flash_attn_ext(pctx, q, k, k, mask, 1.0f, 0.0f, 0.0f);
-            ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+            ggml_prec_set_acc(fa, GGML_PREC_F32);
             m->flash_attn = ggml_backend_supports_op(m->backends[0], fa);
             ggml_free(pctx);
         }
@@ -4087,7 +4087,7 @@ struct graph_builder
             : build_hc_head_w(x, ds.hc_head_fn, ds.hc_head_scale, ds.hc_head_base); // [n_embd, 1, nt]
         h = ggml_reshape_2d(ctx, h, hp.n_embd, nt);
         ggml_tensor * base = ggml_mul_mat(ctx, m.output, rms(h, ds.norm));   // [n_vocab, nt]
-        ggml_mul_mat_set_prec(base, GGML_PREC_F32);
+        ggml_prec_set_acc(base, GGML_PREC_F32);
 
         // Markov chain: position i is biased by W2 . W1[prev(i)], and its argmax
         // is prev(i+1). prev(0) is the anchor, i.e. block token 0.
@@ -4098,7 +4098,7 @@ struct graph_builder
         {
             ggml_tensor * w1 = ggml_get_rows(ctx, ds.markov_w1, prev);        // [rank, 1]
             ggml_tensor * bias = ggml_mul_mat(ctx, ds.markov_w2, w1);         // [n_vocab, 1]
-            ggml_mul_mat_set_prec(bias, GGML_PREC_F32);
+            ggml_prec_set_acc(bias, GGML_PREC_F32);
             ggml_tensor * col = ggml_view_2d(ctx, base, hp.n_vocab, 1, base->nb[1], i * base->nb[1]);
             col = ggml_add(ctx, col, bias);
             ggml_tensor * tok = ggml_argmax(ctx, col);                        // I32 [1]
@@ -4316,7 +4316,7 @@ struct graph_builder
             {
                 cur = ggml_flash_attn_ext(ctx, qp, kp, kp, kq_mask, kq_scale, 0.0f, 0.0f);
                 ggml_flash_attn_ext_add_sinks(cur, sinks);
-                ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
+                ggml_prec_set_acc(cur, GGML_PREC_F32);
                 // V4.1 exposes at most the sliding window plus the selected
                 // compressed rows per query. CUDA can compact this existing mask
                 // and attend to its finite entries without duplicating K/V for
@@ -4337,7 +4337,7 @@ struct graph_builder
         else
         {
             ggml_tensor * kq = ggml_mul_mat(ctx, kp, qp);   // [n_kv, nt, n_head]
-            ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+            ggml_prec_set_acc(kq, GGML_PREC_F32);
             if (hp.v41) precise_matmul(kq);
             if (device >= 0) pin(kq, device);
 
@@ -4749,7 +4749,7 @@ struct graph_builder
         const float clamp_limit = hp.swiglu_clamp_exp.empty() ? 0.0f : hp.swiglu_clamp_exp[il];
 
         ggml_tensor * logits = ggml_mul_mat(ctx, L.ffn_gate_inp, cur);   // [n_expert, nt]
-        ggml_mul_mat_set_prec(logits, GGML_PREC_F32);
+        ggml_prec_set_acc(logits, GGML_PREC_F32);
 
         ggml_tensor * selected = nullptr;
         ggml_tensor * weights = nullptr;

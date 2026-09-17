@@ -368,7 +368,7 @@ namespace
                 set_last_error("Muse-Glimmer vision block: failed to create flash attention.");
                 return 0;
             }
-            ggml_flash_attn_ext_set_prec(fa, GGML_PREC_F32);
+            ggml_prec_set_acc(fa, GGML_PREC_F32);
             if (!backend_supports_op(fa))
             {
                 // Do not silently build the old O(N^2) fallback here.  Returning
