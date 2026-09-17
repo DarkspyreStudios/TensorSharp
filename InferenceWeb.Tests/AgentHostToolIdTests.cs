@@ -157,7 +157,7 @@ public class AgentHostToolIdTests
             (_, _, _) => Task.FromResult(new SkillTurnOutput(++rounds == 1
                 ? new ParsedOutput { ToolCalls = [Call("finished-call", "skills_list")] }
                 : new ParsedOutput { Content = "done" })), new SkillAgentLoopOptions { MaxRounds = 1 });
-        var toolResult = Assert.Single(result.Messages.Where(message => message.Role == "tool"));
+        var toolResult = Assert.Single(result.Messages, message => message.Role == "tool");
         Assert.Equal("finished-call", toolResult.ToolCallId);
         Assert.Equal("user", result.Messages[^1].Role);
         Assert.Contains("limit on tool calls", result.Messages[^1].Content);

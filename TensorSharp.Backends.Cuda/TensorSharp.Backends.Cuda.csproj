@@ -109,7 +109,7 @@
           Inputs="@(CudaKernel);@(CudaKernelHeader);$(MSBuildProjectFullPath);$(CudaArchResolverPs1);$(CudaArchResolverSh)"
           Outputs="@(CudaKernel->'$(PtxOutputDir)/%(Filename).ptx');$(CudaPtxStampDir)/tensorsharp_cuda_$(_CudaBuildSettingsKey).stamp">
     <Message Condition="'$(_NvccExitCode)' != '0'" Importance="high"
-             Text="WARNING: TensorSharp CUDA kernels were not compiled because nvcc was not found. The CUDA backend will keep CPU fallbacks for PTX-backed ops." />
+             Text="TensorSharp CUDA build: nvcc not found; using the committed PTX kernels." />
     <PropertyGroup Condition="'$(_NvccExitCode)' == '0' And '$([MSBuild]::IsOSPlatform(Windows))' == 'true' And '$(VCToolsInstallDir)' != ''">
       <_CompilerBinDir>--compiler-bindir="$(VCToolsInstallDir)bin\Hostx64\x64"</_CompilerBinDir>
     </PropertyGroup>

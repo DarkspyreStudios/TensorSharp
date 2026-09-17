@@ -24,16 +24,16 @@ namespace TensorSharp.Runtime.Scheduling
         private static long _counter;
 
         public SequenceState(
-            string requestId,
+            string? requestId,
             IReadOnlyList<int> promptTokens,
             int maxNewTokens,
             int blockSize,
-            SamplingConfig samplingConfig,
-            object userTag = null,
-            IReadOnlyList<PromptMediaSpan> mediaSpans = null,
-            IReadOnlyList<int> cacheBreakpoints = null,
+            SamplingConfig? samplingConfig,
+            object? userTag = null,
+            IReadOnlyList<PromptMediaSpan>? mediaSpans = null,
+            IReadOnlyList<int>? cacheBreakpoints = null,
             int sharedPrefixTokens = 0,
-            string cacheScope = null)
+            string? cacheScope = null)
         {
             if (promptTokens == null) throw new ArgumentNullException(nameof(promptTokens));
             if (promptTokens.Count == 0) throw new ArgumentException("Prompt must be non-empty.", nameof(promptTokens));
@@ -104,7 +104,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// policy and the full prefix remains eligible; a non-null empty list explicitly
         /// disables prefix caching for this request, as does a sole breakpoint at zero.
         /// </summary>
-        public IReadOnlyList<int> CacheBreakpoints { get; }
+        public IReadOnlyList<int>? CacheBreakpoints { get; }
 
         /// <summary>
         /// The furthest explicit breakpoint, or 0 when an explicit policy allows no
@@ -124,7 +124,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// <summary>Cached sampler instance for this sequence. Avoids per-token
         /// <c>new TokenSampler()</c> allocations (~3 MB LOH at 262K vocab).
         /// Lazily initialized from <see cref="SamplingConfig"/>.</summary>
-        internal TokenSampler CachedSampler { get; private set; }
+        internal TokenSampler? CachedSampler { get; private set; }
 
         internal TokenSampler GetOrCreateSampler()
         {
@@ -135,7 +135,7 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>Sticky reference the caller can use to associate a session,
         /// HTTP request, or telemetry context with this sequence.</summary>
-        public object UserTag { get; }
+        public object? UserTag { get; }
 
         /// <summary>
         /// Where the prompt's images, video frames and audio clips sit and what content
@@ -159,7 +159,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// want continuation reuse pass a stable conversation scope. The explicit
         /// legacy mode retains its historical unscoped matching behavior.
         /// </summary>
-        public string CacheScope { get; }
+        public string? CacheScope { get; }
 
         public SequenceStatus Status { get; internal set; }
         public DateTime SubmittedAt { get; }
@@ -181,7 +181,7 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>The logits produced by the most recent forward at the
         /// sequence's "current" position. Used by the next step's sampler.</summary>
-        public float[] LastLogits { get; internal set; }
+        public float[]? LastLogits { get; internal set; }
 
         /// <summary>Next output token sampled ON-DEVICE by the batched greedy
         /// fast path (argmax of the step's logits, which are never downloaded).
@@ -194,10 +194,10 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>Reason the sequence finished, set when <see cref="Status"/>
         /// becomes one of the Finished* values.</summary>
-        public string FinishReason { get; internal set; }
+        public string? FinishReason { get; internal set; }
 
         /// <summary>Optional exception when <see cref="Status"/> is FinishedError.</summary>
-        public Exception Error { get; internal set; }
+        public Exception? Error { get; internal set; }
 
         /// <summary>Per-step telemetry: when scheduling started for this seq.</summary>
         public DateTime? FirstScheduledAt { get; internal set; }
@@ -218,7 +218,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// request, attached by the executor when speculation arms. Null when
         /// the sequence never ran speculatively. Diagnostic only; the engine
         /// logs it when the request finishes.</summary>
-        public SpeculationStats SpecStats { get; internal set; }
+        public SpeculationStats? SpecStats { get; internal set; }
 
         /// <summary>True when this sequence reuses the model's LIVE KV cache
         /// directly (its prompt extends exactly the tokens still resident in the
@@ -356,7 +356,7 @@ namespace TensorSharp.Runtime.Scheduling
 
         /// <summary>The prompt's full-block prefix-cache hashes, as the scheduler last
         /// computed them (see <c>ContinuousBatchScheduler.GetPromptBlockHashes</c>).</summary>
-        internal PromptBlockHashes CachedPromptBlockHashes { get; set; }
+        internal PromptBlockHashes? CachedPromptBlockHashes { get; set; }
 
         public override string ToString()
             => $"Seq({RequestId}, sn={Sn}, status={Status}, prompt={PromptTokens.Count}, out={OutputTokens.Count}, computed={NumComputedTokens})";

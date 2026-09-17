@@ -34,8 +34,8 @@ namespace TensorSharp.Server.Hosting
         public const int DefaultPort = 5000;
 
         public ServerHostingOptions(
-            string startupModelPath,
-            string startupMmProjPath,
+            string? startupModelPath,
+            string? startupMmProjPath,
             string defaultBackend,
             IReadOnlyList<BackendOption> supportedBackends,
             int defaultMaxTokens,
@@ -45,7 +45,7 @@ namespace TensorSharp.Server.Hosting
             int defaultVideoWidth,
             int defaultVideoHeight,
             int defaultVideoSteps,
-            string defaultVideoMode,
+            string? defaultVideoMode,
             string uploadDirectory,
             string logDirectory,
             bool fileLoggingEnabled,
@@ -64,7 +64,7 @@ namespace TensorSharp.Server.Hosting
             SkillSandboxMode skillsSandbox = SkillSandboxMode.Required,
             bool skillsAllowNetwork = false,
             bool prefixCacheEnabled = true,
-            string prefixCacheDirectory = null,
+            string? prefixCacheDirectory = null,
             bool embeddingsEnabled = false,
             int embeddingThreads = 0,
             int embeddingContextSize = 0)

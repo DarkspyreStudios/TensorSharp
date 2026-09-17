@@ -107,7 +107,7 @@ public sealed class SpeculativeCliFlagsTests : IDisposable
     [Theory]
     [InlineData("--spec-draft", "4")]
     [InlineData("--spec-draft=4", null)]
-    public void Apply_SpecDraft_AcceptsBothValueSpellings(string first, string second)
+    public void Apply_SpecDraft_AcceptsBothValueSpellings(string first, string? second)
     {
         string[] args = second == null ? new[] { first } : new[] { first, second };
 

@@ -150,14 +150,14 @@ namespace TensorSharp.Runtime.Scheduling
         // (The historical parse rule of the flags this type replaced.)
         private static bool ReadFlag(string name, bool fallback)
         {
-            string raw = Environment.GetEnvironmentVariable(name);
+            string? raw = Environment.GetEnvironmentVariable(name);
             if (string.IsNullOrEmpty(raw)) return fallback;
             return raw != "0" && !string.Equals(raw, "false", StringComparison.OrdinalIgnoreCase);
         }
 
         private static int ReadNonNegativeInt(string name, int fallback)
         {
-            string raw = Environment.GetEnvironmentVariable(name);
+            string? raw = Environment.GetEnvironmentVariable(name);
             if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int v) && v >= 0)
                 return v;
             return fallback;

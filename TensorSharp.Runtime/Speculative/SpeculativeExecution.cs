@@ -10,6 +10,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 
 namespace TensorSharp.Runtime.Speculative
 {
@@ -53,27 +54,28 @@ namespace TensorSharp.Runtime.Speculative
         private readonly ISpeculativeTarget _model;
         private readonly ISpeculator _speculator;
         private readonly ISpecTrunk _trunk;
-        private readonly bool _needsHidden;
+        [MemberNotNullWhen(true, nameof(_pendingH), nameof(_verifyH), nameof(_catchUpH))]
+        private bool NeedsHidden => _pendingH != null && _verifyH != null && _catchUpH != null;
         private readonly int _hidden;
         private readonly int _vocab;
 
         // Trunk hidden state of the token immediately BEFORE the next pending
         // token (llama.cpp's pending_h). Zeros before the first prompt token.
         // Null when the speculator needs no hidden state.
-        private readonly float[] _pendingH;
+        private readonly float[]? _pendingH;
 
         // Reusable buffers (speculative windows are small; prefill chunk
         // buffers grow to the largest chunk seen).
         private readonly float[] _verifyLogits;  // [(K+1) * vocab]
-        private readonly float[] _verifyH;       // [(K+1) * hidden]
-        private readonly float[] _catchUpH;      // [(K+1) * hidden]
+        private readonly float[]? _verifyH;       // [(K+1) * hidden]
+        private readonly float[]? _catchUpH;      // [(K+1) * hidden]
         private readonly float[] _stepLogits;    // [vocab] for plain/re-advance steps
         private readonly float[] _rowLogits;     // [vocab] scratch row handed to drawNext
         private readonly int[] _oneToken = new int[1];
 
         /// <summary>Logits handed back for a plain step; see the allocation note at
         /// its only assignment.</summary>
-        private float[] _plainOut;
+        private float[]? _plainOut;
 
         /// <summary>Consecutive decode steps on which the drafter proposed nothing.
         /// Reset by any verify.</summary>
@@ -87,8 +89,8 @@ namespace TensorSharp.Runtime.Speculative
         /// </summary>
         private const int PlainRunBeforeSwitch = 2;
         private readonly List<int> _draftTokens = new();
-        private float[] _chunkH;                 // [chunk * hidden] prefill h capture, shifted in place into (token k, h of k-1) pairs
-        private float[] _lastRowH;               // [hidden] the row the in-place shift would otherwise overwrite
+        private float[]? _chunkH;                 // [chunk * hidden] prefill h capture, shifted in place into (token k, h of k-1) pairs
+        private float[]? _lastRowH;               // [hidden] the row the in-place shift would otherwise overwrite
 
         /// <summary>The algorithm doing the drafting. Exposed for logs and for
         /// callers that want to inspect or retune it mid-run.</summary>
@@ -124,8 +126,8 @@ namespace TensorSharp.Runtime.Speculative
 
         public SpeculationStats Stats { get; } = new();
 
-        public SpeculativeExecution(ISpeculativeTarget model, ISpeculator speculator, ISpecTrunk trunk = null,
-            SpeculationCostGovernor governor = null)
+        public SpeculativeExecution(ISpeculativeTarget model, ISpeculator speculator, ISpecTrunk? trunk = null,
+            SpeculationCostGovernor? governor = null)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             _speculator = speculator ?? throw new ArgumentNullException(nameof(speculator));
@@ -140,7 +142,6 @@ namespace TensorSharp.Runtime.Speculative
             _governorLossesAtStart = Governor.Losses;
             _governorParkedAtStart = Governor.ParkedSteps;
 
-            _needsHidden = speculator.NeedsHiddenState;
             _hidden = model.SpecFeatureSize;
             _vocab = model.Config.VocabSize;
 
@@ -148,7 +149,7 @@ namespace TensorSharp.Runtime.Speculative
             _verifyLogits = new float[(k + 1) * (long)_vocab];
             _stepLogits = new float[_vocab];
             _rowLogits = new float[_vocab];
-            if (_needsHidden)
+            if (speculator.NeedsHiddenState)
             {
                 _pendingH = new float[_hidden];
                 _verifyH = new float[(k + 1) * _hidden];
@@ -191,7 +192,7 @@ namespace TensorSharp.Runtime.Speculative
             // A learned head that resumes after a gap still needs the trunk hidden
             // state of the last committed token, which no plain prefill captured:
             // the first step runs plain and captures it, drafting starts at the second.
-            _carryValid = !_needsHidden;
+            _carryValid = !NeedsHidden;
         }
 
         /// <summary>
@@ -213,7 +214,7 @@ namespace TensorSharp.Runtime.Speculative
             if (tokens.Length == 0)
                 return;
             _speculator.Commit(tokens, null, startPos);
-            _carryValid = !_needsHidden;
+            _carryValid = !NeedsHidden;
             Governor.NoteExternalPlainSteps(tokens.Length);
         }
 
@@ -223,7 +224,7 @@ namespace TensorSharp.Runtime.Speculative
         /// learned head that keeps no per-position state of its own
         /// (<see cref="ISpeculator.CanArmAfterPrefixReuse"/>).
         /// </summary>
-        public bool CanSeedCommitted => !_needsHidden || _speculator.CanArmAfterPrefixReuse;
+        public bool CanSeedCommitted => !NeedsHidden || _speculator.CanArmAfterPrefixReuse;
 
         // False until the trunk hidden state that drafting chains from has been
         // captured by a forward of this execution (see SeedCommitted).
@@ -256,7 +257,7 @@ namespace TensorSharp.Runtime.Speculative
 
             int n = chunk.Length;
 
-            if (!_needsHidden)
+            if (!NeedsHidden)
             {
                 _trunk.Forward(chunk, null, _stepLogits, allLogitsRows: false);
                 _speculator.Commit(chunk, null, startPos);
@@ -317,9 +318,9 @@ namespace TensorSharp.Runtime.Speculative
             int position,
             int kMax,
             Func<float[], int> drawNext,
-            Action<float[], IReadOnlyList<int>> adjustDraftLogits = null,
-            Action<int> onDraftAccepted = null,
-            IReadOnlyList<int> history = null)
+            Action<float[], IReadOnlyList<int>>? adjustDraftLogits = null,
+            Action<int>? onDraftAccepted = null,
+            IReadOnlyList<int>? history = null)
         {
             ArgumentNullException.ThrowIfNull(drawNext);
 
@@ -388,7 +389,7 @@ namespace TensorSharp.Runtime.Speculative
                 // forward with a per-op head), and the governor kept calling
                 // speculation a win against that inflated baseline: E4B-IQ4_XS on the
                 // host benchmark ran prose at 23-40 tok/s under it, against 65 plain.
-                bool cheapPlain = !_needsHidden
+                bool cheapPlain = !NeedsHidden
                     || (governorDeclined && _speculator.CanArmAfterPrefixReuse && _trunk.HasCheapPlainStep);
                 // A model whose plain step costs a graph-family switch keeps
                 // isolated plain steps in the speculative family, because paying the
@@ -406,10 +407,10 @@ namespace TensorSharp.Runtime.Speculative
                         parked: governorDeclined || plainRunDominates);   // the model's own decode step
                 else
                     _trunk.Forward(_oneToken, _verifyH, _stepLogits, allLogitsRows: false);
-                if (_needsHidden)
+                if (NeedsHidden)
                     Array.Copy(_pendingH, 0, _catchUpH, 0, _hidden);
-                _speculator.Commit(_oneToken, _needsHidden && !carryKnown ? null : _catchUpH, position);
-                if (_needsHidden)
+                _speculator.Commit(_oneToken, NeedsHidden && !carryKnown ? null : _catchUpH, position);
+                if (NeedsHidden)
                 {
                     if (cheapPlain)
                     {
@@ -522,7 +523,7 @@ namespace TensorSharp.Runtime.Speculative
             // hidden states.
             {
                 long tCatch0 = Stopwatch.GetTimestamp();
-                if (_needsHidden)
+                if (NeedsHidden)
                 {
                     Array.Copy(_pendingH, 0, _catchUpH, 0, _hidden);
                     if (m > 0)
@@ -532,7 +533,7 @@ namespace TensorSharp.Runtime.Speculative
                 Stats.CatchUpTicks += Stopwatch.GetTimestamp() - tCatch0;
             }
 
-            if (_needsHidden)
+            if (NeedsHidden)
                 Array.Copy(_verifyH, (long)m * _hidden, _pendingH, 0, _hidden);
 
             float[] nextLogits = new float[_vocab];
@@ -562,6 +563,7 @@ namespace TensorSharp.Runtime.Speculative
             Stats.GovernorParkedSteps = Governor.ParkedSteps - _governorParkedAtStart;
         }
 
+        [MemberNotNull(nameof(_chunkH), nameof(_lastRowH))]
         private void EnsureChunkBuffers(int chunkLen)
         {
             long need = (long)chunkLen * _hidden;

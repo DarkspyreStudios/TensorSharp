@@ -83,11 +83,10 @@ namespace TensorSharp.Runtime
         /// <summary>
         /// The stills and clips of one message, in the order their placeholders render.
         /// </summary>
-        public static List<Item> Layout(ChatMessage message)
+        public static List<Item> Layout(ChatMessage? message)
         {
             var items = new List<Item>();
-            var paths = message?.ImagePaths;
-            if (paths == null || paths.Count == 0)
+            if (message?.ImagePaths is not { Count: > 0 } paths)
                 return items;
 
             var times = message.ImageTimestamps;

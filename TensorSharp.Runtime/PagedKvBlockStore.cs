@@ -23,13 +23,13 @@ namespace TensorSharp.Runtime
     {
         private readonly object _gate = new();
         private readonly Dictionary<KvBlockHash, Node> _index = new();
-        private Node _head;
-        private Node _tail;
+        private Node? _head;
+        private Node? _tail;
         private long _residentBytes;
         private readonly long _maxBytes;
-        private readonly Action<KvBlockHash, byte[]> _spillOnEvict;
+        private readonly Action<KvBlockHash, byte[]>? _spillOnEvict;
 
-        public PagedKvBlockStore(long maxBytes, Action<KvBlockHash, byte[]> spillOnEvict = null)
+        public PagedKvBlockStore(long maxBytes, Action<KvBlockHash, byte[]>? spillOnEvict = null)
         {
             if (maxBytes <= 0)
                 throw new ArgumentOutOfRangeException(nameof(maxBytes));
@@ -49,11 +49,11 @@ namespace TensorSharp.Runtime
 
         public long MaxBytes => _maxBytes;
 
-        public bool TryGet(KvBlockHash hash, [NotNullWhen(true)] out byte[] payload)
+        public bool TryGet(KvBlockHash hash, [NotNullWhen(true)] out byte[]? payload)
         {
             lock (_gate)
             {
-                if (_index.TryGetValue(hash, out Node node))
+                if (_index.TryGetValue(hash, out Node? node))
                 {
                     MoveToHead(node);
                     payload = node.Payload;
@@ -89,10 +89,10 @@ namespace TensorSharp.Runtime
             if (payload.Length > _maxBytes)
                 return;
 
-            List<(KvBlockHash Hash, byte[] Bytes)> spilled = null;
+            List<(KvBlockHash Hash, byte[] Bytes)>? spilled = null;
             lock (_gate)
             {
-                if (_index.TryGetValue(hash, out Node existing))
+                if (_index.TryGetValue(hash, out Node? existing))
                 {
                     MoveToHead(existing);
                     return;
@@ -117,7 +117,7 @@ namespace TensorSharp.Runtime
                 _residentBytes += payload.Length;
             }
 
-            if (spilled != null)
+            if (spilled != null && _spillOnEvict != null)
             {
                 foreach (var entry in spilled)
                 {
@@ -182,8 +182,8 @@ namespace TensorSharp.Runtime
 
             public KvBlockHash Hash { get; }
             public byte[] Payload { get; }
-            public Node Prev { get; set; }
-            public Node Next { get; set; }
+            public Node? Prev { get; set; }
+            public Node? Next { get; set; }
         }
     }
 }

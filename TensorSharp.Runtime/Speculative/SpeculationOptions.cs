@@ -98,7 +98,7 @@ namespace TensorSharp.Runtime.Speculative
         /// </summary>
         public static SpeculationOptions FromEnvironment()
         {
-            string enabledRaw = ReadString(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled);
+            string? enabledRaw = ReadString(SpeculationEnvVars.Enabled, SpeculationEnvVars.LegacyEnabled);
             int maxDraftTokens = ReadDraftTokens(
                 SpeculationEnvVars.Draft, SpeculationEnvVars.LegacyDraft,
                 out bool maxDraftTokensExplicit);
@@ -115,15 +115,15 @@ namespace TensorSharp.Runtime.Speculative
             };
         }
 
-        private static string ReadString(string name, string fallbackName)
+        private static string? ReadString(string name, string? fallbackName)
         {
-            string raw = Environment.GetEnvironmentVariable(name);
+            string? raw = Environment.GetEnvironmentVariable(name);
             if (string.IsNullOrWhiteSpace(raw) && fallbackName != null)
                 raw = Environment.GetEnvironmentVariable(fallbackName);
             return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
         }
 
-        private static bool ReadBool(string raw, bool fallback)
+        private static bool ReadBool(string? raw, bool fallback)
         {
             if (raw == null)
                 return fallback;
@@ -132,7 +132,7 @@ namespace TensorSharp.Runtime.Speculative
 
         private static int ReadDraftTokens(string name, string fallbackName, out bool explicitlyConfigured)
         {
-            string raw = ReadString(name, fallbackName);
+            string? raw = ReadString(name, fallbackName);
             if (raw != null
                 && int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)
                 && v >= 1
@@ -151,7 +151,7 @@ namespace TensorSharp.Runtime.Speculative
             // Zero is a real value, not "unset": --spec-pmin 0 means "never gate a
             // draft on confidence", which the removed --spec-draft-conf-min spelling
             // could express and its survivor must keep expressing.
-            string raw = ReadString(name, fallbackName);
+            string? raw = ReadString(name, fallbackName);
             return raw != null
                    && float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out float v)
                    && float.IsFinite(v)

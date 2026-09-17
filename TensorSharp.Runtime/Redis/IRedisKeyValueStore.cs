@@ -22,7 +22,7 @@ namespace TensorSharp.Runtime.Redis
 
         bool StringSet(string key, byte[] value, TimeSpan? expiry);
 
-        byte[] StringGet(string key);
+        byte[]? StringGet(string key);
 
         void KeyDelete(string[] keys);
 

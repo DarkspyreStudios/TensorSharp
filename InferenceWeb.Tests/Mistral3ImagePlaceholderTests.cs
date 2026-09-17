@@ -44,7 +44,7 @@ public class Mistral3ImagePlaceholderTests
 
         string prompt = ChatTemplate.RenderMistral3(messages);
 
-        Assert.Equal(1, Regex.Matches(prompt, Regex.Escape("[IMG]")).Count);
+        Assert.Single(Regex.Matches(prompt, Regex.Escape("[IMG]")));
         Assert.StartsWith("[INST][IMG]What is the code?[/INST]4821[INST]Repeat it as JSON.[/INST]", prompt);
     }
 }

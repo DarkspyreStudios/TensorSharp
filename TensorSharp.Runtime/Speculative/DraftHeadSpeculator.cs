@@ -75,14 +75,14 @@ namespace TensorSharp.Runtime.Speculative
         // appends the token it starts from and does both in ONE head call. Worth a
         // whole head call per speculative step, which on Qwen 3.8 is 6.4 ms of 100.
         private readonly bool _fold;
-        private int[] _pendTokens;
-        private float[] _pendH;
+        private int[] _pendTokens = Array.Empty<int>();
+        private float[] _pendH = Array.Empty<float>();
         private int _pendCount;
         private int _pendStart;
         private bool _hasPend;
         // The folded call's inputs: the stashed run plus one row.
-        private int[] _foldTokens;
-        private float[] _foldH;
+        private int[] _foldTokens = Array.Empty<int>();
+        private float[] _foldH = Array.Empty<float>();
 
         public DraftHeadSpeculator(IDraftHead head, int vocabSize, int featureSize, int maxDraftTokens)
         {
@@ -124,7 +124,7 @@ namespace TensorSharp.Runtime.Speculative
 
         public int Propose(in DraftContext ctx, List<int> draftOut)
         {
-            float[] hIn = ctx.CarryHidden;
+            float[] hIn = ctx.CarryHidden ?? throw new ArgumentException("A learned draft head requires carry hidden state.", nameof(ctx));
             float[] hOut = _hA;
             int tokIn = ctx.LastToken;
             int first = 0;
@@ -194,7 +194,7 @@ namespace TensorSharp.Runtime.Speculative
             return draftOut.Count;
         }
 
-        public void Commit(int[] tokens, float[] hRows, int startPos)
+        public void Commit(int[] tokens, float[]? hRows, int startPos)
         {
             if (!_fold || hRows == null)
             {

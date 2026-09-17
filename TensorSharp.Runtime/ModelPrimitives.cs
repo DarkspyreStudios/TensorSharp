@@ -58,7 +58,7 @@ namespace TensorSharp.Runtime
         /// (common/common.cpp), and several GGUF families ship them — for example
         /// Qwen3.8-27B carries top_k=20, top_p=0.95, temp=1.0.
         /// </summary>
-        public RecommendedSampling RecommendedSampling { get; set; }
+        public RecommendedSampling? RecommendedSampling { get; set; }
 
         public int HeadDim => KeyLength > 0 ? KeyLength : (ValueLength > 0 ? ValueLength : HiddenSize / NumHeads);
     }

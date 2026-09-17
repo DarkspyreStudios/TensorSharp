@@ -100,7 +100,7 @@ namespace TensorSharp.Runtime.Speculative
             return draftOut.Count;
         }
 
-        public void Commit(int[] tokens, float[] hRows, int startPos)
+        public void Commit(int[] tokens, float[]? hRows, int startPos)
             => _head.DraftCatchUp(tokens, hRows, startPos);
 
         public void Reset() { }

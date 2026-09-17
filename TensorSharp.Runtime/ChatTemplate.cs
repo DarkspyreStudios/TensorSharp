@@ -751,7 +751,7 @@ namespace TensorSharp.Runtime
             };
         }
 
-        private static string FormatQwen35ToolCallArg(object value)
+        private static string FormatQwen35ToolCallArg(object? value)
         {
             if (value is string s) return s;
             if (value is bool b) return b.ToString().ToLowerInvariant();
@@ -1219,7 +1219,7 @@ namespace TensorSharp.Runtime
                         bool isString = kv.Value is string;
                         sb.Append('<').Append(DsmlToken).Append("parameter name=\"").Append(kv.Key)
                           .Append("\" string=\"").Append(isString ? "true" : "false").Append("\">")
-                          .Append(isString ? (string)kv.Value : JsonSerializer.Serialize(kv.Value))
+                          .Append(kv.Value is string text ? text : JsonSerializer.Serialize(kv.Value))
                           .Append("</").Append(DsmlToken).Append("parameter>\n");
                     }
                 }
@@ -1553,7 +1553,7 @@ namespace TensorSharp.Runtime
                             ["function"] = new Dictionary<string, object>
                             {
                                 ["name"] = tc.Name,
-                                ["arguments"] = tc.Arguments ?? new Dictionary<string, object>()
+                                ["arguments"] = tc.Arguments ?? new Dictionary<string, object?>()
                             }
                         });
                     }
@@ -1991,7 +1991,7 @@ namespace TensorSharp.Runtime
         }
 
         /// <summary>Serialize tool-call arguments to compact JSON for the Harmony commentary message.</summary>
-        private static string SerializeToolArguments(Dictionary<string, object>? arguments)
+        private static string SerializeToolArguments(Dictionary<string, object?>? arguments)
         {
             if (arguments == null || arguments.Count == 0)
                 return "{}";
@@ -2193,7 +2193,7 @@ namespace TensorSharp.Runtime
             return sb.ToString();
         }
 
-        private static string FormatGemma4ArgValue(object value)
+        private static string FormatGemma4ArgValue(object? value)
         {
             const string q = "<|\"|>";
             if (value is string s)

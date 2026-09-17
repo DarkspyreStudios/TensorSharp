@@ -104,11 +104,11 @@ namespace TensorSharp.Runtime.Scheduling
         /// unsalted, so a media prompt still shares its text-only leading blocks; the
         /// parent-chained block hash carries a span's salt into every later block.
         /// </summary>
-        public static string BlockSalt(IReadOnlyList<PromptMediaSpan> spans, int blockStart, int blockEnd)
+        public static string? BlockSalt(IReadOnlyList<PromptMediaSpan> spans, int blockStart, int blockEnd)
         {
             if (spans == null || spans.Count == 0)
                 return null;
-            System.Text.StringBuilder sb = null;
+            System.Text.StringBuilder? sb = null;
             for (int i = 0; i < spans.Count; i++)
             {
                 PromptMediaSpan span = spans[i];

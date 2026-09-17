@@ -173,7 +173,7 @@ if (SkillHostOptions.Parse(args).ListOnly)
 }
 
 LogLevel resolvedLogLevel = LoggingSetup.ResolveMinimumLevel();
-string configuredBackendInput = ServerOptionsBuilder.ReadConfiguredBackendInput(args);
+string? configuredBackendInput = ServerOptionsBuilder.ReadConfiguredBackendInput(args);
 // Translate --paged-kv* flags into env vars before startup logging reads
 // PagedKvCacheConfig.FromEnvironment().
 bool pagedKvFlagsApplied = ServerOptionsBuilder.ApplyPagedKvCacheCliFlags(args);
@@ -589,7 +589,7 @@ try
             startupLogger);
     }
 }
-catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string loadRefusal))
+catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string? loadRefusal))
 {
     // A refused load (not enough VRAM, an unsupported KV dtype or --tp layout, a
     // missing file or sidecar) used to leave through an unhandled exception: a stack

@@ -118,7 +118,7 @@ namespace TensorSharp.Server
         /// so a host without peers — or without a CUDA backend to link — never pays for it.
         /// Read at load time: set it before <see cref="LoadModel"/>.
         /// </summary>
-        public Func<BackendType, ITensorParallelGroup> TensorParallelGroupFactory
+        public Func<BackendType, ITensorParallelGroup?>? TensorParallelGroupFactory
         {
             get => _lifecycle.TensorParallelGroupFactory;
             set => _lifecycle.TensorParallelGroupFactory = value;
@@ -235,8 +235,8 @@ namespace TensorSharp.Server
             List<ChatMessage> history,
             int maxTokens,
             CancellationToken cancellationToken,
-            SamplingConfig samplingConfig = null,
-            List<ToolFunction> tools = null,
+            SamplingConfig? samplingConfig = null,
+            List<ToolFunction>? tools = null,
             bool enableThinking = false)
         {
             return ChatStreamAsync(_intrinsicSession, history, maxTokens, cancellationToken, samplingConfig, tools, enableThinking);
@@ -251,8 +251,8 @@ namespace TensorSharp.Server
             List<ChatMessage> history,
             int maxTokens,
             CancellationToken cancellationToken,
-            SamplingConfig samplingConfig = null,
-            List<ToolFunction> tools = null,
+            SamplingConfig? samplingConfig = null,
+            List<ToolFunction>? tools = null,
             bool enableThinking = false)
         {
             return _generation.ChatStreamAsync(session, history, maxTokens, cancellationToken, samplingConfig, tools, enableThinking);
@@ -266,8 +266,8 @@ namespace TensorSharp.Server
                 List<ChatMessage> history,
                 int maxTokens,
                 CancellationToken cancellationToken,
-                SamplingConfig samplingConfig = null,
-                List<ToolFunction> tools = null,
+                SamplingConfig? samplingConfig = null,
+                List<ToolFunction>? tools = null,
                 bool enableThinking = false)
         {
             return ChatStreamWithMetricsAsync(_intrinsicSession, history, maxTokens, cancellationToken, samplingConfig, tools, enableThinking);
@@ -283,8 +283,8 @@ namespace TensorSharp.Server
                 List<ChatMessage> history,
                 int maxTokens,
                 CancellationToken cancellationToken,
-                SamplingConfig samplingConfig = null,
-                List<ToolFunction> tools = null,
+                SamplingConfig? samplingConfig = null,
+                List<ToolFunction>? tools = null,
                 bool enableThinking = false)
         {
             return _generation.ChatStreamWithMetricsAsync(session, history, maxTokens, cancellationToken, samplingConfig, tools, enableThinking);
@@ -330,10 +330,10 @@ namespace TensorSharp.Server
                 List<ChatMessage> history,
                 int maxTokens,
                 CancellationToken cancellationToken,
-                SamplingConfig samplingConfig,
-                List<ToolFunction> tools,
+                SamplingConfig? samplingConfig,
+                List<ToolFunction>? tools,
                 bool enableThinking,
-                SkillRequestPlan skills,
+                SkillRequestPlan? skills,
                 ILogger logger = null)
         {
             if (skills == null || !skills.ToolsOffered)
@@ -391,10 +391,10 @@ namespace TensorSharp.Server
                 List<ChatMessage> history,
                 int maxTokens,
                 CancellationToken cancellationToken,
-                SamplingConfig samplingConfig,
-                List<ToolFunction> tools,
+                SamplingConfig? samplingConfig,
+                List<ToolFunction>? tools,
                 bool enableThinking,
-                SkillRequestPlan skills,
+                SkillRequestPlan? skills,
                 ILogger logger = null)
         {
             return ChatStreamWithSkillsAsync(
@@ -426,10 +426,10 @@ namespace TensorSharp.Server
         public IAsyncEnumerable<ChatStreamUpdate>
             GenerateStreamAsync(
                 string prompt,
-                List<string> imagePaths,
+                List<string>? imagePaths,
                 int maxTokens,
                 CancellationToken cancellationToken,
-                SamplingConfig samplingConfig = null)
+                SamplingConfig? samplingConfig = null)
         {
             return GenerateStreamAsync(_intrinsicSession, prompt, imagePaths, maxTokens, cancellationToken, samplingConfig);
         }
@@ -442,10 +442,10 @@ namespace TensorSharp.Server
             GenerateStreamAsync(
                 ChatSession session,
                 string prompt,
-                List<string> imagePaths,
+                List<string>? imagePaths,
                 int maxTokens,
                 CancellationToken cancellationToken,
-                SamplingConfig samplingConfig = null)
+                SamplingConfig? samplingConfig = null)
         {
             return _generation.GenerateStreamAsync(session, prompt, imagePaths, maxTokens, cancellationToken, samplingConfig);
         }

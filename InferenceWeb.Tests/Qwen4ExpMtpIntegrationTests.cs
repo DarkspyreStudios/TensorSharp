@@ -396,7 +396,7 @@ public sealed class Qwen4ExpMtpIntegrationTests(ITestOutputHelper output)
         .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
 
     private static Tensor QsaTensor(Qwen4ExpModel model)
-        => Assert.Single(Field<Tensor[]>(model, "_idxKCache").Where(t => t != null));
+        => Assert.Single(Field<Tensor[]>(model, "_idxKCache"), t => t != null);
 
     private static byte[] HostPrefix(Tensor tensor, int count)
     {

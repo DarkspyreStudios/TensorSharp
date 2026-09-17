@@ -21,7 +21,7 @@ namespace TensorSharp.Runtime.Paged
     /// </summary>
     public sealed class PagedKvStorage : IDisposable
     {
-        private readonly byte[][] _slabs;
+        private readonly byte[]?[] _slabs;
         private readonly long _blockByteSize;
         private readonly int _numBlocks;
         private bool _disposed;

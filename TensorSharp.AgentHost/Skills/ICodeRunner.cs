@@ -93,7 +93,8 @@ namespace TensorSharp.AgentHost.Skills
         /// within a turn either.
         /// </para>
         /// </summary>
-        SamplingConfig ForCodingTurn(SamplingConfig requested) => requested;
+        [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(requested))]
+        SamplingConfig? ForCodingTurn(SamplingConfig? requested) => requested;
 
         /// <summary>
         /// The tool declaration to offer the model.

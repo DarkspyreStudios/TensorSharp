@@ -73,7 +73,7 @@ public class EgressProxyTests
     }
 
     [Fact]
-    public void AllowedHost_TunnelsToAListeningTarget()
+    public async Task AllowedHost_TunnelsToAListeningTarget()
     {
         // A real target on loopback stands in for the registry: the proxy must
         // return 200 Connection Established and then splice bytes both ways. We
@@ -107,7 +107,11 @@ public class EgressProxyTests
 
         target.Stop();
         // The echo task ends when the listener stops accepting; ignore its result.
-        try { echo.Wait(500); } catch (AggregateException) { /* target torn down */ }
+        try { await echo.WaitAsync(TimeSpan.FromMilliseconds(500)); }
+        catch (Exception ex) when (ex is SocketException or InvalidOperationException or TimeoutException)
+        {
+            // The stopped listener cannot accept another connection.
+        }
     }
 
     [Fact]

@@ -219,7 +219,7 @@ public sealed partial class OpenAIChatAdapter
                 ctx, responseFormat, openaiThink, openaiTools, _svc.Architecture).ConfigureAwait(false))
             return;
 
-        using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
+        using RequestWorkspaceLease? workspaceLease = RequestWorkspaceLease.Acquire(
             _workspaces, _codeRunner, _svc.Architecture, allowTools: responseFormat == null && !toolsDisabled);
 
         var skillPlan = SkillRequestPlan.Create(

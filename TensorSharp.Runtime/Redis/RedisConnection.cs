@@ -28,7 +28,7 @@ namespace TensorSharp.Runtime.Redis
         private readonly ConnectionMultiplexer _mux;
         private readonly ILogger _logger;
 
-        public RedisConnection(string connectionString, ILogger logger = null)
+        public RedisConnection(string connectionString, ILogger? logger = null)
         {
             if (string.IsNullOrWhiteSpace(connectionString))
                 throw new ArgumentException("Redis connection string must be non-empty.", nameof(connectionString));
@@ -36,7 +36,7 @@ namespace TensorSharp.Runtime.Redis
             _mux = ConnectionMultiplexer.Connect(connectionString);
         }
 
-        internal RedisConnection(ConnectionMultiplexer mux, ILogger logger = null)
+        internal RedisConnection(ConnectionMultiplexer mux, ILogger? logger = null)
         {
             _mux = mux ?? throw new ArgumentNullException(nameof(mux));
             _logger = logger ?? NullLogger.Instance;
@@ -59,12 +59,12 @@ namespace TensorSharp.Runtime.Redis
             }
         }
 
-        public byte[] StringGet(string key)
+        public byte[]? StringGet(string key)
         {
             try
             {
                 RedisValue value = Db.StringGet(key);
-                return value.HasValue ? (byte[])value : null;
+                return value.HasValue ? (byte[]?)value : null;
             }
             catch (RedisException ex)
             {

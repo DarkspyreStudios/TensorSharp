@@ -180,7 +180,7 @@ namespace TensorSharp.Runtime.Speculative
         private static readonly bool s_debug =
             System.Environment.GetEnvironmentVariable("TS_NGRAM_DEBUG") == "1";
 
-        public void Commit(int[] tokens, float[] hRows, int startPos)
+        public void Commit(int[] tokens, float[]? hRows, int startPos)
         {
             if (s_debug && tokens != null && startPos != _tokens.Count)
                 System.Console.Error.WriteLine($"[ngram] commit of {tokens.Length} at {startPos} while corpus holds {_tokens.Count}");

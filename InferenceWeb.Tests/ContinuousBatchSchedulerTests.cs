@@ -509,7 +509,7 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
-    public void Engine_DriveOneSequence_ProducesTokens()
+    public async Task Engine_DriveOneSequence_ProducesTokens()
     {
         var model = new StubModel("fp-x", peakToken: 7);
         using var engine = new InferenceEngine(model, SmallConfig(), NullLogger.Instance);
@@ -523,7 +523,7 @@ public class ContinuousBatchSchedulerTests
         // (until EOS or max).
         Assert.Contains(7, tokens);
 
-        var completion = handle.Completion.GetAwaiter().GetResult();
+        var completion = await handle.Completion;
         Assert.True(completion.OutputTokenCount > 0);
     }
 
@@ -566,7 +566,7 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
-    public void Engine_ParallelSequences_AllComplete()
+    public async Task Engine_ParallelSequences_AllComplete()
     {
         var model = new StubModel("fp-par", peakToken: 7);
         using var engine = new InferenceEngine(model, SmallConfig(), NullLogger.Instance);
@@ -580,7 +580,7 @@ public class ContinuousBatchSchedulerTests
 
         foreach (var h in handles)
         {
-            var completion = h.Completion.GetAwaiter().GetResult();
+            var completion = await h.Completion;
             Assert.True(completion.OutputTokenCount > 0,
                 $"Sequence {h.RequestId} produced no tokens.");
         }
@@ -592,7 +592,7 @@ public class ContinuousBatchSchedulerTests
     /// the same phrase. The guard ends it at the first provable loop and says so.
     /// </summary>
     [Fact]
-    public void Engine_StopsARunawayLoopBeforeMaxTokens_AndSaysWhy()
+    public async Task Engine_StopsARunawayLoopBeforeMaxTokens_AndSaysWhy()
     {
         var model = new StubModel("fp-loop", peakToken: 5);
         // A pool of 512 slots: room for the 400 tokens the request asks for, so the
@@ -611,7 +611,7 @@ public class ContinuousBatchSchedulerTests
         var seq = NewSequence("loop", promptLen: 4, maxNew: 400);
         var handle = engine.SubmitRequest(seq);
 
-        var completion = handle.Completion.GetAwaiter().GetResult();
+        var completion = await handle.Completion;
         Assert.Equal(SequenceStatus.FinishedStopped, completion.Status);
         Assert.Equal(RepetitionGuard.FinishReason, completion.FinishReason);
         Assert.Equal(RepetitionGuard.MinSpan, completion.OutputTokenCount);
@@ -620,20 +620,20 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
-    public void Engine_RespectsMaxTokens()
+    public async Task Engine_RespectsMaxTokens()
     {
         var model = new StubModel("fp-cap", peakToken: 5);
         using var engine = new InferenceEngine(model, SmallConfig(), NullLogger.Instance);
         var seq = NewSequence("r0", promptLen: 4, maxNew: 3);
         var handle = engine.SubmitRequest(seq);
 
-        var completion = handle.Completion.GetAwaiter().GetResult();
+        var completion = await handle.Completion;
         Assert.Equal(3, completion.OutputTokenCount);
         Assert.Equal(SequenceStatus.FinishedLengthCapped, completion.Status);
     }
 
     [Fact]
-    public void Engine_StopsOnEos()
+    public async Task Engine_StopsOnEos()
     {
         var model = new StubModel("fp-eos", peakToken: 0); // 0 is EOS
         model.SetEos(0);
@@ -641,13 +641,13 @@ public class ContinuousBatchSchedulerTests
         var seq = NewSequence("r0", promptLen: 4, maxNew: 10);
         var handle = engine.SubmitRequest(seq);
 
-        var completion = handle.Completion.GetAwaiter().GetResult();
+        var completion = await handle.Completion;
         Assert.Equal(SequenceStatus.FinishedStopped, completion.Status);
         Assert.Equal("eos", completion.FinishReason);
     }
 
     [Fact]
-    public void Engine_PrefixCacheHit_ReducesUncomputedTokens()
+    public async Task Engine_PrefixCacheHit_ReducesUncomputedTokens()
     {
         var model = new StubModel("fp-prefix", peakToken: 3);
         var cfg = SmallConfig();
@@ -656,19 +656,19 @@ public class ContinuousBatchSchedulerTests
         // Prime the cache: run a request that produces full blocks.
         var promptA = Enumerable.Range(10, BlockSize * 2).ToArray();
         var seqA = NewSequenceFromTokens("rA", promptA, maxNew: 2);
-        engine.SubmitRequest(seqA).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(seqA).Completion;
 
         // Same prompt comes in again on a NEW sequence.
         var seqB = NewSequenceFromTokens("rB", promptA, maxNew: 2);
         var handleB = engine.SubmitRequest(seqB);
-        handleB.Completion.GetAwaiter().GetResult();
+        await handleB.Completion;
         // We expect at least one block worth of prefix-cache reuse.
         Assert.True(seqB.PrefixCacheReusedTokens >= BlockSize,
             $"Expected >= {BlockSize} prefix-cache tokens, got {seqB.PrefixCacheReusedTokens}");
     }
 
     [Fact]
-    public void Engine_RecurrentLargePrefill_CachesOnlyExactChunkEndpoints()
+    public async Task Engine_RecurrentLargePrefill_CachesOnlyExactChunkEndpoints()
     {
         var model = new RecurrentStubModel("fp-recurrent-engine", peakToken: 3);
         var cfg = RecurrentConfig();
@@ -676,7 +676,7 @@ public class ContinuousBatchSchedulerTests
         int[] prompt = Enumerable.Range(1, 5 * BlockSize + 5).ToArray();
 
         var first = NewSequenceFromTokens("recurrent-a", prompt, maxNew: 1);
-        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(first).Completion;
 
         // Keep the high-throughput 32-token fused prefill.  Only the final
         // prompt chunk is split so position 40 becomes an exact checkpoint.
@@ -685,14 +685,14 @@ public class ContinuousBatchSchedulerTests
             model.ForwardChunkSizes.Take(3).ToArray());
 
         var second = NewSequenceFromTokens("recurrent-b", prompt, maxNew: 1);
-        engine.SubmitRequest(second).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(second).Completion;
 
         Assert.Equal(5 * BlockSize, second.PrefixCacheReusedTokens);
         Assert.Equal(new[] { 5, 1 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
     }
 
     [Fact]
-    public void Engine_RecurrentExplicitBreakpoint_MakesTheMarkedPrefixRestorable()
+    public async Task Engine_RecurrentExplicitBreakpoint_MakesTheMarkedPrefixRestorable()
     {
         // A client cache breakpoint lands mid-prompt, capping registration and
         // adoption at its block boundary. The prefill round must snap there so
@@ -708,7 +708,7 @@ public class ContinuousBatchSchedulerTests
         var first = new SequenceState(
             "bp-a", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
             cacheBreakpoints: new[] { 3 * BlockSize });
-        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(first).Completion;
 
         // The fused chunk is split AT the breakpoint boundary (3 blocks) so the
         // capture round ends on a genuine checkpoint, then the tail runs with
@@ -720,7 +720,7 @@ public class ContinuousBatchSchedulerTests
         var second = new SequenceState(
             "bp-b", prompt, maxNewTokens: 1, BlockSize, SamplingConfig.Default,
             cacheBreakpoints: new[] { 3 * BlockSize });
-        engine.SubmitRequest(second).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(second).Completion;
 
         // The marked prefix (everything up to the breakpoint) is fully restorable.
         Assert.Equal(3 * BlockSize, second.PrefixCacheReusedTokens);
@@ -728,7 +728,7 @@ public class ContinuousBatchSchedulerTests
     }
 
     [Fact]
-    public void Engine_RecurrentShorterSibling_NoCheckpointInside_RefillsThenSelfHeals()
+    public async Task Engine_RecurrentShorterSibling_NoCheckpointInside_RefillsThenSelfHeals()
     {
         // A sibling prompt that shares only the interior blocks of a longer
         // fused-round chain matches them in the hash index but has no recurrent
@@ -743,21 +743,21 @@ public class ContinuousBatchSchedulerTests
         int[] shortPrompt = Enumerable.Range(1, 3 * BlockSize + 5).ToArray();
 
         var first = NewSequenceFromTokens("sibling-long", longPrompt, maxNew: 1);
-        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(first).Completion;
         // One 4-block fused round + the aligned final block: blocks 0..2 are
         // interior (non-restorable), block 3 and block 4 are the checkpoints.
         Assert.Equal(new[] { 4 * BlockSize, BlockSize, 5 }, model.ForwardChunkSizes.Take(3).ToArray());
 
         // Shares blocks 0..2 of that chain: matched but nothing restorable.
         var sibling = NewSequenceFromTokens("sibling-short", shortPrompt, maxNew: 1);
-        engine.SubmitRequest(sibling).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(sibling).Completion;
         Assert.Equal(0, sibling.PrefixCacheReusedTokens);
         Assert.Equal(new[] { 3 * BlockSize, 5 }, model.ForwardChunkSizes.Skip(4).Take(2).ToArray());
 
         // Its re-prefill registered a checkpoint at its own end, so the
         // identical follow-up now reuses the whole prefix.
         var sibling2 = NewSequenceFromTokens("sibling-short-2", shortPrompt, maxNew: 1);
-        engine.SubmitRequest(sibling2).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(sibling2).Completion;
         Assert.Equal(3 * BlockSize, sibling2.PrefixCacheReusedTokens);
     }
 

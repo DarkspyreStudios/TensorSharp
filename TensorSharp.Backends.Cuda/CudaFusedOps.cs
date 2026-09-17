@@ -1324,8 +1324,6 @@ namespace TensorSharp.Cuda
             Interop.CudaDriverApi.cuCtxSetCurrent(prevCtx);
             return true;
 
-        fail_packed:
-            Interop.CudaDriverApi.cuMemFree(packedDev);
         fail_alpha:
             Interop.CudaDriverApi.cuMemFree(alphaDev);
         fail_beta:

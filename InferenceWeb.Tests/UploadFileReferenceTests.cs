@@ -45,7 +45,7 @@ public class UploadFileReferenceTests : IDisposable
     [InlineData("   ")]
     [InlineData(".")]
     [InlineData("..")]
-    public void EmptyOrDotReferences_AreRejected(string reference)
+    public void EmptyOrDotReferences_AreRejected(string? reference)
     {
         Assert.False(UploadFileReference.TryResolve(_uploadRoot, reference, out _));
     }

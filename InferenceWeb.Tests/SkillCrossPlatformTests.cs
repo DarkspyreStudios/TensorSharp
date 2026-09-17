@@ -273,8 +273,8 @@ public class SkillCrossPlatformTests : IDisposable
         IReadOnlyList<string> arguments = BubblewrapSandbox.BuildArguments(request);
 
         Assert.Equal(!allowNetwork, arguments.Contains("--unshare-net"));
-        Assert.True(arguments.Zip(arguments.Skip(1))
-            .Any(pair => pair.First == "--tmpfs" && pair.Second == "/run"));
+        Assert.Contains(arguments.Zip(arguments.Skip(1)),
+            pair => pair.First == "--tmpfs" && pair.Second == "/run");
         // The enabled fast path removes only the network namespace split. Read-only root,
         // writable workspace and process namespaces remain present in both policies.
         Assert.Contains("--ro-bind", arguments);

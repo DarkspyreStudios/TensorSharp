@@ -40,9 +40,9 @@ namespace TensorSharp.Server.Skills
         /// Acquire a workspace only when this request can actually be offered built-in
         /// code tools. Other requests retain their existing allocation-free path.
         /// </summary>
-        public static RequestWorkspaceLease Acquire(
+        public static RequestWorkspaceLease? Acquire(
             SessionWorkspaceManager manager,
-            ICodeRunner codeRunner,
+            ICodeRunner? codeRunner,
             string architecture,
             bool allowTools = true)
         {

@@ -183,6 +183,9 @@ namespace TensorSharp.Cuda
                 return;
 
             backingFree(ptr);
+            Shard shard = CurrentShard();
+            lock (shard.Sync)
+                shard.FreedCount++;
         }
 
         /// <summary>

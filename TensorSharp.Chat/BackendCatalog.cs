@@ -83,7 +83,7 @@ namespace TensorSharp.Server
             return supportedBackends.FirstOrDefault()?.Value ?? canonicalBackend ?? configuredBackend;
         }
 
-        public static string Canonicalize(string backend)
+        public static string? Canonicalize(string? backend)
         {
             if (string.IsNullOrWhiteSpace(backend))
                 return null;

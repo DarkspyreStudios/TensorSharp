@@ -93,7 +93,7 @@ namespace TensorSharp.Runtime.Scheduling
     public sealed class InferenceCompletion
     {
         public SequenceStatus Status { get; init; }
-        public string FinishReason { get; init; }
+        public string? FinishReason { get; init; }
         public int PromptTokenCount { get; init; }
         public int OutputTokenCount { get; init; }
         public int PrefixCacheReusedTokens { get; init; }

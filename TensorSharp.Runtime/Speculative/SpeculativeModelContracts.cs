@@ -79,13 +79,13 @@ namespace TensorSharp.Runtime.Speculative
         /// then serves every request with plain decoding and says why, once.
         /// Default null (speculation allowed).
         /// </summary>
-        string SpeculationRefusal => null;
+        string? SpeculationRefusal => null;
 
         /// <summary>Trunk tokens currently committed to the model's live KV cache.</summary>
         int CacheSeqLen { get; }
 
         /// <summary>Maximum trunk context length.</summary>
-        int MaxContextLength { get; }
+        new int MaxContextLength { get; }
 
         /// <summary>
         /// Width of one row of the hidden state the trunk taps for a learned
@@ -182,7 +182,7 @@ namespace TensorSharp.Runtime.Speculative
         /// row into <paramref name="logitsOut"/> (n*vocab floats) instead of
         /// only the last row. Advances the KV caches like Forward().
         /// </summary>
-        void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows);
+        void SpecForward(int[] tokens, float[]? hAllOut, float[] logitsOut, bool allLogitsRows);
 
         /// <summary>Pre-grow the KV caches to cover a full speculative window
         /// (growing mid-draft would drop drafter rows written past the trunk
@@ -237,7 +237,7 @@ namespace TensorSharp.Runtime.Speculative
         /// <paramref name="allLogitsRows"/>, else vocab floats for the last row).
         /// </summary>
         void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
-            float[] hAllOut, float[] logitsOut, bool allLogitsRows);
+            float[]? hAllOut, float[] logitsOut, bool allLogitsRows);
 
         /// <summary>Snapshot the per-slot recurrent (GDN/SSM) state of
         /// <paramref name="seq"/> before a verify batch.</summary>
@@ -333,13 +333,13 @@ namespace TensorSharp.Runtime.Speculative
         /// acceptance probabilities to <paramref name="confOut"/>, and returns
         /// how many it produced. Only called for <see cref="DraftHeadKind.Block"/>.
         /// </summary>
-        int DraftBlock(int lastToken, float[] hPrev, int position, int[] draftOut, float[] confOut) => 0;
+        int DraftBlock(int lastToken, float[]? hPrev, int position, int[] draftOut, float[] confOut) => 0;
 
         /// <summary>Replay verified trunk tokens through the draft head so its
         /// KV cache tracks exact trunk hidden states (llama.cpp's draft-mtp
         /// process()). Row k of <paramref name="hRows"/> is the hidden state of
         /// the token PRECEDING tokens[k].</summary>
-        void DraftCatchUp(int[] tokens, float[] hRows, int startPos);
+        void DraftCatchUp(int[] tokens, float[]? hRows, int startPos);
 
         /// <summary>
         /// True when this head can replay the verified tokens AND take the first

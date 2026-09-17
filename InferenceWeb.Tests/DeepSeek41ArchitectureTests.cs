@@ -422,7 +422,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
     [InlineData("deepseek_v4_flash_dspark_draft")]
     [InlineData("qwen4exp")]
     [InlineData("deepseek41")]
-    public void DraftArchitectureMustBeExplicitlyV41(string architecture)
+    public void DraftArchitectureMustBeExplicitlyV41(string? architecture)
         => Assert.Throws<NotSupportedException>(() => DeepSeek41Architecture.ValidateDsparkArchitecture(architecture));
 
     [Fact]
@@ -444,7 +444,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
     [InlineData("8", 8, 8)]
     [InlineData("4", 0, 4)] // Automatic device enumeration is validated natively.
     [InlineData(" +4", 4, 4)] // Native strtol accepts a leading sign/whitespace.
-    public void RoutedMoeTensorParallelRanksValidateKnownGpuCount(string value, int gpuCount, int expected)
+    public void RoutedMoeTensorParallelRanksValidateKnownGpuCount(string? value, int gpuCount, int expected)
         => Assert.Equal(expected, DeepSeek41Architecture.ParseRoutedMoeTensorParallelRanks(value, gpuCount));
 
     [Theory]

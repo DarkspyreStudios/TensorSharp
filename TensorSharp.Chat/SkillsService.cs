@@ -298,7 +298,7 @@ namespace TensorSharp.Chat
             }
         }
 
-        public object Install(Stream zip, string fileName, long length, bool overwrite)
+        public object Install(Stream zip, string? fileName, long length, bool overwrite)
         {
             ILogger logger = _loggerFactory.CreateLogger("TensorSharp.Server.Skills");
 

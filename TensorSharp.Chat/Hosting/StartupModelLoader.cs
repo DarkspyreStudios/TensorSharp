@@ -31,7 +31,7 @@ namespace TensorSharp.Server.Hosting
         public static void LoadIfConfigured(
             ServerHostingOptions options,
             ModelService modelService,
-            string configuredBackendInput,
+            string? configuredBackendInput,
             ILogger logger)
         {
             if (options == null) throw new ArgumentNullException(nameof(options));

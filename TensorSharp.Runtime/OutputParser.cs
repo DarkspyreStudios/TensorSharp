@@ -138,7 +138,7 @@ namespace TensorSharp.Runtime
                     // renders null as an empty string, which reaches the model as
                     // a meaningless empty choice in the enum.
                     foreach (JsonElement v in enumValues.EnumerateArray())
-                        param.Enum.Add(v.ValueKind == JsonValueKind.String ? v.GetString() : v.GetRawText());
+                        param.Enum.Add(v.ValueKind == JsonValueKind.String ? v.GetString() ?? string.Empty : v.GetRawText());
                 }
                 fn.Parameters[prop.Name] = param;
             }
@@ -149,7 +149,7 @@ namespace TensorSharp.Runtime
             return fn;
         }
 
-        private static string GetString(JsonElement obj, string name)
+        private static string? GetString(JsonElement obj, string name)
             => obj.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String
                 ? v.GetString()
                 : null;
@@ -163,7 +163,7 @@ namespace TensorSharp.Runtime
         /// and drop the <c>"null"</c> member, whose meaning <c>required</c>
         /// already carries.
         /// </summary>
-        private static string ReadSchemaType(JsonElement schema)
+        private static string? ReadSchemaType(JsonElement schema)
         {
             if (!schema.TryGetProperty("type", out JsonElement type))
                 return null;
@@ -172,12 +172,12 @@ namespace TensorSharp.Runtime
             if (type.ValueKind != JsonValueKind.Array)
                 return null;
 
-            string first = null;
+            string? first = null;
             foreach (JsonElement v in type.EnumerateArray())
             {
                 if (v.ValueKind != JsonValueKind.String)
                     continue;
-                string name = v.GetString();
+                string? name = v.GetString();
                 first ??= name;
                 if (name != "null")
                     return name;
@@ -190,8 +190,8 @@ namespace TensorSharp.Runtime
             if (!obj.TryGetProperty("required", out JsonElement req) || req.ValueKind != JsonValueKind.Array)
                 return;
             foreach (JsonElement v in req.EnumerateArray())
-                if (v.ValueKind == JsonValueKind.String)
-                    into.Add(v.GetString());
+                if (v.ValueKind == JsonValueKind.String && v.GetString() is string name)
+                    into.Add(name);
         }
     }
 
@@ -210,7 +210,7 @@ namespace TensorSharp.Runtime
         /// <summary>Source protocol call id, used to associate parallel tool results.</summary>
         public string? Id { get; set; }
         public string Name { get; set; } = string.Empty;
-        public Dictionary<string, object> Arguments { get; set; } = new();
+        public Dictionary<string, object?> Arguments { get; set; } = new();
         public int Index { get; set; }
 
         public override string ToString()
@@ -555,7 +555,7 @@ namespace TensorSharp.Runtime
             string? name = nameEl.GetString();
             if (string.IsNullOrEmpty(name)) return null;
 
-            var args = new Dictionary<string, object>();
+            var args = new Dictionary<string, object?>();
             if (element.TryGetProperty("arguments", out var argsEl) && argsEl.ValueKind == JsonValueKind.Object)
             {
                 foreach (var prop in argsEl.EnumerateObject())
@@ -581,7 +581,7 @@ namespace TensorSharp.Runtime
             string name = raw.Substring(fnIdx + fnOpen.Length, nameEnd - fnIdx - fnOpen.Length).Trim();
             if (name.Length == 0) return null;
 
-            var args = new Dictionary<string, object>();
+            var args = new Dictionary<string, object?>();
             const string paramOpen = "<parameter=";
             const string paramClose = "</parameter>";
             int pos = nameEnd + 1;
@@ -607,7 +607,7 @@ namespace TensorSharp.Runtime
             return new ToolCall { Name = name, Arguments = args, Index = _callIndex++ };
         }
 
-        private static object ParseScalarOrText(string value)
+        private static object? ParseScalarOrText(string value)
         {
             if (value.Length == 0) return value;
             char c = value[0];
@@ -646,7 +646,7 @@ namespace TensorSharp.Runtime
             return maxOverlap;
         }
 
-        internal static object JsonElementToObject(JsonElement el)
+        internal static object? JsonElementToObject(JsonElement el)
         {
             return el.ValueKind switch
             {
@@ -654,24 +654,24 @@ namespace TensorSharp.Runtime
                 JsonValueKind.Number => el.TryGetInt64(out long l) ? (object)l : el.GetDouble(),
                 JsonValueKind.True => true,
                 JsonValueKind.False => false,
-                JsonValueKind.Null => null!,
+                JsonValueKind.Null => null,
                 JsonValueKind.Object => JsonElementToDict(el),
                 JsonValueKind.Array => JsonElementToList(el),
                 _ => el.GetRawText()
             };
         }
 
-        private static Dictionary<string, object> JsonElementToDict(JsonElement el)
+        private static Dictionary<string, object?> JsonElementToDict(JsonElement el)
         {
-            var d = new Dictionary<string, object>();
+            var d = new Dictionary<string, object?>();
             foreach (var p in el.EnumerateObject())
                 d[p.Name] = JsonElementToObject(p.Value);
             return d;
         }
 
-        private static List<object> JsonElementToList(JsonElement el)
+        private static List<object?> JsonElementToList(JsonElement el)
         {
-            var list = new List<object>();
+            var list = new List<object?>();
             foreach (var item in el.EnumerateArray())
                 list.Add(JsonElementToObject(item));
             return list;
@@ -1014,7 +1014,7 @@ namespace TensorSharp.Runtime
             try
             {
                 using var doc = JsonDocument.Parse(json);
-                var args = new Dictionary<string, object>();
+                var args = new Dictionary<string, object?>();
                 foreach (var prop in doc.RootElement.EnumerateObject())
                     args[prop.Name] = ChatMlOutputParser.JsonElementToObject(prop.Value);
                 return new ToolCall { Name = name, Arguments = args };
@@ -1441,7 +1441,7 @@ namespace TensorSharp.Runtime
             string name = _currentRecipient!.Substring(FunctionPrefix.Length);
             if (string.IsNullOrEmpty(name)) return null;
 
-            var args = new Dictionary<string, object>();
+            var args = new Dictionary<string, object?>();
             string raw = _toolArgs.ToString().Trim();
             if (raw.Length > 0)
             {
@@ -1738,7 +1738,7 @@ namespace TensorSharp.Runtime
                 }
                 string inner = end < 0 ? body.Substring(nameEnd) : body.Substring(nameEnd, end - nameEnd);
 
-                var args = new Dictionary<string, object>();
+                var args = new Dictionary<string, object?>();
                 int p = 0;
                 while (true)
                 {
@@ -1780,7 +1780,7 @@ namespace TensorSharp.Runtime
             }
         }
 
-        private static object ParseJsonValue(string value)
+        private static object? ParseJsonValue(string value)
         {
             if (value.Length == 0)
                 return value;
@@ -2123,7 +2123,7 @@ namespace TensorSharp.Runtime
             }
             if (string.IsNullOrEmpty(name)) return null;
 
-            var args = new Dictionary<string, object>();
+            var args = new Dictionary<string, object?>();
             const string paramOpen = "<atem:parameter name=\"";
             const string paramClose = "</atem:parameter>";
             int pos = 0;
@@ -2147,7 +2147,7 @@ namespace TensorSharp.Runtime
             return new ToolCall { Name = name, Arguments = args, Index = index };
         }
 
-        private static object ParseAtemValue(string raw)
+        private static object? ParseAtemValue(string raw)
         {
             string t = raw.Trim();
             if (t.Length == 0) return raw;
@@ -2468,7 +2468,7 @@ namespace TensorSharp.Runtime
             if (name.Length == 0)
                 return;
 
-            var args = new Dictionary<string, object>();
+            var args = new Dictionary<string, object?>();
             int pos = firstKey < 0 ? body.Length : firstKey;
             while (pos < body.Length)
             {
@@ -2501,7 +2501,7 @@ namespace TensorSharp.Runtime
         /// booleans, null and bracketed values are parsed; everything else stays
         /// the literal string the model wrote.
         /// </summary>
-        private static object ParseJsonValue(string value)
+        private static object? ParseJsonValue(string value)
         {
             if (value.Length == 0)
                 return string.Empty;
@@ -2523,7 +2523,7 @@ namespace TensorSharp.Runtime
             }
         }
 
-        private static object JsonElementToObject(JsonElement e)
+        private static object? JsonElementToObject(JsonElement e)
         {
             switch (e.ValueKind)
             {
@@ -2538,13 +2538,13 @@ namespace TensorSharp.Runtime
                 case JsonValueKind.Null: return null;
                 case JsonValueKind.Array:
                 {
-                    var list = new List<object>();
+                    var list = new List<object?>();
                     foreach (var item in e.EnumerateArray()) list.Add(JsonElementToObject(item));
                     return list;
                 }
                 case JsonValueKind.Object:
                 {
-                    var map = new Dictionary<string, object>();
+                    var map = new Dictionary<string, object?>();
                     foreach (var prop in e.EnumerateObject()) map[prop.Name] = JsonElementToObject(prop.Value);
                     return map;
                 }
@@ -2584,7 +2584,7 @@ namespace TensorSharp.Runtime
         /// they are four faces of one text protocol, and splitting them across separate
         /// name chains is how a family used to end up half-added.
         /// </summary>
-        public static IOutputParser Create(string architecture)
+        public static IOutputParser Create(string? architecture)
             => ChatProtocolRegistry.For(architecture)?.CreateOutputParser?.Invoke()
                ?? new PassthroughOutputParser();
 

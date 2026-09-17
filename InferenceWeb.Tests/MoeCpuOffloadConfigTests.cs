@@ -120,7 +120,7 @@ public sealed class MoeCpuOffloadConfigTests : IDisposable
     [InlineData("-1")]
     [InlineData("half")]
     [InlineData("3.5")]
-    public void TryParse_RejectsGarbage(string value)
+    public void TryParse_RejectsGarbage(string? value)
         => Assert.False(MoeCpuOffloadConfig.TryParse(value, out _, out _));
 
     [Theory]
@@ -160,7 +160,7 @@ public sealed class MoeCpuOffloadConfigTests : IDisposable
     [InlineData("token_embd.weight")]
     [InlineData("")]
     [InlineData(null)]
-    public void IsRoutedExpertWeightName_LeavesEverythingElseAlone(string name)
+    public void IsRoutedExpertWeightName_LeavesEverythingElseAlone(string? name)
         => Assert.False(MoeCpuOffloadConfig.IsRoutedExpertWeightName(name));
 
     [Fact]

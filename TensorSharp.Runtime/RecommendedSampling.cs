@@ -42,7 +42,7 @@ namespace TensorSharp.Runtime
         /// Reads the <c>general.sampling.*</c> keys out of GGUF metadata.
         /// Returns null when the file carries none of them.
         /// </summary>
-        public static RecommendedSampling FromGgufMetadata(IReadOnlyDictionary<string, object> metadata)
+        public static RecommendedSampling? FromGgufMetadata(IReadOnlyDictionary<string, object>? metadata)
         {
             if (metadata == null || metadata.Count == 0)
                 return null;

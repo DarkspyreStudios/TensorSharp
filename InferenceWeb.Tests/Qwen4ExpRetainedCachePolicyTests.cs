@@ -91,7 +91,7 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
         Assert.True(fixture.EnsureBudget(200));
         Fixture.AssertDisposed(first, true);
         Fixture.AssertDisposed(second, false);
-        Assert.Equal(1, fixture.Retained.Count);
+        Assert.Single(fixture.Retained);
     }
 
     [Fact]
@@ -119,7 +119,7 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
         Fixture.AssertDisposed(b, true);
         Fixture.AssertDisposed(ckpt, false);
         Assert.True(fixture.Retained.Contains("ckpt"));
-        Assert.Equal(1, fixture.Retained.Count);
+        Assert.Single(fixture.Retained);
     }
 
     // ---- radix prefix cache M2: refuse-and-report once the prefix cache owns retention ----
@@ -163,7 +163,7 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
         using var fixture = new Fixture(budgetBytes: long.MaxValue / 4, spareBytes: null);
         fixture.Retain("a", bytes: 10, serial: 1);
         fixture.Model.TrimIdleMemory();
-        Assert.Equal(0, fixture.Retained.Count);   // nothing attached, nothing to report to
+        Assert.Empty(fixture.Retained);   // nothing attached, nothing to report to
     }
 
     [Fact]
@@ -190,7 +190,7 @@ public sealed class Qwen4ExpRetainedCachePolicyTests
         Fixture.AssertDisposed(c, false);
         Assert.Equal(new[] { "pc:1:3" }, fixture.Model.RetainedPayloadKeys);
         fixture.Model.DiscardRetainedCaches(new[] { "pc:1:1" }, ReleaseReason.Evicted);
-        Assert.Equal(1, fixture.Retained.Count);
+        Assert.Single(fixture.Retained);
     }
 
     [Fact]

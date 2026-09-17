@@ -51,15 +51,15 @@ namespace TensorSharp.Runtime.Scheduling
         // IModelArchitecture.SupportsReuseAcrossMediaSpan).
         private readonly bool _reuseAcrossMediaSpan;
         // See IModelArchitecture.CanPrefillMediaAfterReusedPrefix; null means yes.
-        private readonly Func<int, bool> _canPrefillMediaAfterReusedPrefix;
+        private readonly Func<int, bool>? _canPrefillMediaAfterReusedPrefix;
 
         // Live-cache continuation hooks (wired by the engine to the executor). The
         // first computes how many leading prompt tokens can be served by continuing
         // the model's live KV cache (beyond the pooled-snapshot cap); the second
         // sets the sequence up to do so. Lets same-session follow-up turns reuse the
         // whole conversation prefix on sliding-window models. Null when unwired.
-        private Func<SequenceState, int> _liveContinuationLcp;
-        private Func<SequenceState, int, bool> _liveContinuationAdopt;
+        private Func<SequenceState, int>? _liveContinuationLcp;
+        private Func<SequenceState, int, bool>? _liveContinuationAdopt;
 
         // Retained fused-cache continuation hooks (wired by the engine to the
         // executor). Cross-request analogue of the live-cache hooks above: they
@@ -68,9 +68,9 @@ namespace TensorSharp.Runtime.Scheduling
         // continuation (one shared cache, sole-sequence only), each retained holder
         // is independent, so multiple concurrent admissions can each continue from
         // their own holder. Null when unwired.
-        private Func<SequenceState, int> _fusedContinuationLcp;
-        private Func<SequenceState, int, bool> _fusedContinuationAdopt;
-        private PrefixCacheCoordinator _radixCache;
+        private Func<SequenceState, int>? _fusedContinuationLcp;
+        private Func<SequenceState, int, bool>? _fusedContinuationAdopt;
+        private PrefixCacheCoordinator? _radixCache;
 
         private readonly LinkedList<SequenceState> _waiting = new();
         private readonly Dictionary<string, LinkedListNode<SequenceState>> _waitingIndex = new();
@@ -81,19 +81,19 @@ namespace TensorSharp.Runtime.Scheduling
         // When a mixed decode/prefill step runs out of token budget part-way
         // through the prefill set, resume at that sequence next iteration.
         // Request ids survive additions/removals better than a numeric cursor.
-        private string _nextPrefillRequestId;
+        private string? _nextPrefillRequestId;
         private readonly ILogger _logger;
 
         public ContinuousBatchScheduler(
             SchedulerConfig cfg,
             BlockPool pool,
             string modelFingerprint,
-            ILogger logger = null,
+            ILogger? logger = null,
             bool supportsCrossSequenceKvReuse = true,
             int maxReusablePrefixTokens = int.MaxValue,
             bool requiresPerBlockCapture = false,
             bool supportsReuseAcrossMediaSpan = true,
-            Func<int, bool> canPrefillMediaAfterReusedPrefix = null)
+            Func<int, bool>? canPrefillMediaAfterReusedPrefix = null)
         {
             _reuseAcrossMediaSpan = supportsReuseAcrossMediaSpan;
             _canPrefillMediaAfterReusedPrefix = canPrefillMediaAfterReusedPrefix;
@@ -224,7 +224,7 @@ namespace TensorSharp.Runtime.Scheduling
             if (prompt <= 0) return;
             int reused = seq.PrefixCacheReusedTokens;
             int blocked = _blockedByScopeTokens?.Invoke() ?? 0;
-            string scope = seq.CacheScope == null
+            string? scope = seq.CacheScope == null
                 ? "unscoped"
                 : seq.CacheScope.Length <= 8 ? seq.CacheScope : seq.CacheScope.Substring(0, 8);
 
@@ -487,9 +487,8 @@ namespace TensorSharp.Runtime.Scheduling
 
             // -------------------------------------------------------------- 3. Admit waiting sequences.
             // --------------------------------------------------------------
-            while (_waiting.Count > 0 && tokenBudget > 0 && _running.Count < _cfg.MaxNumRunningSequences)
+            while (_waiting.First is { } node && tokenBudget > 0 && _running.Count < _cfg.MaxNumRunningSequences)
             {
-                var node = _waiting.First;
                 var seq = node.Value;
 
                 // A sequence preempted earlier in this same output must stay
@@ -526,8 +525,8 @@ namespace TensorSharp.Runtime.Scheduling
                     if (_radixCache != null)
                     {
                         _radixCache.PrimaryAvailable = _running.Count == 0 && output.ScheduledWork.Count == 0;
-                        int length = _fusedContinuationLcp(seq);
-                        if (length > 0 && _fusedContinuationAdopt(seq, length))
+                        int length = _fusedContinuationLcp?.Invoke(seq) ?? 0;
+                        if (length > 0 && _fusedContinuationAdopt?.Invoke(seq, length) == true)
                         {
                             plannedFusedContinuation = true;
                             plannedLiveContinuation = _radixCache.RequiresSoleAdmission;
@@ -747,7 +746,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// <summary>Mark a sequence as errored and release any scheduler-owned
         /// blocks. Error paths deliberately skip prefix-cache registration
         /// because the model state for the failed step may be partial.</summary>
-        public bool NotifyError(SequenceState seq, Exception error, SchedulerOutput output = null)
+        public bool NotifyError(SequenceState seq, Exception error, SchedulerOutput? output = null)
         {
             if (seq == null) return false;
             bool finished = FinishSequence(seq, SequenceStatus.FinishedError, "error", cacheBlocks: false, error: error);
@@ -762,7 +761,7 @@ namespace TensorSharp.Runtime.Scheduling
             SequenceStatus finalStatus,
             string reason,
             bool cacheBlocks,
-            Exception error = null)
+            Exception? error = null)
         {
             if (seq == null || seq.Status.IsFinished()) return false;
 
@@ -911,7 +910,7 @@ namespace TensorSharp.Runtime.Scheduling
         // is only counted, so it reuses one list instead of allocating one per call.
         private readonly List<KvBlock> _capacityPlanScratch = new();
 
-        private string _capacityWaitLoggedFor;
+        private string? _capacityWaitLoggedFor;
 
         private void LogCapacityWait(SequenceState seq)
         {
@@ -939,7 +938,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// preempting each other at 14-20k computed tokens.</summary>
         private bool TryPreemptForBlocks(SequenceState needyForBlocks, int extraTokens, SchedulerOutput output)
         {
-            SequenceState victim = null;
+            SequenceState? victim = null;
             long victimRank = VictimRank(needyForBlocks);
             foreach (var s in _runningOrder)
             {
@@ -989,8 +988,7 @@ namespace TensorSharp.Runtime.Scheduling
 
             // Re-park at the front of the waiting queue so the victim resumes
             // soon - we don't want preemption to permanently demote a request.
-            _waiting.AddFirst(victim);
-            _waitingIndex[victim.RequestId] = _waiting.First;
+            _waitingIndex[victim.RequestId] = _waiting.AddFirst(victim);
         }
 
         /// <summary>Look up a sequence's prompt prefix in the block hash index
@@ -1294,12 +1292,12 @@ namespace TensorSharp.Runtime.Scheduling
         /// so another conversation shares the public blocks and nothing after them.</item>
         /// </list>
         /// </summary>
-        private string BlockSalt(SequenceState seq, int blockIndex)
+        private string? BlockSalt(SequenceState seq, int blockIndex)
         {
             int start = blockIndex * _cfg.BlockSize;
             int end = start + _cfg.BlockSize;
-            string media = PromptMediaSpans.BlockSalt(seq.MediaSpans, start, end);
-            string scope = seq.CacheScope != null && end > seq.SharedPrefixTokens
+            string? media = PromptMediaSpans.BlockSalt(seq.MediaSpans, start, end);
+            string? scope = seq.CacheScope != null && end > seq.SharedPrefixTokens
                 ? "scope:" + seq.CacheScope
                 : null;
             if (media == null) return scope;

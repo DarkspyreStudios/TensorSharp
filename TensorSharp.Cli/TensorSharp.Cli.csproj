@@ -5,7 +5,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
-    <Nullable>disable</Nullable>
+    <Nullable>annotations</Nullable>
     <Description>Command-line host for TensorSharp local inference, diagnostics, prompt inspection, and JSONL batch processing.</Description>
     <PackageTags>$(TensorSharpPackageTags);cli;console;batch;diagnostics</PackageTags>
   </PropertyGroup>

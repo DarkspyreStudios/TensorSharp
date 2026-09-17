@@ -192,7 +192,7 @@ public sealed class OpenAIResponsesAdapter
         if (responseFormat != null && !await ValidateStructuredOutputCompatibilityAsync(ctx, responseFormat, enableThinking, tools).ConfigureAwait(false))
             return;
 
-        using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
+        using RequestWorkspaceLease? workspaceLease = RequestWorkspaceLease.Acquire(
             _workspaces, _codeRunner, _svc.Architecture, allowTools: responseFormat == null);
 
         var skillPlan = SkillRequestPlan.Create(

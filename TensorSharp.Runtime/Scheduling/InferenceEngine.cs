@@ -58,7 +58,7 @@ namespace TensorSharp.Runtime.Scheduling
         public PrefixCacheMode PrefixCacheMode => _executor.RadixPrefixCacheEnabled
             ? PrefixCacheMode.Tree : PrefixCacheMode.Legacy;
 
-        public InferenceEngine(IModelArchitecture model, SchedulerConfig cfg, ILogger logger = null)
+        public InferenceEngine(IModelArchitecture model, SchedulerConfig cfg, ILogger? logger = null)
         {
             _model = model ?? throw new ArgumentNullException(nameof(model));
             ArgumentNullException.ThrowIfNull(cfg);
@@ -154,13 +154,13 @@ namespace TensorSharp.Runtime.Scheduling
         /// reader that merely stops reading cannot stop the GPU.
         /// </para>
         /// </summary>
-        public ComputeGate ComputeGate
+        public ComputeGate? ComputeGate
         {
             get => Volatile.Read(ref _computeGate);
             set => Volatile.Write(ref _computeGate, value);
         }
 
-        private ComputeGate _computeGate;
+        private ComputeGate? _computeGate;
         private long _stepsHeldByGate;
 
         /// <summary>
@@ -168,7 +168,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// forwarded to the executor, which reads it on its own thread. See
         /// <see cref="IPrefixCheckpointStore"/>.
         /// </summary>
-        public IPrefixCheckpointStore PrefixCheckpointStore
+        public IPrefixCheckpointStore? PrefixCheckpointStore
         {
             get => _executor.PrefixCheckpointStore;
             set => _executor.PrefixCheckpointStore = value;
@@ -355,7 +355,7 @@ namespace TensorSharp.Runtime.Scheduling
                 {
                     // Run one scheduler step.
                     sw.Restart();
-                    SchedulerOutput output = null;
+                    SchedulerOutput? output = null;
                     List<SequenceStepResult> results;
                     try
                     {
@@ -479,7 +479,7 @@ namespace TensorSharp.Runtime.Scheduling
             NotifyReleasedSequences(released);
         }
 
-        private void FailStepSequences(Exception ex, SchedulerOutput output, string phase)
+        private void FailStepSequences(Exception ex, SchedulerOutput? output, string phase)
         {
             var affected = GetAffectedSequences(output);
             if (affected.Count == 0)
@@ -544,7 +544,7 @@ namespace TensorSharp.Runtime.Scheduling
             NotifyReleasedSequences(released);
         }
 
-        private List<SequenceState> GetAffectedSequences(SchedulerOutput output)
+        private List<SequenceState> GetAffectedSequences(SchedulerOutput? output)
         {
             var affected = new List<SequenceState>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -575,9 +575,9 @@ namespace TensorSharp.Runtime.Scheduling
         }
 
         private void NotifyReleasedSequence(
-            Runtime.Scheduling.IBatchedPagedModel batched,
+            Runtime.Scheduling.IBatchedPagedModel? batched,
             string requestId,
-            HashSet<string> seen,
+            HashSet<string>? seen,
             bool retainFusedCache = true)
         {
             if (string.IsNullOrEmpty(requestId)) return;
@@ -716,7 +716,8 @@ namespace TensorSharp.Runtime.Scheduling
                     // A speculative step emits the sampled token plus the
                     // accepted draft tokens (ExtraTokens); each gets the same
                     // per-token EOS / length checks the one-token path applied.
-                    int extraCount = r.ExtraTokens?.Count ?? 0;
+                    var extraTokens = r.ExtraTokens ?? Array.Empty<int>();
+                    int extraCount = extraTokens.Count;
                     int totalNew = 1 + extraCount;
                     // Tokens already in OutputTokens before this step's batch;
                     // OutputTokens may not be consulted directly mid-loop
@@ -726,7 +727,7 @@ namespace TensorSharp.Runtime.Scheduling
                     bool finished = false;
                     for (int t = 0; t < totalNew && !finished; t++)
                     {
-                        int token = t == 0 ? r.SampledToken : r.ExtraTokens[t - 1];
+                        int token = t == 0 ? r.SampledToken : extraTokens[t - 1];
                         int emittedCount = baseCount + t + 1;
 
                         // Stop on EOS. Do NOT publish the EOS token to the
@@ -851,7 +852,7 @@ namespace TensorSharp.Runtime.Scheduling
             ILogger logger)
         {
             int numBlocks = cfg.NumBlocks;
-            string rawOverride = Environment.GetEnvironmentVariable("TS_SCHED_NUM_BLOCKS");
+            string? rawOverride = Environment.GetEnvironmentVariable("TS_SCHED_NUM_BLOCKS");
             bool explicitOverride = int.TryParse(rawOverride, out int overrideBlocks)
                 && overrideBlocks > 0;
             if (explicitOverride || cfg.BlockSize <= 0)

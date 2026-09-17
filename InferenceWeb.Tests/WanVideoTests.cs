@@ -339,7 +339,6 @@ namespace InferenceWeb.Tests
                 Assert.Equal(0f, rope.Sin[i], 5);
             }
             // token (t=1,h=0,w=0): first t-axis pair rotates by angle 1 (pos 1, freq 1)
-            long o = (long)(1 * 3 * 4) * 0;   // token index for t=1 is 12
             long tok12 = 12 * 128;
             Assert.Equal(MathF.Cos(1f), rope.Cos[tok12 + 0], 5);
             // h/w-axis pairs of that token stay at angle 0 (h=w=0)
