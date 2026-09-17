@@ -275,38 +275,38 @@ namespace TensorSharp.Runtime
         /// in a per-request bucket so concurrent requests don't clobber each other; when null
         /// (legacy single-threaded path) they go into a shared default bucket.
         /// </summary>
-        List<int> ProcessPromptTokens(List<ChatMessage> history, List<int> inputTokens, string requestId = null);
+        List<int> ProcessPromptTokens(List<ChatMessage> history, List<int> inputTokens, string? requestId = null);
 
         /// <summary>
         /// Queue any media embeddings whose insertion span lies AFTER <paramref name="reusablePrefixTokenCount"/>.
         /// Returns true if any embedding span overlaps the suffix that will be re-forwarded.
         /// </summary>
-        bool QueuePromptEmbeddings(int reusablePrefixTokenCount, string requestId = null);
+        bool QueuePromptEmbeddings(int reusablePrefixTokenCount, string? requestId = null);
 
         /// <summary>
         /// Queue the portions of any prepared media embeddings that overlap the prompt-token
         /// slice <c>[promptStartToken, promptStartToken + tokenCount)</c>. Insert positions are
         /// adjusted so the embeddings line up with the sliced token batch passed to Forward.
         /// </summary>
-        bool QueuePromptEmbeddingsForSlice(int promptStartToken, int tokenCount, string requestId = null);
+        bool QueuePromptEmbeddingsForSlice(int promptStartToken, int tokenCount, string? requestId = null);
 
         /// <summary>
         /// Find the largest prefix length &lt;= <paramref name="reusablePrefixTokenCount"/> that does
         /// not split a multimodal embedding span. The model's KV cache for any such span
         /// is only valid when the entire span has been forwarded.
         /// </summary>
-        int ClampReusablePrefix(int reusablePrefixTokenCount, string requestId = null);
+        int ClampReusablePrefix(int reusablePrefixTokenCount, string? requestId = null);
 
         /// <summary>
         /// Find the smallest trim-start position &gt;= <paramref name="trimStartTokenCount"/> that does
         /// not split a multimodal embedding span (used when truncating prompts that are too long).
         /// </summary>
-        int ClampTrimStart(int trimStartTokenCount, string requestId = null);
+        int ClampTrimStart(int trimStartTokenCount, string? requestId = null);
 
         /// <summary>
         /// Drop / shift queued embedding spans after the prompt has been trimmed at the front.
         /// </summary>
-        void TrimPreparedPrompt(int trimStartTokenCount, string requestId = null);
+        void TrimPreparedPrompt(int trimStartTokenCount, string? requestId = null);
 
         /// <summary>True if the request has any prepared (not-yet-fully-consumed) embeddings.
         /// The engine uses this to force the per-seq forward path for multimodal sequences,

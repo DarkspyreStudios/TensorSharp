@@ -678,7 +678,7 @@ public static class ServerOptionsBuilder
             // per-token assistant head) is simply never read from these: the
             // loaders probe the GGUF's own declared architecture, so the
             // operator never has to know which kind their file is.
-            if (SpeculativeCliFlags.TryReadOption(args, ref i, "--draft-model", out string dsparkOpt))
+            if (SpeculativeCliFlags.TryReadOption(args, ref i, "--draft-model", out string? dsparkOpt))
             {
                 Environment.SetEnvironmentVariable("TS_DSV4_DSPARK", dsparkOpt);
                 Environment.SetEnvironmentVariable("TS_QWEN35_DFLASH", dsparkOpt);

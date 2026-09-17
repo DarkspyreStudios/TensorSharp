@@ -33,7 +33,7 @@ namespace TensorSharp.Runtime
 
         /// <summary>Optional SSD spill directory. <c>null</c> disables the spill tier.
         /// The directory is created lazily on first write.</summary>
-        public string SsdDirectory { get; init; }
+        public string? SsdDirectory { get; init; }
 
         /// <summary>Hard cap on bytes resident on the SSD spill tier. Old blocks
         /// are deleted in LRU order once this is exceeded.</summary>
@@ -44,7 +44,7 @@ namespace TensorSharp.Runtime
         /// in-memory tier are also written to Redis, and lookups check Redis
         /// before falling through to the SSD tier. Redis provides a shared
         /// cache across multiple server instances.</summary>
-        public string RedisUrl { get; init; }
+        public string? RedisUrl { get; init; }
 
         /// <summary>TTL applied to each Redis KV entry. <c>null</c> means no
         /// explicit expiry (Redis maxmemory policy governs eviction).
@@ -67,12 +67,12 @@ namespace TensorSharp.Runtime
             bool enabled = ReadBool("TS_KV_PAGED_CACHE", false);
             int blockSize = ReadInt("TS_KV_BLOCK_SIZE", 256);
             long maxRamBytes = ReadLong("TS_KV_CACHE_MAX_RAM_MB", 1024) * 1024L * 1024L;
-            string ssdDir = Environment.GetEnvironmentVariable("TS_KV_CACHE_SSD_DIR");
+            string? ssdDir = Environment.GetEnvironmentVariable("TS_KV_CACHE_SSD_DIR");
             if (string.IsNullOrWhiteSpace(ssdDir))
                 ssdDir = null;
             long maxSsdBytes = ReadLong("TS_KV_CACHE_MAX_SSD_MB", 16 * 1024) * 1024L * 1024L;
 
-            string redisUrl = Environment.GetEnvironmentVariable("TS_KV_CACHE_REDIS_URL");
+            string? redisUrl = Environment.GetEnvironmentVariable("TS_KV_CACHE_REDIS_URL");
             if (string.IsNullOrWhiteSpace(redisUrl))
                 redisUrl = null;
             int redisTtlMinutes = ReadInt("TS_KV_CACHE_REDIS_TTL_MINUTES", 1440);
@@ -99,7 +99,7 @@ namespace TensorSharp.Runtime
 
         private static bool ReadBool(string name, bool defaultValue)
         {
-            string v = Environment.GetEnvironmentVariable(name);
+            string? v = Environment.GetEnvironmentVariable(name);
             if (string.IsNullOrWhiteSpace(v))
                 return defaultValue;
             v = v.Trim().ToLowerInvariant();
@@ -108,13 +108,13 @@ namespace TensorSharp.Runtime
 
         private static int ReadInt(string name, int defaultValue)
         {
-            string v = Environment.GetEnvironmentVariable(name);
+            string? v = Environment.GetEnvironmentVariable(name);
             return int.TryParse(v, out int parsed) ? parsed : defaultValue;
         }
 
         private static long ReadLong(string name, long defaultValue)
         {
-            string v = Environment.GetEnvironmentVariable(name);
+            string? v = Environment.GetEnvironmentVariable(name);
             return long.TryParse(v, out long parsed) ? parsed : defaultValue;
         }
     }

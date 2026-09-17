@@ -43,7 +43,7 @@ namespace TensorSharp.Runtime.Scheduling
             var candidates = new List<ExecutionPathKind>(3);
             var rejections = new List<ExecutionPathRejection>();
             bool mtpUnprofitable = false;
-            string speculationRefusal = null;
+            string? speculationRefusal = null;
 
             bool batchedEnabled = !options.BatchedPathDisabled;
             bool batchedImpl = caps.SupportsBatchedPagedAttention;
@@ -325,7 +325,7 @@ namespace TensorSharp.Runtime.Scheduling
             List<ExecutionPathKind> candidates,
             List<ExecutionPathRejection> rejections,
             bool mtpUnprofitable,
-            string speculationRefusal = null)
+            string? speculationRefusal = null)
         {
             // A plan whose last candidate can decline would leave the step
             // unserved; PerSequence never declines, SpeculativePerSequence /

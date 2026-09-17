@@ -464,7 +464,7 @@ namespace TensorSharp.Server.RequestParsers
         /// string is prepended as a system message, matching how the real API
         /// folds it into the model's system prompt.
         /// </summary>
-        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string instructions, UploadStoragePolicy uploads, ILogger logger = null,
+        public static List<ChatMessage> ParseResponsesInput(JsonElement inputEl, string? instructions, UploadStoragePolicy uploads, ILogger logger = null,
             string architecture = null, bool audioEncoderLoaded = false)
         {
             string audioError = ChatGenerationPipeline.AudioInputErrorFor(architecture, audioEncoderLoaded);

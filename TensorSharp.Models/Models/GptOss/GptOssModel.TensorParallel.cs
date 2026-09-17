@@ -790,6 +790,8 @@ namespace TensorSharp.Models
 
             int groupSize = numHeads / numKVHeads;
             int kvSeqLen = (int)kCache.Sizes[1];
+            // Every head overwrites all scores, so reuse one buffer across heads.
+            Span<float> scores = stackalloc float[attendEnd - attendStart];
 
             for (int h = 0; h < numHeads; h++)
             {
@@ -800,7 +802,6 @@ namespace TensorSharp.Models
 
                 // Compute scores
                 float maxScore = sink;
-                Span<float> scores = stackalloc float[attendEnd - attendStart];
                 for (int k = attendStart; k < attendEnd; k++)
                 {
                     float* kHead = kPtr + (kvH * kvSeqLen + k) * headDim;

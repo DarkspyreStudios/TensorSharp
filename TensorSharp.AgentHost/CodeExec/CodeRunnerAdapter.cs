@@ -92,7 +92,8 @@ namespace TensorSharp.AgentHost.CodeExec
         public string? UnavailableReason => _runner.UnavailableReason;
 
         /// <inheritdoc/>
-        public SamplingConfig ForCodingTurn(SamplingConfig requested) =>
+        [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(requested))]
+        public SamplingConfig? ForCodingTurn(SamplingConfig? requested) =>
             // Two different operations, and only one of them is opt-in.
             //
             // REMOVING the repetition penalty is on by default: it is an Ollama

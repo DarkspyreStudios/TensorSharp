@@ -313,7 +313,7 @@ public sealed class WebUiAdapter
             }
         }
         if (root.TryGetProperty("negative_prompt", out var np2) && np2.ValueKind == JsonValueKind.String)
-            p.NegativePrompt = np2.GetString();
+            p.NegativePrompt = np2.GetString() ?? string.Empty;
         bool wantB64 = root.TryGetProperty("response_format", out var rf) &&
                        rf.ValueKind == JsonValueKind.String && rf.GetString() == "b64_json";
 

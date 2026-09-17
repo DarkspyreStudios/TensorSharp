@@ -93,7 +93,7 @@ namespace TensorSharp.Runtime.Scheduling
         }
 
         /// <summary>Raised after the gate opens (true) or closes (false), on the caller's thread.</summary>
-        public event Action<bool> Changed;
+        public event Action<bool>? Changed;
 
         /// <summary>Work may be submitted again. Idempotent.</summary>
         public void Open()

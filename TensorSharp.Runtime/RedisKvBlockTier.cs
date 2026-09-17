@@ -9,6 +9,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -48,7 +49,7 @@ namespace TensorSharp.Runtime
         private long _residentBytes;
         private int _count;
 
-        public RedisKvBlockTier(IRedisKeyValueStore redis, string fingerprint, TimeSpan? ttl, ILogger logger = null)
+        public RedisKvBlockTier(IRedisKeyValueStore redis, string fingerprint, TimeSpan? ttl, ILogger? logger = null)
         {
             _redis = redis ?? throw new ArgumentNullException(nameof(redis));
             _fingerprintHash = StableFingerprintHash(fingerprint ?? string.Empty);
@@ -68,10 +69,10 @@ namespace TensorSharp.Runtime
         public long ResidentBytes => Interlocked.Read(ref _residentBytes);
         public int Count => Volatile.Read(ref _count);
 
-        public bool TryRead(KvBlockHash hash, out byte[] payload)
+        public bool TryRead(KvBlockHash hash, [NotNullWhen(true)] out byte[]? payload)
         {
             string key = KeyFor(hash);
-            byte[] raw = _redis.StringGet(key);
+            byte[]? raw = _redis.StringGet(key);
             if (raw == null || raw.Length < HeaderSize)
             {
                 payload = null;

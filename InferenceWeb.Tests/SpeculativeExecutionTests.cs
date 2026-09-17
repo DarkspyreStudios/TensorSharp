@@ -51,7 +51,7 @@ public class SpeculativeExecutionTests
         Assert.Equal(4, exec.Stats.TokensDrafted);
         Assert.Equal(4, exec.Stats.TokensAccepted);
         Assert.Equal(0, exec.Stats.RollbackSteps);
-        Assert.Equal(0, model.ProtocolViolations.Count);
+        Assert.Empty(model.ProtocolViolations);
     }
 
     [Fact]
@@ -76,7 +76,7 @@ public class SpeculativeExecutionTests
         Assert.Equal(1, exec.Stats.RollbackSteps);
         Assert.Equal(1, model.SnapshotCalls);
         Assert.Equal(1, model.RestoreCalls);
-        Assert.Equal(0, model.ProtocolViolations.Count);
+        Assert.Empty(model.ProtocolViolations);
     }
 
     [Fact]
@@ -97,7 +97,7 @@ public class SpeculativeExecutionTests
         Assert.Equal(pos + 1, model.CacheSeqLen);
         Assert.Equal(1, exec.Stats.PlainSteps);
         Assert.Equal(0, exec.Stats.TokensDrafted);
-        Assert.Equal(0, model.ProtocolViolations.Count);
+        Assert.Empty(model.ProtocolViolations);
     }
 
     [Fact]
@@ -165,7 +165,7 @@ public class SpeculativeExecutionTests
         Assert.NotNull(seq.SpecStats);
         Assert.True(seq.SpecStats.TokensAccepted > 0, "speculation never accepted a draft");
         Assert.True(seq.SpecStats.RollbackSteps >= 1, "wrong drafts should have caused a rollback");
-        Assert.Equal(0, model.ProtocolViolations.Count);
+        Assert.Empty(model.ProtocolViolations);
     }
 
     [Fact]
@@ -192,7 +192,7 @@ public class SpeculativeExecutionTests
         // tokens it is recorded as holding (and, on a sliding-window ring, no
         // post-stop row evicted a position the next turn still attends to).
         // The cache-length assertion above runs before engine shutdown clears state.
-        Assert.Equal(0, model.ProtocolViolations.Count);
+        Assert.Empty(model.ProtocolViolations);
     }
 
     [Theory]
@@ -320,7 +320,7 @@ public class SpeculativeExecutionTests
     /// <summary>Build the shared core over whatever algorithm the fake's draft
     /// head implies — the same resolution the engine and the CLI go through.</summary>
     [Fact]
-    public void EngineSpec_NGramArmedAfterAPrefixReuse_IsSeededWithTheReusedTokens()
+    public async Task EngineSpec_NGramArmedAfterAPrefixReuse_IsSeededWithTheReusedTokens()
     {
         // A follow-up whose prompt reuses cached blocks arms at a prefill chunk that
         // starts past position 0. The n-gram drafter's corpus used to be empty
@@ -351,12 +351,12 @@ public class SpeculativeExecutionTests
         var greedy = new SamplingConfig { Temperature = 0f, TopK = 0, TopP = 1f, RepetitionPenalty = 1f, PresencePenalty = 0f, FrequencyPenalty = 0f };
 
         var first = new SequenceState("reuse-1", Enumerable.Range(1, promptLen).ToList(), maxNew, BlockSize, greedy);
-        engine.SubmitRequest(first).Completion.GetAwaiter().GetResult();
+        await engine.SubmitRequest(first).Completion;
         Assert.Equal(ExpectedChain(model, promptLen, maxNew), first.OutputTokens);
 
         var prompt2 = Enumerable.Range(1, promptLen).Concat(first.OutputTokens).Concat(new[] { 3, 5 }).ToList();
         var second = new SequenceState("reuse-2", prompt2, maxNew, BlockSize, greedy);
-        var completion = engine.SubmitRequest(second).Completion.GetAwaiter().GetResult();
+        var completion = await engine.SubmitRequest(second).Completion;
 
         Assert.True(completion.PrefixCacheReusedTokens > 0, "the follow-up should have reused the first request's cache");
         Assert.Equal(ExpectedChain(model, prompt2.Count, maxNew), second.OutputTokens);

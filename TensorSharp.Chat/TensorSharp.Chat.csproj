@@ -4,7 +4,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
-    <Nullable>disable</Nullable>
+    <Nullable>annotations</Nullable>
     <Description>Host-neutral chat pipeline for TensorSharp: model service, sessions, generation, skills loop and the Web UI request/stream contract, independent of ASP.NET Core</Description>
     <PackageTags>$(TensorSharpPackageTags);chat;sessions;skills;webui;pipeline</PackageTags>
   </PropertyGroup>

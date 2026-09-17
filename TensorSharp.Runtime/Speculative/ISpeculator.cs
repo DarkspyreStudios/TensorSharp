@@ -41,7 +41,7 @@ namespace TensorSharp.Runtime.Speculative
         /// <see cref="ISpeculator.NeedsHiddenState"/> = false, and never read
         /// by them.
         /// </summary>
-        public float[] CarryHidden { get; init; }
+        public float[]? CarryHidden { get; init; }
 
         /// <summary>
         /// Every token the sequence has emitted so far, oldest first. This is
@@ -51,7 +51,7 @@ namespace TensorSharp.Runtime.Speculative
         /// verification will draw from. May be null when the caller keeps no
         /// history (pure argmax runs with no penalties).
         /// </summary>
-        public IReadOnlyList<int> History { get; init; }
+        public IReadOnlyList<int>? History { get; init; }
 
         /// <summary>
         /// Optional hook applied to a learned drafter's raw logits before its
@@ -62,7 +62,7 @@ namespace TensorSharp.Runtime.Speculative
         /// repPen 1.1, including --temperature 0) diverge ever more often as
         /// the output history grows and acceptance decays to ~0.
         /// </summary>
-        public Action<float[], IReadOnlyList<int>> AdjustLogits { get; init; }
+        public Action<float[], IReadOnlyList<int>>? AdjustLogits { get; init; }
     }
 
     /// <summary>
@@ -167,7 +167,7 @@ namespace TensorSharp.Runtime.Speculative
         /// the token PRECEDING <c>tokens[k]</c>, and is null when
         /// <see cref="NeedsHiddenState"/> is false.
         /// </summary>
-        void Commit(int[] tokens, float[] hRows, int startPos);
+        void Commit(int[] tokens, float[]? hRows, int startPos);
 
         /// <summary>Drop all per-sequence state (a new request, a KV reset).</summary>
         void Reset();

@@ -33,7 +33,7 @@ public class PdfTextExtractorTests
     [InlineData("image.png", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
-    public void IsPdfFile_DetectsExtensionCaseInsensitively(string path, bool expected)
+    public void IsPdfFile_DetectsExtensionCaseInsensitively(string? path, bool expected)
     {
         Assert.Equal(expected, PdfTextExtractor.IsPdfFile(path));
     }

@@ -111,7 +111,7 @@ namespace TensorSharp.Server.Hosting
         /// </summary>
         public static bool TryEnsureHostedModelLoaded(
             ModelService svc,
-            string requestedModel,
+            string? requestedModel,
             string hostedModelPath,
             string hostedMmProjPath,
             string backend,

@@ -29,7 +29,7 @@ namespace TensorSharp.Runtime.Speculative
         /// position, capturing per-row hidden states and logits like
         /// <see cref="ISpeculativeTarget.SpecForward"/>. Advances the trunk
         /// by <c>tokens.Length</c>.</summary>
-        void Forward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows);
+        void Forward(int[] tokens, float[]? hAllOut, float[] logitsOut, bool allLogitsRows);
 
         /// <summary>
         /// One plain single-token step for a speculator that needs no hidden state:
@@ -93,7 +93,7 @@ namespace TensorSharp.Runtime.Speculative
         public LinearSpecTrunk(ISpeculativeTarget model)
             => _model = model ?? throw new ArgumentNullException(nameof(model));
 
-        public void Forward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
+        public void Forward(int[] tokens, float[]? hAllOut, float[] logitsOut, bool allLogitsRows)
             => _model.SpecForward(tokens, hAllOut, logitsOut, allLogitsRows);
 
         private readonly int[] _plainToken = new int[1];

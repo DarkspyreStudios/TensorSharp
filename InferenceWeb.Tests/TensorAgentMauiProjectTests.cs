@@ -155,8 +155,8 @@ public class TensorAgentMauiProjectTests
         // The head links more than one framework now (CPython is embedded beside the
         // engine), so this picks out the engine's own reference rather than assuming
         // it is the only one.
-        XElement native = Assert.Single(Csproj.Descendants(Ns + "NativeReference")
-            .Where(e => e.Attribute("Include")!.Value.Replace('\\', '/').Contains("GgmlOps.xcframework", StringComparison.Ordinal)));
+        XElement native = Assert.Single(Csproj.Descendants(Ns + "NativeReference"),
+            e => e.Attribute("Include")!.Value.Replace('\\', '/').Contains("GgmlOps.xcframework", StringComparison.Ordinal));
         Assert.EndsWith("TensorSharp.GGML.Native/build-ios/GgmlOps.xcframework", native.Attribute("Include")!.Value.Replace('\\', '/'));
         Assert.Equal("Static", native.Attribute("Kind")?.Value);
         Assert.Equal("True", native.Attribute("ForceLoad")?.Value);
@@ -467,8 +467,8 @@ public class TensorAgentMauiProjectTests
         // Several things are bundled now — the skills, the Python standard library —
         // so this is the one that matters: the phone-specific Web UI. It deliberately
         // differs from the desktop Server page while speaking the same loopback API.
-        XElement bundle = Assert.Single(Csproj.Descendants(Ns + "BundleResource")
-            .Where(e => e.Attribute("Include")!.Value.Replace('\\', '/') == "wwwroot/**/*"));
+        XElement bundle = Assert.Single(Csproj.Descendants(Ns + "BundleResource"),
+            e => e.Attribute("Include")!.Value.Replace('\\', '/') == "wwwroot/**/*");
         Assert.StartsWith("webui/", bundle.Attribute("Link")?.Value.Replace('\\', '/'));
 
         string page = Path.Combine(MauiDir, "wwwroot", "index.html");

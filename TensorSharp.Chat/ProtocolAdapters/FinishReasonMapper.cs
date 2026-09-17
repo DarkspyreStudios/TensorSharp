@@ -92,7 +92,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// </remarks>
         /// <param name="pipelineReason">A <see cref="ChatStreamUpdate.FinishReason"/> value.</param>
         /// <param name="hasToolCalls">True when the parsed output carries tool calls.</param>
-        public static string ToOpenAIChat(string pipelineReason, bool hasToolCalls)
+        public static string ToOpenAIChat(string? pipelineReason, bool hasToolCalls)
         {
             if (IsTruncated(pipelineReason))
                 return OpenAiLength;
@@ -116,7 +116,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// and <c>stop</c> otherwise, and this server has always additionally
         /// reported <c>tool_calls</c> when the turn ended in a tool call.
         /// </summary>
-        public static string ToOllamaDoneReason(string pipelineReason, bool hasToolCalls)
+        public static string ToOllamaDoneReason(string? pipelineReason, bool hasToolCalls)
         {
             if (IsTruncated(pipelineReason))
                 return OllamaLength;
@@ -147,7 +147,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// </remarks>
         /// <returns>The <c>status</c>, and the <c>incomplete_details.reason</c>
         /// (null when the response completed).</returns>
-        public static (string Status, string IncompleteReason) ToResponsesStatus(string pipelineReason)
+        public static (string Status, string IncompleteReason) ToResponsesStatus(string? pipelineReason)
         {
             return IsTruncated(pipelineReason)
                 ? (ResponsesIncomplete, ResponsesMaxOutputTokens)
@@ -163,13 +163,13 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// truncation: falsely claiming a complete answer was cut off makes clients
         /// re-request work that was already finished.
         /// </summary>
-        public static bool IsTruncated(string pipelineReason) =>
+        public static bool IsTruncated(string? pipelineReason) =>
             string.Equals(pipelineReason, PipelineMaxTokens, StringComparison.Ordinal)
             || string.Equals(pipelineReason, PipelineThinkingBudget, StringComparison.Ordinal)
             || string.Equals(pipelineReason, PipelineRepetition, StringComparison.Ordinal);
 
         /// <summary>True when the engine's repetition guard ended the turn.</summary>
-        public static bool IsRepetition(string pipelineReason) =>
+        public static bool IsRepetition(string? pipelineReason) =>
             string.Equals(pipelineReason, PipelineRepetition, StringComparison.Ordinal);
     }
 }

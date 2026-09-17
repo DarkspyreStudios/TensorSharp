@@ -2586,6 +2586,34 @@ namespace TensorSharp.Models
             return sum;
         }
 
+        // Each byte contains four 2-bit groups. Keep the shift counts constant so
+        // the JIT can emit immediate shifts for these SIMD unpacking operations.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector256<byte> ShiftRightByTwoBitGroup(Vector256<byte> packed, int group)
+        {
+            return group switch
+            {
+                0 => packed,
+                1 => Avx2.ShiftRightLogical(packed.AsUInt16(), 2).AsByte(),
+                2 => Avx2.ShiftRightLogical(packed.AsUInt16(), 4).AsByte(),
+                3 => Avx2.ShiftRightLogical(packed.AsUInt16(), 6).AsByte(),
+                _ => throw new ArgumentOutOfRangeException(nameof(group)),
+            };
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector128<byte> ShiftRightByTwoBitGroup(Vector128<byte> packed, int group)
+        {
+            return group switch
+            {
+                0 => packed,
+                1 => Sse2.ShiftRightLogical(packed.AsUInt16(), 2).AsByte(),
+                2 => Sse2.ShiftRightLogical(packed.AsUInt16(), 4).AsByte(),
+                3 => Sse2.ShiftRightLogical(packed.AsUInt16(), 6).AsByte(),
+                _ => throw new ArgumentOutOfRangeException(nameof(group)),
+            };
+        }
+
         private static unsafe float VecDotQ2_KQ8_KAvx2(byte* q2k, byte* q8k, int superBlockCount)
         {
             float sum = 0.0f;
@@ -2615,12 +2643,8 @@ namespace TensorSharp.Models
                     for (int g = 0; g < 4; g++)
                     {
                         int s0 = half * 8 + g * 2;      // sub-block holding the low 16
-                        int shift = 2 * g;
-
-                        // (packed >> shift) & 3, as 32 unsigned 2-bit values.
-                        Vector256<byte> values = shift == 0
-                            ? Avx2.And(packed, mask3)
-                            : Avx2.And(Avx2.ShiftRightLogical(packed.AsUInt16(), (byte)shift).AsByte(), mask3);
+                        // (packed >> (2 * g)) & 3, as 32 unsigned 2-bit values.
+                        Vector256<byte> values = Avx2.And(ShiftRightByTwoBitGroup(packed, g), mask3);
 
                         Vector256<sbyte> x = Avx.LoadVector256((sbyte*)(q8Values + (s0 * 16)));
 
@@ -2796,8 +2820,9 @@ namespace TensorSharp.Models
                     Vector256<byte> high = Avx2.And(Avx2.ShiftRightLogical(q4bits.AsUInt16(), 4).AsByte(), loMask);
 
                     // bit (2p) and (2p+1) of each qh byte -> 0/1, shifted to weight 16.
-                    Vector256<byte> hbitLo = Avx2.And(Avx2.ShiftRightLogical(qhbits.AsUInt16(), (byte)(2 * p)).AsByte(), oneByte);
-                    Vector256<byte> hbitHi = Avx2.And(Avx2.ShiftRightLogical(qhbits.AsUInt16(), (byte)(2 * p + 1)).AsByte(), oneByte);
+                    Vector256<byte> hbits = ShiftRightByTwoBitGroup(qhbits, p);
+                    Vector256<byte> hbitLo = Avx2.And(hbits, oneByte);
+                    Vector256<byte> hbitHi = Avx2.And(Avx2.ShiftRightLogical(hbits.AsUInt16(), 1).AsByte(), oneByte);
                     low = Avx2.Add(low, Avx2.ShiftLeftLogical(hbitLo.AsUInt16(), 4).AsByte());
                     high = Avx2.Add(high, Avx2.ShiftLeftLogical(hbitHi.AsUInt16(), 4).AsByte());
 
@@ -2909,7 +2934,6 @@ namespace TensorSharp.Models
                     int qlOff = half * 64 + (pm % 2) * 32;
                     bool isUpper = pm >= 2;
                     int qhOff = half * 32;
-                    int qhShift = pm * 2;
 
                     Vector256<byte> ql32 = Unsafe.ReadUnaligned<Vector256<byte>>(ql + qlOff);
                     Vector256<byte> lo4 = isUpper
@@ -2917,7 +2941,7 @@ namespace TensorSharp.Models
                         : Avx2.And(ql32, loMask);
 
                     Vector256<byte> qh32 = Unsafe.ReadUnaligned<Vector256<byte>>(qh + qhOff);
-                    Vector256<byte> hi2 = Avx2.And(Avx2.ShiftRightLogical(qh32.AsUInt16(), (byte)qhShift).AsByte(), hi2Mask);
+                    Vector256<byte> hi2 = Avx2.And(ShiftRightByTwoBitGroup(qh32, pm), hi2Mask);
                     Vector256<byte> qval = Avx2.Add(lo4, Avx2.ShiftLeftLogical(hi2.AsUInt16(), 4).AsByte());
 
                     Vector256<sbyte> q8v = Unsafe.ReadUnaligned<Vector256<sbyte>>((byte*)(q8Values + pair * 32));
@@ -2975,7 +2999,6 @@ namespace TensorSharp.Models
                     int qlOffset = half * 64 + (sh % 4) * 16;
                     bool isUpper = sh >= 4;
                     int qhOffset = half * 32 + (sh % 2) * 16;
-                    int qhShift = (sh / 2) * 2;
                     int s = scales[sub];
 
                     Vector128<byte> qlBytes = Unsafe.ReadUnaligned<Vector128<byte>>(ql + qlOffset);
@@ -2984,7 +3007,7 @@ namespace TensorSharp.Models
                         : Sse2.And(qlBytes, loMask);
 
                     Vector128<byte> qhBytes = Unsafe.ReadUnaligned<Vector128<byte>>(qh + qhOffset);
-                    Vector128<byte> hi2 = Sse2.And(Sse2.ShiftRightLogical(qhBytes.AsUInt16(), (byte)qhShift).AsByte(), hi2Mask);
+                    Vector128<byte> hi2 = Sse2.And(ShiftRightByTwoBitGroup(qhBytes, sh / 2), hi2Mask);
                     Vector128<byte> qval = Sse2.Add(lo4, Sse2.ShiftLeftLogical(hi2.AsUInt16(), 4).AsByte());
 
                     Vector128<sbyte> q8v = Unsafe.ReadUnaligned<Vector128<sbyte>>((byte*)(q8Values + sub * 16));

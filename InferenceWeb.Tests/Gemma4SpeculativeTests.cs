@@ -388,7 +388,7 @@ public class Gemma4SpeculativeTests
     //   TS_GMTP_E2E=1 TS_GMTP_OOM=1 TS_GMTP_BACKEND=ggml_metal
     //   [TS_GMTP_NEW_TOKENS=1500] [TS_GMTP_PROMPT=...] [TS_GMTP_DRAFT_N=8]
     [Fact]
-    public void Gemma4Mtp_LongGen_NoOom()
+    public async Task Gemma4Mtp_LongGen_NoOom()
     {
         if (!TryResolveModels(out string targetPath, out string draftPath) ||
             Environment.GetEnvironmentVariable("TS_GMTP_OOM") != "1")
@@ -478,7 +478,7 @@ public class Gemma4SpeculativeTests
         int outCount = 0;
         try
         {
-            var completion = handle.Completion.GetAwaiter().GetResult();
+            var completion = await handle.Completion;
             outCount = completion.OutputTokenCount;
         }
         catch (Exception ex) { failure = ex; }

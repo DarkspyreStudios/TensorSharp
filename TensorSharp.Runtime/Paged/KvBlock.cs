@@ -78,8 +78,8 @@ namespace TensorSharp.Runtime.Paged
         /// <summary>Doubly-linked-list pointers for the free queue. Maintained by
         /// <see cref="FreeBlockQueue"/>. When the block is allocated both pointers
         /// are null.</summary>
-        internal KvBlock PrevFree;
-        internal KvBlock NextFree;
+        internal KvBlock? PrevFree;
+        internal KvBlock? NextFree;
 
         public KvBlock(int id)
         {
@@ -126,19 +126,22 @@ namespace TensorSharp.Runtime.Paged
             if (block.PrevFree != null || block.NextFree != null)
                 throw new InvalidOperationException($"Block {block.Id} is already on a free queue.");
 
-            block.PrevFree = _tail.PrevFree;
+            KvBlock previous = _tail.PrevFree
+                ?? throw new InvalidOperationException("The free queue tail has no predecessor.");
+            block.PrevFree = previous;
             block.NextFree = _tail;
-            _tail.PrevFree.NextFree = block;
+            previous.NextFree = block;
             _tail.PrevFree = block;
             _count++;
         }
 
         /// <summary>Pop from the head (least-recently-used).</summary>
-        public KvBlock Dequeue()
+        public KvBlock? Dequeue()
         {
             if (_count == 0)
                 return null;
-            KvBlock first = _head.NextFree;
+            KvBlock first = _head.NextFree
+                ?? throw new InvalidOperationException("The free queue head has no successor.");
             Remove(first);
             return first;
         }
@@ -149,15 +152,19 @@ namespace TensorSharp.Runtime.Paged
         {
             if (block.PrevFree == null && block.NextFree == null)
                 return; // not in queue
-            block.PrevFree.NextFree = block.NextFree;
-            block.NextFree.PrevFree = block.PrevFree;
+            KvBlock previous = block.PrevFree
+                ?? throw new InvalidOperationException($"Block {block.Id} has no predecessor in the free queue.");
+            KvBlock next = block.NextFree
+                ?? throw new InvalidOperationException($"Block {block.Id} has no successor in the free queue.");
+            previous.NextFree = next;
+            next.PrevFree = previous;
             block.PrevFree = null;
             block.NextFree = null;
             _count--;
         }
 
         /// <summary>Peek the first block without removing.</summary>
-        public KvBlock PeekFront()
+        public KvBlock? PeekFront()
         {
             if (_count == 0) return null;
             return _head.NextFree;

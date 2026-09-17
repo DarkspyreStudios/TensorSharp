@@ -126,7 +126,7 @@ public class BatchedExecutorTests
     }
 
     [Fact]
-    public void BatchExecutor_PrefersForwardBatch_WhenModelImplementsBatchedInterface()
+    public async Task BatchExecutor_PrefersForwardBatch_WhenModelImplementsBatchedInterface()
     {
         var model = new BatchedStubModel("fp-batched", peakToken: 7);
         var cfg = SmallConfig();
@@ -142,7 +142,7 @@ public class BatchedExecutorTests
 
         foreach (var h in handles)
         {
-            var completion = h.Completion.GetAwaiter().GetResult();
+            var completion = await h.Completion;
             Assert.True(completion.OutputTokenCount > 0);
         }
 
@@ -155,7 +155,7 @@ public class BatchedExecutorTests
     }
 
     [Fact]
-    public void BatchExecutor_BatchedPath_RoutesPerSeqLogitsCorrectly()
+    public async Task BatchExecutor_BatchedPath_RoutesPerSeqLogitsCorrectly()
     {
         // Each sequence carries its requested peakToken in its UserTag. The
         // stub model reads UserTag to decide which token to favour, so we
@@ -175,7 +175,7 @@ public class BatchedExecutorTests
 
         foreach (var (h, expectedToken) in handles)
         {
-            h.Completion.GetAwaiter().GetResult();
+            await h.Completion;
             Assert.Contains(expectedToken, h.Sequence.OutputTokens);
         }
     }
@@ -470,7 +470,7 @@ public class BatchedExecutorTests
     }
 
     [Fact]
-    public void BatchExecutor_PerSeqFused_ServesConcurrentSequencesViaForwardNotForwardBatch()
+    public async Task BatchExecutor_PerSeqFused_ServesConcurrentSequencesViaForwardNotForwardBatch()
     {
         // A model that opts into the per-sequence fused path
         // (SupportsPerSequenceFusedForward=true, like Gemma 4) must have its
@@ -498,7 +498,7 @@ public class BatchedExecutorTests
 
         foreach (var (h, _) in handles)
         {
-            var completion = h.Completion.GetAwaiter().GetResult();
+            var completion = await h.Completion;
             Assert.True(completion.OutputTokenCount > 0);
         }
 

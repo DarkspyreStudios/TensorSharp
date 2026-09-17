@@ -2,15 +2,17 @@
 // Licensed under the BSD-3-Clause license in the repository root.
 using System.Text;
 using System.Text.Json;
+using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests;
 
-public partial class DeepSeek41ChatTests
+public partial class DeepSeek41ChatTests(ITestOutputHelper output)
 {
     [Theory]
     [MemberData(nameof(ReferencePrompts))]
     public void TextPromptsMatchReference(string name, bool thinking, string messagesJson, string? toolsJson, string expected)
     {
+        output.WriteLine($"Reference prompt: {name}");
         var messages = JsonSerializer.Deserialize<List<ChatMessage>>(messagesJson)!;
         var tools = toolsJson == null ? null : ToolFunction.ParseList(toolsJson);
         Assert.Equal(expected, ChatTemplate.RenderDeepSeek41(messages, enableThinking: thinking, tools: tools));

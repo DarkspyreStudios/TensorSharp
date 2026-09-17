@@ -734,47 +734,50 @@ namespace TensorSharp.Cuda
             IntPtr scr = EnsureGdnSplitScratch(convBytes + coreBytes);
             IntPtr core = new IntPtr(scr.ToInt64() + convBytes);
 
+            IntPtr packedArg = packed; IntPtr convStateArg = convState; IntPtr convWArg = convWeight;
+            IntPtr dtBiasArg = dtBias; IntPtr aLogArg = aLog; IntPtr scrArg = scr;
+            int winStartArg = 0; int winLenArg = 0; int seqLenArg = seqLen;
+            int packedDimArg = packedDim; int qkvDimArg = qkvDim; int qkDimArg = qkDim; int vDimArg = vDim;
+            int numKHeadsArg = numKHeads; int numVHeadsArg = numVHeads;
+            int headKDimArg = headKDim; int headVDimArg = headVDim;
+            int convKernelArg = convKernel; int convWriteIdxArg = convWriteIdx;
+            float epsArg = eps;
+
+            void** convArgs = stackalloc void*[]
+            {
+                &packedArg, &convStateArg, &convWArg, &dtBiasArg, &aLogArg, &scrArg,
+                &winStartArg, &winLenArg, &seqLenArg,
+                &packedDimArg, &qkvDimArg, &qkDimArg, &vDimArg,
+                &numKHeadsArg, &numVHeadsArg, &headKDimArg, &headVDimArg,
+                &convKernelArg, &convWriteIdxArg, &epsArg
+            };
+            IntPtr ssmStateArg = ssmState; IntPtr coreArg = core;
+            void** scanArgs = stackalloc void*[]
+            {
+                &scrArg, &ssmStateArg, &coreArg,
+                &winLenArg, &numVHeadsArg, &headKDimArg, &headVDimArg
+            };
+            IntPtr ssmNormArg = ssmNorm; IntPtr outputArg = output;
+            void** outArgs = stackalloc void*[]
+            {
+                &coreArg, &packedArg, &ssmNormArg, &outputArg,
+                &winStartArg, &winLenArg, &packedDimArg, &qkvDimArg, &vDimArg,
+                &numVHeadsArg, &headVDimArg, &epsArg
+            };
+
             for (int winStart = 0; winStart < seqLen; winStart += win)
             {
                 int winLen = Math.Min(win, seqLen - winStart);
+                winStartArg = winStart;
+                winLenArg = winLen;
 
-                IntPtr packedArg = packed; IntPtr convStateArg = convState; IntPtr convWArg = convWeight;
-                IntPtr dtBiasArg = dtBias; IntPtr aLogArg = aLog; IntPtr scrArg = scr;
-                int winStartArg = winStart; int winLenArg = winLen; int seqLenArg = seqLen;
-                int packedDimArg = packedDim; int qkvDimArg = qkvDim; int qkDimArg = qkDim; int vDimArg = vDim;
-                int numKHeadsArg = numKHeads; int numVHeadsArg = numVHeads;
-                int headKDimArg = headKDim; int headVDimArg = headVDim;
-                int convKernelArg = convKernel; int convWriteIdxArg = convWriteIdx;
-                float epsArg = eps;
-
-                void** convArgs = stackalloc void*[]
-                {
-                    &packedArg, &convStateArg, &convWArg, &dtBiasArg, &aLogArg, &scrArg,
-                    &winStartArg, &winLenArg, &seqLenArg,
-                    &packedDimArg, &qkvDimArg, &qkDimArg, &vDimArg,
-                    &numKHeadsArg, &numVHeadsArg, &headKDimArg, &headVDimArg,
-                    &convKernelArg, &convWriteIdxArg, &epsArg
-                };
                 uint convWarps = (uint)((long)winLen * numVHeads);
                 uint convGrid = (uint)((convWarps + 7) / 8);   // 8 warps per 256-thread block
                 Launch(qwen35GdnPrefillConvF32, convGrid, 1, 1, BlockSize, 1, 1, 0, stream, convArgs);
 
-                IntPtr ssmStateArg = ssmState; IntPtr coreArg = core;
-                void** scanArgs = stackalloc void*[]
-                {
-                    &scrArg, &ssmStateArg, &coreArg,
-                    &winLenArg, &numVHeadsArg, &headKDimArg, &headVDimArg
-                };
                 uint scanGridY = (uint)((headVDim + 31) / 32);  // 8 warps x 4 rows per block
                 Launch(qwen35GdnPrefillScanF32, (uint)numVHeads, scanGridY, 1, BlockSize, 1, 1, 0, stream, scanArgs);
 
-                IntPtr ssmNormArg = ssmNorm; IntPtr outputArg = output;
-                void** outArgs = stackalloc void*[]
-                {
-                    &coreArg, &packedArg, &ssmNormArg, &outputArg,
-                    &winStartArg, &winLenArg, &packedDimArg, &qkvDimArg, &vDimArg,
-                    &numVHeadsArg, &headVDimArg, &epsArg
-                };
                 Launch(qwen35GdnPrefillOutF32, convGrid, 1, 1, BlockSize, 1, 1, 0, stream, outArgs);
             }
         }

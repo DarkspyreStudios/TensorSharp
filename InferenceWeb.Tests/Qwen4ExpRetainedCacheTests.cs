@@ -153,7 +153,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
         using var model = fixture.Load();
         model.BindSequenceCache("source");
         model.ForwardRefill(Prompt);
-        Tensor recurrent = Assert.Single(Field<Tensor[]>(model, "_gdnConvStateT").Where(t => t != null));
+        Tensor recurrent = Assert.Single(Field<Tensor[]>(model, "_gdnConvStateT"), t => t != null);
         GgmlBasicOps.Qwen4ExpInvalidateSeqState(TensorComputePrimitives.GetStoragePointer(recurrent));
         var error = Assert.Throws<InvalidOperationException>(() => model.TryCheckpointActiveCache("invalid"));
         Assert.Contains("authoritative GDN state", error.Message);
@@ -660,7 +660,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
             result["ple_conv"] = MemoryMarshal.Cast<byte, float>(Export(Marshal.UnsafeAddrOfPinnedArrayElement(ple, 0), (long)ple.Length * sizeof(float), model.DeviceForLayer(0))).ToArray();
             foreach (string name in new[] { "_kCache", "_vCache" })
             {
-                Tensor tensor = Assert.Single(Field<Tensor[]>(model, name).Where(t => t != null));
+                Tensor tensor = Assert.Single(Field<Tensor[]>(model, name), t => t != null);
                 Assert.Equal(DType.Float16, tensor.ElementType);
                 var bytes = new byte[checked((int)tensor.Storage.ByteLength)];
                 Marshal.Copy(TensorComputePrimitives.GetStoragePointer(tensor), bytes, 0, bytes.Length);
@@ -827,7 +827,7 @@ public sealed class Qwen4ExpRetainedCacheTests(ITestOutputHelper output)
         .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
 
     private static Tensor QsaTensor(Qwen4ExpModel model)
-        => Assert.Single(Field<Tensor[]>(model, "_idxKCache").Where(t => t != null));
+        => Assert.Single(Field<Tensor[]>(model, "_idxKCache"), t => t != null);
 
     /// <summary>The ACTIVE holder's raw indexer-key bytes for its written rows, read
     /// from the authoritative native entry.</summary>

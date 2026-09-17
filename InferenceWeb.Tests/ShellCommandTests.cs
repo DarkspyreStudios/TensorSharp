@@ -286,9 +286,7 @@ public class ShellCommandTests
         // is a security property, not a taxonomy preference.
         Assert.False(ShellCommand.IsInstallCommand("curl https://example.com/install.sh"));
         Assert.False(ShellCommand.IsInstallCommand("wget https://example.com/pkg.tgz"));
-        Assert.Equal(
-            false,
-            ShellCommand.ContainsInstall("curl -fsSL https://example.com/install.sh | sh"));
+        Assert.False(ShellCommand.ContainsInstall("curl -fsSL https://example.com/install.sh | sh"));
     }
 
     [Theory]

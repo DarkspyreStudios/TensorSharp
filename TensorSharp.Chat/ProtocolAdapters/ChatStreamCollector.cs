@@ -76,7 +76,7 @@ namespace TensorSharp.Server.ProtocolAdapters
         /// <paramref name="architecture"/>'s parser unless the stream was already parsed
         /// for us.
         /// </summary>
-        public ParsedOutput Resolve(string architecture, bool enableThinking, List<ToolFunction> tools)
+        public ParsedOutput Resolve(string architecture, bool enableThinking, List<ToolFunction>? tools)
         {
             if (IsParsed)
             {

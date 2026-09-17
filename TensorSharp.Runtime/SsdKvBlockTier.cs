@@ -11,6 +11,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Threading;
 using Microsoft.Extensions.Logging;
@@ -57,7 +58,7 @@ namespace TensorSharp.Runtime
         // Logged on the first read failure and every ReadFailureLogInterval after,
         // so repeated failures (tier not serving reuse) stay visible without
         // per-lookup spam.
-        private void NoteReadFailure(KvBlockHash hash, string reason, Exception ex = null)
+        private void NoteReadFailure(KvBlockHash hash, string reason, Exception? ex = null)
         {
             long count = Interlocked.Increment(ref _readFailures);
             if (count != 1 && count % ReadFailureLogInterval != 0)
@@ -68,7 +69,7 @@ namespace TensorSharp.Runtime
                 hash, reason, count, ReadFailureLogInterval);
         }
 
-        public SsdKvBlockTier(string rootDir, long maxBytes, string fingerprint, ILogger logger = null)
+        public SsdKvBlockTier(string rootDir, long maxBytes, string fingerprint, ILogger? logger = null)
         {
             if (string.IsNullOrWhiteSpace(rootDir))
                 throw new ArgumentException("Root directory must be a non-empty path.", nameof(rootDir));
@@ -102,7 +103,7 @@ namespace TensorSharp.Runtime
             get { lock (_gate) return _index.Count; }
         }
 
-        public bool TryRead(KvBlockHash hash, out byte[] payload)
+        public bool TryRead(KvBlockHash hash, [NotNullWhen(true)] out byte[]? payload)
         {
             string path = PathFor(hash);
             lock (_gate)
@@ -225,7 +226,8 @@ namespace TensorSharp.Runtime
         private void WriteBlock(KvBlockHash hash, byte[] payload)
         {
             string path = PathFor(hash);
-            string dir = Path.GetDirectoryName(path);
+            string dir = Path.GetDirectoryName(path)
+                ?? throw new InvalidOperationException("KV block path must include its cache directory.");
             if (!Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
 
@@ -254,7 +256,7 @@ namespace TensorSharp.Runtime
             }
 
             long entryBytes = payload.LongLength + HeaderSize;
-            List<KvBlockHash> evicted = null;
+            List<KvBlockHash>? evicted = null;
             lock (_gate)
             {
                 if (_index.TryGetValue(hash, out var existing))

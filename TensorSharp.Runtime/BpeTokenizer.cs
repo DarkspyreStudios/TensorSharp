@@ -132,7 +132,7 @@ namespace TensorSharp.Runtime
         /// mirroring llama.cpp's <c>LLAMA_VOCAB_PRE_TYPE_*</c> table. Extracted from the
         /// constructor so the mapping can be unit-tested without a vocabulary.
         /// </summary>
-        internal static string ResolvePreTokenizerPattern(string preTokenizerType)
+        internal static string ResolvePreTokenizerPattern(string? preTokenizerType)
         {
             return preTokenizerType switch
             {

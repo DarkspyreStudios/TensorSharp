@@ -10,6 +10,7 @@
 
 using System;
 using System.IO;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text;
 
@@ -85,10 +86,10 @@ namespace TensorSharp.Runtime
         /// True when <paramref name="exception"/> (or the one exception it wraps) is a
         /// refusal; <paramref name="reason"/> is then its message flattened to one line.
         /// </summary>
-        public static bool TryDescribe(Exception exception, out string reason)
+        public static bool TryDescribe(Exception? exception, [NotNullWhen(true)] out string? reason)
         {
             reason = null;
-            Exception ex = Unwrap(exception);
+            Exception? ex = Unwrap(exception);
             if (ex == null || !IsRefusal(ex))
                 return false;
 
@@ -99,9 +100,9 @@ namespace TensorSharp.Runtime
         }
 
         /// <summary>True for the exception types listed on <see cref="ModelLoadRefusal"/>.</summary>
-        public static bool IsRefusal(Exception exception)
+        public static bool IsRefusal(Exception? exception)
         {
-            Exception ex = Unwrap(exception);
+            Exception? ex = Unwrap(exception);
             return ex is ModelLoadRefusedException
                 or NotSupportedException
                 or IOException
@@ -146,12 +147,12 @@ namespace TensorSharp.Runtime
         /// Wrappers that only carry another exception: reflection-invoked factories, a
         /// single-exception aggregate from a task, a static constructor.
         /// </summary>
-        private static Exception Unwrap(Exception exception)
+        private static Exception? Unwrap(Exception? exception)
         {
-            Exception ex = exception;
+            Exception? ex = exception;
             for (int depth = 0; ex != null && depth < 8; depth++)
             {
-                Exception inner = ex switch
+                Exception? inner = ex switch
                 {
                     TargetInvocationException tie => tie.InnerException,
                     TypeInitializationException tie => tie.InnerException,

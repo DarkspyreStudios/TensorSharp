@@ -293,15 +293,15 @@ public sealed class NemotronOmniMmprojContractTests
         Assert.Equal("nemotron_v2_vl", gguf.GetString("clip.projector_type"));
         Assert.True(gguf.GetBool("clip.has_vision_encoder"));
         Assert.False(gguf.Metadata.ContainsKey("clip.has_audio_encoder"));
-        Assert.Empty(gguf.Metadata.Keys.Where(k => k.StartsWith("clip.audio", StringComparison.OrdinalIgnoreCase)));
+        Assert.DoesNotContain(gguf.Metadata.Keys, k => k.StartsWith("clip.audio", StringComparison.OrdinalIgnoreCase));
 
         string[] names = gguf.Tensors.Keys.ToArray();
         Assert.NotEmpty(names);
         // Vision blocks and the nemotron_v2_vl MLP projector, nothing else.
         Assert.All(names, n => Assert.True(n.StartsWith("v.", StringComparison.Ordinal) ||
                                             n.StartsWith("mm.", StringComparison.Ordinal), n));
-        Assert.Empty(names.Where(n => n.StartsWith("a.", StringComparison.Ordinal) ||
-                                      n.Contains("audio", StringComparison.OrdinalIgnoreCase)));
+        Assert.DoesNotContain(names, n => n.StartsWith("a.", StringComparison.Ordinal) ||
+                                         n.Contains("audio", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("v.blk.0.attn_qkv.weight", names);
         Assert.Contains("mm.model.mlp.3.weight", names);
         // The tensor NemotronModel.LoadAudioEncoder looks for is absent.

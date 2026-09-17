@@ -77,7 +77,7 @@ namespace TensorSharp.Runtime
                     case "system":
                         if (i > 0) sb.Append("<｜System｜>");
                         sb.Append(message.Content ?? "");
-                        if (hasTools && !toolsRendered)
+                        if (tools is { Count: > 0 } && !toolsRendered)
                         {
                             sb.Append("\n\n").Append(DeepSeek41ToolsHeader);
                             sb.AppendJoin('\n', tools.Select(t => SpaceDeepSeek41Json(DeepSeek41ToolSchema(t))));
@@ -171,13 +171,17 @@ namespace TensorSharp.Runtime
                 ToolCall call = calls[i];
                 sb.Append("<｜DSML｜ invoke name=\"").Append(call.Name).Append("\">\n");
                 bool first = true;
-                foreach (var parameter in call.Arguments ?? new Dictionary<string, object>())
+                foreach (var parameter in call.Arguments ?? new Dictionary<string, object?>())
                 {
                     if (!first) sb.Append('\n');
                     first = false;
-                    bool isString = parameter.Value is string || parameter.Value is JsonElement { ValueKind: JsonValueKind.String };
-                    string? text = isString ? parameter.Value.ToString() : null;
-                    bool rawString = isString && !Grammar.DeepSeek41ToolGrammar.ContainsReservedMarkup(text!);
+                    string? text = parameter.Value switch
+                    {
+                        string value => value,
+                        JsonElement { ValueKind: JsonValueKind.String } value => value.GetString(),
+                        _ => null,
+                    };
+                    bool rawString = text != null && !Grammar.DeepSeek41ToolGrammar.ContainsReservedMarkup(text);
                     sb.Append("<｜DSML｜ parameter name=\"").Append(parameter.Key)
                         .Append("\" string=\"").Append(rawString ? "true" : "false").Append("\">");
                     sb.Append(rawString ? text : SpaceDeepSeek41Json(JsonSerializer.Serialize(parameter.Value), protectToolDelimiters: true));

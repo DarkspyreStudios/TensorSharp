@@ -5,6 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 
 namespace TensorSharp.Runtime.Paged
 {
@@ -28,7 +29,7 @@ namespace TensorSharp.Runtime.Paged
 
         public void Register(KvBlockHash hash, KvBlock block)
         {
-            if (_index.TryGetValue(hash, out KvBlock existing))
+            if (_index.TryGetValue(hash, out KvBlock? existing))
             {
                 // For hybrid recurrent snapshots, two identical token blocks can
                 // differ in whether their bundled recurrent state belongs to the
@@ -42,7 +43,7 @@ namespace TensorSharp.Runtime.Paged
             _index.Add(hash, block);
         }
 
-        public bool TryGet(KvBlockHash hash, out KvBlock block)
+        public bool TryGet(KvBlockHash hash, [NotNullWhen(true)] out KvBlock? block)
         {
             return _index.TryGetValue(hash, out block);
         }
@@ -52,7 +53,7 @@ namespace TensorSharp.Runtime.Paged
             // A later valid checkpoint may have replaced a redundant invalid
             // mapping for the same hash.  Evicting the redundant physical block
             // must not remove that preferred mapping.
-            if (_index.TryGetValue(hash, out KvBlock current) && ReferenceEquals(current, block))
+            if (_index.TryGetValue(hash, out KvBlock? current) && ReferenceEquals(current, block))
                 _index.Remove(hash);
         }
 

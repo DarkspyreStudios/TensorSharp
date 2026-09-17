@@ -15,13 +15,13 @@ namespace TensorSharp.Runtime
     {
         public DeepSeek41OutputParser() : base(true) { }
 
-        internal static bool TryParseParameters(string body, out Dictionary<string, object> arguments)
+        internal static bool TryParseParameters(string body, out Dictionary<string, object?> arguments)
         {
             const string dsmlOpen = "<｜DSML｜ parameter name=\"";
             const string plainOpen = "<parameter name=\"";
             const string dsmlClose = "</｜DSML｜ parameter>";
             const string plainClose = "</parameter>";
-            arguments = new Dictionary<string, object>();
+            arguments = new Dictionary<string, object?>();
             int pos = 0;
             while (true)
             {
@@ -63,7 +63,7 @@ namespace TensorSharp.Runtime
                     value.Contains("<｜DSML｜ invoke", StringComparison.Ordinal))
                     return false;
 
-                object parsed = value;
+                object? parsed = value;
                 if (!isString)
                 {
                     try

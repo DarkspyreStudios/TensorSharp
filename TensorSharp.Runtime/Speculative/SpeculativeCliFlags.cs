@@ -5,6 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.IO;
 
@@ -155,7 +156,7 @@ namespace TensorSharp.Runtime.Speculative
                     changed = true;
                     continue;
                 }
-                if (TryReadOption(args, ref i, "--spec-type", out string typeOpt))
+                if (TryReadOption(args, ref i, "--spec-type", out string? typeOpt))
                 {
                     if (!SpeculatorRegistry.IsKnown(typeOpt))
                     {
@@ -167,7 +168,7 @@ namespace TensorSharp.Runtime.Speculative
                     changed = true;
                     continue;
                 }
-                if (TryReadOption(args, ref i, "--spec-draft", out string draftOpt))
+                if (TryReadOption(args, ref i, "--spec-draft", out string? draftOpt))
                 {
                     if (!int.TryParse(draftOpt, NumberStyles.Integer, CultureInfo.InvariantCulture, out int draft)
                         || draft < 1 || draft > MaxDraftTokens)
@@ -180,7 +181,7 @@ namespace TensorSharp.Runtime.Speculative
                     changed = true;
                     continue;
                 }
-                if (TryReadOption(args, ref i, "--spec-pmin", out string pminOpt))
+                if (TryReadOption(args, ref i, "--spec-pmin", out string? pminOpt))
                 {
                     if (!float.TryParse(pminOpt, NumberStyles.Float, CultureInfo.InvariantCulture, out float pmin)
                         || !float.IsFinite(pmin)
@@ -204,7 +205,7 @@ namespace TensorSharp.Runtime.Speculative
                 // drafters that must be resident before the layer split - and
                 // TryAttachConfiguredDraftHead skips a drafter the factory
                 // already attached, so publishing both ways cannot double-load.
-                if (TryReadOption(args, ref i, "--draft-model", out string draftModelOpt))
+                if (TryReadOption(args, ref i, "--draft-model", out string? draftModelOpt))
                 {
                     if (string.IsNullOrWhiteSpace(draftModelOpt) || !File.Exists(draftModelOpt))
                         throw new ArgumentException($"--draft-model file not found: '{draftModelOpt}'.");
@@ -255,7 +256,7 @@ namespace TensorSharp.Runtime.Speculative
         /// Reads <c>--opt VALUE</c> or <c>--opt=VALUE</c> at <paramref name="index"/>,
         /// advancing past a consumed value token.
         /// </summary>
-        public static bool TryReadOption(string[] args, ref int index, string option, out string value)
+        public static bool TryReadOption(string[] args, ref int index, string option, [NotNullWhen(true)] out string? value)
         {
             string arg = args[index];
             if (string.Equals(arg, option, StringComparison.OrdinalIgnoreCase))

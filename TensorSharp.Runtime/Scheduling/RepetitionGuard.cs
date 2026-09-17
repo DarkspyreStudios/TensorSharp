@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Collections.Generic;
 
 namespace TensorSharp.Runtime.Scheduling
@@ -141,7 +142,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// repeated at least 4 times over at least 64 characters. Used to quote the loop
         /// back to the model; it is not what decides to stop.
         /// </summary>
-        public static bool TryFindTextLoop(string text, out string unit, out int repeats)
+        public static bool TryFindTextLoop(string text, [NotNullWhen(true)] out string? unit, out int repeats)
         {
             unit = null;
             repeats = 0;
@@ -188,7 +189,7 @@ namespace TensorSharp.Runtime.Scheduling
         /// many times, with the unit rendered by <paramref name="decode"/> when a
         /// tokenizer is at hand.
         /// </summary>
-        public static string Describe(IReadOnlyList<int> tokens, int count, int period, int repeats, Func<List<int>, string> decode)
+        public static string Describe(IReadOnlyList<int> tokens, int count, int period, int repeats, Func<List<int>, string?> decode)
         {
             string unit = string.Empty;
             if (tokens != null && decode != null && period > 0 && count >= period)

@@ -749,8 +749,8 @@ namespace TensorSharp.AgentHost.CodeExec
             request = default;
             error = null;
 
-            IDictionary<string, object> arguments =
-                call?.Arguments ?? new Dictionary<string, object>(StringComparer.Ordinal);
+            IDictionary<string, object?> arguments =
+                call?.Arguments ?? new Dictionary<string, object?>(StringComparer.Ordinal);
 
             string? command = ShellCommand.ReadCommand(Find(arguments, "command", "cmd", "script", "shell", "input"));
             if (string.IsNullOrWhiteSpace(command))
@@ -790,8 +790,8 @@ namespace TensorSharp.AgentHost.CodeExec
             patch = string.Empty;
             error = null;
 
-            IDictionary<string, object> arguments =
-                call?.Arguments ?? new Dictionary<string, object>(StringComparer.Ordinal);
+            IDictionary<string, object?> arguments =
+                call?.Arguments ?? new Dictionary<string, object?>(StringComparer.Ordinal);
 
             patch = ReadString(arguments, "patch", "input", "diff", "content", "text") ?? string.Empty;
 
@@ -800,7 +800,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // containing '*** Begin Patch' is a patch — so neither costs a round.
             if (patch.Length == 0)
             {
-                foreach (KeyValuePair<string, object> pair in arguments)
+                foreach (KeyValuePair<string, object?> pair in arguments)
                 {
                     string? value = AsString(pair.Value);
                     if (value != null && value.Contains("*** Begin Patch", StringComparison.Ordinal))
@@ -859,8 +859,8 @@ namespace TensorSharp.AgentHost.CodeExec
             request = default;
             error = null;
 
-            IDictionary<string, object> arguments =
-                call?.Arguments ?? new Dictionary<string, object>(StringComparer.Ordinal);
+            IDictionary<string, object?> arguments =
+                call?.Arguments ?? new Dictionary<string, object?>(StringComparer.Ordinal);
 
             string? path = ReadString(arguments, "path", "file_path", "file", "filename", "filepath", "target_file");
             if (string.IsNullOrWhiteSpace(path))
@@ -951,8 +951,8 @@ namespace TensorSharp.AgentHost.CodeExec
             request = default;
             error = null;
 
-            IDictionary<string, object> arguments =
-                call?.Arguments ?? new Dictionary<string, object>(StringComparer.Ordinal);
+            IDictionary<string, object?> arguments =
+                call?.Arguments ?? new Dictionary<string, object?>(StringComparer.Ordinal);
 
             string? path = ReadString(arguments, "path", "file_path", "file", "filename", "filepath", "target_file");
             if (string.IsNullOrWhiteSpace(path))
@@ -984,8 +984,8 @@ namespace TensorSharp.AgentHost.CodeExec
             request = default;
             error = null;
 
-            IDictionary<string, object> arguments =
-                call?.Arguments ?? new Dictionary<string, object>(StringComparer.Ordinal);
+            IDictionary<string, object?> arguments =
+                call?.Arguments ?? new Dictionary<string, object?>(StringComparer.Ordinal);
 
             string? path = ReadString(arguments, "path", "file_path", "file", "filename", "filepath", "target_file");
             if (string.IsNullOrWhiteSpace(path))
@@ -1020,7 +1020,7 @@ namespace TensorSharp.AgentHost.CodeExec
         /// anchor fails to match, and would do it invisibly.
         /// </para>
         /// </summary>
-        private static string? RawString(IDictionary<string, object> arguments, params string[] names)
+        private static string? RawString(IDictionary<string, object?> arguments, params string[] names)
         {
             object? raw = Find(arguments, names);
             if (raw == null)
@@ -1054,7 +1054,7 @@ namespace TensorSharp.AgentHost.CodeExec
             }
         }
 
-        private static object? Find(IDictionary<string, object> arguments, params string[] names)
+        private static object? Find(IDictionary<string, object?> arguments, params string[] names)
         {
             foreach (string name in names)
             {
@@ -1073,13 +1073,13 @@ namespace TensorSharp.AgentHost.CodeExec
             _ => value.ToString(),
         };
 
-        private static string? ReadString(IDictionary<string, object> arguments, params string[] names)
+        private static string? ReadString(IDictionary<string, object?> arguments, params string[] names)
         {
             string? value = AsString(Find(arguments, names));
             return string.IsNullOrWhiteSpace(value) ? null : value!.Trim();
         }
 
-        private static int ReadInt(IDictionary<string, object> arguments, params string[] names)
+        private static int ReadInt(IDictionary<string, object?> arguments, params string[] names)
         {
             object? raw = Find(arguments, names);
             switch (raw)
@@ -1102,7 +1102,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 : 0;
         }
 
-        private static bool ReadBool(IDictionary<string, object> arguments, params string[] names)
+        private static bool ReadBool(IDictionary<string, object?> arguments, params string[] names)
         {
             object? raw = Find(arguments, names);
             switch (raw)

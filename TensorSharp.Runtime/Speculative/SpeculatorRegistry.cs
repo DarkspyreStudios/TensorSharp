@@ -48,7 +48,7 @@ namespace TensorSharp.Runtime.Speculative
 
         /// <summary>Builds an algorithm for one (target model, options) pair, or
         /// returns null when it cannot serve that model.</summary>
-        public delegate ISpeculator Factory(ISpeculativeTarget target, SpeculationOptions options);
+        public delegate ISpeculator? Factory(ISpeculativeTarget target, SpeculationOptions options);
 
         /// <summary>A registered algorithm: how to build it, and whether it
         /// needs the checkpoint to carry learned speculator weights. The flag is
@@ -127,8 +127,8 @@ namespace TensorSharp.Runtime.Speculative
         /// simply has no drafter under <see cref="Auto"/> declines with a reason
         /// that names the weight-free alternative.
         /// </summary>
-        public static ISpeculator Create(ISpeculativeTarget target, SpeculationOptions options,
-            out string declineReason)
+        public static ISpeculator? Create(ISpeculativeTarget target, SpeculationOptions? options,
+            out string? declineReason)
         {
             ArgumentNullException.ThrowIfNull(target);
             options ??= SpeculationOptions.Disabled;
@@ -142,7 +142,7 @@ namespace TensorSharp.Runtime.Speculative
                 return null;
             }
 
-            string name = string.IsNullOrWhiteSpace(options.SpeculatorName)
+            string? name = string.IsNullOrWhiteSpace(options.SpeculatorName)
                 ? Auto
                 : options.SpeculatorName.Trim();
 
@@ -175,7 +175,7 @@ namespace TensorSharp.Runtime.Speculative
                 }
             }
 
-            ISpeculator speculator = entry.Factory(target, options);
+            ISpeculator? speculator = entry.Factory(target, options);
             if (speculator == null)
             {
                 declineReason = $"the '{name}' speculator cannot serve this model "
@@ -188,7 +188,7 @@ namespace TensorSharp.Runtime.Speculative
             return speculator;
         }
 
-        private static ISpeculator CreateDraftHead(ISpeculativeTarget target, SpeculationOptions options)
+        private static ISpeculator? CreateDraftHead(ISpeculativeTarget target, SpeculationOptions options)
         {
             if (target is not IDraftHead head || head.DraftHeadKind != DraftHeadKind.PerToken)
                 return null;
@@ -196,7 +196,7 @@ namespace TensorSharp.Runtime.Speculative
                 ResolveDraftWindow(target, options));
         }
 
-        private static ISpeculator CreateBlock(ISpeculativeTarget target, SpeculationOptions options)
+        private static ISpeculator? CreateBlock(ISpeculativeTarget target, SpeculationOptions options)
         {
             if (target is not IDraftHead head || head.DraftHeadKind != DraftHeadKind.Block)
                 return null;

@@ -137,7 +137,7 @@ namespace TensorSharp.Runtime.Scheduling
 
         private static int ReadInt(string name, int fallback)
         {
-            string raw = System.Environment.GetEnvironmentVariable(name);
+            string? raw = System.Environment.GetEnvironmentVariable(name);
             if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out int v) && v > 0)
                 return v;
             return fallback;
@@ -145,7 +145,7 @@ namespace TensorSharp.Runtime.Scheduling
 
         private static PrefixCacheMode ReadPrefixCacheMode()
         {
-            string raw = System.Environment.GetEnvironmentVariable("TS_PREFIX_CACHE_MODE");
+            string? raw = System.Environment.GetEnvironmentVariable("TS_PREFIX_CACHE_MODE");
             if (string.IsNullOrWhiteSpace(raw) || string.Equals(raw.Trim(), "tree", System.StringComparison.OrdinalIgnoreCase))
                 return PrefixCacheMode.Tree;
             if (string.Equals(raw.Trim(), "legacy", System.StringComparison.OrdinalIgnoreCase))
@@ -157,7 +157,7 @@ namespace TensorSharp.Runtime.Scheduling
         // ReadInt, this honours an explicit "0" so a flag can actually be disabled.
         private static bool ReadBool(string name, bool fallback)
         {
-            string raw = System.Environment.GetEnvironmentVariable(name);
+            string? raw = System.Environment.GetEnvironmentVariable(name);
             if (string.IsNullOrEmpty(raw)) return fallback;
             raw = raw.Trim();
             if (raw == "1") return true;

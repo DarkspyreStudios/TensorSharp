@@ -364,7 +364,7 @@ public sealed class OllamaAdapter
             return;
         }
 
-        using RequestWorkspaceLease workspaceLease = RequestWorkspaceLease.Acquire(
+        using RequestWorkspaceLease? workspaceLease = RequestWorkspaceLease.Acquire(
             _workspaces, _codeRunner, _svc.Architecture);
 
         var skillPlan = SkillRequestPlan.Create(

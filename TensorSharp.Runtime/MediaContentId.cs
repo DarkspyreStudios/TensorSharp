@@ -40,7 +40,7 @@ namespace TensorSharp.Runtime
         /// be read (missing, permissions): the caller then falls back to the path, which
         /// is what identity was before.
         /// </summary>
-        public static string OfFile(string path)
+        public static string? OfFile(string? path)
         {
             if (string.IsNullOrWhiteSpace(path))
                 return null;

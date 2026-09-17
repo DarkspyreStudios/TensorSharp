@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -37,11 +38,11 @@ namespace TensorSharp.Runtime
     {
         private readonly PagedKvCacheConfig _config;
         private readonly ILogger _logger;
-        private readonly PagedKvBlockStore _ramTier;
-        private readonly SsdKvBlockTier _ssdTier;
-        private readonly RedisKvBlockTier _redisTier;
+        private readonly PagedKvBlockStore? _ramTier;
+        private readonly SsdKvBlockTier? _ssdTier;
+        private readonly RedisKvBlockTier? _redisTier;
         private readonly string _fingerprint;
-        private readonly IKvBlockCodec _codec;
+        private readonly IKvBlockCodec? _codec;
         private long _hitTokens;
         private long _missTokens;
         private long _capturedBlocks;
@@ -49,7 +50,7 @@ namespace TensorSharp.Runtime
         /// <summary>Construct a disabled manager (all operations are no-ops).</summary>
         public static PagedKvCacheManager Disabled() => new(new PagedKvCacheConfig { Enabled = false }, fingerprint: string.Empty, logger: null);
 
-        public PagedKvCacheManager(PagedKvCacheConfig config, string fingerprint, ILogger logger)
+        public PagedKvCacheManager(PagedKvCacheConfig config, string fingerprint, ILogger? logger)
             : this(config, fingerprint, logger, codec: null)
         {
         }
@@ -62,7 +63,7 @@ namespace TensorSharp.Runtime
         /// ever sees raw bytes in its own KV layout. Pass <c>null</c> to use
         /// the historical passthrough behaviour.
         /// </summary>
-        public PagedKvCacheManager(PagedKvCacheConfig config, string fingerprint, ILogger logger, IKvBlockCodec codec)
+        public PagedKvCacheManager(PagedKvCacheConfig config, string fingerprint, ILogger? logger, IKvBlockCodec? codec)
         {
             _config = config ?? throw new ArgumentNullException(nameof(config));
             _fingerprint = fingerprint ?? string.Empty;
@@ -100,7 +101,7 @@ namespace TensorSharp.Runtime
                 }
             }
 
-            Action<KvBlockHash, byte[]> spillCallback = null;
+            Action<KvBlockHash, byte[]>? spillCallback = null;
             if (_redisTier != null || _ssdTier != null)
             {
                 spillCallback = (h, b) =>
@@ -112,10 +113,11 @@ namespace TensorSharp.Runtime
             _ramTier = new PagedKvBlockStore(config.MaxRamBytes, spillCallback);
         }
 
+        [MemberNotNullWhen(true, nameof(_ramTier))]
         public bool IsEnabled => _config.Enabled && _ramTier != null;
         public int BlockSize => _config.BlockSize;
         public string Fingerprint => _fingerprint;
-        public IKvBlockCodec Codec => _codec;
+        public IKvBlockCodec? Codec => _codec;
 
         public PagedKvCacheStats GetStats() => new(
             ramBytes: _ramTier?.ResidentBytes ?? 0,
@@ -219,11 +221,11 @@ namespace TensorSharp.Runtime
             // Reuse a single decode scratch buffer across the loop; freeing
             // and reallocating per-block would thrash the LOH for typical
             // block sizes (>= 85 KB).
-            byte[] decodeScratch = _codec != null ? new byte[expectedRaw] : null;
+            byte[]? decodeScratch = _codec != null ? new byte[expectedRaw] : null;
 
             for (int b = 0; b < restoreBudgetBlocks && b < hashes.Count; b++)
             {
-                if (!TryFetch(hashes[b], out byte[] payload))
+                if (!TryFetch(hashes[b], out byte[]? payload))
                     break;
 
                 ReadOnlySpan<byte> rawSpan;
@@ -333,8 +335,13 @@ namespace TensorSharp.Runtime
             }
         }
 
-        private bool TryFetch(KvBlockHash hash, out byte[] payload)
+        private bool TryFetch(KvBlockHash hash, [NotNullWhen(true)] out byte[]? payload)
         {
+            if (_ramTier == null)
+            {
+                payload = null;
+                return false;
+            }
             if (_ramTier.TryGet(hash, out payload))
                 return true;
             if (_redisTier != null && _redisTier.TryRead(hash, out payload))

@@ -788,9 +788,9 @@ namespace TensorSharp.AgentHost.Skills
             /// rejecting one of them would make the client work against some
             /// implementations and silently return empty arguments against others.
             /// </summary>
-            private static Dictionary<string, object> ParseArguments(JsonElement arguments)
+            private static Dictionary<string, object?> ParseArguments(JsonElement arguments)
             {
-                var result = new Dictionary<string, object>(StringComparer.Ordinal);
+                var result = new Dictionary<string, object?>(StringComparer.Ordinal);
 
                 JsonElement source = arguments;
                 if (arguments.ValueKind == JsonValueKind.String)
@@ -815,9 +815,9 @@ namespace TensorSharp.AgentHost.Skills
                 return source.ValueKind == JsonValueKind.Object ? ToDictionary(source) : result;
             }
 
-            private static Dictionary<string, object> ToDictionary(JsonElement element)
+            private static Dictionary<string, object?> ToDictionary(JsonElement element)
             {
-                var result = new Dictionary<string, object>(StringComparer.Ordinal);
+                var result = new Dictionary<string, object?>(StringComparer.Ordinal);
                 if (element.ValueKind != JsonValueKind.Object)
                     return result;
                 foreach (JsonProperty property in element.EnumerateObject())

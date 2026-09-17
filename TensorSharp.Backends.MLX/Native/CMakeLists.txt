@@ -1,5 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
 
+# The pinned MLX kernels support Metal 4.0, but SDK 27 defaults to Metal 4.1,
+# whose address-space rules reject their thread-qualified member references.
+# MLX owns its shader command lines and exposes the deployment target as the
+# supported way to select the Metal language version. Targeting macOS 26.2
+# selects Metal 4.0 and retains the NAX kernels; older SDKs keep their defaults.
+# Set this before project() so C/C++ and Metal agree on the deployment target.
+# Respect an explicit CMake or standard macOS deployment-target override.
+if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET
+   AND "$ENV{MACOSX_DEPLOYMENT_TARGET}" STREQUAL "")
+  execute_process(
+    COMMAND xcrun --sdk macosx --show-sdk-version
+    OUTPUT_VARIABLE TENSORSHARP_MACOS_SDK_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE TENSORSHARP_MACOS_SDK_RESULT)
+  if(TENSORSHARP_MACOS_SDK_RESULT EQUAL 0
+     AND TENSORSHARP_MACOS_SDK_VERSION VERSION_GREATER_EQUAL "27.0")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.2" CACHE STRING
+        "Minimum macOS version supported by the MLX native libraries" FORCE)
+  endif()
+endif()
+
 project(TensorSharpMlxNative LANGUAGES CXX C)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)

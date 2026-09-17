@@ -231,9 +231,9 @@ namespace TensorSharp.Server.Skills
         /// </param>
         public static SkillRequestPlan Create(
             SkillRegistry registry,
-            IReadOnlyList<string> requestedSkills,
+            IReadOnlyList<string>? requestedSkills,
             bool? discovery,
-            List<ToolFunction> clientTools,
+            List<ToolFunction>? clientTools,
             string architecture,
             int contextTokens,
             ServerHostingOptions options,
@@ -395,7 +395,7 @@ namespace TensorSharp.Server.Skills
         /// </para>
         /// </summary>
         private static SkillRequestPlan? CodeOnly(
-            List<ToolFunction> clientTools,
+            List<ToolFunction>? clientTools,
             string architecture,
             ICodeRunner codeRunner,
             ServerHostingOptions? options,

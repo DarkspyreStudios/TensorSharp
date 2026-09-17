@@ -157,12 +157,12 @@ namespace TensorSharp.Server.Host.Hosting
             EmitEndpoints(logger, options, listenAddress);
         }
 
-        public static void EmitBackendFallback(ILogger logger, ServerHostingOptions options, string requestedBackendInput)
+        public static void EmitBackendFallback(ILogger logger, ServerHostingOptions options, string? requestedBackendInput)
         {
             if (logger == null) throw new ArgumentNullException(nameof(logger));
             if (options == null) throw new ArgumentNullException(nameof(options));
 
-            string canonicalRequested = BackendCatalog.Canonicalize(requestedBackendInput);
+            string? canonicalRequested = BackendCatalog.Canonicalize(requestedBackendInput);
             if (!string.Equals(options.DefaultBackend, canonicalRequested, StringComparison.OrdinalIgnoreCase) &&
                 !string.IsNullOrWhiteSpace(options.DefaultBackend))
             {

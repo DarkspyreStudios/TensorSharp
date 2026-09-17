@@ -61,7 +61,7 @@ public sealed class RedisResponsesStore : IResponsesStore, IDisposable
     public bool TryGet(string id, [NotNullWhen(true)] out StoredResponse? response)
     {
         string key = KeyPrefix + id;
-        byte[] json = _redis.StringGet(key);
+        byte[]? json = _redis.StringGet(key);
         if (json == null)
         {
             response = null;

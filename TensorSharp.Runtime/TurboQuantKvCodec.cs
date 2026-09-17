@@ -446,9 +446,9 @@ namespace TensorSharp.Runtime
         /// so the paged manager can call this once at construction and stash
         /// the codec; nothing in the hot path looks at the env var.
         /// </summary>
-        public static IKvBlockCodec FromEnvironment(KvCodecElementType dtype)
+        public static IKvBlockCodec? FromEnvironment(KvCodecElementType dtype)
         {
-            string raw = Environment.GetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS");
+            string? raw = Environment.GetEnvironmentVariable("TS_KV_PAGED_QUANT_BITS");
             if (string.IsNullOrWhiteSpace(raw) || !int.TryParse(raw.Trim(), out int bits))
                 return null;
             if (bits == 0)
@@ -482,7 +482,7 @@ namespace TensorSharp.Runtime
         /// attention models can opt in via TS_KV_PAGED_QUANT_BITS without
         /// silently corrupting hybrid-architecture inference.
         /// </summary>
-        public static IKvBlockCodec FromEnvironment(IModelArchitecture model)
+        public static IKvBlockCodec? FromEnvironment(IModelArchitecture? model)
         {
             if (model == null) return null;
             if (model.RequiresPerBlockCapture) return null;
