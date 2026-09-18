@@ -28,6 +28,7 @@ name: Release Binaries
 # Trigger: push a version tag like `v2.8.6` (the tag, with the leading `v`
 # stripped, becomes the version and a published Release is created). Or run
 # `workflow_dispatch` with a `version` input to produce a draft Release.
+# Set `gb10_only` on a manual run to test GB10 artifacts without creating a release.
 
 on:
   push:
@@ -39,6 +40,11 @@ on:
         description: "Version to build (e.g. 2.8.6). Required when not run from a tag."
         required: false
         default: ""
+      gb10_only:
+        description: "Build and validate only GB10 artifacts; do not create a GitHub Release."
+        required: false
+        type: boolean
+        default: false
       cuda_arch:
         description: "CMake CUDA architectures for ggml CUDA 12 builds (semicolon-separated; GB10 is pinned at SM121a)."
         required: false
@@ -66,6 +72,7 @@ concurrency:
 jobs:
   build:
     name: Build ${{ matrix.name }}
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.gb10_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -430,6 +437,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.gb10_only }}
     needs: [build, build-gb10]
     runs-on: ubuntu-latest
     permissions:

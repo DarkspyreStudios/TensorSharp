@@ -357,6 +357,9 @@ Docker plus 2 GiB for exports, or 12 GiB when those share a filesystem, and fail
 clearly if the runner lacks that space. It does not delete unrelated tools or
 fall back to a self-hosted Spark. The worker memory limit is 8 GiB; hosted-job
 execution remains a separate check after the workflow reaches GitHub.
+For a fork or branch CI rehearsal, dispatch **Release Binaries** with a version
+and `gb10_only=true`. That runs only the GB10 build/validation/upload job and
+does not create a GitHub Release or run the existing platform matrix.
 
 #### Validated GB10 configuration and limits
 
