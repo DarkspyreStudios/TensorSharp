@@ -53,6 +53,44 @@ namespace TensorSharp.Models
         private QuantizedWeight _mtpHeadQW; // optional nextn.shared_head_head
         private Tensor _mtpHeadF32;
 
+        // Absolute trunk position represented by row zero of the independent MTP
+        // cache. A reused trunk prefix has no corresponding draft hidden rows;
+        // restart only the head at the end of that gap, never the trunk's cache.
+        private int _mtpCacheStart;
+
+        public bool DraftHeadResumesAfterGap => HasMtpDraftHead && !HasDFlash;
+
+        private int MtpCachePosition(int position)
+        {
+            if (position < _mtpCacheStart)
+                throw new ArgumentOutOfRangeException(nameof(position),
+                    "MTP position precedes its restarted cache.");
+            return position - _mtpCacheStart;
+        }
+
+        private Tensor MtpAttentionBlock(Tensor hidden, int seqLen, int startPos)
+        {
+            int cachePos = MtpCachePosition(startPos);
+            int ropeDelta = _ropeDelta;
+            int[] promptPositions = _pendingMRoPEPositions;
+            try
+            {
+                // Compact KV indices, but preserve absolute rotary positions and
+                // the trunk's post-image offset. Prompt M-RoPE tables do not
+                // describe this generated suffix. Never leak either override back
+                // into the trunk or another holder.
+                _ropeDelta = checked(ropeDelta + _mtpCacheStart);
+                if (_mtpCacheStart > 0)
+                    _pendingMRoPEPositions = null;
+                return AttentionBlock(hidden, _mtpLayerIdx, seqLen, cachePos);
+            }
+            finally
+            {
+                _ropeDelta = ropeDelta;
+                _pendingMRoPEPositions = promptPositions;
+            }
+        }
+
         // Recurrent-state snapshot used to roll the trunk back when a verify
         // batch is partially rejected (GDN state cannot be truncated in place).
         private byte[][] _mtpGdnSnapshot;
@@ -261,7 +299,7 @@ namespace TensorSharp.Models
 
             // Full decoder block (attention + FFN/MoE with residuals); reuses the
             // trunk machinery — the MTP layer's weights/KV live at _mtpLayerIdx.
-            x = AttentionBlock(x, _mtpLayerIdx, n, startPos);
+            x = MtpAttentionBlock(x, n, startPos);
             return x;
         }
 
@@ -335,7 +373,7 @@ namespace TensorSharp.Models
             }
 
             EnsureKvCacheHostSynchronized();
-            x = AttentionBlock(x, _mtpLayerIdx, 1, pos);
+            x = MtpAttentionBlock(x, 1, pos);
 
             Tensor headNorm = _mtpHeadNormW ?? _finalNormW;
             Tensor hn = RMSNormOpCached(x, headNorm);
@@ -382,6 +420,15 @@ namespace TensorSharp.Models
             }
             if (!HasMtpDraftHead)
                 throw new InvalidOperationException("Model has no NextN/MTP draft block.");
+            if (hRows == null)
+            {
+                // Startup warmup, Radix reuse and intervening plain steps have
+                // no draft features. Ignore all previous head rows by rebasing
+                // its KV to an empty suffix. The full-context trunk stays intact.
+                _mtpCacheStart = checked(startPos + tokens.Length);
+                _mlxAttentionCache?[_mtpLayerIdx]?.Reset();
+                return;
+            }
             EnterSpecSession();
             EnsureCacheCapacity(startPos + tokens.Length);
 
@@ -398,7 +445,7 @@ namespace TensorSharp.Models
             }
 
             EnsureKvCacheHostSynchronized();
-            x = AttentionBlock(x, _mtpLayerIdx, tokens.Length, startPos);
+            x = MtpAttentionBlock(x, tokens.Length, startPos);
             x.Dispose();
         }
 

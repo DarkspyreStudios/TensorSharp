@@ -1306,6 +1306,7 @@ namespace TensorSharp.Models
 
         protected override void ResetKVCacheCore()
         {
+            _mtpCacheStart = 0;
             if (IsTensorParallel)
             {
                 ResetTpKVCache();
@@ -1528,6 +1529,9 @@ namespace TensorSharp.Models
                 }
             }
             _cacheSeqLen = destToken + tokenCount;
+            // Imported blocks hold trunk state only. A subsequently armed head
+            // starts with an empty suffix, as it does for a retained checkpoint.
+            _mtpCacheStart = _cacheSeqLen;
             // The delta as of this block's end (see ComputeKVBlockByteSize).
             _ropeDelta = ropeDelta;
 

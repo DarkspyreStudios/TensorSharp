@@ -307,15 +307,15 @@ namespace TensorSharp.Runtime.Speculative
         /// </summary>
         bool DraftSelfCatchUp => false;
         /// <summary>
-        /// True when this head keeps NO per-position state of its own - it drafts from
-        /// the trunk's KV cache and the trunk hidden state it is handed - so it can
-        /// start drafting at any trunk position, including right after a request
+        /// True when this head can safely restart at any trunk position, including
+        /// right after a request
         /// adopted a KV prefix it never saw (the previous turn of a chat, a shared
-        /// system-prompt checkpoint, a prefix-cache hit). A NextN/MTP block with its
-        /// own KV cache must leave this false: a gap in what it replayed makes every
-        /// later proposal garbage (harmless, but a wasted verify per step). A head that
-        /// says true must accept a <see cref="DraftCatchUp"/> whose hidden rows are
-        /// null: that is how a seeded start hands it the tokens already committed.
+        /// system-prompt checkpoint, a prefix-cache hit). This includes stateless
+        /// heads and heads that explicitly reset their private cache to a valid
+        /// suffix. A stateful head must never read unwritten or stale prefix rows.
+        /// A head that says true must accept a <see cref="DraftCatchUp"/> whose hidden
+        /// rows are null: that reports a gap ending at startPos + tokens.Length.
+        /// The executor captures a fresh trunk hidden row before proposing again.
         /// </summary>
         bool DraftHeadResumesAfterGap => false;
 

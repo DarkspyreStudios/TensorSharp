@@ -196,6 +196,11 @@ namespace TensorSharp.Runtime.Speculative
 
         public void Commit(int[] tokens, float[]? hRows, int startPos)
         {
+            // Missing hidden rows are a gap, not a catch-up that can be folded.
+            // A resumable head resets its private history here. Never replay a
+            // pending pre-gap commit into that newly restarted history.
+            if (hRows == null)
+                _hasPend = false;
             if (!_fold || hRows == null)
             {
                 _head.DraftCatchUp(tokens, hRows, startPos);
