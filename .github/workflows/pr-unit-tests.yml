@@ -1,8 +1,9 @@
 name: PR Unit Tests
 
-# Deterministic correctness signal for every PR on a stock GitHub-hosted
-# runner: builds the solution (including the CPU-only native GGML library,
-# which the TensorSharp.Backends.GGML build triggers automatically) and runs
+# New forks must enable Actions before these workflows can be dispatched.
+# Deterministic correctness signal for every PR on stock GitHub-hosted x64
+# and ARM64 runners: builds the test project (including the CPU-only native
+# GGML library, which TensorSharp.Backends.GGML builds automatically) and runs
 # the environment-independent test lane — no GPU, no model downloads, no
 # secrets. Lane taxonomy: InferenceWeb.Tests/TestAssemblyConfig.cs and
 # DEVELOPMENT.md "Test lanes". The engine-comparison benchmark workflow
@@ -22,15 +23,21 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Tests run on the GGML CPU backend (TS_TEST_GGML_BACKEND default), so skip
-  # the Vulkan native build the script would otherwise auto-enable if the
-  # runner image ships a Vulkan loader.
+  # Never auto-enable GPU backends based on tools in a hosted runner image.
+  TENSORSHARP_GGML_NATIVE_ENABLE_CUDA: "OFF"
   TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN: "OFF"
+  TENSORSHARP_CUDNN: "OFF"
+  TS_TEST_GGML_BACKEND: "cpu"
   DOTNET_NOLOGO: "true"
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-latest
+    name: CPU correctness (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +45,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+
+      - name: Check GB10 container gates and source context (no GPU)
+        run: |
+          mkdir -p .gb10-container-check
+          TMPDIR="$PWD/.gb10-container-check" python3 eng/tests/gb10-container.py
+          rmdir .gb10-container-check
 
       - name: Run environment-independent tests
         run: >

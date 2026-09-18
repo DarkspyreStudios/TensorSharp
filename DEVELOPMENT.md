@@ -233,6 +233,183 @@ Xcode itself cannot be fetched unattended (the App Store and developer.apple.com
 
 Switching developer directories invalidates the CMake cache (the previous SDK is frozen into `CMakeCache.txt`), so the script discards the stale build tree and reconfigures. The fetched `_deps/*-src` checkouts are preserved, so this costs a reconfigure rather than a re-clone of MLX.
 
+### GB10 / DGX Spark build container (experimental)
+
+`eng/Dockerfile.gb10` builds this checkout's main solution and native GGML/CUDA
+code on a **native Linux ARM64 Docker builder**. It pins CUDA 13.0.2 components, .NET SDK
+10.0.401 and unmodified GGML revision `456172ec733a135778adcd32d00e576a58232e45`.
+Precision kernels remain in TensorSharp-owned code; the build checks that the
+fetched ggml working tree is unchanged.
+The SDK and clean Ubuntu images are pinned by digest; NVIDIA's signed repository
+supplies explicitly versioned compiler, runtime and cuBLAS packages. This avoids
+pulling a full CUDA devel image's profilers and unused math libraries onto small
+hosted runners. Unused cuBLAS static archives are removed in the installation
+layer; dynamically linked CUDA libraries and their notices remain intact.
+Ubuntu build prerequisites are installed from the Ubuntu repositories.
+This is a build/development image, not the deployment image; the `runtime` and
+`artifacts` targets below produce and validate the deployment layout.
+
+Run from the repository root on an available ARM64 builder:
+
+```bash
+docker build --platform linux/arm64 -f eng/Dockerfile.gb10 \
+  --build-arg SOURCE_REVISION="$(git describe --always --dirty)" \
+  --build-arg GGML_BUILD_JOBS=2 \
+  -t tensorsharp-gb10-build .
+```
+
+The image includes local source edits, not a fresh clone of upstream TensorSharp.
+Its Dockerfile-specific ignore file excludes Git metadata, common local
+credentials, model downloads and generated outputs without changing other
+Docker builds. Review the context before using a remote builder; the ignore file
+is not a secret scanner. `SOURCE_REVISION` is caller-supplied provenance, and
+`git describe --dirty` does not detect untracked files.
+
+For a remote build, the `source` target exports the same filtered checkout
+without compiling anything or requiring ARM64. Transfer this archive rather
+than an unfiltered working directory, and retain the original checkout's
+`SOURCE_REVISION` when building the extracted sources:
+
+```bash
+docker build -f eng/Dockerfile.gb10 --target source \
+  --output type=tar,dest=../tensorsharp-gb10-source.tar .
+```
+
+GB10 reports compute capability 12.1: GGML targets `121a-real`, and the direct
+CUDA backend compiles `compute_121` PTX. The build rejects CUDA versions outside
+13.x and rejects x64/QEMU builders. GPU discovery and GPU access are unnecessary
+for compilation. `GGML_NATIVE=OFF` prevents build-host CPU instructions leaking
+into the output; NCCL, Vulkan and optional cuDNN acceleration are disabled. Native
+compilation defaults to two jobs, configurable with `GGML_BUILD_JOBS`.
+
+The resulting development image contains the checkout and build outputs under
+`/src`; its default command is Bash. It does not download models, run inference,
+publish release archives, or install/change the host NVIDIA driver. Before
+building or testing on a shared Spark, arrange downtime for competing workloads
+such as vLLM; even a GPU-free build consumes CPU and shared memory.
+
+The focused container-contract check runs on any development host with Python,
+Bash and a local Docker daemon, without CUDA, model downloads or GPU access:
+
+```bash
+python eng/tests/gb10-container.py
+```
+
+#### GB10 archives and clean runtime
+
+The `artifacts` target publishes self-contained CLI and Server.Host applications
+for `linux-arm64`, bundles the CUDA 13 runtime/cuBLAS libraries and ARM64 native
+media libraries, and verifies the extracted archives in plain Ubuntu 24.04.
+No SDK, CUDA toolkit, source checkout, build cache or `LD_LIBRARY_PATH` is used
+by that verification. GGML uses `$ORIGIN` to locate its companion libraries.
+Missing required assets fail the build; the NVIDIA driver is never bundled.
+The release path skips the full development/test solution build and processes
+the two app bundles sequentially, including clean-runtime verification. It does
+not retain duplicate unpacked apps in the release build cache; the optional
+`runtime` target still keeps both apps for interactive use.
+
+```bash
+docker build --platform linux/arm64 -f eng/Dockerfile.gb10 \
+  --build-arg SOURCE_REVISION="$(git describe --always --dirty)" \
+  --target artifacts --output type=local,dest=artifacts/gb10 .
+```
+
+The version defaults to `Directory.Build.props`; use
+`--build-arg RELEASE_VERSION=2.8.6-gb10.1` for a candidate version. The output is
+`tensorsharp-cli-<version>-linux-arm64-cuda13-GB10.tar.gz`,
+`tensorsharp-server-<version>-linux-arm64-cuda13-GB10.tar.gz`, `SHA256SUMS`, and a
+headless-validation record. Archive startup loads the real packaged cuBLAS and
+OpenCV bindings and encodes one pixel through ImageMagick before invoking each
+application's `--help`. This checks dependency loading, not model inference.
+
+Extract either archive and run `./TensorSharp.Cli` or
+`./TensorSharp.Server.Host`; no .NET install or CUDA toolkit is needed. On
+Ubuntu 24.04, install `ca-certificates libgomp1 libgssapi-krb5-2 libicu74
+libssl3t64 libstdc++6 zlib1g`. GPU execution additionally requires a compatible
+NVIDIA driver (the builder uses CUDA 13.0.2). Preserve the bundled license
+notices and the media dependencies' redistribution/source obligations.
+
+To keep the clean environment as an image, replace the export arguments with
+`--target runtime -t tensorsharp-gb10-runtime`. It contains the extracted apps
+under `/opt/tensorsharp/cli` and `/opt/tensorsharp/server`. The image's default
+command is Bash. For subsequent GPU checks, provide `--gpus all`; building the
+image itself never needs GPU access. The headless build permits the host's
+`libcuda.so.1` to be missing. It also reports, without failing, an unavailable
+`liblttng-ust.so.0` for .NET's optional LTTng tracing provider, matching
+[CoreCLR's optional loading behavior](https://github.com/dotnet/runtime/blob/v10.0.12/src/coreclr/pal/src/misc/tracepointprovider.cpp).
+All other native dependencies are required. A driver-required recheck can be run
+after arranging Spark availability:
+
+```bash
+docker run --rm --gpus all --network none \
+  -v "$PWD/artifacts/gb10:/archives:ro" tensorsharp-gb10-runtime \
+  bash /validation/verify-gb10-release.sh /archives /tmp/gb10-check --require-driver
+```
+
+The default Docker target remains the development image. Existing x64/macOS
+release workflows and their CUDA versions are unchanged.
+
+Hosted GB10 builds use a fresh `docker-container` BuildKit worker rather than
+loading development images into the runner's Docker image store. The complete
+pre-upstream-integration cold archive build was verified with a **hard 10 GiB build-storage cap**:
+peak filesystem use was **8,970,973,184 bytes**, exports used **1,313,840,034
+bytes**, and the run took **691.7 seconds** on four CPUs. CI reserves 10 GiB for
+Docker plus 2 GiB for exports, or 12 GiB when those share a filesystem, and fails
+clearly if the runner lacks that space. It does not delete unrelated tools or
+fall back to a self-hosted Spark. The worker memory limit is 8 GiB; hosted-job
+execution remains a separate check after the workflow reaches GitHub.
+For a fork or branch CI rehearsal, dispatch **Release Binaries** with a version
+and `gb10_only=true`. That runs only the GB10 build/validation/upload job and
+does not create a GitHub Release or run the existing platform matrix.
+On a newly created fork, enable workflows in the repository's Actions tab first.
+Manual dispatch requires GitHub to register the workflow on the fork's default
+branch before selecting a different branch for a test run.
+
+#### Validated GB10 configuration and limits
+
+Historical baseline, verified on **2026-09-17** before the upstream reintegration:
+NVIDIA GB10 (compute capability 12.1), Ubuntu 24.04.5
+ARM64, NVIDIA driver **580.178.04**, CUDA **13.0.2**, and .NET SDK **10.0.401**.
+The clean runtime contains no SDK or CUDA toolkit. Both extracted apphosts passed
+native dependency checks and produced text on `ggml_cuda`, including the server's
+OpenAI-compatible chat endpoint.
+
+That correctness pass ran **3,908 CPU-lane tests**, **129 managed CUDA tests**,
+and **3 native CUDA tests**, all passing with zero skips. The native checks cover
+explicit-F32 matmul precision, sparse flash attention, and activation quantization.
+The CPU lane used a separately built CPU-only GGML library. Its existing shell
+tests need Python with pip/venv and Node.js; one pip-install regression accesses
+the package index, so this lane is not an offline test suite.
+
+The smoke model was
+[`ISTA-DASLab/Qwen3.5-4B-GGUF-GSQ`](https://huggingface.co/ISTA-DASLab/Qwen3.5-4B-GGUF-GSQ),
+file `Qwen3.5-4B-Q2_K_XL.gguf`, revision
+`3fd6825d7b0f014adb03d3981074a43753c0b8be`.
+Its SHA-256 is `b7d9ec51fb4d726d31e6bfd47062fb74574a974b93951da6a435b5e35185cb5a`.
+GSQ retains the standard GGUF K-Quant encoding; no model-specific loader was added.
+
+Five isolated CLI runs used the built-in prompt, `--max-tokens 16 --temperature 0
+--seed 123 --warmup-runs 1`, with four CPUs and a 16 GiB container limit. Each run
+reset the KV cache after its four-token warmup and measured 19 input / 16 output
+tokens. Median prefill was **440.4 tokens/s** (438.5–451.7); median decode was
+**76.9 tokens/s** (76.3–77.5). Maximum container `memory.peak` was **737,058,816
+bytes** (about 703 MiB). That cgroup counter is **not total GPU/unified-memory
+usage**; the runtime separately reported 1,836 MB of device-resident quantized
+weights. Do not add the two counters. These short warm runs are a reproducibility
+baseline, not a long-context benchmark or a CPU-versus-GPU speedup claim.
+
+These checks cover the single-device GB10 Qwen text smoke and the listed
+kernel/media contracts, not every model family. CUDA 12 on GB10, other ARM64 NVIDIA products,
+multi-GPU/multi-Spark operation, Vulkan/MLX, optional cuDNN acceleration and full
+image/video generation are outside this validation. A generic integrated-GPU
+performance warning may appear on GB10; it is not a measured comparison against
+the CPU on this machine. Reserve the Spark explicitly before hardware checks;
+normal CI must not take resources from a running vLLM instance.
+The upstream reintegration changed inference and precision implementations, so
+these historical hardware counts and timings do not certify the rebased code.
+Hosted CI rechecks the current CPU and archive paths; hardware qualification
+must be repeated before carrying these measurements forward.
+
 
 ## Project Structure
 
@@ -436,6 +613,12 @@ The published v3.3.0.0 archive matrix is:
 | `linux-x64-cpu` | GGML CPU | `.tar.gz` |
 | `linux-x64-cuda` | GGML CUDA + pure-C# CUDA (PTX) + CUDA 12.x runtime | `.tar.gz` |
 | `osx-arm64` | GGML Metal + MLX | `.tar.gz` |
+
+The additional experimental GB10 target produces
+`linux-arm64-cuda13-GB10` CLI and Server.Host archives via the
+[GB10 Docker pipeline](#gb10--dgx-spark-build-container-experimental).
+It is not part of the historical v3.3.0.0 matrix above; check the assets of the
+specific release rather than assuming an older release contains it.
 
 - Pushing a `v*` tag triggers the archive and NuGet workflows; publication is conditional on every required job succeeding.
 - The `-cuda` archives bundle the CUDA runtime libraries (`cudart` / `cublas` / `cublasLt`) but still require an NVIDIA GPU and a compatible driver at run time; the `-cpu` archives run anywhere. The macOS archive requires Apple Silicon.

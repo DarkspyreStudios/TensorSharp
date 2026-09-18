@@ -43,6 +43,12 @@ The detailed implementation notes and historical benchmark claims have moved to 
 
 Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.
 
+**NVIDIA DGX Spark / GB10:** use the separate experimental **CUDA 13, Linux ARM64**
+[Docker build and archive instructions](DEVELOPMENT.md#gb10--dgx-spark-build-container-experimental).
+Its archives end in `linux-arm64-cuda13-GB10`; they target a single GB10, not
+generic ARM64 GPUs. CLI and server text inference have been checked on real
+hardware. The existing x64 CUDA archives are not suitable for the Spark.
+
 Source builds target .NET 10. On a new development machine, install the full **.NET 10 SDK**—the .NET Runtime alone cannot build TensorSharp:
 
 | Platform | Install the SDK |

@@ -43,6 +43,11 @@
 
 更愿意使用预构建应用？[Releases 页面](https://github.com/zhongkaifu/TensorSharp/releases)提供自包含的 Windows x64（CPU/CUDA）、Linux x64（CPU/CUDA）与 macOS arm64 CLI / Server 归档。
 
+**NVIDIA DGX Spark / GB10：**请使用独立的实验性 **CUDA 13、Linux ARM64**
+[Docker 构建与归档说明](DEVELOPMENT.md#gb10--dgx-spark-build-container-experimental)。
+归档后缀为 `linux-arm64-cuda13-GB10`，仅面向单个 GB10，而非通用 ARM64 GPU。
+CLI 与服务端文本推理已在真实硬件上验证；现有 x64 CUDA 归档不适用于 Spark。
+
 源码构建面向 .NET 10。全新开发机器需要安装完整的 **.NET 10 SDK**；只安装 .NET Runtime 无法构建 TensorSharp：
 
 | 平台 | 安装 SDK |

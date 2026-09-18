@@ -34,7 +34,8 @@ namespace TensorSharp.Cuda.Interop
             {
                 foreach (string candidate in GetCublasCandidates())
                 {
-                    if (NativeLibrary.TryLoad(candidate, out IntPtr cublasHandle))
+                    // Include the assembly directory when loading bundled libraries on Linux.
+                    if (NativeLibrary.TryLoad(candidate, assembly, searchPath, out IntPtr cublasHandle))
                         return cublasHandle;
                 }
             }

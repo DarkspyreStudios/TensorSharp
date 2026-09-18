@@ -4,3 +4,5 @@
 # corrupts every other line, which silently broke the GGML native build and
 # the CUDA arch-detection fallback.
 *.sh text eol=lf
+# Docker RUN heredocs are shell scripts too.
+Dockerfile* text eol=lf

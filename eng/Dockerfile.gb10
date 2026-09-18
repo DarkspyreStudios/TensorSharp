@@ -1,0 +1,126 @@
+# syntax=docker/dockerfile:1
+
+FROM scratch AS source
+COPY . /
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0.401-noble@sha256:2fa828c68761b1b8c23d7662dc134421b9d3b59fe1425fdbc80804e390cdb24d AS build
+
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+RUN <<'CHECK_GB10_PLATFORM'
+if [[ "${BUILDPLATFORM}" != "linux/arm64" || "${TARGETPLATFORM}" != "linux/arm64" || "$(uname -sm)" != "Linux aarch64" ]]; then
+    echo "GB10 builds require a native Linux ARM64 builder and --platform linux/arm64; QEMU builds are not supported." >&2
+    exit 1
+fi
+CHECK_GB10_PLATFORM
+
+# CUDA 13.0.2 compiler/runtime components, without profilers, NCCL or unused math libraries.
+ADD --checksum=sha256:6ea7d2737648936820e85677177957a0f6521b840d98eb0bbae0a4f003fa7249 \
+    https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/sbsa/cuda-keyring_1.1-1_all.deb /tmp/cuda-keyring.deb
+RUN dpkg -i /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build \
+        cuda-nvcc-13-0=13.0.88-1 libnvvm-13-0=13.0.88-1 \
+        cuda-crt-13-0=13.0.88-1 libnvptxcompiler-13-0=13.0.88-1 \
+        cuda-cudart-13-0=13.0.96-1 cuda-cudart-dev-13-0=13.0.96-1 \
+        cuda-driver-dev-13-0=13.0.96-1 cuda-cccl-13-0=13.0.85-1 \
+        cuda-culibos-dev-13-0=13.0.85-1 cuda-cuobjdump-13-0=13.0.85-1 \
+        cuda-toolkit-13-0-config-common=13.0.96-1 cuda-toolkit-13-config-common=13.0.96-1 \
+        cuda-toolkit-config-common=13.0.96-1 \
+        libcublas-13-0=13.1.0.3-1 libcublas-dev-13-0=13.1.0.3-1 \
+    && rm /usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublas_static.a \
+        /usr/local/cuda-13.0/targets/sbsa-linux/lib/libcublasLt_static.a /tmp/cuda-keyring.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CUDA_HOME=/usr/local/cuda-13.0 \
+    PATH=/usr/local/cuda-13.0/bin:${PATH}
+RUN <<'CHECK_GB10_CUDA'
+cuda_version="$(nvcc --version)"
+if [[ "${cuda_version}" != *"release 13."* ]]; then
+    echo "GB10 builds require CUDA 13; found: ${cuda_version}" >&2
+    exit 1
+fi
+printf '%s\n' "${cuda_version}"
+CHECK_GB10_CUDA
+
+ENV DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    CMAKE_GENERATOR=Ninja \
+    TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON \
+    TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=OFF \
+    TENSORSHARP_GGML_NATIVE_CUDA_ARCHITECTURES=121a-real \
+    TENSORSHARP_CUDA_ARCH=compute_121 \
+    TENSORSHARP_CUDNN=OFF \
+    TENSORSHARP_GGML_GIT_REF=456172ec733a135778adcd32d00e576a58232e45 \
+    TENSORSHARP_GGML_NO_UPDATE=1
+
+ARG GGML_BUILD_JOBS=2
+ENV TENSORSHARP_GGML_NATIVE_BUILD_PARALLEL_LEVEL=${GGML_BUILD_JOBS}
+
+WORKDIR /src
+# Managed and packaging edits must not invalidate the expensive CUDA compilation.
+COPY --from=source /TensorSharp.GGML.Native/ TensorSharp.GGML.Native/
+COPY --from=source /eng/fetch-ggml.sh /eng/fetch-cudnn.sh /eng/fetch-vulkan-toolchain.sh eng/
+RUN bash TensorSharp.GGML.Native/build-linux.sh --cuda --no-vulkan -DGGML_NATIVE=OFF \
+        -DTENSORSHARP_GGML_NATIVE_ENABLE_NCCL=OFF \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$ORIGIN' \
+    && test "$(git -C ExternalProjects/ggml rev-parse HEAD)" = "${TENSORSHARP_GGML_GIT_REF}" \
+    && test -z "$(git -C ExternalProjects/ggml status --porcelain)" \
+    && test -s TensorSharp.GGML.Native/build/libGgmlOps.so
+
+COPY --from=source / .
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.title="TensorSharp GB10 build environment" \
+    org.opencontainers.image.revision=${SOURCE_REVISION}
+RUN : "${SOURCE_REVISION:?Pass --build-arg SOURCE_REVISION with the checkout revision (and -dirty for local edits).}" \
+    && printf 'TensorSharp source: %s\nGGML source: %s\nGPU targets: %s / %s\n' \
+        "${SOURCE_REVISION}" "${TENSORSHARP_GGML_GIT_REF}" \
+        "${TENSORSHARP_GGML_NATIVE_CUDA_ARCHITECTURES}" "${TENSORSHARP_CUDA_ARCH}" \
+    && dotnet --version
+
+# Full solution output includes test assets and other RIDs; release publishing does not need it.
+FROM build AS development
+RUN dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipGgmlNative=true \
+    && test -s TensorSharp.Backends.Cuda/obj/cuda_ptx/ptx/tensorsharp_kernels.ptx \
+    && test -s TensorSharp.Backends.Cuda/obj/cuda_ptx/ptx/tensorsharp_dsv4_kernels.ptx
+
+CMD ["bash"]
+
+FROM build AS package
+ARG RELEASE_VERSION
+RUN bash eng/package-gb10.sh /artifacts "${RELEASE_VERSION:-}" \
+    && dotnet build eng/tests/gb10-release-probe/Gb10ReleaseProbe.csproj -c Release -o /probe
+
+FROM ubuntu:24.04@sha256:69cecf4bbf72d2d44a9eef1b71fb98c7fb973d78af11399deccef19beb008ad9 AS runtime-base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils ca-certificates libgomp1 libgssapi-krb5-2 libicu74 \
+        libssl3t64 libstdc++6 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+COPY --from=package /probe/Gb10ReleaseProbe.dll /validation/Gb10ReleaseProbe.dll
+COPY --from=source /eng/verify-gb10-release.sh /validation/verify-gb10-release.sh
+# Only archives cross this boundary: no SDK, source checkout, CUDA toolkit or build cache.
+FROM runtime-base AS archive-check
+RUN --mount=from=package,source=/artifacts,target=/archives,ro \
+    ! command -v dotnet && ! command -v nvcc && ! command -v gcc && test ! -e /src \
+    && bash /validation/verify-gb10-release.sh /archives /opt/tensorsharp --discard-after-check \
+    && printf 'Archive dependencies and apphosts verified without a GPU; model inference is not yet certified.\n' \
+        > /validation/GB10-VALIDATION.txt
+
+FROM runtime-base AS runtime
+RUN --mount=from=package,source=/artifacts,target=/archives,ro \
+    bash /validation/verify-gb10-release.sh /archives /opt/tensorsharp
+WORKDIR /opt/tensorsharp
+CMD ["bash"]
+
+FROM scratch AS artifacts
+COPY --from=package /artifacts/ /
+COPY --from=archive-check /validation/GB10-VALIDATION.txt /
+
+# Keep an unqualified docker build producing the development image.
+FROM development AS default
