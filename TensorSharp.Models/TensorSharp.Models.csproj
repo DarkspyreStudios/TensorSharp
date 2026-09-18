@@ -48,6 +48,7 @@
   <ItemGroup Condition="'$(TargetPlatformIdentifier)' != 'ios'">
     <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="14.16.0" />
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.ubuntu.24.04-x64" Version="4.13.0.18" />
+    <PackageReference Include="OneWare.OpenCvSharp4.runtime.ubuntu.24.04-arm64" Version="4.13.0.18" />
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.osx-arm64" Version="4.13.0.18" />
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.osx-x64" Version="4.13.0.18" />
     <PackageReference Include="OneWare.OpenCvSharp4.runtime.win-x64" Version="4.13.0.18" />

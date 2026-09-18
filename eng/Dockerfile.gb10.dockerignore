@@ -1,0 +1,56 @@
+# Scoped to Dockerfile.gb10; existing deployment Dockerfiles are unaffected.
+**/.git
+**/.vs
+**/.vscode
+**/.idea
+**/.claude
+**/.copilot
+**/.ssh
+**/.aws
+**/.azure
+**/.env
+**/.env.*
+**/secrets.json
+**/appsettings.*.local.json
+**/*.pem
+**/*.key
+**/*.pfx
+**/*.p12
+**/*.user
+**/launchSettings.json
+
+# Downloaded dependencies, models, and local caches.
+ExternalProjects
+models
+**/*.gguf
+**/*.safetensors
+**/*.ckpt
+**/*.pt
+**/*.pth
+**/node_modules
+**/.venv
+**/__pycache__
+TensorAgent/python-runtime
+
+# Never import a host's native binary, CMake cache, or MSBuild output.
+**/[Bb]in
+**/[Oo]bj
+**/[Ll]og
+**/[Ll]ogs
+**/TestResults
+**/CMakeFiles
+**/CMakeCache.txt
+**/*.binlog
+**/*.nupkg
+**/*.snupkg
+artifacts
+publish
+bench-results
+benchmarks/engine_comparison/results
+TensorSharp.GGML.Native/build*
+TensorSharp.Backends.MLX/Native/build
+TensorSharp.Backends.MLX/Native/dist
+
+# The build scripts are source, not generated build directories.
+!TensorSharp.GGML.Native/build*.sh
+!TensorSharp.GGML.Native/build*.ps1

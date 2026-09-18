@@ -14,12 +14,16 @@ name: Release Binaries
 #   - linux-x64-cpu    libGgmlOps.so (CPU)                     -> .tar.gz
 #   - linux-x64-cuda   libGgmlOps.so (+CUDA) + PTX + CUDA redist -> .tar.gz
 #   - osx-arm64        libGgmlOps.dylib (Metal) + MLX dylibs   -> .tar.gz
+#   - linux-arm64-cuda13-GB10  SM121a GGML + PTX + CUDA 13 redist -> .tar.gz
 #
-# The CUDA archives bundle the CUDA 12.x runtime libraries (cudart / cublas /
+# The x64 CUDA archives bundle the CUDA 12.x runtime libraries (cudart / cublas /
 # cublasLt) so they run against any NVIDIA driver new enough for the toolkit;
 # they still require an NVIDIA GPU + driver at run time. The CPU archives run
 # anywhere (the GGML CPU backend); their pure-C# `--backend cuda` has no PTX and
 # falls back to CPU — use a `-cuda` archive (or build from source) for GPU.
+# GB10 uses the pinned CUDA 13 Docker builder on native hosted ARM64, without
+# a GPU. The artifacts target checks clean-runtime dependencies and startup,
+# not model inference. No self-hosted Spark runner is scheduled here.
 #
 # Trigger: push a version tag like `v2.8.6` (the tag, with the leading `v`
 # stripped, becomes the version and a published Release is created). Or run
@@ -36,7 +40,7 @@ on:
         required: false
         default: ""
       cuda_arch:
-        description: "CMake CUDA architectures for the ggml CUDA build (semicolon-separated)."
+        description: "CMake CUDA architectures for ggml CUDA 12 builds (semicolon-separated; GB10 is pinned at SM121a)."
         required: false
         default: "75-real;86-real;89-real;90-real;90-virtual"
       draft:
@@ -314,9 +318,119 @@ jobs:
           path: artifacts/*
           retention-days: 14
 
+  build-gb10:
+    name: Build linux-arm64-cuda13-GB10
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    # The native 4-CPU cold release measured ~11.5 minutes. Allow ample margin for
+    # hosted variance, archive verification and upload.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Resolve GB10 release version
+        id: ver
+        shell: bash
+        env:
+          V: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$V" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"
+          fi
+          if [[ ! "$V" =~ ^[0-9][0-9A-Za-z.+-]*$ ]]; then
+            echo "::error::Supply a valid release version or push a version tag." >&2
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - name: Check native ARM64 builder and resource budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -sm
+          free -h
+          docker version
+          docker buildx version
+          docker_platform="$(docker info --format '{{.OSType}}/{{.Architecture}}')"
+          if [[ "$(uname -sm)" != "Linux aarch64" || ! "$docker_platform" =~ ^linux/(aarch64|arm64)$ ]]; then
+            echo "::error::GB10 requires a native Linux ARM64 Docker daemon; x64/QEMU is unsupported." >&2
+            exit 1
+          fi
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          sudo df -h "$docker_root" "$GITHUB_WORKSPACE"
+          docker system df
+          docker_free="$(sudo df -B1 --output=avail "$docker_root" | tail -n 1)"
+          export_free="$(df -B1 --output=avail "$GITHUB_WORKSPACE" | tail -n 1)"
+          # Fresh docker-container release passed a hard 10 GiB build-store cap:
+          # peak 8,970,973,184 bytes plus 1,313,840,034 bytes of external exports.
+          # The 12 GiB combined budget also leaves room for BuildKit engine overhead.
+          docker_required=$((10 * 1024 * 1024 * 1024))
+          export_required=$((2 * 1024 * 1024 * 1024))
+          if [[ "$(sudo stat -c %d "$docker_root")" == "$(stat -c %d "$GITHUB_WORKSPACE")" ]]; then
+            docker_required=$((12 * 1024 * 1024 * 1024))
+            export_required="$docker_required"
+          fi
+          if (( docker_free < docker_required || export_free < export_required )); then
+            echo "::error::GB10 requires at least 10 GiB free Docker storage and 2 GiB free export space, or 12 GiB free when they share a filesystem. The measured fresh release passed a hard 10 GiB build-store cap with ~1.3 GB external exports; the combined budget includes BuildKit engine headroom. No host cleanup or runner fallback is performed." >&2
+            exit 1
+          fi
+
+      - name: Set up isolated GB10 builder
+        id: gb10-builder
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: memory=8g
+
+      - name: Build and validate GB10 release archives (no GPU)
+        timeout-minutes: 90
+        shell: bash
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx build --builder "${{ steps.gb10-builder.outputs.name }}" \
+            --progress=plain --platform linux/arm64 \
+            -f eng/Dockerfile.gb10 \
+            --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --build-arg RELEASE_VERSION="$V" \
+            --build-arg GGML_BUILD_JOBS=2 \
+            --target artifacts --output type=local,dest=artifacts/gb10 .
+
+      - name: Verify and name GB10 release assets
+        shell: bash
+        working-directory: artifacts/gb10
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          for app in cli server; do
+            test -s "tensorsharp-$app-$V-linux-arm64-cuda13-GB10.tar.gz"
+          done
+          test -s GB10-VALIDATION.txt
+          sha256sum --check --strict SHA256SUMS
+          # download-artifact merges all release-* artifacts into one directory.
+          mv SHA256SUMS "tensorsharp-$V-linux-arm64-cuda13-GB10-SHA256SUMS"
+          mv GB10-VALIDATION.txt "tensorsharp-$V-linux-arm64-cuda13-GB10-VALIDATION.txt"
+
+      - name: Upload GB10 release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-arm64-cuda13-GB10
+          path: artifacts/gb10/*
+          if-no-files-found: error
+          # The tarballs are already compressed; avoid a second compression pass
+          # and retain this large handoff only long enough to publish the release.
+          compression-level: 0
+          retention-days: 1
+
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-gb10]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -342,6 +456,15 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
+
+      - name: Verify downloaded GB10 archives
+        shell: bash
+        working-directory: dist
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict "tensorsharp-$V-linux-arm64-cuda13-GB10-SHA256SUMS"
 
       - name: Create / update GitHub Release
         uses: softprops/action-gh-release@v2

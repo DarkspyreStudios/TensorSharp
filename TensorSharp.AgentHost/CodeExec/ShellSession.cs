@@ -565,10 +565,12 @@ namespace TensorSharp.AgentHost.CodeExec
             long Length, ulong Device, ulong Identity, ulong Modified, ulong Changed);
 
         // open(2) flag values are ABI values, not POSIX constants, and differ between
-        // Linux and Darwin. O_RDONLY is zero on both platforms.
+        // Linux architectures as well as Darwin. O_RDONLY is zero on these platforms.
         private const int LinuxONonBlock = 0x00000800;
-        private const int LinuxODirectory = 0x00010000;
-        private const int LinuxONoFollow = 0x00020000;
+        private static readonly int LinuxODirectory =
+            RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x00004000 : 0x00010000;
+        private static readonly int LinuxONoFollow =
+            RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? 0x00008000 : 0x00020000;
         private const int LinuxOCloseExec = 0x00080000;
         private const int MacONonBlock = 0x00000004;
         private const int MacONoFollow = 0x00000100;
