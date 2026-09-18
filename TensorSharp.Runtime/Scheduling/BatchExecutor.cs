@@ -1849,7 +1849,7 @@ namespace TensorSharp.Runtime.Scheduling
             //
             // Prefix adoption used to be refused outright, because it skips trunk
             // positions a learned per-position draft head never saw. That is true
-            // of NextN/MTP heads and stays true - they decline below - but it was
+            // of heads without a safe suffix restart - they decline below - but it was
             // applied to every algorithm, and in a Web UI conversation EVERY turn
             // after the first adopts a prefix. So speculation armed on turn one,
             // never again, and DFlash measured as "no faster than plain" for the
@@ -1944,9 +1944,9 @@ namespace TensorSharp.Runtime.Scheduling
             // prefill ran on the plain path - a media turn, whose image/audio
             // embeddings only Forward's inject hook can place, is the everyday case -
             // and until now such a request decoded plainly to its last token. A
-            // speculator that needs no hidden state (n-gram) can start here from the
-            // tokens the trunk already holds; a learned head cannot (no trunk hidden
-            // state for the last committed token to chain from) and is left alone.
+            // speculator that needs no hidden state (n-gram), or a learned head
+            // with a safe gap restart, can start from the tokens the trunk holds.
+            // A restarted learned head first captures a fresh hidden carry.
             else if (!work.IsPrefill && !continuesThisContext && spec.CacheSeqLen == prevComputed
                      && prevComputed > 0
                      && !string.Equals(_lateArmDeclinedFor, seq.RequestId, StringComparison.Ordinal))
@@ -2321,7 +2321,7 @@ namespace TensorSharp.Runtime.Scheduling
             if (_model is not ISpeculativeTarget spec || !spec.SpeculationProfitable)
                 return false;
             // Only a trunk that forwards on the BOUND cache can serve a holder; one
-            // written against the primary linear cache (Qwen 3.5) would unbind it.
+            // written against only the primary linear cache would unbind it.
             if (!spec.SpecTrunkFollowsBoundCache)
             {
                 WarnSpeculationDeclinedOnce(

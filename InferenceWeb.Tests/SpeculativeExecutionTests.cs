@@ -319,17 +319,21 @@ public class SpeculativeExecutionTests
 
     /// <summary>Build the shared core over whatever algorithm the fake's draft
     /// head implies — the same resolution the engine and the CLI go through.</summary>
-    [Fact]
-    public async Task EngineSpec_NGramArmedAfterAPrefixReuse_IsSeededWithTheReusedTokens()
+    [Theory]
+    [InlineData(SpeculatorRegistry.NGram)]
+    [InlineData(SpeculatorRegistry.DraftHead)]
+    public async Task EngineSpec_ArmedAfterAPrefixReuse_IsSeededWithTheReusedTokens(string speculator)
     {
         // A follow-up whose prompt reuses cached blocks arms at a prefill chunk that
         // starts past position 0. The n-gram drafter's corpus used to be empty
         // there, its first commit looked like a gap, and it stayed silent for the
         // whole request. The fake's stream is periodic in position (period 64), so
         // a seeded corpus holding the first request's output must yield drafts.
+        // A resumable learned head must also re-arm and capture a valid hidden
+        // carry before it proposes tokens for the reused turn.
         const int promptLen = 100;
         const int maxNew = 70;
-        var model = new FakeSpeculativeModel();
+        var model = new FakeSpeculativeModel { ResumesAfterGap = true };
         var cfg = new SchedulerConfig
         {
             MaxNumBatchedTokens = 256,
@@ -343,7 +347,7 @@ public class SpeculativeExecutionTests
             Speculation = new SpeculationOptions
             {
                 Enabled = true,
-                SpeculatorName = SpeculatorRegistry.NGram,
+                SpeculatorName = speculator,
                 MaxDraftTokens = 4,
             },
         };
@@ -362,7 +366,7 @@ public class SpeculativeExecutionTests
         Assert.Equal(ExpectedChain(model, prompt2.Count, maxNew), second.OutputTokens);
         Assert.NotNull(second.SpecStats);
         Assert.True(second.SpecStats.VerifySteps > 0, "speculation never verified a window after the prefix reuse");
-        Assert.True(second.SpecStats.TokensAccepted > 0, "no draft was accepted: the corpus was not seeded with the reused tokens");
+        Assert.True(second.SpecStats.TokensAccepted > 0, "no draft was accepted after prefix reuse");
         Assert.Empty(model.ProtocolViolations);
     }
 
@@ -390,17 +394,87 @@ public class SpeculativeExecutionTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void DraftHeadSpeculator_ArmsAfterAPrefixReuse_OnlyWhenTheHeadKeepsNoState(bool resumes)
+    public void DraftHeadSpeculator_ArmsAfterAPrefixReuse_OnlyWhenTheHeadSupportsGaps(bool resumes)
     {
-        // Gemma 4's head reads the trunk's donor KV and the hidden state it is
-        // handed, so it drafts from any position; a NextN block with its own KV
-        // cache cannot, and the executor must keep declining it after a reuse.
+        // A learned head must explicitly support restarting after missing rows,
+        // either by using the trunk's cache or by resetting its own draft cache.
         var model = new FakeSpeculativeModel { ResumesAfterGap = resumes };
         var spec = SpeculatorRegistry.Create(model,
             new SpeculationOptions { Enabled = true, SpeculatorName = SpeculatorRegistry.DraftHead },
             out string decline);
         Assert.Null(decline);
         Assert.Equal(resumes, spec.CanArmAfterPrefixReuse);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DraftHeadSpeculator_GapDiscardsPendingFoldedCatchUp(bool commitAfterGap)
+    {
+        // A concurrent interlude can leave verified rows waiting for a folded
+        // catch-up. Once a gap resets the head, replaying those old rows would
+        // restore a stale draft-cache position before the next proposal.
+        var head = new RecordingGapDraftHead();
+        using var spec = new DraftHeadSpeculator(head, vocabSize: 8, featureSize: 1, maxDraftTokens: 1);
+        spec.Commit(new[] { 1, 2 }, new[] { 0f, 1f }, startPos: 0);
+        spec.Commit(new[] { 3, 4 }, null, startPos: 2);
+        if (commitAfterGap)
+            spec.Commit(new[] { 5 }, new[] { 4f }, startPos: 4);
+
+        int position = commitAfterGap ? 5 : 4;
+        var drafts = new List<int>();
+        spec.Propose(new DraftContext
+        {
+            LastToken = 6,
+            Position = position,
+            CarryHidden = new[] { (float)position },
+            MaxTokens = 1,
+        }, drafts);
+
+        var gap = Assert.Single(head.CatchUps);
+        Assert.Equal(2, gap.Start);
+        Assert.Equal(new[] { 3, 4 }, gap.Tokens);
+        Assert.False(gap.HasHidden);
+        Assert.Equal(new[] { 7 }, drafts);
+        if (commitAfterGap)
+        {
+            var folded = Assert.Single(head.FoldedSteps);
+            Assert.Equal(4, folded.Start);
+            Assert.Equal(new[] { 5, 6 }, folded.Tokens);
+        }
+        else
+        {
+            Assert.Empty(head.FoldedSteps);
+        }
+        Assert.Equal(new[] { position }, head.DraftPositions);
+    }
+
+    private sealed class RecordingGapDraftHead : IDraftHead
+    {
+        public DraftHeadKind DraftHeadKind => DraftHeadKind.PerToken;
+        public bool DraftHeadResumesAfterGap => true;
+        public bool SupportsFusedCatchUpStep => true;
+        public List<(int Start, int[] Tokens, bool HasHidden)> CatchUps { get; } = new();
+        public List<(int Start, int[] Tokens)> FoldedSteps { get; } = new();
+        public List<int> DraftPositions { get; } = new();
+
+        public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
+            => CatchUps.Add((startPos, tokens.ToArray(), hRows != null));
+
+        public void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
+        {
+            DraftPositions.Add(pos);
+            logitsOut[7] = 10f;
+            hOut[0] = pos + 1;
+        }
+
+        public void DraftCatchUpAndStep(int[] tokens, float[] hRows, int startPos,
+            float[] logitsOut, float[] hOut)
+        {
+            FoldedSteps.Add((startPos, tokens.ToArray()));
+            DraftStep(tokens[^1], new[] { hRows[tokens.Length - 1] },
+                startPos + tokens.Length - 1, logitsOut, hOut);
+        }
     }
 
     [Theory]
@@ -562,6 +636,35 @@ public class SpeculativeExecutionTests
         var second = exec.DecodeStep(next, prompt.Length + 1, kMax: 4, drawNext: Argmax);
         Assert.True(second.UsedSpeculation);
         Assert.True(second.AcceptedCount > 0);
+        Assert.Empty(model.ProtocolViolations);
+    }
+
+    [Fact]
+    public void CatchUp_WithAResumableLearnedHead_RecapturesCarryBeforeDrafting()
+    {
+        var model = new FakeSpeculativeModel { ResumesAfterGap = true };
+        using var exec = NewExec(model, maxDraftTokens: 4);
+        int position = PrefillPrompt(model, exec, promptLen: 5, out int token);
+        var initial = exec.DecodeStep(token, position, kMax: 4, drawNext: Argmax);
+        Assert.True(initial.UsedSpeculation);
+
+        // The scheduler forwards two tokens normally while other requests are
+        // active. The speculative context still holds the pre-interlude carry.
+        position = model.CacheSeqLen;
+        int[] gap = { initial.NextToken, model.ExpectedNext(position) };
+        int nextToken = Argmax(model.Forward(gap));
+        exec.CatchUp(gap, position);
+        position += gap.Length;
+
+        var bootstrap = exec.DecodeStep(nextToken, position, kMax: 4, drawNext: Argmax);
+        Assert.False(bootstrap.UsedSpeculation);
+        Assert.Equal(model.ExpectedNext(position), Argmax(bootstrap.NextLogits));
+        var resumed = exec.DecodeStep(Argmax(bootstrap.NextLogits), position + 1,
+            kMax: 4, drawNext: Argmax);
+
+        Assert.True(resumed.UsedSpeculation);
+        Assert.Equal(4, resumed.AcceptedCount);
+        Assert.Equal(model.ExpectedNext(position + 5), resumed.NextToken);
         Assert.Empty(model.ProtocolViolations);
     }
 

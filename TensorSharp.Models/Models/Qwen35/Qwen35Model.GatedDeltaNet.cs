@@ -2545,6 +2545,7 @@ namespace TensorSharp.Models
         internal unsafe bool TryFusedMtpBlock(Tensor x, int startPos, int seqLen,
             float[] normedOut, float[] logitsOut, int nLogitRows)
         {
+            int cachePos = MtpCachePosition(startPos);
             if (!_mtpFusedDraftEnabled)
                 return false;
             if (!_fusedVerifyEnabled || _fvUnsupported
@@ -2570,7 +2571,7 @@ namespace TensorSharp.Models
                 return false;
             int cacheSize = (int)_kvCacheK[mtp].Sizes[1];
             int kvCacheType = FusedGraphKvCacheTypeId(_kvCacheK[mtp].ElementType);
-            if (cacheSize <= 0 || startPos + seqLen > cacheSize)
+            if (cacheSize <= 0 || cachePos + seqLen > cacheSize)
                 return false;
 
             // Head weights/norm: nextn.shared_head_head / shared_head_norm when the
@@ -2599,7 +2600,7 @@ namespace TensorSharp.Models
                 {
                     ok = GgmlBasicOps.Qwen35ModelVerify(
                         _mtpDraftLayer, 1,
-                        (IntPtr)GetFloatPtr(x), Config.HiddenSize, startPos, seqLen,
+                        (IntPtr)GetFloatPtr(x), Config.HiddenSize, cachePos, seqLen,
                         Config.NumHeads, Config.NumKVHeads, headDim, cacheSize,
                         _ropeDimCount > 0 ? _ropeDimCount : headDim, 2, kvCacheType,
                         _convKernel, _headKDim, _headVDim, _numKHeads, _numVHeads,
@@ -2611,7 +2612,7 @@ namespace TensorSharp.Models
                         finalNormPtr, normedOut != null ? (IntPtr)np : IntPtr.Zero, nLogitRows,
                         null, null,
                         ownerId: _verifyOwnerId,
-                        ropePositionDelta: _ropeDelta);
+                        ropePositionDelta: checked(_ropeDelta + _mtpCacheStart));
                 }
             }
             if (ok)

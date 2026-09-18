@@ -56,6 +56,7 @@ namespace TensorSharp.Models
             // It travels with the rows it describes - swapped in and out with the
             // holder, copied with a checkpoint, written into a checkpoint file.
             public int RopeDelta;
+            public int MtpCacheStart;
             public bool KvHostDirty;
             // GDN recurrent state: host conv ring + write idx + device delta state.
             public float[][] ConvState;
@@ -180,6 +181,7 @@ namespace TensorSharp.Models
             InvalidateHolderDeviceCopiesForReuse(h);
             h.CacheSeqLen = 0;
             h.RopeDelta = 0;
+            h.MtpCacheStart = 0;
             h.KvHostDirty = false;
             h.GdnHostDirty = false;
             h.FdStateResident = false;
@@ -249,6 +251,7 @@ namespace TensorSharp.Models
             KvCapacity = _kvCacheCapacity,
             CacheSeqLen = _cacheSeqLen,
             RopeDelta = _ropeDelta,
+            MtpCacheStart = _mtpCacheStart,
             KvHostDirty = _kvCacheHostDirty,
             ConvState = _convState,
             ConvWriteIdx = _convStateWriteIdx,
@@ -274,6 +277,7 @@ namespace TensorSharp.Models
             _kvCacheCapacity = h.KvCapacity;
             _cacheSeqLen = h.CacheSeqLen;
             _ropeDelta = h.RopeDelta;
+            _mtpCacheStart = h.MtpCacheStart;
             _kvCacheHostDirty = h.KvHostDirty;
             _convState = h.ConvState;
             _convStateWriteIdx = h.ConvWriteIdx;
@@ -834,6 +838,9 @@ namespace TensorSharp.Models
                 }
                 h.CacheSeqLen = rows;
                 h.RopeDelta = ropeDelta;
+                // Version 2 persists trunk state, not the draft cache origin.
+                // New speculative executions seed/restart the head after reuse.
+                h.MtpCacheStart = rows;
                 h.KvHostDirty = false;
                 h.GdnHostDirty = false;
                 h.FdStateResident = false;
@@ -952,6 +959,7 @@ namespace TensorSharp.Models
                 }
                 dst.CacheSeqLen = source.CacheSeqLen;
                 dst.RopeDelta = source.RopeDelta;
+                dst.MtpCacheStart = source.MtpCacheStart;
                 dst.KvHostDirty = false;
                 dst.GdnHostDirty = false;
                 dst.FdStateResident = false;

@@ -133,8 +133,8 @@ which algorithms exist.
 A sequence can begin from a KV prefix it never processed itself — the block-hash
 prefix cache handed it over, or it is simply the next turn of a chat. The executor
 used to refuse to arm speculation on any such sequence, because a learned
-per-position draft head (NextN/MTP) chains its state token by token and a gap makes
-every later proposal garbage. That is true of those heads, but it was applied to
+per-position draft head (NextN/MTP) chains its state token by token and cannot
+read an unwritten cache prefix safely. Without an explicit restart that is true, but it was applied to
 every algorithm, and it cost the feature its whole point in ordinary use: from the
 SECOND turn onward a Web UI conversation always adopts a prefix, so speculation
 silently never armed and a DFlash drafter looked like it helped on turn one and did
@@ -151,9 +151,24 @@ speculator can only cost throughput, never a wrong token. Measured in the server
 chat path: 1.02x → 1.85x.
 
 A per-token head can opt in too, through its weights adapter:
-`IDraftHead.DraftHeadResumesAfterGap`. A NextN/MTP block with a KV cache of its
-own (Qwen 3.6, GLM 5.2, GLM-5.3) keeps it false — a gap in what it replayed makes every
-later proposal garbage. Gemma 4's assistant head keeps no state at all: every
+`IDraftHead.DraftHeadResumesAfterGap`. Stateful heads without a suffix restart
+keep it false. Qwen 3.5/3.6/3.8 NextN/MTP opts in by restarting only its private
+attention cache at the end of a missing-hidden-state gap. Its compact KV indices
+retain absolute rotary positions; the trunk's complete Radix KV/recurrent state
+is unchanged. This covers startup-warmed and disk-restored shared prefixes,
+retained chat turns, and plain steps while speculation is parked. Pending folded
+catch-up rows from before a gap are discarded. The first decode step captures a
+fresh trunk hidden row before drafting resumes, and subsequent verified tokens
+rebuild the head's suffix history. Prefill can therefore use the normal fast
+path, even with speculation enabled. Initial draft acceptance may be lower than
+with a fully replayed head prefix; the adaptive governor can still park a
+net-negative drafter. `--spec` does not disable Radix caching, and an explicit
+`--no-prefix-cache` still disables it.
+This applies to the default fused-verify linear/holder route when the request is
+running solo. The alternate paged speculative route selected by explicitly
+disabling fused verify still requires a fresh position-zero prefill.
+
+Gemma 4's assistant head keeps no state at all: every
 draft step reads the trunk's donor KV and the hidden state it is handed, so it
 drafts from any position and reports true. Without that, a Gemma 4 chat armed
 its draft head on the first turn and never again.

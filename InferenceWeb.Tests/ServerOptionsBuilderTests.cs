@@ -10,6 +10,7 @@
 
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.Runtime.Scheduling;
+using TensorSharp.Runtime.Scheduling.PrefixCache;
 using TensorSharp.Server.Hosting;
 using TensorSharp.Server.Host.Hosting;
 
@@ -223,6 +224,27 @@ public class ServerOptionsBuilderTests : IDisposable
 
         Assert.False(ServerOptionsBuilder.ApplyPrefixCacheCliFlag(Array.Empty<string>()));
         Assert.True(SchedulerConfig.FromEnvironment().EnablePrefixCaching);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SpecFlag_KeepsRadixCachingUnlessExplicitlyDisabled(bool disablePrefixCache)
+    {
+        _env.Set("TS_SCHED_PREFIX_CACHE", null);
+        _env.Set("TS_PREFIX_CACHE_MODE", null);
+        string[] args = disablePrefixCache
+            ? new[] { "--spec", "--no-prefix-cache" }
+            : new[] { "--spec" };
+
+        ServerOptionsBuilder.ApplySpeculativeCliFlags(args);
+        ServerOptionsBuilder.ApplyPrefixCacheCliFlag(args);
+
+        var config = SchedulerConfig.FromEnvironment();
+        Assert.True(config.Speculation.Enabled);
+        Assert.Equal(PrefixCacheMode.Tree, config.PrefixCacheMode);
+        Assert.Equal(!disablePrefixCache, config.EnablePrefixCaching);
+        Assert.Equal(!disablePrefixCache, ServerOptionsBuilder.Build(args, _baseDir).PrefixCacheEnabled);
     }
 
     [Fact]
