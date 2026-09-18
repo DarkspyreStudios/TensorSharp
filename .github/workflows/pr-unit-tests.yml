@@ -1,5 +1,6 @@
 name: PR Unit Tests
 
+# New forks must enable Actions before these workflows can be dispatched.
 # Deterministic correctness signal for every PR on stock GitHub-hosted x64
 # and ARM64 runners: builds the test project (including the CPU-only native
 # GGML library, which TensorSharp.Backends.GGML builds automatically) and runs

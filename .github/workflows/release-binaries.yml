@@ -1,5 +1,6 @@
 name: Release Binaries
 
+# New forks must enable Actions before dispatching a branch-based validation run.
 # Builds self-contained, ready-to-run release archives of the TensorSharp apps
 # (TensorSharp.Server.Host and TensorSharp.Cli) for each supported platform and
 # attaches them to a GitHub Release.
