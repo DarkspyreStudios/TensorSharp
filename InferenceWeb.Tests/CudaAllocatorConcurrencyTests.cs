@@ -163,6 +163,7 @@ public class CudaAllocatorConcurrencyTests
     // under concurrency. GPU-independent.
     // ---------------------------------------------------------------------
     [Fact]
+    [Trait("Category", "Bench")]
     public void ShardedPool_OutperformsGlobalLock_UnderHighConcurrency()
     {
         const int opsPerThread = 300_000;
