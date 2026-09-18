@@ -11,8 +11,6 @@ ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE = ROOT / "eng" / "Dockerfile.gb10"
 dockerfile_bytes = DOCKERFILE.read_bytes()
 assert b"\r\n" not in dockerfile_bytes, "Docker RUN heredocs must retain LF line endings"
-for patch in (ROOT / "eng" / "ggml-patches").glob("*.patch"):
-    assert b"\r\n" not in patch.read_bytes(), f"{patch}: CUDA patches must retain LF line endings"
 for name in ("package-gb10.sh", "verify-gb10-release.sh"):
     assert b"\r\n" not in (ROOT / "eng" / name).read_bytes(), f"{name}: shell scripts must retain LF line endings"
 bash = shutil.which("bash")

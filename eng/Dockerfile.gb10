@@ -55,7 +55,7 @@ ENV DOTNET_ROOT=/usr/share/dotnet \
     TENSORSHARP_GGML_NATIVE_CUDA_ARCHITECTURES=121a-real \
     TENSORSHARP_CUDA_ARCH=compute_121 \
     TENSORSHARP_CUDNN=OFF \
-    TENSORSHARP_GGML_GIT_REF=7840aaba1989c6deeefede1d77d5aaf8f52b947e \
+    TENSORSHARP_GGML_GIT_REF=456172ec733a135778adcd32d00e576a58232e45 \
     TENSORSHARP_GGML_NO_UPDATE=1
 
 ARG GGML_BUILD_JOBS=2
@@ -65,11 +65,11 @@ WORKDIR /src
 # Managed and packaging edits must not invalidate the expensive CUDA compilation.
 COPY --from=source /TensorSharp.GGML.Native/ TensorSharp.GGML.Native/
 COPY --from=source /eng/fetch-ggml.sh /eng/fetch-cudnn.sh /eng/fetch-vulkan-toolchain.sh eng/
-COPY --from=source /eng/ggml-patches/ eng/ggml-patches/
 RUN bash TensorSharp.GGML.Native/build-linux.sh --cuda --no-vulkan -DGGML_NATIVE=OFF \
         -DTENSORSHARP_GGML_NATIVE_ENABLE_NCCL=OFF \
         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON '-DCMAKE_INSTALL_RPATH=$ORIGIN' \
     && test "$(git -C ExternalProjects/ggml rev-parse HEAD)" = "${TENSORSHARP_GGML_GIT_REF}" \
+    && test -z "$(git -C ExternalProjects/ggml status --porcelain)" \
     && test -s TensorSharp.GGML.Native/build/libGgmlOps.so
 
 COPY --from=source / .

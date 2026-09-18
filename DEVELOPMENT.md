@@ -237,8 +237,9 @@ Switching developer directories invalidates the CMake cache (the previous SDK is
 
 `eng/Dockerfile.gb10` builds this checkout's main solution and native GGML/CUDA
 code on a **native Linux ARM64 Docker builder**. It pins CUDA 13.0.2 components, .NET SDK
-10.0.401 and GGML revision `7840aaba1989c6deeefede1d77d5aaf8f52b947e` (the recorded
-DeepSeek V4.1 CUDA baseline, compatible with the repository's precision patch).
+10.0.401 and unmodified GGML revision `456172ec733a135778adcd32d00e576a58232e45`.
+Precision kernels remain in TensorSharp-owned code; the build checks that the
+fetched ggml working tree is unchanged.
 The SDK and clean Ubuntu images are pinned by digest; NVIDIA's signed repository
 supplies explicitly versioned compiler, runtime and cuBLAS packages. This avoids
 pulling a full CUDA devel image's profilers and unused math libraries onto small
@@ -350,7 +351,7 @@ release workflows and their CUDA versions are unchanged.
 
 Hosted GB10 builds use a fresh `docker-container` BuildKit worker rather than
 loading development images into the runner's Docker image store. The complete
-cold archive build was verified with a **hard 10 GiB build-storage cap**:
+pre-upstream-integration cold archive build was verified with a **hard 10 GiB build-storage cap**:
 peak filesystem use was **8,970,973,184 bytes**, exports used **1,313,840,034
 bytes**, and the run took **691.7 seconds** on four CPUs. CI reserves 10 GiB for
 Docker plus 2 GiB for exports, or 12 GiB when those share a filesystem, and fails
@@ -361,18 +362,19 @@ For a fork or branch CI rehearsal, dispatch **Release Binaries** with a version
 and `gb10_only=true`. That runs only the GB10 build/validation/upload job and
 does not create a GitHub Release or run the existing platform matrix.
 On a newly created fork, enable workflows in the repository's Actions tab first.
-If GitHub has not indexed them yet, push the workflow branch after activation
-before dispatching a run on that branch.
+Manual dispatch requires GitHub to register the workflow on the fork's default
+branch before selecting a different branch for a test run.
 
 #### Validated GB10 configuration and limits
 
-Verified on **2026-09-17**: NVIDIA GB10 (compute capability 12.1), Ubuntu 24.04.5
+Historical baseline, verified on **2026-09-17** before the upstream reintegration:
+NVIDIA GB10 (compute capability 12.1), Ubuntu 24.04.5
 ARM64, NVIDIA driver **580.178.04**, CUDA **13.0.2**, and .NET SDK **10.0.401**.
 The clean runtime contains no SDK or CUDA toolkit. Both extracted apphosts passed
 native dependency checks and produced text on `ggml_cuda`, including the server's
 OpenAI-compatible chat endpoint.
 
-The final correctness pass ran **3,908 CPU-lane tests**, **129 managed CUDA tests**,
+That correctness pass ran **3,908 CPU-lane tests**, **129 managed CUDA tests**,
 and **3 native CUDA tests**, all passing with zero skips. The native checks cover
 explicit-F32 matmul precision, sparse flash attention, and activation quantization.
 The CPU lane used a separately built CPU-only GGML library. Its existing shell
@@ -403,6 +405,10 @@ image/video generation are outside this validation. A generic integrated-GPU
 performance warning may appear on GB10; it is not a measured comparison against
 the CPU on this machine. Reserve the Spark explicitly before hardware checks;
 normal CI must not take resources from a running vLLM instance.
+The upstream reintegration changed inference and precision implementations, so
+these historical hardware counts and timings do not certify the rebased code.
+Hosted CI rechecks the current CPU and archive paths; hardware qualification
+must be repeated before carrying these measurements forward.
 
 
 ## Project Structure

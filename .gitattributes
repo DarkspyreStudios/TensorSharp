@@ -6,6 +6,3 @@
 *.sh text eol=lf
 # Docker RUN heredocs are shell scripts too.
 Dockerfile* text eol=lf
-
-# Patches must match upstream LF sources when a Windows checkout is copied to Linux.
-*.patch text eol=lf
