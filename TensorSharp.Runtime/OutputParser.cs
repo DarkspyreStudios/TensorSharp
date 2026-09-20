@@ -266,6 +266,7 @@ namespace TensorSharp.Runtime
         private readonly StringBuilder _buffer = new();
         private bool _stripLeadingThinkTag;
         private int _callIndex;
+        private readonly Dictionary<string, ToolFunction> _tools = new(StringComparer.Ordinal);
 
         // Watermark into the in-progress tool-call body already surfaced as
         // ParsedOutput.ToolCallText. The buffer keeps the whole body for the completion
@@ -283,6 +284,10 @@ namespace TensorSharp.Runtime
             _buffer.Clear();
             _callIndex = 0;
             _toolReportedChars = 0;
+            _tools.Clear();
+            if (tools != null)
+                foreach (ToolFunction tool in tools)
+                    _tools[tool.Name] = tool;
             if (enableThinking)
             {
                 _state = State.CollectingThinking;
@@ -423,7 +428,7 @@ namespace TensorSharp.Runtime
                         break;
 
                     case State.CollectingTool:
-                        int endIdx = buf.IndexOf("</tool_call>", StringComparison.Ordinal);
+                        int endIdx = FindToolCallEnd(buf);
                         if (endIdx >= 0)
                         {
                             string raw = buf.Substring(0, endIdx);
@@ -476,6 +481,51 @@ namespace TensorSharp.Runtime
         private static readonly Regex JsonToolNameRe = new(
             "^\\s*\\{\\s*\"name\"\\s*:\\s*\"([^\"]+)\"",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        // Generated code can contain the protocol's closing tag as ordinary data.
+        // Only a tag outside a JSON string or XML parameter ends the call.
+        private static int FindToolCallEnd(string body)
+        {
+            // Most decoding steps have not reached a closing marker yet. Avoid
+            // rescanning a long generated program character by character each time.
+            if (body.IndexOf("</tool_call>", StringComparison.Ordinal) < 0) return -1;
+            ReadOnlySpan<char> trimmed = body.AsSpan().TrimStart();
+            bool json = trimmed.StartsWith("{", StringComparison.Ordinal)
+                || trimmed.StartsWith("[", StringComparison.Ordinal);
+            bool quoted = false;
+            bool escaped = false;
+            for (int pos = 0; pos < body.Length; pos++)
+            {
+                char c = body[pos];
+                if (json)
+                {
+                    if (quoted)
+                    {
+                        if (escaped) escaped = false;
+                        else if (c == '\\') escaped = true;
+                        else if (c == '"') quoted = false;
+                        continue;
+                    }
+                    if (c == '"')
+                    {
+                        quoted = true;
+                        continue;
+                    }
+                }
+                else if (body.AsSpan(pos).StartsWith("<parameter=", StringComparison.Ordinal))
+                {
+                    int valueStart = body.IndexOf('>', pos + 11);
+                    if (valueStart < 0) return -1;
+                    int valueEnd = body.IndexOf("</parameter>", valueStart + 1, StringComparison.Ordinal);
+                    if (valueEnd < 0) return -1;
+                    pos = valueEnd + "</parameter>".Length - 1;
+                    continue;
+                }
+                if (c == '<' && body.AsSpan(pos).StartsWith("</tool_call>", StringComparison.Ordinal))
+                    return pos;
+            }
+            return -1;
+        }
 
         /// <summary>The in-progress call's tool name, from whichever body shape has
         /// gotten far enough to carry it.</summary>
@@ -566,20 +616,20 @@ namespace TensorSharp.Runtime
 
         /// <summary>
         /// Parse the `&lt;function=NAME&gt;&lt;parameter=KEY&gt;VALUE&lt;/parameter&gt;&lt;/function&gt;`
-        /// tool-call body. Each parameter value is trimmed of the surrounding
-        /// newlines the template emits, and parsed as JSON when it is a scalar /
-        /// object / array so numbers and booleans do not arrive quoted.
+        /// tool-call body. Declared string parameters preserve their exact text after
+        /// removing the single framing newline on each side. Other values retain the
+        /// JSON scalar/object/array handling used by schema-less callers.
         /// </summary>
         private ToolCall? ParseXmlToolCall(string raw)
         {
             const string fnOpen = "<function=";
-            int fnIdx = raw.IndexOf(fnOpen, StringComparison.Ordinal);
-            if (fnIdx < 0) return null;
-            int nameEnd = raw.IndexOf('>', fnIdx + fnOpen.Length);
+            if (!raw.StartsWith(fnOpen, StringComparison.Ordinal)) return null;
+            int nameEnd = raw.IndexOf('>', fnOpen.Length);
             if (nameEnd < 0) return null;
 
-            string name = raw.Substring(fnIdx + fnOpen.Length, nameEnd - fnIdx - fnOpen.Length).Trim();
+            string name = raw.Substring(fnOpen.Length, nameEnd - fnOpen.Length).Trim();
             if (name.Length == 0) return null;
+            _tools.TryGetValue(name, out ToolFunction? tool);
 
             var args = new Dictionary<string, object?>();
             const string paramOpen = "<parameter=";
@@ -587,24 +637,39 @@ namespace TensorSharp.Runtime
             int pos = nameEnd + 1;
             while (true)
             {
-                int pIdx = raw.IndexOf(paramOpen, pos, StringComparison.Ordinal);
-                if (pIdx < 0) break;
-                int keyEnd = raw.IndexOf('>', pIdx + paramOpen.Length);
-                if (keyEnd < 0) break;
-                string key = raw.Substring(pIdx + paramOpen.Length, keyEnd - pIdx - paramOpen.Length).Trim();
+                while (pos < raw.Length && char.IsWhiteSpace(raw[pos])) pos++;
+                if (raw.AsSpan(pos).SequenceEqual("</function>"))
+                    return new ToolCall { Name = name, Arguments = args, Index = _callIndex++ };
+                if (!raw.AsSpan(pos).StartsWith(paramOpen, StringComparison.Ordinal)) return null;
+                int keyEnd = raw.IndexOf('>', pos + paramOpen.Length);
+                if (keyEnd < 0) return null;
+                string key = raw.Substring(pos + paramOpen.Length, keyEnd - pos - paramOpen.Length).Trim();
+                if (key.Length == 0) return null;
 
                 int valEnd = raw.IndexOf(paramClose, keyEnd + 1, StringComparison.Ordinal);
-                string value = valEnd < 0
-                    ? raw.Substring(keyEnd + 1)
-                    : raw.Substring(keyEnd + 1, valEnd - keyEnd - 1);
-                if (key.Length > 0)
-                    args[key] = ParseScalarOrText(value.Trim());
+                // EOS/token limits must not turn a half-written shell command or edit
+                // into a structured call that the agent loop can execute.
+                if (valEnd < 0) return null;
+                string value = raw.Substring(keyEnd + 1, valEnd - keyEnd - 1);
+                bool isString = tool != null && tool.Parameters.TryGetValue(key, out ToolParameter? parameter)
+                    && parameter.Type == "string";
+                args[key] = isString ? RemoveXmlFramingNewlines(value) : ParseScalarOrText(value.Trim());
 
-                if (valEnd < 0) break;
                 pos = valEnd + paramClose.Length;
             }
+        }
 
-            return new ToolCall { Name = name, Arguments = args, Index = _callIndex++ };
+        private static string RemoveXmlFramingNewlines(string value)
+        {
+            int start = value.StartsWith("\r\n", StringComparison.Ordinal) ? 2
+                : value.StartsWith("\n", StringComparison.Ordinal) ? 1 : 0;
+            int end = value.Length;
+            if (end > start && value[end - 1] == '\n')
+            {
+                end--;
+                if (end > start && value[end - 1] == '\r') end--;
+            }
+            return value.Substring(start, end - start);
         }
 
         private static object? ParseScalarOrText(string value)

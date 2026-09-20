@@ -39,7 +39,7 @@ See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs
 | Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
 | Image editing | Qwen-Image-Edit (`qwen_image`) models are served through `/api/image-edit` and `/api/image-edit/stream`, not the chat endpoints |
 | Video generation | Any video-generation model — MiniMax-H3 (`minimax-h3`), Wan 2.1 / 2.2 (`wan`) — is served through `/api/video-generate`, `/api/video-generate/stream` and `/v1/videos/generations`; MiniMax-H3 returns a 32 kHz stereo `.wav` sidecar alongside the MP4, and `/api/models` advertises what conditioning the loaded checkpoint takes |
-| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint. On families with both declaration and output-parser support, the model's own skill calls are answered inside the server, so clients receive a finished completion. No-tool families such as `qwen4exp` receive selected skill instructions inline instead. `skills_run` is off unless the server starts with `--skills-allow-exec`. |
+| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint. On families with both declaration and output-parser support, including Qwen 3.8 Flash Next (`qwen4exp`), the model's own skill calls are answered inside the server, so clients receive a finished completion. Families without usable tool support receive selected skill instructions inline instead. `skills_run` is off unless the server starts with `--skills-allow-exec`. |
 | Agentic code execution | `--code-exec` adds the in-process `shell`, `read_file`, `write_file`, and `apply_patch` tools on tool-capable model families. Web UI keeps one workspace per chat session; each OpenAI/Ollama HTTP request gets a private workspace across its internal rounds and the server deletes it after the response. Network and package installation are separate, off-by-default permissions. |
 | Structured outputs | OpenAI `response_format` supports `text`, `json_object`, and `json_schema`; `response_format` (`json_object` / `json_schema`) cannot be combined with `tools`, and combines with `think` only on families that declare where reasoning ends (GPT-OSS, DeepSeek V4.1, Qwen 3.8 Flash Next, Gemma 4, Nemotron-H, Muse-Glimmer) |
 
@@ -470,9 +470,9 @@ the `SKILL.md` body and any reference files it needs through built-in
 `skills_list` / `skills_read` tools that **the server executes itself**, so the
 response you get back is an ordinary completion rather than a tool call your
 client has to service. This progressive-disclosure loop requires both tool
-declaration and output-parser support. Qwen 3.8 Flash Next (`qwen4exp`) currently
-has no structured tool parser, so it receives selected skill instructions inline
-and is not offered skill or code-execution tools.
+declaration and output-parser support. Qwen 3.8 Flash Next (`qwen4exp`) parses
+Qwen XML-style calls into structured tool calls and supports this loop. Its
+code-execution tools are available when `--code-exec` is enabled.
 
 `skills_discovery` is optional and defaults to `true` — the model is also shown
 the names and descriptions of the skills the request did *not* select, so it can
@@ -799,8 +799,9 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 The reply is a normal `chat.completion`. On a tool-capable model family, any
 built-in skill or code calls happened inside the server; the OpenAI SDK needs no
 changes and sees no built-in call it cannot service. Caller-defined tools still
-come back normally. Families without a structured tool parser, including
-`qwen4exp`, use the selected-skill inline fallback and are not offered code tools.
+come back normally. Qwen 3.8 Flash Next (`qwen4exp`) supports both paths.
+Families without a structured tool parser use the selected-skill inline fallback
+and are not offered code tools.
 
 ```python
 from openai import OpenAI

@@ -18,6 +18,47 @@ PLE n-gram 嵌入块、×4 hyper-connection 流以及 512 专家的 MoE。GGUF �
 Qwen3.5-VL 塔，位置用 (T,H,W) IMRoPE；支持多图与多轮图像会话，并在轮次之间复用
 KV（GDN 递归无法回退，因此只有当新 prompt **恰好扩展**已缓存前缀时才复用；见[保留前缀复用](#保留前缀复用)）。
 
+## 工具调用与 Agent 工作流
+
+`qwen4exp` 通过 Qwen ChatML 输出解析器返回结构化工具调用。支持 `<tool_call>`
+内的 JSON 与 `<function=...><parameter=...>` 格式，以及流式分片和思考模式。
+调用方工具以带调用 ID 的 OpenAI `tool_calls` 返回，结束原因是 `tool_calls`；
+配置启用后，内置技能与代码工具由服务端 Agent 循环执行。
+
+XML 参数按工具声明的 schema 解析：字符串 `123`、`true` 与 JSON 源码不会变成
+数字、布尔值或对象。解析器仅移除两侧各一个格式换行，保留源码缩进与额外空行；
+参数或 JSON 字符串内的 `</tool_call>` 不会提前结束调用。不完整的参数或函数不会
+成为可执行调用；EOS 时已有完整正文、仅缺外层结束标记的恢复行为保持不变。
+
+使用 `--skills-dir` 启用技能目录，`--skills-allow-exec` 启用技能脚本，
+`--code-exec` 启用工作区文件与 shell 工具；编辑工具为 `apply_patch`。
+执行与沙箱配置见 [Agent Skills](../agent_skills.md)。
+
+可复用验证脚本：`eng/validation/validate-qwen38-tool-calls.py` 检查通用 API 的
+流式/非流式、思考开/关与工具结果回传；`validate-release-agent-workflows.py`
+配合 `eng/validation/fixtures/skills` 检查技能发现、读取、脚本、shell、代码生成
+与读取/编辑/运行。`verify-agent-code-artifacts.py` 对最终源码使用额外输入独立执行。
+若验证服务器显式关闭沙箱，两个执行验证脚本需传 `--sandbox-off`，报告只证明功能
+执行成功，不证明沙箱隔离。完整命令见[英文版](qwen38-flash-next.md#tool-calling-and-agent-workflows)。
+
+2026-09-19 使用提供的 UD-IQ4_XS 模型，在三张 NVIDIA A40 上验证
+（`ggml_cuda`，按 15/16/17 层切分，关闭 MTP）；构建使用未修改的 upstream ggml
+`456172ec733a135778adcd32d00e576a58232e45`：
+
+- 160 项托管回归测试通过，无失败或跳过。
+- 12 项常规通用工具用例全部通过：天气、数字字符串/JSON 源码、多行 Python
+  （含尾部换行），分别覆盖流式与思考开/关，并用实际调用 ID 完成工具结果回传。
+- 12 项技能/shell/代码工作流所需工具均成功执行；4 份最终生成或编辑的程序用额外
+  输入独立执行通过。分离工具调用前的说明文字后，严格最终回答检查为 9/12 通过；
+  另外 3 项在正确值外添加反引号或说明，仍记为失败。
+- 4 项包含工具标记字面量的压力用例均在调用完成前以 EOS 结束，端到端仍失败；
+  完整 XML/JSON 字面量调用已通过解析器回归。日志未暴露最终采样 token 的 ID，
+  工具标记 token 本身不属于 EOS。
+
+VM 禁止 user namespace，执行验证显式关闭了沙箱。本轮仅覆盖一种量化与串行请求，
+不验证沙箱隔离、MTP、其他设备或性能。完整请求、SSE、产物、构建信息及失败证据保存在
+已忽略的 `docs/validation/qwen38-tool-calling/` 目录。
+
 ## 视频输入
 
 视频以 OpenAI Chat Completions 的 `video_url` content part 送达模型，内容是 base64 的

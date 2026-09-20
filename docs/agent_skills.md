@@ -830,18 +830,19 @@ protocol registry, so a new family with an unusual renderer gets it right for fr
 
 | Family | Tool declarations rendered? | `role: "tool"` rendered? | What happens |
 |---|---|---|---|
-| Qwen 3.5 / 3.6, Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, GLM 5.x | yes | yes | Full progressive disclosure |
+| Qwen 3.5 / 3.6, Qwen 3.8 Flash Next (`qwen4exp`), Gemma 4, GPT OSS, Nemotron-H, Muse-Glimmer, DeepSeek V4, GLM 5.x | yes | yes | Full progressive disclosure |
 | **Mistral 3** | no | **no** | No tools are offered; selected skill bodies are written into the prompt up front, and any tool result the loop does produce is fed back as a `user` turn rather than a `tool` turn |
-| **Any family nothing can parse** — `qwen4exp`, and every architecture with no registry entry at all | withheld | n/a | Selected skill bodies are written into the prompt up front and the catalog is dropped |
+| **Any family without a tool-output parser**, including architectures with no registry entry | withheld | n/a | Selected skill bodies are written into the prompt up front and the catalog is dropped |
 
 That last row is the one worth understanding, because it is the one that was wrong.
 Offering a tool is two halves decided in two places: the protocol registry says whether
 the renderer *writes* the declaration, and `OutputParserFactory` decides what *reads* the
 reply. Nothing structural makes them agree. An architecture with no `CreateOutputParser`
-— `qwen4exp` is registered and has none — falls back to `PassthroughOutputParser`, which
-returns every byte as content and cannot produce a tool call at all.
+falls back to `PassthroughOutputParser`, which returns every byte as content and cannot
+produce a tool call at all. Qwen 3.8 Flash Next registers `Qwen35OutputParser`, so its
+XML-style calls become structured tool calls and take part in the full skills loop.
 
-Declaring `skills_read` to such a model is strictly worse than staying quiet: the model
+Declaring `skills_read` to a model without a tool-output parser cannot complete the loop: the model
 emits the call, nothing answers it, and the raw tool markup reaches the user as though it
 were the answer, while the disclosure loop never runs. So the capability is the **AND** of
 the two halves, and a family that cannot complete the round trip gets its skill bodies
