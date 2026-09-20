@@ -27,7 +27,7 @@ TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核�
 | Mistral 3 | Mistral-Small-3.1-24B-Instruct | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF)，Pixtral 投影器 `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` |
 | Hunyuan Dense | 腾讯稠密 Hunyuan 检查点（`hunyuan-dense`） | 任何 `general.architecture` 为 `hunyuan-dense` 的 GGUF 均可加载，例如 Hy-MT2 系列（参考对话模板取自 `tencent/Hy-MT2-1.8B`）。仅文本、单设备，没有投影器也没有草稿模型。见 [hunyuan-dense](docs/models/hunyuan-dense_zh-cn.md) |
 | Muse-Glimmer | Muse-Glimmer-30B（稠密，支持图像） | [unsloth/Muse-Glimmer-30B-GGUF](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF)，如 `Muse-Glimmer-30B-UD-Q4_K_XL.gguf` 或 `Muse-Glimmer-30B-Q8_0.gguf`；`general.architecture` 为 `muse-glimmer` / `muse_glimmer`。图像输入需同仓库的 `mmproj-Muse-Glimmer-30B-Q8_0.gguf`，且必须**显式**用 `--mmproj` 指定——这是唯一没有 mmproj 自动探测的系列。可选提速产物：同仓库的 DFlash 分块 draft `dflash-kquant.gguf`，用 `--draft-model` 加载即可无损推测解码——不要传任何采样参数，它只在纯贪心下生效 |
-| DeepSeek V4.1 | DeepSeek-V4.1-Flash（`deepseek41`，384 个路由专家） | [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5)，固定 revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5`——七个 Q2_K 分片（246.35 GiB，张量类型混合 Q2_K/Q3_K）需放在同一目录，`--model` 指向第一个分片。该文件**不能单独运行**：`eng/dsv41-prepare.py` 会依据官方 [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) 的 `config.json` / `tokenizer.json` 在分片旁生成由分词器派生的 Engram sidecar；`eng/dsv41-prepare-vision.py` 生成约 970 MB 的可选视觉伴随文件，图像与视频经 `--mmproj` 使用。服务后端为 `ggml_cuda`；`ggml_cpu` 与 `cpu` 是正确性与可移植性路径，而非服务路径——`--backend cpu` 用纯 C# 执行器 `DeepSeek4CpuExecutor` 跑完整的 V4.1 计算图，不依赖 ggml、原生库与 GPU；它同样必须准备 Engram sidecar，而视觉伴随文件不会跟到这个后端上（`LoadVisionEncoder` 会抛异常），因此该后端上没有图像也没有视频。V4 的草稿模型会被拒绝。完整流程与校验哈希见 [deepseek41](docs/models/deepseek41_zh-cn.md) |
+| DeepSeek V4.1 | DeepSeek-V4.1-Flash（`deepseek41`，384 个路由专家） | [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45)，固定 revision `58d8ac86298fdf85a2440defee08b1abcad32e45`——七个 Q2_K 分片（246.35 GiB，张量类型混合 Q2_K/Q3_K）需放在同一目录，`--model` 指向第一个分片。GGUF 已包含 Engram 权重与哈希常量，无需生成 Engram 或单独的 Engram 文件。`eng/dsv41-prepare-vision.py` 生成约 970 MB 的可选视觉伴随文件，图像与视频经 `--mmproj` 使用。服务后端为 `ggml_cuda`；`ggml_cpu` 与 `cpu` 是正确性与可移植性路径，而非服务路径——`--backend cpu` 用纯 C# 执行器 `DeepSeek4CpuExecutor` 跑完整的 V4.1 计算图，不依赖 ggml、原生库与 GPU；它同样直接读取内嵌的 Engram 元数据，而视觉伴随文件不会跟到这个后端上（`LoadVisionEncoder` 会抛异常），因此该后端上没有图像也没有视频。V4 的草稿模型会被拒绝。完整流程与校验哈希见 [deepseek41](docs/models/deepseek41_zh-cn.md) |
 | DeepSeek V4 | DeepSeek-V4-Flash-0731（284B MoE） | [unsloth/DeepSeek-V4-Flash-0731-GGUF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF)；每种量化一个子目录（`UD-Q8_K_XL/`、`UD-IQ4_XS/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。仅文本 |
 | GLM 5.x | GLM-5.2（744B-A40B MoE，内嵌 NextN MTP） | [unsloth/GLM-5.2-GGUF](https://huggingface.co/unsloth/GLM-5.2-GGUF)；每种量化一个子目录（`UD-Q4_K_XL/`、`UD-IQ2_XXS/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。**仅文本**——再往下两行的 GLM-5.3-Flash 才是支持图像的那个；中间那行的 GLM-5.3 同样仅文本。这些 GGUF 已带有服务端 `--spec` 所需的 NextN 块——与 Qwen 3.6 不同，不存在需要挑选的独立 MTP 仓库 |
 | GLM 5.x | GLM-5.3（`glm-dsa`，256 个路由专家，仅文本） | [unsloth/GLM-5.3-GGUF](https://huggingface.co/unsloth/GLM-5.3-GGUF)；每种量化一个子目录（`UD-Q2_K_XL/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。`general.architecture` 为 `glm-dsa`，层结构与 GLM-5.2 一致（79 个 block —— 78 层主干加 1 个 NextN ——256 个路由专家 top-8、带 lightning indexer 的 MLA、rope base 8e6），因此直接走现有的 GLM-5.2 路径，无需额外开关。**仅文本**——与下面的 Flash 仓库不同，这个仓库完全没有发布 mmproj。它确实带着供 `--spec` 使用的 NextN 块，但 `blk.78` 没有自己的 `nextn.shared_head_head.weight`，draft 块只能借用主干的 LM head——而在 `--tp N` 下该 head 是按列切分的。加载器拒绝用某个 rank 上的词表切片来 draft，并在 stderr 上明说，所以只有**不带** `--tp`（即默认按层切分到所有可见 GPU）运行时 `--spec` 才会真正生效 |
@@ -96,30 +96,27 @@ Gemma 4 目前已有可用的推测解码路径：上表中的 `gemma4-assistant
 echo "列出三条关于月球的事实。" > prompt.txt
 ```
 
-**DeepSeek V4.1 Flash**（384 个路由专家，服务后端为 `ggml_cuda`，必须先准备 Engram sidecar）：
+**DeepSeek V4.1 Flash**（384 个路由专家，服务后端为 `ggml_cuda`，直接读取 GGUF 内嵌的 Engram 元数据）：
 
 ```bash
-# 七个分片共 246 GiB Q2_K 权重，Engram 预热还需要约 60 GiB 主机页缓存
+# 七个分片共 246 GiB Q2_K 权重。主机映射的 Engram 表预热需要约 60 GiB 页缓存；
+# 驻留 GPU 的表无需这一步预热。
 python3 -m venv /tmp/dsv41-tools
-/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 tokenizers==0.22.2 huggingface_hub gguf
-hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
-    --revision 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5 \
+/tmp/dsv41-tools/bin/python -m pip install huggingface_hub
+/tmp/dsv41-tools/bin/hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+    --revision 58d8ac86298fdf85a2440defee08b1abcad32e45 \
     --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
 
-# 必需：由官方 config/tokenizer 派生的 Engram sidecar
-/tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
-    --repo deepseek-ai/DeepSeek-V4.1-Flash \
-    --revision dba1be0a40aa45a94ad051997016db3960a90277
-
-# 也可以改用 Q4_K_M：十一个分片共 415 GiB。它的两张 Engram 表各 51.5 GiB，
-# 只能留在主机内存映射中，因此在 8x46 GB 上必须把路由专家卸载到 CPU，
+# 也可以改用 Q4_K_M：十一个分片共 415 GiB。它的两张 Engram 表各 51.5 GiB；
+# 在 8x46 GB 上，这些表留在主机内存映射中，路由专家需要卸载到 CPU，
 # 加载器会打印它需要的 --n-cpu-moe N。
 #   --include "DeepSeek-V4.1-Flash-Q4_K_M-*.gguf" --local-dir models/deepseek41-q4
-# 下面的 sidecar 步骤对每一种量化都是必需的：社区 GGUF 仓库都不附带
-# deepseek41.engram.bin。
+# 两种量化均内嵌 Engram 常量，无需另行准备 Engram。
 
 # 可选：约 970 MB 的视觉伴随文件，--mmproj 用它启用图像与视频
+/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 gguf
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
+    --parent-model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --repository deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
@@ -131,12 +128,13 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 
 这里的 `--tp N` 表示在 N 张 GPU 上**按层切分**，不是张量并行；`TS_DSV41_TP=N` 才会打开实验性的
 routed-MoE TP，而它目前实测比按层切分更慢。权重与上下文放不下时加 `--n-cpu-moe N`。
-Python 只用于准备 sidecar，推理阶段不需要。
+Python 用于 Hugging Face 下载 CLI 与可选的视觉准备；推理无需 Python。仅提供文本服务时，
+省略视觉准备命令与 `--mmproj`。
 
 `--backend cpu` 不是上面“换后端”提示里的 `ggml_cpu`：它用纯 C# 执行器 `DeepSeek4CpuExecutor`
 跑完整的 V4.1 计算图——不依赖 ggml、原生库与 GPU，凡是 .NET 能跑的地方它都能跑——定位是正确性
 与可移植性路径，而非服务路径；整份 checkpoint 在它上面的吞吐、加载时间与常驻内存都从未实测过。
-上面的 `deepseek41.engram.bin` sidecar 依然必需。`--mmproj` 在这里完全不可用（视觉伴随文件是
+CPU 执行器直接从 GGUF 读取 Engram。`--mmproj` 在这里完全不可用（视觉伴随文件是
 原生 ggml 组件，`LoadVisionEncoder` 会抛异常），所以没有图像也没有视频；分布式 TP 组、任何草稿
 模型或 `TS_DSV4_DSPARK`、非 `0` 的 `TS_DSV41_TP`、非 `0` 的 `TS_DSV41_ENGRAM_DEVICE`，都会在
 读取任何权重之前被拒绝。它也没有多轮 KV 前缀复用、没有按序列的 slot——每次分叉的对话都要重新

@@ -2,13 +2,21 @@
 // Licensed under the BSD-3-Clause license in the repository root.
 //
 // Host-only storage benchmark for the DeepSeek V4 / V4.1 load-time warm passes,
-// run against a byte range of a real checkpoint shard. Linux only. It EVICTS the
-// named range from the page cache (posix_fadvise DONTNEED) before every arm, so
-// run it only while nothing else is reading that file.
+// run against byte ranges of real checkpoint shards. Linux only. The original
+// single-range benchmark EVICTS the named range from the page cache before
+// every arm, so run it only while nothing else is reading that file.
 //
 //   GgmlOpsDsv4FileWarmBench FILE OFFSET BYTES [--threads N] [--repeats N]
 //       [--modes pread,touch,engram] [--rows N] [--row-bytes N] [--row-origin N]
 //       [--drop-cost] [--hint-wait SECONDS]
+//   GgmlOpsDsv4FileWarmBench --verify-ranges FILE OFFSET BYTES [FILE OFFSET BYTES ...]
+//       [--threads N] [--block-bytes N]
+//
+// --verify-ranges performs one combined warm without eviction. Every file is
+// mapped before warming, then final residency is checked on those same mappings
+// after ALL workers finish. No checkpoint file is reopened between warming and
+// mincore: reopening can invalidate the GeeseFS page cache. Exit status is nonzero
+// on warm errors, invalid ranges, or any nonresident page in a requested range.
 //
 // Modes (each preceded by eviction with mincore()=0 verified):
 //   pread   tsg_dsv4::warm_file_ranges, the default warm (TS_DSV4_WARM_PREAD=1)
@@ -125,8 +133,147 @@ static double evict(const char * path, uint64_t off, uint64_t bytes, const map_v
     return res;
 }
 
+static std::string json_string(const std::string & text)
+{
+    std::string result = "\"";
+    for (unsigned char c : text)
+    {
+        if (c == '"' || c == '\\') { result += '\\'; result += char(c); }
+        else if (c < 0x20)
+        {
+            char escaped[7];
+            std::snprintf(escaped, sizeof(escaped), "\\u%04x", unsigned(c));
+            result += escaped;
+        }
+        else result += char(c);
+    }
+    return result + '"';
+}
+
+static uint64_t unsigned_argument(const char * text)
+{
+    if (!text || *text < '0' || *text > '9') throw std::runtime_error("expected an unsigned decimal integer");
+    char * end = nullptr;
+    errno = 0;
+    const uint64_t value = std::strtoull(text, &end, 10);
+    if (errno == ERANGE || !end || *end) throw std::runtime_error("invalid or overflowing integer argument");
+    return value;
+}
+
+static int verify_ranges(int argc, char ** argv)
+{
+    struct requested_range
+    {
+        size_t file;
+        uint64_t offset, bytes;
+        void * aligned = nullptr;
+        size_t length = 0, resident = 0;
+        int error = 0;
+        std::vector<unsigned char> pages;
+    };
+    try
+    {
+        std::vector<std::string> paths, quoted_paths;
+        std::vector<requested_range> requested;
+        tsg_dsv4::file_warm_options options;
+        for (int i = 2; i < argc; ++i)
+        {
+            const std::string argument = argv[i];
+            if (argument == "--threads" || argument == "--block-bytes")
+            {
+                if (++i >= argc) throw std::runtime_error(argument + " needs a value");
+                const uint64_t value = unsigned_argument(argv[i]);
+                if (argument == "--threads")
+                {
+                    if (!value || value > 256) throw std::runtime_error("threads must be in [1, 256]");
+                    options.threads = int(value);
+                }
+                else
+                {
+                    if (!value || value > SIZE_MAX) throw std::runtime_error("invalid block byte count");
+                    options.block_bytes = value;
+                }
+                continue;
+            }
+            if (argument.compare(0, 2, "--") == 0) throw std::runtime_error("unknown option " + argument);
+            if (i + 2 >= argc) throw std::runtime_error("each range requires FILE OFFSET BYTES");
+            const uint64_t offset = unsigned_argument(argv[++i]);
+            const uint64_t bytes = unsigned_argument(argv[++i]);
+            if (!bytes) throw std::runtime_error("range byte count must be positive");
+            const auto found = std::find(paths.begin(), paths.end(), argument);
+            const size_t file = size_t(found - paths.begin());
+            if (found == paths.end()) { paths.push_back(argument); quoted_paths.push_back(json_string(argument)); }
+            requested_range request{};
+            request.file = file;
+            request.offset = offset;
+            request.bytes = bytes;
+            requested.push_back(std::move(request));
+        }
+        if (requested.empty()) throw std::runtime_error("provide at least one FILE OFFSET BYTES range");
+
+        std::vector<std::unique_ptr<map_view>> mappings;
+        for (const auto & path : paths) mappings.emplace_back(new map_view(path.c_str()));
+        const size_t page = tsg_dsv4::file_warm_detail::page_size();
+        std::vector<tsg_dsv4::file_warm_range> ranges;
+        uint64_t requested_bytes = 0;
+        for (auto & request : requested)
+        {
+            const auto & view = *mappings[request.file];
+            if (request.offset > view.size || request.bytes > view.size - request.offset)
+                throw std::runtime_error("range exceeds file bounds: " + paths[request.file]);
+            if (request.bytes > UINT64_MAX - requested_bytes) throw std::runtime_error("total requested bytes overflow");
+            requested_bytes += request.bytes;
+            tsg_dsv4::file_warm_detail::page_span(view.at(request.offset), request.bytes,
+                                                request.aligned, request.length);
+            // Allocate residency output before warming to avoid page-cache
+            // pressure from this diagnostic's scratch allocation after the warm.
+            request.pages.resize(request.length / page + (request.length % page != 0));
+            ranges.push_back({ int(request.file), request.offset, request.bytes, view.at(request.offset) });
+        }
+        const auto warm = tsg_dsv4::warm_file_ranges(paths, ranges, options);
+        bool passed = warm.ok && !warm.stopped;
+        // Measure every mapping before printing results. This path deliberately
+        // performs no model opens, remaps, or eviction calls after the warm.
+        for (auto & request : requested)
+        {
+            if (mincore(request.aligned, request.length, request.pages.data()) != 0)
+                request.error = errno;
+            else
+                for (unsigned char value : request.pages) request.resident += value & 1;
+            passed = passed && !request.error && request.resident == request.pages.size();
+        }
+        for (size_t i = 0; i < requested.size(); ++i)
+        {
+            const auto & request = requested[i];
+            const bool resident = !request.error && request.resident == request.pages.size();
+            std::printf("{\"mode\":\"verify_range\",\"range\":%zu,\"file\":%s,\"offset\":%" PRIu64
+                ",\"bytes\":%" PRIu64 ",\"resident_pages\":%zu,\"total_pages\":%zu,\"resident_fraction\":%.9f,"
+                "\"mincore_errno\":%d,\"fully_resident\":%s}\n", i, quoted_paths[request.file].c_str(),
+                request.offset, request.bytes, request.resident, request.pages.size(),
+                request.error ? -1.0 : double(request.resident) / double(request.pages.size()),
+                request.error, resident ? "true" : "false");
+        }
+        std::printf("{\"mode\":\"verify_ranges\",\"range_count\":%zu,\"file_count\":%zu,"
+            "\"requested_bytes\":%" PRIu64 ",\"warm_bytes_total\":%" PRIu64 ",\"bytes_read\":%" PRIu64
+            ",\"bytes_resident_skipped\":%" PRIu64 ",\"threads\":%d,\"block_bytes\":%" PRIu64
+            ",\"seconds\":%.6f,\"eviction_requested\":false,\"warm_ok\":%s,\"warm_stopped\":%s,"
+            "\"ok\":%s,\"error\":%s}\n", requested.size(), paths.size(), requested_bytes, warm.bytes_total,
+            warm.bytes_read, warm.bytes_resident, warm.threads, options.block_bytes, warm.seconds,
+            warm.ok ? "true" : "false", warm.stopped ? "true" : "false", passed ? "true" : "false",
+            json_string(warm.error).c_str());
+        std::fflush(stdout);
+        return passed ? 0 : 1;
+    }
+    catch (const std::exception & error)
+    {
+        std::fprintf(stderr, "%s\n", error.what());
+        return 2;
+    }
+}
+
 int main(int argc, char ** argv)
 {
+    if (argc > 1 && std::strcmp(argv[1], "--verify-ranges") == 0) return verify_ranges(argc, argv);
     if (argc < 4)
     {
         std::fprintf(stderr, "usage: %s FILE OFFSET BYTES [--threads N] [--repeats N] [--modes pread,touch,engram] "

@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
+import re
 import statistics
 import time
 
@@ -150,12 +151,58 @@ def strip_json_fence(text):
     return rest.strip()
 
 
+def decode_content_error(text):
+    """Minimum technical coverage, not a semantic quality or factuality score.
+
+    Naming the requested topic in a refusal or repeatedly promising to explain
+    it is insufficient. Require basic mapping/storage vocabulary and either
+    hash-to-index or collision mechanics in the assistant content channel. The
+    fixed token budget can end before an explanation reaches its collision
+    section, so complete coverage of every requested section is not required.
+    """
+    if len(text) <= 300:
+        return "decode answer needs more than 300 characters of assistant content"
+    coverage = (
+        ("hashing", r"\bhash(?:es|ing)?\b"),
+        ("keys and values", r"\bkeys?\b", r"\bvalues?\b"),
+        ("indexed storage (array, bucket or slot)", r"\b(?:arrays?|buckets?|slots?)\b"),
+        ("collisions", r"\bcollisions?\b"),
+        ("hash-to-index or collision mechanics",
+         r"\b(?:chaining|linked\s+lists?|prob(?:e|es|ing)|open\s+addressing|cuckoo|robin\s+hood)\b"
+         r"|\bkeys\b[^\n.!?]{0,100}\bsame\b[^\n.!?]{0,35}"
+         r"\b(?:index|bucket|slot|position|location|hash)\b"
+         r"|\bhash(?:\s+function)?\b[^\n.!?]{0,150}"
+         r"\b(?:comput\w*|convert\w*|map\w*|return\w*|transform\w*)\b[^\n.!?]{0,100}"
+         r"\b(?:index|indices|bucket|slot|position|location)\b"),
+    )
+    missing = [label for label, *patterns in coverage
+               if not all(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)]
+    if missing:
+        return "decode answer lacks minimum technical coverage: " + ", ".join(missing)
+    return None
+
+
+def validate_decode(metrics, max_tokens, text):
+    """Enforce the sustained-generation request as well as minimum coverage."""
+    count = metrics.get("completion_tokens")
+    if type(count) is not int or count != max_tokens:
+        raise ValueError(f"decode completion_tokens must equal the requested token budget "
+                         f"({max_tokens}); got {count!r}")
+    # An EOS can coincide with the budget boundary. Usage still has to match
+    # the exact budget, so accepting stop here does not permit early exits.
+    if metrics.get("finish_reason") not in ("length", "stop"):
+        raise ValueError("decode must finish with finish_reason=length or stop at its token budget; "
+                         f"got {metrics.get('finish_reason')!r}")
+    error = decode_content_error(text)
+    if error:
+        raise ValueError(error)
+
+
 def check_answer(name, text):
     if name in ("short", "short_zh"):
         return text.strip() == "42"
     if name in ("decode", "decode_8k"):
-        lower = text.lower()
-        return len(text) > 300 and "hash" in lower and "collision" in lower
+        return decode_content_error(text) is None
     if name in ("json", "json_schema"):
         # Python's equality conflates false and 0: enforce JSON types too.
         if not exact_json(text, {"name": "Mars", "moons": 2, "habitable": False}):
@@ -258,6 +305,8 @@ def run_case(url, model, engine, name, tag, thinking=False, stream=True, timeout
         # Never count reasoning-only output as a correct final answer.
         text = assistant_content(metrics)
         result["validated_content"] = text
+        if name in ("decode", "decode_8k"):
+            validate_decode(metrics, spec["max_tokens"], text)
         truncated = metrics["finish_reason"] == "length" and name not in ("decode", "decode_8k")
         if not check_answer(name, text):
             # Opt-in secondary verdict: a ```json fence around otherwise exact JSON

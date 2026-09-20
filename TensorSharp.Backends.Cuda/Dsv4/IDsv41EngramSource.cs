@@ -15,7 +15,7 @@ namespace TensorSharp.Cuda
     /// millions of rows, tens to hundreds of GiB, of which a token touches
     /// <see cref="HashColumns"/>. It is far too large to live in VRAM beside the
     /// model, so it stays a host mapping and only the selected rows cross the
-    /// bus. Which rows those are depends on the tokenizer-derived sidecar and on
+    /// bus. Which rows those are depends on the embedded GGUF metadata and on
     /// the sequence's own token history, neither of which is the engine's
     /// business — so the executor that owns the GGUF does the hashing and the
     /// dequantization, and the engine only uploads what comes back.</para>

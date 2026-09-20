@@ -3,12 +3,13 @@
 
 Downloads the isolated BF16 vision shard and HTTP byte ranges for three image
 delimiters and forty VL router biases. Requires numpy and gguf; inference does
-not depend on Python. The existing deepseek41.engram.bin identifies the parent
-text tokenizer. Downloads and output tensors have SHA256 provenance.
+not depend on Python. The parent model GGUF identifies its text tokenizer.
+Downloads and output tensors have SHA256 provenance.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -18,10 +19,20 @@ import urllib.request
 import time
 
 import numpy as np
-from gguf import GGUFWriter, GGMLQuantizationType
+from gguf import GGUFReader, GGUFWriter, GGMLQuantizationType
 
 REPOSITORY = "deepseek-ai/DeepSeek-V4.1-Flash"
 REVISION = "dba1be0a40aa45a94ad051997016db3960a90277"
+
+
+def parent_tokenizer_identity(path):
+    spec = importlib.util.spec_from_file_location("dsv41_gguf", Path(__file__).with_name("dsv41-gguf.py"))
+    metadata = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(metadata)
+    reader = GGUFReader(str(path), mode="r")
+    if reader.fields["general.architecture"].contents() != "deepseek41":
+        raise ValueError("Parent model must be a DeepSeek V4.1 GGUF")
+    return metadata.tokenizer_identity(reader)
 
 
 def sha256(path):
@@ -169,27 +180,21 @@ def main():
     parser.add_argument("--repository", default=REPOSITORY)
     parser.add_argument("--revision", default=REVISION)
     parser.add_argument("--cache-dir", type=Path)
-    parser.add_argument("--parent-engram", type=Path)
+    parser.add_argument("--parent-model", type=Path, required=True, help="Parent text GGUF (first shard)")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--metadata-only", action="store_true", help="Fetch only headers and small delimiter/router ranges; defer large shard verification/GGUF writing")
     args = parser.parse_args()
     if not 1 <= args.workers <= 8:
         raise ValueError("Metadata download workers must be in [1, 8]")
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    parent = args.parent_engram or args.output_dir / "deepseek41.engram.bin"
-    with parent.open("rb") as source:
-        metadata = source.read(44)
-    if len(metadata) != 44 or metadata[:8] != b"TSD41E01":
-        raise ValueError("Invalid parent Engram sidecar")
-    parent_vocab = struct.unpack_from("<I", metadata, 8)[0]
-    tokenizer_hash = struct.unpack_from("<Q", metadata, 36)[0]
+    parent_vocab, tokenizer_hash = parent_tokenizer_identity(args.parent_model)
     download = Download(args.repository, args.revision, args.cache_dir or args.output_dir / ".deepseek41-vision-cache")
     config, index = download.json_file("config.json"), download.json_file("model.safetensors.index.json")
     if parent_vocab != config["text_config"]["vocab_size"]:
         raise ValueError("Vision configuration does not match parent vocabulary")
     tokenizer = download.json_file("tokenizer.json")
     if tokenizer_fingerprint(tokenizer, parent_vocab) != tokenizer_hash:
-        raise ValueError("Vision checkpoint tokenizer does not match the parent Engram fingerprint")
+        raise ValueError("Vision checkpoint tokenizer does not match the parent GGUF fingerprint")
     selected = select_tensors(index, config["text_config"]["num_hidden_layers"])
     vision_shards = {shard for name, shard in selected.items() if name.startswith(("vision.", "aligner."))}
     for shard in sorted(vision_shards):

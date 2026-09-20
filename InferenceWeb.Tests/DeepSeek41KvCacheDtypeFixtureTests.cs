@@ -11,7 +11,7 @@ public sealed class DeepSeek41TinyFixtureFactAttribute : FactAttribute
     public DeepSeek41TinyFixtureFactAttribute()
     {
         if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("TS_TEST_DSV41_TARGET")))
-            Skip = "Requires TS_TEST_DSV41_TARGET: the tiny DeepSeek V4.1 fixture GGUF (with its Engram sidecar beside it).";
+            Skip = "Requires TS_TEST_DSV41_TARGET: the tiny DeepSeek V4.1 fixture GGUF (including embedded Engram metadata).";
     }
 }
 

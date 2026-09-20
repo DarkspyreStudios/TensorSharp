@@ -25,6 +25,15 @@ class StreamResponse:
 
 
 class ValidationTests(unittest.TestCase):
+    HASH_EXPLANATION = (
+        "A hash table maps keys to values. A hash function converts a key to an integer, "
+        "which is reduced modulo the capacity to index an array of buckets. Two different "
+        "keys can select the same bucket: this is a collision. With separate chaining, "
+        "each bucket holds a linked list and lookup compares keys in that list. With "
+        "open addressing, insertion probes for an empty slot. Resizing allocates a larger "
+        "array and rehashes entries, keeping average lookup and insertion near O(1)."
+    )
+
     @staticmethod
     def workflow_response(content=None, calls=()):
         details = [{"id": f"call_{i}_{name}", "type": "function",
@@ -93,6 +102,101 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(validation.check_answer("json", '{"name":"Mars","moons":2,"habitable":false}'))
         self.assertFalse(validation.check_answer("json", '{"name":"Mars","moons":2,"habitable":0}'))
         self.assertFalse(validation.check_answer("json", '```json\n{"name":"Mars","moons":2,"habitable":false}\n```'))
+
+    def decode_result(self, content, *, tokens=512, finish="length", scenario="decode", budget=None):
+        response = self.workflow_response(content)
+        response.update(completion_tokens=tokens, finish_reason=finish)
+        with patch.object(engines, "run_openai_chat", return_value=response):
+            return validation.run_case("http://unused", "model", "tensorsharp", scenario,
+                                       "decode-gate", max_tokens=budget)
+
+    def test_decode_accepts_substantive_explanation_for_short_and_background_prompts(self):
+        for scenario in ("decode", "decode_8k"):
+            with self.subTest(scenario=scenario):
+                result = self.decode_result(self.HASH_EXPLANATION, scenario=scenario)
+                self.assertEqual(result["status"], "ok", result)
+
+    def test_decode_rejects_early_stop_even_with_good_content(self):
+        result = self.decode_result(self.HASH_EXPLANATION, tokens=133, finish="stop")
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("requested token budget (512); got 133", result["detail"])
+        self.assertEqual(result["validated_content"], self.HASH_EXPLANATION)
+
+    def test_decode_requires_exact_usage_and_valid_finish_reason(self):
+        for tokens in (None, "512", 511, 513, True):
+            with self.subTest(tokens=tokens):
+                result = self.decode_result(self.HASH_EXPLANATION, tokens=tokens)
+                self.assertEqual(result["status"], "fail")
+                self.assertIn("completion_tokens", result["detail"])
+        for finish in ("tool_calls", "content_filter", "unknown"):
+            with self.subTest(finish=finish):
+                result = self.decode_result(self.HASH_EXPLANATION, finish=finish)
+                self.assertEqual(result["status"], "fail")
+                self.assertIn("finish_reason=length or stop", result["detail"])
+        result = self.decode_result(self.HASH_EXPLANATION, finish="stop")
+        self.assertEqual(result["status"], "ok", result)  # EOS exactly at the budget boundary
+
+    def test_decode_uses_custom_sent_budget(self):
+        for budget in (256, 1024):
+            with self.subTest(budget=budget):
+                result = self.decode_result(self.HASH_EXPLANATION, tokens=budget, budget=budget)
+                self.assertEqual(result["status"], "ok", result)
+                self.assertEqual(result["turns"][0]["request"]["max_tokens"], budget)
+                mismatch = self.decode_result(self.HASH_EXPLANATION, budget=budget)
+                self.assertEqual(mismatch["status"], "fail")
+
+    def test_decode_refusal_and_promise_loop_do_not_establish_technical_coverage(self):
+        refusal = ("I cannot write the requested hash table explanation, including collisions, "
+                   "resizing, complexity and an example, because the background is a history "
+                   "of computing essay. Please clarify whether I should explain hash tables. ") * 2
+        promise = ("The instruction asks for a detailed explanation of how a hash table works, "
+                   "including collisions, resizing, complexity and a worked example. "
+                   "I should follow it and will write that explanation. ") * 8
+        for content in (refusal, promise):
+            with self.subTest(content=content[:40]):
+                self.assertFalse(validation.check_answer("decode", content))
+                result = self.decode_result(content, scenario="decode_8k")
+                self.assertEqual(result["status"], "fail")
+                self.assertIn("minimum technical coverage", result["detail"])
+                self.assertIn("keys and values", result["detail"])
+                self.assertIn("collision mechanics", result["detail"])
+
+    def test_decode_requires_storage_and_collision_mechanics_not_just_topic_keywords(self):
+        content = ("A hash table maps keys to values. I will discuss collisions later. "
+                   "Efficient lookup depends on a good hash function. ") * 3
+        result = self.decode_result(content)
+        self.assertEqual(result["status"], "fail")
+        self.assertIn("indexed storage", result["detail"])
+        self.assertIn("collision mechanics", result["detail"])
+
+    def test_decode_accepts_collision_example_before_resolution_section(self):
+        content = (
+            "A hash table maps keys to values using a hash function to compute an index "
+            "into an array. Insert and lookup compute the same hash for the key. In an "
+            "array of ten buckets, the integer key 12 selects index 2 using key modulo 10. "
+            "The key 22 also selects index 2: two different keys map to the same bucket. "
+            "This is a collision. A good hash function spreads keys uniformly, reducing "
+            "the chance of collisions and providing fast average lookup."
+        )
+        result = self.decode_result(content, scenario="decode_8k")
+        self.assertEqual(result["status"], "ok", result)
+
+    def test_decode_accepts_hash_index_explanation_truncated_before_collision_section(self):
+        content = (
+            "A hash table maps keys to values. The hash function converts each key into an "
+            "integer index in an array of buckets. On insertion, store the key-value pair "
+            "in that bucket. On lookup, calculate the same hash for the key to locate its "
+            "bucket and retrieve the value. For an array of ten elements, integer key 12 "
+            "selects bucket 2 using modulo 10. The next section describes how collisions "
+            "are handled when the table contains more entries."
+        )
+        result = self.decode_result(content, scenario="decode_8k")
+        self.assertEqual(result["status"], "ok", result)
+
+    def test_decode_does_not_blanket_reject_a_refusal_prefix_before_an_explanation(self):
+        content = "I can't help with that. Let me address the actual request directly. " + self.HASH_EXPLANATION
+        result = self.decode_result(content, scenario="decode_8k")
+        self.assertEqual(result["status"], "ok", result)
 
     def test_long_prompt_uses_three_distributed_needles(self):
         text = validation.case_spec("long_8k", "test")["messages"][0]["content"]

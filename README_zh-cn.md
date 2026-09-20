@@ -178,7 +178,7 @@ curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
 
 | 家族 | 示例模型（GGUF） | 图像 / 视频 / 音频 | 思维链 | 工具 | 卡片 |
 |---|---|---|---|---|---|
-| DeepSeek V4.1 Flash | [DeepSeek-V4.1-Flash](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5)（Q2_K 或 Q4_K_M 分片 + 预处理 Engram sidecar，服务路径为 `ggml_cuda`；`ggml_cpu` 是仍能加载视觉伴随文件的正确性与可移植性路径，`cuda` 与纯 C# `cpu` 执行器则是仅文本的） | ✅（视觉伴随文件） / ✅（视觉伴随文件） / — | ✅ | ✅ | [deepseek41](docs/models/deepseek41_zh-cn.md) |
+| DeepSeek V4.1 Flash | [DeepSeek-V4.1-Flash](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45)（内嵌 Engram 的 Q2_K 或 Q4_K_M 分片，服务路径为 `ggml_cuda`；`ggml_cpu` 是仍能加载视觉伴随文件的正确性与可移植性路径，`cuda` 与纯 C# `cpu` 执行器则是仅文本的） | ✅（视觉伴随文件） / ✅（视觉伴随文件） / — | ✅ | ✅ | [deepseek41](docs/models/deepseek41_zh-cn.md) |
 | DeepSeek V4 Flash | [DeepSeek-V4-Flash-0731](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF)（284B MoE，分片 GGUF） | — / — / — | ✅ | ✅ | [deepseek4](docs/models/deepseek4_zh-cn.md) |
 | GLM 5.x | [GLM-5.2](https://huggingface.co/unsloth/GLM-5.2-GGUF)（744B-A40B MoE，分片 GGUF）、[GLM-5.3](https://huggingface.co/unsloth/GLM-5.3-GGUF)（256 个路由专家，仅文本；每个量化档一个子目录，UD-Q2_K_XL 为 7 个分片、236.4 GiB——`--model` 指向 `-00001-of-00007` 那一片）、[GLM-5.3-Flash](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)（320B MoE，分片 GGUF，+ mmproj） | ✅（仅 5.3-Flash；5.2 与 5.3 均仅文本） / — / — | ✅ | ✅ | [glm](docs/models/glm_zh-cn.md) |
 | Qwen 3.8 Flash Next | [Qwen3.8-Flash-Next](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF)（GDN + 注意力混合 MoE，512 专家，分片 GGUF，+ mmproj） | ✅ / — / — | ✅ | 否（无解析器） | [qwen38-flash-next](docs/models/qwen38-flash-next_zh-cn.md) |

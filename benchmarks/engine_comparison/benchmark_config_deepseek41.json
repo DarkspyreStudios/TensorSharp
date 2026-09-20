@@ -1,5 +1,5 @@
 {
-  "_comment": "DeepSeek V4.1 Flash Q2_K conservative validation matrix, using seven pinned GGUF shards. Default execution uses layer split. Routed-MoE tensor parallelism has 2/4/8-rank fixture coverage; the first full-checkpoint TP run completed and was slower than layer split. This matrix retains ubatch256, prefill-chunk256, solo-chunk8192 and the disabled-by-default compact gather; optimized measured profiles are recorded separately. Set launch-time TS_CPU_MOE_THREADS explicitly and TS_DSV41_COMPACT_RAW_GATHER=0 to avoid inherited settings changing this baseline. The first TP profile requested CLI48, which did not reach the native pool; default32 is inferred from source and the VM override probe, not a direct pool-width measurement on that host. Later explicit-thread experiments are separate. A compatible llama.cpp V4.1 runtime is unavailable: this blocks a same-model parity claim. Run validate_inference.py against each running endpoint for strict quality checks and repeated timing.",
+  "_comment": "DeepSeek V4.1 Flash Q2_K conservative validation matrix, using seven pinned GGUF shards with embedded Engram constants. Historical performance observations below refer to the older recorded files; rerun this matrix for the current revision. Default execution uses layer split. Routed-MoE tensor parallelism has 2/4/8-rank fixture coverage; the first full-checkpoint TP run completed and was slower than layer split. This matrix retains ubatch256, prefill-chunk256, solo-chunk8192 and the disabled-by-default compact gather; optimized measured profiles are recorded separately. Set launch-time TS_CPU_MOE_THREADS explicitly and TS_DSV41_COMPACT_RAW_GATHER=0 to avoid inherited settings changing this baseline. The first TP profile requested CLI48, which did not reach the native pool; default32 is inferred from source and the VM override probe, not a direct pool-width measurement on that host. Later explicit-thread experiments are separate. A compatible llama.cpp V4.1 runtime is unavailable: this blocks a same-model parity claim. Run validate_inference.py against each running endpoint for strict quality checks and repeated timing.",
   "paths": {
     "model_root": "/workspace/models",
     "results_dir": "${here}/results_deepseek41",
@@ -14,7 +14,7 @@
       "family": "deepseek41",
       "source": {
         "hf_repo": "vcruz305/DeepSeek-V4.1-Flash-GGUF",
-        "revision": "8e0c4de3cb6519bfc11ed69dc87184b457a57bb5"
+        "revision": "58d8ac86298fdf85a2440defee08b1abcad32e45"
       },
       "gguf": {
         "path": "${model_root}/DeepSeek-V4.1-Flash-Q2_K/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf",

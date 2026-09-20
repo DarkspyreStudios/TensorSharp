@@ -38,21 +38,18 @@ dotnet run --project TensorSharp.Server.Host -c Release --no-build -- --model mo
 
   <h3 id="deepseek41">DeepSeek V4.1 Flash（384 个路由专家，文本 + 图像/视频、思考、工具）</h3>
   <p>V4.1 并不是换了权重的 V4——它在每一次前向上都不同，把 GGUF 的架构名改成 <code>deepseek4</code> 是无效的。TensorSharp 为它准备了独立的原生计算图：四条残差流与延迟 hyper-connection 混合，每个注意力块带 128 token 的原始滑动窗口（前两层没有压缩注意力，接下来的 18 层压缩比为 2，最后 20 层为 1），带候选块过滤的 lightning indexer，以及在第 1 层与第 14 层注入的 Engram n-gram 特征。<strong>服务后端是 <code>ggml_cuda</code>。</strong><code>ggml_cpu</code> 用标量回退实现跑同一套图，使得没有 GPU 也能验证该架构；<code>ggml_vulkan</code> 与 <code>ggml_metal</code> 需要 <code>TS_DSV41_ALLOW_NON_CUDA_GPU=1</code>，且每遇到一个架构专属算子就要一次主机往返；<code>cpu</code> 运行纯 C# 执行器——不用 ggml、不依赖原生库、也不需要 GPU——在一个小型合成夹具上按 2e-5 对齐 PyTorch 参考实现（这是架构层面的一致，而不是在真实 Q2_K 权重上的对齐），而且在这条路径上只能跑纯文本，因为视觉伴生模型是原生 ggml 组件；<code>cuda</code> 则用 Direct CUDA 引擎自己的内核运行 V4.1；两者都是正确性与可移植性路径，而非服务路径；<code>mlx</code> 会直接拒绝该检查点，而不是把 V4.1 的权重塞进并未实现它的图。</p>
-  <p>发布的 Q2_K 版本<strong>不能单独运行</strong>：它需要由官方仓库派生出的 Engram sidecar；图像还需要第二个准备好的文件——转换过程丢掉了视觉塔、aligner 与视觉路由偏置。</p>
+  <p>当前发布的 GGUF <strong>已包含 Engram 权重与哈希常量</strong>。TensorSharp 直接读取，文本推理无需生成或提供单独的 Engram 文件。图像与视频仍需要可选的视觉伴随文件，因为转换过程未包含视觉塔、aligner 与视觉路由偏置。</p>
   <pre data-lang="bash"><code># 七个 Q2_K 分片，246.35 GiB，张量类型混合 Q2_K/Q3_K —— 需放在同一目录
 python3 -m venv /tmp/dsv41-tools
-/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 tokenizers==0.22.2 huggingface_hub gguf
-hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
-    --revision 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5 \
+/tmp/dsv41-tools/bin/python -m pip install huggingface_hub
+/tmp/dsv41-tools/bin/hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+    --revision 58d8ac86298fdf85a2440defee08b1abcad32e45 \
     --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
 
-# 必需：由官方 config.json / tokenizer.json 派生的 Engram sidecar
-/tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
-    --repo deepseek-ai/DeepSeek-V4.1-Flash \
-    --revision dba1be0a40aa45a94ad051997016db3960a90277
-
 # 可选：--mmproj 需要的约 970 MB 视觉伴随文件
+/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 gguf
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
+    --parent-model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --repository deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
@@ -61,8 +58,9 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
     --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
     --backend ggml_cuda --tp 8 --port 5000</code></pre>
-  <p>同一仓库的十一个 Q4_K_M 分片（415 GiB）同样已测试，sidecar 步骤完全相同。在那里两张 Engram 表各自涨到 51.5 GiB，只能留在主机内存映射中而不再驻留 GPU，路由专家也需要在八张 46 GB 卡上卸载到 CPU——加载器会打印它需要的 <code>--n-cpu-moe N</code> 并直接拒绝启动，而不是在推理途中耗尽显存。</p>
-  <p>两张 Engram 表<strong>默认驻留 GPU</strong>，在图内用 <code>get_rows</code> 直接对量化行做 gather——因为 TensorSharp 保持检查点自身的量化格式：一行 256 个值的 Q2_K 只有 84 字节，两张 3.84 亿行的表合计 60.2 GiB。八卡 A40、每次都用冷提示词实测：驻留 GPU 为 prefill 532–541 / decode 35.6–35.9 tok/s；主机映射并用 <code>TS_DSV41_ENGRAM_WARM=1</code> 预热为 506–528 / 34.5–35.2；不预热则只有 207–221 / 28.0–29.2。驻留 GPU 还省掉了启动时 130 秒的整表预热，以及预热路径依赖的 60 GiB 主机页缓存。放置策略是保守的：如果把表放上 GPU 会逼出路由专家的 CPU 卸载，它们就留在主机映射上，并在启动时说明。</p>
+  <p>仅提供文本服务时，省略视觉准备命令与 <code>--mmproj</code>。下方吞吐数据对应早期二进制与检查点；每次测量的 revision 与覆盖范围见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/deepseek41_validation.md">验证报告</a>。</p>
+  <p>同一仓库的十一个 Q4_K_M 分片（415 GiB）同样内嵌 Engram 常量。在那里两张 Engram 表各自涨到 51.5 GiB；在八张 46 GB 卡上，这些表留在主机内存映射中，路由专家也需要卸载到 CPU——加载器会打印它需要的 <code>--n-cpu-moe N</code> 并直接拒绝启动，而不是在推理途中耗尽显存。</p>
+  <p>Q2_K 的两张 Engram 表在显存足够时<strong>默认驻留 GPU</strong>，在图内用 <code>get_rows</code> 直接对量化行做 gather——因为 TensorSharp 保持检查点自身的量化格式：一行 256 个值的 Q2_K 只有 84 字节，两张 3.84 亿行的表合计 60.1 GiB。历史上的八卡 A40 实测（每次使用冷提示词）：驻留 GPU 为 prefill 532–541 / decode 35.6–35.9 tok/s；主机映射并用 <code>TS_DSV41_ENGRAM_WARM=1</code> 预热为 506–528 / 34.5–35.2；不预热则只有 207–221 / 28.0–29.2。驻留 GPU 还省掉了启动时 130 秒的整表预热，以及预热路径依赖的 60 GiB 主机页缓存。放置策略是保守的：如果把表放上 GPU 会逼出路由专家的 CPU 卸载，它们就留在主机映射上，并在启动时说明。</p>
   <p>多 GPU 指的是按层切分。<code>TS_DSV41_TP=N</code> 可在同一批 GPU 上打开实验性的 routed-MoE 张量并行——gate/up 沿 FFN 中间维切分，down 沿输入维切分，partial 经主机中转的 F32 缓冲归约——而首次完整 Q2_K 实测比按层切分<em>更慢</em>。并发请求各有独立的序列槽位，但会回退到逐槽前向，因此这里的并发并不等于批处理的 GPU 吞吐。没有 V4.1 的 DSpark：V4 的草稿模型会被拒绝，而不是半加载。带音频的请求以 HTTP 400 拒绝，而不是被悄悄丢掉。哪些已实测、哪些明确未验证，见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/deepseek41_validation.md">验证报告</a>。</p>
 
   <h3 id="deepseek4">DeepSeek V4 Flash（284B MoE，文本、思考、工具、DSpark）</h3>

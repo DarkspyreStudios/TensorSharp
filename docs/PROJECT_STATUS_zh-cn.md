@@ -18,10 +18,10 @@ TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码�
   伴随文件。服务后端是 `ggml_cuda`；`ggml_cpu` 用同一套图跑标量回退实现，`cpu` 则运行
   纯 C# 的 V4.1 执行器，两者都是正确性与可移植性通道；`cuda` 用 Direct CUDA 引擎自己的
   内核运行 V4.1，但尚无数值门禁；`ggml_vulkan` 与 `ggml_metal` 需要
-  `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会拒绝该检查点。每一种量化都必须先准备好
-  Engram sidecar 才能运行——社区 GGUF 仓库都不附带，需用 `eng/dsv41-prepare.py` 生成。
-  Q2_K 与 Q4_K_M 均已测试；在 Q4_K_M 上两张 Engram 表各 51.5 GiB，只能留在主机内存映射
-  中，因此在 8x46 GB 上必须把路由专家卸载到 CPU（见
+  `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会拒绝该检查点。当前 vcruz305 GGUF 已包含
+  Engram 权重与哈希常量，TensorSharp 直接读取，无需生成或提供单独的 Engram 文件。
+  Q2_K 与 Q4_K_M 的历史测试与当前文件的验证分别记录；Q4_K_M 的两张 Engram 表各 51.5 GiB。
+  在 8x46 GB 上，这些表留在主机内存映射中，路由专家需要卸载到 CPU（见
   [量化报告](validation/deepseek41-quants/README.md)）。多 GPU 指的是按层切分；routed-MoE 张量并行藏在 `TS_DSV41_TP`
   之后，实测比按层切分更慢。并发请求各有独立槽位，但目前回退到逐槽前向，因此并发还不
   等于批处理的 GPU 吞吐；也没有 V4.1 的 DSpark。哪些已实测、哪些明确未验证，都记录在

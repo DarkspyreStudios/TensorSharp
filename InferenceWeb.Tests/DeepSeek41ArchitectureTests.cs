@@ -136,10 +136,8 @@ public class DeepSeek41ArchitectureTests : IDisposable
         Assert.Contains("TS_DSV41_ALLOW_NON_CUDA_GPU", refused.Message);
 
         _env.Set("TS_DSV41_ALLOW_NON_CUDA_GPU", "1");
-        // Past the backend gate it fails on the missing Engram sidecar, which is
-        // how these tests observe "reached the load" without a checkpoint.
-        Assert.Throws<FileNotFoundException>(() =>
-            DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, null));
+        // Backend validation succeeds before the loader reads embedded metadata.
+        DeepSeek41Architecture.ValidateLoad("missing.gguf", backend, null);
     }
 
     /// <summary>The opt-in covers ggml GPU backends only; it does not open a
@@ -166,7 +164,6 @@ public class DeepSeek41ArchitectureTests : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
             DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), BackendType.Cuda, null);
         }
         finally { Directory.Delete(directory, recursive: true); }
@@ -187,7 +184,6 @@ public class DeepSeek41ArchitectureTests : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
             DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), BackendType.Cpu, null);
             Assert.Contains("--backend cpu", DeepSeek41Architecture.DescribeCpuBackendChoice(BackendType.Cpu));
         }
@@ -248,7 +244,6 @@ public class DeepSeek41ArchitectureTests : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
             DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), BackendType.GgmlCuda, null);
         }
         finally
@@ -272,7 +267,6 @@ public class DeepSeek41ArchitectureTests : IDisposable
         Directory.CreateDirectory(directory);
         try
         {
-            File.WriteAllBytes(Path.Combine(directory, "deepseek41.engram.bin"), new byte[] { 0 });
             DeepSeek41Architecture.ValidateLoad(Path.Combine(directory, "model.gguf"), backend, null);
         }
         finally { Directory.Delete(directory, recursive: true); }
@@ -331,9 +325,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
     public void HostMappedEngramTablesRemainSelectableOnTheCpuBackend()
     {
         _env.Set("TS_DSV41_ENGRAM_DEVICE", "0");
-        // Reaches the sidecar check, which is the last gate before the weights.
-        Assert.Throws<FileNotFoundException>(() =>
-            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null));
+        DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCpu, null);
     }
 
     /// <summary>
@@ -346,8 +338,7 @@ public class DeepSeek41ArchitectureTests : IDisposable
     public void EngramPlacementIsLeftToTheLoaderOnTheGpuBackend(string value)
     {
         _env.Set("TS_DSV41_ENGRAM_DEVICE", value);
-        Assert.Throws<FileNotFoundException>(() =>
-            DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null));
+        DeepSeek41Architecture.ValidateLoad("missing.gguf", BackendType.GgmlCuda, null);
     }
 
     /// <summary>
@@ -369,13 +360,10 @@ public class DeepSeek41ArchitectureTests : IDisposable
     [Theory]
     [InlineData(BackendType.GgmlCuda)]
     [InlineData(BackendType.GgmlCpu)]
-    public void MissingEngramSidecarGivesPreparationInstructions(BackendType backend)
+    public void BackendValidationDoesNotRequireExternalEngramFiles(BackendType backend)
     {
         string model = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "model.gguf");
-        var error = Assert.Throws<FileNotFoundException>(() =>
-            DeepSeek41Architecture.ValidateLoad(model, backend, null));
-        Assert.EndsWith("deepseek41.engram.bin", error.FileName);
-        Assert.Contains("eng/dsv41-prepare.py", error.Message);
+        DeepSeek41Architecture.ValidateLoad(model, backend, null);
     }
 
     [Fact]

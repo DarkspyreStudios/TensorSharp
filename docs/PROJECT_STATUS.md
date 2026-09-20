@@ -21,11 +21,12 @@ knowing before you plan around them.
   both as correctness and portability paths. `cuda` runs V4.1 through the
   direct-CUDA engine's own kernels and is not yet held to a numerical gate.
   `ggml_vulkan` and `ggml_metal` need `TS_DSV41_ALLOW_NON_CUDA_GPU=1`; `mlx`
-  refuses the checkpoint. Every release needs a prepared Engram sidecar before it
-  will run at all — the community GGUF repositories do not ship one, so generate
-  it with `eng/dsv41-prepare.py`. Q2_K and Q4_K_M are both tested; at Q4_K_M the
-  two Engram tables are 51.5 GiB each and stay host mappings, so the checkpoint
-  needs routed-expert CPU offload on 8x46 GB (see the
+  refuses the checkpoint. The current vcruz305 GGUF release includes Engram
+  weights and hash constants; TensorSharp reads them directly, without Engram
+  generation or a separate Engram file. Historical Q2_K and Q4_K_M tests are
+  recorded separately from validation of the current files; at Q4_K_M the
+  two Engram tables are 51.5 GiB each. On 8x46 GB they stay host mappings, and
+  the checkpoint needs routed-expert CPU offload (see the
   [quantization report](validation/deepseek41-quants/README.md)).
   Multi-GPU means a layer split; routed-MoE tensor parallelism exists behind
   `TS_DSV41_TP` and has measured slower than the split. Concurrent requests get

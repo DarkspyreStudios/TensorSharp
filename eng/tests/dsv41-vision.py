@@ -103,7 +103,7 @@ def main():
                 raise ValueError("Mixed-state tests require a small synthetic text fixture")
             weights = reference.GgufWeights(args.text_fixture / "deepseek41-fixture.gguf")
             visual_weights = reference.GgufWeights(args.fixture_dir / "deepseek41.vision.gguf")
-            engram = reference.load_engram(args.text_fixture / "deepseek41.engram.bin")
+            engram = reference.load_engram(weights)
             config = metadata["config"]
             image_id = manifest["config"]["image_token_id"]
             vocab = config["text_config"]["vocab_size"]

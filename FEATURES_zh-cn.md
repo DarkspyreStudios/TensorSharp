@@ -220,12 +220,11 @@ prefill、1/3/5/8 的分块 prefill（每个位置都检查）与 reset。这道
 checkpoint 在这条路径上的吞吐、加载时间与常驻内存从来没有被测过，所以上面那张线程池宽度表
 （gemma-4-E4B，通用 CPU 线程池，用 `TS_CPU_THREADS` / `TS_CPU_SPIN` 扫出来的）说明不了 V4.1
 的任何事情，而且也没有 V4.1 的数字可以补上去。它没有按序列的 slot，也没有多轮 KV 前缀复用，
-因此每一次分叉的对话轮都要重新 prefill，并发请求则排队串行。`deepseek41.engram.bin` 旁挂文件
-仍然是必需的。
+因此每一次分叉的对话轮都要重新 prefill，并发请求则排队串行。Engram 配置直接从 GGUF 读取。
 `TS_DSV4_THREADS` 在这个后端上默认取 `ProcessorCount`，而不是别处的 min(核数, 32)；
 `TS_DSV4_CPU_TRACE_DIR` 写出的逐张量文件与 `eng/dsv41-reference.py --output` 写出的完全同名
-同形，因此两个目录可以逐张量地 diff；而 `TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM` /
-`_SIDECAR`、`TS_DSV41_SPARSE_FA` 与 `TS_DSV41_COMPACT_RAW_GATHER` 只对原生加载器有效，在这里
+同形，因此两个目录可以逐张量地 diff；而 `TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM`、
+`TS_DSV41_SPARSE_FA` 与 `TS_DSV41_COMPACT_RAW_GATHER` 只对原生加载器有效，在这里
 是**失效**的。图像与视频在这个后端上**跑不了**——视觉伴随模型是原生 ggml 组件，
 `LoadVisionEncoder` 会抛异常，所以卡片里“视觉伴随模型会跟随文本模型落到同一个后端”那句话说
 的是 `--backend ggml_cpu`，不是这条路径。另外，分布式 TP 组、任何草稿模型或 `TS_DSV4_DSPARK`、

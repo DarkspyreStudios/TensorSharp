@@ -29,7 +29,7 @@
 
 **DeepSeek V4 Flash 是上表的例外。** 它那套 284B 的压缩稀疏注意力 MoE 结构不走通用的逐算子路径，而是使用三套专属的整模型执行器之一：Direct CUDA 引擎（`--backend cuda`）、原生 ggml 执行器（`--backend ggml_cuda` / `ggml_vulkan`），以及 100% 纯 C# 的 CPU 执行器（`--backend cpu`，直接从内存映射的 GGUF 分片提供量化权重）。三者都会把权重按层切分到所有可见 GPU（CPU 路径则从映射分片流式读取），因此远大于单卡显存的模型依然跑得起来。详见 [DeepSeek V4 卡片](docs/models/deepseek4_zh-cn.md)。
 
-**DeepSeek V4.1 Flash（`deepseek41`）另有一套自己的托管整模型执行器。** `--backend ggml_cuda` 是它的服务路径，而 `--backend cpu` 会把整张 V4.1 计算图跑在 100% 纯 C# 的 `DeepSeek4CpuExecutor` 上——没有 ggml、没有原生库、也没有 GPU，因此 .NET 能跑的地方它都能跑：ratio-1 与 ratio-2 的块压缩器、共享的 compressed 与 indexer cache（含 lightning indexer 的 top-k）、候选块剪枝、Engram 表、延迟超连接门控、共享专家，以及检查点自带的训练后 cache 量化（raw 行为 FP8 E4M3、indexer 为 MXFP4、compressed 为 NVFP4）。它由独立的 PyTorch 参照实现 `eng/dsv41-reference.py` 在一个 5 层 F32 fixture 上以 `atol=rtol=2e-5` 把关，并在一次性 prefill、分块大小 1/3/5/8 与 reset 上要求贪心 argmax 完全一致；它是**正确性与可移植性路径，而非服务路径**——从未测量过 V4.1 完整检查点在这条路径上的吞吐、加载时间或常驻内存。`deepseek41.engram.bin` sidecar 依然是必需的；图像与视频在这里不可用，因为视觉伴随件是原生 ggml 组件，`--mmproj` 会抛异常；草稿模型 / `TS_DSV4_DSPARK`、分布式 TP 组、非 `0` 的 `TS_DSV41_TP` 与非 `0` 的 `TS_DSV41_ENGRAM_DEVICE`，都会在读取任何权重之前被拒绝。`--backend ggml_cpu` 是另一条路径——在标量 ggml CPU 内核上跑原生计算图。详见 [DeepSeek V4.1 卡片](docs/models/deepseek41_zh-cn.md)。
+**DeepSeek V4.1 Flash（`deepseek41`）另有一套自己的托管整模型执行器。** `--backend ggml_cuda` 是它的服务路径，而 `--backend cpu` 会把整张 V4.1 计算图跑在 100% 纯 C# 的 `DeepSeek4CpuExecutor` 上——没有 ggml、没有原生库、也没有 GPU，因此 .NET 能跑的地方它都能跑：ratio-1 与 ratio-2 的块压缩器、共享的 compressed 与 indexer cache（含 lightning indexer 的 top-k）、候选块剪枝、Engram 表、延迟超连接门控、共享专家，以及检查点自带的训练后 cache 量化（raw 行为 FP8 E4M3、indexer 为 MXFP4、compressed 为 NVFP4）。它由独立的 PyTorch 参照实现 `eng/dsv41-reference.py` 在一个 5 层 F32 fixture 上以 `atol=rtol=2e-5` 把关，并在一次性 prefill、分块大小 1/3/5/8 与 reset 上要求贪心 argmax 完全一致；它是**正确性与可移植性路径，而非服务路径**——从未测量过 V4.1 完整检查点在这条路径上的吞吐、加载时间或常驻内存。Engram 直接来自 GGUF 元数据；图像与视频在这里不可用，因为视觉伴随件是原生 ggml 组件，`--mmproj` 会抛异常；草稿模型 / `TS_DSV4_DSPARK`、分布式 TP 组、非 `0` 的 `TS_DSV41_TP` 与非 `0` 的 `TS_DSV41_ENGRAM_DEVICE`，都会在读取任何权重之前被拒绝。`--backend ggml_cpu` 是另一条路径——在标量 ggml CPU 内核上跑原生计算图。详见 [DeepSeek V4.1 卡片](docs/models/deepseek41_zh-cn.md)。
 
 **GLM 5.x（`glm-dsa`）是另一个例外。** 它那套 744B-A40B 的 MLA + 稀疏注意力 MoE 在 `--backend ggml_cuda` / `ggml_vulkan` / `ggml_cpu` / `ggml_metal` 上走原生整模型 ggml 执行器，在 `--backend cpu`（100% 托管，无原生依赖）与 `--backend cuda` 上走托管逐算子路径；在 GGML 后端上设 `TS_GLM_NATIVE=0` 可切到托管路径做 A/B 对照。**GLM-5.3（非 Flash）与 GLM-5.2 是同一套 `glm-dsa` 块结构**——79 个 block（78 层主干 + 一个 NextN）、256 个路由专家 top-8 外加一个共享专家、带 lightning indexer 的 MLA、rope base 8e6——因此它就走 GLM-5.2 那条路径、同样这几个后端，不需要新代码也不需要新参数；它是**仅文本**，而且是两重意义上的仅文本：仓库在任何量化档都没有发布 mmproj，而在 `glm-dsa` 上给出 `--mmproj` 只会收到一条警告并被忽略，而不是让这次运行失败。分片 GGUF 由 `GgufFile` 自己处理——`--model` 指向该量化目录里 `-00001-of-` 那一片即可（GLM-5.2 是 6 分片，GLM-5.3 的 UD-Q2_K_XL 是 7 分片、236.4 GiB）。MLX 跑不了它。详见 [GLM 卡片](docs/models/glm_zh-cn.md)，两者的差别见其中的 [GLM-5.3 专节](docs/models/glm_zh-cn.md#glm-53glm-dsa)。
 
@@ -1641,7 +1641,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gg
 | 纯 C# 执行器的计算宽度 | `--backend cpu` 上为 `Environment.ProcessorCount`，其余后端为 min(核数, 32) | `TS_DSV4_THREADS=N` | — |
 | 纯 C# 执行器的数值把关 | `InferenceWeb.Tests.Dsv41CpuExecutorTests` 以独立的 PyTorch 参照实现 `eng/dsv41-reference.py` 为准，`atol=rtol=2e-5`，并要求贪心 argmax 完全一致；覆盖一次性 prefill、按 1/3/5/8 分块的 prefill（每个位置都检查）与 reset | **`TS_DSV41_FIXTURE_DIR`**——不设置它这些测试会静默返回。fixture 是一个 5 层、256 隐藏维、16 token 的 F32 合成模型，因此它确立的是与参照实现的架构一致性，而不是真实 246 GiB Q2_K 权重上的 CPU/CUDA 一致性 | — |
 | 逐张量 trace（与参照实现对拍） | 关闭 | `TS_DSV4_CPU_TRACE_DIR=<dir>` 写出与 `eng/dsv41-reference.py --output` 完全相同的逐张量文件，两个目录可以逐张量 diff | — |
-| Engram sidecar | `deepseek41.engram.bin` 在所有后端（含 `--backend cpu`）都是必需的 | 在 `--backend cpu` 上 `TS_DSV41_ENGRAM_DEVICE` 必须为 `0`（其他取值会在读取任何权重之前被拒绝）；`TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM` / `_SIDECAR` 仅对原生加载器有效，在这里是空操作 | — |
+| 内嵌 Engram | 所有后端（含 `--backend cpu`）都直接从 GGUF 读取 | 在 `--backend cpu` 上 `TS_DSV41_ENGRAM_DEVICE` 必须为 `0`（其他取值会在读取任何权重之前被拒绝）；`TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM` 仅对原生加载器有效，在这里是空操作 | — |
 | 路由 MoE 张量并行 | 关闭 | `TS_DSV41_TP=N` 仅在原生路径上有效；在 `--backend cpu` 上任何非零值都会被拒绝，分布式 TP 组同样被拒 | `--tp N` |
 | 仅原生加载器可用的注意力 / gather 开关 | — | `TS_DSV41_SPARSE_FA`、`TS_DSV41_COMPACT_RAW_GATHER`——在 `--backend cpu` 上是空操作 | — |
 | 投机起草 | V4.1 在任何后端上都没有 | `TS_DSV4_DSPARK` 在 V4.1 上是硬拒绝，而不是 DeepSeek V4 那种「告警后继续」 | `--draft-model`（同样被拒绝） |
@@ -1845,7 +1845,7 @@ shell 能够到达 PATH 上的每一个解释器——于是手上还拿着旧�
 **什么算"加载被拒绝"**（退出码 `2`）：加载器有意做出的、给出可操作原因的决定——显存不足以容纳
 请求的上下文或 `--n-cpu-moe` 设置（消息会给出放得下的数值）、设备装不下的 `--tp` 布局、架构不支持的
 KV 缓存类型（例如 DeepSeek V4.1 上的 `KV_CACHE_DTYPE=q8_0`）、模型或本机不支持的后端、缺失/截断/
-不是 GGUF 的模型文件、缺失的附属文件（DeepSeek V4.1 的 `deepseek41.engram.bin`），或者显式指定却无法
+不是 GGUF 的模型文件、缺失或无效的 DeepSeek V4.1 Engram 元数据，或者显式指定却无法
 启用的 `--draft-model`。原生加载器自己的诊断行（`[dsv4] ...`、`[glm] ...`）仍可能出现在错误行之前；
 错误行会重复原因，单独读也能看懂。加载过程中其他任何失败——`NullReferenceException`、CUDA 错误、
 内存不足导致的中止——都不算拒绝，会保留堆栈信息。唯一的例外：DeepSeek V4/V4.1 与 GLM 的原生整模型加载器

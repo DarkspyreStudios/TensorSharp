@@ -243,12 +243,12 @@ measured for a full V4.1 checkpoint here, so the pool-width table above —
 gemma-4-E4B on the generic CPU worker pool, swept with `TS_CPU_THREADS` /
 `TS_CPU_SPIN` — says nothing about V4.1, and there are no V4.1 numbers to put in
 its place. It keeps no per-sequence slots and no multi-turn KV prefix reuse,
-so every diverging turn re-prefills and concurrent requests serialize. The
-`deepseek41.engram.bin` sidecar is still mandatory. `TS_DSV4_THREADS` defaults to
+so every diverging turn re-prefills and concurrent requests serialize. Engram configuration
+is read directly from the GGUF. `TS_DSV4_THREADS` defaults to
 `ProcessorCount` on this backend rather than min(cores, 32), and
 `TS_DSV4_CPU_TRACE_DIR` writes the same per-tensor files
 `eng/dsv41-reference.py --output` writes, so the two directories diff tensor by
-tensor; `TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM` / `_SIDECAR`,
+tensor; `TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM`,
 `TS_DSV41_SPARSE_FA` and `TS_DSV41_COMPACT_RAW_GATHER` are native-loader knobs and
 are inert here. Image and video do **not** work on this backend — the vision
 companion is a native ggml component and `LoadVisionEncoder` throws, so the card's

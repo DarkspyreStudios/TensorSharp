@@ -88,7 +88,7 @@ namespace TensorSharp.Cuda
             /// space instead of running a second compressor for it.</summary>
             public QuantWeightDesc IndexerK;
             public float[] IndexerKNorm;
-            /// <summary>Index into the sidecar's table list, or -1.</summary>
+            /// <summary>Index into the GGUF's table list, or -1.</summary>
             public int EngramIndex = -1;
             public QuantWeightDesc EngramWkv;
             public float[] EngramQ, EngramK;
@@ -1428,7 +1428,7 @@ namespace TensorSharp.Cuda
                 var dev = _devs[curDev];
                 dev.MakeCurrent();
 
-                // ---- Engram (V4.1, on the layers the sidecar names) ----
+                // ---- Engram (V4.1, on the layers the GGUF metadata names) ----
                 // Runs before the attention block and rewrites the residual in
                 // place, which is where the reference puts it.
                 if (L.EngramIndex >= 0)

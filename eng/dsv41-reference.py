@@ -7,16 +7,22 @@ are dequantized. This checks GGUF execution, not the original FP8 checkpoint's
 activation quantization or its quality. Requires torch, numpy, and gguf.
 """
 import argparse
+import importlib.util
 import json
 import math
 import re
-import struct
 import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+_metadata_spec = importlib.util.spec_from_file_location("dsv41_gguf", Path(__file__).with_name("dsv41-gguf.py"))
+metadata = importlib.util.module_from_spec(_metadata_spec)
+_metadata_spec.loader.exec_module(metadata)
+load_engram = metadata.load_engram
+load_config = metadata.load_config
 
 
 class GgufWeights:
@@ -72,27 +78,6 @@ class GgufWeights:
             w = self.rows(name, slice(offset + row, offset + stop))
             output[:, row:stop] = F.linear(x.float(), w)
         return output
-
-
-def load_engram(path):
-    with open(path, "rb") as source:
-        if source.read(8) != b"TSD41E01":
-            raise ValueError("Invalid Engram sidecar")
-        def read(fmt):
-            return struct.unpack("<" + fmt, source.read(struct.calcsize("<" + fmt)))
-        vocab, compressed, pad, layers, max_ngram, heads, dim, fingerprint, candidate, topk, block, nkv, nidx = read("7IQi4I")
-        kv_sources, index_sources = list(read(f"{nkv}i")), list(read(f"{nidx}i"))
-        token_map = np.frombuffer(source.read(4 * vocab), dtype="<i4").copy()
-        layouts = []
-        for _ in range(layers):
-            layer_id, rows = read("iQ")
-            multipliers = np.array(read(f"{max_ngram}Q"), dtype=np.int64)
-            primes = np.array(read(f"{(max_ngram - 1) * heads}I"), dtype=np.int64).reshape(max_ngram - 1, heads)
-            offsets = np.array(read(f"{(max_ngram - 1) * heads}Q"), dtype=np.int64)
-            layouts.append(dict(id=layer_id, rows=rows, multipliers=multipliers, primes=primes, offsets=offsets))
-        return dict(token_map=token_map, pad=pad, max_ngram=max_ngram, heads=heads, dim=dim, layouts=layouts,
-                    kv_sources=kv_sources, index_sources=index_sources, candidate=candidate,
-                    candidate_topk=topk, candidate_block=block, fingerprint=fingerprint, compressed=compressed)
 
 
 def rms(x, epsilon, weight=None):
@@ -194,7 +179,7 @@ class Reference:
             history, blocked = [], False
             for shift in range(self.engram["max_ngram"]):
                 blocked = blocked or pos < shift or self.history[pos - shift] < 0
-                history.append(mapping[self.engram["pad"]] if blocked else mapping[self.history[pos - shift]])
+                history.append(self.engram["pad"] if blocked else mapping[self.history[pos - shift]])
             products = np.asarray(history, dtype=np.int64) * layout["multipliers"]
             rows = [np.bitwise_xor.reduce(products[:n]) % layout["primes"][n - 2]
                     for n in range(2, self.engram["max_ngram"] + 1)]
@@ -325,7 +310,8 @@ class Reference:
         def expert(inp, suffix, index=None):
             gate = self.w.mm(prefix + f"ffn_gate_{suffix}.weight", inp, index)
             up = self.w.mm(prefix + f"ffn_up_{suffix}.weight", inp, index)
-            limit = c.get("swiglu_limit", 0)
+            limits = c.get("swiglu_clamp_shexp" if suffix == "shexp" else "swiglu_clamp_exp")
+            limit = limits[layer] if limits is not None else c.get("swiglu_limit", 0)
             if limit > 0:
                 gate, up = gate.clamp(max=limit), up.clamp(-limit, limit)
             return F.silu(gate) * up
@@ -398,9 +384,8 @@ def main():
     torch.backends.cuda.matmul.allow_tf32 = False
     text = Path(args.tokens).read_text() if args.tokens.endswith(".json") else args.tokens
     tokens = json.loads(text) if text.strip().startswith("[") else [int(value) for value in text.split(",")]
-    config = json.loads((args.model.parent / "deepseek41.config.json").read_text())["config"]
-    engram = load_engram(args.model.parent / "deepseek41.engram.bin")
     weights = GgufWeights(args.model, args.device, args.row_block)
+    config, engram = load_config(weights), load_engram(weights)
     reference = Reference(weights, config, engram, args.cache_type, args.output)
     chunk = args.chunk_size or len(tokens)
     outputs = [reference.forward(tokens[start:start + chunk]) for start in range(0, len(tokens), chunk)]

@@ -63,10 +63,7 @@ def validate_schedule(plan, plan_hash, schedule):
     expected_files = {str(PurePosixPath(plan['model']['directory']) / item['path']):
                       {'bytes': item['size'], 'sha256': item['expected_sha256']} for item in plan['model']['files']}
     require(files == expected_files, 'Checkpoint file identities differ from the pinned teacher plan')
-    require(identity.get('engram_files'), 'Engram sidecar identities are required')
-    for item in identity['engram_files'].values():
-        hash_value(item['sha256'])
-        require(type(item['bytes']) is int and item['bytes'] > 0, 'Invalid Engram byte length')
+    require(identity.get('engram_storage') == 'gguf-metadata', 'Engram must be covered by the pinned GGUF checkpoint files')
     tokenizer = identity['tokenizer']
     require(type(tokenizer['vocab_size']) is int and tokenizer['vocab_size'] > 1, 'Invalid vocabulary')
     require(tokenizer['first_gguf_sha256'] == plan['model']['files'][0]['expected_sha256'], 'Tokenizer GGUF differs')
@@ -122,7 +119,7 @@ def validate_capture(capture, schedule, schedule_hash, plan):
     for observation in (before, after):
         require(observation['mapped_native_libraries'].get(library) == identity['native_sha256'], 'Actual native mapping does not match pin')
         require(observation['native_source_sha256'] == identity['native_source_sha256'], 'Native source audit differs')
-        require(observation['checkpoint_files'] == identity['checkpoint_files'] and observation['engram_files'] == identity['engram_files'], 'Model file audit differs')
+        require(observation['checkpoint_files'] == identity['checkpoint_files'], 'Model file audit differs')
         require(observation['token_export_sha256'] == identity['token_export_sha256'], 'Exported tokens changed during capture')
     require(before['mapped_native_libraries'] == after['mapped_native_libraries'], 'Native mapping set changed during capture')
     rows = capture['rows']

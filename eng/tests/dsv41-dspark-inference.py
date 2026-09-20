@@ -147,7 +147,7 @@ def main():
         config, settings, draft_path = prepare(args.fixture_dir, args.out)
         report["inputs"] = {str(p.resolve()): sha(p) for p in [
             args.fixture_dir / "deepseek41-fixture.gguf", args.fixture_dir / "deepseek41.config.json",
-            args.fixture_dir / "deepseek41.engram.bin", draft_path, args.out / "draft-config.json"]}
+            draft_path, args.out / "draft-config.json"]}
         if args.prepare_only:
             report["status"] = "prepared-not-executed"
             return
@@ -216,7 +216,7 @@ def main():
         oracle = load_module("dspark_reference", Path(__file__).parents[1] / "dsv41-dspark-reference.py")
         weights = oracle.reference.GgufWeights(args.fixture_dir / "deepseek41-fixture.gguf")
         draft_weights = oracle.reference.GgufWeights(draft_path)
-        engram = oracle.reference.load_engram(args.fixture_dir / "deepseek41.engram.bin")
+        engram = oracle.reference.load_engram(weights)
         report["oracle_sources"] = {str(p): sha(p) for p in [
             Path(__file__).parents[1] / "dsv41-dspark-reference.py", Path(__file__).parents[1] / "dsv41-reference.py"]}
         for length in (() if args.state_only else args.reference_prefixes):

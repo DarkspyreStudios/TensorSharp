@@ -30,7 +30,7 @@ TensorSharp loads models in GGUF format. Below are verified Hugging Face repos f
 | Mistral 3 | Mistral-Small-3.1-24B-Instruct-2503 | [bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) — Pixtral mmproj `mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf` in the same repo |
 | Hunyuan Dense | Tencent dense Hunyuan checkpoints (`hunyuan-dense`) | Any GGUF whose `general.architecture` is `hunyuan-dense`, such as the Hy-MT2 releases (`tencent/Hy-MT2-1.8B` supplies the reference chat template). Text only, single device, no projector and no drafter. See [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
 | Muse-Glimmer | Muse-Glimmer-30B (dense, image-capable) | [unsloth/Muse-Glimmer-30B-GGUF](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF) — e.g. `Muse-Glimmer-30B-UD-Q4_K_XL.gguf` or `Muse-Glimmer-30B-Q8_0.gguf`; `general.architecture` = `muse-glimmer` / `muse_glimmer`. Image input requires `mmproj-Muse-Glimmer-30B-Q8_0.gguf` (same repo) passed **explicitly** with `--mmproj` — this is the one family with no mmproj auto-detection. Optional speed artifacts: the DFlash block drafter `dflash-kquant.gguf` (same repo) or the newer DFlash2 drafter [z-lab/Muse-Glimmer-30B-DFlash2-GGUF](https://huggingface.co/z-lab/Muse-Glimmer-30B-DFlash2-GGUF) (prefer `-Q4_K_M` on a 16 GB card — see the note on drafter size in [speculative_decoding.md](docs/speculative_decoding.md#what-to-expect)), loaded with `--draft-model` for lossless speculative decoding — pass no sampler flags, it needs plain greedy |
-| DeepSeek V4.1 | DeepSeek-V4.1-Flash (`deepseek41`, 384 routed experts) | [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5) at revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5` — seven Q2_K shards (246.35 GiB, mixed Q2_K/Q3_K tensors) kept in one directory; point `--model` at the first shard. The file **does not run on its own**: `eng/dsv41-prepare.py` writes the tokenizer-derived Engram sidecar beside the shards from the official [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) `config.json` / `tokenizer.json`, and `eng/dsv41-prepare-vision.py` builds the optional ~970 MB vision companion that `--mmproj` needs for images and video. `ggml_cuda` is the serving backend; `ggml_cpu` and `cpu` are correctness and portability paths rather than serving ones — `--backend cpu` runs the whole V4.1 graph on the pure-C# `DeepSeek4CpuExecutor`, with no ggml, no native library and no GPU; it needs the same mandatory Engram sidecar, and the vision companion does not follow it there (`LoadVisionEncoder` throws), so images and video are not available on that backend. V4 drafters are rejected. Full recipe and checkpoint hashes: [deepseek41.md](docs/models/deepseek41.md) |
+| DeepSeek V4.1 | DeepSeek-V4.1-Flash (`deepseek41`, 384 routed experts) | [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45) at revision `58d8ac86298fdf85a2440defee08b1abcad32e45` — seven Q2_K shards (246.35 GiB, mixed Q2_K/Q3_K tensors) kept in one directory; point `--model` at the first shard. Engram weights and hash constants are already embedded in the GGUF; no Engram preparation or separate Engram file is needed. `eng/dsv41-prepare-vision.py` builds the optional ~970 MB vision companion that `--mmproj` needs for images and video. `ggml_cuda` is the serving backend; `ggml_cpu` and `cpu` are correctness and portability paths rather than serving ones — `--backend cpu` runs the whole V4.1 graph on the pure-C# `DeepSeek4CpuExecutor`, with no ggml, no native library and no GPU; it reads the embedded Engram metadata, and the vision companion does not follow it there (`LoadVisionEncoder` throws), so images and video are not available on that backend. V4 drafters are rejected. Full recipe and checkpoint hashes: [deepseek41.md](docs/models/deepseek41.md) |
 | DeepSeek V4 | DeepSeek-V4-Flash-0731 (284B MoE) | [unsloth/DeepSeek-V4-Flash-0731-GGUF](https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF) — one subdirectory per quant (`UD-Q8_K_XL/`, `UD-IQ4_XS/`, `UD-IQ1_S/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. Text only |
 | GLM 5.x | GLM-5.2 (744B-A40B MoE, embedded NextN MTP) | [unsloth/GLM-5.2-GGUF](https://huggingface.co/unsloth/GLM-5.2-GGUF) — one subdirectory per quant (`UD-Q4_K_XL/`, `UD-IQ2_XXS/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. **Text only** — GLM-5.3-Flash, two rows down, is the one that takes images; the GLM-5.3 row in between is text-only as well. These GGUFs already carry the NextN block for the server's `--spec` — unlike Qwen 3.6 there is no separate MTP repo to pick |
 | GLM 5.x | GLM-5.3 (`glm-dsa`, 256 routed experts, text only) | [unsloth/GLM-5.3-GGUF](https://huggingface.co/unsloth/GLM-5.3-GGUF) — one subdirectory per quant (`UD-Q2_K_XL/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. `general.architecture` = `glm-dsa`, and the block shape matches GLM-5.2 (79 blocks — 78 trunk plus one NextN — 256 routed experts top-8, MLA with the lightning indexer, rope base 8e6), so it loads on the existing GLM-5.2 path with nothing new to enable. **Text only** — this repo publishes no mmproj at all, unlike the Flash one below. It does carry the NextN block for `--spec`, but `blk.78` ships no `nextn.shared_head_head.weight` of its own, so the draft block borrows the trunk's LM head — which is column-parallel under `--tp N`. The loader refuses to draft from one rank's strip of the vocabulary and says so on stderr, so `--spec` is only engaged when you run **without** `--tp`, i.e. on the default layer split across every visible GPU |
@@ -107,30 +107,27 @@ The `hf download` commands need the Hugging Face CLI (`pip install -U huggingfac
 echo "Give me three facts about the Moon." > prompt.txt
 ```
 
-**DeepSeek V4.1 Flash** — 384 routed experts, served on `ggml_cuda`, needs a prepared Engram sidecar ([vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5))
+**DeepSeek V4.1 Flash** — 384 routed experts, served on `ggml_cuda`, uses the Engram metadata embedded in the GGUF ([vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/58d8ac86298fdf85a2440defee08b1abcad32e45))
 
 ```bash
-# 246 GiB of Q2_K weights across seven shards, plus ~60 GiB of host page cache for Engram warming
+# 246 GiB of Q2_K weights across seven shards. Warming host-mapped Engram tables
+# uses ~60 GiB of host page cache; tables placed on GPUs do not need that warm.
 python3 -m venv /tmp/dsv41-tools
-/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 tokenizers==0.22.2 huggingface_hub gguf
-hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
-    --revision 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5 \
+/tmp/dsv41-tools/bin/python -m pip install huggingface_hub
+/tmp/dsv41-tools/bin/hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+    --revision 58d8ac86298fdf85a2440defee08b1abcad32e45 \
     --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" --local-dir models/deepseek41-q2
 
-# Required: the tokenizer-derived Engram sidecar, from the official repository's config/tokenizer
-/tmp/dsv41-tools/bin/python eng/dsv41-prepare.py models/deepseek41-q2 \
-    --repo deepseek-ai/DeepSeek-V4.1-Flash \
-    --revision dba1be0a40aa45a94ad051997016db3960a90277
-
 # Q4_K_M instead of Q2_K: 415 GiB across eleven shards. Its two Engram tables are
-# 51.5 GiB each, so they stay host mappings and the checkpoint needs routed-expert
-# CPU offload on 8x46 GB -- the loader prints the --n-cpu-moe N it wants.
+# 51.5 GiB each. On 8x46 GB they stay host mappings and routed experts need CPU
+# offload -- the loader prints the --n-cpu-moe N it wants.
 #   --include "DeepSeek-V4.1-Flash-Q4_K_M-*.gguf" --local-dir models/deepseek41-q4
-# The sidecar step below is the same and is REQUIRED for every quantization: no
-# community GGUF repository ships deepseek41.engram.bin.
+# Both quantizations include their Engram constants; no Engram preparation is needed.
 
 # Optional: the ~970 MB vision companion that --mmproj needs for images and video
+/tmp/dsv41-tools/bin/python -m pip install numpy==2.0.2 gguf
 /tmp/dsv41-tools/bin/python eng/dsv41-prepare-vision.py models/deepseek41-q2 \
+    --parent-model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --repository deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
@@ -142,14 +139,15 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 
 `--tp N` here selects a **layer split** across N GPUs, not tensor parallelism; `TS_DSV41_TP=N`
 opts into the experimental routed-MoE TP, which has measured slower than the split so far.
-Add `--n-cpu-moe N` when the weights and context do not fit. Python is needed to prepare the
-sidecars, not to serve.
+Add `--n-cpu-moe N` when the weights and context do not fit. Python is needed for
+the Hugging Face download CLI and optional vision preparation; inference needs no Python.
+For text-only serving, omit the vision commands and `--mmproj`.
 
 `--backend cpu` is not the `ggml_cpu` of the swap-the-backend note above: it runs the whole
 V4.1 graph on the pure-C# `DeepSeek4CpuExecutor` — no ggml, no native library, no GPU, so it
 runs anywhere .NET runs — and it is a correctness and portability path, not a serving path;
 no throughput, load time or resident footprint has ever been measured for a full checkpoint
-on it. The `deepseek41.engram.bin` sidecar above is still mandatory. `--mmproj` is not
+on it. The CPU executor reads Engram directly from the GGUF. `--mmproj` is not
 available there at all (the vision companion is a native ggml component and
 `LoadVisionEncoder` throws), so no images and no video, and distributed TP groups, any draft
 model or `TS_DSV4_DSPARK`, `TS_DSV41_TP` other than `0` and `TS_DSV41_ENGRAM_DEVICE` other

@@ -19,58 +19,43 @@ TensorSharp 为 V4.1 提供了**运行在 `ggml_cuda` 上的专用推理计算�
 上下文长度为 1,048,576 token。V4.1 与 V4 的差异会影响每一次前向，把 GGUF 的架构名
 改成 `deepseek4` 是无效的。
 
-## 准备 Q2_K 检查点
+## 下载 Q2_K 检查点
 
-目前处于验证状态的产物是
-[vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5)
-在 revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5` 上发布的七分片 Q2_K 版本。
-七个分片必须放在同一目录，并把第一个分片交给 TensorSharp。该发布包含混合的张量类型，
-既有 Q2_K 也有 Q3_K；文件名并不意味着每个张量都是 Q2_K。七个文件合计
-264,514,761,248 字节（246.35 GiB）。它们的
-[整文件 SHA-256 校验记录](../validation/deepseek41/checkpoint-sha256.json)
-列出了每个文件名、期望大小与对应摘要。
+使用 [vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/main)
+发布的七分片 Q2_K 版本。下方命令固定到该仓库当前的 revision
+`58d8ac86298fdf85a2440defee08b1abcad32e45`。七个分片放在同一目录，并把第一个分片
+交给 TensorSharp。Q2_K 包含混合的 Q2_K/Q3_K 张量，约需 246.35 GiB 磁盘空间。
 
-V4.1 还需要一个由分词器派生的小体积 Engram sidecar。已发布的 GGUF 并未包含完整的
-因果 encoder-decoder 与 Engram 配置：部分 Engram 键仍用旧的 `deepseek4` 前缀，而分词器
-的 padding 元数据与 Engram 哈希的 padding 也不一致。准备脚本会读取官方配置与分词器，
-而不是猜测这些取值。
+**GGUF 已包含 Engram。** TensorSharp 直接读取 GGUF 元数据中的 token 映射、哈希乘数、
+桶质数与偏移以及 padding ID，并使用同一检查点中的 Engram 权重张量。文本推理无需生成
+Engram、无需单独的 Engram 文件，也无需另行下载分词器或配置文件。发布者已将
+[这些常量加入 Q2_K 的第一个分片](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/commit/259692f97dad8bf9c59726f5e401f986898ca551)；
+升级旧下载时请使用当前版本。
+
+加载器会对照 Engram 张量维度校验内嵌布局，并拒绝缺失或无效的常量；不再回退读取旧的
+附属文件，也不再提供 Engram 路径覆盖。Engram 表的设备放置与页预热仍作用于学习到的
+权重，不会生成哈希常量。
 
 在存放模型的机器上，从仓库根目录执行：
 
 ```bash
 python3 -m venv /workspace/dsv41-tools
-/workspace/dsv41-tools/bin/python -m pip install \
-  numpy==2.0.2 tokenizers==0.22.2 huggingface_hub
-
-/workspace/dsv41-tools/bin/python - <<'PY'
-from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="vcruz305/DeepSeek-V4.1-Flash-GGUF",
-    revision="8e0c4de3cb6519bfc11ed69dc87184b457a57bb5",
-    allow_patterns=["DeepSeek-V4.1-Flash-Q2_K-*.gguf"],
-    local_dir="/workspace/models/deepseek41-q2",
-)
-PY
-
-/workspace/dsv41-tools/bin/python eng/dsv41-prepare.py \
-  /workspace/models/deepseek41-q2 \
-  --repo deepseek-ai/DeepSeek-V4.1-Flash \
-  --revision dba1be0a40aa45a94ad051997016db3960a90277
+/workspace/dsv41-tools/bin/python -m pip install huggingface_hub
+/workspace/dsv41-tools/bin/hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+  --revision 58d8ac86298fdf85a2440defee08b1abcad32e45 \
+  --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" \
+  --local-dir /workspace/models/deepseek41-q2
 ```
 
-准备脚本只下载官方的 `config.json` 与 `tokenizer.json`，然后在 GGUF 分片旁边写出
-`deepseek41.engram.bin` 以及溯源文件 `deepseek41.config.json`。它会核对词表大小、
-压缩后词表大小与官方 Engram 布局，并记录来源与 sidecar 的 SHA-256。原生加载器会用
-该布局校验 GGUF 的张量维度。准备阶段需要 Python，推理阶段不需要。
-如果官方文件已经下载到本地，用 `--source-dir` 直接从本地准备。
+同一仓库也提供内嵌 Engram 常量的十一个 Q4_K_M 分片（约 415 GiB）。把 include 模式改为
+`DeepSeek-V4.1-Flash-Q4_K_M-*.gguf` 并使用该量化的第一个分片即可。Q4_K_M 的两张
+Engram 表各约 51.5 GiB。在八张 46 GB 显卡上，这些表保留在主机内存映射中，部分路由
+专家需要卸载到 CPU。[量化报告](../validation/deepseek41-quants/README.md)保留了该放置方式的历史测试。
 
-实现期间锁定的官方文件哈希如下：
-
-| 文件 | SHA-256 |
-|---|---|
-| `config.json` | `8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879` |
-| `tokenizer.json` | `c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b` |
+本卡片中的早期结果与[整文件 SHA-256 记录](../validation/deepseek41/checkpoint-sha256.json)
+对应旧 revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5` 及其旧版第一个分片。
+未经重新验证，不应把这些哈希或性能结果视为当前文件的结果。新的验证记录应包含仓库 revision
+及所有分片的哈希。
 
 ## 准备可选的视觉伴随文件
 
@@ -79,15 +64,17 @@ PY
 原始文本权重的情况下准备它们：
 
 ```bash
-/workspace/dsv41-tools/bin/python -m pip install gguf
+/workspace/dsv41-tools/bin/python -m pip install numpy==2.0.2 gguf
 /workspace/dsv41-tools/bin/python eng/dsv41-prepare-vision.py \
   /workspace/models/deepseek41-q2 \
+  --parent-model /workspace/models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
   --repository deepseek-ai/DeepSeek-V4.1-Flash \
   --revision dba1be0a40aa45a94ad051997016db3960a90277
 ```
 
-它会在文本分片与 Engram sidecar 旁边生成 `deepseek41.vision.gguf` 与
-`deepseek41.vision.json`。
+它会在文本分片旁边生成 `deepseek41.vision.gguf` 与
+`deepseek41.vision.json`。`--parent-model` 提供 GGUF 的分词器指纹；分词器一致时，
+已有的视觉伴随文件仍然兼容。
 该脚本下载独立的视觉分片，以及分隔符/路由张量所需的少量字节范围，并保留 BF16/F32
 存储。它会用 LFS 的 SHA-256 校验完整的独立视觉分片，并记录分隔符/路由权重各自的
 范围哈希；它不会下载或校验完整的原始文本分片。
@@ -233,8 +220,8 @@ TensorSharp 默认按可用显存分配整层。
 独立数值 fixture 在 2/4/8 张 GPU 上均通过，包括量化专家分片与整模型 oracle 检查。这些
 小规模 fixture 并不能说明完整的 Q2_K 检查点能装进两张或四张 A40。本卡片的 VM 示例用的
 是八张；更少的卡数需要足够的 CPU 专家卸载才能装下。
-它的 Engram 预热在就绪之前会占用约 60 GiB 主机页缓存。冷加载与预热时间要与热态吞吐
-分开记录。
+当 Q2_K 的 Engram 表使用主机映射时，同步预热会在就绪之前占用约 60 GiB 主机页缓存；
+驻留 GPU 的表跳过这一步。冷加载与预热时间要与热态吞吐分开记录。
 
 在 CUDA 上，Q2_K 与 Q4_K 的 gate/up 分片走 TensorSharp 自有的量化分片 kernel
 （`ggml_ops_matmul_quant_strip.cuh`、`tsg_matmul_id_quant_pair`）：它只读取本 rank 的权重分片，
@@ -248,9 +235,10 @@ TensorSharp 默认按可用显存分配整层。
 [numerical-tp-chosen-r1](../validation/qualification-2026-09-16/numerical-tp-chosen-r1/README.md)。
 
 如果权重与上下文放不下，加上 `--n-cpu-moe N` 把前 N 层的路由专家留在主机上，或者用
-`--cpu-moe` 卸载全部路由专家。注意力、路由与共享专家仍在 GPU 上。Engram 表始终以内存
-映射方式留在主机上；每个输入批次只读取并传输选中的 embedding 行。CPU MoE 卸载与按层
-切分都已实现，但它们在你所用硬件与上下文下的吞吐需要实测。与 `TS_DSV41_TP` 组合时，
+`--cpu-moe` 卸载全部路由专家。注意力、路由与共享专家仍在 GPU 上。
+[Engram 表的放置](#engram-表放在哪里)单独选择；使用主机映射时，每个输入批次只读取并
+传输选中的 embedding 行。CPU MoE 卸载与按层切分都已实现，但它们在你所用硬件与上下文下的
+吞吐需要实测。与 `TS_DSV41_TP` 组合时，
 被 CPU 卸载的前置层保留完整的 CPU 专家，其余层使用路由专家分片。
 
 原生版本 `6b3b5ab3…` 显式把共享专家的 gate/up/down 投影指派到该层所在设备。这修正了
@@ -281,7 +269,7 @@ TensorSharp 默认按可用显存分配整层。
 `Engram lookup: GPU-resident tables, gathered in-graph`。
 
 之所以能这样，是因为 TensorSharp 保持检查点自身的量化格式。一行 256 个值的 Q2_K 只有
-84 字节，因此两张 3.84 亿行的表合计 60.2 GiB。vLLM 与 SGLang 把同样的行存成 FP8 值加
+84 字节，因此两张 3.84 亿行的表合计 60.1 GiB。vLLM 与 SGLang 把同样的行存成 FP8 值加
 每 32 个元素的块 scale，一行 264 字节——这也是它们默认使用主机表加 FP8 gather kernel
 的原因。
 
@@ -434,7 +422,7 @@ hyper-connection 门控、top-k 掩码）以 `GGML_OP_CUSTOM` 节点发出，由
 启动时会报告每个已初始化的计算设备，以及路由专家的 CPU 卸载层数。使用
 `--backend ggml_cuda` 且不带任何 CPU 卸载选项时，全部 40 层都在 CUDA 设备上运行。
 `auxiliary CPU worker pool` 这条消息描述的是调度器的主机线程池，并不表示在做纯 CPU
-推理。Engram 查表仍使用主机内存，而按层切分会让相邻的层落在相邻的 GPU 上，因此仅凭
+推理。Engram 仅在表使用主机映射时才从主机查表。按层切分会让相邻的层落在相邻的 GPU 上，因此仅凭
 单卡利用率低并不能断定发生了 CPU 回退。`TS_DSV4_PERF=2` 报告输入准备与图计算耗时；
 `TS_DSV4_PERF=3` 还会记录调度器实际的后端切换。它们是诊断模式，其日志开销会影响吞吐。
 见 [CLI 执行调查](../validation/deepseek41/cli-gpu-execution/README.md)。
@@ -590,7 +578,7 @@ Engram 表花了 311.3 s。
 `pread` 只填充页缓存，并不填充进程的页表，而逐页遍历两者都做了；第一次 prefill 又会密集地
 读取专家。因此预取在每个块进入缓存后还会逐页读一个字节：在已驻留的页面上，这趟遍历在 16
 线程下耗时 0.004–0.006 s/GiB，而对同样区间调用 `madvise(MADV_POPULATE_READ)` 需要
-0.019–0.023 s/GiB。Engram 表不做映射；它的行每次只读几行。
+0.019–0.023 s/GiB。主机映射的 Engram 表不预先填充进程页表，因为每次只读取其中几行。
 
 在这个挂载点上，预读提示无法替代读取。对一段已逐出的 8 GiB 区间调用 `MADV_WILLNEED`、
 `POSIX_FADV_WILLNEED` 或 `readahead(2)`，十秒后都只有 128 KiB（0.0015%）驻留。不要再尝试。
@@ -666,8 +654,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   --backend ggml_cpu --port 5000
 ```
 
-准备步骤没有变化：由分词器派生的 `deepseek41.engram.bin` sidecar 在 CPU 后端上与在
-CUDA 上一样是必需的，缺少它时会在读取任何权重之前拒绝加载。
+CPU 后端与 CUDA 一样，直接读取内嵌的 Engram 元数据。下载当前 GGUF 分片即可，无需
+另行准备 Engram。
 
 `TS_DSV4_THREADS` 设置计算线程数，默认上限为 32。那个上限是为 GPU 运行选的——在那里
 这些线程只做辅助性的主机工作；而在纯 CPU 运行里它们就是整个引擎，所以请把它设为本次
@@ -721,9 +709,9 @@ fixture 规模的——一个五层、hidden 256、16 token 的 F32 合成模型
 `TS_DSV41_FIXTURE_DIR` 指向 fixture 目录时，这些测试会静默返回，什么都不检查。与
 `--backend ggml_cpu` 不同，它不接受视觉伴随文件：那个编码器是原生 ggml 组件，在这里
 `LoadVisionEncoder` 会抛异常，所以图像与视频输入不可用。原生加载器的 Engram 与注意力
-开关——`TS_DSV41_ENGRAM_WARM`、`_THREADS`、`_RANDOM`、`_SIDECAR`、
-`TS_DSV41_SPARSE_FA`、`TS_DSV41_COMPACT_RAW_GATHER`——在这里全部无效，但准备好的
-`deepseek41.engram.bin` sidecar 仍然是必需的；`TS_DSV4_THREADS` 在这个后端上默认取
+开关——`TS_DSV41_ENGRAM_WARM`、`_THREADS`、`_RANDOM`、
+`TS_DSV41_SPARSE_FA`、`TS_DSV41_COMPACT_RAW_GATHER`——在这里全部无效。Engram 配置直接来自 GGUF；
+`TS_DSV4_THREADS` 在这个后端上默认取
 `ProcessorCount`，而不是 min(核数, 32)；`TS_DSV4_CPU_TRACE_DIR` 写出的逐张量文件与
 `eng/dsv41-reference.py --output` 写出的同名，于是两个目录可以逐张量对拍。和
 `--backend ggml_cpu` 一样，它是正确性与可移植性通道，而不是服务通道：完整检查点在它
@@ -737,8 +725,8 @@ Direct CUDA 引擎 `--backend cuda` 也用自己的内核、不经 ggml 运行 V
 ## 前向计算图与状态
 
 原生计算图使用四条残差流以及 V4.1 的延迟 hyper-connection 混合。第 1 层与第 14 层会
-加入由确定性 token n-gram 哈希选出的 Engram 特征。token 归一化与桶布局来自准备好的
-sidecar；各序列槽位保留各自的 token 历史。
+加入由确定性 token n-gram 哈希选出的 Engram 特征。token 归一化与桶布局来自 GGUF 元数据；
+各序列槽位保留各自的 token 历史。
 
 每个注意力块都包含一个 128 token 的原始滑动窗口。前两层没有压缩注意力，接下来的 18 层
 压缩比为 2，最后 20 层为 1。压缩 KV 源与索引器选择按官方的因果 encoder-decoder 拓扑
@@ -755,8 +743,8 @@ per-sequence 槽位与计算图缓存。V4.1 的激活量化与候选过滤有�
   与[托管驱动](../../TensorSharp.Models/Models/DeepSeek4/DeepSeek4Model.cs)。
 - [原生加载器与调度器](../../TensorSharp.GGML.Native/ggml_ops_deepseek4.cpp)
   与 [V4.1 计算图](../../TensorSharp.GGML.Native/ggml_ops_deepseek41.inc)。
-- [Engram 哈希与 sidecar 读取](../../TensorSharp.GGML.Native/dsv41_engram.h)
-  与[准备脚本](../../eng/dsv41-prepare.py)。
+- [Engram 元数据加载器](../../TensorSharp.GGML.Native/dsv41_engram_gguf.h)
+  与[哈希与配置校验](../../TensorSharp.GGML.Native/dsv41_engram.h)。
 - [对话渲染器](../../TensorSharp.Runtime/ChatTemplate.DeepSeek41.cs)
   与[输出解析器](../../TensorSharp.Runtime/DeepSeek41OutputParser.cs)。
 

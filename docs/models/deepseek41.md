@@ -22,68 +22,52 @@ one shared expert, and a 2304-wide expert intermediate. It declares a
 1,048,576-token context. V4.1 differs from V4 in ways that affect every forward
 pass; changing the GGUF architecture name to `deepseek4` is invalid.
 
-## Prepare the Q2_K checkpoint
+## Download the Q2_K checkpoint
 
-The supported artifact under validation is the seven-part Q2_K release from
-[vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/8e0c4de3cb6519bfc11ed69dc87184b457a57bb5),
-revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5`. Keep all seven shards in
-one directory and give TensorSharp the first shard. The release contains mixed
-tensor types, including Q2_K and Q3_K; the filename does not imply every tensor
-uses Q2_K. The seven files total 264,514,761,248 bytes (246.35 GiB). Their
-[complete-file SHA-256 verification record](../validation/deepseek41/checkpoint-sha256.json)
-lists every filename, expected size, and matching digest.
+Use the seven-part Q2_K release from
+[vcruz305/DeepSeek-V4.1-Flash-GGUF](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/tree/main).
+The commands below pin the repository's current revision,
+`58d8ac86298fdf85a2440defee08b1abcad32e45`. Keep all seven shards in one
+directory and give TensorSharp the first shard. Q2_K contains mixed Q2_K/Q3_K
+tensors and needs approximately 246.35 GiB of disk space.
 
-The same repository's eleven-part Q4_K_M release (415 GiB) is tested too, and
-the [quantization report](../validation/deepseek41-quants/README.md) records
-what changes with it: the two Engram tables grow to 51.5 GiB each, so they stay
-host mappings instead of going GPU-resident, and the routed experts need CPU
-offload on eight 46 GB cards. Everything below applies to either release, the
-Engram sidecar included.
+**The GGUF already includes Engram.** TensorSharp reads its token map, hash
+multipliers, bucket primes and offsets, and padding ID directly from the GGUF
+metadata, alongside the learned Engram weight tensors. No Engram generation,
+separate Engram file, or tokenizer/config download is needed for text inference.
+The publisher [added the embedded constants to the first Q2_K shard](https://huggingface.co/vcruz305/DeepSeek-V4.1-Flash-GGUF/commit/259692f97dad8bf9c59726f5e401f986898ca551);
+use the current release when upgrading an older download.
 
-V4.1 also needs a small tokenizer-derived Engram sidecar. The published GGUF
-does not contain all of the causal encoder-decoder and Engram configuration.
-Some Engram keys use the older `deepseek4` prefix, and the tokenizer padding
-metadata differs from the Engram hash padding. The preparer reads the official
-configuration and tokenizer rather than guessing these values.
+The loader validates the embedded layout against the Engram tensor dimensions
+and rejects missing or malformed constants. There is no legacy file fallback or
+Engram path override. Engram table placement and page warming still apply to
+the learned weights; they do not generate hash constants.
 
 From the repository root, on the machine storing the model:
 
 ```bash
 python3 -m venv /workspace/dsv41-tools
-/workspace/dsv41-tools/bin/python -m pip install \
-  numpy==2.0.2 tokenizers==0.22.2 huggingface_hub
-
-/workspace/dsv41-tools/bin/python - <<'PY'
-from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="vcruz305/DeepSeek-V4.1-Flash-GGUF",
-    revision="8e0c4de3cb6519bfc11ed69dc87184b457a57bb5",
-    allow_patterns=["DeepSeek-V4.1-Flash-Q2_K-*.gguf"],
-    local_dir="/workspace/models/deepseek41-q2",
-)
-PY
-
-/workspace/dsv41-tools/bin/python eng/dsv41-prepare.py \
-  /workspace/models/deepseek41-q2 \
-  --repo deepseek-ai/DeepSeek-V4.1-Flash \
-  --revision dba1be0a40aa45a94ad051997016db3960a90277
+/workspace/dsv41-tools/bin/python -m pip install huggingface_hub
+/workspace/dsv41-tools/bin/hf download vcruz305/DeepSeek-V4.1-Flash-GGUF \
+  --revision 58d8ac86298fdf85a2440defee08b1abcad32e45 \
+  --include "DeepSeek-V4.1-Flash-Q2_K-*.gguf" \
+  --local-dir /workspace/models/deepseek41-q2
 ```
 
-The preparer downloads only the official `config.json` and `tokenizer.json`,
-then writes `deepseek41.engram.bin` and a provenance file,
-`deepseek41.config.json`, beside the GGUF shards. It checks vocabulary size,
-compressed vocabulary size, and the official Engram layout, and records source
-and sidecar SHA-256 hashes. The native loader checks the GGUF tensor dimensions
-against that layout. Python is required for preparation, not inference.
-Use `--source-dir` to prepare from already-downloaded official files.
+The same repository also provides eleven Q4_K_M shards (approximately 415 GiB)
+with embedded Engram constants. Change the include pattern to
+`DeepSeek-V4.1-Flash-Q4_K_M-*.gguf` and use its first shard. The two Q4_K_M
+Engram tables are approximately 51.5 GiB each. On eight 46 GB cards they remain
+host mappings, and routed experts need CPU offload. The
+[quantization report](../validation/deepseek41-quants/README.md) records the
+historical tests of that placement.
 
-The pinned official files used during implementation have these SHA-256 hashes:
-
-| File | SHA-256 |
-|---|---|
-| `config.json` | `8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879` |
-| `tokenizer.json` | `c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b` |
+Earlier results in this card and the
+[complete-file SHA-256 record](../validation/deepseek41/checkpoint-sha256.json)
+refer to revision `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5` and its older
+first shard. Those hashes and performance results must not be attributed to the
+current files without rerunning the checks. Record the repository revision and
+all shard hashes with new validation results.
 
 ## Prepare the optional vision companion
 
@@ -93,15 +77,17 @@ the approximately 970 MB vision/aligner weights in an isolated shard, so these
 can be prepared without downloading the original text weights:
 
 ```bash
-/workspace/dsv41-tools/bin/python -m pip install gguf
+/workspace/dsv41-tools/bin/python -m pip install numpy==2.0.2 gguf
 /workspace/dsv41-tools/bin/python eng/dsv41-prepare-vision.py \
   /workspace/models/deepseek41-q2 \
+  --parent-model /workspace/models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
   --repository deepseek-ai/DeepSeek-V4.1-Flash \
   --revision dba1be0a40aa45a94ad051997016db3960a90277
 ```
 
 This creates `deepseek41.vision.gguf` and `deepseek41.vision.json` beside the text
-shards and Engram sidecar.
+shards. The `--parent-model` argument supplies the GGUF tokenizer fingerprint;
+existing companions remain compatible when the tokenizer matches.
 The preparer downloads the isolated vision shard and small byte ranges for
 the delimiter/router tensors and preserves BF16/F32 storage. It verifies the
 complete isolated vision shard against its LFS SHA-256 and records individual
@@ -282,8 +268,9 @@ Independent numerical fixtures passed on 2/4/8 GPUs, including quantized
 expert shards and complete-model oracle checks. Those small fixtures do not
 establish that the full Q2_K checkpoint fits on two or four A40s. The VM example
 uses eight; smaller placements require enough CPU expert offload to fit.
-Its Engram warming consumes approximately 60 GiB of host page cache before
-readiness. Record cold-load and warming time separately from warm throughput.
+When the Q2_K Engram tables use host mappings, synchronous warming consumes
+approximately 60 GiB of host page cache before readiness. GPU-resident tables
+skip this warm. Record cold-load and warming time separately from warm throughput.
 
 On CUDA, Q2_K and Q4_K gate/up strips run through TensorSharp's owned
 quantized strip kernel (`ggml_ops_matmul_quant_strip.cuh`,
@@ -304,10 +291,11 @@ is a correctness change, not a speedup; see
 
 If the weights and context do not fit, add `--n-cpu-moe N` to keep the routed
 experts of the first N layers on the host, or `--cpu-moe` for all routed
-experts. Attention, routing, and the shared expert remain on the GPU. Engram
-tables always remain memory-mapped on the host; only selected embedding rows
-are read and transferred for each input batch. CPU MoE offload and layer split
-are implemented, but their throughput must be measured for the chosen hardware
+experts. Attention, routing, and the shared expert remain on the GPU.
+[Engram table placement](#where-the-engram-tables-live) is selected separately;
+when the tables use host mappings, only selected embedding rows are read and
+transferred for each input batch. CPU MoE offload and layer split are implemented,
+but their throughput must be measured for the chosen hardware
 and context. When combined with `TS_DSV41_TP`, CPU-offloaded leading layers
 retain whole CPU experts; the remaining layers use the routed-expert shards.
 
@@ -344,7 +332,7 @@ CPU and only the row ids cross the link. Startup prints
 
 This is possible because TensorSharp keeps the tables in the checkpoint's
 quantization. A Q2_K row of 256 values is 84 bytes, so both 384M-row tables
-together are 60.2 GiB. vLLM and SGLang store the same rows as FP8 values plus
+together are 60.1 GiB. vLLM and SGLang store the same rows as FP8 values plus
 per-32 block scales, 264 bytes a row, which is why their default is a host
 table with an FP8 gather kernel.
 
@@ -509,8 +497,8 @@ Startup reports each initialized compute device and the routed-expert CPU
 offload count. With `--backend ggml_cuda` and no CPU-offload option, all 40
 layers run on CUDA devices. The `auxiliary CPU worker pool` message describes
 the scheduler's host pool; it does not indicate CPU-only inference. Engram
-lookups still use host memory, and layer split executes successive layers on
-successive GPUs, so low per-device utilization alone does not establish a
+lookups use host memory only when the tables are host-mapped. Layer split executes
+successive layers on successive GPUs, so low per-device utilization alone does not establish a
 CPU fallback. `TS_DSV4_PERF=2` reports input preparation and graph-compute times;
 `TS_DSV4_PERF=3` additionally logs actual scheduler backend transitions. These
 are diagnostic modes whose logging overhead affects throughput. See the
@@ -714,8 +702,8 @@ native tests), 16 threads, 8 GiB ranges evicted before every arm with
 also did, and the first prefill reads the experts densely. So the prefault also
 reads one byte per page of each block once it is cached: on resident pages that
 walk costs 0.004-0.006 s/GiB at 16 threads, against 0.019-0.023 s/GiB for
-`madvise(MADV_POPULATE_READ)` on the same ranges. The Engram tables are left
-unmapped; their rows are read a few at a time.
+`madvise(MADV_POPULATE_READ)` on the same ranges. The host-mapped Engram tables
+are not prefaulted into the process's page tables; their rows are read a few at a time.
 
 Read-ahead hints are no substitute on this mount. `MADV_WILLNEED`,
 `POSIX_FADV_WILLNEED` and `readahead(2)` over an evicted 8 GiB range each left
@@ -903,9 +891,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   --backend ggml_cpu --port 5000
 ```
 
-The preparation steps are unchanged: the tokenizer-derived
-`deepseek41.engram.bin` sidecar is required on the CPU backend exactly as it is
-on CUDA, and the load is refused without it before any weight is read.
+The CPU backend reads the same embedded Engram metadata as CUDA. Download the
+current GGUF shards; no separate Engram preparation is needed.
 
 `TS_DSV4_THREADS` sets the compute thread count, defaulting to at most 32. That
 cap was chosen for GPU runs, where those threads only do auxiliary host work; on
@@ -975,9 +962,9 @@ tests return silently unless `TS_DSV41_FIXTURE_DIR` names the fixture
 directory. Unlike `--backend ggml_cpu` it takes no vision companion: that
 encoder is a native ggml component, and `LoadVisionEncoder` throws here, so
 image and video input are not available. The native loader's Engram and
-attention knobs — `TS_DSV41_ENGRAM_WARM`, `_THREADS`, `_RANDOM`, `_SIDECAR`,
-`TS_DSV41_SPARSE_FA`, `TS_DSV41_COMPACT_RAW_GATHER` — are inert on it, though
-the prepared `deepseek41.engram.bin` sidecar is still mandatory;
+attention knobs — `TS_DSV41_ENGRAM_WARM`, `_THREADS`, `_RANDOM`,
+`TS_DSV41_SPARSE_FA`, `TS_DSV41_COMPACT_RAW_GATHER` — are inert on it.
+Engram configuration comes directly from the GGUF;
 `TS_DSV4_THREADS` defaults to `ProcessorCount` here rather than
 min(cores, 32); and `TS_DSV4_CPU_TRACE_DIR` writes the same per-tensor files
 that `eng/dsv41-reference.py --output` writes, so the two directories diff
@@ -995,7 +982,7 @@ has been verified and what blocks the rest. `--backend mlx` remains refused.
 The native graph uses four residual streams and V4.1's delayed
 hyper-connection mixing. Layers 1 and 14 add Engram features selected by
 deterministic token n-gram hashes. Token normalization and bucket layouts come
-from the prepared sidecar; sequence slots retain separate token histories.
+from the GGUF metadata; sequence slots retain separate token histories.
 
 Each attention block includes a 128-token raw sliding window. The first two
 layers have no compressed attention; the next 18 use compression ratio 2 and
@@ -1017,8 +1004,8 @@ Useful source locations:
   and [managed driver](../../TensorSharp.Models/Models/DeepSeek4/DeepSeek4Model.cs).
 - [Native loader and scheduler](../../TensorSharp.GGML.Native/ggml_ops_deepseek4.cpp)
   and [V4.1 graph](../../TensorSharp.GGML.Native/ggml_ops_deepseek41.inc).
-- [Engram hashing and sidecar reader](../../TensorSharp.GGML.Native/dsv41_engram.h)
-  and [preparer](../../eng/dsv41-prepare.py).
+- [Engram metadata loader](../../TensorSharp.GGML.Native/dsv41_engram_gguf.h)
+  and [hashing and configuration validation](../../TensorSharp.GGML.Native/dsv41_engram.h).
 - [Chat renderer](../../TensorSharp.Runtime/ChatTemplate.DeepSeek41.cs)
   and [output parser](../../TensorSharp.Runtime/DeepSeek41OutputParser.cs).
 
