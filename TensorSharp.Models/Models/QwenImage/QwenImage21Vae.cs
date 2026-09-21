@@ -58,7 +58,7 @@ namespace TensorSharp.Models.QwenImage
         private static Feature Mid21(VaeWeights w, string prefix, Feature x)
         {
             x = Residual21(w, prefix + ".0", x);
-            x = AttentionBlock(w, prefix + ".1", x);
+            x = AttentionBlock(w, prefix + ".1", x, nativeAttention: true);
             return Residual21(w, prefix + ".2", x);
         }
 

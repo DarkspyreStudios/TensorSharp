@@ -1085,14 +1085,27 @@ CLI commands and model-specific defaults.
 ```bash
 curl --fail-with-body http://localhost:5000/api/image-generate \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"A cat beside a blue vase, soft daylight","width":1024,"height":1024,"steps":40,"cfg":6,"seed":42}'
+  -d '{"prompt":"A cat beside a blue vase, soft daylight","width":2048,"height":2048,"steps":40,"cfg":1,"seed":42}'
 ```
 
 The response contains `ok`, `url`, `width`, `height` and `elapsedSeconds`.
 `/api/image-generate/stream` accepts the same JSON and emits SSE denoising
 progress (`imageGenerate: true`) and a final `done: true` result. Use the existing
 image-edit routes below for reference-conditioned editing. Set both dimensions
-in multiples of 32; `negativePrompt` is optional in either mode.
+in multiples of 32. Omitting dimensions selects native 2048×2048 for generation,
+or approximately the same area at the first reference's aspect ratio for editing.
+`targetArea: 1048576` selects approximately 1K output with automatic aspect ratio;
+explicit dimensions take precedence. Editing references are conditioned at
+approximately 1 megapixel each, or the output area if smaller.
+
+Omitted `steps`/`cfg` select 40 Euler steps and CFG 1, following the released
+2.1 model's recommendation. CFG 1 needs one transformer prediction per step;
+`negativePrompt` takes effect only with explicit CFG above 1, which also runs a
+negative prediction. For faster drafts, request 1024×1024 or explicitly select
+25 steps, as in the official ComfyUI workflow; fewer steps can change quality.
+The [model guide](../docs/models/qwenimage21.md) records the official scheduler
+settings, source links and measured validation. Earlier Qwen-Image Lightning
+LoRAs are incompatible with 2.1; no compatible acceleration adapter was verified.
 
 ### Image Editing (`/api/image-edit`, Qwen-Image-Edit)
 

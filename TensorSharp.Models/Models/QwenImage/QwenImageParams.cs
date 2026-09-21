@@ -22,7 +22,8 @@ namespace TensorSharp.Models.QwenImage
         /// <summary>
         /// True-CFG guidance scale; &lt;= 1 disables the negative pass (single forward/step),
         /// 0 = auto: 2.5, or 1.0 (no CFG) when a Lightning distillation LoRA is loaded.
-        /// Qwen-Image-2.1 defaults to 6.0 and uses standard CFG without per-token renormalization.
+        /// Qwen-Image-2.1 defaults to 1.0 (the checkpoint's recommended unguided sampling).
+        /// Explicit guidance above 1 uses standard CFG without per-token renormalization.
         /// 2.5 follows the Qwen-Image-Edit-2511 recommendation (matches stable-diffusion.cpp):
         /// 4.0 over-guides ("CFG burn") — it distorts faces/fine detail and over-saturates color.
         /// 2.5 preserves face structure while still applying the edit; raise toward 3.5-4 for a
@@ -36,11 +37,16 @@ namespace TensorSharp.Models.QwenImage
         public long Seed { get; set; } = 0;
 
         /// <summary>
-        /// Target output area in pixels (aspect ratio follows the input image). The
-        /// TensorSharp defaults to approximately 1 megapixel. Dimensions are snapped
-        /// to multiples of 16 for the earlier model, or 32 for Qwen-Image-2.1.
+        /// Target output area in pixels (aspect ratio follows the input image).
+        /// 0 = model default: 1024² for Qwen-Image-Edit, or native 2048² for Qwen-Image-2.1.
+        /// Dimensions are snapped to multiples of 16 for the earlier model, or 32 for 2.1.
+        /// An explicit positive area takes precedence over the model default.
         /// </summary>
-        public long TargetArea { get; set; } = 1024 * 1024;
+        public long TargetArea { get; set; } = 0;
+
+        /// <summary>Resolve automatic output area for the loaded model, retaining an explicit area.</summary>
+        public long ResolveTargetArea(bool version21) =>
+            TargetArea > 0 ? TargetArea : version21 ? 2048L * 2048 : 1024L * 1024;
 
         /// <summary>Optional explicit output width/height override (0 = derive from input + TargetArea).</summary>
         public int Width { get; set; } = 0;

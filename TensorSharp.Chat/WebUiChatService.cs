@@ -1182,7 +1182,8 @@ namespace TensorSharp.Chat
                 if (body.TryGetProperty("seed", out var seed)) p.Seed = seed.GetInt64();
                 if (body.TryGetProperty("width", out var width)) p.Width = width.GetInt32();
                 if (body.TryGetProperty("height", out var height)) p.Height = height.GetInt32();
-                if (body.TryGetProperty("targetArea", out var area)) p.TargetArea = area.GetInt64();
+                p.TargetArea = body.TryGetProperty("targetArea", out var area)
+                    ? area.GetInt64() : p.ResolveTargetArea(version21);
                 if (body.TryGetProperty("negativePrompt", out var negative)) p.NegativePrompt = negative.GetString() ?? " ";
             }
             catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException)
@@ -1248,8 +1249,9 @@ namespace TensorSharp.Chat
             var p = new TensorSharp.Models.QwenImage.QwenImageParams
             {
                 Steps = steps, CfgScale = cfg, Seed = seed, Width = width, Height = height,
-                TargetArea = targetArea > 0 ? targetArea : 1024 * 1024, NegativePrompt = negativePrompt ?? " ",
+                TargetArea = targetArea, NegativePrompt = negativePrompt ?? " ",
             };
+            p.TargetArea = p.ResolveTargetArea(model.IsVersion21);
             ValidateImageParameters(p, model.IsVersion21);
             return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, cancellationToken);
         }

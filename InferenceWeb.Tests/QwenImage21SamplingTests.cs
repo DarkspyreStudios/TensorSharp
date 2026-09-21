@@ -19,14 +19,67 @@ public class QwenImage21SamplingTests
     }
 
     [Theory]
-    [InlineData(256, .6224593312)]
-    [InlineData(4096, .7595109169)]
-    public void ResolutionScheduleUsesTwoPointOneAnchors(int tokens, double middleSigma)
+    [InlineData(256, .9843579531, .8282203674, .6143688560, .3408319354, .0601277351)]
+    [InlineData(4096, .9869637489, .8528681993, .6566662788, .3819332719, .0678805709)] // 1024²
+    [InlineData(8192, .9892514348, .8756618500, .6988655925, .4275377989, .0776016116)]
+    [InlineData(16384, .9926459789, .9116604924, .7724375129, .5205857754, .1022295356)] // 2048²
+    public void FortyStepScheduleMatchesOfficialQwenImage21Scheduler(
+        int tokens, double first, double quarter, double middle, double threeQuarter, double penultimate)
     {
-        var actual = QwenImage21Sampling.Sigmas(2, tokens);
+        // Golden values evaluated by the unmodified NumPy time_shift and
+        // stretch_shift_to_terminal methods in Diffusers 6256aa7666cedd47443adc8f82da9a10e110b09c,
+        // using https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/scheduler/scheduler_config.json.
+        // Covers both official anchors and extrapolation to native 2K (16384 tokens).
+        var actual = QwenImage21Sampling.Sigmas(40, tokens);
+        Assert.Equal(41, actual.Length);
         Assert.Equal(1f, actual[0]);
-        Assert.InRange(Math.Abs(actual[1] - middleSigma), 0, 1e-7);
+        int[] indices = { 1, 10, 20, 30, 38 };
+        double[] expected = { first, quarter, middle, threeQuarter, penultimate };
+        for (int i = 0; i < indices.Length; i++)
+            Assert.InRange(Math.Abs(actual[indices[i]] - expected[i]), 0, 2e-7);
+        Assert.Equal(.02f, actual[^2]);
         Assert.Equal(0f, actual[^1]);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]
+    [InlineData(40)]
+    [InlineData(100)]
+    public void ResolutionSchedulesStayFiniteAndStrictlyDecrease(int steps)
+    {
+        foreach (int tokens in new[] { 4, 256, 4096, 8192, 16384, 65536 })
+        {
+            var actual = QwenImage21Sampling.Sigmas(steps, tokens);
+            Assert.Equal(steps + 1, actual.Length);
+            Assert.Equal(1f, actual[0]);
+            Assert.Equal(0f, actual[^1]);
+            for (int i = 0; i < actual.Length; i++)
+            {
+                Assert.True(float.IsFinite(actual[i]));
+                Assert.InRange(actual[i], 0f, 1f);
+                if (i > 0) Assert.True(actual[i] < actual[i - 1]);
+            }
+            if (steps > 1) Assert.Equal(.02f, actual[^2]);
+        }
+    }
+
+    [Fact]
+    public void SingleStepKeepsOneEulerUpdateWithoutDividingByZero()
+    {
+        Assert.Equal(new[] { 1f, 0f }, QwenImage21Sampling.Sigmas(1, 16384));
+    }
+
+    [Theory]
+    [InlineData(0, 16384)]
+    [InlineData(-1, 16384)]
+    [InlineData(40, 0)]
+    [InlineData(40, -1)]
+    public void InvalidScheduleParametersAreRejected(int steps, int tokens)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => QwenImage21Sampling.Sigmas(steps, tokens));
     }
 
     [Fact]

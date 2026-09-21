@@ -32,7 +32,9 @@ namespace TensorSharp.Models.QwenImage
 
             var (width, height) = ResolveDimensions(p, inputs.Length > 0 ? inputs[0] : null);
             int steps = p.Steps == 0 ? 40 : p.Steps;
-            float cfg = p.CfgScale == 0 ? 6f : p.CfgScale;
+            // The released 2.1 checkpoint is intended for sampling without CFG.
+            // An explicit value > 1 still opts into the additional negative pass.
+            float cfg = p.CfgScale == 0 ? 1f : p.CfgScale;
             int h = height / 16, w = width / 16, sequence = checked(h * w);
             var total = Stopwatch.StartNew();
             var phase = Stopwatch.StartNew();
@@ -53,7 +55,7 @@ namespace TensorSharp.Models.QwenImage
                 {
                     // Vision and VAE must see the SAME geometry: one image slot expands
                     // to four /16 VAE tokens in the single-stream transformer.
-                    var (rw, rh) = DimensionsForArea(inputs[i].Width, inputs[i].Height, (long)width * height);
+                    var (rw, rh) = ResolveReferenceDimensions(inputs[i], width, height);
                     refs[i] = ImageIO.Resize(inputs[i], rw, rh);
                     var latent = Vae.Encode(refs[i]);
                     refHeights[i] = latent.Height;
@@ -113,6 +115,9 @@ namespace TensorSharp.Models.QwenImage
                 }
                 Phase("denoise");
                 GgmlBasicOps.ReleaseReuseComputeBuffers();
+                // Denoising is finished; release resident DiT weights before
+                // allocating the much larger full-resolution VAE feature maps.
+                GgmlBasicOps.ClearHostBufferCache();
                 var output = Vae.Decode(new VaeLatent(64, h, w, ToChannels(latents, h, w)));
                 Phase("VAE decode");
                 Console.WriteLine($"  [qwen21-timing] total: {total.Elapsed.TotalSeconds:F3}s");
@@ -158,7 +163,7 @@ namespace TensorSharp.Models.QwenImage
                     throw new ArgumentException("Qwen-Image-2.1 width and height must both be positive multiples of 32.");
                 return (width, height);
             }
-            long area = p.TargetArea > 0 ? p.TargetArea : 1024L * 1024;
+            long area = p.ResolveTargetArea(version21: true);
             return DimensionsForArea(reference?.Width ?? 1, reference?.Height ?? 1, area);
         }
 
@@ -169,6 +174,15 @@ namespace TensorSharp.Models.QwenImage
             // keep the grid multiplication checked as well as the conversion.
             return (Math.Max(32, checked((int)Math.Round(Math.Sqrt(area * ratio) / 32, MidpointRounding.AwayFromZero) * 32)),
                 Math.Max(32, checked((int)Math.Round(Math.Sqrt(area / ratio) / 32, MidpointRounding.AwayFromZero) * 32)));
+        }
+
+        internal static (int Width, int Height) ResolveReferenceDimensions(RgbImage image, int outputWidth, int outputHeight)
+        {
+            // Diffusers conditions 2K output on approximately 1MP references.
+            // Keep small previews small as well; doubling output resolution must
+            // not quadruple every reference's VAE, vision and transformer work.
+            long area = Math.Min(1024L * 1024, checked((long)outputWidth * outputHeight));
+            return DimensionsForArea(image.Width, image.Height, area);
         }
 
         internal static float[] ToTokens(float[] chw, int height, int width)
@@ -203,15 +217,24 @@ namespace TensorSharp.Models.QwenImage
         internal static float[] Sigmas(int steps, int imageTokens)
         {
             if (steps <= 0 || imageTokens <= 0) throw new ArgumentOutOfRangeException();
-            // Qwen 2.1 uses the Flux resolution schedule (256 -> 0.5, 4096 -> 1.15).
-            float mu = 0.5f + (imageTokens - 256) * (1.15f - 0.5f) / (4096 - 256);
-            float exp = MathF.Exp(mu);
+            // Official Qwen/Qwen-Image-2.1 scheduler_config.json: dynamic exponential
+            // shift (256 -> 0.5, 8192 -> 0.9), followed by shift_terminal=0.02.
+            // The anchors are interpolated/extrapolated, including 16384 tokens at 2K.
+            // One step has no interval to stretch; retain a single Euler update to zero.
+            if (steps == 1) return new[] { 1f, 0f };
+            double mu = 0.5 + (imageTokens - 256) * (0.9 - 0.5) / (8192 - 256);
+            double exp = Math.Exp(mu);
+            double lastShifted = exp / (exp + steps - 1);
+            double terminalScale = (1 - lastShifted) / (1 - 0.02);
             var result = new float[steps + 1];
             for (int i = 0; i < steps; i++)
             {
-                float t = 1f - (float)i / steps;
-                result[i] = exp / (exp + (1f / t - 1f));
+                // Equivalent to the pipeline's linspace(1, 1 / steps, steps).
+                double t = (double)(steps - i) / steps;
+                double shifted = exp / (exp + (1 / t - 1));
+                result[i] = (float)(1 - (1 - shifted) / terminalScale);
             }
+            result[steps - 1] = 0.02f;
             return result;
         }
 

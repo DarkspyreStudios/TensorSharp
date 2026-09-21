@@ -1,7 +1,8 @@
 {
   // Qwen-Image-2.1: text-to-image and editing, using its dedicated VAE and Qwen3-VL-8B.
   // Both CLI and Server.Host verify SHA-256 for new downloads; cached files are reused.
-  // Defaults: 40 Euler steps, CFG 6.0; use dimensions divisible by 32.
+  // Defaults: native 2048x2048, 40 Euler steps, CFG 1.0; edits retain the input aspect ratio.
+  // Use --width 1024 --height 1024 for faster drafts; explicit dimensions must be divisible by 32.
   // Apple Silicon uses ggml_metal. Override --backend ggml_cuda for NVIDIA GPUs.
   "variables": {
     "root": "${TENSORSHARP_MODELS:-../models}/qwen-image-2.1"

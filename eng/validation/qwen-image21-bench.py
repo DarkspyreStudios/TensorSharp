@@ -219,7 +219,7 @@ def main():
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--steps", type=int, default=20)
-    parser.add_argument("--cfg", type=float, default=6)
+    parser.add_argument("--cfg", type=float, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--models-dir", type=Path, default=ROOT.parent/"models/qwen-image-2.1")
     for name in MODEL_NAMES:
@@ -234,6 +234,8 @@ def main():
     parser.add_argument("--ts-extra", action="append", default=[], help="Additional TensorSharp argv token; use --ts-extra=--option.")
     parser.add_argument("--sd-extra", action="append", default=[], help="Additional sd.cpp argv token; use --sd-extra=--option.")
     parser.add_argument("--engine-order", choices=("sd-first", "ts-first"), default="sd-first")
+    parser.add_argument("--engine", choices=("both", "tensorsharp", "sd_cpp"), default="both",
+                        help="Run a single engine for quality/performance validation without requiring the reference binary.")
     parser.add_argument("--repeat", type=int, default=1, help="Serial fresh-process measurements per engine, not warm in-process requests.")
     parser.add_argument("--timeout", type=float, default=3600, help="Seconds per engine invocation.")
     parser.add_argument("--output", type=Path, default=ROOT/"docs/validation/qwen-image-2.1"/datetime.now().strftime("bench-%Y%m%d-%H%M%S"))
@@ -251,7 +253,9 @@ def main():
     args.cli, args.sd_cli, args.sd_repo, args.ggml_repo, args.output = (
         p.resolve() for p in (args.cli, args.sd_cli, args.sd_repo, args.ggml_repo, args.output))
     if not args.dry_run:
-        for path in list(models.values()) + args.image + [args.cli, args.sd_cli]:
+        binaries = ([args.cli] if args.engine == "tensorsharp" else [args.sd_cli]
+                    if args.engine == "sd_cpp" else [args.cli, args.sd_cli])
+        for path in list(models.values()) + args.image + binaries:
             if not path.is_file():
                 parser.error(f"Required file is missing: {path}")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -263,6 +267,9 @@ def main():
         "created_utc": datetime.now(timezone.utc).isoformat(), "dry_run": args.dry_run,
         "parameters": {k: getattr(args, k) for k in ("mode", "prompt", "negative_prompt", "width", "height", "steps", "cfg", "seed", "backend", "sd_backend", "repeat")},
         "sampler": "Euler", "noise": "Philox4x32-10 / Box-Muller (--rng cuda)",
+        "engine_selection": args.engine,
+        "tensorsharp_schedule": {"base_image_seq_len": 256, "max_image_seq_len": 8192,
+                                 "base_shift": 0.5, "max_shift": 0.9, "shift_terminal": 0.02},
         "hardware": {"platform": platform.platform(), "machine": platform.machine(),
                      "cpu": capture(["sysctl", "-n", "machdep.cpu.brand_string"]) if sys.platform == "darwin" else platform.processor(),
                      "memory_bytes": capture(["sysctl", "-n", "hw.memsize"]) if sys.platform == "darwin" else None},
@@ -275,6 +282,7 @@ def main():
                         "Peak RSS is process resident memory, not peak GPU allocation; it includes shared mappings on unified-memory systems.",
                         "Phase boundaries and weight-loading inclusion differ between engines; compare wall time alongside the phase logs.",
                         "Pixel statistics and matched-seed similarity do not establish semantic quality or fidelity.",
+                        "TensorSharp now uses the released Qwen 2.1 scheduler. Older sd.cpp revisions use Flux shift defaults; identical CLI settings do not imply identical sigma schedules.",
                         "No unavailable model/device scenario is counted as a passing measurement."],
         "runs": [],
     }
@@ -290,6 +298,8 @@ def main():
         pair = {"repeat": index+1, "engines": {}}
         manifest["runs"].append(pair)
         order = ("sd_cpp", "tensorsharp") if args.engine_order == "sd-first" else ("tensorsharp", "sd_cpp")
+        if args.engine != "both":
+            order = (args.engine,)
         for engine in order:
             print(f"[{index+1}/{args.repeat}] {engine}: {shlex.join(argv[engine])}", flush=True)
             if args.dry_run:
@@ -313,7 +323,7 @@ def main():
             pair["engines"][engine] = result
             save()
             print(f"  {result['status']}: {result['wall_seconds']:.3f}s wall; log {logfile}", flush=True)
-        if not args.dry_run:
+        if not args.dry_run and args.engine == "both":
             pair["pixel_comparison"] = pixel_comparison(paths["tensorsharp"], paths["sd_cpp"])
             ts, sd = pair["engines"]["tensorsharp"], pair["engines"]["sd_cpp"]
             if ts["status"] == sd["status"] == "passed":

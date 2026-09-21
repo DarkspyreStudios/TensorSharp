@@ -50,7 +50,7 @@ Text-to-image:
 dotnet run --project TensorSharp.Cli -c Release --no-build -- \
   --config config/qwen-image-2.1.json \
   --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
-  --width 1024 --height 1024 --diffusion-steps 40 --cfg 6 \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
   --diffusion-seed 42 --output generated.png
 ```
 
@@ -61,23 +61,53 @@ dotnet run --project TensorSharp.Cli -c Release --no-build -- \
   --config config/qwen-image-2.1.json \
   --image generated.png \
   --prompt 'Change the blue vase to a red vase. Preserve the cat, lighting and composition.' \
-  --width 1024 --height 1024 --diffusion-steps 40 --cfg 6 \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
   --diffusion-seed 42 --output edited.png
 ```
 
 No `--image` selects generation; one or more `--image` arguments select editing.
 Repeat `--image first.png --image second.png` for multiple references in that order.
-`--input prompt.txt` can supply the prompt instead. Both modes accept
-`--negative-prompt 'blur, low detail'`. Omitted sampling settings select 40 Euler
-steps and CFG 6.0 for 2.1. Set width and height together, in multiples of 32.
-TensorSharp chooses approximately 1024×1024 when dimensions are omitted, following
-the first reference aspect ratio for editing. This is a conservative local default;
-the [official model example](https://huggingface.co/Qwen/Qwen-Image-2.1) uses
-2048×2048 and 40 steps.
+`--input prompt.txt` can supply the prompt instead. Omitted sampling settings
+select **40 Euler steps and CFG 1.0**, following
+[Qwen's recommended unguided sampling](https://github.com/huggingface/diffusers/blob/main/docs/source/en/api/pipelines/qwenimage21.md).
+CFG 1 runs one transformer prediction per step; the previous CFG 6 default ran
+both positive and negative predictions. Explicit CFG above 1 still enables the
+second prediction and applies `--negative-prompt 'blur, low detail'`. Negative
+prompts have no effect at CFG 1.
+
+Omitting dimensions selects **2048×2048 for generation**, or approximately the
+same pixel area with the first reference's aspect ratio for editing. Set width
+and height together, in multiples of 32, to override this. The model supports
+[native 2K aspect ratios](https://github.com/QwenLM/Qwen-Image-2.1#supported-aspect-ratios).
+Reference images are conditioned at approximately 1 megapixel each, or the
+output area if smaller; increasing the output to 2K does not also quadruple each
+reference's VAE, vision-encoder and transformer workload.
+
+The schedule now follows the
+[official scheduler configuration](https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/scheduler/scheduler_config.json):
+exponential dynamic shifting with the 256/0.5 and 8192/0.9 sequence-length/shift
+anchors, followed by terminal stretching to 0.02 and a final Euler step to zero.
+This replaces the earlier Flux-derived 4096/1.15 schedule, so existing seeds can
+produce different images after this correction.
+
+For faster drafts, specify `--width 1024 --height 1024`. A 2K square has four
+times the latent image tokens and more attention work than a 1K square.
+`--diffusion-steps 25 --cfg 1` is an optional faster profile used by the official
+ComfyUI [generation](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_qwen_image_2_1_t2i.json)
+and [editing](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_qwen_image_2_1_image_edit.json)
+workflows. Forty steps remains the default; fewer steps are a quality/speed
+tradeoff, not a claim of equivalent image quality.
+
+No compatible Qwen-Image-2.1 acceleration LoRA was verified in the September 20,
+2026 research. The published
+[Qwen-Image Lightning](https://huggingface.co/lightx2v/Qwen-Image-Lightning)
+and [Edit-2511 Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning)
+adapters target earlier architectures and are rejected by this pipeline. The
+CFG 1 speed improvement uses the released 2.1 checkpoint directly.
 
 For a quick executable smoke test use 256×256 and one step. Such a run verifies
 loading and the end-to-end data path; it does not demonstrate image quality or
-performance at the normal 1024×1024/40-step settings.
+performance at the default 2048×2048/40-step settings.
 
 ## Launch TensorSharp.Server.Host
 
@@ -96,10 +126,10 @@ Text-to-image JSON API:
 ```bash
 curl --fail-with-body http://127.0.0.1:5000/api/image-generate \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"An orange cat beside a blue ceramic vase, soft daylight","width":1024,"height":1024,"steps":40,"cfg":6,"seed":42}'
+  -d '{"prompt":"An orange cat beside a blue ceramic vase, soft daylight","width":2048,"height":2048,"steps":40,"cfg":1,"seed":42}'
 ```
 
-The response is `{ "ok": true, "url": "...", "width": 1024, "height": 1024,
+The response is `{ "ok": true, "url": "...", "width": 2048, "height": 2048,
 "elapsedSeconds": ... }`. Download the returned URL from the same server.
 
 Multipart image editing:
@@ -108,14 +138,16 @@ Multipart image editing:
 curl --fail-with-body http://127.0.0.1:5000/api/image-edit \
   -F 'image=@generated.png' \
   -F 'prompt=Change the blue vase to red. Preserve the cat and composition.' \
-  -F 'width=1024' -F 'height=1024' -F 'steps=40' -F 'cfg=6' -F 'seed=42'
+  -F 'width=2048' -F 'height=2048' -F 'steps=40' -F 'cfg=1' -F 'seed=42'
 ```
 
 Repeat the `image` part for multiple references. Alternatively upload files to
 `/api/upload` and send JSON containing `imagePaths` (or legacy `imagePath`) to
 `/api/image-edit`. Both image endpoints accept `negativePrompt`, `targetArea`,
 `width`, `height`, `steps`, `cfg` and `seed`. `targetArea` controls automatic
-geometry; explicit dimensions take precedence.
+geometry; explicit dimensions take precedence. Omitting `width`, `height`,
+`targetArea`, `steps` and `cfg` selects the model defaults above. `targetArea: 1048576`
+selects approximately 1K output while retaining automatic aspect-ratio selection.
 
 For progress, use the JSON routes `/api/image-generate/stream` and
 `/api/image-edit/stream` with `curl -N`. They emit SSE `data:` frames with
@@ -131,9 +163,125 @@ do not apply to this implementation. Start with smaller dimensions if available
 memory is insufficient. CUDA and Vulkan are selectable GGML backends but have not
 been exercised on this local Apple Silicon validation machine.
 
-## Validation and comparison
+## Current full-model performance
 
-The final focused suite passed **317 tests**, with **one explicit skip** for a
+On this Apple M5 Pro/48 GiB machine, the Q4_K_M model generated the same bookstore
+prompt at 1024×1024, 40 steps and seed 42 in **353.120 seconds** (353.734 seconds
+process wall time), compared with the historical **751.156 seconds** below.
+This is a **2.13× inference speedup for this workload**. Denoising took 334.695
+seconds, VAE decoding 18.117 seconds, and peak process RSS was 16.69 GiB.
+
+Both runs used the same model files, resolution, prompt and step count on Metal,
+but the current run uses the recommended CFG 1 and corrected Qwen scheduler;
+the historical run used CFG 6 and the Flux-derived schedule. This measures the
+combined change in defaults and implementation, not isolated kernel speed or
+equivalent output pixels. Each result is one fresh process with warm OS file
+caches; thermal state was uncontrolled. Visual inspection of the new PNG found
+correct “TENSORSHARP” lettering, detailed shelves, warm lighting and wet-pavement
+reflections. One image is not a general quality score.
+
+The current run's commands, model hashes, dependency revisions, phase timings,
+memory measurement and RGBA PNG are in ignored
+`docs/validation/qwen-image-2.1/performance/quality-1024-40/`.
+
+A real **2048×2048, 25-step, CFG 1** run with the same prompt and seed also
+completed, producing a native-resolution RGBA PNG. It took **1548.719 seconds**
+for inference (**1551.161 seconds / 25m 51s process wall time**): 1438.921 seconds
+denoising and 109.483 seconds decoding. Peak process RSS was **32.30 GiB**;
+macOS also reported a 57.33 GiB peak memory footprint. Neither measure is a
+dedicated GPU-allocation measurement. This run demonstrates that native 2K
+works here, while also showing its substantial time and memory cost.
+
+Visual inspection at full resolution found correct main-sign lettering,
+detailed brickwork and window frames, warm interior lighting and wet-pavement
+reflections. Small interior details remain synthesized; this single prompt does
+not establish general quality superiority over the 1K/40-step image. The PNG,
+log and benchmark manifest are in
+`docs/validation/qwen-image-2.1/performance/quality-2048-25/`.
+The default 2K/40-step run, full-resolution editing, and CUDA/Vulkan generation
+were not run in this validation and are not counted as passing scenarios.
+
+The final Release build and focused suite passed **169 tests, zero skipped**,
+including real companion-file metadata, automatic/explicit output geometry,
+reference geometry, official 1K/2K sigma golden vectors, CPU VAE primitives,
+RGBA handling, request parsing, Web UI service and upload-confinement regressions.
+The legacy `QwenImageDiTWeightDtypeTests` GPU-forward test was outside this focused
+run. Evidence is `docs/validation/qwen-image-2.1/performance/final-managed.trx`;
+native operator coverage is detailed below.
+
+## Native optimization validation
+
+CPU and Metal image attention now uses each segment's exact key/value length
+without a dense padding mask. Causal text masks are retained. Metal casts the
+strided key/value tensors directly to F16, and supported backends use upstream
+fused SwiGLU to avoid intermediate feed-forward copies. These operations preserve
+the mathematical computation, with possible floating-point rounding differences;
+other backends retain the padded attention path pending device validation.
+Upstream ggml remains unchanged at
+`456172ec733a135778adcd32d00e576a58232e45`.
+
+The independent NumPy transformer oracle passed **16 cases on CPU and 16 on
+Metal**, each with five forwards. It covers generation, editing, multiple
+references, fused/separate MLP weights, flash/explicit attention, changed latent
+inputs, shape shrink/restore, and attention tile boundaries. Maximum absolute
+error was 0.000005282 on CPU and 0.001409 on Metal. The larger boundary fixture
+uses a 0.002 Metal tolerance because the unchanged baseline already has 0.001333
+error from its half-precision matmuls; the existing small-case tolerances remain
+0.001 on Metal and 0.0001 on CPU.
+
+On Apple M5 Pro/Metal, a synthetic two-layer F32 transformer with 16,384 target
+tokens, 64 prefix tokens, hidden size 256 and two 128-wide attention heads had
+median warm forward latency **194.34 ms before → 167.81 ms after** (13.65% lower).
+Each version ran in a separate process with five measurements after the first
+forward. This geometry eliminates a 520 MiB image-mask allocation per prediction;
+that is the calculated allocation size, not a measured reduction in peak RSS.
+These timings exclude the full model, conditioning, scheduler and VAE and do not
+establish full-resolution generation speed or visual quality. CUDA and Vulkan
+were unavailable and are not counted as passing validation.
+
+Run the oracle and optional synthetic benchmark with:
+
+```bash
+python3 eng/tests/qwen-image21-dit.py --backend cpu
+python3 eng/tests/qwen-image21-dit.py --backend metal
+python3 eng/tests/qwen-image21-dit.py --backend metal --benchmark-target-tokens 16384
+```
+
+The benchmark mode reports timings separately and does not count as an oracle
+test. Logs, the before/after measurements and dependency metadata are under
+ignored `docs/validation/qwen-image-2.1/performance-native-20260920/`.
+
+The 2.1 VAE also routes spatial attention through native matrix operations,
+tiling queries while every query still attends to every key. Each score tile is
+bounded to 16 MiB, supporting the VAE's 768/1152-channel attention heads without
+requiring a flash-attention kernel for those widths. The managed implementation
+remains the fallback; `TS_QWEN21_VAE_ATTN=0` selects it for comparison.
+
+Large VAE CPU normalization passes now visit contiguous spatial tiles, and SiLU
+uses parallel ranges. Twelve scalar-oracle tests pass with bit-exact outputs,
+including real channel counts, tile/chunk boundaries and extreme inputs. Resident
+DiT weights are released before final VAE decoding to reduce memory pressure at
+2K. These changes also retain the small-array path for previews.
+
+[`eng/tests/qwen-image21-vae-attention.py`](../../eng/tests/qwen-image21-vae-attention.py)
+passed **16 numerical cases and seven invalid-argument cases on each of CPU and
+Metal**, including actual head widths, partial query tiles, uniform attention,
+large logits, input/shape reuse and output guard regions. Maximum absolute error
+was 0.000006323 on CPU and 0.002377 on Metal; maximum relative L2 error was
+0.000000705 and 0.000891 respectively. Metal uses an explicit 0.003 absolute and
+0.002 relative-L2 tolerance for upstream half-precision matrix operands with F32
+accumulation. These are operator checks, not a VAE image-quality or speed
+benchmark. Evidence is under ignored
+`docs/validation/qwen-image-2.1/vae-attention-{cpu,metal}.{json,log}`.
+
+## Historical validation and comparison
+
+The results below predate the current 2K/CFG 1 defaults, official scheduler
+correction and native optimizations. Image-generation measurements used CFG 6
+and the earlier Flux-derived schedule. They describe those historical outputs
+and workloads, not current-default performance or quality.
+
+The earlier focused suite passed **317 tests**, with **one explicit skip** for a
 legacy Qwen-Image DiT full-weight test because its older checkpoint was unavailable.
 The skipped scenario is not counted as validation. Coverage includes request and
 configuration handling, sampling/layout math, companion compatibility checks
@@ -232,19 +380,26 @@ compilation are included. Compare both cold end-to-end latency and repeated
 inference with the same loaded process. Identical seeds across engines do not
 guarantee identical initial noise; compare images as well as timing.
 
+## Reproduce comparisons with the current implementation
+
 The reusable [benchmark runner](../../eng/validation/qwen-image21-bench.py)
-launches both engines serially with matched settings and records commands,
-model hashes, revisions, phase timings, peak RSS and image diagnostics:
+launches both engines serially with matched request settings and records commands,
+model hashes, revisions, phase timings, peak RSS and image diagnostics. The
+command below uses the current sampling settings; reproducing the historical
+images above requires their earlier implementation and schedule. Older sd.cpp
+revisions use the Flux-derived schedule, so matching command-line settings alone
+does not establish matching sigma schedules or image quality:
 
 ```bash
 python3 eng/validation/qwen-image21-bench.py \
   --models-dir "$TENSORSHARP_MODELS/qwen-image-2.1" \
-  --width 512 --height 512 --steps 20 --cfg 6 --seed 42 \
+  --width 1024 --height 1024 --steps 40 --cfg 1 --seed 42 \
   --prompt 'A red ceramic teapot on a wooden table, soft daylight, product photograph.'
 ```
 
-Add `--mode edit --image reference.png` and an editing prompt for a matched
-edit, `--repeat 3` for repeated fresh-process measurements, or `--dry-run` to
+Add `--mode edit --image reference.png` and an editing prompt for an edit,
+`--engine tensorsharp` to run only TensorSharp without a reference binary,
+`--repeat 3` for repeated fresh-process measurements, or `--dry-run` to
 inspect commands. The default reference binary is
 `artifacts/qwen-image-2.1/sd-build/bin/sd-cli`; override `--sd-cli` when needed.
 Image diagnostics use NumPy and Pillow.

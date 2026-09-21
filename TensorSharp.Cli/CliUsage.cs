@@ -576,7 +576,7 @@ namespace TensorSharp.Cli
                     "Repeat --image for multiple references. Default: empty.",
                     "--prompt \"Make the sky look like sunset\""),
                 new OptionHelp("--cfg <f>",
-                    "Classifier-free guidance scale. Default: 6.0 for Qwen-Image-2.1; 2.5 for older " +
+                    "Classifier-free guidance scale. Default: 1.0 for Qwen-Image-2.1 (one prediction per step); 2.5 for older " +
                     "Qwen-Image-Edit checkpoints (1.0 with a Lightning LoRA).",
                     "--cfg 2.5"),
                 new OptionHelp("--diffusion-steps <N>",
@@ -592,7 +592,7 @@ namespace TensorSharp.Cli
                     "--diffusion-blocks 4"),
                 new OptionHelp("--width <px> / --height <px>",
                     "Image output dimensions; set both together. Qwen-Image-2.1 requires multiples of 32. " +
-                    "Default: 0 — automatic (1024x1024 for text-to-image).",
+                    "Default: 0 — automatic (native 2048x2048 for Qwen-Image-2.1 text-to-image). Use 1024x1024 for faster drafts.",
                     "--width 1024 --height 768"),
                 new OptionHelp("--qwen-image-vae <path>",
                     "Matching VAE GGUF or safetensors (2.1 requires its own VAE). Default: same-directory scan next to the DiT model.",
@@ -604,7 +604,7 @@ namespace TensorSharp.Cli
                     "Matching vision projector GGUF, required for image editing. Default: same-directory scan.",
                     "--qwen-image-mmproj Qwen2.5-VL-7B-mmproj-BF16.gguf"),
                 new OptionHelp("--qwen-image-lora <path>",
-                    "DiT LoRA (e.g. a Lightning step-distillation checkpoint), merged into the weights at load; " +
+                    "Earlier Qwen-Image DiT LoRA (not compatible with 2.1), merged into the weights at load; " +
                     "also switches the sampling defaults (steps, cfg 1.0). Default: none.",
                     "--qwen-image-lora Qwen-Image-Edit-Lightning-8steps.safetensors"),
                 new OptionHelp("--offload-cpu",

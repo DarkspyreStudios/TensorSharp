@@ -11,6 +11,7 @@ import ctypes as ct
 import json
 import os
 from pathlib import Path
+import time
 import numpy as np
 
 
@@ -99,7 +100,7 @@ def reference(w, blocks, images, text, ts, cos, sin, segments, prefix, heads):
     return linear(norm(x[prefix:]) * (1 + linear(time[:1], w["norm_out"])), w["proj_out"])
 
 
-def run_case(lib, backend, case, fused, flash):
+def run_case(lib, backend, case, fused, flash, benchmark_tokens=0):
     rng = np.random.default_rng(2141)
     keep = []
 
@@ -112,15 +113,23 @@ def run_case(lib, backend, case, fused, flash):
         return Weight(a.ctypes.data, 0, 0, a.shape[-1], a.shape[0], a.nbytes)
 
     dim, hd, heads, channels, td, ff = 256, 128, 2, 64, 96, 320
-    if case == "text":
+    if benchmark_tokens:
+        specs = [(0, 64, 0, 0), (64, 64 + benchmark_tokens, 0, 1)]
+        tsq, isq, prefix = 64, benchmark_tokens, 64
+    elif case == "text":
         specs = [(0, 5, 0, 0), (5, 11, 0, 1)]
         tsq, isq, prefix = 5, 6, 5
     elif case == "edit":
         specs = [(0, 2, 0, 0), (2, 6, 0, 1), (6, 9, 3, 0), (9, 15, 4, 1)]
         tsq, isq, prefix = 6, 10, 9
-    else:
+    elif case == "multi-edit":
         specs = [(0, 2, 0, 0), (2, 6, 0, 1), (6, 8, 3, 0), (8, 12, 4, 1), (12, 15, 6, 0), (15, 21, 8, 1)]
         tsq, isq, prefix = 9, 14, 15
+    else:
+        # Text and image boundaries straddle flash-attention tile lengths;
+        # the shape mutation below changes 512 KV/256 query rows to 511/255.
+        specs = [(0, 63, 0, 0), (63, 255, 0, 1), (255, 256, 63, 0), (256, 512, 192, 1)]
+        tsq, isq, prefix = 64, 448, 256
     segments = (Segment * len(specs))(*(Segment(*s) for s in specs))
     seq = specs[-1][1]
     images, text = array((isq, channels)), array((tsq, td))
@@ -151,8 +160,8 @@ def run_case(lib, backend, case, fused, flash):
             keep.append(gu)
             native_blocks[i].gate, native_blocks[i].up = weight(gu), Weight()
         native_blocks[i].norm_q, native_blocks[i].norm_k = b["norm_q"].ctypes.data, b["norm_k"].ctypes.data
-    expected = reference(w, blocks, images, text, ts, cos, sin, segments, prefix, heads)
-    output = np.zeros_like(expected, dtype=np.float32)
+    expected = None if benchmark_tokens else reference(w, blocks, images, text, ts, cos, sin, segments, prefix, heads)
+    output = np.zeros((seq - prefix, channels), dtype=np.float32)
     d = Desc()
     for name, a in dict(images=images, text=text, time_embedding=ts, cos=cos, sin=sin, output=output).items():
         setattr(d, name, a.ctypes.data)
@@ -165,28 +174,40 @@ def run_case(lib, backend, case, fused, flash):
                             num_layers=2, num_segments=len(specs), eps=1e-6).items():
         setattr(d, name, value)
     os.environ["TS_QWEN21_FLASH"] = "1" if flash else "0"
-    tolerance = .001 if backend == "metal" else .0001
-    errors = []
-    for repeat in range(5):
+    # The larger boundary fixture uses Metal's half-precision matrix kernels;
+    # the unchanged baseline has ~1.4e-3 absolute error against the F32 oracle.
+    tolerance = (.002 if case == "tile-boundaries" else .001) if backend == "metal" else .0001
+    errors, seconds = [], []
+    first_output = None
+    for repeat in range(6 if benchmark_tokens else 5):
         # Changed latent input exercises allocation/cache reuse with new data.
-        if repeat == 2:
+        if repeat == 2 and not benchmark_tokens:
             images *= 1.1
             expected = reference(w, blocks, images, text, ts, cos, sin, segments, prefix, heads)
-        if repeat == 3:
+        if repeat == 3 and not benchmark_tokens:
             # Real CFG alternates prompt shapes through the shared allocator.
             # Shrink then restore the target with resident weights untouched.
             segments[-1].end -= 1
             d.total_seq -= 1
             d.image_seq -= 1
             expected = reference(w, blocks, images[:-1], text, ts, cos[:-1], sin[:-1], segments, prefix, heads)
-        if repeat == 4:
+        if repeat == 4 and not benchmark_tokens:
             segments[-1].end += 1
             d.total_seq += 1
             d.image_seq += 1
             expected = reference(w, blocks, images, text, ts, cos, sin, segments, prefix, heads)
         output.fill(np.nan)
+        start = time.perf_counter()
         if lib.TSGgml_QwenImage21Forward(ct.byref(d)) != 1:
             raise RuntimeError(lib.TSGgml_GetLastError().decode())
+        seconds.append(time.perf_counter() - start)
+        if benchmark_tokens:
+            assert np.isfinite(output).all(), "Non-finite benchmark output"
+            if first_output is None:
+                first_output = output.copy()
+            else:
+                assert np.array_equal(first_output, output), "Repeated input produced a different output"
+            continue
         actual = output[:len(expected)]
         error = float(np.max(np.abs(actual - expected)))
         assert np.isfinite(actual).all() and error < tolerance, (case, fused, flash, repeat, error)
@@ -196,23 +217,38 @@ def run_case(lib, backend, case, fused, flash):
     segments[0].start = 1
     assert lib.TSGgml_QwenImage21Forward(ct.byref(d)) == 0
     lib.TSGgml_ClearHostBufferCache()
-    return dict(case=case, fused_mlp=fused, flash=flash, max_absolute_errors=errors)
+    if benchmark_tokens:
+        return dict(case=case, fused_mlp=fused, flash=flash, target_tokens=benchmark_tokens,
+                    prefix_tokens=prefix, dim=dim, head_dim=hd, layers=len(blocks), weight_type="F32",
+                    first_seconds=seconds[0], warm_seconds=seconds[1:], warm_median_seconds=float(np.median(seconds[1:])),
+                    reference_validated=False,
+                    limitation="Synthetic two-layer graph; excludes model loading, conditioning, scheduler and VAE. No image quality validation.")
+    return dict(case=case, fused_mlp=fused, flash=flash, tolerance=tolerance, max_absolute_errors=errors)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=("cpu", "metal", "cuda"), default="cpu")
     parser.add_argument("--library", type=Path, default=Path(__file__).resolve().parents[2]/"TensorSharp.GGML.Native/build/libGgmlOps.dylib")
+    parser.add_argument("--benchmark-target-tokens", type=int, default=0,
+                        help="Run one synthetic F32/fused/flash timing workload with this many target tokens; skips the NumPy oracle.")
     args = parser.parse_args()
+    if args.benchmark_target_tokens < 0:
+        parser.error("--benchmark-target-tokens must be positive when supplied")
     lib = ct.CDLL(str(args.library.resolve()))
     lib.TSGgml_GetLastError.restype = ct.c_char_p
     lib.TSGgml_QwenImage21Forward.argtypes = [ct.POINTER(Desc)]
     assert lib.TSGgml_IsBackendAvailable({"cpu": 2, "metal": 1, "cuda": 3}[args.backend]) == 1
-    rows = [run_case(lib, args.backend, case, fused, flash)
-            for case in ("text", "edit", "multi-edit") for fused in (False, True) for flash in (False, True)]
-    lib.TSGgml_ReleaseReuseComputeBuffers()
-    lib.TSGgml_ClearHostBufferCache()
-    print(json.dumps(dict(backend=args.backend, passed=len(rows), cases=rows), indent=2))
+    try:
+        if args.benchmark_target_tokens:
+            rows = [run_case(lib, args.backend, "text", True, True, args.benchmark_target_tokens)]
+        else:
+            rows = [run_case(lib, args.backend, case, fused, flash)
+                    for case in ("text", "edit", "multi-edit", "tile-boundaries") for fused in (False, True) for flash in (False, True)]
+    finally:
+        lib.TSGgml_ReleaseReuseComputeBuffers()
+        lib.TSGgml_ClearHostBufferCache()
+    print(json.dumps(dict(backend=args.backend, passed=0 if args.benchmark_target_tokens else len(rows), cases=rows), indent=2))
 
 
 if __name__ == "__main__":

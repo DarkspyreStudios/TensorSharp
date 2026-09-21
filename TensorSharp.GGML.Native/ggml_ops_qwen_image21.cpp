@@ -98,12 +98,21 @@ struct Builder {
             auto vs = ggml_view_3d(ctx, vp, d.head_dim, nk, d.heads, vp->nb[1], vp->nb[2], 0);
             ggml_tensor* out = nullptr;
             if (!flash_env || flash_env[0] != '0') {
-                int pad = mask_tensors[i]->ne[0] - nk;
-                auto kpad = pad ? ggml_pad(ctx, ks, 0, pad, 0, 0) : ggml_cont(ctx, ks);
-                auto vpad = pad ? ggml_pad(ctx, vs, 0, pad, 0, 0) : ggml_cont(ctx, vs);
+                // Bidirectional image segments need no mask when the backend
+                // accepts their actual KV length. Let upstream handle its own
+                // tile boundaries instead of materializing a quadratic padding
+                // mask and padded F32 K/V for every layer.
+                int pad = mask_tensors[i] ? mask_tensors[i]->ne[0] - nk : 0;
+                auto kpad = pad ? ggml_pad(ctx, ks, 0, pad, 0, 0) : ks;
+                auto vpad = pad ? ggml_pad(ctx, vs, 0, pad, 0, 0) : vs;
                 if (g_backend_type == BACKEND_TYPE_METAL) {
+                    // CAST accepts the strided segment directly and produces
+                    // contiguous F16, avoiding an intermediate F32 CONT copy.
                     kpad = ggml_cast(ctx, kpad, GGML_TYPE_F16);
                     vpad = ggml_cast(ctx, vpad, GGML_TYPE_F16);
+                } else {
+                    kpad = ggml_cont(ctx, kpad);
+                    vpad = ggml_cont(ctx, vpad);
                 }
                 auto fa = ggml_flash_attn_ext(ctx, qs, kpad, vpad, mask_tensors[i], scale, 0.f, 0.f);
                 ggml_prec_set_acc(fa, GGML_PREC_F32);
@@ -167,6 +176,13 @@ TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
         b.masks.reserve(d->num_segments);
         for (int i = 0; i < d->num_segments; ++i) {
             const auto& s = d->segments[i];
+            // CPU and Metal support unpadded, mask-free flash attention. Keep
+            // the existing padded path for other backends until device tests
+            // establish their supported kernels for all segment lengths.
+            if (s.is_image && (g_backend_type == BACKEND_TYPE_CPU || g_backend_type == BACKEND_TYPE_METAL)) {
+                mask_tensors.push_back(nullptr);
+                continue;
+            }
             int nk = (s.end + 255) / 256 * 256, nq = (s.end - s.start + 63) / 64 * 64;
             b.masks.emplace_back(static_cast<size_t>(nk) * nq, ggml_fp32_to_fp16(-INFINITY));
             auto& data = b.masks.back();
@@ -205,14 +221,25 @@ TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
             h = b.linear(w.out, b.attention(q, k, v, *d, mask_tensors));
             joint = ggml_add(ctx, joint, b.modulate(h, modulation[1], d->prefix_seq, true));
             h = b.modulate(ggml_norm(ctx, joint, d->eps), modulation[2], d->prefix_seq, false);
-            ggml_tensor *gate, *up;
+            ggml_tensor *gate = nullptr, *up = nullptr, *activated = nullptr;
             if (!w.up.data) {
                 auto gu = b.linear(w.gate, h);
-                int ff = gu->ne[0] / 2;
-                gate = ggml_cont(ctx, ggml_view_2d(ctx, gu, ff, d->total_seq, gu->nb[1], 0));
-                up = ggml_cont(ctx, ggml_view_2d(ctx, gu, ff, d->total_seq, gu->nb[1], ff * sizeof(float)));
+                // The checkpoint stores [gate, up] in one projection. Upstream
+                // SwiGLU reads that layout directly, avoiding two FF-sized
+                // copies and a materialized SiLU activation per layer.
+                auto fused = ggml_swiglu(ctx, gu);
+                if (backend_supports_op(fused)) activated = fused;
+                else {
+                    int ff = gu->ne[0] / 2;
+                    gate = ggml_cont(ctx, ggml_view_2d(ctx, gu, ff, d->total_seq, gu->nb[1], 0));
+                    up = ggml_cont(ctx, ggml_view_2d(ctx, gu, ff, d->total_seq, gu->nb[1], ff * sizeof(float)));
+                }
             } else { gate = b.linear(w.gate, h); up = b.linear(w.up, h); }
-            h = b.linear(w.down, ggml_mul(ctx, up, ggml_silu(ctx, gate)));
+            if (!activated) {
+                auto fused = ggml_swiglu_split(ctx, gate, up);
+                activated = backend_supports_op(fused) ? fused : ggml_mul(ctx, up, ggml_silu(ctx, gate));
+            }
+            h = b.linear(w.down, activated);
             joint = ggml_add(ctx, joint, b.modulate(h, modulation[3], d->prefix_seq, true));
         }
         auto target = b.slice(joint, d->prefix_seq, d->total_seq - d->prefix_seq);

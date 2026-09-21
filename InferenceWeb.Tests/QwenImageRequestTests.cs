@@ -62,6 +62,28 @@ public sealed class QwenImageRequestTests
     }
 
     [Theory]
+    [InlineData(true, 4194304)]
+    [InlineData(false, 1048576)]
+    public void ImageParameters_OmittedAreaUsesTheLoadedModelResolution(bool version21, long expectedArea)
+    {
+        // Both plain and streaming routes share this parser; the Web UI omits geometry.
+        var p = WebUiChatService.ParseImageParameters(Json("{}"), version21);
+        Assert.Equal(expectedArea, p.TargetArea);
+        Assert.Equal(0, p.Width);
+        Assert.Equal(0, p.Height);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ImageParameters_ExplicitDraftAreaOverridesModelDefaults(bool version21)
+    {
+        var p = WebUiChatService.ParseImageParameters(Json("{\"targetArea\":1048576}"), version21);
+        Assert.Equal(1048576, p.TargetArea);
+        Assert.Equal(1048576, p.ResolveTargetArea(version21));
+    }
+
+    [Theory]
     [InlineData("{}")]
     [InlineData("{\"prompt\":\" \"}")]
     [InlineData("{\"prompt\":5}")]

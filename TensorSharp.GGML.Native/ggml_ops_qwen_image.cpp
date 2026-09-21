@@ -135,6 +135,64 @@ TSG_EXPORT int TSGgml_Conv2d(const TSGgmlConv2dDesc* d)
     catch (...) { set_last_error("Conv2d: unknown error."); return 0; }
 }
 
+// Spatial VAE attention with query tiling. Q/K/V are channel-planar [3,C,H*W].
+// Each query still attends to every key: tiling bounds scratch without changing
+// the softmax domain or introducing image seams. This also handles the 2.1 VAE's
+// 768/1152-channel heads, which are too wide for many flash-attention backends.
+TSG_EXPORT int TSGgml_QwenVaeAttention(const float* qkv, float* output, int channels, int sequence)
+{
+    try {
+        if (!qkv || !output || channels <= 0 || sequence <= 0 ||
+            static_cast<int64_t>(channels) * sequence > INT32_MAX / 3)
+            throw std::invalid_argument("QwenVaeAttention: invalid shape or pointers");
+        if (!ensure_backend()) return 0;
+        // Keep each score matrix at most 16 MiB, including for rectangular 2K.
+        const int tile = std::min(sequence, std::max(1, std::min(256, (4 * 1024 * 1024) / sequence)));
+        const size_t nodes = static_cast<size_t>((sequence + tile - 1) / tile) * 12 + 64;
+        ggml_init_params params{ggml_tensor_overhead() * (nodes + 64) + ggml_graph_overhead_custom(nodes, false), nullptr, true};
+        ContextHandle context(ggml_init(params));
+        if (!context.value) throw std::runtime_error("QwenVaeAttention: context allocation failed");
+        auto ctx = context.value;
+        auto input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, sequence, 3LL * channels);
+        ggml_set_input(input);
+        auto part = [&](int channel) {
+            return ggml_view_2d(ctx, input, sequence, channels, input->nb[1], channel * input->nb[1]);
+        };
+        auto q = ggml_cont(ctx, ggml_transpose(ctx, part(0)));
+        auto k = ggml_cont(ctx, ggml_transpose(ctx, part(channels)));
+        auto v = part(2 * channels);
+        auto result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, sequence, channels);
+        ggml_set_output(result);
+        auto graph = ggml_new_graph_custom(ctx, nodes, false);
+        for (int start = 0; start < sequence; start += tile) {
+            int count = std::min(tile, sequence - start);
+            auto queries = ggml_view_2d(ctx, q, channels, count, q->nb[1], start * q->nb[1]);
+            auto scores = ggml_mul_mat(ctx, k, queries);
+            ggml_prec_set_acc(scores, GGML_PREC_F32);
+            auto probs = ggml_soft_max_ext(ctx, scores, nullptr, 1.f / std::sqrt(static_cast<float>(channels)), 0.f);
+            auto values = ggml_mul_mat(ctx, probs, v);
+            ggml_prec_set_acc(values, GGML_PREC_F32);
+            auto destination = ggml_view_2d(ctx, result, count, channels, result->nb[1], start * sizeof(float));
+            // Expanding each copy in order lets gallocr recycle a tile's scores
+            // before evaluating the next tile, instead of retaining all scores.
+            ggml_build_forward_expand(graph, ggml_cpy(ctx, values, destination));
+        }
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i)
+            if (!backend_supports_op(ggml_graph_node(graph, i)))
+                throw std::runtime_error("QwenVaeAttention: operation unsupported by backend");
+        if (!alloc_graph_reuse_gallocr(graph)) throw std::runtime_error("QwenVaeAttention: graph allocation failed");
+        host_read_barrier();
+        ggml_backend_tensor_set(input, qkv, 0, ggml_nbytes(input));
+        if (compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
+            throw std::runtime_error("QwenVaeAttention: graph compute failed");
+        sync_backend(g_backend);
+        ggml_backend_tensor_get(result, output, 0, ggml_nbytes(result));
+        clear_last_error();
+        return 1;
+    } catch (const std::exception& e) { set_last_error(e.what()); return 0; }
+    catch (...) { set_last_error("QwenVaeAttention: unknown error"); return 0; }
+}
+
 // ============================================================================
 // Whole-VAE fused graph. The per-conv TSGgml_Conv2d path above runs the VAE as a
 // long C# chain: every conv re-uploads its weights AND the full feature map, then
