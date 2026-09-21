@@ -39,8 +39,8 @@ curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
 | 上传 | `/api/upload` 接受图像 / 视频 / 音频 / 文本 / **PDF** 文件；原生数字 PDF 返回抽取出的文本，扫描版 PDF 在加载了具备视觉能力的模型时返回逐页图像（`TS_PDF_MAX_PAGES` 限制读取页数） |
 | 图像编辑 | Qwen-Image-Edit（`qwen_image`）模型通过 `/api/image-edit` 与 `/api/image-edit/stream` 提供服务，而不是聊天端点 |
 | 视频生成 | 任何视频生成模型 —— MiniMax-H3（`minimax-h3`）、Wan 2.1 / 2.2（`wan`）—— 都通过 `/api/video-generate`、`/api/video-generate/stream` 与 `/v1/videos/generations` 提供服务；MiniMax-H3 在 MP4 之外还会返回一个 32 kHz 立体声 `.wav` 旁挂文件，`/api/models` 会告知当前加载的检查点接受哪些条件输入 |
-| Agent Skills | 技能目录来自 `--skills-dir`（或二进制文件旁的 `skills` 目录），在 `/v1/skills` 与 `/api/skills` 列出，也可通过 `POST /api/skills` 以 `.zip` 安装。所有聊天端点都可用 `"skills": [...]` 按请求选中。对同时支持工具声明与输出解析的模型族，模型自己的技能调用在服务端内部应答，因此客户端拿到完整回复；`qwen4exp` 等无工具模型族则以内联方式获得选中技能说明。`skills_run` 只有在服务启动时传入 `--skills-allow-exec` 才可用。 |
-| Agent 式代码执行 | `--code-exec` 会为支持工具调用的模型族加入进程内执行的 `shell`、`read_file`、`edit_file`、`write_file` 与 `apply_patch`。Web UI 每个聊天会话保留一个工作区；每个 OpenAI/Ollama HTTP 请求在内部轮次间使用私有工作区，响应结束后由服务删除。联网与安装软件包是相互独立且默认关闭的权限。 |
+| Agent Skills | 技能目录来自 `--skills-dir`（或二进制文件旁的 `skills` 目录），在 `/v1/skills` 与 `/api/skills` 列出，也可通过 `POST /api/skills` 以 `.zip` 安装。所有聊天端点都可用 `"skills": [...]` 按请求选中。对同时支持工具声明与输出解析的模型族（包括 Qwen 3.8 Flash Next，`qwen4exp`），模型自己的技能调用在服务端内部应答，因此客户端拿到完整回复；不支持完整工具闭环的模型族则以内联方式获得选中技能说明。`skills_run` 只有在服务启动时传入 `--skills-allow-exec` 才可用。 |
+| Agent 式代码执行 | `--code-exec` 会为支持工具调用的模型族加入进程内执行的 `shell`、`read_file`、`write_file` 与 `apply_patch`。Web UI 每个聊天会话保留一个工作区；每个 OpenAI/Ollama HTTP 请求在内部轮次间使用私有工作区，响应结束后由服务删除。联网与安装软件包是相互独立且默认关闭的权限。 |
 | 结构化输出 | OpenAI `response_format` 支持 `text`、`json_object`、`json_schema`；`response_format`（`json_object` / `json_schema`）不能与 `tools` 同时使用；只有声明了推理结束位置的模型家族（GPT-OSS、DeepSeek V4.1、Qwen 3.8 Flash Next、Gemma 4、Nemotron-H、Muse-Glimmer）允许与 `think` 同时使用 |
 
 > **网络安全：**服务监听 `0.0.0.0:5000`，没有 API Key 身份验证或内置 TLS。
@@ -135,7 +135,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gg
 
 ### 服务端 Agent 式代码执行
 
-代码执行必须显式开启。下面是一条较保守的本地启动命令：启用五个内置工具，
+代码执行必须显式开启。下面是一条较保守的本地启动命令：启用四个内置工具，
 同时只监听环回地址，并让模型生成的命令保持离线。Linux 需要 `bwrap` 0.12.0
 或更高版本，macOS 则使用系统自带的 Seatbelt 沙箱：
 
@@ -456,8 +456,8 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 的一行描述会占用上下文；`SKILL.md` 正文与所需的参考文件由模型通过内置的
 `skills_list` / `skills_read` 工具自取，而这些工具**由服务端自己执行**，因此你拿到的
 是一条普通回复，而不是一个需要客户端去执行的工具调用。这套渐进披露循环同时要求
-工具声明与输出解析支持。Qwen 3.8 Flash Next（`qwen4exp`）目前没有结构化工具解析器，
-因此会以内联方式获得选中技能说明，也不会拿到技能或代码执行工具。
+工具声明与输出解析支持。Qwen 3.8 Flash Next（`qwen4exp`）会把 Qwen XML 格式的调用
+解析为结构化工具调用，支持这套循环；启用 `--code-exec` 后也可使用代码执行工具。
 
 `skills_discovery` 可选，默认为 `true` —— 模型还会看到本次请求*没有*选中的那些技能的
 名称与描述，以便自己挑出你没想到要点名的那个。设为 `false` 则把本次请求严格限制在它
@@ -484,7 +484,7 @@ curl -X POST http://localhost:5000/api/chat/ollama \
 已经留在对话中。
 
 服务端使用 `--code-exec` 启动后，同一个进程内循环还可使用 `shell`、`read_file`、
-`edit_file`、`write_file` 与 `apply_patch`。这些内置调用始终留在 TensorSharp 内部；
+`write_file` 与 `apply_patch`。这些内置调用始终留在 TensorSharp 内部；
 工作区、沙箱、网络、安装与制品行为见[服务端 Agent 式代码执行](#服务端-agent-式代码执行)。
 
 ---
@@ -774,8 +774,8 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 返回的是一条普通的 `chat.completion`。对支持工具调用的模型族，所有内置技能或代码
 调用都发生在服务端内部；OpenAI SDK 无需改动，也不会看到它无法执行的内置调用。
-调用者定义的工具仍会照常返回。包括 `qwen4exp` 在内、没有结构化工具解析器的模型族
-使用选中技能内联回退，并且不会获得代码工具。
+调用者定义的工具仍会照常返回。Qwen 3.8 Flash Next（`qwen4exp`）支持这两条路径。
+没有结构化工具解析器的模型族使用选中技能内联回退，并且不会获得代码工具。
 
 ```python
 from openai import OpenAI

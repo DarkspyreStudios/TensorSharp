@@ -3,17 +3,15 @@
 
 Exercises both compression ratios, shared caches, candidate filtering, delayed
 hyper-connections, Engram, and mixed Q2_K/Q8_0/F32 weight storage. Not a language
-model. Requires numpy, tokenizers, and gguf.
+model. Requires numpy and gguf.
 """
 import argparse
-import importlib.util
 import json
 from pathlib import Path
 
 import numpy as np
-from gguf import GGUFWriter, GGMLQuantizationType
+from gguf import GGUFWriter, GGMLQuantizationType, GGUFValueType
 from gguf.quants import quantize, dequantize
-from tokenizers import Tokenizer, models
 
 
 def main():
@@ -56,13 +54,7 @@ def main():
         # shared head, so a fixture meant to exercise it has to use that width.
         c["head_dim"], c["qk_rope_head_dim"] = 512, 64
     tokens = [f"t{i}" for i in range(c["vocab_size"])]
-    tokenizer = Tokenizer(models.WordLevel({token: i for i, token in enumerate(tokens)}, unk_token="t2"))
-    module_spec = importlib.util.spec_from_file_location("dsv41_prepare", Path(__file__).with_name("dsv41-prepare.py"))
-    prepare = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(prepare)
-    sidecar, provenance, _ = prepare.prepare(config, tokenizer)
-    (args.output_dir / "deepseek41.engram.bin").write_bytes(sidecar)
-    (args.output_dir / "deepseek41.config.json").write_text(json.dumps(dict(config=config, fixture=True, **provenance), indent=2) + "\n")
+    (args.output_dir / "deepseek41.config.json").write_text(json.dumps(dict(config=config, fixture=True), indent=2) + "\n")
     writer = GGUFWriter(args.output_dir / "deepseek41-fixture.gguf", "deepseek41")
     writer.add_name("DeepSeek V4.1 deterministic numerical fixture")
     uints = {
@@ -80,6 +72,9 @@ def main():
         "rope.scaling.original_context_length": c["rope_scaling"]["original_max_position_embeddings"],
         "engram.head_count": c["engram_n_heads"], "engram.key_length": c["engram_head_dim"],
         "engram.max_ngram_size": c["engram_max_ngram_size"],
+        "engram.pad_id": c["engram_pad_token_id"],
+        "attention.indexer.candidate_top_k": c["candidate_topk_blocks"],
+        "attention.indexer.candidate_block_size": c["candidate_block_size"],
     }
     floats = {
         "attention.layer_norm_rms_epsilon": c["rms_norm_eps"], "expert_weights_scale": c["routed_scaling_factor"],
@@ -95,6 +90,15 @@ def main():
     writer.add_bool("deepseek41.expert_weights_norm", True)
     writer.add_array("deepseek41.attention.compress_ratios", c["compress_ratios"])
     writer.add_array("deepseek41.engram.layer_ids", c["engram_layer_ids"])
+    # Fixed synthetic lookup data keeps historical numerical fixtures stable.
+    # Production hash arrays are read from GGUF; no tokenizer reconstruction is used.
+    writer.add_array("deepseek41.engram.token_map", list(range(c["vocab_size"])))
+    writer.add_key_value("deepseek41.engram.multipliers",
+                        [29662608052400909, 1873410163432121, 13919202536988139],
+                        GGUFValueType.ARRAY, GGUFValueType.UINT64)
+    writer.add_array("deepseek41.engram.primes", [97, 101, 103, 107])
+    writer.add_array("deepseek41.engram.offsets", [0, 97, 198, 301])
+    writer.add_int32("deepseek41.attention.indexer.candidate_source_layer", c["candidate_source_layer_id"])
     writer.add_array("deepseek41.swiglu_clamp_exp", [10.0] * 5)
     writer.add_array("deepseek41.swiglu_clamp_shexp", [10.0] * 5)
     writer.add_tokenizer_model("gpt2")

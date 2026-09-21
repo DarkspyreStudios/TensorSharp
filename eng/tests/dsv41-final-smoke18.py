@@ -154,7 +154,7 @@ def main():
     elif args.trace_after:
         command += ["--trace-after-dir", str(output / "trace-after")]
     paths = [library, reference_log, reference_path, tokens, smoke_source, Path(__file__).resolve(),
-             checkpoint_manifest, model.parent / "deepseek41.engram.bin", model.parent / "deepseek41.config.json"]
+             checkpoint_manifest]
     manifest = dict(scope=__doc__, command=command, explicit_environment=settings,
                     trace_mode="fresh_slot_after_untraced_primary" if args.trace_after else "primary" if args.trace else "none",
                     removed_override_names=sorted(set(removed)), gpu_processes_before=processes.stdout,

@@ -16,14 +16,45 @@ using TensorSharp.AgentHost.Skills;
 namespace TensorSharp.AgentHost.CodeExec
 {
     /// <summary>
-    /// Turns a code failure into a small, actionable edit loop. Tracebacks are useful to
-    /// a human, but a model also needs an explicit choice between changing the faulty
-    /// region and sending the entire file again. This hint is emitted only by callers
-    /// that offered the persistent file tools for the current request.
+    /// Adds bounded guidance to observed execution failures. Source-edit hints are
+    /// emitted only when persistent file tools were offered; runtime compatibility
+    /// hints depend on the actual result and never change sandbox policy.
     /// </summary>
     public static class CodeRepairHint
     {
         private const int MaxSourceBytes = 1024 * 1024;
+        private const int MaxSandboxDiagnosticChars = 64 * 1024;
+
+        /// <summary>
+        /// Explain an application's explicit refusal to initialize a nested sandbox.
+        /// The hint never changes policy and is withheld without evidence that the
+        /// failed process ran inside the host's filesystem sandbox.
+        /// </summary>
+        public static string? NestedSandboxFailure(ConfinedResult result, bool hostSandboxActive)
+        {
+            if (!hostSandboxActive || !result.Started || result.Ok || result.TimedOut
+                || string.IsNullOrEmpty(result.SandboxName)
+                || string.Equals(result.SandboxName, "none", StringComparison.OrdinalIgnoreCase)
+                || (!HasSandboxReinitializationDiagnostic(result.Stderr)
+                    && !HasSandboxReinitializationDiagnostic(result.Stdout)))
+                return null;
+
+            return "\nThe application reported forbidden-sandbox-reinit while already inside the host OS sandbox. "
+                + "Check the application's documented launch or configuration options for compatibility with "
+                + "existing OS confinement, apply its supported setting, and retry. Keep the host OS sandbox enabled.\n";
+        }
+
+        private static bool HasSandboxReinitializationDiagnostic(string? text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return false;
+            const string marker = "forbidden-sandbox-reinit";
+            if (text.Length <= MaxSandboxDiagnosticChars)
+                return text.Contains(marker, StringComparison.OrdinalIgnoreCase);
+            int half = MaxSandboxDiagnosticChars / 2;
+            return text.AsSpan(0, half).Contains(marker, StringComparison.OrdinalIgnoreCase)
+                || text.AsSpan(text.Length - half).Contains(marker, StringComparison.OrdinalIgnoreCase);
+        }
 
         private static readonly Regex PythonFrame = new(
             "^\\s*File \\\"(?<path>[^\\\"]+)\\\", line (?<line>[0-9]+)(?:, in .*)?\\s*$",
@@ -57,7 +88,7 @@ namespace TensorSharp.AgentHost.CodeExec
                     out string? displayPath, out string? fullPath, out int line))
             {
                 // Inline code and installed-library frames have no workspace file the
-                // declared editors can change. Naming edit_file there would prescribe
+                // declared patch tool can change. Naming apply_patch there would prescribe
                 // an impossible next action; the original diagnostic remains intact.
                 return null;
             }
@@ -140,11 +171,10 @@ namespace TensorSharp.AgentHost.CodeExec
             }
 
             sb.Append("Fix the smallest incorrect region with `")
-              .Append(ShellTools.EditToolName)
-              .Append("` (or `").Append(ShellTools.PatchToolName)
-              .Append("` when the fix spans files), then run the same check again. Do not use `")
+              .Append(ShellTools.PatchToolName)
+              .Append("` for a change in one file or across multiple files, then run the same check again. Do not use `")
               .Append(ShellTools.WriteToolName)
-              .Append("` or re-type the whole file for a local bug. If the exact edit no longer "
+              .Append("` or re-type the whole file for a local bug. If the patch context no longer "
                     + "matches, read that region and retry against its current text.\n");
 
             return sb.ToString();

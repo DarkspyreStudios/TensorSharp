@@ -40,7 +40,7 @@
 #include "ggml_ops_matmul_precision.h"
 #include "ggml_ops_attention_precision.h"
 #include "ggml_ops_scheduler_alloc.h"
-#include "dsv41_engram.h"
+#include "dsv41_engram_gguf.h"
 #include "dsv41_raw_gather.h"
 #include "dsv41_truncate.h"
 #include "dsv41_dspark.h"
@@ -50,6 +50,7 @@
 #include "dsv41_engram_io.h"
 #include "dsv41_engram_advice.h"
 #include "dsv4_file_warm.h"
+#include "dsv4_exact_read.h"
 #include "ggml_ops_deepseek41_vision.h"
 #include "ggml_ops_deepseek41_tp.h"
 #if defined(TSG_GGML_TEST_HOOKS)
@@ -1195,20 +1196,22 @@ static bool dsv4_upload_parallel(const shard_files & shards, std::vector<load_jo
             }
             if (staging.size() < j.len) staging.resize(j.len);
 
-#if defined(_WIN32)
-            _fseeki64(f, (long long) j.file_off, SEEK_SET);
-#else
-            fseeko(f, (off_t) j.file_off, SEEK_SET);
-#endif
             auto t_read0 = std::chrono::steady_clock::now();
-            const size_t got = fread(staging.data(), 1, j.len, f);
+            const auto read = tsg_dsv4::read_range_exact(staging.data(), j.len, j.file_off,
+                [&](uint64_t offset, void * data, size_t length) {
+                    return tsg_dsv4::fread_at(f, offset, data, length);
+                }, [&](const tsg_dsv4::exact_read_retry & retry) {
+                    fprintf(stderr, "[dsv4] read retry %u/5 for %s: %zu/%zu bytes read, "
+                            "resume offset %" PRIu64 " of %s, errno=%d (%s), backoff=%ums\n",
+                            retry.number, j.t->name, retry.bytes, retry.requested, retry.offset,
+                            shards.paths[j.shard].c_str(), retry.error, strerror(retry.error), retry.delay_ms);
+                });
             auto t_read1 = std::chrono::steady_clock::now();
-            if (got != j.len)
+            if (!read.ok)
             {
-                // Not a truncated file (dsv4_check_shard_complete already ruled
-                // that out), so name the exact read that failed.
-                fprintf(stderr, "[dsv4] short read for %s: %zu bytes at offset %zu of %s\n",
-                        j.t->name, j.len, j.file_off, shards.paths[j.shard].c_str());
+                char error[256];
+                tsg_dsv4::format_exact_read_failure(error, sizeof(error), read, j.len, j.file_off);
+                fprintf(stderr, "[dsv4] %s in %s: %s\n", j.t->name, shards.paths[j.shard].c_str(), error);
                 failed.store(true, std::memory_order_relaxed);
                 break;
             }
@@ -2347,36 +2350,6 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         tsg::report_load_refusal( "[dsv4] missing/invalid deepseek4 metadata\n");
         return nullptr;
     }
-    if (hp.v41)
-    {
-        const int64_t tid = gguf_find_key(g0, "tokenizer.ggml.tokens");
-        if (tid < 0) throw std::runtime_error("V4.1 tokenizer metadata is missing");
-        const uint32_t vocab = (uint32_t) gguf_get_arr_n(g0, tid);
-        uint64_t hash = UINT64_C(14695981039346656037);
-        for (uint32_t i = 0; i < vocab; i++)
-            hash = tsg_dsv41::engram_data::fingerprint_token(hash, gguf_get_arr_str(g0, tid, i));
-        std::string path(gguf_path);
-        const auto slash = path.find_last_of("/\\");
-        path = (slash == std::string::npos ? "" : path.substr(0, slash + 1)) + "deepseek41.engram.bin";
-        m->engram = tsg_dsv41::engram_data::load(path, vocab, hash);
-        hp.kv_sources = m->engram.kv_source_layer_ids;
-        hp.index_sources = m->engram.index_source_layer_ids;
-        hp.candidate_source = m->engram.candidate_source_layer_id;
-        hp.candidate_topk = m->engram.candidate_topk_blocks;
-        hp.candidate_block = m->engram.candidate_block_size;
-        if (hp.kv_sources.back() >= hp.n_layer || hp.index_sources.back() >= hp.n_layer)
-            throw std::runtime_error("V4.1 shared-cache source exceeds layer count");
-        if (m->engram.layers.back().id >= hp.n_layer)
-            throw std::runtime_error("V4.1 Engram layer exceeds layer count");
-        if (hp.candidate_source >= 0 &&
-            std::find(hp.index_sources.begin(), hp.index_sources.end(), hp.candidate_source) == hp.index_sources.end())
-            throw std::runtime_error("V4.1 candidate source must own an indexer");
-        if (hp.swiglu_clamp_exp.empty()) hp.swiglu_clamp_exp.assign(hp.n_layer, 10.0f);
-        if (hp.swiglu_clamp_shexp.empty()) hp.swiglu_clamp_shexp = hp.swiglu_clamp_exp;
-    }
-    metadata_owner.reset();
-    metadata_tensors_owner.reset();
-
     // --- gather tensor sources across shards ---
     std::map<std::string, tensor_source> sources;
     std::vector<size_t> layer_bytes(hp.n_layer, 0);
@@ -2438,6 +2411,31 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
         gguf_free(g);
         ggml_free(meta);
     }
+
+    if (hp.v41)
+    {
+        m->engram = tsg_dsv41::load_engram_gguf(g0, [&](const std::string & name) {
+            const auto it = sources.find(name);
+            return it == sources.end() ? std::vector<int64_t>{}
+                : std::vector<int64_t>(it->second.ne, it->second.ne + 4);
+        });
+        hp.kv_sources = m->engram.kv_source_layer_ids;
+        hp.index_sources = m->engram.index_source_layer_ids;
+        hp.candidate_source = m->engram.candidate_source_layer_id;
+        hp.candidate_topk = m->engram.candidate_topk_blocks;
+        hp.candidate_block = m->engram.candidate_block_size;
+        if (hp.kv_sources.back() >= hp.n_layer || hp.index_sources.back() >= hp.n_layer)
+            throw std::runtime_error("V4.1 shared-cache source exceeds layer count");
+        if (m->engram.layers.back().id >= hp.n_layer)
+            throw std::runtime_error("V4.1 Engram layer exceeds layer count");
+        if (hp.candidate_source >= 0 &&
+            std::find(hp.index_sources.begin(), hp.index_sources.end(), hp.candidate_source) == hp.index_sources.end())
+            throw std::runtime_error("V4.1 candidate source must own an indexer");
+        if (hp.swiglu_clamp_exp.empty()) hp.swiglu_clamp_exp.assign(hp.n_layer, 10.0f);
+        if (hp.swiglu_clamp_shexp.empty()) hp.swiglu_clamp_shexp = hp.swiglu_clamp_exp;
+    }
+    metadata_owner.reset();
+    metadata_tensors_owner.reset();
 
     // --- vocab size from tok_embd ---
     // Its size is also where the split learns how the root bytes really land:
@@ -3166,7 +3164,7 @@ static dsv4_model * dsv4_load(const char * gguf_path, int n_gpu_req, int n_ctx, 
                 L.engram_q->ne[0] != hp.n_embd || L.engram_q->ne[1] != hp.hc_mult ||
                 L.engram_wkv->ne[0] != m->engram.hash_columns() * m->engram.head_dim ||
                 L.engram_wkv->ne[1] != (hp.hc_mult + 1) * hp.n_embd))
-                throw std::runtime_error("V4.1 Engram tensor dimensions do not match prepared metadata");
+                throw std::runtime_error("V4.1 Engram tensor dimensions do not match embedded metadata");
         }
     }
 

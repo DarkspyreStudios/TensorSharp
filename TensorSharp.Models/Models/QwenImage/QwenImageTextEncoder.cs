@@ -32,18 +32,27 @@ namespace TensorSharp.Models.QwenImage
         public int Start;          // index of first image-pad token
         public int Count;          // number of image-pad tokens (= llm_h * llm_w)
         public int GridH, GridW;   // vision patch grid (before 2x merge)
-        public float[] Embeds;     // [Count, 3584] merged vision embeddings
+        public float[][] DeepStack; // additions after the first three language blocks
+        public float[] Embeds;     // [Count, hidden] merged vision embeddings
     }
 
     internal sealed class QwenImageTextEncoder : ModelBase
     {
         private readonly int _numHeads, _numKVHeads, _headDim, _numLayers;
         private readonly float _ropeBase, _eps;
+        private readonly bool _qwenImage21;
+        internal IAllocator ConditionerAllocator => _allocator;
 
         public int HiddenSize => Config.HiddenSize;
 
-        public QwenImageTextEncoder(string ggufPath, BackendType backend) : base(ggufPath, backend)
+        public QwenImageTextEncoder(string ggufPath, BackendType backend, bool qwenImage21 = false) : base(ggufPath, backend)
         {
+            _qwenImage21 = qwenImage21;
+            if (qwenImage21)
+            {
+                try { QwenImage21CompanionValidation.ValidateText(_gguf); }
+                catch { base.Dispose(); throw; }
+            }
             Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") ?? "qwen2vl" };
             ParseBaseConfig();
             _numHeads = Config.NumHeads;
@@ -58,9 +67,10 @@ namespace TensorSharp.Models.QwenImage
         }
 
         /// <summary>
-        /// Run the trunk over <paramref name="tokens"/> and return the post-final-norm hidden
-        /// states as a row-major <c>[seqLen, hidden]</c> float array (matches
-        /// transformers <c>outputs.hidden_states[-1]</c>). Caller drops the template prefix.
+        /// Run the trunk over <paramref name="tokens"/> and return row-major
+        /// <c>[seqLen, hidden]</c> conditioning. The original Qwen-Image uses final-normalized
+        /// hidden states; Qwen-Image-2.1 uses the last block before final RMSNorm.
+        /// Caller drops the appropriate model-specific template prefix.
         /// </summary>
         // M-RoPE 3D positions [3*seq] = (t[seq], h[seq], w[seq]); for text-only all three equal.
         private int[] _mropePos;
@@ -118,6 +128,25 @@ namespace TensorSharp.Models.QwenImage
                     Tensor res = Ops.Add(hidden, hidden, ffnOut);
                     if (!ReferenceEquals(res, hidden)) { hidden.Dispose(); hidden = res; }
                 }
+                if (_qwenImage21 && imgs != null)
+                {
+                    float* hp = GetFloatPtr(hidden);
+                    foreach (var img in imgs)
+                    {
+                        if (img.DeepStack == null || layer >= img.DeepStack.Length) continue;
+                        var extra = img.DeepStack[layer];
+                        for (int i = 0; i < img.Count; i++)
+                            for (int d = 0; d < Config.HiddenSize; d++)
+                                hp[(long)(img.Start + i) * Config.HiddenSize + d] += extra[(long)i * Config.HiddenSize + d];
+                    }
+                    InvalidateTensorDeviceCache(hidden);
+                }
+            }
+            if (_qwenImage21)
+            {
+                var output = TensorToHostFloat(hidden, (long)seq * Config.HiddenSize);
+                hidden.Dispose();
+                return output; // Qwen-Image-2.1 uses the last block before output_norm.
             }
             using (Tensor finalNorm = RMSNormOp(hidden, "output_norm.weight"))
             {
@@ -162,6 +191,11 @@ namespace TensorSharp.Models.QwenImage
             Tensor k = LinearWithBias(input, $"{prefix}.attn_k.weight", $"{prefix}.attn_k.bias");
             Tensor v = LinearWithBias(input, $"{prefix}.attn_v.weight", $"{prefix}.attn_v.bias");
 
+            if (_qwenImage21)
+            {
+                NormalizeHeads(q, $"{prefix}.attn_q_norm.weight", _numHeads, seq);
+                NormalizeHeads(k, $"{prefix}.attn_k_norm.weight", _numKVHeads, seq);
+            }
             ApplyMRoPE(q, _numHeads, seq);
             ApplyMRoPE(k, _numKVHeads, seq);
 
@@ -230,7 +264,7 @@ namespace TensorSharp.Models.QwenImage
                     for (int i = 0; i < half; i++)
                     {
                         if (i >= acc + MRopeSection[sec]) { acc += MRopeSection[sec]; sec++; }
-                        int comp = sec;                                  // 0/1/2 -> t/h/w
+                        int comp = _qwenImage21 ? InterleavedRopeAxis(i) : sec; // 0/1/2 -> t/h/w
                         int position = pos[comp * seq + s];
                         float freq = (float)Math.Pow(_ropeBase, -2.0 * i / _headDim);
                         float ang = position * freq;
@@ -242,6 +276,24 @@ namespace TensorSharp.Models.QwenImage
                 }
             });
             InvalidateTensorDeviceCache(data);
+        }
+
+        internal static int InterleavedRopeAxis(int frequency) =>
+            frequency % 3 == 1 && frequency < 60 ? 1 : frequency % 3 == 2 && frequency < 60 ? 2 : 0;
+
+        private unsafe void NormalizeHeads(Tensor x, string weight, int heads, int seq)
+        {
+            float* data = GetFloatPtr(x);
+            float* gamma = GetFloatPtr(_weights[weight]);
+            Parallel.For(0, seq * heads, row =>
+            {
+                float* p = data + (long)row * _headDim;
+                double ss = 0;
+                for (int d = 0; d < _headDim; d++) ss += (double)p[d] * p[d];
+                float inv = 1f / MathF.Sqrt((float)(ss / _headDim) + _eps);
+                for (int d = 0; d < _headDim; d++) p[d] *= inv * gamma[d];
+            });
+            InvalidateTensorDeviceCache(x);
         }
 
         private unsafe Tensor LinearWithBias(Tensor input, string weightName, string biasName)
@@ -258,6 +310,7 @@ namespace TensorSharp.Models.QwenImage
                     float* row = rPtr + (long)s * outDim;
                     for (int d = 0; d < dim; d++) row[d] += bPtr[d];
                 });
+                InvalidateTensorDeviceCache(result);
             }
             return result;
         }
@@ -272,6 +325,7 @@ namespace TensorSharp.Models.QwenImage
                 float x = g[i];
                 g[i] = (x / (1f + MathF.Exp(-x))) * u[i];
             });
+            InvalidateTensorDeviceCache(gate);
         }
 
         private unsafe float[] TensorToHostFloat(Tensor t, long count)
@@ -329,16 +383,22 @@ namespace TensorSharp.Models.QwenImage
                 {
                     if (i >= acc + MRopeSection[sec]) { acc += MRopeSection[sec]; sec++; }
                     float freq = (float)Math.Pow(_ropeBase, -2.0 * i / hd);
-                    float ang = pos[sec * seq + s] * freq;
+                    float ang = pos[(_qwenImage21 ? InterleavedRopeAxis(i) : sec) * seq + s] * freq;
                     float c = MathF.Cos(ang), sn = MathF.Sin(ang);
                     cos[b + i] = c; cos[b + half + i] = c;
                     sin[b + i] = sn; sin[b + half + i] = sn;
                 }
             });
 
+            int deepCount = _qwenImage21 && imgs != null ? 3 : 0;
+            var deep = new float[(long)deepCount * seq * H];
+            if (imgs != null)
+                foreach (var img in imgs)
+                    for (int l = 0; l < Math.Min(deepCount, img.DeepStack?.Length ?? 0); l++)
+                        Array.Copy(img.DeepStack[l], 0, deep, ((long)l * seq + img.Start) * H, (long)img.Count * H);
             var outArr = new float[(long)seq * H];
             bool ok;
-            fixed (float* xp = x, cp = cos, sp = sin, op = outArr)
+            fixed (float* xp = x, cp = cos, sp = sin, op = outArr, dp = deep)
             fixed (QwenTeLayerW* lp = _fusedLayers)
             {
                 var a = new QwenTeTrunkArgs
@@ -348,7 +408,7 @@ namespace TensorSharp.Models.QwenImage
                     Layers = (IntPtr)lp, NumLayers = _numLayers,
                     StructBytes = System.Runtime.InteropServices.Marshal.SizeOf<QwenTeTrunkArgs>(),
                     Hidden = H, Heads = _numHeads, KvHeads = _numKVHeads, HeadDim = hd, Seq = seq,
-                    Eps = Config.Eps,
+                    Eps = Config.Eps, DeepStack = (IntPtr)dp, DeepStackCount = deepCount,
                 };
                 ok = GgmlBasicOps.TryQwenTeTrunk(in a);
             }
@@ -402,10 +462,12 @@ namespace TensorSharp.Models.QwenImage
                         Gate = W($"{p}.ffn_gate.weight", null),
                         Up = W($"{p}.ffn_up.weight", null),
                         Down = W($"{p}.ffn_down.weight", null),
+                        QNorm = _qwenImage21 ? F32Stable($"{p}.attn_q_norm.weight") : IntPtr.Zero,
+                        KNorm = _qwenImage21 ? F32Stable($"{p}.attn_k_norm.weight") : IntPtr.Zero,
                         MaskKind = 1,   // causal
                     };
                 }
-                _fusedFinalNorm = F32Stable("output_norm.weight");
+                _fusedFinalNorm = _qwenImage21 ? IntPtr.Zero : F32Stable("output_norm.weight");
                 _fusedLayers = layers;
                 return true;
             }

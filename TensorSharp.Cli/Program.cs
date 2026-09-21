@@ -877,15 +877,21 @@ namespace TensorSharp.Cli
             // "Picture 1", "Picture 2", ... in listed order.
             if (model is TensorSharp.Models.QwenImage.QwenImageModel qwenImageModel)
             {
-                if (imagePathList.Count == 0)
+                if (imagePathList.Count == 0 && !qwenImageModel.IsVersion21)
                 {
                     Console.Error.WriteLine("Qwen-Image-Edit requires --image <input.png> (repeatable for multi-image edits). Optionally --prompt, --output, --diffusion-steps, --cfg, --diffusion-seed.");
                     return;
                 }
                 string prompt = editPrompt
                     ?? (inputFile != null && File.Exists(inputFile) ? File.ReadAllText(inputFile).Trim() : "");
-                string outPath = outputFile ?? "edited.png";
-                RunImageEdit(qwenImageModel, imagePathList, prompt, outPath, diffusionStepsSet ? diffusionSteps : 0, cfgScaleSet ? cfgScale : 0f, diffusionSeed, imageWidth, imageHeight);
+                if (imagePathList.Count == 0 && string.IsNullOrWhiteSpace(prompt))
+                {
+                    Console.Error.WriteLine("Qwen-Image-2.1 text-to-image generation requires --prompt <description> or --input prompt.txt.");
+                    Environment.ExitCode = 1;
+                    return;
+                }
+                string outPath = outputFile ?? (imagePathList.Count == 0 ? "generated.png" : "edited.png");
+                RunImageEdit(qwenImageModel, imagePathList, prompt, outPath, diffusionStepsSet ? diffusionSteps : 0, cfgScaleSet ? cfgScale : 0f, diffusionSeed, imageWidth, imageHeight, negativePrompt);
                 return;
             }
 
@@ -1933,7 +1939,7 @@ namespace TensorSharp.Cli
 
         static void RunImageEdit(TensorSharp.Models.QwenImage.QwenImageModel model,
             IReadOnlyList<string> imagePaths, string prompt, string outputPath, int steps, float cfgScale, int seed,
-            int width = 0, int height = 0)
+            int width = 0, int height = 0, string negativePrompt = null)
         {
             foreach (var path in imagePaths)
             {
@@ -1943,7 +1949,7 @@ namespace TensorSharp.Cli
                     return;
                 }
             }
-            Console.WriteLine($"=== Qwen-Image-Edit ===");
+            Console.WriteLine(model.IsVersion21 ? "=== Qwen-Image-2.1 ===" : "=== Qwen-Image-Edit ===");
             for (int i = 0; i < imagePaths.Count; i++)
                 Console.WriteLine($"  input{(imagePaths.Count > 1 ? $" {i + 1}" : "  ")}: {imagePaths[i]}");
             Console.WriteLine($"  prompt : {prompt}");
@@ -1951,7 +1957,7 @@ namespace TensorSharp.Cli
 
             var inputs = new List<TensorSharp.Models.QwenImage.RgbImage>();
             foreach (var path in imagePaths)
-                inputs.Add(TensorSharp.Models.QwenImage.ImageIO.Load(path));
+                inputs.Add(TensorSharp.Models.QwenImage.ImageIO.Load(path, preserveAlpha: model.IsVersion21));
             var p = new TensorSharp.Models.QwenImage.QwenImageParams
             {
                 Steps = steps,
@@ -1959,15 +1965,16 @@ namespace TensorSharp.Cli
                 Seed = seed,
                 Width = width,
                 Height = height,
+                NegativePrompt = negativePrompt ?? " ",
             };
             if (width > 0 && height > 0)
                 Console.WriteLine($"  explicit output size {width}x{height} (bypasses the VRAM area clamp)");
             var sw = Stopwatch.StartNew();
-            var output = model.EditImage(prompt, inputs, p);
+            var output = inputs.Count == 0 ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
             sw.Stop();
             TensorSharp.Models.QwenImage.ImageIO.SavePng(outputPath, output);
-            Console.WriteLine($"Saved {output.Width}x{output.Height} edited image to {outputPath} " +
-                $"({sw.Elapsed.TotalSeconds:F1}s, {sw.Elapsed.TotalMilliseconds / Math.Max(1, steps):F0} ms/step)");
+            Console.WriteLine($"Saved {output.Width}x{output.Height} image to {outputPath} " +
+                $"({sw.Elapsed.TotalSeconds:F1}s)");
         }
 
         static void RunVideoGeneration(TensorSharp.Models.Video.IVideoGenerationModel model,
@@ -3289,7 +3296,7 @@ namespace TensorSharp.Cli
         /// It is passed rather than assumed: this took the <c>DeclareTools()</c> overload
         /// whose <c>persists</c> defaults to true, so a CLI without a workspace would have
         /// been offered the file tools and the patcher — every call to which refuses,
-        /// because all four need a directory that outlives the call.
+        /// because all three need a directory that outlives the call.
         /// </param>
         /// <summary>
         /// The six editing rules for the tools that were actually declared, or the empty
@@ -3305,7 +3312,7 @@ namespace TensorSharp.Cli
                 tools.Any(t => string.Equals(t?.Name, name, StringComparison.Ordinal));
 
             return CodePrompt.Block(
-                fileTools: Declared(SkillToolNames.EditFile) && Declared(SkillToolNames.ReadFile),
+                fileTools: Declared(SkillToolNames.ReadFile) && Declared(SkillToolNames.WriteFile),
                 hasPatch: Declared(SkillToolNames.ApplyPatch));
         }
 

@@ -19,7 +19,7 @@ using TensorSharp.MLX;
 
 namespace TensorSharp.Models
 {
-    public class Qwen35VisionEncoder : IDisposable
+    public partial class Qwen35VisionEncoder : IDisposable
     {
         private readonly Dictionary<string, Tensor> _weights = new();
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
@@ -30,6 +30,7 @@ namespace TensorSharp.Models
         private readonly Dictionary<long, (Tensor Cos, Tensor Sin)> _ropeDeviceCache = new();
         private readonly IAllocator _allocator;
         private readonly bool _useNativeAttention;
+        private readonly bool _qwenImage21;
         // Direct-CUDA backend. Tensor data lives in device memory and every raw
         // host pointer checkout (TensorComputePrimitives.GetFloatPointer) forces a
         // synchronous DtoH copy plus a re-upload on the next kernel, so the encoder
@@ -72,12 +73,14 @@ namespace TensorSharp.Models
         /// </summary>
         public int TemporalPatchSize => _weights.ContainsKey("v.patch_embd.weight.1") ? 2 : 1;
 
-        public Qwen35VisionEncoder(string mmProjPath, IAllocator allocator)
+        public Qwen35VisionEncoder(string mmProjPath, IAllocator allocator, bool qwenImage21 = false)
         {
+            _qwenImage21 = qwenImage21;
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
-            var gguf = new GgufFile(mmProjPath);
+            using var gguf = new GgufFile(mmProjPath);
+            if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);
 
             _imageSize = (int)gguf.GetUint32("clip.vision.image_size", 768);
             _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 16);
@@ -102,7 +105,6 @@ namespace TensorSharp.Models
 
             LoadWeights(gguf);
             CombineTemporalPatchWeights();
-            gguf.Dispose();
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -182,7 +184,7 @@ namespace TensorSharp.Models
             return EncodeCore(firstFrame, secondFrame, resizedH, resizedW);
         }
 
-        private unsafe Tensor EncodeCore(float[] pixelValues, float[] secondFrame, int resizedH, int resizedW)
+        private unsafe Tensor EncodeCore(float[] pixelValues, float[] secondFrame, int resizedH, int resizedW, List<Tensor> deepStack = null)
         {
             ArgumentNullException.ThrowIfNull(pixelValues);
             int factor = checked(_patchSize * _spatialMergeSize);
@@ -225,7 +227,7 @@ namespace TensorSharp.Models
             // round-tripping dispatches per block. Falls back to the per-block
             // loop on any failure. CPU-allocator path keeps the per-block loop.
             bool wholeEncoderDone = false;
-            if (_useNativeAttention && s_wholeEncoderFusedEnabled)
+            if (deepStack == null && _useNativeAttention && s_wholeEncoderFusedEnabled)
             {
                 wholeEncoderDone = TryWholeEncoderFused(blockOrdered, numPatches, headDim, halfDim,
                     ropeCache.CosTable, ropeCache.SinTable);
@@ -238,6 +240,8 @@ namespace TensorSharp.Models
                         Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
                     blockOrdered = EncoderBlock(blockOrdered, i, numPatches, headDim, halfDim,
                         ropeCache.CosTable, ropeCache.SinTable);
+                    if (deepStack != null && _weights.ContainsKey($"v.deepstack.{i}.norm.weight"))
+                        deepStack.Add(ProjectDeepStack(blockOrdered, i, numPatches));
                     Trace($"block{i}", blockOrdered);
                     // Flush MLX's lazy graph at every block boundary. Without this
                     // the [numHeads, numPatches, numPatches] attention-scores
@@ -278,7 +282,7 @@ namespace TensorSharp.Models
 
             using var fc1 = LinearForwardWithBias(mergedContig, "mm.0.weight", "mm.0.bias");
             mergedContig.Dispose();
-            Ops.GELU(fc1, fc1);
+            ApplyVisionGelu(fc1);
 
             var projected = LinearForwardWithBias(fc1, "mm.2.weight", "mm.2.bias");
 
@@ -734,7 +738,7 @@ namespace TensorSharp.Models
             Trace($"{prefix}.postAttn", hidden);
 
             // Fused MLP path: LayerNorm + up + GELU + down + residual in one GPU dispatch.
-            if (_useNativeAttention
+            if (!_qwenImage21 && _useNativeAttention
                 && _weights.TryGetValue($"{prefix}.ln2.weight", out var ln2W)
                 && _weights.TryGetValue($"{prefix}.ln2.bias", out var ln2B)
                 && _weights.TryGetValue($"{prefix}.ffn_up.weight", out var upW)
@@ -1090,7 +1094,7 @@ namespace TensorSharp.Models
         private Tensor VisionMLP(Tensor input, string prefix)
         {
             using var fc1Out = LinearForwardWithBias(input, $"{prefix}.ffn_up.weight", $"{prefix}.ffn_up.bias");
-            Ops.GELU(fc1Out, fc1Out);
+            ApplyVisionGelu(fc1Out);
             return LinearForwardWithBias(fc1Out, $"{prefix}.ffn_down.weight", $"{prefix}.ffn_down.bias");
         }
 

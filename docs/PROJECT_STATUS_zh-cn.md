@@ -18,10 +18,10 @@ TensorSharp 是面向 GGUF 模型的原生 .NET 10 推理引擎。当前源码�
   伴随文件。服务后端是 `ggml_cuda`；`ggml_cpu` 用同一套图跑标量回退实现，`cpu` 则运行
   纯 C# 的 V4.1 执行器，两者都是正确性与可移植性通道；`cuda` 用 Direct CUDA 引擎自己的
   内核运行 V4.1，但尚无数值门禁；`ggml_vulkan` 与 `ggml_metal` 需要
-  `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会拒绝该检查点。每一种量化都必须先准备好
-  Engram sidecar 才能运行——社区 GGUF 仓库都不附带，需用 `eng/dsv41-prepare.py` 生成。
-  Q2_K 与 Q4_K_M 均已测试；在 Q4_K_M 上两张 Engram 表各 51.5 GiB，只能留在主机内存映射
-  中，因此在 8x46 GB 上必须把路由专家卸载到 CPU（见
+  `TS_DSV41_ALLOW_NON_CUDA_GPU=1`；`mlx` 会拒绝该检查点。当前 vcruz305 GGUF 已包含
+  Engram 权重与哈希常量，TensorSharp 直接读取，无需生成或提供单独的 Engram 文件。
+  Q2_K 与 Q4_K_M 的历史测试与当前文件的验证分别记录；Q4_K_M 的两张 Engram 表各 51.5 GiB。
+  在 8x46 GB 上，这些表留在主机内存映射中，路由专家需要卸载到 CPU（见
   [量化报告](validation/deepseek41-quants/README.md)）。多 GPU 指的是按层切分；routed-MoE 张量并行藏在 `TS_DSV41_TP`
   之后，实测比按层切分更慢。并发请求各有独立槽位，但目前回退到逐槽前向，因此并发还不
   等于批处理的 GPU 吞吐；也没有 V4.1 的 DSpark。哪些已实测、哪些明确未验证，都记录在
@@ -81,8 +81,8 @@ TensorAgent 是使用 .NET MAUI 构建的 iOS/iPadOS 应用，在设备本地运
 | 连续批处理 | vLLM 风格分页 KV 缓存、基于内容哈希的前缀共享、共享前缀 checkpoint（所有会话共享的那段提示词末尾的状态会被克隆进每个新会话，因此新会话只需重新 prefill 自己的那条消息；适用于 GGML 上的 Gemma 4 与 Qwen 3.5/3.6，宿主还可通过 `IPrefixCheckpointStore` 让它跨进程重启存活）、迭代级调度器（默认启用，`--no-continuous-batching` 关闭）。分页池常驻主机内存，因此它买到的是内存效率与前缀复用，而不是随并发增长的吞吐。DeepSeek V4 与 GLM 5.x 在同一引擎上通过各自原生的 per-sequence slot 提供服务——压缩后的 MLA 每 token 只有一行缓存，没有可分页的布局——GLM 的批处理融合解码默认启用（设置 `TS_BATCHED_FUSED_DECODE=0` 可切回串行融合 decode；4 路并发下总吞吐 1.81 倍）。Qwen 3.8 Flash Next 出于同样的原因使用逐序列状态持有者——它的 GatedDeltaNet、PLE 与索引器状态同样没有可分页的布局。 |
 | 投机解码 | Qwen 3.6、GLM 5.2 与 GLM-5.3（三者均内嵌于 checkpoint——GLM-5.3 的 `blk.78` NextN 块本身是完整的，但它没有自己的 LM head，因此投机只在默认的按层切分下生效，即不传 `--tp` 时）以及 Gemma 4（独立草稿 GGUF，通过 `--draft-model` 加载）的 MTP / NextN 草稿头；DeepSeek V4 的 DSpark 块级起草（仅 `cuda` / `ggml_cuda`）、Muse-Glimmer 与 Qwen 3.8 的 DFlash / DFlash2 块级起草（Nemotron-H 拒绝投机解码：它的 verify 与 decode 内核结果不一致，投机输出会与普通解码不同）——这些都通过 `--draft-model` 加载独立的草稿 GGUF；此外还有一个不需要任何草稿权重的 n-gram（prompt-lookup）投机器，用 `--spec-type ngram` 选择，因而在任何检查点上都能用。每个输出 token 都取自主干的一行 logits，并由本次运行自身配置的采样器抽出，因此输出流与普通 decode 产生的完全相同。默认关闭；内嵌草稿头在 CLI 与服务端两端均以 `--spec` 启用，而对以独立 GGUF 发布的草稿器，传入 `--draft-model` 本身即可启用投机。 |
 | 张量并行 | Direct `cuda` 后端与 GGML CUDA / Vulkan 后端上的 Megatron-LM 列/行并行 TP（`--tp N` / `TENSORSHARP_TP_DEGREE`，CLI 与服务端均支持）；通过点对点 TCP 的多节点分布式 TP（`--tp-node-id` / `--tp-peers`），采用分层 AllReduce，CUDA P2P 不可用时自动回退到主机中转。覆盖全部自回归架构；GGML 上 Gemma 4 与 Qwen 3.5/3.6 使用 MoE 专家并行与融合的按 rank decode/prefill 计算图。GLM 5.x 默认按层切分，但 GGML GPU 后端上的 `--tp N` 会为 GLM 5.2、GLM-5.3 与 GLM-5.3-Flash 选择仅支持本地单进程的原生 TP（GLM-5.3-Flash 会切 KDA / MLA head 与路由专家隐藏行）；整个 GLM 家族都会在构建模型之前硬拒 `--tp-node-id` / `--tp-peers`，而在 GLM-5.3 上 `--tp N` 只是一个被接受的模式，而非已验证的配置——它会按 rank 复制 MLA 与索引器缓存，占用随之成倍增长、能装下的上下文随之缩短，并且该 checkpoint 上从未跑过 `--tp 1` 以上的配置（`--tp 8` 折算下来每个 rank 需要 41.7 GiB，放不进 46 GB 的卡）。本身不切分权重的架构把同一个 `--tp N` 当作按层切分——每张 GPU 拿一段连续的整层，DeepSeek V4 与 V4.1 即是如此（V4.1 上还可用 `TS_DSV41_TP=N` 打开实验性的 routed-MoE 张量并行，目前实测比按层切分更慢）；Qwen 3.8 Flash Next（`qwen4exp`）上可用 `TS_Q4E_LAYER_SPLIT=20,28` 覆盖自动均衡，遇到无法满足的切分会直接报错而不是静默忽略。启动时会打印实际采用的模式与每张 GPU 的层数/字节分配；两种模式都不支持的架构会在 stderr 上明说，并改用单卡运行。可选 Redis 支撑的 KV 缓存与 Responses API 存储。 |
-| Agent Skills | 技能目录来自 `--skills-dir`（或二进制旁的 `skills` 目录），也可通过 `POST /api/skills` 在运行期安装。在 `/v1/chat/completions`、`/v1/responses`、`/api/chat/ollama`（Ollama）与 `/api/chat`（Web UI）上用 `"skills": [...]` 按请求选中，CLI 上用 `--skill`。支持完整工具闭环的家族只接收元数据，并通过进程内应答的 `skills_list` / `skills_read` 激活说明；调用方自己的工具仍照常回传。脚本执行（`skills_run`）默认关闭。Mistral 3 以及没有可解析工具协议的家族（包括 `qwen4exp`）改为内联选中技能正文，且不提供技能 / 代码工具。 |
-| 智能体代码工作 | 可选的 `--code-exec` 在同一个有界“模型→工具”循环里提供 `read_file`、`edit_file`、`write_file`、`shell` 与原子 `apply_patch`。Web UI / CLI 聊天保留会话工作区；每个 OpenAI / Ollama 请求只在内部修复轮次间保留一个私有工作区，响应后删除。生成文件可作为产物下载。这是单模型的进程内循环；TensorSharp 目前不提供多智能体委派或逐命令审批工作流。 |
+| Agent Skills | 技能目录来自 `--skills-dir`（或二进制旁的 `skills` 目录），也可通过 `POST /api/skills` 在运行期安装。在 `/v1/chat/completions`、`/v1/responses`、`/api/chat/ollama`（Ollama）与 `/api/chat`（Web UI）上用 `"skills": [...]` 按请求选中，CLI 上用 `--skill`。支持完整工具闭环的家族（包括 Qwen 3.8 Flash Next，`qwen4exp`）只接收元数据，并通过进程内应答的 `skills_list` / `skills_read` 激活说明；调用方自己的工具仍照常回传。脚本执行（`skills_run`）默认关闭。Mistral 3 以及没有可解析工具协议的家族改为内联选中技能正文，且不提供技能 / 代码工具。 |
+| 智能体代码工作 | 可选的 `--code-exec` 在同一个有界“模型→工具”循环里提供 `read_file`、`write_file`、`shell` 与原子 `apply_patch`。Web UI / CLI 聊天保留会话工作区；每个 OpenAI / Ollama 请求只在内部修复轮次间保留一个私有工作区，响应后删除。生成文件可作为产物下载。这是单模型的进程内循环；TensorSharp 目前不提供多智能体委派或逐命令审批工作流。 |
 | 沙箱与权限 | 代码执行和技能脚本默认关闭。macOS 使用 Seatbelt，Linux 需要 `bwrap` 0.12.0+；`required` 模式在无法隔离时拒绝运行。Windows 代码执行必须显式传入 `--code-exec-unconfined`，Windows 技能脚本则需以 `--skills-sandbox preferred` 明确接受仅 job-object 的限制。技能脚本联网、代码联网与宿主代办装包是三个独立开关。 |
 | 服务端模型范围 | 通过 `--model` 显式托管单个 GGUF；可通过 `--mmproj` 显式指定投影器；不扫描目录。 |
 | 可观测性 | 结构化每轮日志、队列状态，以及 Web UI / Ollama / OpenAI 中的 KV 缓存复用指标。 |

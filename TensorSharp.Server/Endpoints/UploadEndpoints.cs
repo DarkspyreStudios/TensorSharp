@@ -33,6 +33,13 @@ public static class UploadEndpoints
         endpoints.MapPost("/api/image-edit/stream",
             (HttpContext ctx, WebUiAdapter adapter) => adapter.ImageEditStreamAsync(ctx))
             .DisableRequestTimeout();
+        // Qwen-Image-2.1 text-to-image, sharing the serialized diffusion worker.
+        endpoints.MapPost("/api/image-generate",
+            (HttpRequest req, WebUiAdapter adapter) => adapter.ImageGenerateAsync(req))
+            .DisableRequestTimeout();
+        endpoints.MapPost("/api/image-generate/stream",
+            (HttpContext ctx, WebUiAdapter adapter) => adapter.ImageGenerateStreamAsync(ctx))
+            .DisableRequestTimeout();
         // Wan text-to-video: prompt -> generated (downloadable) MP4.
         endpoints.MapPost("/api/video-generate",
             (HttpRequest req, WebUiAdapter adapter) => adapter.VideoGenerateAsync(req))

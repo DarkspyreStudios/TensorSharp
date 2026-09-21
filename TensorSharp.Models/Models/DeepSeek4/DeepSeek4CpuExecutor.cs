@@ -97,7 +97,7 @@ namespace TensorSharp.Models
             public WeightRef IndexerK;
             public float[] IndexerKNorm;
 
-            /// <summary>V4.1 Engram (layers named by the sidecar; null elsewhere).
+            /// <summary>V4.1 Engram (layers named by the GGUF; null elsewhere).
             /// EngramEmbd stays quantized and is read one 256-value row at a time:
             /// it is ~30 GiB and only 24 rows per token are ever touched.</summary>
             public int EngramIndex = -1;
@@ -132,8 +132,8 @@ namespace TensorSharp.Models
         private bool _isV41;
         private int _nExpertShared;
 
-        // V4.1 Engram. The sidecar carries the token map and bucket layout the
-        // GGUF does not; the history is per sequence and indexed by ABSOLUTE
+        // V4.1 Engram. GGUF metadata carries the token map and bucket layout;
+        // the history is per sequence and indexed by ABSOLUTE
         // position, which is what makes a chunked prompt hash the same as a
         // one-shot one.
         private Dsv41EngramData _engram;
@@ -241,7 +241,7 @@ namespace TensorSharp.Models
             OpenShards(ggufPath);
             ParseHparams();
             if (_isV41)
-                LoadEngramSidecar(ggufPath);
+                LoadEngramMetadata();
 
             var shardSelected = new bool[_shards.Count];
             bool anySelected = false;
@@ -418,24 +418,12 @@ namespace TensorSharp.Models
             _compCorr1 = MathF.Min(_nRot - 1, MathF.Ceiling(YarnCorrDim(_nRot, _nCtxOrig, _yarnBetaSlow, _compressRopeBase)));
         }
 
-        /// <summary>
-        /// Reads <c>deepseek41.engram.bin</c> from beside the checkpoint. The GGUF
-        /// conversion keeps neither the compressed token map nor the bucket
-        /// layout, so V4.1 cannot address an Engram row without it. The sidecar is
-        /// bound to the checkpoint by a fingerprint over the tokenizer, because
-        /// nothing else would catch a sidecar built from a different vocabulary.
-        /// </summary>
-        private void LoadEngramSidecar(string ggufPath)
+        /// <summary>Reads embedded Engram metadata and derives cache-sharing
+        /// topology from the checkpoint's tensor ownership across all shards.</summary>
+        private void LoadEngramMetadata()
         {
-            string[] tokens = _shards[0].GetStringArray("tokenizer.ggml.tokens")
-                ?? throw new InvalidOperationException("DeepSeek V4.1 tokenizer metadata is missing");
-            ulong fingerprint = 14695981039346656037UL;
-            foreach (string token in tokens)
-                fingerprint = Dsv41EngramData.FingerprintToken(fingerprint, token);
-
-            string directory = Path.GetDirectoryName(Path.GetFullPath(ggufPath));
-            string sidecar = Path.Combine(directory ?? string.Empty, "deepseek41.engram.bin");
-            _engram = Dsv41EngramData.Load(sidecar, (uint)tokens.Length, fingerprint);
+            _engram = Dsv41EngramData.Load(_shards[0],
+                name => _tensorMap.TryGetValue(name, out var entry) ? entry.Info : null);
             _v41KvSource = new int[_nLayer];
             _v41IndexSource = new int[_nLayer];
 
@@ -481,7 +469,7 @@ namespace TensorSharp.Models
             }
         }
 
-        // Filled by LoadEngramSidecar, consumed by LoadWeights (which builds the
+        // Filled by LoadEngramMetadata, consumed by LoadWeights (which builds the
         // Layer objects afterwards).
         private int[] _v41KvSource, _v41IndexSource;
 
@@ -1083,7 +1071,7 @@ namespace TensorSharp.Models
             {
                 Layer L = _layers[il];
 
-                // ---- Engram (V4.1, on the layers the sidecar names) ----
+                // ---- Engram (V4.1, on the layers the GGUF metadata names) ----
                 // Runs before attention and rewrites the residual in place, which
                 // is what build_engram does in the native graph.
                 if (L.EngramIndex >= 0)

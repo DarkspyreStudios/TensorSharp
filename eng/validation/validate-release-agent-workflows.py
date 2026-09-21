@@ -2,8 +2,10 @@
 """Exercise real server skill discovery, built-in file tools and shell execution.
 
 Unlike client-simulated tool fixtures, this retains the Web UI SSE tool events
-and independently downloads result artifacts. A host without a working OS
-sandbox cannot pass execution cases; refusal evidence is reported as blocked.
+and independently downloads result artifacts. By default, a host without a
+working OS sandbox cannot pass execution cases. --sandbox-off explicitly tests
+functional execution on a host started with its sandbox disabled and records
+that limitation; it makes no sandbox validation claim.
 """
 from concurrent.futures import ThreadPoolExecutor
 import argparse
@@ -28,8 +30,8 @@ CASES = {
                   "expected": "release-shell-4821", "tools": ["shell"], "execution": True},
     "code_generation_run": {"prompt": "Create sum_numbers.py in the request workspace using write_file. Its function sum_numbers(n) must return the sum of the integers 1 through n. Use shell to run the program for n=37 and verify n=0 gives 0 and n=1 gives 1. Save result.json with exactly {\"n\":37,\"sum\":703,\"tests_passed\":true}. Return the artifact download link. Do not claim a test ran if shell refuses.",
                             "tools": ["write_file", "shell"], "artifact": {"n": 37, "sum": 703, "tests_passed": True}, "execution": True},
-    "code_edit_run": {"prompt": "Use write_file to create parity.py containing def parity(n): return 'even'. Use read_file to inspect it, then edit_file to fix it to return 'even' for even integers and 'odd' for odd integers. Use shell to run checks for -3,0,4,7. Write result.json containing exactly {\"outputs\":[\"odd\",\"even\",\"even\",\"odd\"],\"tests_passed\":true}. Return its download link. Do not claim execution if a tool refuses.",
-                      "tools": ["write_file", "read_file", "edit_file", "shell"], "artifact": {"outputs": ["odd", "even", "even", "odd"], "tests_passed": True}, "execution": True},
+    "code_edit_run": {"prompt": "Use write_file to create parity.py containing def parity(n): return 'even'. Use read_file to inspect it, then apply_patch to fix this single file to return 'even' for even integers and 'odd' for odd integers. Use shell to run checks for -3,0,4,7. Write result.json containing exactly {\"outputs\":[\"odd\",\"even\",\"even\",\"odd\"],\"tests_passed\":true}. Return its download link. Do not claim execution if a tool refuses.",
+                      "tools": ["write_file", "read_file", "apply_patch", "shell"], "artifact": {"outputs": ["odd", "even", "even", "odd"], "tests_passed": True}, "execution": True},
 }
 
 
@@ -72,12 +74,12 @@ def validate_result_artifact(client, artifacts, expected, result):
         raise RuntimeError("Downloaded final result artifact failed validation")
 
 
-def run(client, name, trial, timeout, sandbox_available, distinct_inputs=False, thinking=False):
+def run(client, name, trial, timeout, sandbox_available, distinct_inputs=False, thinking=False, sandbox_off=False):
     spec = case_spec(name, trial, distinct_inputs)
     session = create_session(client, 30)
     result = {"scenario": name, "trial": trial, "session": session, "status": "fail", "events": [], "artifacts": []}
     result["expected"] = spec.get("artifact", spec.get("expected"))
-    artifacts, answer, connection = {}, "", None
+    artifacts, answer, final_answer, connection = {}, "", "", None
     started = time.monotonic()
     try:
         body = {"messages": [{"role": "user", "content": spec["prompt"]}], "sessionId": session,
@@ -94,18 +96,27 @@ def run(client, name, trial, timeout, sandbox_available, distinct_inputs=False, 
         for event in iter_sse(response, started + timeout):
             result["events"].append(event)
             collect_artifacts(artifacts, event)
+            if event.get("skill_step"):
+                # SkillChatLoop forwards narration from tool-calling rounds too.
+                # WebUiChatService emits each completed skill_step before the
+                # next round's content, so only text after the final step is the
+                # final answer. Keep the combined text and events as evidence.
+                final_answer = ""
             if isinstance(event.get("replace"), str):
                 answer = event["replace"]
+                final_answer = event["replace"]
             elif isinstance(event.get("token"), str):
                 answer += event["token"]
+                final_answer += event["token"]
             if event.get("done"):
                 terminal = event
                 break
         result["answer"] = answer
+        result["final_answer"] = final_answer
         steps = [event for event in result["events"] if event.get("skill_step")]
         succeeded = {event["skill_step"] for event in steps if event.get("ok")}
         result["successful_tools"] = sorted(succeeded)
-        if spec.get("execution") and not sandbox_available:
+        if spec.get("execution") and not sandbox_available and not sandbox_off:
             result["status"] = "blocked"
             result["detail"] = "Host denies user namespace creation; a required OS sandbox is unavailable. Successful unconfined execution would not satisfy this case."
             result["refusal_events"] = [event for event in steps if not event.get("ok")]
@@ -115,7 +126,7 @@ def run(client, name, trial, timeout, sandbox_available, distinct_inputs=False, 
         missing = set(spec["tools"]) - succeeded
         if missing:
             raise RuntimeError("Required successful tool events absent: " + ", ".join(sorted(missing)))
-        if "expected" in spec and answer.strip() != spec["expected"]:
+        if "expected" in spec and final_answer.strip() != spec["expected"]:
             raise RuntimeError("Final answer differs from the independent expected value")
         if "artifact" in spec:
             validate_result_artifact(client, artifacts, spec["artifact"], result)
@@ -139,7 +150,10 @@ def main():
     parser.add_argument("--scenarios", default=",".join(CASES))
     parser.add_argument("--concurrency", default="1,4")
     parser.add_argument("--timeout", type=float, default=1200)
-    parser.add_argument("--sandbox-unavailable", action="store_true")
+    sandbox = parser.add_mutually_exclusive_group()
+    sandbox.add_argument("--sandbox-unavailable", action="store_true")
+    sandbox.add_argument("--sandbox-off", action="store_true",
+                         help="Validate functional execution on a host explicitly configured with sandbox=off; does not validate isolation")
     parser.add_argument("--thinking", action="store_true",
                         help="Exercise the same workflow and quality checks with thinking enabled")
     parser.add_argument("--distinct-inputs", action="store_true",
@@ -148,7 +162,8 @@ def main():
     client = HttpClient(args.url, 30)
     status, skills = client.json_request("GET", "/api/skills", None, 30)
     report = {"format_version": 1, "started_at_unix": time.time(), "skills_http_status": status,
-              "skills": skills, "sandbox_available": not args.sandbox_unavailable,
+              "skills": skills, "sandbox_available": False if args.sandbox_unavailable else (None if args.sandbox_off else True),
+              "execution_mode": "unconfined" if args.sandbox_off else "sandbox",
               "distinct_inputs": args.distinct_inputs,
               "thinking": args.thinking,
               "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -160,7 +175,8 @@ def main():
         for degree in [int(item) for item in args.concurrency.split(",")]:
             with ThreadPoolExecutor(max_workers=degree) as pool:
                 futures = [pool.submit(run, client, name, f"c{degree}-i{index}", args.timeout,
-                                       not args.sandbox_unavailable, args.distinct_inputs, args.thinking) for index in range(degree)]
+                                       not args.sandbox_unavailable and not args.sandbox_off,
+                                       args.distinct_inputs, args.thinking, args.sandbox_off) for index in range(degree)]
                 cases = [future.result() for future in futures]
             for case in cases:
                 case["concurrency"] = degree

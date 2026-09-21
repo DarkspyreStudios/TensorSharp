@@ -215,7 +215,7 @@ namespace TensorSharp.Models.QwenImage
             }
             else
             {
-                area = ResolveAutoArea(p.TargetArea, inputs.Length, steps, doCfgPass, offloadAllowed, ref offload, refAreaForCeiling);
+                area = ResolveAutoArea(p.ResolveTargetArea(version21: false), inputs.Length, steps, doCfgPass, offloadAllowed, ref offload, refAreaForCeiling);
                 img = ImageIO.ResizeToArea(inputs[0], area);
             }
             Dit.OffloadCpu = offload;

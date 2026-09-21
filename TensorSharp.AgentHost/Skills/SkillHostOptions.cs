@@ -86,6 +86,8 @@ namespace TensorSharp.AgentHost.Skills
         /// <summary>Directories to scan, in precedence order.</summary>
         public List<string> Roots { get; } = new();
 
+        private string? _defaultBinaryRoot;
+
         /// <summary>Skills selected up front, by name.</summary>
         public List<string> Selected { get; } = new();
 
@@ -232,13 +234,23 @@ namespace TensorSharp.AgentHost.Skills
 
         /// <summary>
         /// Layer environment variables under whatever the command line supplied, then
-        /// fall back to the conventional <c>skills</c> directory next to the binary.
+        /// fall back to repository <c>.agents/skills</c> roots and the conventional
+        /// <c>skills</c> directory next to the binary.
         /// </summary>
         /// <param name="baseDirectory">
         /// Where the host binary lives. The default root is created if missing, so an
         /// operator can drop a skill directory in and restart without any flag at all.
         /// </param>
-        public SkillHostOptions ApplyEnvironmentAndDefaults(string baseDirectory)
+        public SkillHostOptions ApplyEnvironmentAndDefaults(string baseDirectory) =>
+            ApplyEnvironmentAndDefaults(baseDirectory, Environment.CurrentDirectory);
+
+        /// <summary>Apply environment and defaults with an explicit working directory.</summary>
+        /// <param name="baseDirectory">Where the host binary lives.</param>
+        /// <param name="workingDirectory">
+        /// Directory from which repository skills are discovered when no roots were
+        /// configured. Null uses the process working directory.
+        /// </param>
+        public SkillHostOptions ApplyEnvironmentAndDefaults(string baseDirectory, string? workingDirectory)
         {
             if (Environment.GetEnvironmentVariable(DisableEnvVar) is { } disable
                 && !string.Equals(disable, "0", StringComparison.Ordinal))
@@ -282,8 +294,15 @@ namespace TensorSharp.AgentHost.Skills
                 AllowNetwork = true;
             }
 
-            if (Roots.Count == 0 && !string.IsNullOrWhiteSpace(baseDirectory))
-                Roots.Add(Path.Combine(baseDirectory, DefaultDirectoryName));
+            if (Roots.Count == 0)
+            {
+                Roots.AddRange(SkillDiscovery.RepositoryRoots(workingDirectory ?? Environment.CurrentDirectory));
+                if (!string.IsNullOrWhiteSpace(baseDirectory))
+                {
+                    _defaultBinaryRoot = Path.Combine(baseDirectory, DefaultDirectoryName);
+                    Roots.Add(_defaultBinaryRoot);
+                }
+            }
 
             return this;
         }
@@ -331,7 +350,7 @@ namespace TensorSharp.AgentHost.Skills
                 if (Directory.Exists(root))
                     continue;
 
-                if (createDefault)
+                if (createDefault || string.Equals(root, _defaultBinaryRoot, StringComparison.Ordinal))
                 {
                     try
                     {

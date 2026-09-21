@@ -12,6 +12,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using TensorSharp.AgentHost.Skills;
 
 namespace TensorSharp.AgentHost.CodeExec
 {
@@ -47,6 +48,18 @@ namespace TensorSharp.AgentHost.CodeExec
     /// </summary>
     public static class CodeEnvironment
     {
+        /// <summary>The shared executable search path for shell commands and skill scripts.</summary>
+        public static string SessionExecutablePath(SessionWorkspace workspace, string? hostPath) =>
+            string.Join(Path.PathSeparator, new[]
+            {
+                Path.Combine(workspace.EnvDirectory, "shim"),
+                VenvBin(workspace.EnvDirectory),
+                Path.Combine(workspace.EnvDirectory, "bin"),
+                Path.Combine(workspace.EnvDirectory, "node_modules", ".bin"),
+                Path.Combine(workspace.WorkDirectory, ".local", "bin"),
+                hostPath ?? string.Empty,
+            }.Where(path => path.Length > 0));
+
         // ---- a host with its own runtime ------------------------------------
 
         /// <summary>What a host told <see cref="Configure"/> about the runtime it embeds.</summary>
@@ -127,6 +140,33 @@ namespace TensorSharp.AgentHost.CodeExec
                 ? new[] { "node.exe" }
                 : new[] { "node" },
         };
+
+        /// <summary>
+        /// Prefer a runtime installed in this session's conventional .local prefix.
+        /// Resolve every link inside the work tree before selecting it; an executable
+        /// link must never authorize reading a host runtime or the user's home.
+        /// Embedded hosts keep their configured interpreter resolution unchanged.
+        /// </summary>
+        public static bool TryResolveSessionInterpreter(
+            SessionWorkspace workspace, CodeLanguage language, out string? path, out string? error)
+        {
+            if (!IsConfigured && Candidates.TryGetValue(language, out string[]? names))
+            {
+                string root = Path.GetFullPath(workspace.WorkDirectory);
+                foreach (string name in names)
+                {
+                    string candidate = Path.Combine(root, ".local", "bin", name);
+                    if (SkillPathGuard.TryResolveSymlinks(root, candidate, out string? resolved, out _)
+                        && resolved != null && IsUsableExecutable(resolved))
+                    {
+                        path = resolved;
+                        error = null;
+                        return true;
+                    }
+                }
+            }
+            return TryResolveInterpreter(language, out path, out error);
+        }
 
         /// <summary>
         /// Find the interpreter for <paramref name="language"/>, or explain why it cannot

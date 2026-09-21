@@ -150,12 +150,11 @@ public sealed class DeepSeek41DsparkIntegrationTests(ITestOutputHelper output)
         }
         string target = Environment.GetEnvironmentVariable("TS_TEST_DSV41_DSPARK_TARGET")!;
         string draft = Environment.GetEnvironmentVariable("TS_TEST_DSV41_DSPARK_HEAD")!;
-        // Derived from f3917170... by adding only the missing empty BPE merges
-        // metadata. All142 original tensor payloads and both sidecars are pinned
-        // byte-identical in prepare-dsv41-managed-fixture.py's manifest.
-        CheckHash(target, "b455020bd7500c5a835744fb189443451e0849331e15ac72557d58d5eafb13c4");
-        CheckHash(Path.Combine(Path.GetDirectoryName(target)!, "deepseek41.config.json"), "159a8b4c221953310a590a40b28c90181d8bc05e421d0f4ec49dda94360e96c0");
-        CheckHash(Path.Combine(Path.GetDirectoryName(target)!, "deepseek41.engram.bin"), "d9f9c28124c59c1df587ccd9eef24297c5eefa0aad1bcccc1939b8ded2f5f126");
+        // Derived from the embedded-Engram F32 fixture by adding empty BPE
+        // merges. All 142 original tensor payloads and Engram metadata remain
+        // identical; prepare-dsv41-managed-fixture.py records their manifest.
+        CheckHash(target, "245fc5b043c71af6a67854f139d9b4b4482c041b0da29c16f60296590a024712");
+        CheckHash(Path.Combine(Path.GetDirectoryName(target)!, "deepseek41.config.json"), "264618b0f475c0c6c735acff6cc2a5a14a4ba2ccaddc4c00f44c4c2e6a438207");
         CheckHash(draft, "edfdccb348e5e85c714fb8dfe38a61b2324105d1cbd5e14c738324a0940ef600");
         var model = new DeepSeek4Model(target, BackendType.GgmlCpu, draftModelPath: draft);
         try

@@ -1,11 +1,11 @@
 // Copyright (c) Zhongkai Fu. All rights reserved.
 // Licensed under the BSD-3-Clause license in the repository root.
-using System.Buffers.Binary;
+using TensorSharp.Runtime;
 
 namespace InferenceWeb.Tests;
 
 /// <summary>
-/// The Engram sidecar decides which of 384 million rows each token reads. A
+/// The Engram GGUF metadata decides which of 384 million rows each token reads. A
 /// single wrong multiplier, prime or offset selects a different row and changes
 /// every embedding silently, so the parser and the hashing are pinned here
 /// against an independently written expectation rather than against themselves.
@@ -22,63 +22,55 @@ public class Dsv41EngramDataTests : IDisposable
         }
     }
 
-    /// <summary>Builds a valid sidecar so the tests exercise the real parser.</summary>
-    private string WriteSidecar(
-        uint vocab = 8, uint compressed = 4, uint pad = 3,
-        uint maxNgram = 3, uint heads = 2, uint headDim = 16,
-        ulong tokenizerHash = 0xABCDEF0123456789UL,
-        int[] layerIds = null, uint[][] primesPerLayer = null,
-        ulong[][] multipliersPerLayer = null, int[] tokenMap = null,
-        int candidateSource = -1, uint candidateTopk = 0, uint candidateBlock = 0)
+    /// <summary>Creates embedded metadata with two distinct layer-major hash
+    /// layouts. The GGUF parser reads the file; tests may mutate metadata to
+    /// check rejection without allocating embedding-table payloads.</summary>
+    private GgufFile EmbeddedFixture()
     {
-        layerIds ??= new[] { 1, 5 };
-        uint columns = (maxNgram - 1) * heads;
-        primesPerLayer ??= layerIds.Select((_, li) =>
-            Enumerable.Range(0, (int)columns).Select(c => (uint)(11 + 2 * c + 4 * li)).ToArray()).ToArray();
-        multipliersPerLayer ??= layerIds.Select((_, li) =>
-            Enumerable.Range(0, (int)maxNgram).Select(j => (ulong)(2 * (j + 3 + li) + 1)).ToArray()).ToArray();
-        // Every compressed id must appear at least once.
-        tokenMap ??= Enumerable.Range(0, (int)vocab).Select(i => i % (int)compressed).ToArray();
-
-        var bytes = new List<byte>();
-        bytes.AddRange(System.Text.Encoding.ASCII.GetBytes("TSD41E01"));
-        void U32(uint v) { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); bytes.AddRange(b.ToArray()); }
-        void I32(int v) => U32(unchecked((uint)v));
-        void U64(ulong v) { Span<byte> b = stackalloc byte[8]; BinaryPrimitives.WriteUInt64LittleEndian(b, v); bytes.AddRange(b.ToArray()); }
-
-        U32(vocab); U32(compressed); U32(pad);
-        U32((uint)layerIds.Length); U32(maxNgram); U32(heads); U32(headDim);
-        U64(tokenizerHash);
-        I32(candidateSource); U32(candidateTopk); U32(candidateBlock);
-        U32(1); U32(1);                       // one kv source, one index source
-        I32(0);                               // kv source layer ids
-        I32(0);                               // index source layer ids
-        foreach (int v in tokenMap) I32(v);
-        for (int li = 0; li < layerIds.Length; li++)
+        string path = Path.Combine(Path.GetTempPath(), $"dsv41-engram-{Guid.NewGuid():N}.gguf");
+        using (var writer = new BinaryWriter(File.Create(path)))
         {
-            I32(layerIds[li]);
-            U64((ulong)primesPerLayer[li].Select(p => (long)p).Sum());
-            foreach (ulong m in multipliersPerLayer[li]) U64(m);
-            foreach (uint p in primesPerLayer[li]) U32(p);
-            long running = 0;
-            foreach (uint p in primesPerLayer[li]) { U64((ulong)running); running += p; }
+            writer.Write(0x46554747u); writer.Write(3u);
+            writer.Write(0UL); writer.Write(0UL);
         }
-
-        string path = Path.Combine(Path.GetTempPath(), $"dsv41-engram-{Guid.NewGuid():N}.bin");
-        File.WriteAllBytes(path, bytes.ToArray());
         _temp.Add(path);
-        return path;
+        var file = GgufFile.OpenWithoutSiblingShards(path);
+        var m = file.Metadata;
+        m["tokenizer.ggml.tokens"] = Enumerable.Range(0, 8).Select(i => $"token{i}").ToArray();
+        m["deepseek41.block_count"] = 6u;
+        m["deepseek41.engram.pad_id"] = 3u;
+        m["deepseek41.engram.max_ngram_size"] = 3u;
+        m["deepseek41.engram.head_count"] = 2u;
+        m["deepseek41.engram.key_length"] = 16u;
+        m["deepseek41.engram.layer_ids"] = new uint[] { 1, 5 };
+        m["deepseek41.engram.multipliers"] = new ulong[] { 7, 9, 11, 9, 11, 13 };
+        m["deepseek41.engram.primes"] = new uint[] { 11, 13, 15, 17, 15, 17, 19, 21 };
+        m["deepseek41.engram.offsets"] = new ulong[] { 0, 11, 24, 39, 0, 15, 32, 51 };
+        // The embedded pad ID is compressed already; TokenMap[3] != 3.
+        m["deepseek41.engram.token_map"] = new int[] { 0, 1, 2, 0, 3, 1, 2, 3 };
+        m["deepseek41.attention.compress_ratios"] = new uint[] { 2, 2, 1, 1, 1, 1 };
+        void Tensor(string name, params ulong[] shape) =>
+            file.Tensors[name] = new GgufTensorInfo { Name = name, Shape = shape, Type = GgmlTensorType.F32 };
+        Tensor("token_embd.weight", 16, 8);
+        Tensor("blk.1.engram_embd.weight", 16, 56);
+        Tensor("blk.5.engram_embd.weight", 16, 72);
+        Tensor("blk.0.attn_compressor_kv.weight", 16, 16);
+        Tensor("blk.2.attn_compressor_kv.weight", 16, 16);
+        Tensor("blk.0.indexer.attn_q_b.weight", 16, 16);
+        Tensor("blk.2.indexer.attn_q_b.weight", 16, 16);
+        Tensor("blk.4.indexer.attn_q_b.weight", 16, 16);
+        return file;
     }
 
     [Fact]
-    public void Load_ReadsEveryFieldOfAWellFormedSidecar()
+    public void Load_ReadsEveryFieldOfAWellFormedEmbeddedGguf()
     {
-        string path = WriteSidecar();
-        var data = Dsv41EngramData.Load(path, expectedVocab: 8, expectedTokenizerHash: 0xABCDEF0123456789UL);
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
 
         Assert.Equal(8u, data.VocabSize);
         Assert.Equal(4u, data.CompressedVocabSize);
-        Assert.Equal(3u, data.PadTokenId);
+        Assert.Equal(3u, data.PadId);
         Assert.Equal(3u, data.MaxNgramSize);
         Assert.Equal(2u, data.HeadCount);
         Assert.Equal(16u, data.HeadDim);
@@ -99,27 +91,82 @@ public class Dsv41EngramDataTests : IDisposable
     }
 
     [Theory]
-    [InlineData("vocab")]
-    [InlineData("hash")]
-    public void Load_RefusesASidecarFromADifferentCheckpoint(string mismatch)
+    [InlineData("deepseek41.engram.token_map")]
+    [InlineData("deepseek41.engram.multipliers")]
+    [InlineData("deepseek41.engram.primes")]
+    [InlineData("deepseek41.engram.offsets")]
+    public void Load_RequiresEmbeddedMetadata(string key)
     {
-        string path = WriteSidecar();
-        uint vocab = mismatch == "vocab" ? 9u : 8u;
-        ulong hash = mismatch == "hash" ? 1UL : 0xABCDEF0123456789UL;
-        Assert.Throws<InvalidDataException>(() => Dsv41EngramData.Load(path, vocab, hash));
+        using var file = EmbeddedFixture();
+        file.Metadata.Remove(key);
+        var error = Assert.Throws<InvalidDataException>(() => Dsv41EngramData.Load(file));
+        Assert.Contains(key, error.Message);
+    }
+
+    [Theory]
+    [InlineData("map-length")]
+    [InlineData("map-gap")]
+    [InlineData("map-negative")]
+    [InlineData("map-overflow")]
+    [InlineData("offset-gap")]
+    [InlineData("multiplier-even")]
+    [InlineData("multiplier-overflow")]
+    [InlineData("layer-order")]
+    [InlineData("table-rows")]
+    [InlineData("table-width")]
+    [InlineData("unlisted-table")]
+    [InlineData("vocab")]
+    [InlineData("pad")]
+    [InlineData("candidate")]
+    [InlineData("candidate-topk")]
+    [InlineData("candidate-topk-overflow")]
+    [InlineData("candidate-block-overflow")]
+    public void Load_RejectsInvalidEmbeddedGeometry(string fault)
+    {
+        using var file = EmbeddedFixture();
+        var m = file.Metadata;
+        switch (fault)
+        {
+            case "map-length": m["deepseek41.engram.token_map"] = new int[] { 0, 1, 2, 3 }; break;
+            case "map-gap": m["deepseek41.engram.token_map"] = new int[] { 0, 1, 2, 0, 4, 1, 2, 4 }; break;
+            case "map-negative": m["deepseek41.engram.token_map"] = new int[] { -1, 1, 2, 0, 3, 1, 2, 3 }; break;
+            case "map-overflow": m["deepseek41.engram.token_map"] = new ulong[] { 0, 1, 2, 0, 3, 1, 2, ulong.MaxValue }; break;
+            case "offset-gap": ((ulong[])m["deepseek41.engram.offsets"])[6]++; break;
+            case "multiplier-even": ((ulong[])m["deepseek41.engram.multipliers"])[0] = 8; break;
+            case "multiplier-overflow": ((ulong[])m["deepseek41.engram.multipliers"])[5] = ulong.MaxValue; break;
+            case "layer-order": m["deepseek41.engram.layer_ids"] = new uint[] { 5, 1 }; break;
+            case "table-rows": file.Tensors["blk.5.engram_embd.weight"].Shape[1]++; break;
+            case "unlisted-table": file.Tensors["blk.3.engram_embd.weight"] = file.Tensors["blk.5.engram_embd.weight"]; break;
+            case "table-width": file.Tensors["blk.5.engram_embd.weight"].Shape[0]++; break;
+            case "vocab": file.Tensors["token_embd.weight"].Shape[1]++; break;
+            case "pad": m["deepseek41.engram.pad_id"] = 4u; break;
+            case "candidate": m["deepseek41.attention.indexer.candidate_source_layer"] = 1; break;
+            case "candidate-topk-overflow": m["deepseek41.attention.indexer.candidate_top_k"] = 2147483648u; break;
+            case "candidate-block-overflow": m["deepseek41.attention.indexer.candidate_block_size"] = 2147483648u; break;
+            case "candidate-topk": m["deepseek41.attention.indexer.candidate_top_k"] = 0u; break;
+        }
+        Assert.Throws<InvalidDataException>(() => Dsv41EngramData.Load(file));
     }
 
     [Fact]
-    public void Load_RefusesBucketsThatDoNotTileTheTable()
+    public void Load_DerivesCacheOwnershipAndAppliesCandidateOverrides()
     {
-        // Offsets are written as the running sum; corrupt one and the layout is
-        // no longer a partition of the rows.
-        string path = WriteSidecar();
-        byte[] raw = File.ReadAllBytes(path);
-        int firstOffset = raw.Length - (8 * 4) - (4 * 4);   // last layer's first offset
-        BinaryPrimitives.WriteUInt64LittleEndian(raw.AsSpan(firstOffset), 999);
-        File.WriteAllBytes(path, raw);
-        Assert.Throws<InvalidDataException>(() => Dsv41EngramData.Load(path, 8, 0xABCDEF0123456789UL));
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
+        Assert.Equal(new[] { 0, 2 }, data.KvSourceLayerIds);
+        Assert.Equal(new[] { 0, 2, 4 }, data.IndexSourceLayerIds);
+        Assert.Equal(2, data.CandidateSourceLayerId);
+        Assert.Equal(2048u, data.CandidateTopkBlocks);
+        Assert.Equal(8u, data.CandidateBlockSize);
+        file.Metadata["deepseek41.attention.indexer.candidate_source_layer"] = 4;
+        file.Metadata["deepseek41.attention.indexer.candidate_top_k"] = 2u;
+        file.Metadata["deepseek41.attention.indexer.candidate_block_size"] = 2u;
+        data = Dsv41EngramData.Load(file);
+        Assert.Equal(4, data.CandidateSourceLayerId);
+        Assert.Equal(2u, data.CandidateTopkBlocks);
+        Assert.Equal(2u, data.CandidateBlockSize);
+        file.Metadata["deepseek41.attention.indexer.candidate_source_layer"] = -1;
+        Assert.Equal(-1, Dsv41EngramData.Load(file).CandidateSourceLayerId);
     }
 
     /// <summary>
@@ -131,8 +178,8 @@ public class Dsv41EngramDataTests : IDisposable
     [Fact]
     public void HashTokens_MatchesTheRecurrenceWrittenOutLonghand()
     {
-        string path = WriteSidecar();
-        var data = Dsv41EngramData.Load(path, 8, 0xABCDEF0123456789UL);
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
 
         int[] tokens = { 5, 2, 7, 0 };
         int[] history = null; int historyLength = 0;
@@ -142,7 +189,7 @@ public class Dsv41EngramDataTests : IDisposable
         Assert.Equal(data.Layers.Length * tokens.Length * (int)columns, actual.Length);
 
         int[] compressed = tokens.Select(t => data.TokenMap[t]).ToArray();
-        int padCompressed = data.TokenMap[data.PadTokenId];
+        int padCompressed = (int)data.PadId;
 
         for (int li = 0; li < data.Layers.Length; li++)
         {
@@ -171,8 +218,8 @@ public class Dsv41EngramDataTests : IDisposable
     [Fact]
     public void HashTokens_EveryRowLandsInsideItsOwnColumnBucket()
     {
-        string path = WriteSidecar();
-        var data = Dsv41EngramData.Load(path, 8, 0xABCDEF0123456789UL);
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
         int[] tokens = { 1, 6, 3, 4, 0, 7 };
         int[] history = null; int historyLength = 0;
         int[] rows = data.HashTokens(tokens, 0, ref history, ref historyLength);
@@ -201,8 +248,8 @@ public class Dsv41EngramDataTests : IDisposable
     [Fact]
     public void HashTokens_AnImagePositionBlocksItselfAndEveryLookbackThroughIt()
     {
-        string path = WriteSidecar();
-        var data = Dsv41EngramData.Load(path, 8, 0xABCDEF0123456789UL);
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
         uint columns = data.HashColumns;
 
         int[] history = null; int historyLength = 0;
@@ -229,8 +276,8 @@ public class Dsv41EngramDataTests : IDisposable
     [Fact]
     public void HashTokens_LooksBackIntoAnEarlierCall()
     {
-        string path = WriteSidecar();
-        var data = Dsv41EngramData.Load(path, 8, 0xABCDEF0123456789UL);
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
         uint columns = data.HashColumns;
 
         int[] whole = null; int wholeLen = 0;
@@ -257,29 +304,23 @@ public class Dsv41EngramDataTests : IDisposable
     [Fact]
     public void HashTokens_RefusesANonContiguousHistory()
     {
-        string path = WriteSidecar();
-        var data = Dsv41EngramData.Load(path, 8, 0xABCDEF0123456789UL);
+        using var file = EmbeddedFixture();
+        var data = Dsv41EngramData.Load(file);
         int[] history = null; int historyLength = 0;
         data.HashTokens(new[] { 1, 2 }, 0, ref history, ref historyLength);
         Assert.Throws<InvalidOperationException>(() =>
             data.HashTokens(new[] { 3 }, 5, ref history, ref historyLength));
     }
 
-    /// <summary>
-    /// The real sidecar from the DeepSeek-V4.1-Flash checkpoint, when it is
-    /// present. The synthetic ones above prove the parser is self-consistent;
-    /// only this one proves it agrees with what eng/dsv41-prepare.py writes.
-    /// Set TS_DSV41_ENGRAM_SIDECAR to the file to enable it.
-    /// </summary>
-    [Fact]
-    public void Load_ReadsTheRealCheckpointSidecar()
+    /// <summary>Validates the embedded metadata in the published checkpoint.
+    /// Unavailable checkpoints are reported as skipped, never passed.</summary>
+    [Dsv41RealGgufFact]
+    public void Load_ReadsTheRealCheckpointEmbeddedGguf()
     {
-        string path = Environment.GetEnvironmentVariable("TS_DSV41_ENGRAM_SIDECAR");
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return;   // not staged on this host
+        string path = Environment.GetEnvironmentVariable("TS_TEST_DSV41_REAL_GGUF");
 
-        var data = Dsv41EngramData.Load(path, expectedVocab: 129280,
-            expectedTokenizerHash: 1610858572546052822UL);
+        using var file = new GgufFile(path);
+        var data = Dsv41EngramData.Load(file);
 
         Assert.Equal(99092u, data.CompressedVocabSize);
         Assert.Equal(4u, data.MaxNgramSize);
@@ -315,20 +356,18 @@ public class Dsv41EngramDataTests : IDisposable
     /// <summary>
     /// The canonical hash oracle. These row ids were produced by a NumPy
     /// reference using the official tokenizer normalization, outside TensorSharp
-    /// entirely, and are pinned in the native test at
-    /// TensorSharp.GGML.Native/tests/dsv41_engram_test.cpp:92-116. Matching them
+    /// entirely. Matching them
     /// is what proves the managed hashing agrees with the checkpoint, including
     /// the image position at index 4 and the lookbacks it blocks.
-    /// Set TS_DSV41_ENGRAM_SIDECAR to the real sidecar to enable it.
+    /// Set TS_TEST_DSV41_REAL_GGUF to the real GGUF metadata to enable it.
     /// </summary>
-    [Fact]
+    [Dsv41RealGgufFact]
     public void HashTokens_MatchesTheCanonicalNumPyOracle()
     {
-        string path = Environment.GetEnvironmentVariable("TS_DSV41_ENGRAM_SIDECAR");
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return;
+        string path = Environment.GetEnvironmentVariable("TS_TEST_DSV41_REAL_GGUF");
 
-        var data = Dsv41EngramData.Load(path, 129280, 1610858572546052822UL);
+        using var file = new GgufFile(path);
+        var data = Dsv41EngramData.Load(file);
         Assert.Equal(new[] { 2, 8, 14, 20 }, data.KvSourceLayerIds);
         Assert.Equal(new[] { 2, 8, 14, 20, 24, 28, 32, 36 }, data.IndexSourceLayerIds);
         Assert.Equal(20, data.CandidateSourceLayerId);
@@ -376,14 +415,13 @@ public class Dsv41EngramDataTests : IDisposable
     /// C# executor splits every prompt longer than its microbatch, so this is the
     /// property that keeps long prompts correct.
     /// </summary>
-    [Fact]
+    [Dsv41RealGgufFact]
     public void HashTokens_ChunkingAPromptChangesNothing()
     {
-        string path = Environment.GetEnvironmentVariable("TS_DSV41_ENGRAM_SIDECAR");
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return;
+        string path = Environment.GetEnvironmentVariable("TS_TEST_DSV41_REAL_GGUF");
 
-        var data = Dsv41EngramData.Load(path, 129280, 1610858572546052822UL);
+        using var file = new GgufFile(path);
+        var data = Dsv41EngramData.Load(file);
         int[] tokens = { 0, 100, 101, 102, -1, 103, 104 };
         int columns = (int)data.HashColumns;
 
@@ -422,5 +460,15 @@ public class Dsv41EngramDataTests : IDisposable
             expected = (expected ^ b) * 1099511628211UL;
 
         Assert.Equal(expected, Dsv41EngramData.FingerprintToken(seed, "ab"));
+    }
+}
+
+public sealed class Dsv41RealGgufFactAttribute : FactAttribute
+{
+    public Dsv41RealGgufFactAttribute()
+    {
+        string path = Environment.GetEnvironmentVariable("TS_TEST_DSV41_REAL_GGUF");
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            Skip = "Requires TS_TEST_DSV41_REAL_GGUF pointing to the published DeepSeek V4.1 Flash first GGUF shard.";
     }
 }

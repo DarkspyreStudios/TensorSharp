@@ -30,7 +30,7 @@ def fixture(directory, second=None):
         'token_export_sha256': '3' * 64, 'capture_program_sha256': '4' * 64,
         'model_manifest_sha256': model['manifest_sha256'],
         'checkpoint_files': {'/models/model.gguf': {'bytes': 123, 'sha256': 'e' * 64}},
-        'engram_files': {'/models/engram.bin': {'bytes': 123, 'sha256': '5' * 64}},
+        'engram_storage': 'gguf-metadata',
         'tokenizer': {'first_gguf_sha256': 'e' * 64, 'vocab_size': 4, 'eos_ids': [3]}}
     rows = [{'row_id': f'request0/primary/{i}', 'request_id': 'request0', 'phase': 'primary',
              'slot_id': 0, 'call_index': i, 'position_before': i, 'input_token_count': 1,
@@ -41,7 +41,7 @@ def fixture(directory, second=None):
                 'shared_identity': identity, 'rows': rows, 'coverage': 'complete-primary'}
     observation = {'pid': 123, 'start_ticks': 456, 'boot_id': 'offline-fixture-boot',
                    'mapped_native_libraries': {'/app/libGgmlOps.so': native},
-                   **{name: identity[name] for name in ('native_source_sha256', 'checkpoint_files', 'engram_files', 'token_export_sha256')}}
+                   **{name: identity[name] for name in ('native_source_sha256', 'checkpoint_files', 'token_export_sha256')}}
     first = np.array([[0, 2, -1, 0.5], [0.1, 3, 0, -2]], dtype='<f4')
     captures = []
     for index, (variant, vectors) in enumerate([('non-tp', first), ('expert-tp7', first if second is None else second)]):

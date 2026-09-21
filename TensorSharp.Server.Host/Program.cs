@@ -618,7 +618,11 @@ catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string? loadRefu
 // later launches from the store attached above.
 if (!hostingOptions.EmbeddingsEnabled && hostingOptions.PrefixCacheEnabled
     && TensorSharp.Runtime.Scheduling.SchedulerConfig.FromEnvironment().EnablePrefixCaching
-    && !string.IsNullOrWhiteSpace(hostingOptions.StartupModelPath))
+    && !string.IsNullOrWhiteSpace(hostingOptions.StartupModelPath)
+    // Image/video diffusion models have no autoregressive chat prefix to prefill.
+    // Calling their chat adapter would emit a false startup failure before image serving.
+    && app.Services.GetRequiredService<ModelService>().Model is not
+        (TensorSharp.Models.QwenImage.QwenImageModel or TensorSharp.Models.Video.IVideoGenerationModel))
 {
     var warmupAdapter = app.Services.GetRequiredService<WebUiAdapter>();
     var warmupSessions = app.Services.GetRequiredService<SessionManager>();

@@ -21,7 +21,7 @@ import types
 
 import numpy as np
 
-COMPARATOR_SHA256 = 'b096ddef66b8fd8541dcc4c62c694b96dc7d1d93dbdf00137c51f8e489f3ed55'
+COMPARATOR_SHA256 = '76573227edefb7e199a0d8ea1bfe33fb16f93d5cadb0e06511a000fd6bd7bed0'
 SUPPORTED_SCOPE = 'primary-serialized-slot0'
 
 
@@ -350,7 +350,7 @@ class Observer:
         require(attestation['verification'] == 'publisher-hash-reuse-with-immutable-stat-attestation'
                 and attestation['model_manifest_sha256'] == identity['model_manifest_sha256'], 'Wrong independent immutable model attestation')
         stats = {}
-        for category in ('checkpoint_files', 'engram_files'):
+        for category in ('checkpoint_files',):
             require(set(attestation[category]) == set(identity[category]), 'Model attestation file set differs')
             for path, expected in identity[category].items():
                 item = attestation[category][path]
@@ -370,7 +370,7 @@ class Observer:
         stat = Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()
         return {'pid': os.getpid(), 'start_ticks': int(stat[19]), 'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                 'mapped_native_libraries': maps, 'native_source_sha256': identity['native_source_sha256'],
-                'checkpoint_files': identity['checkpoint_files'], 'engram_files': identity['engram_files'],
+                'checkpoint_files': identity['checkpoint_files'],
                 'token_export_sha256': identity['token_export_sha256'], 'model_stat_observations': stats,
                 'model_attestation_sha256': identity['model_attestation_sha256'],
                 'computation_environment': {name: value for name, value in os.environ.items()

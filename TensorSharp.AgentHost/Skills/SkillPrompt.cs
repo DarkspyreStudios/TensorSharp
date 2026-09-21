@@ -527,10 +527,12 @@ namespace TensorSharp.AgentHost.Skills
             {
                 sb.Append('\n').Append("### Skills selected for this conversation\n");
                 sb.Append(
-                    "These were chosen deliberately and are the ones to prefer. What follows is each skill's "
-                    + "name and description ONLY - the instructions themselves are not in this prompt and you "
-                    + "have not seen them. Use the ones whose description matches the task, not all of them, "
-                    + "and none of them if none matches, and say in one short line which you are using.\n");
+                    "These were chosen deliberately and are the ones to prefer when they match the task. "
+                    + "Say in one short line which you are using.\n");
+                if (inlined.Count == 0)
+                    sb.Append("Only names and descriptions follow; the instructions are not loaded.\n");
+                else
+                    sb.Append("Instructions inside <skill> blocks are already loaded; read any skill marked NOT loaded before using it.\n");
 
                 foreach (Skill skill in inlined)
                     AppendInlinedSkill(sb, skill, options);
@@ -552,7 +554,7 @@ namespace TensorSharp.AgentHost.Skills
                 }
             }
 
-            if (catalog.Count > 0)
+            if (catalog.Count > 0 || omitted > 0)
             {
                 sb.Append('\n').Append("### Other available skills\n");
                 sb.Append(
@@ -709,13 +711,19 @@ namespace TensorSharp.AgentHost.Skills
         /// </para>
         /// </summary>
         private const string SelectionWithTools =
-            "Determine the subject and requested action from the latest user message before choosing tools. "
-            + "Only use a skill if BOTH match its description. Skill availability does not imply relevance. "
-            + "If required details are missing, ask the user for them before calling tools. "
+            "Determine the subject and requested action from the latest user message and relevant conversation "
+            + "context before choosing tools. When the user supplies requested information or confirms a handoff "
+            + "is ready, resume the pending task unless they change or cancel it. "
+            + "Use a skill the user explicitly asks to use, or one whose description matches BOTH. "
+            + "Skill availability does not imply relevance. "
+            + "If required information or a choice is missing, ask a focused question and wait for the user's answer before "
+            + "dependent actions. Do not invent missing details. Continue only work that does not depend on them. "
+            + "Use the supplied answer to perform authorized actions yourself, such as filling a field, selecting "
+            + "an option, or clicking a control; verify the result and continue the task. "
             + "If no skill matches, respond directly or use another appropriate tool.";
 
         private const string UsageWithTools =
-            "- Decide first. Use a skill only when its described scope matches the user's current request. "
+            "- Decide first. Use a skill explicitly requested by name (including $name), or whose described scope matches the user's current request. "
             + "Needing current information alone does not make a skill relevant. If none matches, answer "
             + "normally or use another appropriate tool; do not call skills_list or skills_read just to start a turn.\n"
             + "- Load before using. Once you have chosen a matching skill, call "
@@ -727,14 +735,17 @@ namespace TensorSharp.AgentHost.Skills
             + "you have not actually read, and never report a skill's steps as done when you never "
             + "opened it.\n"
             + "- Paths are relative to the skill. A path such as scripts/extract.py means that file inside that "
-            + "skill's own directory; pass it to skills_read with the same skill name. Never treat it as a path "
-            + "on the host filesystem.\n"
+            + "skill's own directory; pass it to skills_read with the same skill name. Paths and home variables "
+            + "shown for another agent's installation are examples, not this host's actual locations. "
+            + "When skills_run is offered, run a bundled script with skills_run(skill=\"<name>\", "
+            + "path=\"scripts/tool.sh\", args=[\"argument\"]); the host resolves its location. "
+            + "Do not copy the wrapper into the workspace or guess a host path.\n"
             + "- Prefer what the skill ships. If it provides a script, run or adapt that script rather than "
             + "rewriting its logic. If it provides a template or asset, reuse it rather than recreating it.\n"
             + "- Read only what you need. Open the reference files the task actually calls for; do not load a "
             + "skill's whole reference directory speculatively.\n"
-            + "- If a file is truncated, continue from the offset the result reports until you have the part you "
-            + "need.\n"
+            + "- Read a selected SKILL.md completely: if truncated, continue from the reported offset until "
+            + "the end before following its instructions. Page other resources only as far as the task needs.\n"
             + "- If a skill cannot be applied — a file is missing, the instructions do not fit the task — say so "
             + "in one line, then continue with the best alternative.\n";
 

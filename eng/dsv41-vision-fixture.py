@@ -10,7 +10,6 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
-import struct
 
 import numpy as np
 import torch
@@ -63,7 +62,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--reference-source-dir", type=Path, required=True)
-    parser.add_argument("--parent-engram", type=Path, required=True)
+    parser.add_argument("--parent-model", type=Path, required=True, help="Parent text fixture GGUF")
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--preprocess", action="store_true")
     args = parser.parse_args()
@@ -71,9 +70,7 @@ def main():
     vision = module("dsv41_official_vision", args.reference_source_dir / "vision.py")
     processor = module("dsv41_official_processor", args.reference_source_dir / "image_processor.py")
     prepare = module("dsv41_prepare_vision", Path(__file__).with_name("dsv41-prepare-vision.py"))
-    with args.parent_engram.open("rb") as source:
-        header = source.read(44)
-    fingerprint = struct.unpack_from("<Q", header, 36)[0]
+    _, fingerprint = prepare.parent_tokenizer_identity(args.parent_model)
     config = dict(image_token_id=250, text_config=dict(hidden_size=256, num_hidden_layers=5),
         vision_config=dict(num_hidden_layers=2, hidden_size=128, num_attention_heads=2,
                            intermediate_size=192, patch_size=14, rope_theta=10000,

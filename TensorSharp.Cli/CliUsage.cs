@@ -81,8 +81,11 @@ namespace TensorSharp.Cli
                 new OptionHelp("--skills-dir <path>",
                     "Directory to scan for Agent Skills (SKILL.md bundles). A root may hold one skill or many, " +
                     "nested up to three levels, so a checkout of a skills repository works as-is. Repeat the " +
-                    "flag for several; earlier roots win a name clash. Default: the skills/ directory next to " +
-                    "the binary, created on first run (TS_SKILLS_DIR env var overrides, path-separated).",
+                    "flag for several; earlier roots win a name clash. Default: existing .agents/skills " +
+                    "directories from the working directory up to its Git repository root (nearest first), " +
+                    "then skills/ next to the binary, created on first run. Outside a repository only the " +
+                    "working directory is considered. Explicit roots or path-separated TS_SKILLS_DIR " +
+                    "replace these defaults; personal skill directories are not loaded automatically.",
                     "--skills-dir ./skills"),
                 new OptionHelp("--skill <name>",
                     "Use this skill for the run: its instructions go into the prompt and the model is told to " +
@@ -566,20 +569,19 @@ namespace TensorSharp.Cli
                     "Run chat-template rendering tests against every GGUF in the directory and exit (no inference).",
                     "--test-templates C:\\models"),
             }),
-            ("Image generation and editing (DiffusionGemma / Qwen-Image-Edit models)", new[]
+            ("Image generation and editing (DiffusionGemma / Qwen-Image models)", new[]
             {
                 new OptionHelp("--prompt <text>",
-                    "Edit instruction for Qwen-Image-Edit (alternative to --input). Reference multiple source " +
-                    "images as \"Picture 1\", \"Picture 2\", ... Default: empty.",
+                    "Image description for Qwen-Image-2.1; --image selects editing (alternative to --input). " +
+                    "Repeat --image for multiple references. Default: empty.",
                     "--prompt \"Make the sky look like sunset\""),
                 new OptionHelp("--cfg <f>",
-                    "Classifier-free guidance scale for image editing. Higher follows the prompt more strongly " +
-                    "but over-guides (distorts faces) past ~4. Typical range: 1.0-4.0. Default: 2.5 (Lightning " +
-                    "LoRA switches it to 1.0).",
+                    "Classifier-free guidance scale. Default: 1.0 for Qwen-Image-2.1 (one prediction per step); 2.5 for older " +
+                    "Qwen-Image-Edit checkpoints (1.0 with a Lightning LoRA).",
                     "--cfg 2.5"),
                 new OptionHelp("--diffusion-steps <N>",
-                    "Denoising steps. Range: >= 1. Default: 48 for DiffusionGemma; auto for Qwen-Image-Edit " +
-                    "(model/LoRA-dependent).",
+                    "Denoising steps. Range: >= 1. Default: 48 for DiffusionGemma, 40 for Qwen-Image-2.1; " +
+                    "30 for older Qwen-Image-Edit (model/LoRA-dependent).",
                     "--diffusion-steps 20"),
                 new OptionHelp("--diffusion-seed <N>",
                     "Random seed for the diffusion sampler. Default: 0.",
@@ -589,20 +591,20 @@ namespace TensorSharp.Cli
                     "the model's canvas length.",
                     "--diffusion-blocks 4"),
                 new OptionHelp("--width <px> / --height <px>",
-                    "Fixed output size for Qwen-Image-Edit. Range: > 0, capped at what VRAM allows. Default: 0 — " +
-                    "auto (source size, VRAM-clamped).",
+                    "Image output dimensions; set both together. Qwen-Image-2.1 requires multiples of 32. " +
+                    "Default: 0 — automatic (native 2048x2048 for Qwen-Image-2.1 text-to-image). Use 1024x1024 for faster drafts.",
                     "--width 1024 --height 768"),
                 new OptionHelp("--qwen-image-vae <path>",
-                    "Qwen-Image-Edit VAE GGUF. Default: same-directory scan next to the DiT model.",
+                    "Matching VAE GGUF or safetensors (2.1 requires its own VAE). Default: same-directory scan next to the DiT model.",
                     "--qwen-image-vae qwen-image-vae.gguf"),
                 new OptionHelp("--qwen-image-vl <path>",
-                    "Qwen2.5-VL text-encoder GGUF for Qwen-Image-Edit. Default: same-directory scan.",
+                    "Text encoder GGUF: Qwen3-VL-8B for 2.1; Qwen2.5-VL for older models. Default: same-directory scan.",
                     "--qwen-image-vl qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf"),
                 new OptionHelp("--qwen-image-mmproj <path>",
-                    "Vision projector GGUF for the Qwen-Image-Edit text encoder. Default: same-directory scan.",
+                    "Matching vision projector GGUF, required for image editing. Default: same-directory scan.",
                     "--qwen-image-mmproj Qwen2.5-VL-7B-mmproj-BF16.gguf"),
                 new OptionHelp("--qwen-image-lora <path>",
-                    "DiT LoRA (e.g. a Lightning step-distillation checkpoint), merged into the weights at load; " +
+                    "Earlier Qwen-Image DiT LoRA (not compatible with 2.1), merged into the weights at load; " +
                     "also switches the sampling defaults (steps, cfg 1.0). Default: none.",
                     "--qwen-image-lora Qwen-Image-Edit-Lightning-8steps.safetensors"),
                 new OptionHelp("--offload-cpu",
@@ -631,8 +633,8 @@ namespace TensorSharp.Cli
                     "at the same step count) or euler. Default: the model's own (unipc for Wan).",
                     "--sampler unipc"),
                 new OptionHelp("--negative-prompt <text>",
-                    "Video generation: negative prompt for classifier-free guidance. Default: the model's " +
-                    "official negative prompt. Unused at --cfg 1.0, where no negative pass runs.",
+                    "Image/video negative prompt for classifier-free guidance. Default: empty for Qwen-Image, " +
+                    "the model's official negative prompt for video. Unused at --cfg 1.0.",
                     "--negative-prompt \"static, blurry\""),
                 new OptionHelp("--cfg-cache-stride <N>",
                     "Guidance cache: run the unconditional CFG pass on one step in N and reuse the cached " +

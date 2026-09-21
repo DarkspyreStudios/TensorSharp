@@ -22,6 +22,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="InferenceWeb.Tests" />
     <InternalsVisibleTo Include="QwenImageEditBench" />
+    <InternalsVisibleTo Include="QwenImage21CompanionProbe" />
     <InternalsVisibleTo Include="CpuQuantBench" />
     <InternalsVisibleTo Include="WanVideoBench" />
   </ItemGroup>

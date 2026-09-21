@@ -49,7 +49,7 @@ public class CodePromptTests
         string block = CodePrompt.Block(fileTools: true, hasPatch: true);
 
         Assert.Contains(SkillToolNames.ReadFile, block, StringComparison.Ordinal);
-        Assert.Contains(SkillToolNames.EditFile, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(SkillToolNames.EditFile, block, StringComparison.Ordinal);
         Assert.Contains(SkillToolNames.WriteFile, block, StringComparison.Ordinal);
         Assert.Contains(SkillToolNames.ApplyPatch, block, StringComparison.Ordinal);
         Assert.Contains(SkillToolNames.Shell, block, StringComparison.Ordinal);
@@ -63,7 +63,8 @@ public class CodePromptTests
         string block = CodePrompt.Block(fileTools: true, hasPatch: false);
 
         Assert.DoesNotContain(SkillToolNames.ApplyPatch, block, StringComparison.Ordinal);
-        Assert.Contains(SkillToolNames.EditFile, block, StringComparison.Ordinal);
+        Assert.DoesNotContain(SkillToolNames.EditFile, block, StringComparison.Ordinal);
+        Assert.Contains("`write_file` only to create a new file", block, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -83,19 +84,32 @@ public class CodePromptTests
         string block = CodePrompt.Block(fileTools: true, hasPatch: true);
 
         Assert.Contains("Never rewrite a whole file to change part of it", block, StringComparison.Ordinal);
+        Assert.Contains("one file or multiple files", block, StringComparison.Ordinal);
+        Assert.Contains("only tool for changing existing files", block, StringComparison.Ordinal);
         Assert.Contains("do not read the file back", block, StringComparison.Ordinal);
     }
 
     [Fact]
     public void TheBlockIsShort()
     {
-        // Six lines and no syntax teaching. Everything about HOW to call a tool lives in
+        // Concise guidance and no syntax teaching. Everything about HOW to call a tool lives in
         // that tool's declaration, and everything about recovering from a failure is
         // attached to the failing result — which is where this codebase has its only
         // evidence that guidance changes behaviour.
         string block = CodePrompt.Block(fileTools: true, hasPatch: true);
 
-        Assert.True(block.Length < 1200, $"the block has grown to {block.Length} characters");
+        Assert.True(block.Length < 1500, $"the block has grown to {block.Length} characters");
         Assert.StartsWith(CodePrompt.Heading, block, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExecutionGuidanceReusesSetupAndRequiresBehavioralVerification()
+    {
+        string block = CodePrompt.Block(fileTools: true, hasPatch: true);
+
+        Assert.DoesNotContain("exports and cd do not persist", block, StringComparison.Ordinal);
+        Assert.Contains("reuse successful installs", block, StringComparison.Ordinal);
+        Assert.Contains("verify behavior", block, StringComparison.Ordinal);
+        Assert.Contains("inspect generated output before claiming success", block, StringComparison.Ordinal);
     }
 }

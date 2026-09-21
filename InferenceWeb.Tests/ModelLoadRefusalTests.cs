@@ -52,7 +52,7 @@ public class ModelLoadRefusalTests : IDisposable
     {
         new object[] { new ModelLoadRefusedException("[dsv4] not enough VRAM: re-run with --n-cpu-moe 2") },
         new object[] { new NotSupportedException("KV_CACHE_DTYPE=q8_0 is not supported by DeepSeek V4.1 Flash.") },
-        new object[] { new FileNotFoundException("DeepSeek V4.1 requires its Engram lookup sidecar.", "deepseek41.engram.bin") },
+        new object[] { new InvalidDataException("DeepSeek V4.1 GGUF is missing embedded Engram metadata.") },
         new object[] { new IOException("model.gguf is incomplete: re-download this file.") },
         new object[] { new InvalidDataException("Not a GGUF file (magic: 0x20746F6E)") },
         new object[] { new UnauthorizedAccessException("Access to the path is denied.") },

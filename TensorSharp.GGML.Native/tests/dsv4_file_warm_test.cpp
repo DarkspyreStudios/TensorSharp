@@ -173,6 +173,144 @@ int main()
 }
 #else
 
+// A deterministic model of FUSE KeepPageCache=false: opening any handle drops
+// that file's cached bytes. No sleeps, kernel eviction assumptions or races are
+// needed to verify that ALL opens precede ALL residency checks and reads.
+struct invalidating_file_ops
+{
+    struct handle { int file; uint64_t end = 0; bool closed = false; };
+    std::mutex mu;
+    char data[2][7] = {};
+    bool cached[2][7] = {};
+    std::vector<handle> handles;
+    int opens = 0, closes = 0, checks = 0, reads = 0;
+    int fail_open = 0, throw_open = 0, stop_open = 0;
+    std::atomic<bool> * stop = nullptr;
+    bool fail_read = false;
+
+    invalidating_file_ops()
+    {
+        handles.reserve(4);
+        for (auto & file : cached) std::fill(std::begin(file), std::end(file), true);
+    }
+    int open_file(const std::string & path)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        check(checks == 0 && reads == 0, "a late open can invalidate completed warm work");
+        ++opens;
+        if (opens == throw_open) throw std::runtime_error("injected open exception");
+        if (opens == fail_open) { errno = EMFILE; return -1; }
+        const int file = path == "a" ? 0 : path == "b" ? 1 : -1;
+        check(file >= 0, "opened an unused shard: %s", path.c_str());
+        if (file < 0) { errno = ENOENT; return -1; }
+        std::fill(std::begin(cached[file]), std::end(cached[file]), false);
+        handles.push_back({ file });
+        if (stop && opens == stop_open) stop->store(true);
+        return (int) handles.size() - 1;
+    }
+    void close_file(int fd) noexcept
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        check(fd >= 0 && (size_t) fd < handles.size(), "closed an unknown warm descriptor");
+        if (fd < 0 || (size_t) fd >= handles.size()) return;
+        check(!handles[(size_t) fd].closed, "warm descriptor was closed twice");
+        handles[(size_t) fd].closed = true;
+        ++closes;
+    }
+    bool resident(const void * p, uint64_t bytes, std::vector<unsigned char> &)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        check(opens == 4 && closes == 0, "residency checked before all four handles were opened");
+        ++checks;
+        for (int file = 0; file < 2; ++file)
+        {
+            const uintptr_t base = (uintptr_t) data[file], at = (uintptr_t) p;
+            if (at < base || at >= base + 7) continue;
+            const size_t off = (size_t) (at - base);
+            check(bytes <= 7 - off, "residency range exceeds simulated file");
+            if (bytes > 7 - off) return false;
+            for (size_t i = off; i < off + bytes; ++i) if (!cached[file][i]) return false;
+            return true;
+        }
+        check(false, "unknown simulated mapping");
+        return false;
+    }
+    file_read_attempt read_at(int fd, uint64_t off, void * destination, size_t bytes)
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        check(opens == 4 && closes == 0, "read started before all four handles were opened");
+        ++reads;
+        if (fail_read) return { 0, EIO };
+        handle & h = handles.at((size_t) fd);
+        check(!h.closed && off >= h.end && off <= 7 && bytes <= 7 - off,
+              "worker reads must retain their per-descriptor ordered streams");
+        h.end = off + bytes;
+        std::memcpy(destination, data[h.file] + off, bytes);
+        for (uint64_t i = off; i < off + bytes; ++i) cached[h.file][i] = true;
+        return { bytes };
+    }
+    std::vector<file_warm_range> ranges() const
+    {
+        // Three 4-byte runs: worker 0 a[0,3)+a[4,5), worker 1 a[5,7)+b[0,2),
+        // worker 2 b[2,6). Worker 1 switches shards midway, as with two Engram
+        // tables split across three load threads. Repeated a pieces reuse fd.
+        return { { 0, 0, 3, data[0] }, { 0, 4, 3, data[0] + 4 }, { 1, 0, 6, data[1] } };
+    }
+};
+
+static void test_open_before_warm()
+{
+    file_warm_options options;
+    options.threads = 3;
+    options.block_bytes = 1;
+    const std::vector<std::string> paths = { "a", "b", "unused" };
+    for (bool skip : { true, false })
+    {
+        invalidating_file_ops io;
+        options.skip_resident = skip;
+        const auto r = file_warm_detail::warm_file_ranges_with_io(paths, io.ranges(), options, io);
+        check(r.ok && r.bytes_read == 12 && r.bytes_resident == 0,
+              "open invalidation must be observed before skip checks, then all bytes warmed");
+        check(io.opens == 4 && io.closes == 4 && io.checks == (skip ? 12 : 0) && io.reads == 12,
+              "only each worker's used shards must be opened once and closed once");
+        for (const auto & range : io.ranges())
+            for (uint64_t i = range.offset; i < range.offset + range.bytes; ++i)
+                check(io.cached[range.file][i], "a later open invalidated previously warmed bytes");
+    }
+    options.skip_resident = true;
+    for (int failure = 1; failure <= 4; ++failure)
+        for (bool throws : { false, true })
+        {
+            invalidating_file_ops io;
+            if (throws) io.throw_open = failure;
+            else io.fail_open = failure;
+            const auto r = file_warm_detail::warm_file_ranges_with_io(paths, io.ranges(), options, io);
+            check(!r.ok && r.bytes_read == 0 && r.bytes_resident == 0 && io.checks == 0 && io.reads == 0,
+                  "an open failure must prevent all residency checks and reads");
+            check(io.opens == failure && io.closes == failure - 1,
+                  "open failure %d must close all %d acquired handles exactly once", failure, failure - 1);
+            check(r.error.find(throws ? "injected open exception" : "cannot open") != std::string::npos,
+                  "open failure must be reported: %s", r.error.c_str());
+        }
+    for (int stop_after : { 0, 1, 3 })
+    {
+        invalidating_file_ops io;
+        std::atomic<bool> stop(stop_after == 0);
+        options.stop = &stop;
+        io.stop = &stop;
+        io.stop_open = stop_after;
+        const auto r = file_warm_detail::warm_file_ranges_with_io(paths, io.ranges(), options, io);
+        check(r.ok && r.stopped && io.opens == stop_after && io.closes == stop_after &&
+              io.checks == 0 && io.reads == 0, "setup cancellation must close acquired handles and start no warm work");
+    }
+    options.stop = nullptr;
+    invalidating_file_ops io;
+    io.fail_read = true;
+    const auto r = file_warm_detail::warm_file_ranges_with_io(paths, io.ranges(), options, io);
+    check(!r.ok && r.bytes_read == 0 && io.opens == 4 && io.closes == 4,
+          "a worker read failure must close every pre-opened descriptor");
+}
+
 struct temp_dir
 {
     std::string path;
@@ -449,13 +587,14 @@ int main()
 {
     test_policies();
     test_planning();
+    test_open_before_warm();
     test_file_warm();
     if (g_failures)
     {
         std::fprintf(stderr, "%d check(s) failed\n", g_failures);
         return 1;
     }
-    std::puts("dsv4 file warm: policies, planning, pread coverage, residency skip, stop flag and truncation passed");
+    std::puts("dsv4 file warm: policies, planning, open-before-warm ordering, cleanup, pread coverage, residency skip, stop flag and truncation passed");
     return 0;
 }
 #endif

@@ -60,9 +60,8 @@ def main():
     reference = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(reference)
     weights_path = args.fixture_dir / "deepseek41-fixture.gguf"
-    engram_path = args.fixture_dir / "deepseek41.engram.bin"
     weights = reference.GgufWeights(weights_path)
-    engram = reference.load_engram(engram_path)
+    engram = reference.load_engram(weights)
 
     def oracle(ids):
         return reference.Reference(weights, config["config"], engram, "model").forward(ids.tolist()).cpu().numpy()
@@ -360,7 +359,7 @@ def main():
                       settings=settings, test_hooks_required=True, atol=2e-5, rtol=2e-5,
                       library=str(args.library.resolve()), library_sha256=digest(args.library),
                       source_sha256=digest(__file__), reference_sha256=digest(reference_path),
-                      fixture_sha256={path.name: digest(path) for path in (weights_path, config_path, engram_path)},
+                      fixture_sha256={path.name: digest(path) for path in (weights_path, config_path)},
                       checks=checks, passed=error is None and all(item["passed"] for item in checks), error=error)
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(report, indent=2) + "\n")

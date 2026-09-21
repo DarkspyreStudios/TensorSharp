@@ -156,19 +156,17 @@ namespace TensorSharp.AgentHost.CodeExec
                         networkExecutionInstructions: NetworkExecutionInstructions(),
                         networkHosts: _networkHosts?.Invoke(),
                         providedPackagesInstructions: _providedPackagesInstructions,
-                        executionInstructions: _executionInstructions),
+                        executionInstructions: ExecutionInstructions()),
                 };
             }
 
-            // ORDER MATTERS, and this is the order. read_file and edit_file come first
-            // because a declaration list is read top-down and the measured failure is a
-            // model reaching for the shell to do a job the editor does better; apply_patch
-            // stays last, now correctly, as the specialist for a change that spans several
-            // files atomically.
+            // Keep reading and patching before the shell: apply_patch handles every
+            // modification, from a single line in one file to an atomic multi-file change.
+            // Legacy edit calls remain dispatchable but are not advertised to the model.
             return new[]
             {
                 ShellTools.DeclareRead(),
-                ShellTools.DeclareEdit(),
+                ShellTools.DeclarePatch(),
                 ShellTools.DeclareWrite(),
                 ShellTools.DeclareShell(
                     _options, shell, _runner.KeepsArtifacts, persists, fileTools: true,
@@ -176,10 +174,31 @@ namespace TensorSharp.AgentHost.CodeExec
                     packageInstallInstructions: PackageInstallInstructions(),
                     networkExecutionInstructions: NetworkExecutionInstructions(),
                     networkHosts: _networkHosts?.Invoke(),
-                        providedPackagesInstructions: _providedPackagesInstructions,
-                        executionInstructions: _executionInstructions),
-                ShellTools.DeclarePatch(),
+                    providedPackagesInstructions: _providedPackagesInstructions,
+                    executionInstructions: ExecutionInstructions()),
             };
+        }
+
+        private string ExecutionInstructions()
+        {
+            // Facts that are stable across sessions, without machine paths or ids in
+            // the prompt prefix. The selected sandbox is not a promise that a
+            // preferred-mode launch cannot fall back; results report what ran.
+            string platform = OperatingSystem.IsMacOS() ? "macOS (Darwin)"
+                : OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst() ? "iOS"
+                : OperatingSystem.IsAndroid() ? "Android"
+                : OperatingSystem.IsLinux() ? "Linux"
+                : OperatingSystem.IsWindows() ? "Windows" : "other";
+            SkillSandboxMode policy = _runner.Options.Unconfined
+                ? SkillSandboxMode.Preferred : _runner.Options.Sandbox;
+            string environment = $"Host platform: {platform}. Execution backend: {_runner.Backend.Name}. "
+                + $"Sandbox policy: {policy.ToString().ToLowerInvariant()}; "
+                + $"configured sandbox: {_runner.Sandbox?.Name ?? "none"}. "
+                + "Each tool result reports the applied sandbox. "
+                + "HOME and USERPROFILE point to the tool workspace. Desktop browser profiles, login cookies "
+                + "and saved credentials are not imported automatically; verify authentication in the connected session.";
+            return string.IsNullOrWhiteSpace(_executionInstructions)
+                ? environment : environment + "\n" + _executionInstructions.Trim();
         }
 
         /// <inheritdoc/>

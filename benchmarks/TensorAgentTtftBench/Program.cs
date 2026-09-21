@@ -102,6 +102,8 @@ internal static class Program
         string root = opts.Root ?? Path.Combine(Path.GetTempPath(), "tensoragent-ttft-" + Guid.NewGuid().ToString("N"));
         var paths = new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache"))
         {
+            // This benchmark emulates the mobile host, including its embedded runtimes.
+            ExecutionMode = TensorAgent.Core.Shell.AgentExecutionMode.InProcess,
             DeviceMemoryGB = opts.DeviceGb,
             BundledSkillsDirectory = opts.Skills ? RepoSkillsDirectory() : string.Empty,
             PythonRuntimeDirectory = opts.PythonRoot ?? string.Empty,

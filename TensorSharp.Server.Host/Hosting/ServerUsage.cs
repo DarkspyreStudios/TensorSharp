@@ -319,13 +319,13 @@ namespace TensorSharp.Server.Host.Hosting
                     "the trunk and use --spec instead. Default: none.",
                     "--draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf"),
             }),
-            ("Qwen-Image-Edit companion models (qwen_image DiT GGUFs)", new[]
+            ("Qwen-Image companion models (2.1 and older image-edit DiTs)", new[]
             {
                 new OptionHelp("--qwen-image-vae <path>",
-                    "VAE GGUF. Default: same-directory scan next to the DiT model.",
+                    "Matching VAE GGUF or safetensors (2.1 requires its own VAE). Default: same-directory scan.",
                     "--qwen-image-vae qwen-image-vae.gguf"),
                 new OptionHelp("--qwen-image-vl <path>",
-                    "Qwen2.5-VL text-encoder GGUF. Default: same-directory scan.",
+                    "Qwen3-VL-8B text-encoder GGUF for 2.1, Qwen2.5-VL for older models. Default: same-directory scan.",
                     "--qwen-image-vl qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf"),
                 new OptionHelp("--qwen-image-mmproj <path>",
                     "Vision projector GGUF for the text encoder. Default: same-directory scan.",
@@ -424,14 +424,16 @@ namespace TensorSharp.Server.Host.Hosting
                     "the server is reachable by untrusted clients (TS_UPLOAD_TTL_HOURS env var overrides).",
                     "--upload-ttl-hours 24"),
             }),
-            ("Agent skills (SKILL.md bundles; the skills/ directory next to the server binary)", new[]
+            ("Agent skills (SKILL.md bundles; repository and configured skill directories)", new[]
             {
                 new OptionHelp("--skills-dir <path>",
                     "Directory to scan for skills. A root may hold one skill (it contains SKILL.md) or many, " +
                     "nested up to three levels, so a checkout of a skills repository works as-is. Repeat the " +
-                    "flag for several; earlier roots take precedence on a name clash. Default: the skills/ " +
-                    "directory next to the binary, created on startup (TS_SKILLS_DIR env var overrides, " +
-                    "path-separated).",
+                    "flag for several; earlier roots take precedence on a name clash. Default: existing " +
+                    ".agents/skills directories from the working directory up to its Git repository root " +
+                    "(nearest first), then skills/ next to the binary, created on startup. Outside a repository " +
+                    "only the working directory is considered. Explicit roots or path-separated TS_SKILLS_DIR " +
+                    "replace these defaults; personal skill directories are not loaded automatically.",
                     "--skills-dir ./skills"),
                 new OptionHelp("--skill <name>",
                     "Give EVERY request this skill, instead of waiting for a client to name it in the request's " +

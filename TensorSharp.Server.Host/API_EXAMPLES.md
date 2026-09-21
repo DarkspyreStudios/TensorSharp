@@ -6,7 +6,7 @@ TensorSharp.Server.Host provides three API styles plus a few utility endpoints:
 
 - **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`)
 - **OpenAI-compatible** (`/v1/chat/completions`, `/v1/responses`, `/v1/models`)
-- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`)
+- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`, `/api/image-generate`, `/api/image-generate/stream`)
 - **Utilities** (`/api/version`, `/api/queue/status`)
 
 Start the server with the exact hosted model via `--model` and, when needed, the exact projector via `--mmproj`. The projector is **not auto-detected** by `TensorSharp.Server.Host`. The Web UI and compatibility endpoints expose only that startup model/projector pair; `/api/models/load` can reload the same pair on a supported backend, but it cannot choose a model on a model-less server or switch to another file at runtime.
@@ -39,8 +39,8 @@ See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs
 | Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
 | Image editing | Qwen-Image-Edit (`qwen_image`) models are served through `/api/image-edit` and `/api/image-edit/stream`, not the chat endpoints |
 | Video generation | Any video-generation model — MiniMax-H3 (`minimax-h3`), Wan 2.1 / 2.2 (`wan`) — is served through `/api/video-generate`, `/api/video-generate/stream` and `/v1/videos/generations`; MiniMax-H3 returns a 32 kHz stereo `.wav` sidecar alongside the MP4, and `/api/models` advertises what conditioning the loaded checkpoint takes |
-| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint. On families with both declaration and output-parser support, the model's own skill calls are answered inside the server, so clients receive a finished completion. No-tool families such as `qwen4exp` receive selected skill instructions inline instead. `skills_run` is off unless the server starts with `--skills-allow-exec`. |
-| Agentic code execution | `--code-exec` adds the in-process `shell`, `read_file`, `edit_file`, `write_file`, and `apply_patch` tools on tool-capable model families. Web UI keeps one workspace per chat session; each OpenAI/Ollama HTTP request gets a private workspace across its internal rounds and the server deletes it after the response. Network and package installation are separate, off-by-default permissions. |
+| Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint. On families with both declaration and output-parser support, including Qwen 3.8 Flash Next (`qwen4exp`), the model's own skill calls are answered inside the server, so clients receive a finished completion. Families without usable tool support receive selected skill instructions inline instead. `skills_run` is off unless the server starts with `--skills-allow-exec`. |
+| Agentic code execution | `--code-exec` adds the in-process `shell`, `read_file`, `write_file`, and `apply_patch` tools on tool-capable model families. Web UI keeps one workspace per chat session; each OpenAI/Ollama HTTP request gets a private workspace across its internal rounds and the server deletes it after the response. Network and package installation are separate, off-by-default permissions. |
 | Structured outputs | OpenAI `response_format` supports `text`, `json_object`, and `json_schema`; `response_format` (`json_object` / `json_schema`) cannot be combined with `tools`, and combines with `think` only on families that declare where reasoning ends (GPT-OSS, DeepSeek V4.1, Qwen 3.8 Flash Next, Gemma 4, Nemotron-H, Muse-Glimmer) |
 
 > **Network safety:** the server listens on `0.0.0.0:5000` and has no API-key
@@ -140,7 +140,7 @@ model.
 
 ### Server-side agentic code execution
 
-Code execution is opt-in. A conservative local start enables the five built-in
+Code execution is opt-in. A conservative local start enables the four built-in
 tools while keeping the listener on loopback and leaving generated commands
 offline; Linux needs `bwrap` 0.12.0 or newer, while macOS uses its built-in
 Seatbelt sandbox:
@@ -470,9 +470,9 @@ the `SKILL.md` body and any reference files it needs through built-in
 `skills_list` / `skills_read` tools that **the server executes itself**, so the
 response you get back is an ordinary completion rather than a tool call your
 client has to service. This progressive-disclosure loop requires both tool
-declaration and output-parser support. Qwen 3.8 Flash Next (`qwen4exp`) currently
-has no structured tool parser, so it receives selected skill instructions inline
-and is not offered skill or code-execution tools.
+declaration and output-parser support. Qwen 3.8 Flash Next (`qwen4exp`) parses
+Qwen XML-style calls into structured tool calls and supports this loop. Its
+code-execution tools are available when `--code-exec` is enabled.
 
 `skills_discovery` is optional and defaults to `true` — the model is also shown
 the names and descriptions of the skills the request did *not* select, so it can
@@ -502,7 +502,7 @@ tools comes back to you as usual — with whatever the model read from a skill
 already folded into the conversation.
 
 When the server starts with `--code-exec`, the same in-process loop may also use
-`shell`, `read_file`, `edit_file`, `write_file`, and `apply_patch`. Those built-in
+`shell`, `read_file`, `write_file`, and `apply_patch`. Those built-in
 calls stay inside TensorSharp; see [Server-side agentic code execution](#server-side-agentic-code-execution)
 for workspace, sandbox, network, install, and artifact behavior.
 
@@ -799,8 +799,9 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 The reply is a normal `chat.completion`. On a tool-capable model family, any
 built-in skill or code calls happened inside the server; the OpenAI SDK needs no
 changes and sees no built-in call it cannot service. Caller-defined tools still
-come back normally. Families without a structured tool parser, including
-`qwen4exp`, use the selected-skill inline fallback and are not offered code tools.
+come back normally. Qwen 3.8 Flash Next (`qwen4exp`) supports both paths.
+Families without a structured tool parser use the selected-skill inline fallback
+and are not offered code tools.
 
 ```python
 from openai import OpenAI
@@ -1074,6 +1075,37 @@ and `/v1/*` returns `{"error": {"message": "...", "type": "invalid_request_error
 
 The field is `null` when the server has skills disabled, which is how the Web UI
 decides whether to show the skills control at all.
+
+### Qwen-Image-2.1 Text-to-Image
+
+Launch `TensorSharp.Server.Host` with `--config config/qwen-image-2.1.json`.
+See the [Qwen-Image-2.1 guide](../docs/models/qwenimage21.md) for downloads,
+CLI commands and model-specific defaults.
+
+```bash
+curl --fail-with-body http://localhost:5000/api/image-generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A cat beside a blue vase, soft daylight","width":2048,"height":2048,"steps":40,"cfg":1,"seed":42}'
+```
+
+The response contains `ok`, `url`, `width`, `height` and `elapsedSeconds`.
+`/api/image-generate/stream` accepts the same JSON and emits SSE denoising
+progress (`imageGenerate: true`) and a final `done: true` result. Use the existing
+image-edit routes below for reference-conditioned editing. Set both dimensions
+in multiples of 32. Omitting dimensions selects native 2048×2048 for generation,
+or approximately the same area at the first reference's aspect ratio for editing.
+`targetArea: 1048576` selects approximately 1K output with automatic aspect ratio;
+explicit dimensions take precedence. Editing references are conditioned at
+approximately 1 megapixel each, or the output area if smaller.
+
+Omitted `steps`/`cfg` select 40 Euler steps and CFG 1, following the released
+2.1 model's recommendation. CFG 1 needs one transformer prediction per step;
+`negativePrompt` takes effect only with explicit CFG above 1, which also runs a
+negative prediction. For faster drafts, request 1024×1024 or explicitly select
+25 steps, as in the official ComfyUI workflow; fewer steps can change quality.
+The [model guide](../docs/models/qwenimage21.md) records the official scheduler
+settings, source links and measured validation. Earlier Qwen-Image Lightning
+LoRAs are incompatible with 2.1; no compatible acceleration adapter was verified.
 
 ### Image Editing (`/api/image-edit`, Qwen-Image-Edit)
 

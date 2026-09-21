@@ -10,7 +10,7 @@
 - **思维链 / 推理模式** —— 通过 `<think>` / `<|channel>thought` / `<|channel>analysis` 标签输出结构化的思维链推理（Qwen 3.5/3.6-family、Qwen 3.8 Flash Next、Gemma 4、GPT OSS、Nemotron-H、Muse-Glimmer、DeepSeek V4、DeepSeek V4.1、GLM 5.x）
 - **工具调用 / 函数调用** —— 模型可调用用户定义的工具；所有三种 API 风格均支持多轮工具调用对话
 - **Agent Skills（智能体技能）** —— 面向模型的说明文件夹（`SKILL.md` + 脚本 / 参考文档 / 素材），只在任务需要时才加载。每次请求用 `"skills": ["pdf"]`（所有聊天 API）或 CLI 的 `--skill` 选中；其余内容由模型通过内置的 `skills_list` / `skills_read` 工具自取，而这些工具由 TensorSharp 在进程内应答，因此普通 OpenAI 客户端拿到的仍然只是一条写完的回复。→ [Agent Skills（智能体技能）](#agent-skills智能体技能)
-- **代码执行** —— `--code-exec` 提供 `read_file`、`edit_file`、`write_file`、`shell` 与原子 `apply_patch`：读取有界源码、做最小精确修改、运行测试，再根据带源码片段的诊断修复并验证。Web UI / CLI 为整个聊天保留工作区；每个 OpenAI / Ollama HTTP 请求只在自己的内部工具轮次间保留私有工作区，响应后删除。开启代码执行时技能脚本共享该工作区，否则使用逐次临时目录。功能默认关闭，并在 macOS（Seatbelt）与 Linux（`bwrap` 0.12.0+）上实行“沙箱或拒绝”；Windows 必须显式传入会放开文件与网络约束的 `--code-exec-unconfined`。模型命令默认不能访问 IP 网络；`--code-exec-allow-network` 会授予不受限的宿主 IP 网络访问，且与 `--skills-allow-network`、宿主代办装包三个权限彼此独立。→ [完整安全与工作区说明](docs/agent_skills.md)
+- **代码执行** —— `--code-exec` 提供 `read_file`、`write_file`、`shell` 与原子 `apply_patch`：读取有界源码、运行测试，再根据带源码片段的诊断修复并验证。`write_file` 仅用于新建文件；已有单个或多个文件的所有修改都使用 `apply_patch`，包括单行修改。Web UI / CLI 为整个聊天保留工作区；每个 OpenAI / Ollama HTTP 请求只在自己的内部工具轮次间保留私有工作区，响应后删除。开启代码执行时技能脚本共享该工作区，否则使用逐次临时目录。功能默认关闭，并在 macOS（Seatbelt）与 Linux（`bwrap` 0.12.0+）上实行“沙箱或拒绝”；Windows 必须显式传入会放开文件与网络约束的 `--code-exec-unconfined`。模型命令默认不能访问 IP 网络；`--code-exec-allow-network` 会授予不受限的宿主 IP 网络访问，且与 `--skills-allow-network`、宿主代办装包三个权限彼此独立。→ [完整安全与工作区说明](docs/agent_skills.md)
 - **量化模型支持** —— 加载 Q4_K_M、Q8_0、F16、MXFP4、`Q1_0`（GGML 张量类型 41：每块一个 F16 scale 加 128 个 1 bit 符号位，即每权重 1.125 bit，见 [Bonsai 卡片](docs/models/bonsai_zh-cn.md)）等量化格式的 GGUF 文件；执行原生量化矩阵乘法（matmul），无需反量化到 FP32，并且纯 C# CPU 后端在加载大型 GGUF 时也会保持量化权重压缩状态
 - **GPU 加速** —— 通过 GGML 支持 Apple Metal（macOS）、GGML CUDA（Windows/Linux + NVIDIA）和 GGML Vulkan（Windows/Linux + AMD/Intel/NVIDIA），并提供 Direct CUDA/cuBLAS 后端（含 PTX 内核与未覆盖算子的 CPU 回退），以及面向 Apple Silicon 的 MLX 后端（mlx-c / Metal）
 - **优化后的纯 C# CPU 后端** —— 为 GEMM、RMSNorm、RoPE、softmax、融合激活等推理热点路径提供托管快速路径和 SIMD 内核；托管矩阵乘法现在跑在一个常驻的“先自旋后挂起”工作线程池上，而不是每次矩阵乘都开一次 `Parallel.For`——在 122 核主机上 prefill 约 +15%、decode 约 2.8×。→ [纯 C# CPU 后端](#纯-c-cpu-后端)
@@ -220,12 +220,11 @@ prefill、1/3/5/8 的分块 prefill（每个位置都检查）与 reset。这道
 checkpoint 在这条路径上的吞吐、加载时间与常驻内存从来没有被测过，所以上面那张线程池宽度表
 （gemma-4-E4B，通用 CPU 线程池，用 `TS_CPU_THREADS` / `TS_CPU_SPIN` 扫出来的）说明不了 V4.1
 的任何事情，而且也没有 V4.1 的数字可以补上去。它没有按序列的 slot，也没有多轮 KV 前缀复用，
-因此每一次分叉的对话轮都要重新 prefill，并发请求则排队串行。`deepseek41.engram.bin` 旁挂文件
-仍然是必需的。
+因此每一次分叉的对话轮都要重新 prefill，并发请求则排队串行。Engram 配置直接从 GGUF 读取。
 `TS_DSV4_THREADS` 在这个后端上默认取 `ProcessorCount`，而不是别处的 min(核数, 32)；
 `TS_DSV4_CPU_TRACE_DIR` 写出的逐张量文件与 `eng/dsv41-reference.py --output` 写出的完全同名
-同形，因此两个目录可以逐张量地 diff；而 `TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM` /
-`_SIDECAR`、`TS_DSV41_SPARSE_FA` 与 `TS_DSV41_COMPACT_RAW_GATHER` 只对原生加载器有效，在这里
+同形，因此两个目录可以逐张量地 diff；而 `TS_DSV41_ENGRAM_WARM` / `_THREADS` / `_RANDOM`、
+`TS_DSV41_SPARSE_FA` 与 `TS_DSV41_COMPACT_RAW_GATHER` 只对原生加载器有效，在这里
 是**失效**的。图像与视频在这个后端上**跑不了**——视觉伴随模型是原生 ggml 组件，
 `LoadVisionEncoder` 会抛异常，所以卡片里“视觉伴随模型会跟随文本模型落到同一个后端”那句话说
 的是 `--backend ggml_cpu`，不是这条路径。另外，分布式 TP 组、任何草稿模型或 `TS_DSV4_DSPARK`、

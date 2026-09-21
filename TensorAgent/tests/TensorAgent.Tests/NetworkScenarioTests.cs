@@ -754,7 +754,10 @@ public sealed class NetworkScenarioTests : IDisposable
     private AgentPaths Paths(bool network = false)
     {
         string root = Path.Combine(_root, "host-" + Guid.NewGuid().ToString("N")[..8]);
-        var paths = new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache"));
+        var paths = new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache"))
+        {
+            ExecutionMode = AgentExecutionMode.InProcess,
+        };
         paths.EnsureCreated();
         var settings = new SettingsStore(paths.SettingsFile);
         AppSettings loaded = settings.Load();

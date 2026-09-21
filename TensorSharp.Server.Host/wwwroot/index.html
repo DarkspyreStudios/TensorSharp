@@ -2083,8 +2083,10 @@ async function sendMessage() {
 
 async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
   if (queueDiv) queueDiv.style.display = 'none';
-  bubbleText.textContent = 'Starting edit… (preparing the diffusion pipeline)';
-  statsDiv.textContent = 'Qwen-Image-Edit';
+  const editing = !!(userMsg.imagePaths && userMsg.imagePaths.length);
+  const action = editing ? 'Image edit' : 'Image generation';
+  bubbleText.textContent = editing ? 'Starting edit…' : 'Generating image…';
+  statsDiv.textContent = action;
   const t0 = performance.now();
 
   // The image element is created lazily on the first frame, then refreshed in place as the
@@ -2094,7 +2096,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
     if (img) return img;
     bubbleText.innerHTML = '';
     img = document.createElement('img');
-    img.alt = 'edited image (denoising…)';
+    img.alt = 'image (denoising…)';
     img.style.maxWidth = '512px';
     img.style.maxHeight = '512px';
     img.style.borderRadius = '8px';
@@ -2105,7 +2107,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
   }
 
   try {
-    const res = await fetch('/api/image-edit/stream', {
+    const res = await fetch(editing ? '/api/image-edit/stream' : '/api/image-generate/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ imagePaths: userMsg.imagePaths, prompt: userMsg.content || '' }),
@@ -2114,7 +2116,7 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
     if (!res.ok) {
       let err = 'HTTP ' + res.status;
       try { const j = await res.json(); if (j && j.error) err = j.error; } catch {}
-      bubbleText.textContent = 'Image edit failed: ' + err;
+      bubbleText.textContent = action + ' failed: ' + err;
       statsDiv.textContent = 'Failed';
       return;
     }
@@ -2133,32 +2135,32 @@ async function runImageEdit(userMsg, bubbleText, statsDiv, queueDiv) {
         let data;
         try { data = JSON.parse(line.slice(6)); } catch { continue; }
 
-        if (data.imageEdit) {
+        if (data.imageEdit || data.imageGenerate) {
           if (data.image) { ensureImg().src = data.image; }
           if (data.total > 0) statsDiv.textContent = `Denoising… step ${data.step}/${data.total}`;
           scrollChatToBottom();
         } else if (data.done) {
           if (data.error) {
-            bubbleText.textContent = 'Image edit failed: ' + data.error;
+            bubbleText.textContent = action + ' failed: ' + data.error;
             statsDiv.textContent = 'Failed';
           } else {
             ensureImg().src = data.url + '?t=' + Date.now();  // final full-resolution result
-            img.alt = 'edited image';
+            img.alt = editing ? 'edited image' : 'generated image';
             const dl = document.createElement('a');
             dl.href = data.url;
             dl.setAttribute('download', '');
             dl.textContent = '⬇ Download image';
             dl.style.cssText = 'display:inline-block;margin-top:8px;color:var(--accent);';
             bubbleText.appendChild(dl);
-            statsDiv.textContent = `Edited ${data.width}×${data.height} · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
+            statsDiv.textContent = `${editing ? "Edited" : "Generated"} ${data.width}×${data.height} · ${((performance.now() - t0) / 1000).toFixed(1)}s`;
           }
           scrollChatToBottom();
         }
       }
     }
   } catch (e) {
-    if (e.name === 'AbortError') { if (!img) bubbleText.textContent = 'Image edit cancelled.'; statsDiv.textContent = 'Stopped by user'; }
-    else { bubbleText.textContent = 'Image edit error: ' + e.message; statsDiv.textContent = 'Failed'; }
+    if (e.name === 'AbortError') { if (!img) bubbleText.textContent = action + ' cancelled.'; statsDiv.textContent = 'Stopped by user'; }
+    else { bubbleText.textContent = action + ' error: ' + e.message; statsDiv.textContent = 'Failed'; }
   }
 }
 
@@ -2327,9 +2329,9 @@ async function requestAssistantResponse() {
       await createSession();
     }
 
-    // Qwen-Image-Edit: an attached image + prompt produces a NEW image, not chat text.
+    // Qwen image models use the diffusion endpoints; an attachment selects editing.
     const _lastUser = chatHistory[chatHistory.length - 1];
-    if (currentArchitecture === 'qwen_image' && _lastUser && _lastUser.imagePaths && _lastUser.imagePaths.length > 0) {
+    if ((currentArchitecture === 'qwen_image' || currentArchitecture === 'qwen-image') && _lastUser) {
       await runImageEdit(_lastUser, bubbleText, statsDiv, queueDiv);
       return;
     }

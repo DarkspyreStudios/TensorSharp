@@ -56,7 +56,7 @@ def main():
     spec.loader.exec_module(reference)
     torch.set_num_threads(2)
     weights = reference.GgufWeights(args.fixture_dir / "deepseek41-fixture.gguf")
-    engram = reference.load_engram(args.fixture_dir / "deepseek41.engram.bin")
+    engram = reference.load_engram(weights)
     tokens = np.array(json.loads((args.fixture_dir / "tokens.json").read_text()), dtype=np.int32)
     other = np.array([0, 9, 21, 85, 11, 19, 6, 44, 35, 72, 11], dtype=np.int32)
     def oracle(ids):

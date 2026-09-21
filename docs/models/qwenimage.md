@@ -1,5 +1,7 @@
 # Qwen-Image-Edit
 
+For **Qwen-Image-2.1** text-to-image and editing, see the [2.1 guide](qwenimage21.md) and its separate companion configuration. This page describes the older Qwen-Image-Edit models.
+
 [← back to model index](README.md)
 
 ## Status snapshot

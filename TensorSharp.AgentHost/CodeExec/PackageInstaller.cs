@@ -166,12 +166,14 @@ namespace TensorSharp.AgentHost.CodeExec
             }
             if (!CodeExecOptions.SupportsInstall(language))
                 return $"{CodeExecOptions.NameOf(language)} has no package installer here";
-            if (!CodeEnvironment.TryResolveInterpreter(language, out string? interpreter, out string? resolveError))
+            if (!TryValidate(packages, out string? invalid, language))
+                return invalid;
+            if (!CodeEnvironment.TryResolveSessionInterpreter(workspace, language, out string? interpreter, out string? resolveError))
                 return resolveError;
 
             string ledger = CodeExecOptions.NameOf(language);
             List<string> pending = packages
-                .Where(p => BareName(p) != p || !workspace.IsInstalled(ledger, p))
+                .Where(p => BareName(p, language) != p || !workspace.IsInstalled(ledger, p))
                 .ToList();
             // A manifest install always runs: its contents can change between calls, and
             // the ledger has no name to remember it by.
@@ -186,15 +188,12 @@ namespace TensorSharp.AgentHost.CodeExec
             if (pending.Count == 0 && !manifest)
                 return null;
 
-            if (!TryValidate(pending, out string? invalid))
-                return invalid;
-
             string? failure = Run(language, interpreter!, workspace, pending, onOutput);
             if (failure != null)
                 return failure;
 
             performed = true;
-            workspace.MarkInstalled(ledger, pending.Select(BareName));
+            workspace.MarkInstalled(ledger, pending.Select(p => BareName(p, language)));
             return null;
         }
 
@@ -306,7 +305,7 @@ namespace TensorSharp.AgentHost.CodeExec
                   .Append(" (naming its download host in ").Append(CodeExecOptions.InstallDomainsFlag)
                   .Append(" too, if it serves files from a second hostname).\n");
             }
-            else if (denied.Count == 0 && result.Error == null)
+            else if (language == CodeLanguage.Python && denied.Count == 0 && result.Error == null)
             {
                 sb.Append("Only prebuilt wheels are installed here (never source packages, which would run ")
                   .Append("their own build scripts), so a package with no wheel for this platform cannot be ")
@@ -365,7 +364,8 @@ namespace TensorSharp.AgentHost.CodeExec
         /// install to a host of someone else's choosing.
         /// </para>
         /// </summary>
-        internal bool TryValidate(IReadOnlyList<string> packages, out string? error)
+        internal bool TryValidate(IReadOnlyList<string> packages, out string? error,
+            CodeLanguage language = CodeLanguage.Python)
         {
             error = null;
 
@@ -378,10 +378,14 @@ namespace TensorSharp.AgentHost.CodeExec
 
             foreach (string package in packages)
             {
-                if (!PackageName.IsMatch(package))
+                bool npm = language == CodeLanguage.JavaScript;
+                if (string.IsNullOrEmpty(package)
+                    || !(npm ? NpmPackageName : PackageName).IsMatch(package)
+                    || (npm && BareName(package, language).Length > 214))
                 {
-                    error = $"'{package}' is not a valid package name. Use plain names, optionally with a "
-                          + "version such as 'numpy==2.1.0'.";
+                    error = $"'{package}' is not a valid package name. " + (npm
+                        ? "Use registry names, optionally scoped and versioned, such as '@scope/tool@1.2.3' or 'typescript@latest'. URLs, local paths and aliases are not accepted."
+                        : "Use plain names, optionally with a version such as 'numpy==2.1.0'.");
                     return false;
                 }
 
@@ -389,7 +393,7 @@ namespace TensorSharp.AgentHost.CodeExec
                 {
                     // Matched on the BARE name, so a version the model pins (numpy==2.1.0)
                     // still matches an operator's entry of "numpy".
-                    string bare = BareName(package);
+                    string bare = BareName(package, language);
                     if (!_options.AllowedPackages.Any(a => string.Equals(a, bare, StringComparison.OrdinalIgnoreCase)))
                     {
                         error = $"'{bare}' is not on this host's allowed-package list. Allowed: "
@@ -406,11 +410,22 @@ namespace TensorSharp.AgentHost.CodeExec
 
         /// <summary>A name, optionally with extras and a version specifier. Nothing else.</summary>
         private static readonly Regex PackageName = new(
-            @"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(\[[A-Za-z0-9,._-]{1,64}\])?((==|>=|<=|~=|>|<)[A-Za-z0-9._-]{1,32})?$",
+            @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}(\[[A-Za-z0-9,._-]{1,64}\])?((==|>=|<=|~=|>|<)[A-Za-z0-9._-]{1,32})?\z",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-        internal static string BareName(string package)
+        // Registry package specs only. Slashes belong solely to @scope/name;
+        // no git shorthand, file/URL requirements or npm aliases can change source.
+        private static readonly Regex NpmPackageName = new(
+            @"\A(@[A-Za-z0-9][A-Za-z0-9._-]{0,213}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,213}(@[~^<>=]{0,2}[A-Za-z0-9*][A-Za-z0-9.*+_-]{0,127})?\z",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        internal static string BareName(string package, CodeLanguage language = CodeLanguage.Python)
         {
+            if (language == CodeLanguage.JavaScript)
+            {
+                int version = package.IndexOf('@', package.StartsWith('@') ? 1 : 0);
+                return version < 0 ? package : package.Substring(0, version);
+            }
             int cut = package.IndexOfAny(new[] { '[', '=', '>', '<', '~' });
             return cut < 0 ? package : package.Substring(0, cut);
         }

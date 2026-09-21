@@ -7,8 +7,9 @@
 //
 // Managed CPU reference for AutoencoderKLQwenImage (single image / T=1). See
 // QwenImageVae.Reference.cs for the single-frame simplification rationale. Every
-// operation is a faithful, un-optimized port of the diffusers/sglang reference,
-// validated numerically against diffusers (tools/qwen_image_vae_reference.py).
+// operation follows the diffusers/sglang reference; large CPU elementwise passes
+// use spatial tiling/parallel ranges, and supported backends accelerate convolution
+// and Qwen-Image-2.1 spatial attention. The scalar equations remain the oracle.
 //
 // Tensor convention here: a feature map is a flat float[] in planar CHW order
 // (channel c, row y, col x at index (c*H + y)*W + x). Time is degenerate (T=1).
@@ -31,7 +32,7 @@ namespace TensorSharp.Models.QwenImage
         public int Idx(int c, int y, int x) => (c * H + y) * W + x;
     }
 
-    internal static class VaeReferenceMath
+    internal static partial class VaeReferenceMath
     {
         // When set (by QwenImageVae on a GGML backend), the conv stack runs on the
         // device via TSGgml_Conv2d instead of the pure-C# scalar loops. This is THE
@@ -66,28 +67,66 @@ namespace TensorSharp.Models.QwenImage
 
         // ---- primitive ops ----------------------------------------------------
 
-        private static void SiluInPlace(float[] d)
+        internal static void SiluInPlace(float[] d)
         {
-            for (long i = 0; i < d.Length; i++)
+            void Apply(int start, int count)
             {
-                float v = d[i];
-                d[i] = v / (1f + MathF.Exp(-v));
+                int end = start + count;
+                for (int i = start; i < end; i++)
+                {
+                    float v = d[i];
+                    d[i] = v / (1f + MathF.Exp(-v));
+                }
             }
+            // Large decoded feature maps contain hundreds of millions of values.
+            // Partition contiguous ranges while keeping small previews serial.
+            const int chunkSize = 64 * 1024;
+            if (d.Length < 2 * chunkSize) Apply(0, d.Length);
+            else Parallel.For(0, (d.Length - 1) / chunkSize + 1, chunk =>
+            {
+                int start = chunk * chunkSize;
+                Apply(start, Math.Min(chunkSize, d.Length - start));
+            });
         }
 
         // RMS norm over the channel dimension (F.normalize(dim=1) * sqrt(C) * gamma).
-        private static Feature RmsNormChannel(Feature x, float[] gamma)
+        internal static Feature RmsNormChannel(Feature x, float[] gamma)
         {
             int C = x.C, H = x.H, W = x.W, hw = H * W;
             var outp = new Feature(C, H, W);
             float scale = MathF.Sqrt(C);
-            Parallel.For(0, hw, p =>
+            // Visit contiguous spatial tiles within each channel. Per-pixel channel
+            // walks skip whole image planes, thrashing caches and TLBs at 2K.
+            // Keep double accumulation in the original channel order and retain
+            // the original float multiplication order for numerical equivalence.
+            const int tileSize = 256;
+            int tiles = (int)(((long)hw + tileSize - 1) / tileSize);
+            Parallel.For(0, tiles, tile =>
             {
-                double ss = 0;
-                for (int c = 0; c < C; c++) { float v = x.D[c * hw + p]; ss += (double)v * v; }
-                float inv = (float)(1.0 / Math.Sqrt(ss + 1e-12));
+                int start = tile * tileSize;
+                int count = Math.Min(tileSize, hw - start);
+                Span<double> sums = stackalloc double[tileSize];
+                Span<float> inverses = stackalloc float[tileSize];
+                sums.Clear();
                 for (int c = 0; c < C; c++)
-                    outp.D[c * hw + p] = x.D[c * hw + p] * inv * scale * gamma[c];
+                {
+                    ReadOnlySpan<float> source = x.D.AsSpan(c * hw + start, count);
+                    for (int p = 0; p < count; p++)
+                    {
+                        float v = source[p];
+                        sums[p] += (double)v * v;
+                    }
+                }
+                for (int p = 0; p < count; p++)
+                    inverses[p] = (float)(1.0 / Math.Sqrt(sums[p] + 1e-12));
+                for (int c = 0; c < C; c++)
+                {
+                    ReadOnlySpan<float> source = x.D.AsSpan(c * hw + start, count);
+                    Span<float> destination = outp.D.AsSpan(c * hw + start, count);
+                    float channelGamma = gamma[c];
+                    for (int p = 0; p < count; p++)
+                        destination[p] = source[p] * inverses[p] * scale * channelGamma;
+                }
             });
             return outp;
         }
@@ -353,7 +392,7 @@ namespace TensorSharp.Models.QwenImage
             return AddInPlace(t, h);
         }
 
-        private static Feature AttentionBlock(VaeWeights w, string prefix, Feature x)
+        private static Feature AttentionBlock(VaeWeights w, string prefix, Feature x, bool nativeAttention = false)
         {
             int C = x.C, H = x.H, W = x.W, hw = H * W;
             var identity = x;
@@ -364,6 +403,13 @@ namespace TensorSharp.Models.QwenImage
             // q,k,v: [C, hw] each (channel-planar). attention over hw positions, single head, dim=C.
             float scale = 1f / MathF.Sqrt(C);
             var outp = new Feature(C, H, W);
+            if (nativeAttention && UseGpuConv && Environment.GetEnvironmentVariable("TS_QWEN21_VAE_ATTN") != "0" &&
+                GgmlBasicOps.TryQwenVaeAttention(qkv.D, outp.D, C, hw))
+            {
+                var projected = Conv2d(outp, w.Get(prefix + ".proj.weight"), C, C, 1, 1,
+                    w.Get(prefix + ".proj.bias"), 1, 1, 0, 0, 0, 0);
+                return AddInPlace(projected, identity);
+            }
             // scores[i,j] = sum_c q[c,i]*k[c,j] * scale ; softmax over j ; out[c,i] = sum_j p[i,j]*v[c,j]
             Parallel.For(0, hw, i =>
             {

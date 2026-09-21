@@ -31,23 +31,16 @@ namespace InferenceWeb.Tests
 {
     public class QwenImageDiTWeightDtypeTests
     {
-        private static string DitPath()
-        {
-            string path = Environment.GetEnvironmentVariable("TENSORSHARP_QWEN_IMAGE_DIT");
-            return !string.IsNullOrWhiteSpace(path) && File.Exists(path) ? path : null;
-        }
-
         /// <summary>
         /// End-to-end guard: a DiT forward must be finite. This is the check that actually
         /// fails when the native path is handed a wrong-dtype pointer — the managed reference
         /// path stays correct because it uses the dequantized weight copies, so only a native
         /// forward reproduces it.
         /// </summary>
-        [Fact]
+        [ModelFact("TENSORSHARP_QWEN_IMAGE_DIT")]
         public void DitForward_IsFinite_OnTheConfiguredModel()
         {
-            string path = DitPath();
-            if (path == null) return;
+            string path = Environment.GetEnvironmentVariable("TENSORSHARP_QWEN_IMAGE_DIT");
 
             var backendName = Environment.GetEnvironmentVariable("TS_QWEN_BACKEND") ?? "ggml_cpu";
             var backend = backendName switch

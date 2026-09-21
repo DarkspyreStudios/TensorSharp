@@ -41,7 +41,14 @@
 // owns or could write; otherwise it reports pages mapped in this process, which
 // makes a resident block look cold. That fails safe: the block is re-read from
 // the page cache at memory speed.
+//
+// OPEN BEFORE WARMING. Some FUSE filesystems (including GeeseFS) invalidate an
+// inode's page cache on every new open. Acquire every planned worker's file
+// descriptors before any residency check or read; a worker opening its next
+// shard later could otherwise evict pages another worker has already warmed.
 #pragma once
+
+#include "dsv4_exact_read.h"
 
 #include <algorithm>
 #include <atomic>
@@ -195,7 +202,7 @@ inline std::vector<file_warm_range> merge_file_warm_ranges(std::vector<file_warm
         {
             file_warm_range & cur = out.back();
             const uint64_t cur_end = cur.offset + cur.bytes;
-            bool same_map = (cur.mapped == nullptr) == (r.mapped == nullptr);
+            bool same_map = cur.file == r.file && (cur.mapped == nullptr) == (r.mapped == nullptr);
             if (same_map && cur.mapped)
                 same_map = (const char *) cur.mapped + (r.offset - cur.offset) == (const char *) r.mapped;
             if (cur.file == r.file && r.offset <= cur_end && same_map)
@@ -338,12 +345,51 @@ inline void populate(const void * p, uint64_t bytes)
 } // namespace file_warm_detail
 #endif
 
+namespace file_warm_detail {
+
+struct system_file_ops
+{
+#if !defined(_WIN32)
+    int open_file(const std::string & path) { return ::open(path.c_str(), O_RDONLY | O_CLOEXEC); }
+    void close_file(int fd) noexcept { ::close(fd); }
+    bool resident(const void * p, uint64_t bytes, std::vector<unsigned char> & scratch)
+    {
+        return fully_resident(p, bytes, scratch);
+    }
+    file_read_attempt read_at(int fd, uint64_t offset, void * destination, size_t length)
+    {
+        return pread_at(fd, offset, destination, length);
+    }
+#endif
+};
+
+#if !defined(_WIN32)
+// Allocate the entire descriptor table before opening anything. Its lifetime
+// spans setup and every worker, including cancellation and exception paths.
+template<class FileOps> struct warm_descriptors
+{
+    FileOps & io;
+    std::vector<std::vector<int>> workers;
+    warm_descriptors(FileOps & ops, size_t threads, size_t files)
+        : io(ops), workers(threads, std::vector<int>(files, -1)) {}
+    ~warm_descriptors()
+    {
+        for (const auto & fds : workers)
+            for (int fd : fds) if (fd >= 0) io.close_file(fd);
+    }
+    warm_descriptors(const warm_descriptors &) = delete;
+    warm_descriptors & operator=(const warm_descriptors &) = delete;
+};
+#endif
+
 // Read every byte of `ranges` into the page cache (see the header comment).
 // I/O and worker failures are reported in the result. Planning allocations may
-// throw to the caller, before any workers are started.
-inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
-                                         const std::vector<file_warm_range> & ranges,
-                                         const file_warm_options & options)
+// throw to the caller, before any workers are started. FileOps allows the tests
+// to model open-time cache invalidation and failure without timing assumptions.
+template<class FileOps>
+inline file_warm_result warm_file_ranges_with_io(const std::vector<std::string> & paths,
+                                                const std::vector<file_warm_range> & ranges,
+                                                const file_warm_options & options, FileOps & io)
 {
     file_warm_result result;
     const auto t0 = std::chrono::steady_clock::now();
@@ -361,6 +407,7 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
     }
 #if defined(_WIN32)
     (void) options;
+    (void) io;
     if (result.bytes_total == 0) return result; // nothing mapped, nothing to warm
     result.ok = false;
     result.error = "pread warming is not available on Windows";
@@ -370,6 +417,7 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
     const auto plan = plan_file_warm(merged, options.threads, block);
     result.threads = (int) plan.size();
     if (plan.empty()) return result;
+    warm_descriptors<FileOps> descriptors(io, plan.size(), paths.size());
 
     std::atomic<bool> failed(false), stopped(false);
     std::atomic<uint64_t> bytes_read(0), bytes_resident(0);
@@ -390,13 +438,12 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
 
     auto worker = [&](int k)
     {
-        std::vector<int> fds;
+        const auto & fds = descriptors.workers[(size_t) k];
         std::unique_ptr<char[]> buffer;
         std::vector<unsigned char> residency;
-        // Returns at the first failure or stop; the descriptors close below.
+        // Returns at the first failure or stop; descriptors outlive all workers.
         auto run = [&]()
         {
-            fds.assign(paths.size(), -1);
             for (const file_warm_piece & piece : plan[(size_t) k])
             {
                 const file_warm_range & range = merged[piece.range];
@@ -414,23 +461,14 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
                     const void * mapped = range.mapped
                         ? (const void *) ((const char *) range.mapped + (off - range.offset)) : nullptr;
                     const bool resident = options.skip_resident && mapped &&
-                                          file_warm_detail::fully_resident(mapped, len, residency);
+                                          io.resident(mapped, len, residency);
                     if (resident)
                     {
                         bytes_resident.fetch_add(len, std::memory_order_relaxed);
                     }
                     else
                     {
-                        int & fd = fds[(size_t) range.file];
-                        if (fd < 0)
-                        {
-                            fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-                            if (fd < 0)
-                            {
-                                fail("cannot open " + path + " for warming: " + std::strerror(errno));
-                                return;
-                            }
-                        }
+                        const int fd = fds[(size_t) range.file];
                         if (!buffer)
                         {
                             buffer.reset(new (std::nothrow) char[(size_t) block]);
@@ -440,26 +478,20 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
                                 return;
                             }
                         }
-                        for (uint64_t got_total = 0; got_total < len; )
+                        const auto read = read_range_exact(buffer.get(), (size_t) len, off,
+                            [&](uint64_t offset, void * destination, size_t length) {
+                                return io.read_at(fd, offset, destination, length);
+                            }, [&](const exact_read_retry & retry) {
+                                std::fprintf(stderr, "[dsv4] warm read retry %u/5: %zu/%zu bytes read, "
+                                    "resume offset %llu of %s, errno=%d (%s), backoff=%ums\n",
+                                    retry.number, retry.bytes, retry.requested,
+                                    (unsigned long long) retry.offset, path.c_str(), retry.error,
+                                    std::strerror(retry.error), retry.delay_ms);
+                            });
+                        if (!read.ok)
                         {
-                            const ssize_t got = ::pread(fd, buffer.get(), (size_t) (len - got_total),
-                                                        (off_t) (off + got_total));
-                            if (got < 0 && errno == EINTR) continue;
-                            if (got <= 0)
-                            {
-                                const int err = errno;
-                                char msg[256];
-                                if (got == 0)
-                                    std::snprintf(msg, sizeof(msg), "short read at offset %llu (%llu of %llu bytes missing; "
-                                                  "the file ends early)", (unsigned long long) (off + got_total),
-                                                  (unsigned long long) (len - got_total), (unsigned long long) len);
-                                else
-                                    std::snprintf(msg, sizeof(msg), "read error at offset %llu: %s",
-                                                  (unsigned long long) (off + got_total), std::strerror(err));
-                                fail(path + ": " + msg);
-                                return;
-                            }
-                            got_total += (uint64_t) got;
+                            fail(path + ": " + exact_read_failure(read, (size_t) len, off));
+                            return;
                         }
                         bytes_read.fetch_add(len, std::memory_order_relaxed);
                     }
@@ -477,20 +509,44 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
         {
             capture_exception();
         }
-        for (int fd : fds) if (fd >= 0) ::close(fd);
     };
 
     std::vector<std::thread> pool;
     pool.reserve(plan.size());
     try
     {
-        for (int k = 1; k < (int) plan.size(); ++k) pool.emplace_back(worker, k);
+        // Only shards used by a worker get opened, once per worker. Do this
+        // synchronously: no worker may inspect residency or read until the last
+        // open has completed, and any open failure prevents all warm reads.
+        for (size_t k = 0; k < plan.size() && !failed.load() && !stopped.load(); ++k)
+            for (const file_warm_piece & piece : plan[k])
+            {
+                if (options.stop && options.stop->load(std::memory_order_relaxed))
+                {
+                    stopped.store(true);
+                    break;
+                }
+                const size_t file = (size_t) merged[piece.range].file;
+                int & fd = descriptors.workers[k][file];
+                if (fd >= 0) continue;
+                fd = io.open_file(paths[file]);
+                if (fd < 0)
+                {
+                    const int error = errno;
+                    fail("cannot open " + paths[file] + " for warming: " + std::strerror(error));
+                    break;
+                }
+            }
+        if (!failed.load() && !stopped.load())
+        {
+            for (int k = 1; k < (int) plan.size(); ++k) pool.emplace_back(worker, k);
+            worker(0);
+        }
     }
     catch (...)
     {
         capture_exception();
     }
-    worker(0);
     for (auto & th : pool) th.join();
 
     if (worker_error)
@@ -507,6 +563,16 @@ inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
     result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return result;
 #endif
+}
+
+} // namespace file_warm_detail
+
+inline file_warm_result warm_file_ranges(const std::vector<std::string> & paths,
+                                         const std::vector<file_warm_range> & ranges,
+                                         const file_warm_options & options)
+{
+    file_warm_detail::system_file_ops io;
+    return file_warm_detail::warm_file_ranges_with_io(paths, ranges, options, io);
 }
 
 // ---------------------------------------------------------------------------

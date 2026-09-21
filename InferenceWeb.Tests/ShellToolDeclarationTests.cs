@@ -252,6 +252,49 @@ public class ShellToolDeclarationTests : IDisposable
         Assert.DoesNotContain("ENABLED and unrestricted", restricted, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(SkillSandboxMode.Required, false, "required", "sandbox-exec")]
+    [InlineData(SkillSandboxMode.Preferred, false, "preferred", "sandbox-exec")]
+    [InlineData(SkillSandboxMode.Required, true, "preferred", "sandbox-exec")]
+    [InlineData(SkillSandboxMode.Off, false, "off", "none")]
+    public void ExecutionEnvironmentDescribesTheActualBackendAndWorkspace(
+        SkillSandboxMode mode, bool unconfined, string expectedPolicy, string expectedSandbox)
+    {
+        var options = new CodeExecOptions
+        {
+            Enabled = true,
+            Sandbox = mode,
+            Unconfined = unconfined,
+            ScratchDirectory = _base,
+        };
+        var backend = new FakeShellBackend
+        {
+            Sandbox = mode == SkillSandboxMode.Off ? null : new SeatbeltSandbox(),
+        };
+        using var runner = new ShellRunner(options, backend: backend);
+        var adapter = new CodeRunnerAdapter(runner, executionInstructions: "HOST-COMMAND-GUIDANCE");
+
+        foreach (bool persists in new[] { true, false })
+        {
+            string description = adapter.DeclareTools(persists)
+                .Single(tool => tool.Name == ShellTools.ShellToolName).Description;
+
+            Assert.Contains("Host platform: ", description, StringComparison.Ordinal);
+            Assert.Contains("Execution backend: fake", description, StringComparison.Ordinal);
+            Assert.Contains($"Sandbox policy: {expectedPolicy}; configured sandbox: {expectedSandbox}",
+                description, StringComparison.Ordinal);
+            Assert.Contains("Each tool result reports the applied sandbox", description, StringComparison.Ordinal);
+            Assert.Contains("HOME and USERPROFILE point to the tool workspace", description, StringComparison.Ordinal);
+            Assert.Contains("not imported automatically", description, StringComparison.Ordinal);
+            Assert.Contains("HOST-COMMAND-GUIDANCE", description, StringComparison.Ordinal);
+            Assert.DoesNotContain(_base, description, StringComparison.Ordinal);
+            Assert.Equal(description, adapter.DeclareTools(persists)
+                .Single(tool => tool.Name == ShellTools.ShellToolName).Description);
+        }
+
+        Assert.Empty(backend.Launches);
+    }
+
     [Fact]
     public void TheDeclaration_WhereTheOsCannotEnforceNetwork_DoesNotPromiseItIsBlocked()
     {
@@ -359,7 +402,7 @@ public class ShellToolDeclarationTests : IDisposable
 
     // ---- the schema stays inside what ToolParameter can express ---------------
 
-    /// <summary>Both tools, in both dialects and both install modes — the whole declared surface.</summary>
+    /// <summary>The advertised file tools, with shell declarations for both dialects and install modes.</summary>
     private List<ToolFunction> EveryDeclaration() => new()
     {
         ShellTools.DeclareShell(
@@ -367,6 +410,8 @@ public class ShellToolDeclarationTests : IDisposable
         ShellTools.DeclareShell(
             new CodeExecOptions { Enabled = true, AllowInstall = false }, Stub("pwsh"), keepsArtifacts: false),
         ShellTools.DeclarePatch(),
+        ShellTools.DeclareRead(),
+        ShellTools.DeclareWrite(),
     };
 
     [Fact]
@@ -414,7 +459,7 @@ public class ShellToolDeclarationTests : IDisposable
     }
 
     [Fact]
-    public void TheDeclaredParameters_AreExactlyTheOnesTheHostReadsBack()
+    public void TheDeclaredParameters_ExposeTheSupportedModelFacingSchema()
     {
         // Anti-vacuity for the three sweeps above, which all pass over an empty parameter
         // dictionary — and the pin that keeps declaration and reader in step, since
@@ -438,19 +483,11 @@ public class ShellToolDeclarationTests : IDisposable
             read.Parameters.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
         Assert.Equal(new[] { "path" }, read.Required.ToArray());
 
-        ToolFunction edit = ShellTools.DeclareEdit();
-        Assert.Equal(
-            new[] { "new_string", "old_string", "path", "replace_all" },
-            edit.Parameters.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
-        Assert.Equal(new[] { "path", "old_string", "new_string" }, edit.Required.ToArray());
-        Assert.Equal("boolean", edit.Parameters["replace_all"].Type);
-
         ToolFunction write = ShellTools.DeclareWrite();
         Assert.Equal(
-            new[] { "content", "overwrite", "path" },
+            new[] { "content", "path" },
             write.Parameters.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
         Assert.Equal(new[] { "path", "content" }, write.Required.ToArray());
-        Assert.Equal("boolean", write.Parameters["overwrite"].Type);
     }
 
     [Fact]
@@ -683,8 +720,19 @@ public class ShellToolDeclarationTests : IDisposable
         // nothing. Pin the literal names so that regression fails loudly here instead of
         // turning the rest of this file green.
         Assert.Equal(
-            new[] { "apply_patch", "edit_file", "read_file", "shell", "write_file" },
+            new[] { "apply_patch", "read_file", "shell", "write_file" },
             _adapter.DeclareTools().Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+
+        // Prompt guidance and parameter descriptions must not direct a model to the
+        // legacy editor or expose whole-file overwrite as an alternative to patching.
+        foreach (ToolFunction tool in _adapter.DeclareTools())
+        {
+            Assert.DoesNotContain(SkillToolNames.EditFile, tool.Description, StringComparison.Ordinal);
+            foreach (ToolParameter parameter in tool.Parameters.Values)
+                Assert.DoesNotContain(SkillToolNames.EditFile, parameter.Description, StringComparison.Ordinal);
+        }
+        Assert.DoesNotContain("overwrite", ShellTools.DeclareWrite().Parameters.Keys);
+        Assert.Contains("single file or multiple files", ShellTools.DeclarePatch().Description, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -700,10 +748,9 @@ public class ShellToolDeclarationTests : IDisposable
         //
         // The order is also a claim about behaviour. A declaration list is read top-down,
         // and the measured failure is a model reaching for the shell to do a job the
-        // editor does better, so the editor comes first and the multi-file specialist
-        // comes last.
+        // patcher does better, so read and patch come before shell execution.
         Assert.Equal(
-            new[] { "read_file", "edit_file", "write_file", "shell", "apply_patch" },
+            new[] { "read_file", "apply_patch", "write_file", "shell" },
             _adapter.DeclareTools().Select(t => t.Name).ToArray());
     }
 
@@ -727,13 +774,13 @@ public class ShellToolDeclarationTests : IDisposable
     }
 
     [Fact]
-    public void TheDeclaredToolNames_AreExactlyTheDispatchTablesCodeTools()
+    public void TheDeclaredToolNames_AreTheDispatchTablesNonLegacyCodeTools()
     {
-        // One list, checked against the declarations rather than trusted. Adding a third
-        // code tool is then one edit in SkillToolNames plus its declaration; forgetting
-        // either half fails here instead of in a user's chat.
+        // Legacy edit_file calls still dispatch for compatibility, but new prompts must
+        // advertise apply_patch as the sole editor.
         Assert.Equal(
-            SkillToolNames.CodeTools.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+            SkillToolNames.CodeTools.Where(n => n != SkillToolNames.EditFile)
+                .OrderBy(n => n, StringComparer.Ordinal).ToArray(),
             _adapter.DeclareTools().Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
     }
 

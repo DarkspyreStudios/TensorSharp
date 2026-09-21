@@ -69,9 +69,8 @@ namespace TensorSharp.AgentHost.CodeExec
     ///
     /// <para>
     /// The surface separates execution from mutation: the shell runs and verifies code;
-    /// <c>read_file</c> supplies bounded current context; <c>edit_file</c> performs the
-    /// common exact local repair; <c>write_file</c> creates or intentionally replaces a
-    /// whole file; and <c>apply_patch</c> makes an atomic multi-file change. Keeping local
+    /// <c>read_file</c> supplies bounded current context; <c>write_file</c> creates a
+    /// new file; and <c>apply_patch</c> updates one or multiple files atomically. Keeping local
     /// fixes out of heredocs is what avoids re-emitting and re-rolling hundreds of lines
     /// that were already correct.
     /// </para>
@@ -437,7 +436,10 @@ namespace TensorSharp.AgentHost.CodeExec
             if (workspaceRebuilt)
                 notes.Add(SessionWorkspace.RebuiltNote);
 
-            if (ShellCommand.ContainsInstall(command))
+            // Fetch-and-run tools need both permissions and cannot enforce the host package allow-list.
+            bool allowPackageRunners = _options.AllowNetwork && _options.AllowInstall
+                && _options.AllowedPackages.Count == 0;
+            if (ShellCommand.ContainsInstall(command, includePackageRunners: !allowPackageRunners))
             {
                 // The switch is about FETCHING. A request for something the host already
                 // provides fetches nothing, so it goes through to the installer, which
@@ -467,7 +469,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 }
 
                 if (!ShellInstall.TryRead(command, RelativeReader(workspace),
-                        out IReadOnlyList<ShellInstallRequest> installs, out string? installError))
+                        out IReadOnlyList<ShellInstallRequest> installs, out string? installError,
+                        includePackageRunners: !allowPackageRunners))
                 {
                     return CodeExecResult.Refused(installError!);
                 }
@@ -1298,9 +1301,9 @@ namespace TensorSharp.AgentHost.CodeExec
                 // Both are narrowed here, where the layout is known.
                 ["HOME"] = workspace.WorkDirectory,
                 ["USERPROFILE"] = workspace.WorkDirectory,
-                ["TMPDIR"] = workspace.TempDirectory,
-                ["TEMP"] = workspace.TempDirectory,
-                ["TMP"] = workspace.TempDirectory,
+                ["TMPDIR"] = workspace.RuntimeTempDirectory,
+                ["TEMP"] = workspace.RuntimeTempDirectory,
+                ["TMP"] = workspace.RuntimeTempDirectory,
                 // The session's package environment, reachable by whatever the model runs
                 // without it having to know where the host put it.
                 ["PYTHONPATH"] = workspace.EnvDirectory,
@@ -1327,19 +1330,8 @@ namespace TensorSharp.AgentHost.CodeExec
             // PATH is set by ConfinedProcess from the host's own, then overwritten here —
             // the launch plan's variables are applied last, so this wins. The prefixed
             // directories are on the readable list above for the same reason.
-            string hostPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            string separator = OperatingSystem.IsWindows() ? ";" : ":";
-            environment["PATH"] = string.Join(separator, new[]
-            {
-                // Ahead of everything: the host's own interpreter aliases, which must not
-                // be shadowed by a package that happens to install a script of the same
-                // name. See EnsureInterpreterAliases.
-                Path.Combine(workspace.EnvDirectory, "shim"),
-                CodeEnvironment.VenvBin(workspace.EnvDirectory),
-                Path.Combine(workspace.EnvDirectory, "bin"),
-                Path.Combine(workspace.EnvDirectory, "node_modules", ".bin"),
-                hostPath,
-            }.Where(p => p.Length > 0));
+            environment["PATH"] = CodeEnvironment.SessionExecutablePath(
+                workspace, Environment.GetEnvironmentVariable("PATH"));
 
             if (_options.AllowNetwork)
                 AddNetworkEnvironment(workspace, environment, readablePaths);
@@ -2040,11 +2032,9 @@ namespace TensorSharp.AgentHost.CodeExec
 
         // ---- the file tools ------------------------------------------------
         //
-        // read_file / edit_file / write_file, the shape Claude Code uses and the one
-        // Anthropic publishes as str_replace_based_edit_tool. They sit beside apply_patch
-        // rather than replacing it: a string replacement cannot change four files
-        // atomically, and a patch envelope is more than a small model can reliably emit
-        // for a one-line fix. Each reference answers the problem it actually solved.
+        // read_file supplies context and write_file creates new files. apply_patch is
+        // the advertised editor for both one-line repairs and changes across files.
+        // The exact-replacement and explicit-overwrite APIs remain for compatibility.
 
         /// <summary>
         /// Show the model a file's real current bytes, numbered, and remember that it has
@@ -2373,7 +2363,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // Creating and replacing are materially different operations. Treating an
             // omitted flag as permission to replace made write_file the easiest escape
             // hatch after a failed edit: the model re-emitted every correct line, the
-            // host destroyed the old file, and only THEN explained that edit_file would
+            // host destroyed the old file, and only THEN explained that apply_patch would
             // have been cheaper. Refuse before touching the bytes. A genuine rewrite is
             // still available, but it has to be named explicitly so a local repair does
             // not silently become one.
@@ -2399,9 +2389,9 @@ namespace TensorSharp.AgentHost.CodeExec
 
                 return CodeExecResult.NoChange(
                     $"'{request.Path}' already exists, so write_file did not replace it. "
-                    + $"For a bug fix or any local change, use {ShellTools.EditToolName} with only the exact "
-                    + "old and new text; every other byte will stay unchanged. If the old file genuinely should "
-                    + "be discarded in full, retry write_file with overwrite=true. Nothing was written.");
+                    + $"Use {ShellTools.PatchToolName} to modify or replace existing content in one file or "
+                    + "multiple files, with context matching the current text. Use write_file only to create "
+                    + "a new file. Nothing was written.");
             }
 
             // Preserve the create-only promise across the small interval between the
@@ -2428,7 +2418,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // scanning a command line for a redirect, which is why this tool exists at all
             // rather than being left to the shell.
             if (previous != null
-                && RewriteWatch.DescribeRetyped(request.Path, previous, content, ShellTools.EditToolName)
+                && RewriteWatch.DescribeRetyped(request.Path, previous, content, ShellTools.PatchToolName)
                     is { Length: > 0 } retyped)
             {
                 sb.Append('\n').Append(retyped);
@@ -3082,7 +3072,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 {
                     reason += $"\nThis is launch {inARow} in a row that failed before running anything, so the "
                         + "problem is this host's shell and not the command — simplifying it will not help. "
-                        + "Use read_file, write_file, edit_file and apply_patch, which do not need the shell, "
+                        + "Use read_file for context, write_file to create new files, and apply_patch to modify "
+                        + "one or multiple files; these tools do not need the shell. Use those tools "
                         + "or a skill's own script through skills_run; if the task cannot be done without a "
                         + "shell, say so in your answer instead of trying again.";
                 }
@@ -3203,13 +3194,11 @@ namespace TensorSharp.AgentHost.CodeExec
             // thing in general terms was measured to have no effect: apply_patch was used
             // zero times out of ten opportunities while it said exactly this.
             //
-            // It names edit_file, not apply_patch. The note renders a ready-to-send call —
-            // path, old_string, new_string — and those are edit_file's parameters; naming
-            // the patch tool beside them handed the model a call shape apply_patch does
-            // not have, so following the advice literally would have cost a refusal.
+            // The note describes apply_patch's patch envelope and contextual hunks.
+            // Its unordered line comparison is evidence of wasted work, not a ready-to-send patch.
             // Not gated on success. The whole file was re-typed either way, and a failing
             // run is exactly where the model is looping and re-emitting.
-            if (rewrites?.Describe(workspace, ShellTools.EditToolName) is { Length: > 0 } retyped)
+            if (rewrites?.Describe(workspace, ShellTools.PatchToolName) is { Length: > 0 } retyped)
             {
                 sb.Append(retyped);
                 _logger.LogInformation(LogEventIds.CodeExecRewrote,
@@ -3292,6 +3281,10 @@ namespace TensorSharp.AgentHost.CodeExec
                 return;
 
             string diagnosis = run.Stderr.Length > 0 ? run.Stderr : run.Stdout;
+
+            if (CodeRepairHint.NestedSandboxFailure(run, _sandbox?.Capabilities.ConfinesWrites == true)
+                is { } sandboxHint)
+                sb.Append(sandboxHint);
 
             if (CodeDiagnostics.TryFindMissingModule(diagnosis, out CodeLanguage language, out string module))
             {
@@ -3410,8 +3403,8 @@ namespace TensorSharp.AgentHost.CodeExec
 
             AppendWhoseFaultThisIs(sb, run, diagnosis);
 
-            // Only name edit_file/apply_patch when this request was actually offered
-            // them. A null-workspace caller has shell alone and must never be instructed
+            // Only name apply_patch when this request was actually offered
+            // it. A null-workspace caller has shell alone and must never be instructed
             // to invoke a tool it cannot send.
             if (fileToolsAvailable
                 && CodeRepairHint.Create(diagnosis, workspace, ranIn, NetworkWasConfined(run))

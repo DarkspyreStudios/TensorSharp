@@ -232,7 +232,7 @@ namespace TensorSharp.Models
             OpenShards(ggufPath, dsparkPath);
             ParseHparams();
             if (_isV41)
-                LoadEngramSidecar(ggufPath);
+                LoadEngramMetadata();
             Mark("shards opened / hparams parsed");
 
             // Large weights are read exactly once, on their way to VRAM, so the
@@ -493,27 +493,16 @@ namespace TensorSharp.Models
         private int[] _engramHashes;
         private int _engramUbatchTokens;
 
-        /// <summary>
-        /// Reads <c>deepseek41.engram.bin</c> from beside the checkpoint and
-        /// derives this checkpoint's cache-sharing topology from it. The GGUF
-        /// conversion keeps neither the compressed token map nor the bucket
-        /// layout, so V4.1 cannot address an Engram row without the sidecar.
-        /// </summary>
-        private void LoadEngramSidecar(string ggufPath)
+        /// <summary>Reads embedded Engram metadata and derives cache-sharing
+        /// topology from the checkpoint's tensor ownership across all shards.</summary>
+        private void LoadEngramMetadata()
         {
-            string[] tokens = _shards[0].GetStringArray("tokenizer.ggml.tokens")
-                ?? throw new InvalidOperationException("DeepSeek V4.1 tokenizer metadata is missing");
-            ulong fingerprint = 14695981039346656037UL;
-            foreach (string token in tokens)
-                fingerprint = Dsv41EngramData.FingerprintToken(fingerprint, token);
-
-            string directory = Path.GetDirectoryName(Path.GetFullPath(ggufPath));
-            string sidecar = Path.Combine(directory ?? string.Empty, "deepseek41.engram.bin");
-            _engram = Dsv41EngramData.Load(sidecar, (uint)tokens.Length, fingerprint);
+            _engram = Dsv41EngramData.Load(_shards[0],
+                name => _tensorMap.TryGetValue(name, out var entry) ? entry.Info : null);
 
             if (_engram.Layers[^1].Id >= _nLayer ||
                 _engram.KvSourceLayerIds[^1] >= _nLayer || _engram.IndexSourceLayerIds[^1] >= _nLayer)
-                throw new InvalidOperationException("DeepSeek V4.1 sidecar names a layer beyond the layer count");
+                throw new InvalidOperationException("DeepSeek V4.1 GGUF metadata names a layer beyond the layer count");
 
             _v41KvSource = new int[_nLayer];
             _v41IndexSource = new int[_nLayer];

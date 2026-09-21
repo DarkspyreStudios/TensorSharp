@@ -280,6 +280,47 @@ public class SkillToolsTests : IDisposable
     }
 
     [Fact]
+    public void Execute_Read_PortableScriptGuidanceUsesRegisteredBundleAndLeavesManifestUnchanged()
+    {
+        const string body = "Run $OTHER_AGENT_HOME/skills/automation/scripts/runner.sh with the task arguments.";
+        string directory = WriteSkill("automation", "Automates an application.", body);
+        Directory.CreateDirectory(Path.Combine(directory, "scripts"));
+        File.WriteAllText(Path.Combine(directory, "scripts", "runner.sh"), "#!/bin/sh\nprintf '%s' \"$1\"\n");
+        string original = File.ReadAllText(Path.Combine(directory, "SKILL.md"));
+        var runner = new RecordingScriptRunner();
+        var context = new SkillToolContext(Context().Reachable) { ScriptRunner = runner };
+
+        SkillToolResult read = SkillTools.Execute(Call(SkillTools.ReadToolName, ("skill", "automation")), context);
+
+        Assert.True(read.Ok, read.Content);
+        Assert.Contains(original, read.Content, StringComparison.Ordinal);
+        Assert.Equal(original, File.ReadAllText(Path.Combine(directory, "SKILL.md")));
+        const string marker = "Example tool arguments for skills_run: ";
+        string example = read.Content.Split(marker, StringSplitOptions.None)[1].Split('\n')[0];
+        var arguments = JsonSerializer.Deserialize<Dictionary<string, object>>(example)!;
+        arguments["args"] = new[] { "task argument with spaces" };
+
+        SkillToolResult run = SkillTools.Execute(new ToolCall { Name = SkillTools.RunToolName, Arguments = arguments }, context);
+
+        Assert.True(run.Ok, run.Content);
+        Assert.Equal("scripts/runner.sh", runner.RelativePath);
+        Assert.Equal(new[] { "task argument with spaces" }, runner.Arguments);
+        Assert.DoesNotContain(directory, read.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Execute_Read_DoesNotPromiseScriptExecutionWhenNoRunnerIsAvailable()
+    {
+        string directory = WriteSkill("automation", "Automates an application.");
+        Directory.CreateDirectory(Path.Combine(directory, "scripts"));
+        File.WriteAllText(Path.Combine(directory, "scripts", "runner.sh"), "echo hello\n");
+
+        SkillToolResult read = SkillTools.Execute(Call(SkillTools.ReadToolName, ("skill", "automation")), Context());
+
+        Assert.DoesNotContain("Example tool arguments for skills_run", read.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Execute_Read_ARedundantSkillNamePrefix_IsAccepted()
     {
         // Models routinely answer "read pdf's reference" with path="pdf/references/api.md",
@@ -455,6 +496,23 @@ public class SkillToolsTests : IDisposable
         Assert.Equal(new[] { "--canonical" }, runner.Arguments);
     }
 
+    [Theory]
+    [InlineData("[")]
+    [InlineData("[\"ignored\", null]")]
+    public void Execute_Run_IgnoresMalformedAliasWhenCanonicalArgsAreNonEmpty(string alias)
+    {
+        WriteSkill("pdf", "does pdfs");
+        var runner = new RecordingScriptRunner();
+        var context = new SkillToolContext(Context().Reachable) { ScriptRunner = runner };
+
+        SkillToolResult result = SkillTools.Execute(
+            Call(SkillTools.RunToolName, ("skill", "pdf"), ("path", "scripts/render.py"),
+                ("args", Json("[\"--out\", \"canonical report.pdf\"]")), ("arguments", alias)), context);
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Equal(new[] { "--out", "canonical report.pdf" }, runner.Arguments);
+    }
+
     [Fact]
     public void Execute_Run_NormalizesQualifiedAndDotPrefixedSkillPath()
     {
@@ -516,6 +574,118 @@ public class SkillToolsTests : IDisposable
     }
 
     // ---- skills_run argument shapes ----------------------------------------
+
+    [Fact]
+    public void Execute_Run_QwenXmlStringArrayReachesTheScriptAsAnArgumentVector()
+    {
+        WriteSkill("playwright", "controls a browser");
+        var runner = new RecordingScriptRunner();
+        var context = new SkillToolContext(Context().Reachable) { ScriptRunner = runner };
+        string[] expected = ["open", "http://127.0.0.1:54524"];
+        var parser = OutputParserFactory.Create("qwen35");
+        parser.Init(enableThinking: false, tools: SkillTools.BuiltIn(allowScripts: true));
+        string text = "<tool_call>\n<function=skills_run>\n"
+            + "<parameter=skill>\nplaywright\n</parameter>\n"
+            + "<parameter=path>\nscripts/playwright_cli.sh\n</parameter>\n"
+            + "<parameter=args>\n" + JsonSerializer.Serialize(expected) + "\n</parameter>\n"
+            + "</function>\n</tool_call>";
+        var calls = new List<ToolCall>();
+        // Exercise the streamed parser and declared string schema from the failing run.
+        for (int offset = 0; offset < text.Length; offset += 13)
+        {
+            ParsedOutput chunk = parser.Add(text.Substring(offset, Math.Min(13, text.Length - offset)), false);
+            if (chunk.ToolCalls != null)
+                calls.AddRange(chunk.ToolCalls);
+        }
+        ParsedOutput last = parser.Add(string.Empty, true);
+        if (last.ToolCalls != null)
+            calls.AddRange(last.ToolCalls);
+        ToolCall call = Assert.Single(calls);
+        Assert.IsType<string>(call.Arguments["args"]);
+
+        SkillToolResult result = SkillTools.Execute(call, context);
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Equal(expected, runner.Arguments);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Execute_Run_StringifiedArrayPreservesArgumentBoundariesAndLiteralShellSyntax(bool jsonString)
+    {
+        WriteSkill("report", "creates reports");
+        var runner = new RecordingScriptRunner();
+        var context = new SkillToolContext(Context().Reachable) { ScriptRunner = runner };
+        string[] expected = ["fill", "e1", "quoted \"value\" 与 空格", "", @"C:\folder\file.txt",
+            "$(touch must-not-execute)", "`id`", "$HOME", "a; b | c > d"];
+        string encoded = " \n" + JsonSerializer.Serialize(expected) + "\n ";
+        object arguments = jsonString ? Json(JsonSerializer.Serialize(encoded)) : encoded;
+
+        SkillToolResult result = SkillTools.Execute(
+            Call(SkillTools.RunToolName, ("skill", "report"), ("path", "scripts/report.py"),
+                ("args", arguments)), context);
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Equal(expected, runner.Arguments);
+    }
+
+    [Theory]
+    [InlineData("[\"open\",")]
+    [InlineData("[\"open\"] trailing")]
+    [InlineData("[\"open\", null]")]
+    [InlineData("[\"open\", 7]")]
+    [InlineData("[\"open\", {\"url\":\"https://example.com\"}]")]
+    public void Execute_Run_InvalidStringifiedVectorReturnsGuidanceWithoutLaunching(string arguments)
+    {
+        WriteSkill("browser", "controls a browser");
+        var runner = new RecordingScriptRunner();
+        var context = new SkillToolContext(Context().Reachable) { ScriptRunner = runner };
+
+        SkillToolResult result = SkillTools.Execute(
+            Call(SkillTools.RunToolName, ("skill", "browser"), ("path", "scripts/browser.sh"),
+                ("args", arguments)), context);
+
+        Assert.False(result.Ok);
+        Assert.Null(runner.Arguments);
+        Assert.Contains("'args' must be a valid JSON array of strings", result.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Execute_Run_EmptyStringifiedVectorFallsBackToArgumentsAlias()
+    {
+        WriteSkill("browser", "controls a browser");
+        var runner = new RecordingScriptRunner();
+        var context = new SkillToolContext(Context().Reachable) { ScriptRunner = runner };
+
+        SkillToolResult result = SkillTools.Execute(
+            Call(SkillTools.RunToolName, ("skill", "browser"), ("path", "scripts/browser.sh"),
+                ("args", "[]"), ("arguments", "[\"open\", \"https://example.com\"]")), context);
+
+        Assert.True(result.Ok, result.Content);
+        Assert.Equal(new[] { "open", "https://example.com" }, runner.Arguments);
+    }
+
+    [Fact]
+    public void ReadArgumentList_QuotedJsonRemainsOneLiteralArgument()
+    {
+        ToolCall call = Call(SkillTools.RunToolName, ("args", "'[\"open\", \"literal text\"]'"));
+
+        Assert.Equal(new[] { "[\"open\", \"literal text\"]" }, SkillTools.ReadArgumentList(call, "args"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ReadArgumentList_ExplicitArraysPreserveEmptyArgumentsAndSkipNulls(bool jsonArray)
+    {
+        string[] expected = ["fill", "e1", ""];
+        object?[] supplied = ["fill", null, "e1", Json("null"), ""];
+        object arguments = jsonArray ? Json(JsonSerializer.Serialize(supplied)) : supplied;
+
+        Assert.Equal(expected, SkillTools.ReadArgumentList(
+            Call(SkillTools.RunToolName, ("args", arguments)), "args"));
+    }
 
     [Fact]
     public void ReadArgumentList_AcceptsAJsonArray()

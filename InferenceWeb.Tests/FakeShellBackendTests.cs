@@ -253,7 +253,7 @@ public sealed class FakeShellBackendTests : IDisposable
         Assert.False(launch.AllowNetwork);
         Assert.Equal(TimeSpan.FromSeconds(30), launch.Timeout);
         Assert.Equal(workspace.WorkDirectory, launch.Environment["HOME"]);
-        Assert.Equal(workspace.TempDirectory, launch.Environment["TMPDIR"]);
+        Assert.Equal(workspace.RuntimeTempDirectory, launch.Environment["TMPDIR"]);
         Assert.Equal(workspace.EnvDirectory, launch.Environment["PYTHONPATH"]);
         Assert.True(launch.Environment.ContainsKey("PATH"));
 
@@ -395,6 +395,29 @@ public sealed class FakeShellBackendTests : IDisposable
         ShellLaunch launch = Assert.Single(backend.Launches);
         Assert.Equal(System.Threading.Timeout.InfiniteTimeSpan, launch.Timeout);
         Assert.True(File.Exists(Path.Combine(workspace.StateDirectory, ".jobs", "job-1.log")));
+    }
+
+    [Theory]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(true, true, false, true)]
+    public void PackageRunnersRequireNetworkInstallAndUnrestrictedPackages(
+        bool network, bool install, bool restricted, bool expectedLaunch)
+    {
+        foreach (string command in new[] { "npx --yes @scope/tool --version", "npm exec -- @scope/tool" })
+        {
+            var backend = Backend();
+            using var runner = Runner(backend, o =>
+            {
+                o.AllowNetwork = network;
+                o.AllowInstall = install;
+                o.AllowedPackages = restricted ? new[] { "other" } : Array.Empty<string>();
+            });
+            var result = runner.Run(new ShellRequest(command), Workspace());
+            Assert.Equal(expectedLaunch, result.Ok);
+            Assert.Equal(expectedLaunch ? 1 : 0, backend.Launches.Count);
+        }
     }
 
     // ---- installs are the host's, and go to whatever installer it was given ------
@@ -670,11 +693,10 @@ public sealed class SkillScriptRunnerBackendTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(60), launch.Timeout);
 
         // Windows keeps interpreter caches beneath the session's hidden home;
-        // POSIX redirects both variables to the writable working directory.
+        // Session scripts share the shell runtime temp directory for local IPC.
         string expectedHome = OperatingSystem.IsWindows()
             ? Path.Combine(workspace.WorkDirectory, ".home") : workspace.WorkDirectory;
-        string expectedTemp = OperatingSystem.IsWindows()
-            ? Path.Combine(expectedHome, "Temp") : workspace.WorkDirectory;
+        string expectedTemp = workspace.RuntimeTempDirectory;
         Assert.Equal(expectedHome, launch.Environment["HOME"]);
         Assert.Equal(expectedTemp, launch.Environment["TMPDIR"]);
         Assert.Equal(workspace.WorkDirectory, launch.Environment["PWD"]);
@@ -858,7 +880,8 @@ public sealed class SkillScriptRunnerBackendTests : IDisposable
         Assert.Contains("input file 'reports/apple-chips.json'", result.Content, StringComparison.Ordinal);
         Assert.Contains("not from the bundled skill script", result.Content, StringComparison.Ordinal);
         Assert.Contains("Apple M6 vs M5", result.Content, StringComparison.Ordinal);
-        Assert.Contains("with `edit_file`", result.Content, StringComparison.Ordinal);
+        Assert.Contains("with `apply_patch`", result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("edit_file", result.Content, StringComparison.Ordinal);
         Assert.Contains("Do not use `write_file` or re-type the whole spec", result.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("A copy of this script", result.Content, StringComparison.Ordinal);
         Assert.Empty(RepairCopies(workspace));
@@ -893,8 +916,8 @@ public sealed class SkillScriptRunnerBackendTests : IDisposable
 
         Assert.False(result.Ok);
         Assert.Contains("A copy of this script", result.Content, StringComparison.Ordinal);
-        Assert.Contains("edit_file", result.Content, StringComparison.Ordinal);
-        Assert.DoesNotContain("apply_patch", result.Content, StringComparison.Ordinal);
+        Assert.Contains("apply_patch", result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("edit_file", result.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("input file 'deck.json'", result.Content, StringComparison.Ordinal);
         string overlay = Assert.Single(RepairCopies(workspace));
         Assert.Equal(File.ReadAllBytes(scriptPath), File.ReadAllBytes(overlay));
@@ -929,7 +952,8 @@ public sealed class SkillScriptRunnerBackendTests : IDisposable
         Assert.Single(RepairCopies(workspace));
         Assert.Contains("editable repair copy already exists", result.Content, StringComparison.Ordinal);
         Assert.Contains("was not overwritten", result.Content, StringComparison.Ordinal);
-        Assert.Contains("edit_file", result.Content, StringComparison.Ordinal);
+        Assert.Contains("apply_patch", result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("edit_file", result.Content, StringComparison.Ordinal);
         Assert.Contains("Do not rewrite the complete file", result.Content, StringComparison.Ordinal);
     }
 
@@ -1138,7 +1162,8 @@ public sealed class SkillScriptRunnerBackendTests : IDisposable
 
         Assert.False(result.Ok);
         Assert.Contains("input file 'deck.json'", result.Content, StringComparison.Ordinal);
-        Assert.Contains("with `edit_file`", result.Content, StringComparison.Ordinal);
+        Assert.Contains("with `apply_patch`", result.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("edit_file", result.Content, StringComparison.Ordinal);
         Assert.DoesNotContain("A copy of this script", result.Content, StringComparison.Ordinal);
     }
 

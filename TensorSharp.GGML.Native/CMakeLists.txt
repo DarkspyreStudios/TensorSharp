@@ -292,6 +292,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_dflash.cpp
     ggml_ops_diffusion.cpp
     ggml_ops_qwen_image.cpp
+    ggml_ops_qwen_image21.cpp
     ggml_ops_wan.cpp
     ggml_ops_minimax_h3.cpp
     ggml_ops_gated_delta_net.cpp
@@ -457,9 +458,18 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     set_property(SOURCE ggml_ops_deepseek4.cpp APPEND PROPERTY COMPILE_DEFINITIONS TSG_GGML_TEST_HOOKS)
     set_property(SOURCE ggml_ops_deepseek41_tp.cpp APPEND PROPERTY COMPILE_DEFINITIONS TSG_GGML_TEST_HOOKS)
     enable_testing()
+    add_executable(GgmlOpsDsv41EngramTest tests/dsv41_engram_test.cpp)
+    add_test(NAME deepseek41-engram-hash-lookup COMMAND GgmlOpsDsv41EngramTest)
+    add_executable(GgmlOpsDsv41EngramGgufTest tests/dsv41_engram_gguf_test.cpp)
+    target_link_libraries(GgmlOpsDsv41EngramGgufTest PRIVATE ggml-base)
+    add_test(NAME deepseek41-engram-embedded-gguf COMMAND GgmlOpsDsv41EngramGgufTest)
     add_executable(GgmlOpsDsv41EngramIoTest tests/dsv41_engram_io_test.cpp)
     target_link_libraries(GgmlOpsDsv41EngramIoTest PRIVATE Threads::Threads)
     add_test(NAME deepseek41-engram-parallel-io COMMAND GgmlOpsDsv41EngramIoTest)
+    add_executable(GgmlOpsDsv4ExactReadTest tests/dsv4_exact_read_test.cpp)
+    target_link_libraries(GgmlOpsDsv4ExactReadTest PRIVATE Threads::Threads)
+    add_test(NAME deepseek4-exact-file-reads COMMAND GgmlOpsDsv4ExactReadTest)
+    set_tests_properties(deepseek4-exact-file-reads PROPERTIES TIMEOUT 30)
     add_executable(GgmlOpsDsv4FileWarmTest tests/dsv4_file_warm_test.cpp)
     target_link_libraries(GgmlOpsDsv4FileWarmTest PRIVATE Threads::Threads)
     add_test(NAME deepseek41-host-file-warm COMMAND GgmlOpsDsv4FileWarmTest)

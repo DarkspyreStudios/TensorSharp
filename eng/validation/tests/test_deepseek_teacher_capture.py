@@ -32,7 +32,7 @@ def fixture(root):
                 'token_export_sha256': '3' * 64, 'capture_program_sha256': '4' * 64,
                 'model_manifest_sha256': model['manifest_sha256'],
                 'checkpoint_files': {'/models/model.gguf': {'bytes': 123, 'sha256': 'e' * 64}},
-                'engram_files': {'/models/engram.bin': {'bytes': 123, 'sha256': '5' * 64}},
+                'engram_storage': 'gguf-metadata',
                 'tokenizer': {'first_gguf_sha256': 'e' * 64, 'vocab_size': 4, 'eos_ids': [3]}}
     rows, history = [], b''
     for index, (tokens, stage, forced) in enumerate([([0, 1], 'prompt', None), ([2], 'prompt', 2), ([2], 'continuation', 3)]):
@@ -62,7 +62,7 @@ def fixture(root):
                 'shared_identity': identity, 'rows': rows, 'coverage': 'complete-primary', 'capture_scope': capture.SUPPORTED_SCOPE}
     observation = {'pid': 123, 'start_ticks': 456, 'boot_id': 'scripted-offline',
                    'mapped_native_libraries': {'/app/libGgmlOps.so': native},
-                   **{key: identity[key] for key in ('native_source_sha256', 'checkpoint_files', 'engram_files', 'token_export_sha256')}}
+                   **{key: identity[key] for key in ('native_source_sha256', 'checkpoint_files', 'token_export_sha256')}}
     report = {'schema_version': 1, 'schedule_sha256': 'c' * 64, 'shared_identity': identity, 'variant': 'non-tp',
               'native_load': load, 'environment': plan['variants']['non-tp']['environment'], 'native_library_path': '/app/libGgmlOps.so',
               'placement': {'effective_tp_ranks': 0, 'effective_gpu_count': 7, 'effective_cpu_moe_layers': 12,
@@ -328,17 +328,17 @@ class ObserverTests(unittest.TestCase):
     def test_exact_files_mapping_and_immutable_stats_are_required_at_each_audit(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            paths = {name: root / name for name in ('libGgmlOps.so', 'owned.cpp', 'export.json', 'model.gguf', 'engram.bin')}
+            paths = {name: root / name for name in ('libGgmlOps.so', 'owned.cpp', 'export.json', 'model.gguf')}
             for name, path in paths.items():
                 path.write_bytes(name.encode())
             identity = {'native_sha256': capture.file_sha(paths['libGgmlOps.so']),
                         'native_source_sha256': {'owned.cpp': capture.file_sha(paths['owned.cpp'])},
                         'token_export_sha256': capture.file_sha(paths['export.json']),
                         'capture_program_sha256': capture.file_sha(capture.__file__), 'model_manifest_sha256': 'd' * 64}
-            for category, name in [('checkpoint_files', 'model.gguf'), ('engram_files', 'engram.bin')]:
+            for category, name in [('checkpoint_files', 'model.gguf')]:
                 identity[category] = {str(paths[name]): {'bytes': paths[name].stat().st_size, 'sha256': capture.file_sha(paths[name])}}
             attestation = {'verification': 'publisher-hash-reuse-with-immutable-stat-attestation', 'model_manifest_sha256': 'd' * 64}
-            for category in ('checkpoint_files', 'engram_files'):
+            for category in ('checkpoint_files',):
                 attestation[category] = {name: {**item, 'stat': capture.stat_identity(name)} for name, item in identity[category].items()}
             attestation_path = root / 'attestation.json'
             attestation_path.write_text(json.dumps(attestation), encoding='utf-8')
@@ -361,7 +361,7 @@ class ObserverTests(unittest.TestCase):
                 mappings.append(mappings[0] + ' (deleted)')
                 with self.assertRaisesRegex(ValueError, 'Deleted native mapping'): observer.audit()
                 mappings.pop()
-                paths['engram.bin'].write_bytes(b'changed')
+                paths['model.gguf'].write_bytes(b'changed')
                 with self.assertRaisesRegex(ValueError, 'Model file changed'): observer.audit()
                 paths['owned.cpp'].write_bytes(b'changed')
                 with self.assertRaisesRegex(ValueError, 'Native source changed'): observer.audit()

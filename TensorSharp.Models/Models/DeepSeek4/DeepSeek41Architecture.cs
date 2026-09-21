@@ -98,11 +98,7 @@ namespace TensorSharp.Models
                     : "TS_DSV41_ENGRAM_DEVICE must be 0 or 1 (unset selects automatically).");
             }
 
-            string sidecar = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(ggufPath))!, "deepseek41.engram.bin");
-            if (!File.Exists(sidecar))
-                throw new FileNotFoundException(
-                    "DeepSeek V4.1 requires its tokenizer-derived Engram lookup sidecar. " +
-                    "Run python eng/dsv41-prepare.py --help for preparation instructions.", sidecar);
+
         }
 
         /// <summary>

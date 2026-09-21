@@ -54,6 +54,8 @@ namespace TensorAgent.Core.Hosting;
 public sealed class AgentAppHost : IDisposable
 {
     private readonly ILoggerFactory _loggerFactory;
+    private readonly InProcessShellBackend? _embeddedBackend;
+    private readonly DesktopShellBackend? _desktopBackend;
     private readonly List<IDisposable> _owned = new();
     private readonly object _shareClaimsLock = new();
     private readonly Dictionary<string, string> _shareClaims = new(StringComparer.Ordinal);
@@ -145,44 +147,54 @@ public sealed class AgentAppHost : IDisposable
         Workspaces = new SessionWorkspaceManager(paths.ScratchDirectory, _loggerFactory.CreateLogger("TensorAgent.Workspaces"));
         Workspaces.SweepOrphans();
 
-        // Both runtimes are discovered rather than required. Each reports its own
-        // availability with a reason, the shell repeats that reason when a model tries
-        // to use one, and the engine line says so before anything is attempted — so a
-        // build without an interpreter is a build that says it has no interpreter,
-        // never one that fails halfway through a script.
-        Python = python ?? Discover(() => new EmbeddedPython(paths.PythonRuntimeDirectory));
-        JavaScript = javaScript ?? Discover(() => new JavaScriptCoreEngine());
-        ConfigureCodeEnvironment(Python, JavaScript);
-        // The installer's own policy answers "can this app install anything at all",
-        // which is the user's network switch; each individual install is re-checked
-        // against the policy of the launch that asked for it.
-        Installer = installer ?? new WheelInstaller(new ExecutionPolicy(
-            AllowScripts: settings.AllowCodeExecution,
-            AllowNetwork: settings.AllowNetwork,
-            WorkRoot: paths.ScratchDirectory,
-            ReadableRoots: Array.Empty<string>(),
-            TempRoot: paths.ScratchDirectory)
-        {
-            NetworkHosts = settings.NetworkHosts,
-        }, pythonVersion: Python?.Version);
-        // Do not expose the raw hook inside the model's shell. The ShellRunner bridge
-        // below is the sole install path and applies validation, the package allow-list,
-        // the session ledger, target directory and timeout. A nested `sh -c 'pip ...'`
-        // must not step around those terms.
-        Backend = new InProcessShellBackend(
-            Python, JavaScript, installer: null, networkHosts: settings.NetworkHosts);
         Artifacts = new CodeArtifactStore(paths.ArtifactsDirectory);
-        // ShellRunner intercepts every recognised `pip install` before the remaining
-        // command reaches Backend. Supplying the bridge is therefore essential: its
-        // desktop default tries to launch a real `python -m pip`, while this host has no
-        // processes and deliberately does not stage pip into embedded CPython.
-        // The bundle is asked before the index: lxml, numpy and Pillow are compiled into
-        // the app, and `pip install lxml` from a model must be told so rather than
-        // refused as "compiled code" by a lookup that never needed to happen.
-        var packageInstaller = new InstallHookPackageInstaller(
-            Installer, CodeExec, () => Backend.NetworkHosts,
-            () => Python?.BundledDistributions ?? Array.Empty<BundledDistribution>());
-        Backend.HostPerformsInstalls = packageInstaller.CanInstall;
+        IPackageInstaller? packageInstaller = null;
+        bool useProcesses = paths.ExecutionMode switch
+        {
+            AgentExecutionMode.Auto => DesktopShellBackend.IsSupported,
+            AgentExecutionMode.InProcess => false,
+            AgentExecutionMode.Process when DesktopShellBackend.IsSupported => true,
+            AgentExecutionMode.Process => throw new PlatformNotSupportedException(
+                "This platform cannot launch native shell, Node.js/npm or browser processes. Use in-process execution."),
+            _ => throw new ArgumentOutOfRangeException(nameof(paths.ExecutionMode)),
+        };
+        if (useProcesses)
+        {
+            if (python is not null || javaScript is not null || installer is not null)
+                throw new ArgumentException("Embedded runtime overrides require AgentExecutionMode.InProcess.");
+            // Desktop hosts use actual interpreters, package managers and child
+            // processes. Do not register JavaScriptCore's limited Node-shaped API
+            // as Node.js when a real Node executable is available on this platform.
+            CodeEnvironment.Reset();
+            _desktopBackend = new DesktopShellBackend(
+                ProcessShellBackend.Detect(CodeExec, _loggerFactory.CreateLogger("TensorAgent.CodeExec")),
+                settings.NetworkHosts);
+            Backend = _desktopBackend;
+        }
+        else
+        {
+            Python = python ?? Discover(() => new EmbeddedPython(paths.PythonRuntimeDirectory));
+            JavaScript = javaScript ?? Discover(() => new JavaScriptCoreEngine());
+            ConfigureCodeEnvironment(Python, JavaScript);
+            Installer = installer ?? new WheelInstaller(new ExecutionPolicy(
+                AllowScripts: settings.AllowCodeExecution,
+                AllowNetwork: settings.AllowNetwork,
+                WorkRoot: paths.ScratchDirectory,
+                ReadableRoots: Array.Empty<string>(),
+                TempRoot: paths.ScratchDirectory)
+            {
+                NetworkHosts = settings.NetworkHosts,
+            }, pythonVersion: Python?.Version);
+            // Only the shared runner may install packages. Nested shells must not
+            // bypass validation, the session ledger or the target directory.
+            _embeddedBackend = new InProcessShellBackend(
+                Python, JavaScript, installer: null, networkHosts: settings.NetworkHosts);
+            Backend = _embeddedBackend;
+            packageInstaller = new InstallHookPackageInstaller(
+                Installer, CodeExec, () => _embeddedBackend.NetworkHosts,
+                () => Python?.BundledDistributions ?? Array.Empty<BundledDistribution>());
+            _embeddedBackend.HostPerformsInstalls = packageInstaller.CanInstall;
+        }
         ShellRunner runner = new(
             CodeExec,
             _loggerFactory.CreateLogger("TensorAgent.CodeExec"),
@@ -196,7 +208,7 @@ public sealed class AgentAppHost : IDisposable
         // user can lift from the Settings screen without relaunching the app. Building
         // it conditionally is what made both sandbox switches take effect "next time
         // TensorAgent starts", which on a phone reads as a switch that does nothing.
-        CodeRunner = new CodeRunnerAdapter(
+        CodeRunner = useProcesses ? new CodeRunnerAdapter(runner, CodeExec) : new CodeRunnerAdapter(
             runner,
             CodeExec,
             packageInstallInstructions: InstallHookPackageInstaller.ModelInstallInstructions,
@@ -205,7 +217,7 @@ public sealed class AgentAppHost : IDisposable
             // finance host was allow-listed, because it WAS about that host; now that
             // every sentence of it is true of any request, a narrowed allow-list must
             // not be what decides whether the model is told how to write a heredoc.
-            networkHosts: () => Backend.NetworkHosts,
+            networkHosts: () => _embeddedBackend!.NetworkHosts,
             providedPackagesInstructions: InstallHookPackageInstaller.ModelProvidedPackagesInstructions,
             executionInstructions: InstallHookPackageInstaller.ModelShellInstructions);
 
@@ -369,7 +381,7 @@ public sealed class AgentAppHost : IDisposable
     public IReadOnlyList<CatalogModel> Catalog { get; }
     public CodeExecOptions CodeExec { get; }
     public SessionWorkspaceManager Workspaces { get; }
-    public InProcessShellBackend Backend { get; }
+    public IShellBackend Backend { get; }
     public IPythonRuntime? Python { get; }
     public IJavaScriptRuntime? JavaScript { get; }
     public IInstallHook? Installer { get; }
@@ -902,8 +914,8 @@ public sealed class AgentAppHost : IDisposable
                 // prompt and warming a different one. A request that carries no session
                 // is served by the DEFAULT session; WorkspaceFor returns null for that
                 // one, and a chat with no workspace is declared only `shell` with no
-                // file tools, where a real turn is declared read_file, edit_file,
-                // write_file, a persisting shell and apply_patch, plus the "Working with
+                // file tools, where a real turn is declared read_file, apply_patch,
+                // write_file and a persisting shell, plus the "Working with
                 // files" instructions. KV reuse is a longest-common-PREFIX match, so a
                 // tool block that differs makes everything after it unshareable -- the
                 // warm-up would run for twenty seconds and save a real turn only the
@@ -1970,7 +1982,10 @@ public sealed class AgentAppHost : IDisposable
         // stepper to mean something before the next launch.
         Options.RepointGenerationDefaults(settings.MaxTokens);
 
-        Backend.NetworkHosts = settings.NetworkHosts;
+        if (_embeddedBackend is not null)
+            _embeddedBackend.NetworkHosts = settings.NetworkHosts;
+        if (_desktopBackend is not null)
+            _desktopBackend.NetworkHosts = settings.NetworkHosts;
         if (Installer is WheelInstaller wheels)
         {
             wheels.Policy = wheels.Policy with
@@ -1980,7 +1995,8 @@ public sealed class AgentAppHost : IDisposable
                 NetworkHosts = settings.NetworkHosts,
             };
         }
-        Backend.HostPerformsInstalls = CodeExec.AllowInstall && Installer is { CanInstall: true };
+        if (_embeddedBackend is not null)
+            _embeddedBackend.HostPerformsInstalls = CodeExec.AllowInstall && Installer is { CanInstall: true };
 
         Options.RepointSandboxPermissions(settings.AllowCodeExecution, settings.AllowNetwork);
         Options.RepointSkills(settings.SkillsEnabled);
@@ -2043,7 +2059,11 @@ public sealed class AgentAppHost : IDisposable
     /// </summary>
     public string DescribeEngine()
     {
-        var parts = new List<string> { Backend.Describe() };
+        var parts = new List<string>
+        {
+            _embeddedBackend?.Describe() ?? $"native process shell ({Backend.Shell?.Name ?? "unavailable"}); "
+                + string.Join(", ", CodeEnvironment.AvailableTools),
+        };
         // Asked of the runner rather than of the field, because the runner is always
         // there now and it is its answer -- read live from CodeExec.Enabled -- that
         // decides whether the model is offered the tools at all.
@@ -2665,6 +2685,11 @@ public sealed record SelfTestResult(string Name, bool Ok, string Detail)
 /// </summary>
 public sealed record AgentPaths(string DataRoot, string CacheRoot)
 {
+    /// <summary>
+    /// Auto uses the shared OS process sandbox on desktop and embedded interpreters
+    /// on mobile. InProcess can also emulate the mobile execution environment in tests.
+    /// </summary>
+    public AgentExecutionMode ExecutionMode { get; init; } = AgentExecutionMode.Auto;
     /// <summary>Physical memory in whole gigabytes, which decides what the catalog offers.</summary>
     public int DeviceMemoryGB { get; init; } = 12;
 

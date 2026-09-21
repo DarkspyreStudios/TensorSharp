@@ -62,9 +62,11 @@
   "model": "${root}/Qwen3.8-27B-UD-Q4_K_XL.gguf",
 
   // ---- Agent Skills -------------------------------------------------------
-  // 11 skills live in TensorAgent/skills. Six bundle runnable scripts: four
+  // 12 skills live in TensorAgent/skills. Seven bundle runnable scripts: four
   // Python (documents, research, slack-gif-creator, market-data), one shell
-  // (web-artifacts-builder) and one JS template (algorithmic-art).
+  // (web-artifacts-builder), the Playwright CLI wrapper, and one JS template
+  // (algorithmic-art). Playwright includes macOS sandbox setup and account
+  // handoff instructions; a fresh browser does not inherit desktop logins.
   // The default root (a "skills" folder beside the binary) is empty here, so
   // without this key the agent silently has zero skills. A path that does not
   // exist is a fatal startup error, so keep this in step with the checkout.

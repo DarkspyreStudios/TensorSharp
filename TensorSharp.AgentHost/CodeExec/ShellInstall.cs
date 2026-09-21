@@ -64,7 +64,8 @@ namespace TensorSharp.AgentHost.CodeExec
             string? command,
             Func<string, string?>? readFile,
             out IReadOnlyList<ShellInstallRequest> requests,
-            out string? error)
+            out string? error,
+            bool includePackageRunners = true)
         {
             var found = new List<ShellInstallRequest>();
             requests = found;
@@ -72,7 +73,7 @@ namespace TensorSharp.AgentHost.CodeExec
 
             foreach (ShellSegment segment in ShellCommand.SplitSegments(command))
             {
-                if (!ShellCommand.IsInstallCommand(segment.Text))
+                if (!ShellCommand.IsInstallCommand(segment.Text, includePackageRunners))
                     continue;
                 if (!TryReadOne(segment, readFile, out ShellInstallRequest request, out error))
                     return false;

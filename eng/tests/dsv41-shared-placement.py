@@ -37,7 +37,7 @@ def main():
     torch.set_num_threads(2)
     tokens = np.array(json.loads((args.fixture_dir / "tokens.json").read_text())[:8], dtype=np.int32)
     weights = reference.GgufWeights(args.fixture_dir / "deepseek41-fixture.gguf")
-    layout = reference.load_engram(args.fixture_dir / "deepseek41.engram.bin")
+    layout = reference.load_engram(weights)
     expected = reference.Reference(weights, config, layout, "model").forward(tokens.tolist()).cpu().numpy()
     lib = ctypes.CDLL(str(args.library.resolve()))
     def bind(name, parameters, result=ctypes.c_int):

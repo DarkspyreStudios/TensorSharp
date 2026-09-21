@@ -47,7 +47,7 @@ def main():
     os.environ["TS_DSV41_TP"] = str(args.tp)
     weights = reference.GgufWeights(args.fixture_dir / "deepseek41-fixture.gguf")
     visual_weights = reference.GgufWeights(args.vision_fixture / "deepseek41.vision.gguf")
-    layout = reference.load_engram(args.fixture_dir / "deepseek41.engram.bin")
+    layout = reference.load_engram(weights)
     visual = json.loads((args.vision_fixture / "manifest.json").read_text())
     image_id = visual["config"]["image_token_id"]
     dim = config["config"]["text_config"]["hidden_size"]

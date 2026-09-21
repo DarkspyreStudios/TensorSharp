@@ -81,7 +81,10 @@ internal sealed class InstallHookPackageInstaller : IPackageInstaller
     /// all, and it used to be shown only to a model whose user had turned networking on.
     /// </summary>
     internal const string ModelShellInstructions =
-        "Write anything longer than one line as a quoted heredoc — `python3 - <<'PY' ... PY` — rather than "
+        "This host uses embedded interpreters: `node` is a JavaScriptCore compatibility layer, not Node.js. "
+        + "npm/npx, native executables and child-process APIs are unavailable, even with network access on. "
+        + "A skill requiring those capabilities cannot run here; explain the platform limitation rather than claiming it succeeded. "
+        + "Write anything longer than one line as a quoted heredoc — `python3 - <<'PY' ... PY` — rather than "
         + "`python3 -c`. Quoting is what breaks first in a `-c` one-liner once the program contains quotes of "
         + "its own, and the failure looks like a syntax error in code that is actually fine. "
         + "Do not narrate a command before running it, and when its output already answers the question, quote "

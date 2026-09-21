@@ -3,12 +3,127 @@
 This file contains the reproducible test plan and measured numerical evidence.
 It does **not establish model-quality or performance parity**. The evidence
 below distinguishes passing checks from remaining numerical differences.
-The requested VM's [hardware and dependency versions](validation/deepseek41/environment.json)
-and each artifact's binary hashes define the measured environment.
+Each run's recorded hardware, dependency versions and binary hashes define its
+measured environment.
 
-The final eight-GPU layer-placement profile passes all 138 end-to-end cases,
-with median sustained single-request decode of 34.83 tokens/s. The final managed
-code passes 3,651 correctness tests locally and on the VM; native CTests pass
+## Embedded GGUF validation — September 19, 2026
+
+The current loader reads the published Engram metadata directly from the first
+GGUF shard and validates it against tensors across all seven shards. The
+checkpoint directory contains only GGUF files; text inference has no Engram
+preparation step. Native, pure-C# CPU and direct-CUDA metadata readers use the
+same embedded constants, including the already-compressed padding ID.
+
+The recreated VM has five A40 GPUs. The native Release build uses unchanged
+upstream ggml `456172ec733a135778adcd32d00e576a58232e45`; its source checkout is
+clean. The [current evidence](validation/deepseek41/embedded-gguf-20260919/README.md)
+records the source manifest, final native hash, hardware, logs and limitations.
+The complete five-GPU run executed 103 cases. The original harness reported
+102 passes, but independent review found two decode false positives: an early
+refusal and a repetitive promise to answer. Rechecking the saved responses with
+strengthened token-budget and minimum-content gates gives **100/103 passes**.
+The third failure is Markdown-fenced JSON in the 8K retrieval response. All four
+suites completed and the server stayed available; original captures remain
+unchanged. This revalidation is not a new inference run or a broad answer-quality
+score. Manual review also identified an incorrect worked example and mixed
+responses that eventually supplied technical content.
+
+| Current check | Actual coverage |
+|---|---|
+| Published Q2_K checkpoint SHA256 | All seven shards passed: 264,515,279,456 bytes in 816.45 s; one transient ENOMEM read recovered and its full shard hash matched |
+| Native CTests | 36 passed, 0 failed; 2 skipped because seven/eight GPUs are unavailable |
+| Native CPU and two-GPU CUDA against independent F32 PyTorch fixture | 66/66 passed on each backend at `atol=rtol=2e-5`; maximum absolute errors `5.04e-6` and `4.63e-6` |
+| Managed Engram, architecture and refusal tests | 140 passed, including three checks using actual published GGUF metadata |
+| Pure-C# CPU numerical fixture | 6 passed, including prefill, decode, chunking and reset |
+| Python metadata and download verifier contracts | 11 passed, including partial reads, retry exhaustion and permanent failures |
+| Synthetic vision using `--parent-model` | 158 native CPU checks passed; 22 metadata/shape checks; F32/BF16 fixture generation. Real vision and BF16 inference are not covered |
+| Both full-checkpoint Engram tables resident after warming | All 15,750,472 pages resident across 60.08 GiB, checked on the original mappings after all workers finished |
+| Full-checkpoint initial HTTP quality | 40/40 passed: English/Chinese, JSON/schema/Unicode, generated conversation and dependent tool calls, concurrency 1/4 |
+| Long-context HTTP quality | 32K and 64K passed; 8K retrieved all three facts but failed strict formatting by wrapping JSON in Markdown fences |
+| Sustained HTTP decode | Original harness 30/30; saved-response revalidation 28/30. One 133-token refusal and one 512-token loop fail the stronger gates |
+| Tool-policy HTTP suite | 30/30 contract checks passed: required/named choices, disabled tools with history, single/two-call behavior, thinking-mode calls and invalid policies |
+| Benchmark validation regression checks | 35 tests passed; 3 offline-revalidation tests passed. Original reports are preserved |
+
+The VM's model filesystem returned transient read failures during earlier
+loads. TensorSharp-owned upload and Engram warming now preserve partial-read
+offsets and retry `EINTR`, `EAGAIN` and `ENOMEM` at most five times per range.
+EOF, permanent errors and failed seeks still reject the load. Fault-injection
+and sanitizer checks cover the retry logic; no upstream ggml changes are needed.
+The earlier failed launches remain failures in the retained evidence.
+
+The warmer also opens every required worker/shard descriptor before checking
+residency or reading. GeeseFS can invalidate an inode's cached pages on a new
+open, so opening the next shard during warming could evict another worker's
+completed reads. Deterministic tests cover that ordering, cancellation and
+descriptor cleanup. The native `GgmlOpsDsv4FileWarmBench --verify-ranges`
+mode checks final residency of multiple ranges on their existing mappings,
+without reopening checkpoint files after warming.
+On this VM it verified both complete tables with three readers and 1 MiB
+chunks. Native regression tests ran concurrently with that diagnostic, so its
+337.34 s duration is not an isolated storage-performance measurement.
+
+The rebuilt server loaded 186.3 GiB of GPU weights in 1,382.4 s and warmed
+60.08 GiB of Engram in 332.72 s; endpoint readiness took 1,729.04 s. Upload
+used 1 MiB chunks; server warming retained its 64 MiB default. The standalone
+residency diagnostic used 1 MiB blocks. These startup times reflect the supplied
+GeeseFS mount after earlier diagnostic reads, not a controlled cold start.
+
+The run requested 512 output tokens per decode case: 29 reached that budget,
+and one stopped at 133 tokens with a refusal. The stronger validator also rejects
+a 512-token loop that contains topic keywords without an explanation. The
+[offline revalidation tool](../eng/validation/revalidate-inference-report.py)
+records original and current harness hashes and preserves the captured responses.
+It checks token budgets and minimum technical coverage, not factual correctness.
+
+The following timing medians use only whole waves that pass the stronger gates.
+Three repetitions remain for each short-prompt row and for single-request 8K.
+The concurrent 8K row uses two complete waves (eight requests); the entire failed
+repetition is excluded. Aggregate end-to-end throughput includes prompt processing.
+These are workload timings, not an answer-quality qualification.
+
+| Prompt tokens | Concurrency | Per-request decode (tokens/s) | TTFT (s) | Aggregate end-to-end (tokens/s) |
+|---:|---:|---:|---:|---:|
+| 44 | 1 | 36.50 | 0.355 | 35.66 |
+| 44 | 4 | 13.65 | 1.463 | 52.62 |
+| 7,680 | 1 | 32.79 | 37.497 | 9.65 |
+| 7,680 | 4 | 11.82 | 151.253 | 10.53 |
+
+The stopped earlier run's three identical short-prompt, single-request cases
+had a median of 5.11 tokens/s; it did not complete concurrent or 8K-prompt decode
+benchmarks. All three final single-request decode windows had zero major page
+faults, compared with thousands in each earlier window. This is an observed
+same-VM comparison, not cross-engine performance parity. Long-prompt prefill
+remains a substantial part of end-to-end latency on these five A40 GPUs.
+Manual decode review found 25 relevant but truncated responses, three qualified
+responses (including an incorrect worked collision example), and two clear
+failures. The required-tool thinking case returned a valid call after 963
+completion tokens and automatic closure of repetitive reasoning. Passing the
+minimum-content or tool-policy gates does not establish factual or reasoning
+quality. These issues remain unresolved in the retained evidence.
+
+The reusable [five-GPU profile](../eng/validation/deepseek41-embedded-profile.json)
+records text, JSON, Unicode, tool, long-context and decode benchmark scenarios.
+Its three-reader, 1 MiB upload settings accommodate the tested GeeseFS mount;
+global loader defaults are unchanged. Run the full checksum scan before
+launching this profile, outside measured inference.
+Current full-model results and timing are recorded with that profile in the
+linked evidence. Synthetic numerical checks do not establish full-checkpoint
+quality or performance parity; Q4_K_M, full-model CPU/direct CUDA, vision,
+DSpark and unavailable GPU counts are not covered by this run.
+
+## Historical validation
+
+The results below are historical measurements of the revisions recorded with
+each artifact. For current setup, download the GGUF with embedded Engram
+constants using the [model-card instructions](models/deepseek41.md#download-the-q2_k-checkpoint).
+The current download revision is `58d8ac86298fdf85a2440defee08b1abcad32e45`;
+its first shard differs from the older files used in the original tests. No
+Engram generation or separate Engram file is required. Historical passes and
+throughput figures do not validate the current loader or updated shards.
+
+The original final eight-GPU layer-placement profile passed all 138 end-to-end cases,
+with median sustained single-request decode of 34.83 tokens/s. That managed
+code passed 3,651 correctness tests locally and on the VM; native CTests passed
 13/13. See the [final placement results](validation/deepseek41/final-placements/README.md)
 for CPU offload and routed-expert tensor parallelism. Acceptance remains
 incomplete: those two profiles each introduce an additional dependent-tool-call
@@ -28,10 +143,11 @@ not yet held to a numerical gate. The pure-C# `cpu` executor is checked against
 chaotic for every implementation, including the native one, and are not a
 tight-tolerance target.
 
-The checkpoint is `vcruz305/DeepSeek-V4.1-Flash-GGUF`, revision
+The original measured checkpoint was `vcruz305/DeepSeek-V4.1-Flash-GGUF`, revision
 `8e0c4de3cb6519bfc11ed69dc87184b457a57bb5`, Q2_K, seven shards beginning with
-`DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf`. Use these exact files for both
-engines. Record `sha256sum` of every shard, both source commits, build flags,
+`DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf`. New comparisons should use the
+current embedded-metadata release and identical files for both engines. Record
+`sha256sum` of every shard, both source commits, build flags,
 launch arguments/environment, GPU models/VRAM/driver, CPU affinity/quota, RAM,
 and competing processes alongside results. A llama.cpp build rejecting
 `deepseek41` leaves the comparison blocked; an unavailable reference is never a
@@ -43,7 +159,7 @@ upstream `5bda51bf…`, the current supplied patch, or its linked conversion PR.
 Those newer revisions were inspected without building them; the actual
 tested load failure remains pinned to `df03399b…`.
 
-All seven downloaded Q2_K shards passed a complete SHA256 scan against the
+All seven original Q2_K shards passed a complete SHA256 scan against the
 pinned repository's LFS digests: 264,514,761,248 bytes verified. The bounded
 three-worker scan took 283.8 seconds while no qualified benchmark was active.
 The exact expected/observed digests and file sizes are preserved in
@@ -68,11 +184,10 @@ the pinned official vision weights. The native image graph and text injection
 have independent CPU/CUDA fixture coverage. The full Q2_K checkpoint passed
 25 image/video requests at concurrency 1/4 and a separate image-after-long-text
 request. Audio is unsupported by this model and is explicitly rejected.
-Prepare the tokenizer-derived `deepseek41.engram.bin` sidecar using the
-[model-card instructions](models/deepseek41.md#prepare-the-q2_k-checkpoint)
-before running inference. The matrix defaults to `/workspace/models/DeepSeek-V4.1-Flash-Q2_K`;
-`BENCH_DSV41_GGUF` overrides the first-shard path. Automatic GGUF downloads do
-not prepare this required sidecar.
+Use the current GGUF release with embedded Engram metadata; no additional text
+preparation is needed. The matrix defaults to `/workspace/models/DeepSeek-V4.1-Flash-Q2_K`;
+`BENCH_DSV41_GGUF` overrides the first-shard path. Provision all seven shards
+from the same revision before running inference.
 
 ```bash
 cd benchmarks/engine_comparison
@@ -106,14 +221,14 @@ sequence. Confirm the effective allocation in both startup logs.
 # Start the reference server, then read its model id from /v1/models.
 python validate_inference.py --url http://127.0.0.1:5001 \
   --engine llamacpp --model SERVED_MODEL_ID \
-  --weights-id 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5-Q2_K \
+  --weights-id 58d8ac86298fdf85a2440defee08b1abcad32e45-Q2_K \
   --profile layer8-context65536-ubatch256-cpumoe0-sparse1-warm \
   --repeats 3 --concurrency 1,4 --output results_deepseek41/llama-layer8.json
 
 # Stop reference, start TensorSharp on the same hardware and placement, then:
 python validate_inference.py --url http://127.0.0.1:5000 \
   --engine tensorsharp --model SERVED_MODEL_ID \
-  --weights-id 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5-Q2_K \
+  --weights-id 58d8ac86298fdf85a2440defee08b1abcad32e45-Q2_K \
   --profile layer8-context65536-ubatch256-cpumoe0-sparse1-warm \
   --repeats 3 --concurrency 1,4 --output results_deepseek41/ts-layer8.json \
   --reference results_deepseek41/llama-layer8.json --tolerance 0.05
@@ -519,7 +634,7 @@ this verifies the final build without isolating the grammar change.
 
 Startup is diagnostic: loading overlapped managed builds and a sequential
 read of all 196,765,286,400 routed-expert bytes (23.425 s). The native loader
-reported 186.3 GiB in 442.0 s, followed by Engram preparation. A short process
+reported 186.3 GiB in 442.0 s, followed by Engram page warming. A short process
 sample observed 5,323 major faults in five seconds with rank workers waiting
 for file pages and GPUs at 0–1% utilization. No startup speedup is established.
 The profile's launch, source warming, complete results, failures, native
@@ -980,8 +1095,9 @@ shard (970,533,624 bytes) plus HTTP ranges for the three learned image
 delimiters and forty visual router biases. It verifies the complete isolated
 shard against its published LFS SHA256 and records each selected tensor's
 source range and SHA256. Partial text-shard ranges are explicitly recorded as
-partial verification. The official tokenizer fingerprint must match the
-parent Engram sidecar before the companion is written.
+partial verification. The current preparer derives the parent fingerprint from
+the GGUF tokenizer passed through `--parent-model`; no Engram file is involved.
+The historical companion results below used the earlier preparation format.
 
 The synthetic oracle imports the pinned official `vision.py` and
 `image_processor.py`. F32 complete spans passed all four grids (3×3, 4×5,
@@ -1056,7 +1172,7 @@ test build to reproduce these checks; production builds exclude fault injection.
 ```bash
 python eng/dsv41-vision-fixture.py VISION_FIXTURE_DIRECTORY \
   --reference-source-dir PINNED_OFFICIAL_SOURCE_DIRECTORY \
-  --parent-engram TEXT_FIXTURE_DIRECTORY/deepseek41.engram.bin --preprocess
+  --parent-model TEXT_FIXTURE_DIRECTORY/deepseek41-fixture.gguf --preprocess
 TS_DSV4_FA=0 TS_DSV4_GATHER=0 python eng/tests/dsv41-vision.py \
   VISION_FIXTURE_DIRECTORY --text-fixture TEXT_FIXTURE_DIRECTORY \
   --library /absolute/path/to/libGgmlOps.so --backend CPU

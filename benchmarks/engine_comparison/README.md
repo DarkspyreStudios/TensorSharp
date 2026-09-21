@@ -440,14 +440,18 @@ result lands on 68.75 and is recorded as wrong. Every tool result is a fixed
 fixture; nothing is executed.
 
 Both loops are driven **from the client**. TensorSharp's own code-execution tool
-surface (`--code-exec`: `shell`, `read_file`, `edit_file`, `write_file`,
-`apply_patch`) is answered *inside the server* and never handed back to the API
+surface (`--code-exec`: `shell`, `read_file`, `write_file`, `apply_patch`) is
+answered *inside the server* and never handed back to the API
 client, it is off by default, and an OpenAI-request workspace is destroyed when
 the response ends — so it can neither be observed round-trip-by-round-trip nor
 carry a file from one request to the next, and llama.cpp and vLLM have no
 equivalent at all. A client-driven loop is the only shape that is both
 measurable and identical on every engine, which is what makes these cells
 comparable.
+
+On TensorSharp's server-owned surface, `apply_patch` handles every modification
+to an existing file, from a single-line change in one file to atomic changes
+across multiple files. `write_file` is reserved for creating new files.
 
 A follow-up that cannot continue — the model emitted no structured tool call,
 or called the wrong function — **stops the conversation there** instead of
@@ -739,8 +743,10 @@ To run it as a CI job instead, add a second job on the old
 
 ## DeepSeek V4.1 Flash strict validation
 
-Use `benchmark_config_deepseek41.json` for the pinned seven-shard Q2_K model and
-explicit layer-placement/CPU-MoE profiles. `validate_inference.py` validates
+Use `benchmark_config_deepseek41.json` for the pinned seven-shard Q2_K model with
+embedded Engram metadata and explicit layer-placement/CPU-MoE profiles. Download
+all shards from revision `58d8ac86298fdf85a2440defee08b1abcad32e45`; no Engram
+preparation is required. `validate_inference.py` validates
 running endpoints with actual short prompts, long-context recall, strict JSON,
 generated conversation history, tool-result round trips, a two-tool agent
 workflow, repeated measurements and per-request concurrent correctness. It
@@ -748,6 +754,21 @@ retains full request/response artifacts and refuses to establish parity when
 the reference is missing or invalid. See the
 [validation protocol](../../docs/deepseek41_validation.md) for commands,
 comparison requirements and uncovered capabilities.
+
+The sustained `decode`/`decode_8k` scenarios require the full requested output
+token budget and basic hash-table explanatory content. These checks reject
+early refusals and topic-only promise loops; they do not score factual accuracy
+or complete coverage of an explanation truncated at the token limit. Review
+captured answers separately. To apply the current gates to an existing completed
+decode report without rerunning inference or overwriting the original capture:
+
+```bash
+python ../../eng/validation/revalidate-inference-report.py captured-decode.json \
+  --output ../../docs/validation/deepseek41/decode-revalidation.json
+```
+
+The replay records both harness versions and excludes an entire concurrent wave
+from comparable throughput when any of its responses fails the current gates.
 
 For dependent tool workflows, the optional `--serial-tool-workflows` flag sends
 `parallel_tool_calls: false` on their tool-bearing turns. It retains the exact
@@ -758,11 +779,11 @@ this follow-up separately from the original quality run:
 ```bash
 python validate_inference.py \
   --url http://127.0.0.1:5000 --engine tensorsharp --model deepseek-v4.1-flash \
-  --weights-id 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5-Q2_K \
+  --weights-id 58d8ac86298fdf85a2440defee08b1abcad32e45-Q2_K \
   --profile layer8-ctx65536-ubatch1024-cpumoe0-compact1 \
   --scenarios tool_round_trip,agentic --concurrency 1,4 --repeats 1 \
   --structured-tool-results --serial-tool-workflows \
-  --output results/deepseek41-serial-tools.json
+  --output ../../docs/validation/deepseek41/serial-tools.json
 ```
 
 These ten cases check a client serialization constraint. A successful follow-up
@@ -787,9 +808,9 @@ Tools return fixed fixture data; the harness never executes external tools.
 ```bash
 python validate_deepseek41_tools.py \
   --url http://127.0.0.1:5000 --model deepseek-v4.1-flash \
-  --weights-id 8e0c4de3cb6519bfc11ed69dc87184b457a57bb5-Q2_K \
+  --weights-id 58d8ac86298fdf85a2440defee08b1abcad32e45-Q2_K \
   --profile layer8-ctx65536-ubatch1024-cpumoe0-compact1 \
-  --server-build server-v41-tools --output results/deepseek41-tool-policies.json
+  --server-build server-v41-tools --output ../../docs/validation/deepseek41/tool-policies.json
 ```
 
 Set `--native-sha256` to the loaded library hash when recording a measured run.

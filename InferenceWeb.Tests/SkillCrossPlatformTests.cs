@@ -248,6 +248,12 @@ public class SkillCrossPlatformTests : IDisposable
         // boundary from the generated profile.
         Assert.Contains("(deny default)", profile, StringComparison.Ordinal);
         Assert.DoesNotContain("(allow file-write*)", profile, StringComparison.Ordinal);
+        // Desktop presentation only needs this specific shared-surface client. Keep
+        // the allowance independent of networking and exclude blanket device access.
+        Assert.Contains("(allow iokit-open (iokit-user-client-class \"IOSurfaceRootUserClient\"))", profile, StringComparison.Ordinal);
+        Assert.DoesNotContain("(allow iokit-open)", profile, StringComparison.Ordinal);
+        Assert.DoesNotContain("(allow iokit-open-user-client)", profile, StringComparison.Ordinal);
+        Assert.DoesNotContain("(allow iokit-open-service)", profile, StringComparison.Ordinal);
         Assert.Contains("(allow file-read* file-write* (subpath", profile, StringComparison.Ordinal);
         if (!string.IsNullOrEmpty(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)))
             Assert.Contains("(deny file-read* (subpath", profile, StringComparison.Ordinal);

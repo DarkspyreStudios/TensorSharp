@@ -31,13 +31,19 @@ def sha(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--source-sha256", required=True, help="Pin the synthetic GGUF input bytes")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     if args.output_dir.exists(): parser.error("Output must be fresh; preserve prior fixture evidence")
     source_hash = sha(args.source)
-    if source_hash != "f3917170dd3b8bf2b3220a1c41ff5a6dfd81517b2ae37079afbf5224d7dca99d":
+    if source_hash != args.source_sha256:
         parser.error("Unexpected source fixture")
+    manifest = json.loads((args.source.parent / "deepseek41.config.json").read_text())
+    if not manifest.get("fixture"):
+        parser.error("Only generated synthetic fixtures are supported")
     source = GGUFReader(args.source)
+    if "deepseek41.engram.token_map" not in source.fields:
+        parser.error("Regenerate the fixture with embedded Engram metadata")
     assert "tokenizer.ggml.merges" not in source.fields
     args.output_dir.mkdir(parents=True)
     output = args.output_dir / args.source.name
@@ -52,7 +58,7 @@ def main():
     writer.write_header_to_file(); writer.write_kv_data_to_file(); writer.write_tensors_to_file(); writer.close()
     derived = GGUFReader(output)
     assert derived.fields["tokenizer.ggml.merges"].contents() == []
-    assert len(source.tensors) == len(derived.tensors) == 142
+    assert len(source.tensors) == len(derived.tensors)
     tensors = []
     for old, new in zip(source.tensors, derived.tensors):
         old_hash = hashlib.sha256(old.data.tobytes()).hexdigest()
@@ -62,7 +68,7 @@ def main():
         tensors.append(dict(name=old.name, shape=[int(n) for n in old.shape], dtype=old.tensor_type.name,
                             bytes=old.n_bytes, sha256=old_hash))
     sidecars = {}
-    for name in ("deepseek41.config.json", "deepseek41.engram.bin"):
+    for name in ("deepseek41.config.json", "tokens.json"):
         src, dst = args.source.parent / name, args.output_dir / name
         shutil.copyfile(src, dst)
         assert sha(src) == sha(dst)

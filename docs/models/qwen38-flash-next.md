@@ -21,6 +21,70 @@ image sessions are supported, with KV reuse across turns (the GDN recurrence
 cannot rewind, so a cached prefix is reused only when the new prompt extends
 it exactly; see [Retained-prefix reuse](#retained-prefix-reuse)).
 
+## Tool calling and agent workflows
+
+`qwen4exp` returns structured tool calls through the Qwen ChatML output parser.
+Both JSON and `<function=...><parameter=...>` bodies inside `<tool_call>` are
+accepted, including streamed fragments and thinking-enabled responses. Generic
+client tools return OpenAI `tool_calls` with call IDs and
+`finish_reason: "tool_calls"`; built-in skill and code tools run through the
+server's agent loop when configured.
+
+XML parameters use the declared tool schema: string values such as `123`,
+`true`, and JSON source stay strings. The parser removes one framing newline
+on each side, retaining code indentation and additional blank lines. Literal
+`</tool_call>` inside a parameter or JSON string does not terminate the call.
+Incomplete parameters/functions do not become executable calls; a complete
+body at EOS retains the existing recovery for an omitted outer closing tag.
+
+Enable skills with `--skills-dir`, skill scripts with `--skills-allow-exec`,
+and workspace file/shell tools with `--code-exec`. Editing uses `apply_patch`.
+See [Agent Skills](../agent_skills.md) for execution and sandbox configuration.
+
+Reusable checks:
+
+```bash
+python3 eng/validation/validate-qwen38-tool-calls.py \
+  --url http://127.0.0.1:5098 \
+  --output docs/validation/qwen38-tool-calling/generic.json
+python3 eng/validation/validate-release-agent-workflows.py \
+  --url http://127.0.0.1:5098 --concurrency 1 \
+  --output docs/validation/qwen38-tool-calling/workflows.json
+```
+
+The workflow check uses `eng/validation/fixtures/skills` as the server's skills
+directory and verifies skill discovery/read/script execution, shell commands,
+code generation, and read/patch/run workflows. Add `--thinking` to repeat with
+reasoning enabled. `verify-agent-code-artifacts.py` independently executes the
+final source artifacts against additional inputs. On a validation host started
+with its sandbox disabled, pass `--sandbox-off` to both execution validators;
+those reports establish functional execution only, not sandbox isolation.
+
+Validation on 2026-09-19 used the supplied UD-IQ4_XS checkpoint on three NVIDIA
+A40 GPUs (`ggml_cuda`, 15/16/17-layer split, MTP disabled), built against clean
+upstream ggml `456172ec733a135778adcd32d00e576a58232e45`:
+
+- 160 managed regression tests passed, with no failures or skips.
+- All 12 ordinary generic-tool cases passed: weather, string-looking numbers /
+  JSON source, and multiline Python with a trailing newline, each with streaming
+  and thinking independently on/off. Each call also completed a tool-result
+  round trip using its actual call ID.
+- All required tools executed successfully across 12 skill/shell/code workflows.
+  Four retained generated or edited programs passed independent execution with
+  additional inputs. Strict final-answer checks passed 9/12 after separating
+  pre-tool narration from the final turn; three responses added backticks or
+  prose around the correct value and remain failures.
+- All four literal-tool-marker stress prompts ended with EOS before completing
+  the call. They remain failed end-to-end cases, although complete XML/JSON
+  marker-containing calls pass parser regressions. The logs do not identify
+  which terminal token was sampled; the tool-marker token IDs are not EOS IDs.
+
+The VM denied user namespaces, so execution checks used an explicitly disabled
+sandbox. This campaign tested one quantization and sequential requests; it did
+not validate sandbox isolation, MTP, other devices, or performance. Full requests,
+SSE events, artifacts, build provenance, and failures are retained in the ignored
+`docs/validation/qwen38-tool-calling/` directory.
+
 ## Video input
 
 A video reaches the model as an OpenAI Chat Completions `video_url` content
