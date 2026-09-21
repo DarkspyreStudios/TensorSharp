@@ -201,6 +201,9 @@ public sealed class WebUiAdapter
                 float cfg = float.TryParse(form["cfg"], out float c) ? c : 0f;  // 0 = auto (2.5, or 1.0 with a Lightning LoRA)
                 long seed = long.TryParse(form["seed"], out long sd) ? sd : 0;
                 long targetArea = long.TryParse(form["targetArea"], out long taf) && taf > 0 ? taf : 0;
+                int width = int.TryParse(form["width"], out int wi) ? wi : 0;
+                int height = int.TryParse(form["height"], out int he) ? he : 0;
+                string negativePrompt = form.ContainsKey("negativePrompt") ? form["negativePrompt"].ToString() : " ";
                 var imageBytesList = new List<byte[]>();
                 foreach (var file in fileList)
                 {
@@ -209,7 +212,7 @@ public sealed class WebUiAdapter
                     imageBytesList.Add(ms.ToArray());
                 }
                 return Results.Json(await _service.ImageEditAsync(
-                    prompt, steps, cfg, seed, targetArea, imageBytesList, req.HttpContext.RequestAborted).ConfigureAwait(false));
+                    prompt, steps, cfg, seed, targetArea, imageBytesList, req.HttpContext.RequestAborted, width, height, negativePrompt).ConfigureAwait(false));
             }
 
             // JSON: { imagePaths[] or imagePath (server paths from /api/upload), prompt, steps, cfg, seed } (Web UI).
@@ -251,6 +254,34 @@ public sealed class WebUiAdapter
         if (!ok)
             return;
         await WriteFramesAsync(ctx, _service.ImageEditStreamAsync(body, ct), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Qwen-Image-2.1 JSON text-to-image endpoint; returns a PNG download URL.</summary>
+    public async Task<IResult> ImageGenerateAsync(HttpRequest req)
+    {
+        try
+        {
+            _service.EnsureImageGenerationAvailable();
+            using var body = await JsonDocument.ParseAsync(req.Body, cancellationToken: req.HttpContext.RequestAborted).ConfigureAwait(false);
+            return Results.Json(await _service.ImageGenerateAsync(body.RootElement, req.HttpContext.RequestAborted).ConfigureAwait(false));
+        }
+        catch (WebUiRequestRejectedException ex) { return Rejected(ex); }
+        catch (JsonException ex) { return Results.Json(new { error = "Bad request: " + ex.Message }, statusCode: 400); }
+    }
+
+    /// <summary>Text-to-image SSE with denoising progress and a final PNG download URL.</summary>
+    public async Task ImageGenerateStreamAsync(HttpContext ctx)
+    {
+        SseWriter.ApplyHeaders(ctx.Response);
+        var ct = ctx.RequestAborted;
+        try { _service.EnsureImageGenerationAvailable(); }
+        catch (WebUiRequestRejectedException ex)
+        {
+            await SseWriter.WriteEventAsync(ctx.Response, new { done = true, error = ex.Message }, ct).ConfigureAwait(false);
+            return;
+        }
+        var (ok, body) = await ReadStreamBodyAsync(ctx).ConfigureAwait(false);
+        if (ok) await WriteFramesAsync(ctx, _service.ImageGenerateStreamAsync(body, ct), ct).ConfigureAwait(false);
     }
 
     // ---- Text-to-video (Wan) ---------------------------------------------

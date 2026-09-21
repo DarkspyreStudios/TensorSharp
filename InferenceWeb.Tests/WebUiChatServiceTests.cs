@@ -744,4 +744,20 @@ public class WebUiChatServiceTests : IDisposable
         Assert.Single(frames);
         Assert.Equal("""{"done":true,"error":"The loaded model is not a Qwen-Image-Edit model."}""", JsonSerializer.Serialize(frames[0]));
     }
+    [Fact]
+    public async Task ImageGenerate_WithoutTheModel_RefusesPlainAndStreamingRequests()
+    {
+        Fixture f = Build();
+        var error = Assert.Throws<WebUiRequestRejectedException>(() => f.Service.EnsureImageGenerationAvailable());
+        Assert.Equal(400, error.StatusCode);
+        Assert.Contains("Qwen-Image-2.1", error.Message);
+        await Assert.ThrowsAsync<WebUiRequestRejectedException>(() =>
+            f.Service.ImageGenerateAsync(Json("""{"prompt":"cat"}"""), CancellationToken.None));
+        var frames = new List<object>();
+        await foreach (object frame in f.Service.ImageGenerateStreamAsync(Json("""{"prompt":"cat"}"""), CancellationToken.None))
+            frames.Add(frame);
+        Assert.Single(frames);
+        Assert.Equal("""{"done":true,"error":"Text-to-image generation requires a Qwen-Image-2.1 model."}""", JsonSerializer.Serialize(frames[0]));
+    }
+
 }

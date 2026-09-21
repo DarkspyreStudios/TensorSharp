@@ -6,29 +6,30 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System;
 using System.IO;
+using System.Linq;
 using TensorSharp.Core;
 using TensorSharp.Runtime;
 
 namespace TensorSharp.Models.QwenImage
 {
     /// <summary>
-    /// Qwen-Image-Edit-2511 image-editing model. Unlike the autoregressive LLMs this
-    /// orchestrates three networks that the diffusion-transformer GGUF
-    /// (<c>general.architecture = qwen_image</c>) does <b>not</b> itself contain:
+    /// Qwen-Image-Edit-2511 and Qwen-Image-2.1 generation/editing pipelines.
+    /// The diffusion-transformer GGUF selects the architecture and requires
+    /// matching VAE and text/vision companions:
     /// <list type="bullet">
-    ///   <item>the MMDiT diffusion transformer (the loaded <c>_gguf</c>),</item>
-    ///   <item>the Qwen-Image VAE (image &lt;-&gt; 16-channel latent), and</item>
-    ///   <item>the Qwen2.5-VL-7B text encoder (prompt -&gt; 3584-dim conditioning).</item>
+    ///   <item>2511: 60-layer, 3072-wide double-stream DiT, 16-channel /8 VAE,
+    ///   and Qwen2.5-VL-7B with 3584-dimensional conditioning.</item>
+    ///   <item>2.1: 32-layer, 4096-wide single-stream DiT, 64-channel /16 RGBA VAE,
+    ///   and Qwen3-VL-8B with 4096-dimensional conditioning.</item>
     /// </list>
     /// The companion GGUFs are resolved next to the DiT GGUF (or via the
     /// <c>TS_QWEN_IMAGE_VAE</c> / <c>TS_QWEN_IMAGE_TE</c> / <c>TS_QWEN_IMAGE_MMPROJ</c>
     /// environment variables). This class is not an <see cref="IModelArchitecture"/>
-    /// text generator; the autoregressive entry points throw, and image editing is
-    /// driven through <see cref="EditImage"/>.
+    /// text generator; use <see cref="GenerateImage"/> or <see cref="EditImage"/>.
     /// </summary>
     public sealed partial class QwenImageModel : ModelBase
     {
-        // ---- DiT architecture constants (the qwen_image GGUF carries no hyperparams) ----
+        // Legacy Qwen-Image/2511 constants. QwenImage21DiT owns the 2.1 dimensions.
         public const int DitHiddenSize = 3072;
         public const int DitNumLayers = 60;
         public const int DitNumHeads = 24;
@@ -50,6 +51,8 @@ namespace TensorSharp.Models.QwenImage
         private IFloatTensorStore _vaeWeights;
 
         private readonly string _ditPath;
+        /// <summary>True for the 2.1 single-stream transformer and its Qwen3-VL/64-channel VAE companions.</summary>
+        public bool IsVersion21 { get; }
         /// <summary>The diffusion-transformer GGUF (alias of the base <c>_gguf</c>).</summary>
         internal GgufFile DitGguf => _gguf;
         internal string DitGgufPath => _ditPath;
@@ -80,33 +83,71 @@ namespace TensorSharp.Models.QwenImage
 
         public QwenImageModel(string ggufPath, BackendType backend) : base(ggufPath, backend)
         {
-            _ditPath = ggufPath;
-            Config = new ModelConfig
+            try
             {
-                Architecture = "qwen_image",
-                HiddenSize = DitHiddenSize,
-                NumLayers = DitNumLayers,
-                NumHeads = DitNumHeads,
-                NumKVHeads = DitNumHeads,
-                Eps = DitEps,
-                VocabSize = 0,
-            };
+                _ditPath = ggufPath;
+                IsVersion21 = _gguf.Tensors.Keys.Any(n => n == "txt_in.text_norm.weight" ||
+                    n.EndsWith(".txt_in.text_norm.weight", StringComparison.Ordinal));
+                if (IsVersion21 && !IsGgmlBackend)
+                    throw new NotSupportedException("Qwen-Image-2.1 requires a GGML backend (ggml_metal, ggml_cuda, ggml_vulkan or ggml_cpu).");
+                Config = new ModelConfig
+                {
+                    Architecture = "qwen_image",
+                    HiddenSize = IsVersion21 ? 4096 : DitHiddenSize,
+                    NumLayers = IsVersion21 ? 32 : DitNumLayers,
+                    NumHeads = IsVersion21 ? 32 : DitNumHeads,
+                    NumKVHeads = IsVersion21 ? 32 : DitNumHeads,
+                    Eps = DitEps,
+                    VocabSize = 0,
+                };
 
-            string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath)) ?? ".";
-            _vaePath = ResolveVaeCompanion(dir);
-            _tePath = ResolveTeCompanion(dir);
-            _mmprojPath = ResolveCompanionOptional("TS_QWEN_IMAGE_MMPROJ", dir,
-                n => n.Contains("mmproj") && (n.Contains("qwen2") || n.Contains("qwen-image")) && n.EndsWith(".gguf"));
+                string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath)) ?? ".";
+                _vaePath = IsVersion21 ? ResolveVersion21Companion("TS_QWEN_IMAGE_VAE", dir,
+                    n => n.Contains("qwen_image_2.1_vae") && n.EndsWith(".safetensors")) : ResolveVaeCompanion(dir);
+                _tePath = IsVersion21 ? ResolveVersion21Companion("TS_QWEN_IMAGE_TE", dir,
+                    n => (n.Contains("qwen3vl-8b") || n.Contains("qwen3-vl-8b")) && !n.Contains("mmproj") && n.EndsWith(".gguf")) : ResolveTeCompanion(dir);
+                _mmprojPath = IsVersion21 ? ResolveVersion21Companion("TS_QWEN_IMAGE_MMPROJ", dir,
+                    n => n.Contains("mmproj") && (n.Contains("qwen3vl-8b") || n.Contains("qwen3-vl-8b")) && n.EndsWith(".gguf")) :
+                    ResolveCompanionOptional("TS_QWEN_IMAGE_MMPROJ", dir,
+                        n => n.Contains("mmproj") && (n.Contains("qwen2") || n.Contains("qwen-image")) && n.EndsWith(".gguf"));
 
-            Console.WriteLine($"Qwen-Image-Edit: DiT={Path.GetFileName(ggufPath)}");
-            Console.WriteLine($"  VAE          = {_vaePath ?? "<missing>"}");
-            Console.WriteLine($"  text-encoder = {_tePath ?? "<missing>"}");
-            Console.WriteLine($"  mmproj       = {_mmprojPath ?? "<none> (text-only grounding)"}");
+                Console.WriteLine($"{(IsVersion21 ? "Qwen-Image-2.1" : "Qwen-Image-Edit")}: DiT={Path.GetFileName(ggufPath)}");
+                Console.WriteLine($"  VAE          = {_vaePath ?? "<missing>"}");
+                Console.WriteLine($"  text-encoder = {_tePath ?? "<missing>"}");
+                Console.WriteLine($"  mmproj       = {_mmprojPath ?? "<none> (text-only grounding)"}");
 
-            if (_vaePath == null || _tePath == null)
-                throw new FileNotFoundException(
-                    "Qwen-Image-Edit needs companion VAE + Qwen2.5-VL text-encoder GGUFs. " +
-                    "Place them next to the DiT GGUF or set TS_QWEN_IMAGE_VAE / TS_QWEN_IMAGE_TE.");
+                if (_vaePath == null || _tePath == null)
+                    throw new FileNotFoundException(
+                        (IsVersion21 ? "Qwen-Image-2.1 needs its 2.1 VAE and Qwen3-VL-8B text-encoder GGUF. " :
+                        "Qwen-Image-Edit needs companion VAE + Qwen2.5-VL text-encoder GGUFs. ") +
+                        "Place them next to the DiT GGUF or set TS_QWEN_IMAGE_VAE / TS_QWEN_IMAGE_TE.");
+
+                if (IsVersion21)
+                {
+                    // Header-only checks fail before any expensive generation work.
+                    QwenImage21CompanionValidation.ValidateVae(VaeWeightSource);
+                    QwenImage21CompanionValidation.ValidateText(TeGguf);
+                    if (_mmprojPath != null)
+                    {
+                        using var vision = new GgufFile(_mmprojPath);
+                        QwenImage21CompanionValidation.ValidateVision(vision);
+                    }
+                }
+            }
+            catch { Dispose(); throw; }
+        }
+
+        private static string ResolveVersion21Companion(string envVar, string dir, Func<string, bool> match)
+        {
+            string explicitPath = Environment.GetEnvironmentVariable(envVar);
+            if (!string.IsNullOrWhiteSpace(explicitPath))
+            {
+                if (!File.Exists(explicitPath))
+                    throw new FileNotFoundException($"Qwen-Image-2.1 companion specified by {envVar} does not exist.", explicitPath);
+                return Path.GetFullPath(explicitPath);
+            }
+            return Directory.EnumerateFiles(dir).Where(f => match(Path.GetFileName(f).ToLowerInvariant()))
+                .OrderByDescending(f => new FileInfo(f).Length).ThenBy(f => f, StringComparer.Ordinal).FirstOrDefault();
         }
 
         /// <summary>
@@ -214,6 +255,8 @@ namespace TensorSharp.Models.QwenImage
         /// </summary>
         public RgbImage EditImage(string prompt, RgbImage input, QwenImageParams p)
         {
+            if (input == null) throw new ArgumentNullException(nameof(input));
+            if (IsVersion21) return GetPipeline21().Run(prompt, new[] { input }, p ?? new QwenImageParams());
             var pipeline = GetPipeline();
             return pipeline.Edit(prompt, input, p ?? new QwenImageParams());
         }
@@ -228,16 +271,27 @@ namespace TensorSharp.Models.QwenImage
         {
             if (inputs == null || inputs.Count == 0)
                 throw new ArgumentException("At least one input image is required.", nameof(inputs));
+            if (IsVersion21) return GetPipeline21().Run(prompt, inputs.ToArray(), p ?? new QwenImageParams());
             var pipeline = GetPipeline();
             return pipeline.Edit(prompt, System.Linq.Enumerable.ToArray(inputs), p ?? new QwenImageParams());
         }
 
         private QwenImagePipeline _pipeline;
         private QwenImagePipeline GetPipeline() => _pipeline ??= new QwenImagePipeline(this);
+        private QwenImage21Pipeline _pipeline21;
+        private QwenImage21Pipeline GetPipeline21() => _pipeline21 ??= new QwenImage21Pipeline(this);
+
+        /// <summary>Generate an image from text using Qwen-Image-2.1.</summary>
+        public RgbImage GenerateImage(string prompt, QwenImageParams p = null)
+        {
+            if (!IsVersion21)
+                throw new NotSupportedException("Text-to-image generation requires Qwen-Image-2.1 weights.");
+            return GetPipeline21().Run(prompt, Array.Empty<RgbImage>(), p ?? new QwenImageParams());
+        }
 
         // ---- IModelArchitecture autoregressive surface: not applicable to an image model ----
         protected override float[] ForwardCore(int[] tokens) =>
-            throw new NotSupportedException("QwenImageModel is an image-editing model; use EditImage().");
+            throw new NotSupportedException("QwenImageModel is an image model; use GenerateImage() or EditImage().");
 
         protected override void ResetKVCacheCore() { /* no autoregressive KV cache */ }
 
@@ -248,6 +302,7 @@ namespace TensorSharp.Models.QwenImage
         public override void Dispose()
         {
             _pipeline?.Dispose();
+            _pipeline21?.Dispose();
             _vaeSafetensors?.Dispose();
             _vaeGguf?.Dispose();
             _teGguf?.Dispose();

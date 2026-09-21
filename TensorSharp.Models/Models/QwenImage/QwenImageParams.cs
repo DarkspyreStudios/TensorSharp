@@ -9,18 +9,20 @@ using System;
 namespace TensorSharp.Models.QwenImage
 {
     /// <summary>
-    /// Sampling / generation parameters for a Qwen-Image-Edit run. Defaults track the
-    /// reference <c>QwenImageEditPlusPipeline</c> (FlowMatch Euler, true-CFG).
+    /// Sampling parameters shared by Qwen-Image-Edit and Qwen-Image-2.1.
+    /// Zero-valued step/CFG settings select the loaded model's defaults.
     /// </summary>
     public sealed class QwenImageParams
     {
         /// <summary>Number of denoising (FlowMatch Euler) steps. 0 = auto: 30, or the step
-        /// count of a loaded Lightning distillation LoRA (e.g. 4 or 8).</summary>
+        /// count of a loaded Lightning distillation LoRA (e.g. 4 or 8).
+        /// Qwen-Image-2.1 defaults to 40 steps.</summary>
         public int Steps { get; set; } = 0;
 
         /// <summary>
         /// True-CFG guidance scale; &lt;= 1 disables the negative pass (single forward/step),
         /// 0 = auto: 2.5, or 1.0 (no CFG) when a Lightning distillation LoRA is loaded.
+        /// Qwen-Image-2.1 defaults to 6.0 and uses standard CFG without per-token renormalization.
         /// 2.5 follows the Qwen-Image-Edit-2511 recommendation (matches stable-diffusion.cpp):
         /// 4.0 over-guides ("CFG burn") — it distorts faces/fine detail and over-saturates color.
         /// 2.5 preserves face structure while still applying the edit; raise toward 3.5-4 for a
@@ -35,7 +37,8 @@ namespace TensorSharp.Models.QwenImage
 
         /// <summary>
         /// Target output area in pixels (aspect ratio follows the input image). The
-        /// reference pipeline targets ~1 megapixel; dims are snapped to a multiple of 16.
+        /// TensorSharp defaults to approximately 1 megapixel. Dimensions are snapped
+        /// to multiples of 16 for the earlier model, or 32 for Qwen-Image-2.1.
         /// </summary>
         public long TargetArea { get; set; } = 1024 * 1024;
 

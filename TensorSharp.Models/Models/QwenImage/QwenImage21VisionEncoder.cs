@@ -1,0 +1,60 @@
+// Copyright (c) Zhongkai Fu. All rights reserved.
+// Licensed under the BSD-3-Clause license in the root of this source tree.
+using System;
+using System.Collections.Generic;
+using TensorSharp.GGML;
+
+namespace TensorSharp.Models
+{
+    public partial class Qwen35VisionEncoder
+    {
+        /// <summary>Qwen3-VL main image embedding and additions for the first language blocks.
+        /// The deepstack projectors normalize merged (4*1152) features, unlike the final
+        /// projector, whose normalization precedes spatial merging.</summary>
+        internal Tensor[] EncodeWithDeepStack(float[] pixels, int height, int width)
+        {
+            var deepStack = new List<Tensor>();
+            try
+            {
+                var main = EncodeCore(pixels, null, height, width, deepStack);
+                deepStack.Insert(0, main);
+                return deepStack.ToArray();
+            }
+            catch
+            {
+                foreach (var tensor in deepStack) tensor.Dispose();
+                throw;
+            }
+        }
+
+        private Tensor ProjectDeepStack(Tensor hidden, int layer, int patches)
+        {
+            int unit = _spatialMergeSize * _spatialMergeSize;
+            string prefix = $"v.deepstack.{layer}";
+            using var merged = hidden.View(patches / unit, _hiddenSize * unit);
+            using var normalized = LayerNormOp(merged, prefix + ".norm.weight", prefix + ".norm.bias");
+            using var fc1 = LinearForwardWithBias(normalized, prefix + ".fc1.weight", prefix + ".fc1.bias");
+            ApplyVisionGelu(fc1);
+            return LinearForwardWithBias(fc1, prefix + ".fc2.weight", prefix + ".fc2.bias");
+        }
+        private void ApplyVisionGelu(Tensor tensor)
+        {
+            if (!_qwenImage21) { Ops.GELU(tensor, tensor); return; }
+            // Qwen3-VL uses GELU(erf); Ops.GELU uses the tanh approximation.
+            var values = tensor.GetElementsAsFloat((int)tensor.ElementCount());
+            System.Threading.Tasks.Parallel.For(0, values.Length, i =>
+            {
+                double x = values[i] / Math.Sqrt(2.0);
+                double sign = x < 0 ? -1.0 : 1.0;
+                x = Math.Abs(x);
+                double t = 1.0 / (1.0 + 0.3275911 * x);
+                double p = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t;
+                double erf = sign * (1.0 - p * Math.Exp(-x * x));
+                values[i] = (float)(0.5 * values[i] * (1.0 + erf));
+            });
+            tensor.SetElementsAsFloat(values);
+            if (_useNativeAttention)
+                GgmlBasicOps.InvalidateHostBuffer(TensorComputePrimitives.GetStoragePointer(tensor));
+        }
+    }
+}

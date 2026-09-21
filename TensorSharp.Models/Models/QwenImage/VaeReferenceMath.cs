@@ -31,7 +31,7 @@ namespace TensorSharp.Models.QwenImage
         public int Idx(int c, int y, int x) => (c * H + y) * W + x;
     }
 
-    internal static class VaeReferenceMath
+    internal static partial class VaeReferenceMath
     {
         // When set (by QwenImageVae on a GGML backend), the conv stack runs on the
         // device via TSGgml_Conv2d instead of the pure-C# scalar loops. This is THE

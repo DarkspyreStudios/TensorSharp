@@ -292,6 +292,7 @@ set(TSG_GGMLOPS_SOURCES
     ggml_ops_dflash.cpp
     ggml_ops_diffusion.cpp
     ggml_ops_qwen_image.cpp
+    ggml_ops_qwen_image21.cpp
     ggml_ops_wan.cpp
     ggml_ops_minimax_h3.cpp
     ggml_ops_gated_delta_net.cpp

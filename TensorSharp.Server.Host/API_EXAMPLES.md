@@ -6,7 +6,7 @@ TensorSharp.Server.Host provides three API styles plus a few utility endpoints:
 
 - **Ollama-compatible** (`/api/generate`, `/api/chat/ollama`, `/api/tags`, `/api/show`)
 - **OpenAI-compatible** (`/v1/chat/completions`, `/v1/responses`, `/v1/models`)
-- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`)
+- **Web UI** (`/api/chat`, `/api/sessions`, `/api/models`, `/api/models/load`, `/api/upload`, `/api/skills`, `/api/image-edit`, `/api/image-edit/stream`, `/api/image-generate`, `/api/image-generate/stream`)
 - **Utilities** (`/api/version`, `/api/queue/status`)
 
 Start the server with the exact hosted model via `--model` and, when needed, the exact projector via `--mmproj`. The projector is **not auto-detected** by `TensorSharp.Server.Host`. The Web UI and compatibility endpoints expose only that startup model/projector pair; `/api/models/load` can reload the same pair on a supported backend, but it cannot choose a model on a model-less server or switch to another file at runtime.
@@ -1075,6 +1075,24 @@ and `/v1/*` returns `{"error": {"message": "...", "type": "invalid_request_error
 
 The field is `null` when the server has skills disabled, which is how the Web UI
 decides whether to show the skills control at all.
+
+### Qwen-Image-2.1 Text-to-Image
+
+Launch `TensorSharp.Server.Host` with `--config config/qwen-image-2.1.json`.
+See the [Qwen-Image-2.1 guide](../docs/models/qwenimage21.md) for downloads,
+CLI commands and model-specific defaults.
+
+```bash
+curl --fail-with-body http://localhost:5000/api/image-generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A cat beside a blue vase, soft daylight","width":1024,"height":1024,"steps":40,"cfg":6,"seed":42}'
+```
+
+The response contains `ok`, `url`, `width`, `height` and `elapsedSeconds`.
+`/api/image-generate/stream` accepts the same JSON and emits SSE denoising
+progress (`imageGenerate: true`) and a final `done: true` result. Use the existing
+image-edit routes below for reference-conditioned editing. Set both dimensions
+in multiples of 32; `negativePrompt` is optional in either mode.
 
 ### Image Editing (`/api/image-edit`, Qwen-Image-Edit)
 

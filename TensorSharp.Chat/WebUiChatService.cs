@@ -1148,72 +1148,140 @@ namespace TensorSharp.Chat
         /// multiple images the first drives the output geometry and the prompt can
         /// reference them as "Picture 1", "Picture 2", ... in upload order.
         /// </summary>
-        public async Task<object> ImageEditAsync(JsonElement body, CancellationToken cancellationToken)
+        public Task<object> ImageEditAsync(JsonElement body, CancellationToken cancellationToken) =>
+            ImageRequestAsync(body, generate: false, cancellationToken);
+
+        /// <summary>Text-to-image generation with a Qwen-Image-2.1 model.</summary>
+        public Task<object> ImageGenerateAsync(JsonElement body, CancellationToken cancellationToken) =>
+            ImageRequestAsync(body, generate: true, cancellationToken);
+
+        public void EnsureImageGenerationAvailable()
         {
-            var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
-            var editModel = RequireImageEditModel();
-            EnsureImageEditHeadroom(logger, "Image edit rejected: {Reason}");
-
-            string prompt = body.TryGetProperty("prompt", out var pr) ? pr.GetString() ?? "" : "";
-            int steps = body.TryGetProperty("steps", out var st) && st.TryGetInt32(out int si) ? si : 0;   // 0 = auto
-            float cfg = body.TryGetProperty("cfg", out var cf) && cf.TryGetSingle(out float cv) ? cv : 0f;  // 0 = auto
-            long seed = body.TryGetProperty("seed", out var se) && se.TryGetInt64(out long sv) ? sv : 0;
-            long targetArea = 0;
-            if (body.TryGetProperty("targetArea", out var ta) && ta.TryGetInt64(out long tav) && tav > 0)
-                targetArea = tav;
-            var imageBytesList = new List<byte[]>();
-            string error = await ReadUploadedImagesAsync(body, imageBytesList, CancellationToken.None);
-            if (error != null)
-                throw new WebUiRequestRejectedException(400, new { error });
-
-            return await RunImageEditAsync(editModel, prompt, steps, cfg, seed, targetArea, imageBytesList, logger);
+            RequireImageGenerationModel();
+            EnsureImageEditHeadroom(_loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit"), "Image generation rejected: {Reason}");
         }
 
-        /// <summary>
-        /// <see cref="ImageEditAsync(JsonElement, CancellationToken)"/> for a transport
-        /// that already has the image bytes (the Server's multipart form): the same
-        /// checks, the same worker, the same reply.
-        /// </summary>
+        private TensorSharp.Models.QwenImage.QwenImageModel RequireImageGenerationModel()
+        {
+            if (_svc.Model is not TensorSharp.Models.QwenImage.QwenImageModel model || !model.IsVersion21)
+                throw new WebUiRequestRejectedException(400, new { error = "Text-to-image generation requires a Qwen-Image-2.1 model." });
+            return model;
+        }
+
+        // Shared by plain and streaming routes so size, sampling and negative-prompt
+        // settings cannot silently disappear when a client switches transport.
+        internal static TensorSharp.Models.QwenImage.QwenImageParams ParseImageParameters(JsonElement body, bool version21)
+        {
+            if (body.ValueKind != JsonValueKind.Object)
+                throw new WebUiRequestRejectedException(400, new { error = "Expected a JSON object." });
+            var p = new TensorSharp.Models.QwenImage.QwenImageParams();
+            try
+            {
+                if (body.TryGetProperty("steps", out var steps)) p.Steps = steps.GetInt32();
+                if (body.TryGetProperty("cfg", out var cfg)) p.CfgScale = cfg.GetSingle();
+                if (body.TryGetProperty("seed", out var seed)) p.Seed = seed.GetInt64();
+                if (body.TryGetProperty("width", out var width)) p.Width = width.GetInt32();
+                if (body.TryGetProperty("height", out var height)) p.Height = height.GetInt32();
+                if (body.TryGetProperty("targetArea", out var area)) p.TargetArea = area.GetInt64();
+                if (body.TryGetProperty("negativePrompt", out var negative)) p.NegativePrompt = negative.GetString() ?? " ";
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException)
+            {
+                throw new WebUiRequestRejectedException(400, new { error = "Invalid image-generation parameters: " + ex.Message });
+            }
+            ValidateImageParameters(p, version21);
+            return p;
+        }
+
+        private static void ValidateImageParameters(TensorSharp.Models.QwenImage.QwenImageParams p, bool version21)
+        {
+            if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0 || p.TargetArea <= 0)
+                throw new WebUiRequestRejectedException(400, new { error = "steps and cfg must be nonnegative; targetArea must be positive." });
+            int alignment = version21 ? 32 : 16;
+            if (p.Width < 0 || p.Height < 0 || (p.Width == 0) != (p.Height == 0)
+                || p.Width % alignment != 0 || p.Height % alignment != 0)
+                throw new WebUiRequestRejectedException(400, new { error = $"width and height must both be zero (automatic) or positive multiples of {alignment}." });
+        }
+
+        internal static string ParseImagePrompt(JsonElement body, bool generate)
+        {
+            if (body.TryGetProperty("prompt", out var value) && value.ValueKind != JsonValueKind.String)
+                throw new WebUiRequestRejectedException(400, new { error = "prompt must be a string." });
+            string prompt = value.ValueKind == JsonValueKind.String ? value.GetString() : "";
+            if (generate && string.IsNullOrWhiteSpace(prompt))
+                throw new WebUiRequestRejectedException(400, new { error = "Text-to-image generation requires a nonempty prompt." });
+            if (generate && ((body.TryGetProperty("imagePaths", out var images)
+                    && images.ValueKind != JsonValueKind.Null
+                    && (images.ValueKind != JsonValueKind.Array || images.GetArrayLength() > 0))
+                || (body.TryGetProperty("imagePath", out var image) && image.ValueKind != JsonValueKind.Null
+                    && (image.ValueKind != JsonValueKind.String || !string.IsNullOrWhiteSpace(image.GetString())))))
+                throw new WebUiRequestRejectedException(400, new { error = "Use /api/image-edit for requests with reference images." });
+            return prompt;
+        }
+
+        private async Task<object> ImageRequestAsync(JsonElement body, bool generate, CancellationToken cancellationToken)
+        {
+            var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
+            var model = generate ? RequireImageGenerationModel() : RequireImageEditModel();
+            EnsureImageEditHeadroom(logger, "Image request rejected: {Reason}");
+            var p = ParseImageParameters(body, model.IsVersion21);
+            string prompt = ParseImagePrompt(body, generate);
+            var images = new List<byte[]>();
+            if (!generate)
+            {
+                string error = await ReadUploadedImagesAsync(body, images, cancellationToken);
+                if (error != null) throw new WebUiRequestRejectedException(400, new { error });
+            }
+            return await RunImageEditAsync(model, prompt, p, images, logger, generate, cancellationToken);
+        }
+
+        /// <summary>The multipart edit route uses the same validation and worker as JSON.</summary>
         public async Task<object> ImageEditAsync(
-            string prompt, int steps, float cfg, long seed, long targetArea, IReadOnlyList<byte[]> images, CancellationToken cancellationToken)
+            string prompt, int steps, float cfg, long seed, long targetArea, IReadOnlyList<byte[]> images, CancellationToken cancellationToken,
+            int width = 0, int height = 0, string negativePrompt = null)
         {
             if (images == null) throw new ArgumentNullException(nameof(images));
+            if (images.Count == 0) throw new WebUiRequestRejectedException(400, new { error = "No image uploaded (field 'image')." });
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
-            var editModel = RequireImageEditModel();
+            var model = RequireImageEditModel();
             EnsureImageEditHeadroom(logger, "Image edit rejected: {Reason}");
-            return await RunImageEditAsync(editModel, prompt ?? "", steps, cfg, seed, targetArea, images.ToList(), logger);
+            var p = new TensorSharp.Models.QwenImage.QwenImageParams
+            {
+                Steps = steps, CfgScale = cfg, Seed = seed, Width = width, Height = height,
+                TargetArea = targetArea > 0 ? targetArea : 1024 * 1024, NegativePrompt = negativePrompt ?? " ",
+            };
+            ValidateImageParameters(p, model.IsVersion21);
+            return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, cancellationToken);
         }
 
         private async Task<object> RunImageEditAsync(
-            TensorSharp.Models.QwenImage.QwenImageModel editModel,
-            string prompt, int steps, float cfg, long seed, long targetArea, List<byte[]> imageBytesList, ILogger logger)
+            TensorSharp.Models.QwenImage.QwenImageModel model,
+            string prompt, TensorSharp.Models.QwenImage.QwenImageParams p, List<byte[]> imageBytesList, ILogger logger,
+            bool generate, CancellationToken cancellationToken)
         {
-            string outName = $"edit-{Guid.NewGuid():N}.png";
+            string outName = $"{(generate ? "generated" : "edit")}-{Guid.NewGuid():N}.png";
             string outPath = Path.Combine(_options.UploadDirectory, outName);
-
             logger.LogInformation(LogEventIds.UploadReceived,
-                "Image edit: prompt='{Prompt}' steps={Steps} cfg={Cfg} images={Count} bytes={Bytes}",
-                prompt, steps, cfg, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
-
+                "Image request: prompt='{Prompt}' steps={Steps} cfg={Cfg} images={Count} bytes={Bytes}",
+                prompt, p.Steps, p.CfgScale, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
             var sw = Stopwatch.StartNew();
             (int w, int h) = await Task.Run(() =>
             {
                 lock (_imageEditLock)
                 {
-                    var inputs = imageBytesList.ConvertAll(TensorSharp.Models.QwenImage.ImageIO.Decode);
-                    var p = new TensorSharp.Models.QwenImage.QwenImageParams { Steps = steps, CfgScale = cfg, Seed = seed };
-                    if (targetArea > 0) p.TargetArea = targetArea;
-                    var output = editModel.EditImage(prompt, inputs, p);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: model.IsVersion21));
+                    p.OnStep = (_, _, _) => cancellationToken.ThrowIfCancellationRequested();
+                    var output = generate ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
                     TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
                     return (output.Width, output.Height);
                 }
-            });
+            }, cancellationToken);
             sw.Stop();
             _uploads.RecordFile(outPath);
-
             string url = BuildUploadUrl(outName);
             logger.LogInformation(LogEventIds.UploadReceived,
-                "Image edit done: {W}x{H} -> {Url} ({Sec:F1}s)", w, h, url, sw.Elapsed.TotalSeconds);
+                "Image request done: {W}x{H} -> {Url} ({Sec:F1}s)", w, h, url, sw.Elapsed.TotalSeconds);
             return new { ok = true, url, width = w, height = h, elapsedSeconds = sw.Elapsed.TotalSeconds };
         }
 
@@ -1267,8 +1335,14 @@ namespace TensorSharp.Chat
         /// <c>{ done, error }</c> frames, never exceptions: the original route had
         /// already started its response by then, and the page treats both alike.
         /// </summary>
-        public async IAsyncEnumerable<object> ImageEditStreamAsync(
-            JsonElement body,
+        public IAsyncEnumerable<object> ImageEditStreamAsync(JsonElement body, CancellationToken cancellationToken) =>
+            ImageRequestStreamAsync(body, false, cancellationToken);
+
+        public IAsyncEnumerable<object> ImageGenerateStreamAsync(JsonElement body, CancellationToken cancellationToken) =>
+            ImageRequestStreamAsync(body, true, cancellationToken);
+
+        private async IAsyncEnumerable<object> ImageRequestStreamAsync(
+            JsonElement body, bool generate,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
@@ -1276,7 +1350,13 @@ namespace TensorSharp.Chat
 
             if (_svc.Model is not TensorSharp.Models.QwenImage.QwenImageModel editModel)
             {
-                yield return new { done = true, error = "The loaded model is not a Qwen-Image-Edit model." };
+                yield return new { done = true, error = generate ? "Text-to-image generation requires a Qwen-Image-2.1 model." : "The loaded model is not a Qwen-Image-Edit model." };
+                yield break;
+            }
+
+            if (generate && !editModel.IsVersion21)
+            {
+                yield return new { done = true, error = "Text-to-image generation requires a Qwen-Image-2.1 model." };
                 yield break;
             }
 
@@ -1287,38 +1367,30 @@ namespace TensorSharp.Chat
                 yield break;
             }
 
-            // Parse the Web UI JSON body (mirrors ImageEditAsync).
-            string prompt; int steps; float cfg; long seed; long targetArea = 0;
+            string prompt = null;
+            TensorSharp.Models.QwenImage.QwenImageParams p = null;
             var imageBytesList = new List<byte[]>();
             string parseError = null;
             try
             {
-                prompt = body.TryGetProperty("prompt", out var pr) ? pr.GetString() ?? "" : "";
-                steps = body.TryGetProperty("steps", out var st) && st.TryGetInt32(out int si) ? si : 0;   // 0 = auto
-                cfg = body.TryGetProperty("cfg", out var cf) && cf.TryGetSingle(out float cv) ? cv : 0f;  // 0 = auto
-                seed = body.TryGetProperty("seed", out var se) && se.TryGetInt64(out long sv) ? sv : 0;
-                if (body.TryGetProperty("targetArea", out var ta) && ta.TryGetInt64(out long tav) && tav > 0)
-                    targetArea = tav;
-                string error = await ReadUploadedImagesAsync(body, imageBytesList, ct);
-                if (error != null)
-                    parseError = error;
+                p = ParseImageParameters(body, editModel.IsVersion21);
+                prompt = ParseImagePrompt(body, generate);
+                if (!generate)
+                    parseError = await ReadUploadedImagesAsync(body, imageBytesList, ct);
             }
-            catch (Exception ex)
-            {
-                parseError = "Bad request: " + ex.Message;
-                prompt = null; steps = 0; cfg = 0; seed = 0;
-            }
+            catch (WebUiRequestRejectedException ex) { parseError = ex.Message; }
+            catch (Exception ex) { parseError = "Bad request: " + ex.Message; }
             if (parseError != null)
             {
                 yield return new { done = true, error = parseError };
                 yield break;
             }
 
-            string outName = $"edit-{Guid.NewGuid():N}.png";
+            string outName = $"{(generate ? "generated" : "edit")}-{Guid.NewGuid():N}.png";
             string outPath = Path.Combine(_options.UploadDirectory, outName);
             logger.LogInformation(LogEventIds.UploadReceived,
                 "Image edit (stream): prompt='{Prompt}' steps={Steps} cfg={Cfg} images={Count} bytes={Bytes}",
-                prompt, steps, cfg, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
+                prompt, p.Steps, p.CfgScale, imageBytesList.Count, imageBytesList.Sum(b => (long)b.Length));
 
             // The edit worker pushes frames into this channel; the stream drains it. The callback
             // never blocks on the consumer (unbounded TryWrite) so it can't stall the denoise.
@@ -1327,7 +1399,7 @@ namespace TensorSharp.Chat
             // Lightning LoRA's trained step count), so request the full preview budget and let
             // the pipeline's interval math fit it to the resolved steps. Clamping against the
             // raw 0 here disabled previews entirely for auto-step requests (the Web UI default).
-            int previewCount = steps > 0 ? Math.Clamp(steps - 1, 0, 8) : 8;
+            int previewCount = p.Steps > 0 ? Math.Clamp(p.Steps - 1, 0, 8) : 8;
 
             var editTask = Task.Run(() =>
             {
@@ -1337,14 +1409,10 @@ namespace TensorSharp.Chat
                     // The model is not thread-safe; serialize edit requests (shared with ImageEditAsync).
                     lock (_imageEditLock)
                     {
-                        var inputs = imageBytesList.ConvertAll(TensorSharp.Models.QwenImage.ImageIO.Decode);
-                        var p = new TensorSharp.Models.QwenImage.QwenImageParams
-                        {
-                            Steps = steps,
-                            CfgScale = cfg,
-                            Seed = seed,
-                            PreviewCount = previewCount,
-                            OnStep = (step, total, preview) =>
+                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: editModel.IsVersion21));
+                        ct.ThrowIfCancellationRequested();
+                        p.PreviewCount = previewCount;
+                        p.OnStep = (step, total, preview) =>
                             {
                                 if (ct.IsCancellationRequested) throw new OperationCanceledException(ct);
                                 // Preview encoding is best-effort: a failure here must degrade to a
@@ -1361,10 +1429,8 @@ namespace TensorSharp.Chat
                                     Step = step, Total = total, Png = png,
                                     Width = png != null ? preview.Width : 0, Height = png != null ? preview.Height : 0,
                                 });
-                            },
-                        };
-                        if (targetArea > 0) p.TargetArea = targetArea;
-                        var output = editModel.EditImage(prompt, inputs, p);
+                            };
+                        var output = generate ? editModel.GenerateImage(prompt, p) : editModel.EditImage(prompt, inputs, p);
                         TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
                         _uploads.RecordFile(outPath);
                         channel.Writer.TryWrite(new EditFrame
@@ -1417,7 +1483,10 @@ namespace TensorSharp.Chat
                 else
                 {
                     string image = f.Png != null ? "data:image/png;base64," + Convert.ToBase64String(f.Png) : null;
-                    yield return new { imageEdit = true, step = f.Step, total = f.Total, image, width = f.Width, height = f.Height };
+                    if (generate)
+                        yield return new { imageGenerate = true, step = f.Step, total = f.Total, image, width = f.Width, height = f.Height };
+                    else
+                        yield return new { imageEdit = true, step = f.Step, total = f.Total, image, width = f.Width, height = f.Height };
                 }
             }
 

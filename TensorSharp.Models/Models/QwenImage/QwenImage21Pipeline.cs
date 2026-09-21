@@ -1,0 +1,243 @@
+// Copyright (c) Zhongkai Fu. All rights reserved.
+// Licensed under the BSD-3-Clause license in the repository root.
+using System;
+using System.Diagnostics;
+using TensorSharp.GGML;
+
+namespace TensorSharp.Models.QwenImage
+{
+    /// <summary>Qwen-Image-2.1 flow-matching pipeline. Latents are 64-channel /16, without patch packing.</summary>
+    internal sealed class QwenImage21Pipeline : IDisposable
+    {
+        private readonly QwenImageModel _model;
+        private QwenImage21Vae _vae;
+        private QwenImage21DiT _dit;
+        private QwenImage21Vae Vae => _vae ??= new QwenImage21Vae(_model);
+        private QwenImage21DiT Dit => _dit ??= new QwenImage21DiT(_model.DitGgufPath, _model.Backend);
+
+        public QwenImage21Pipeline(QwenImageModel model) => _model = model;
+
+        public RgbImage Run(string prompt, RgbImage[] inputs, QwenImageParams p)
+        {
+            ArgumentNullException.ThrowIfNull(prompt);
+            ArgumentNullException.ThrowIfNull(inputs);
+            ArgumentNullException.ThrowIfNull(p);
+            if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0)
+                throw new ArgumentException("Steps and CFG must be finite and nonnegative (zero selects the model default).");
+            if (!string.IsNullOrWhiteSpace(QwenImageDiT.LoraPath))
+                throw new NotSupportedException("Qwen-Image-2.1 does not support the earlier Qwen-Image Lightning LoRAs. Remove --qwen-image-lora / TS_QWEN_IMAGE_LORA.");
+            foreach (var input in inputs) ArgumentNullException.ThrowIfNull(input);
+            if (inputs.Length > 0 && _model.MmprojPath == null)
+                throw new InvalidOperationException("Qwen-Image-2.1 editing requires the Qwen3-VL-8B vision projector; set --qwen-image-mmproj or TS_QWEN_IMAGE_MMPROJ.");
+
+            var (width, height) = ResolveDimensions(p, inputs.Length > 0 ? inputs[0] : null);
+            int steps = p.Steps == 0 ? 40 : p.Steps;
+            float cfg = p.CfgScale == 0 ? 6f : p.CfgScale;
+            int h = height / 16, w = width / 16, sequence = checked(h * w);
+            var total = Stopwatch.StartNew();
+            var phase = Stopwatch.StartNew();
+            void Phase(string name)
+            {
+                Console.WriteLine($"  [qwen21-timing] {name}: {phase.Elapsed.TotalMilliseconds:F0}ms");
+                phase.Restart();
+            }
+            Console.WriteLine($"Qwen-Image-2.1: {width}x{height}, {steps} steps, CFG {cfg}, seed {p.Seed}, {inputs.Length} reference(s)");
+
+            try
+            {
+                var refs = new RgbImage[inputs.Length];
+                var refTokens = new float[inputs.Length][];
+                var refHeights = new int[inputs.Length];
+                var refWidths = new int[inputs.Length];
+                for (int i = 0; i < inputs.Length; i++)
+                {
+                    // Vision and VAE must see the SAME geometry: one image slot expands
+                    // to four /16 VAE tokens in the single-stream transformer.
+                    var (rw, rh) = DimensionsForArea(inputs[i].Width, inputs[i].Height, (long)width * height);
+                    refs[i] = ImageIO.Resize(inputs[i], rw, rh);
+                    var latent = Vae.Encode(refs[i]);
+                    refHeights[i] = latent.Height;
+                    refWidths[i] = latent.Width;
+                    refTokens[i] = ToTokens(latent.Data, latent.Height, latent.Width);
+                }
+                if (refs.Length > 0) Phase("VAE encode");
+
+                float[] positive, negative = null;
+                int positiveLength, negativeLength = 0;
+                int[] positiveSlots, negativeSlots = null;
+                // Encoder residency ends before the DiT starts. This also bounds
+                // GPU memory on discrete devices; no encoder is needed during denoising.
+                using (var conditioner = new QwenImage21Conditioner(_model.TePath, _model.MmprojPath, _model.Backend))
+                {
+                    (positive, positiveLength, positiveSlots) = conditioner.EncodePrompt(prompt, refs);
+                    if (cfg > 1f)
+                        (negative, negativeLength, negativeSlots) = conditioner.EncodePrompt(p.NegativePrompt ?? "", refs);
+                }
+                Phase("text and vision encode");
+                GgmlBasicOps.ReleaseReuseComputeBuffers();
+                GgmlBasicOps.ClearHostBufferCache();
+
+                float[] latents = ToTokens(QwenImage21Sampling.Noise(checked(sequence * 64), p.Seed), h, w);
+                float[] sigmas = QwenImage21Sampling.Sigmas(steps, sequence);
+                for (int step = 0; step < steps; step++)
+                {
+                    var timer = Stopwatch.StartNew();
+                    float[] velocity = Dit.Predict(latents, h, w, positive, positiveLength, sigmas[step],
+                        positiveSlots, refTokens, refHeights, refWidths);
+                    if (cfg > 1f)
+                    {
+                        float[] unconditional = Dit.Predict(latents, h, w, negative, negativeLength, sigmas[step],
+                            negativeSlots, refTokens, refHeights, refWidths);
+                        for (int j = 0; j < velocity.Length; j++)
+                            velocity[j] = unconditional[j] + cfg * (velocity[j] - unconditional[j]);
+                    }
+                    float dt = sigmas[step + 1] - sigmas[step];
+                    for (int j = 0; j < latents.Length; j++)
+                    {
+                        if (!float.IsFinite(velocity[j]))
+                            throw new InvalidOperationException($"Qwen-Image-2.1 produced a non-finite velocity at step {step + 1}.");
+                        latents[j] += dt * velocity[j];
+                    }
+                    Console.WriteLine($"  [qwen21-step] {step + 1}/{steps}: {timer.Elapsed.TotalSeconds:F3}s sigma={sigmas[step]:F6}");
+                    RgbImage preview = null;
+                    int interval = p.PreviewCount > 0 ? Math.Max(1, (steps + p.PreviewCount) / (p.PreviewCount + 1)) : 0;
+                    if (p.OnStep != null && interval > 0 && step + 1 < steps && (step + 1) % interval == 0)
+                    {
+                        try { preview = DecodePreview(latents, h, w); }
+                        catch (Exception error) when (error is not OperationCanceledException)
+                        {
+                            Console.WriteLine($"  [qwen21] preview decode skipped: {error.Message}");
+                        }
+                    }
+                    p.OnStep?.Invoke(step + 1, steps, preview);
+                }
+                Phase("denoise");
+                GgmlBasicOps.ReleaseReuseComputeBuffers();
+                var output = Vae.Decode(new VaeLatent(64, h, w, ToChannels(latents, h, w)));
+                Phase("VAE decode");
+                Console.WriteLine($"  [qwen21-timing] total: {total.Elapsed.TotalSeconds:F3}s");
+                return output;
+            }
+            finally
+            {
+                GgmlBasicOps.ReleaseReuseComputeBuffers();
+                GgmlBasicOps.ClearHostBufferCache();
+            }
+        }
+
+        private RgbImage DecodePreview(float[] tokens, int height, int width)
+        {
+            int factor = Math.Max(1, (Math.Max(height, width) + 23) / 24);
+            if (factor == 1) return Vae.Decode(new VaeLatent(64, height, width, ToChannels(tokens, height, width)));
+            int h = Math.Max(1, height / factor), w = Math.Max(1, width / factor);
+            var pooled = new float[64 * h * w];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    for (int c = 0; c < 64; c++)
+                    {
+                        float sum = 0;
+                        int count = 0;
+                        for (int yy = y * factor; yy < Math.Min(height, (y + 1) * factor); yy++)
+                            for (int xx = x * factor; xx < Math.Min(width, (x + 1) * factor); xx++)
+                            { sum += tokens[(yy * width + xx) * 64 + c]; count++; }
+                        pooled[(c * h + y) * w + x] = sum / count;
+                    }
+            return Vae.Decode(new VaeLatent(64, h, w, pooled));
+        }
+
+        internal static (int Width, int Height) ResolveDimensions(QwenImageParams p, RgbImage reference)
+        {
+            int width = p.Width, height = p.Height;
+            if (width == 0 && height == 0 &&
+                int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_WIDTH"), out int envWidth) &&
+                int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_HEIGHT"), out int envHeight))
+                (width, height) = (envWidth, envHeight);
+            if (width != 0 || height != 0)
+            {
+                if (width <= 0 || height <= 0 || width % 32 != 0 || height % 32 != 0)
+                    throw new ArgumentException("Qwen-Image-2.1 width and height must both be positive multiples of 32.");
+                return (width, height);
+            }
+            long area = p.TargetArea > 0 ? p.TargetArea : 1024L * 1024;
+            return DimensionsForArea(reference?.Width ?? 1, reference?.Height ?? 1, area);
+        }
+
+        private static (int Width, int Height) DimensionsForArea(int sourceWidth, int sourceHeight, long area)
+        {
+            double ratio = (double)sourceWidth / sourceHeight;
+            // Match std::round in sd.cpp, including exact half-grid values;
+            // keep the grid multiplication checked as well as the conversion.
+            return (Math.Max(32, checked((int)Math.Round(Math.Sqrt(area * ratio) / 32, MidpointRounding.AwayFromZero) * 32)),
+                Math.Max(32, checked((int)Math.Round(Math.Sqrt(area / ratio) / 32, MidpointRounding.AwayFromZero) * 32)));
+        }
+
+        internal static float[] ToTokens(float[] chw, int height, int width)
+        {
+            int count = checked(height * width);
+            if (chw.Length != checked(count * 64)) throw new ArgumentException("Expected 64-channel latent.");
+            var result = new float[chw.Length];
+            for (int i = 0; i < count; i++)
+                for (int c = 0; c < 64; c++) result[i * 64 + c] = chw[c * count + i];
+            return result;
+        }
+
+        internal static float[] ToChannels(float[] tokens, int height, int width)
+        {
+            int count = checked(height * width);
+            if (tokens.Length != checked(count * 64)) throw new ArgumentException("Expected 64-channel latent.");
+            var result = new float[tokens.Length];
+            for (int i = 0; i < count; i++)
+                for (int c = 0; c < 64; c++) result[c * count + i] = tokens[i * 64 + c];
+            return result;
+        }
+
+        public void Dispose()
+        {
+            _dit?.Dispose();
+            _vae?.Dispose();
+        }
+    }
+
+    internal static class QwenImage21Sampling
+    {
+        internal static float[] Sigmas(int steps, int imageTokens)
+        {
+            if (steps <= 0 || imageTokens <= 0) throw new ArgumentOutOfRangeException();
+            // Qwen 2.1 uses the Flux resolution schedule (256 -> 0.5, 4096 -> 1.15).
+            float mu = 0.5f + (imageTokens - 256) * (1.15f - 0.5f) / (4096 - 256);
+            float exp = MathF.Exp(mu);
+            var result = new float[steps + 1];
+            for (int i = 0; i < steps; i++)
+            {
+                float t = 1f - (float)i / steps;
+                result[i] = exp / (exp + (1f / t - 1f));
+            }
+            return result;
+        }
+
+        // Philox4x32-10 + Box-Muller, matching stable-diffusion.cpp --rng cuda.
+        // Generate in CHW order before transposing, so equal seeds identify equal noise.
+        internal static float[] Noise(int count, long seed)
+        {
+            var result = new float[count];
+            const float inv32 = 2.3283064e-10f;
+            const float inv32Tau = inv32 * 6.2831855f;
+            for (int i = 0; i < count; i++)
+            {
+                uint a = 0, b = 0, c = (uint)i, d = 0;
+                uint k0 = (uint)seed, k1 = (uint)((ulong)seed >> 32);
+                for (int round = 0; round < 10; round++)
+                {
+                    ulong p0 = (ulong)a * 0xD2511F53u, p1 = (ulong)c * 0xCD9E8D57u;
+                    (a, b, c, d) = ((uint)(p1 >> 32) ^ b ^ k0, (uint)p1, (uint)(p0 >> 32) ^ d ^ k1, (uint)p0);
+                    k0 = unchecked(k0 + 0x9E3779B9u);
+                    k1 = unchecked(k1 + 0xBB67AE85u);
+                }
+                float u = (float)a * inv32 + inv32 / 2;
+                float v = (float)b * inv32Tau + inv32Tau / 2;
+                result[i] = (float)(Math.Sqrt(-2f * Math.Log(u)) * Math.Sin(v));
+            }
+            return result;
+        }
+    }
+}

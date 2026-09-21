@@ -677,6 +677,7 @@ struct TSGTeLayerW
     TSGImgAttnW q, k, v, o, gate, up, down;      // .b = optional F32 bias
     std::int32_t mask_kind;                      // 0 full, 1 causal, 2 window mask
     std::int32_t pad_;
+    void* q_norm; void* k_norm;
 };
 
 struct TSGgmlQwenTeTrunkDesc
@@ -689,6 +690,8 @@ struct TSGgmlQwenTeTrunkDesc
     const TSGTeLayerW* layers; std::int32_t num_layers;
     std::int32_t struct_bytes, hidden, heads, kv_heads, head_dim, seq;
     float eps;
+    void* deepstack;
+    std::int32_t deepstack_count;
 };
 
 namespace {
@@ -815,6 +818,15 @@ TSG_EXPORT int TSGgml_QwenTeTrunk(const TSGgmlQwenTeTrunkDesc* d)
             ggml_tensor* q = ggml_reshape_3d(ctx, mm(qw, n1, qb), hd, heads, seq);
             ggml_tensor* k = ggml_reshape_3d(ctx, mm(kw, n1, kb), hd, kvh, seq);
             ggml_tensor* v = ggml_reshape_3d(ctx, mm(vw, n1, vb), hd, kvh, seq);
+            if (lw.q_norm && lw.k_norm)
+            {
+                ggml_tensor* qn = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hd);
+                ggml_tensor* kn = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hd);
+                bind(qn, lw.q_norm, static_cast<std::size_t>(hd) * sizeof(float));
+                bind(kn, lw.k_norm, static_cast<std::size_t>(hd) * sizeof(float));
+                q = ggml_mul(ctx, ggml_rms_norm(ctx, q, eps), qn);
+                k = ggml_mul(ctx, ggml_rms_norm(ctx, k, eps), kn);
+            }
             q = qte_rope_half(ctx, q, cosf, sinf, hd, heads, seq);
             k = qte_rope_half(ctx, k, cosf, sinf, hd, kvh, seq);
 
@@ -842,6 +854,14 @@ TSG_EXPORT int TSGgml_QwenTeTrunk(const TSGgmlQwenTeTrunkDesc* d)
             ggml_tensor* u = mm(uw, n2, ub);
             ggml_tensor* ff = ggml_mul(ctx, ggml_silu(ctx, g), u);
             h = ggml_add(ctx, h, mm(dw, ff, db));
+            if (d->deepstack && l < d->deepstack_count)
+            {
+                ggml_tensor* extra = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hidden, seq);
+                ggml_set_input(extra);
+                uploads.push_back({extra, static_cast<float*>(d->deepstack) + static_cast<std::size_t>(l) * hidden * seq,
+                    static_cast<std::size_t>(hidden) * seq * sizeof(float)});
+                h = ggml_add(ctx, h, extra);
+            }
         }
 
         if (d->final_norm)
@@ -853,7 +873,7 @@ TSG_EXPORT int TSGgml_QwenTeTrunk(const TSGgmlQwenTeTrunkDesc* d)
         ggml_tensor* copied = ggml_cpy(ctx, h, outT);
         ggml_set_output(copied);
 
-        const std::size_t nodes = static_cast<std::size_t>(nl) * 64 + 1024;
+        const std::size_t nodes = static_cast<std::size_t>(nl) * 96 + 1024;
         ggml_cgraph* graph = ggml_new_graph_custom(ctx, nodes, false);
         if (graph == nullptr) { set_last_error("QwenTeTrunk: graph alloc failed."); return 0; }
         ggml_build_forward_expand(graph, copied);

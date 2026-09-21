@@ -749,6 +749,7 @@ public struct QwenTeLayerW
     public QImgAttnW Q, K, V, O, Gate, Up, Down;         // .B = optional F32 bias
     public int MaskKind;
     public int Pad;
+    public IntPtr QNorm, KNorm; // optional [head_dim] RMS scale, Qwen3-VL
 }
 
 // Descriptor for the fused transformer trunk (TSGgml_QwenTeTrunk): the Qwen2.5-VL
@@ -765,6 +766,8 @@ public struct QwenTeTrunkArgs
     public IntPtr Layers; public int NumLayers;
     public int StructBytes, Hidden, Heads, KvHeads, HeadDim, Seq;
     public float Eps;
+    public IntPtr DeepStack; // [DeepStackCount, seq, hidden] F32 additions after each block
+    public int DeepStackCount;
 }
 
 // Descriptor for the whole fused DiT block (attn + both MLP streams in one graph)

@@ -319,13 +319,13 @@ namespace TensorSharp.Server.Host.Hosting
                     "the trunk and use --spec instead. Default: none.",
                     "--draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf"),
             }),
-            ("Qwen-Image-Edit companion models (qwen_image DiT GGUFs)", new[]
+            ("Qwen-Image companion models (2.1 and older image-edit DiTs)", new[]
             {
                 new OptionHelp("--qwen-image-vae <path>",
-                    "VAE GGUF. Default: same-directory scan next to the DiT model.",
+                    "Matching VAE GGUF or safetensors (2.1 requires its own VAE). Default: same-directory scan.",
                     "--qwen-image-vae qwen-image-vae.gguf"),
                 new OptionHelp("--qwen-image-vl <path>",
-                    "Qwen2.5-VL text-encoder GGUF. Default: same-directory scan.",
+                    "Qwen3-VL-8B text-encoder GGUF for 2.1, Qwen2.5-VL for older models. Default: same-directory scan.",
                     "--qwen-image-vl qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf"),
                 new OptionHelp("--qwen-image-mmproj <path>",
                     "Vision projector GGUF for the text encoder. Default: same-directory scan.",
