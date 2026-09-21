@@ -424,14 +424,16 @@ namespace TensorSharp.Server.Host.Hosting
                     "the server is reachable by untrusted clients (TS_UPLOAD_TTL_HOURS env var overrides).",
                     "--upload-ttl-hours 24"),
             }),
-            ("Agent skills (SKILL.md bundles; the skills/ directory next to the server binary)", new[]
+            ("Agent skills (SKILL.md bundles; repository and configured skill directories)", new[]
             {
                 new OptionHelp("--skills-dir <path>",
                     "Directory to scan for skills. A root may hold one skill (it contains SKILL.md) or many, " +
                     "nested up to three levels, so a checkout of a skills repository works as-is. Repeat the " +
-                    "flag for several; earlier roots take precedence on a name clash. Default: the skills/ " +
-                    "directory next to the binary, created on startup (TS_SKILLS_DIR env var overrides, " +
-                    "path-separated).",
+                    "flag for several; earlier roots take precedence on a name clash. Default: existing " +
+                    ".agents/skills directories from the working directory up to its Git repository root " +
+                    "(nearest first), then skills/ next to the binary, created on startup. Outside a repository " +
+                    "only the working directory is considered. Explicit roots or path-separated TS_SKILLS_DIR " +
+                    "replace these defaults; personal skill directories are not loaded automatically.",
                     "--skills-dir ./skills"),
                 new OptionHelp("--skill <name>",
                     "Give EVERY request this skill, instead of waiting for a client to name it in the request's " +

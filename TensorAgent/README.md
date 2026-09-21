@@ -212,8 +212,8 @@ holders together (the runner's options, the installer's standing policy, the she
 host list, and the terms a skill's scripts are planned against). A command already
 running keeps the terms it started with.
 
-**Skills.** Eleven are bundled, chosen by inspection rather than by hope — see
-"Skills" below. Users can install more from a zip.
+**Skills.** Bundled and installed skill directories are discovered automatically — see
+"Skills" below for platform requirements. Users can install more from a zip.
 
 **Code, generated and run.** The agent host's shell tool works here, backed by an
 in-process POSIX shell, an embedded CPython 3.13 and JavaScriptCore, because iOS
@@ -223,8 +223,10 @@ A missing command never ends in "command not found" and nothing else. Installing
 native program is available to nobody here — iOS runs no child processes and will not
 execute a binary that was not signed into the bundle — so the shell names what does
 work instead: `$(( ))` and `python3` for `bc`, the interpreters for another language,
-the fact that `apt`/`brew`/`sudo` have no meaning on this device *and* that Python and
-JavaScript packages do install with `pip`/`npm` when network access is on. It also
+the fact that `apt`/`brew`/`sudo` have no meaning on this device, and that pure-Python
+`none-any` wheels can be installed with `pip` when network access is on. JavaScriptCore's
+`node` command is a compatibility layer; it cannot install npm packages or launch
+native child processes. It also
 catches a transposed name. This is not politeness: a dead end is where a model stops
 using the shell and starts inventing the answer, which is exactly what one did on a
 phone — reaching for `bc` to subtract two dates, being told 127, and finishing the
@@ -408,6 +410,34 @@ one, on the first command of a session, after which it stops reaching for the sh
 the kernel to the runtimes: every path goes through `ConfinedPaths`, every network
 call consults the policy first. The backend reports that honestly, including the
 one thing it genuinely cannot do — preempt a builtin already inside a long call.
+
+**Native execution when hosted on desktop.** `AgentPaths.ExecutionMode` defaults to
+`Auto`: an `AgentAppHost` running on macOS, Linux or Windows uses TensorSharp's shared
+`ProcessShellBackend`, OS sandbox, shell sessions and package installer. Real Node.js,
+npm/npx, Python and other programs on the host can then run inside the session sandbox.
+The process backend requires an available sandbox; it does not fall back to unrestricted
+execution. Set `AgentExecutionMode.InProcess` when a desktop test is intended to emulate
+the iOS runtimes. Embedded runtime injection is not supported in process mode.
+
+The Playwright skill requires actual Node.js/npm and browser child processes.
+These capabilities are available on the desktop execution path when their dependencies
+are present, but cannot be supplied to the iOS app by widening its sandbox. Installing
+the skill on iOS makes its instructions discoverable, not its dependencies executable.
+No browser-specific bridge is used. A nonempty `networkHosts` restriction is enforced by
+the embedded backend; the desktop backend refuses network-enabled launches under that
+restriction because its general process sandbox cannot enforce DNS host allow-lists.
+
+For HTTP/WebUI validation of the desktop host, use the reusable launcher:
+
+```sh
+dotnet run --project eng/validation/TensorAgentHost -- \
+  --root artifacts/tensoragent-browser --skills TensorAgent/skills \
+  --weights /path/to/model.gguf --network --port 5038
+```
+
+The launcher writes its loopback URL and authentication cookie to
+`artifacts/tensoragent-browser/connection.json`. The browser-workflow validator accepts
+that file via `--connection`. Desktop results do not establish browser support on iOS.
 
 **The transcript is the host's, and it carries the attachments.** The Web UI keeps
 its history in the page and nowhere else; on a phone the app is suspended and killed
@@ -599,6 +629,7 @@ because they instruct the model on behalf of another product in every turn):
 | pdf | `pdfplumber` is missing, and `pdf2image` shells out to poppler |
 | skill-creator | `subprocess`, `webbrowser` |
 | webapp-testing | `playwright` needs a browser engine |
+| playwright | Node.js/npm and native browser processes; supported by the desktop process backend, unavailable on iOS |
 | mcp-builder | an MCP server needs a process and a socket |
 
 Importable is not the same as usable: `subprocess` is in the standard library and

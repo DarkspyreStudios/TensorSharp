@@ -16,6 +16,7 @@ using TensorAgent.Core.Catalog;
 using TensorAgent.Core.Hosting;
 using TensorAgent.Core.Settings;
 using TensorAgent.Core.Python;
+using TensorAgent.Core.Shell;
 using TensorSharp.AgentHost.Skills;
 
 namespace TensorAgent.Tests;
@@ -353,6 +354,7 @@ public abstract class LiveModelHarness : IDisposable
         var paths = new AgentPaths(Path.Combine(_root, "data"), Path.Combine(_root, "cache"))
         {
             DeviceMemoryGB = 16,
+            ExecutionMode = AgentExecutionMode.InProcess,
             BundledSkillsDirectory = skills ? RepoSkillsDirectory : string.Empty,
             PythonRuntimeDirectory = interpreter ? InterpreterRoot ?? string.Empty : string.Empty,
         };

@@ -416,6 +416,9 @@ namespace TensorSharp.AgentHost.Skills
                 Argv = argv,
                 WorkingDirectory = workDirectory,
                 WriteDirectory = workDirectory,
+                WritablePaths = _options.Workspace is { } sessionWorkspace
+                    ? new[] { sessionWorkspace.TempDirectory }
+                    : Array.Empty<string>(),
                 ReadOnlyDirectory = skill.RootDirectory,
                 ReadablePaths = readablePaths,
                 AllowNetwork = _options.AllowNetwork,
@@ -504,6 +507,10 @@ namespace TensorSharp.AgentHost.Skills
                 sb.Append("Not confined on this host: ").Append(string.Join("; ", gaps)).Append(".\n");
 
             sb.Append(Describe(result.Stdout, result.Stderr, workDirectory, preRun, _options.Workspace));
+
+            if (CodeExec.CodeRepairHint.NestedSandboxFailure(result, _sandbox?.Capabilities.ConfinesWrites == true)
+                is { } sandboxHint)
+                sb.Append(sandboxHint);
 
             // A script that died on a missing import is the single most common way a
             // skill's tooling fails on a fresh host, and the fix is one call away:
@@ -1371,6 +1378,15 @@ namespace TensorSharp.AgentHost.Skills
             {
                 startInfo.Environment["PYTHONPATH"] = workspace.EnvDirectory;
                 startInfo.Environment["NODE_PATH"] = Path.Combine(workspace.EnvDirectory, "node_modules");
+                startInfo.Environment["PATH"] = CodeExec.CodeEnvironment.SessionExecutablePath(
+                    workspace, startInfo.Environment.GetValueOrDefault("PATH"));
+                startInfo.Environment["TMPDIR"] = workspace.RuntimeTempDirectory;
+                startInfo.Environment["TEMP"] = workspace.RuntimeTempDirectory;
+                startInfo.Environment["TMP"] = workspace.RuntimeTempDirectory;
+                startInfo.Environment["NPM_CONFIG_PREFIX"] = workspace.EnvDirectory;
+                startInfo.Environment["NPM_CONFIG_IGNORE_SCRIPTS"] = "true";
+                startInfo.Environment["NPM_CONFIG_UPDATE_NOTIFIER"] = "false";
+                startInfo.Environment["NPM_CONFIG_FUND"] = "false";
             }
 
             // The skill's OWN root, so a script can import its siblings the way its
@@ -1735,7 +1751,9 @@ namespace TensorSharp.AgentHost.Skills
                     : "python3",
             [".js"] = "node",
             [".mjs"] = "node",
-            [".sh"] = OperatingSystem.IsWindows() ? "bash" : "/bin/sh",
+            // Bash accepts POSIX scripts and scripts using arrays/pipefail shipped by
+            // many skills. /bin/sh is dash on Linux and cannot run those scripts.
+            [".sh"] = "bash",
             [".bash"] = "bash",
         };
 

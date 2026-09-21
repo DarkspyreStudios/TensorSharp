@@ -436,7 +436,10 @@ namespace TensorSharp.AgentHost.CodeExec
             if (workspaceRebuilt)
                 notes.Add(SessionWorkspace.RebuiltNote);
 
-            if (ShellCommand.ContainsInstall(command))
+            // Fetch-and-run tools need both permissions and cannot enforce the host package allow-list.
+            bool allowPackageRunners = _options.AllowNetwork && _options.AllowInstall
+                && _options.AllowedPackages.Count == 0;
+            if (ShellCommand.ContainsInstall(command, includePackageRunners: !allowPackageRunners))
             {
                 // The switch is about FETCHING. A request for something the host already
                 // provides fetches nothing, so it goes through to the installer, which
@@ -466,7 +469,8 @@ namespace TensorSharp.AgentHost.CodeExec
                 }
 
                 if (!ShellInstall.TryRead(command, RelativeReader(workspace),
-                        out IReadOnlyList<ShellInstallRequest> installs, out string? installError))
+                        out IReadOnlyList<ShellInstallRequest> installs, out string? installError,
+                        includePackageRunners: !allowPackageRunners))
                 {
                     return CodeExecResult.Refused(installError!);
                 }
@@ -1297,9 +1301,9 @@ namespace TensorSharp.AgentHost.CodeExec
                 // Both are narrowed here, where the layout is known.
                 ["HOME"] = workspace.WorkDirectory,
                 ["USERPROFILE"] = workspace.WorkDirectory,
-                ["TMPDIR"] = workspace.TempDirectory,
-                ["TEMP"] = workspace.TempDirectory,
-                ["TMP"] = workspace.TempDirectory,
+                ["TMPDIR"] = workspace.RuntimeTempDirectory,
+                ["TEMP"] = workspace.RuntimeTempDirectory,
+                ["TMP"] = workspace.RuntimeTempDirectory,
                 // The session's package environment, reachable by whatever the model runs
                 // without it having to know where the host put it.
                 ["PYTHONPATH"] = workspace.EnvDirectory,
@@ -1326,19 +1330,8 @@ namespace TensorSharp.AgentHost.CodeExec
             // PATH is set by ConfinedProcess from the host's own, then overwritten here —
             // the launch plan's variables are applied last, so this wins. The prefixed
             // directories are on the readable list above for the same reason.
-            string hostPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            string separator = OperatingSystem.IsWindows() ? ";" : ":";
-            environment["PATH"] = string.Join(separator, new[]
-            {
-                // Ahead of everything: the host's own interpreter aliases, which must not
-                // be shadowed by a package that happens to install a script of the same
-                // name. See EnsureInterpreterAliases.
-                Path.Combine(workspace.EnvDirectory, "shim"),
-                CodeEnvironment.VenvBin(workspace.EnvDirectory),
-                Path.Combine(workspace.EnvDirectory, "bin"),
-                Path.Combine(workspace.EnvDirectory, "node_modules", ".bin"),
-                hostPath,
-            }.Where(p => p.Length > 0));
+            environment["PATH"] = CodeEnvironment.SessionExecutablePath(
+                workspace, Environment.GetEnvironmentVariable("PATH"));
 
             if (_options.AllowNetwork)
                 AddNetworkEnvironment(workspace, environment, readablePaths);
@@ -3288,6 +3281,10 @@ namespace TensorSharp.AgentHost.CodeExec
                 return;
 
             string diagnosis = run.Stderr.Length > 0 ? run.Stderr : run.Stdout;
+
+            if (CodeRepairHint.NestedSandboxFailure(run, _sandbox?.Capabilities.ConfinesWrites == true)
+                is { } sandboxHint)
+                sb.Append(sandboxHint);
 
             if (CodeDiagnostics.TryFindMissingModule(diagnosis, out CodeLanguage language, out string module))
             {

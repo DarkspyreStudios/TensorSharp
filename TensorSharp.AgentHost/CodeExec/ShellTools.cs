@@ -216,7 +216,7 @@ namespace TensorSharp.AgentHost.CodeExec
             // while, visible only to a model whose user had turned networking on.
             if (!string.IsNullOrWhiteSpace(executionInstructions))
             {
-                description.Append("\nWriting a command here: ")
+                description.Append("\nExecution environment and commands: ")
                     .Append(executionInstructions.Trim()).Append('\n');
             }
 

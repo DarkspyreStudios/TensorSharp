@@ -14,7 +14,7 @@ using System.Text;
 namespace TensorSharp.AgentHost.CodeExec
 {
     /// <summary>
-    /// The six rules about editing that have to be known BEFORE the first tool call, put
+    /// The rules about editing and execution needed BEFORE the first tool call, put
     /// in the system prompt.
     ///
     /// <para>
@@ -30,12 +30,12 @@ namespace TensorSharp.AgentHost.CodeExec
     /// experiment that was skipped.
     /// </para>
     /// <para>
-    /// <b>Six lines, and no syntax teaching.</b> Everything about HOW to call a tool lives
-    /// in that tool's declaration, and everything about recovering from a failure is
-    /// attached to the failing result — which is where this codebase has its one existence
+    /// <b>Short guidance, and no syntax teaching.</b> Everything about HOW to call a tool lives
+    /// in that tool's declaration, and detailed recovery advice is attached to the
+    /// failing result — which is where this codebase has its one existence
     /// proof that guidance changes behaviour. What is left is only what must be known
-    /// before there is any result to attach anything to: which tool to reach for, and what
-    /// not to do.
+    /// before there is any result to attach anything to: which tool to reach for,
+    /// how to keep the work focused, and what not to do.
     /// </para>
     /// <para>
     /// <b>Every byte is a pure function of the options.</b> No timestamps, no paths, no
@@ -87,12 +87,21 @@ namespace TensorSharp.AgentHost.CodeExec
                     + "text into patch context and removed lines rather than recalling it.\n"
                   : "` to see its current contents.\n");
 
-            sb.Append("- After an edit or a write reports success, do not read the file back to check "
-                    + "it. The result is authoritative — if it had not applied, it would have said so.\n");
+            sb.Append("- After a successful edit, do not read the file back merely to confirm the write. "
+                    + "Run the relevant program or checks to verify behavior; inspect generated output before claiming success.\n");
 
             sb.Append("- Search with `rg` (or `grep -rn`) through the `")
               .Append(ShellTools.ShellToolName)
               .Append("`; use the shell to run programs and checks.\n");
+
+            sb.Append("- Follow the shell tool's declared working-directory and environment behavior. "
+                    + "Check prerequisites once, install missing dependencies using the "
+                    + "available package setup, and reuse successful installs.\n");
+
+            sb.Append("- Recover from errors using the reported diagnostics and documented configuration. "
+                    + "Do not repeat the same failed command without a relevant change. Keep recovery focused "
+                    + "on the user's task; inspect dependency internals only after supported setup and diagnostics "
+                    + "cannot resolve the failure.\n");
 
             // Without this line a model given file tools treats the CONVERSATION as if
             // it were a filesystem. Measured on gemma-4-E4B: asked a question about a
@@ -102,8 +111,8 @@ namespace TensorSharp.AgentHost.CodeExec
             // write it somewhere -- and never answered. The tools are not the problem
             // and neither is the model; nothing had told it that text already in front
             // of it is already read.
-            sb.Append("- Text that is already in this conversation is already available to you. "
-                    + "Never write it to a file in order to read it back, and never call `")
+            sb.Append("- Text in this conversation is already available. Never write it to a file to read it "
+                    + "back or call `")
               .Append(ShellTools.ReadToolName)
               .Append("` for something the user pasted — answer from what you were given.\n");
 

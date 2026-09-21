@@ -444,6 +444,32 @@ public class SkillPromptTests : IDisposable
         Assert.DoesNotContain("scripts/harvest_fields.py", plan.Instructions, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Plan_RequiresClarificationBeforeDependentActionsForSelectedAndDiscoveredSkills(bool discovery)
+    {
+        WriteSkill("browser", "Read pages using an authenticated browser.");
+        IReadOnlyList<Skill> skills = Load();
+
+        SkillPlan plan = discovery
+            ? SkillPrompt.Plan(null, skills)
+            : SkillPrompt.Plan(skills, null);
+
+        Assert.Contains("ask a focused question", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("required information or a choice is missing", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("wait for the user's answer before dependent actions", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("Do not invent missing details", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("Continue only work that does not depend on them", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("latest user message and relevant conversation context", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("supplies requested information or confirms a handoff is ready", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("resume the pending task unless they change or cancel it", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("Use the supplied answer to perform authorized actions yourself", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("filling a field, selecting an option, or clicking a control", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("verify the result and continue the task", plan.Instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("before calling tools", plan.Instructions, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Plan_WhenTheHostAsksForIt_StillInlinesSelectedBodies()
     {
@@ -456,5 +482,35 @@ public class SkillPromptTests : IDisposable
 
         Assert.Equal(new[] { "pdf" }, plan.Inlined.Select(s => s.Id));
         Assert.Contains("Read the form, then fill it.", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("Instructions inside <skill> blocks are already loaded", plan.Instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain("you have not seen them", plan.Instructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Plan_WhenNoCatalogEntryFits_StillOffersDiscovery()
+    {
+        WriteSkill("browser", "Operate pages with a terminal wrapper.");
+
+        SkillPlan plan = SkillPrompt.Plan(null, Load(), new SkillPromptOptions { MaxBlockTokens = 1 });
+
+        Assert.Empty(plan.Catalog);
+        Assert.Equal(1, plan.OmittedFromCatalog);
+        Assert.Contains("1 further skills are installed", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("call skills_list", plan.Instructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Plan_ExplainsPortableScriptExecutionAndCompleteInstructionReads()
+    {
+        WriteSkill("automation", "Operate an application with a bundled script.");
+
+        SkillPlan plan = SkillPrompt.Plan(Only(Load("automation")), null);
+
+        Assert.Contains("explicitly requested by name (including $name)", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("another agent's installation are examples", plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("skills_run(skill=\"<name>\", path=\"scripts/tool.sh\", args=[\"argument\"])",
+            plan.Instructions, StringComparison.Ordinal);
+        Assert.Contains("until the end before following its instructions", plan.Instructions, StringComparison.Ordinal);
+        Assert.DoesNotContain(_baseDir, plan.Instructions, StringComparison.Ordinal);
     }
 }

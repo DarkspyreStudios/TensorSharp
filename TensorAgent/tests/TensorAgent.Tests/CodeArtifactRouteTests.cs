@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Hosting;
+using TensorAgent.Core.Shell;
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime;
@@ -130,7 +131,10 @@ public sealed class CodeArtifactRouteTests : IDisposable
     public async Task ACommandThatWritesAFileHandsBackALinkThisServerAnswers()
     {
         string root = Path.Combine(_root, "app");
-        using var host = new AgentAppHost(new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache")));
+        using var host = new AgentAppHost(new AgentPaths(Path.Combine(root, "data"), Path.Combine(root, "cache"))
+        {
+            ExecutionMode = AgentExecutionMode.InProcess,
+        });
         host.Start();
         using var client = new HttpClient { BaseAddress = new Uri(host.Server.BaseUrl) };
         client.DefaultRequestHeaders.Add("Cookie", $"{LoopbackServer.TokenCookie}={host.Server.Token}");

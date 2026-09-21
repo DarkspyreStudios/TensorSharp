@@ -81,8 +81,11 @@ namespace TensorSharp.Cli
                 new OptionHelp("--skills-dir <path>",
                     "Directory to scan for Agent Skills (SKILL.md bundles). A root may hold one skill or many, " +
                     "nested up to three levels, so a checkout of a skills repository works as-is. Repeat the " +
-                    "flag for several; earlier roots win a name clash. Default: the skills/ directory next to " +
-                    "the binary, created on first run (TS_SKILLS_DIR env var overrides, path-separated).",
+                    "flag for several; earlier roots win a name clash. Default: existing .agents/skills " +
+                    "directories from the working directory up to its Git repository root (nearest first), " +
+                    "then skills/ next to the binary, created on first run. Outside a repository only the " +
+                    "working directory is considered. Explicit roots or path-separated TS_SKILLS_DIR " +
+                    "replace these defaults; personal skill directories are not loaded automatically.",
                     "--skills-dir ./skills"),
                 new OptionHelp("--skill <name>",
                     "Use this skill for the run: its instructions go into the prompt and the model is told to " +

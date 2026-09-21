@@ -269,6 +269,8 @@ public class ShellCommandTests
     [InlineData("yarn run test")]
     [InlineData("pip list")]
     [InlineData("pip --version")]
+    [InlineData("npx --version")]
+    [InlineData("npx --help")]
     [InlineData("dotnet build")]
     [InlineData("git clone https://github.com/acme/pkg")]
     // The word "install" appearing as an ARGUMENT is not an install.
@@ -276,6 +278,19 @@ public class ShellCommandTests
     public void AnOrdinaryCommand_IsNotAnInstall(string segment)
     {
         Assert.False(ShellCommand.IsInstallCommand(segment), segment);
+    }
+
+    [Theory]
+    [InlineData("npx --yes --package tool tool --help")]
+    [InlineData("npm exec -- tool")]
+    [InlineData("uvx ruff check .")]
+    public void PackageRunnersRemainInstallRequestsUnlessGeneralNetworkAccessIsEnabled(string command)
+    {
+        Assert.True(ShellCommand.ContainsInstall(command));
+        Assert.False(ShellCommand.ContainsInstall(command, includePackageRunners: false));
+        Assert.True(ShellInstall.TryRead(command, null, out var requests, out _, includePackageRunners: false));
+        Assert.Empty(requests);
+        Assert.True(ShellCommand.ContainsInstall("npm install example-package", includePackageRunners: false));
     }
 
     [Fact]

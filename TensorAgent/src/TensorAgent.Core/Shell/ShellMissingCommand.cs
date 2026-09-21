@@ -88,6 +88,8 @@ internal static class ShellMissingCommand
         ["npm"] = "npm/JavaScript packages cannot be installed on this device; use Node's built-in modules "
                 + "or write it in python3, whose pure-Python `none-any` wheels can be installed and which already "
                 + "has numpy, Pillow, lxml, python-pptx and python-docx built in",
+        ["npx"] = "this embedded JavaScript runtime is not Node.js and cannot execute npm packages or child processes; "
+                + "a skill that requires native processes must run on a desktop host",
 
         ["sudo"] = "there is nothing to escalate to; run the command by itself",
         ["su"] = "there is nothing to escalate to; run the command by itself",

@@ -373,8 +373,8 @@ namespace TensorSharp.AgentHost.Skills
                             Description =
                                 "Arguments to pass to the script, i.e. everything after the filename on the "
                                 + "command line. For \"scripts/budget.py 2400\" this is \"2400\". Either one "
-                                + "string quoted the way a shell would be, or a plain list of arguments - both "
-                                + "are accepted. Omit it only when the script genuinely takes none. No shell "
+                                + "string quoted the way a shell would be, or a JSON array of strings (also "
+                                + "accepted when encoded inside a string). Omit it only when the script takes none. No shell "
                                 + "is involved, so pipes, redirection and variable expansion do not work.",
                         },
                     },
@@ -591,9 +591,44 @@ namespace TensorSharp.AgentHost.Skills
                 && string.Equals(content.Path, SkillManifestParser.SkillFileName, StringComparison.Ordinal))
             {
                 AppendBundledFileIndex(sb, skill);
+                if (context.ScriptRunner != null)
+                    AppendHostExecutionGuidance(sb, skill);
             }
 
             return SkillToolResult.Success(sb.ToString(), skill.Id, content.Path);
+        }
+
+        /// <summary>
+        /// Place host-specific execution guidance next to the instructions it adapts.
+        /// Portable skills often show another agent's installation home; repeating that
+        /// path in a shell cannot locate the registered bundle. Keep this separate from
+        /// the verbatim file content and offer an actual registered script path.
+        /// </summary>
+        private static void AppendHostExecutionGuidance(StringBuilder sb, Skill skill)
+        {
+            SkillFile? script = skill.BundledFiles
+                .Where(file => file.Kind == SkillFileKind.Script && file.IsText)
+                .Select(file => (SkillFile?)file)
+                .FirstOrDefault();
+            if (script == null)
+                return;
+
+            sb.Append("\n\n[TensorSharp host execution guidance; not part of SKILL.md]\n")
+              .Append("This skill and its bundled scripts are available. Example installation paths and ")
+              .Append("agent-home variables in the instructions do not identify their location on this host. ")
+              .Append("Run bundled scripts through ").Append(RunToolName)
+              .Append("; it resolves the registered skill directory. Do not probe those example home paths, ")
+              .Append("copy the wrapper, or report it missing because a shell cannot find that example path.\n")
+              .Append("Example tool arguments for ").Append(RunToolName).Append(": ")
+              .Append(JsonSerializer.Serialize(new
+              {
+                  skill = skill.Id,
+                  path = script.Value.Path,
+                  args = Array.Empty<string>(),
+              }))
+              .Append("\nChoose the script documented for the task and replace args with its command arguments ")
+              .Append("only, without the interpreter or script path. Follow the skill's prerequisite checks ")
+              .Append("and workflow using the available host tools.\n");
         }
 
         /// <summary>
@@ -640,8 +675,9 @@ namespace TensorSharp.AgentHost.Skills
             string? path = ReadString(call, "path") ?? ReadString(call, "script");
             IReadOnlyList<string>? canonicalArgs =
                 ReadRunArgumentList(call, "args", context.CodeInputFiles);
-            IReadOnlyList<string>? aliasedArgs =
-                ReadRunArgumentList(call, "arguments", context.CodeInputFiles);
+            IReadOnlyList<string>? aliasedArgs = canonicalArgs is { Count: > 0 }
+                ? null
+                : ReadRunArgumentList(call, "arguments", context.CodeInputFiles);
             IReadOnlyList<string> args = canonicalArgs is { Count: > 0 }
                 ? canonicalArgs
                 : aliasedArgs is { Count: > 0 }
@@ -772,7 +808,7 @@ namespace TensorSharp.AgentHost.Skills
         }
 
         /// <summary>
-        /// Read the argument vector for <see cref="RunToolName"/>, accepting both shapes
+        /// Read the argument vector for <see cref="RunToolName"/>, accepting the shapes
         /// a model actually produces.
         ///
         /// <para>
@@ -788,8 +824,10 @@ namespace TensorSharp.AgentHost.Skills
         /// <para>
         /// An array's elements are used VERBATIM, one argument each: they have already
         /// been separated by the model, so re-splitting them on whitespace would break
-        /// any argument containing a space. Only the string form goes through
-        /// shell-style splitting.
+        /// any argument containing a space. Qwen's XML parser preserves a parameter
+        /// declared as a string even when it contains a JSON array. Decode that vector
+        /// before considering shell-style splitting; otherwise brackets and commas
+        /// become part of the command's arguments.
         /// </para>
         /// </summary>
         internal static IReadOnlyList<string>? ReadArgumentList(ToolCall call, string name)
@@ -808,7 +846,7 @@ namespace TensorSharp.AgentHost.Skills
                         JsonValueKind.Null => null,
                         _ => item.GetRawText(),
                     };
-                    if (!string.IsNullOrEmpty(text))
+                    if (text != null)
                         items.Add(text);
                 }
                 return items;
@@ -819,19 +857,47 @@ namespace TensorSharp.AgentHost.Skills
                 var items = new List<string>();
                 foreach (object? item in enumerable)
                 {
-                    string? text = item is JsonElement e
-                        ? (e.ValueKind == JsonValueKind.String ? e.GetString() : e.GetRawText())
-                        : Convert.ToString(item, CultureInfo.InvariantCulture);
-                    if (!string.IsNullOrEmpty(text))
+                    string? text = item switch
+                    {
+                        null => null,
+                        JsonElement { ValueKind: JsonValueKind.Null } => null,
+                        JsonElement { ValueKind: JsonValueKind.String } e => e.GetString(),
+                        JsonElement e => e.GetRawText(),
+                        _ => Convert.ToString(item, CultureInfo.InvariantCulture),
+                    };
+                    if (text != null)
                         items.Add(text);
                 }
                 return items;
             }
 
             string? single = ReadString(call, name);
-            return string.IsNullOrWhiteSpace(single)
-                ? Array.Empty<string>()
-                : SkillScriptRunner.SplitArguments(single);
+            if (string.IsNullOrWhiteSpace(single))
+                return Array.Empty<string>();
+
+            if (single.AsSpan().TrimStart().StartsWith("[", StringComparison.Ordinal))
+            {
+                const string guidance = "must be a valid JSON array of strings, or shell-style arguments "
+                    + "with values containing spaces quoted. To pass literal text beginning with '[', quote that argument.";
+                try
+                {
+                    using JsonDocument document = JsonDocument.Parse(single);
+                    var items = new List<string>();
+                    foreach (JsonElement item in document.RootElement.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.String)
+                            throw new FormatException($"'{name}' {guidance}");
+                        items.Add(item.GetString()!);
+                    }
+                    return items;
+                }
+                catch (JsonException)
+                {
+                    throw new FormatException($"'{name}' {guidance}");
+                }
+            }
+
+            return SkillScriptRunner.SplitArguments(single);
         }
 
         internal static long? ReadInt64(ToolCall call, string name)

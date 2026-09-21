@@ -252,6 +252,49 @@ public class ShellToolDeclarationTests : IDisposable
         Assert.DoesNotContain("ENABLED and unrestricted", restricted, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(SkillSandboxMode.Required, false, "required", "sandbox-exec")]
+    [InlineData(SkillSandboxMode.Preferred, false, "preferred", "sandbox-exec")]
+    [InlineData(SkillSandboxMode.Required, true, "preferred", "sandbox-exec")]
+    [InlineData(SkillSandboxMode.Off, false, "off", "none")]
+    public void ExecutionEnvironmentDescribesTheActualBackendAndWorkspace(
+        SkillSandboxMode mode, bool unconfined, string expectedPolicy, string expectedSandbox)
+    {
+        var options = new CodeExecOptions
+        {
+            Enabled = true,
+            Sandbox = mode,
+            Unconfined = unconfined,
+            ScratchDirectory = _base,
+        };
+        var backend = new FakeShellBackend
+        {
+            Sandbox = mode == SkillSandboxMode.Off ? null : new SeatbeltSandbox(),
+        };
+        using var runner = new ShellRunner(options, backend: backend);
+        var adapter = new CodeRunnerAdapter(runner, executionInstructions: "HOST-COMMAND-GUIDANCE");
+
+        foreach (bool persists in new[] { true, false })
+        {
+            string description = adapter.DeclareTools(persists)
+                .Single(tool => tool.Name == ShellTools.ShellToolName).Description;
+
+            Assert.Contains("Host platform: ", description, StringComparison.Ordinal);
+            Assert.Contains("Execution backend: fake", description, StringComparison.Ordinal);
+            Assert.Contains($"Sandbox policy: {expectedPolicy}; configured sandbox: {expectedSandbox}",
+                description, StringComparison.Ordinal);
+            Assert.Contains("Each tool result reports the applied sandbox", description, StringComparison.Ordinal);
+            Assert.Contains("HOME and USERPROFILE point to the tool workspace", description, StringComparison.Ordinal);
+            Assert.Contains("not imported automatically", description, StringComparison.Ordinal);
+            Assert.Contains("HOST-COMMAND-GUIDANCE", description, StringComparison.Ordinal);
+            Assert.DoesNotContain(_base, description, StringComparison.Ordinal);
+            Assert.Equal(description, adapter.DeclareTools(persists)
+                .Single(tool => tool.Name == ShellTools.ShellToolName).Description);
+        }
+
+        Assert.Empty(backend.Launches);
+    }
+
     [Fact]
     public void TheDeclaration_WhereTheOsCannotEnforceNetwork_DoesNotPromiseItIsBlocked()
     {

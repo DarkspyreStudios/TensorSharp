@@ -717,13 +717,14 @@ namespace TensorSharp.AgentHost.CodeExec
             ("npm",    new[] { "install", "i", "add", "ci", "update", "exec" }),
             ("pnpm",   new[] { "install", "i", "add", "update" }),
             ("yarn",   new[] { "install", "add", "up" }),
-            // `npx` stays ALL invocations, and the test asserting that is right: `npx
+            // Offline `npx` execution remains an install request: `npx
             // cowsay hi` fetches cowsay from the registry if it is not already in
             // node_modules, which is the whole point of npx. Deciding otherwise would need
             // to know what is in this session's node_modules, which a static parser cannot
             // see. `npx tsc` on a package that IS installed is therefore refused too — so
             // the refusal names the way to run it (ShellInstall.TryReadOne), which is the
-            // half that was missing.
+            // half that was missing. Help/version probes are pure, and the network-on
+            // path lets package runners execute with the already granted network policy.
             ("npx",    Array.Empty<string>()),
             ("poetry", new[] { "install", "add", "update", "lock" }),
             ("pipenv", new[] { "install", "sync", "update" }),
@@ -764,13 +765,21 @@ namespace TensorSharp.AgentHost.CodeExec
         }
 
         /// <summary>What one simple command is.</summary>
-        internal static bool IsInstallCommand(string segment)
+        internal static bool IsInstallCommand(string segment, bool includePackageRunners = true)
         {
             IReadOnlyList<string> words = WordsOf(segment);
             if (words.Count == 0)
                 return false;
 
             string tool = System.IO.Path.GetFileNameWithoutExtension(words[0]);
+            if (words.Count == 2 && words[1] is "--version" or "-v" or "--help" or "-h")
+                return false;
+            // Package runners are ordinary execution when the operator already permits
+            // arbitrary network access. Offline mode still routes their potential fetch
+            // through the host's refusal; a parser cannot infer their local cache state.
+            if (!includePackageRunners && (tool.Equals("npx", StringComparison.OrdinalIgnoreCase)
+                || tool.Equals("uvx", StringComparison.OrdinalIgnoreCase)))
+                return false;
 
             // `python -m pip install x`, and `python3 -m uv pip install x`. Matched
             // exactly, plus the versioned spellings — a prefix test sent every tool whose
@@ -779,7 +788,7 @@ namespace TensorSharp.AgentHost.CodeExec
             {
                 int m = words.ToList().IndexOf("-m");
                 if (m >= 0 && m + 1 < words.Count)
-                    return IsInstallCommand(string.Join(" ", words.Skip(m + 1).Select(QuotePosix)));
+                    return IsInstallCommand(string.Join(" ", words.Skip(m + 1).Select(QuotePosix)), includePackageRunners);
                 return false;
             }
 
@@ -797,6 +806,9 @@ namespace TensorSharp.AgentHost.CodeExec
                 {
                     if (word.StartsWith('-'))
                         continue;
+                    if (!includePackageRunners && tool.Equals("npm", StringComparison.OrdinalIgnoreCase)
+                        && word.Equals("exec", StringComparison.OrdinalIgnoreCase))
+                        return false;
                     return subcommands.Contains(word, StringComparer.OrdinalIgnoreCase);
                 }
                 return false;
@@ -816,8 +828,8 @@ namespace TensorSharp.AgentHost.CodeExec
         /// both cases are handled identically and the extra state was decoration.
         /// </para>
         /// </summary>
-        public static bool ContainsInstall(string? command) =>
-            SplitSimpleCommands(command).Any(IsInstallCommand);
+        public static bool ContainsInstall(string? command, bool includePackageRunners = true) =>
+            SplitSimpleCommands(command).Any(segment => IsInstallCommand(segment, includePackageRunners));
 
         // ---- apply_patch interception --------------------------------------
 

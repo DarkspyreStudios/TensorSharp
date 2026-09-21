@@ -13,6 +13,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 
 using TensorSharp.AgentHost.CodeExec;
@@ -316,7 +317,8 @@ namespace TensorSharp.AgentHost.Skills
         public string Describe() =>
             "can deny IP network access (pathname Unix sockets remain scoped to shared temporary/scratch paths " +
             "plus the exact mDNSResponder endpoint when networking is enabled), " +
-            "denies reads and file metadata of the user's home directory, and confines writes to the run's scratch directory";
+            "denies reads and file metadata of the user's home directory, and confines writes to the run's scratch " +
+            "and shared system/native temporary directories; PID-suffixed Mach IPC registration is permitted";
 
         public bool TryWrap(
             SkillSandboxRequest request,
@@ -380,6 +382,8 @@ namespace TensorSharp.AgentHost.Skills
             }
             sb.AppendLine("(allow system-socket (socket-domain AF_UNIX))");
             var socketRoots = new List<string> { "/private/tmp" };
+            if (DarwinTempDirectory is { } nativeTemp)
+                socketRoots.AddRange(Forms(nativeTemp));
             socketRoots.AddRange(Forms(request.WorkDirectory));
             foreach (string writable in request.WritablePaths ?? Array.Empty<string>())
             {
@@ -406,7 +410,20 @@ namespace TensorSharp.AgentHost.Skills
             // running a single line of the script.
             sb.AppendLine("(allow process-fork process-exec)");
             sb.AppendLine("(allow sysctl-read mach-lookup ipc-posix-shm)");
-            sb.AppendLine("(allow signal (target self))");
+            sb.AppendLine("(allow signal (target same-sandbox))");
+            sb.AppendLine("(allow process-info* (target same-sandbox))");
+            // Multiprocess native applications rendezvous over dynamically named Mach
+            // endpoints ending in a PID. Keep fixed host service names unavailable.
+            sb.AppendLine("(allow mach-register (global-name-regex #\"\\.[0-9]+$\"))");
+            // Native event loops subscribe to system sleep/wake notifications. Opening
+            // this power-management client grants neither device control nor general IOKit.
+            sb.AppendLine("(allow iokit-open (iokit-registry-entry-class \"RootDomainUserClient\"))");
+            // CoreAnimation needs an IOSurface to present a desktop window, including
+            // when a browser falls back to software rendering. Without this exact
+            // client a headed browser can create an on-screen window with zero alpha
+            // while its page automation still works. This does not open general IOKit
+            // or GPU device clients, or relax the filesystem/network policy below.
+            sb.AppendLine("(allow iokit-open (iokit-user-client-class \"IOSurfaceRootUserClient\"))");
 
             // Reads: broad, then the user's home carved out. Narrowing reads to a
             // system whitelist kills the interpreter (see the class remarks); what has
@@ -478,9 +495,18 @@ namespace TensorSharp.AgentHost.Skills
             // already (mode 1777 — every process on the host shares it), so generated
             // code can exchange data/IPC there. The user's home stays unreadable and the
             // session's own files live under the server's scratch root, never here. The
-            // per-user Darwin temp (/var/folders/.../T) is left denied; nothing needed it
-            // once /private/tmp was open.
+            // native per-user temp is handled separately below because macOS system APIs
+            // can ignore TMPDIR.
             sb.AppendLine("(allow file-read* file-write* (subpath \"/private/tmp\"))");
+            // Native macOS programs use NSTemporaryDirectory/confstr instead of TMPDIR.
+            // Admit the OS-resolved temporary directory, never all of /var/folders
+            // (which also holds caches and service state). Like /private/tmp above,
+            // this is shared temporary storage, not a per-session isolation boundary.
+            if (DarwinTempDirectory is { } darwinTemp)
+            {
+                foreach (string form in Forms(darwinTemp))
+                    sb.Append("(allow file-read* file-write* (subpath ").Append(Quote(form)).AppendLine("))");
+            }
 
             // Reassert the caller's boundary after the compatibility carve-out above.
             // This matters when a test or deployment itself lives under /private/tmp:
@@ -517,8 +543,38 @@ namespace TensorSharp.AgentHost.Skills
                   .Append(Quote(form)).AppendLine("))");
             }
 
+            // A writable directory's contents may change, but its identity must not.
+            // Otherwise a prior child can replace a granted root with a symlink and
+            // have a later launch resolve that link into a broader filesystem grant.
+            foreach (string root in writableRoots.Concat(new[] { "/private/tmp" })
+                .Concat(DarwinTempDirectory is { } temp ? Forms(temp) : Array.Empty<string>())
+                .Distinct(StringComparer.Ordinal))
+            {
+                if (!File.Exists(root))
+                    sb.Append("(deny file-write-unlink (literal ").Append(Quote(root)).AppendLine("))");
+            }
+
             return sb.ToString();
         }
+
+        internal static string? DarwinTempDirectory { get; } = ResolveDarwinTempDirectory();
+
+        private static string? ResolveDarwinTempDirectory()
+        {
+            if (!OperatingSystem.IsMacOS()) return null;
+            var buffer = new StringBuilder(4096);
+            nuint length = confstr(65537, buffer, (nuint)buffer.Capacity); // _CS_DARWIN_USER_TEMP_DIR
+            if (length == 0 || length > (nuint)buffer.Capacity) return null;
+            string path = Path.GetFullPath(buffer.ToString()).TrimEnd(Path.DirectorySeparatorChar);
+            if (path.StartsWith("/var/", StringComparison.Ordinal)) path = "/private" + path;
+            // Fail closed if an unexpected OS response would broaden the exception.
+            return (path.StartsWith("/var/folders/", StringComparison.Ordinal)
+                    || path.StartsWith("/private/var/folders/", StringComparison.Ordinal))
+                && path.EndsWith("/T", StringComparison.Ordinal) ? path : null;
+        }
+
+        [DllImport("libSystem.B.dylib", SetLastError = true)]
+        private static extern nuint confstr(int name, StringBuilder buffer, nuint length);
 
         /// <summary>
         /// Every spelling of <paramref name="path"/> a <c>subpath</c> rule might need to

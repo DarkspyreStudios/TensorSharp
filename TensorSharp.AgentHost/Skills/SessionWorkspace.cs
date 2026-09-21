@@ -258,6 +258,7 @@ namespace TensorSharp.AgentHost.Skills
         /// </remarks>
         public bool EnsureDirectories()
         {
+            EnsureRealDirectory(Root);
             bool rebuilt = false;
             rebuilt |= CreateIfMissing(WorkDirectory);
             rebuilt |= CreateIfMissing(EnvDirectory);
@@ -272,11 +273,18 @@ namespace TensorSharp.AgentHost.Skills
 
             static bool CreateIfMissing(string path)
             {
+                EnsureRealDirectory(path);
                 if (Directory.Exists(path))
                     return false;
                 Directory.CreateDirectory(path);
                 return true;
             }
+        }
+
+        private static void EnsureRealDirectory(string path)
+        {
+            if (new DirectoryInfo(path).LinkTarget != null)
+                throw new IOException("The session directory was replaced by a symbolic link: " + path);
         }
 
         /// <summary>
@@ -389,6 +397,50 @@ namespace TensorSharp.AgentHost.Skills
         /// </para>
         /// </summary>
         public string TempDirectory { get; }
+
+        private string? _runtimeTempDirectory;
+
+        /// <summary>
+        /// A short spelling of the temporary directory for runtimes which create Unix
+        /// sockets. Unix socket addresses have a roughly 100-byte limit, independent
+        /// of the filesystem's path limit. Long deployment/session paths must not
+        /// prevent an otherwise valid local IPC endpoint from being created.
+        /// </summary>
+        public string RuntimeTempDirectory
+        {
+            get
+            {
+                EnsureRealDirectory(Root);
+                EnsureRealDirectory(TempDirectory);
+                if (!OperatingSystem.IsMacOS() || Encoding.UTF8.GetByteCount(TempDirectory) <= 48)
+                    return TempDirectory;
+                lock (_gate)
+                {
+                    if (_runtimeTempDirectory != null
+                        && string.Equals(new DirectoryInfo(_runtimeTempDirectory).LinkTarget, TempDirectory, StringComparison.Ordinal))
+                        return _runtimeTempDirectory;
+                    // Shared /tmp lets an earlier command replace the alias. Recreate a
+                    // fresh spelling if that happened, and never derive sandbox grants
+                    // from this model-mutable symlink; only TempDirectory is trusted.
+                    string alias = Path.Combine("/tmp", "tsh-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateSymbolicLink(alias, TempDirectory);
+                    _runtimeTempDirectory = alias;
+                    RegisterCleanup(new TemporaryAlias(alias));
+                    return alias;
+                }
+            }
+        }
+
+        private sealed class TemporaryAlias(string path) : IDisposable
+        {
+            public void Dispose()
+            {
+                // Delete only the link, never recursively traverse model-owned scratch.
+                try { Directory.Delete(path); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
 
         /// <summary>
         /// Keep this workspace alive while one host tool is using it.

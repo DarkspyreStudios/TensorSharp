@@ -253,7 +253,7 @@ public sealed class FakeShellBackendTests : IDisposable
         Assert.False(launch.AllowNetwork);
         Assert.Equal(TimeSpan.FromSeconds(30), launch.Timeout);
         Assert.Equal(workspace.WorkDirectory, launch.Environment["HOME"]);
-        Assert.Equal(workspace.TempDirectory, launch.Environment["TMPDIR"]);
+        Assert.Equal(workspace.RuntimeTempDirectory, launch.Environment["TMPDIR"]);
         Assert.Equal(workspace.EnvDirectory, launch.Environment["PYTHONPATH"]);
         Assert.True(launch.Environment.ContainsKey("PATH"));
 
@@ -395,6 +395,29 @@ public sealed class FakeShellBackendTests : IDisposable
         ShellLaunch launch = Assert.Single(backend.Launches);
         Assert.Equal(System.Threading.Timeout.InfiniteTimeSpan, launch.Timeout);
         Assert.True(File.Exists(Path.Combine(workspace.StateDirectory, ".jobs", "job-1.log")));
+    }
+
+    [Theory]
+    [InlineData(false, true, false, false)]
+    [InlineData(true, false, false, false)]
+    [InlineData(true, true, true, false)]
+    [InlineData(true, true, false, true)]
+    public void PackageRunnersRequireNetworkInstallAndUnrestrictedPackages(
+        bool network, bool install, bool restricted, bool expectedLaunch)
+    {
+        foreach (string command in new[] { "npx --yes @scope/tool --version", "npm exec -- @scope/tool" })
+        {
+            var backend = Backend();
+            using var runner = Runner(backend, o =>
+            {
+                o.AllowNetwork = network;
+                o.AllowInstall = install;
+                o.AllowedPackages = restricted ? new[] { "other" } : Array.Empty<string>();
+            });
+            var result = runner.Run(new ShellRequest(command), Workspace());
+            Assert.Equal(expectedLaunch, result.Ok);
+            Assert.Equal(expectedLaunch ? 1 : 0, backend.Launches.Count);
+        }
     }
 
     // ---- installs are the host's, and go to whatever installer it was given ------
@@ -670,11 +693,10 @@ public sealed class SkillScriptRunnerBackendTests : IDisposable
         Assert.Equal(TimeSpan.FromSeconds(60), launch.Timeout);
 
         // Windows keeps interpreter caches beneath the session's hidden home;
-        // POSIX redirects both variables to the writable working directory.
+        // Session scripts share the shell runtime temp directory for local IPC.
         string expectedHome = OperatingSystem.IsWindows()
             ? Path.Combine(workspace.WorkDirectory, ".home") : workspace.WorkDirectory;
-        string expectedTemp = OperatingSystem.IsWindows()
-            ? Path.Combine(expectedHome, "Temp") : workspace.WorkDirectory;
+        string expectedTemp = workspace.RuntimeTempDirectory;
         Assert.Equal(expectedHome, launch.Environment["HOME"]);
         Assert.Equal(expectedTemp, launch.Environment["TMPDIR"]);
         Assert.Equal(workspace.WorkDirectory, launch.Environment["PWD"]);

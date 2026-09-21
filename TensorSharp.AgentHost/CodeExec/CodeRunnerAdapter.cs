@@ -156,7 +156,7 @@ namespace TensorSharp.AgentHost.CodeExec
                         networkExecutionInstructions: NetworkExecutionInstructions(),
                         networkHosts: _networkHosts?.Invoke(),
                         providedPackagesInstructions: _providedPackagesInstructions,
-                        executionInstructions: _executionInstructions),
+                        executionInstructions: ExecutionInstructions()),
                 };
             }
 
@@ -174,9 +174,31 @@ namespace TensorSharp.AgentHost.CodeExec
                     packageInstallInstructions: PackageInstallInstructions(),
                     networkExecutionInstructions: NetworkExecutionInstructions(),
                     networkHosts: _networkHosts?.Invoke(),
-                        providedPackagesInstructions: _providedPackagesInstructions,
-                        executionInstructions: _executionInstructions),
+                    providedPackagesInstructions: _providedPackagesInstructions,
+                    executionInstructions: ExecutionInstructions()),
             };
+        }
+
+        private string ExecutionInstructions()
+        {
+            // Facts that are stable across sessions, without machine paths or ids in
+            // the prompt prefix. The selected sandbox is not a promise that a
+            // preferred-mode launch cannot fall back; results report what ran.
+            string platform = OperatingSystem.IsMacOS() ? "macOS (Darwin)"
+                : OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst() ? "iOS"
+                : OperatingSystem.IsAndroid() ? "Android"
+                : OperatingSystem.IsLinux() ? "Linux"
+                : OperatingSystem.IsWindows() ? "Windows" : "other";
+            SkillSandboxMode policy = _runner.Options.Unconfined
+                ? SkillSandboxMode.Preferred : _runner.Options.Sandbox;
+            string environment = $"Host platform: {platform}. Execution backend: {_runner.Backend.Name}. "
+                + $"Sandbox policy: {policy.ToString().ToLowerInvariant()}; "
+                + $"configured sandbox: {_runner.Sandbox?.Name ?? "none"}. "
+                + "Each tool result reports the applied sandbox. "
+                + "HOME and USERPROFILE point to the tool workspace. Desktop browser profiles, login cookies "
+                + "and saved credentials are not imported automatically; verify authentication in the connected session.";
+            return string.IsNullOrWhiteSpace(_executionInstructions)
+                ? environment : environment + "\n" + _executionInstructions.Trim();
         }
 
         /// <inheritdoc/>

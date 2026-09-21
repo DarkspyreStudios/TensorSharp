@@ -36,7 +36,10 @@ public sealed class AgentAppHostTests : IDisposable
     private AgentAppHost? _host;
     private HttpClient? _client;
 
-    private AgentPaths Paths => new(Path.Combine(_root, "data"), Path.Combine(_root, "cache"));
+    private AgentPaths Paths => new(Path.Combine(_root, "data"), Path.Combine(_root, "cache"))
+    {
+        ExecutionMode = AgentExecutionMode.InProcess,
+    };
 
     private AgentAppHost Start(Action<SettingsStore>? configure = null)
     {
