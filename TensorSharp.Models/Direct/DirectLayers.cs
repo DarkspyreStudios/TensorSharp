@@ -434,7 +434,8 @@ namespace TensorSharp.Models.Direct
             using var normalizedRows = DirectOps.LayerNorm(ctx, groupedRows, null, null, epsilon);
             using var normalizedGroups = normalizedRows.View(batch, groups, height, width, channelsPerGroup);
             using var outputPermutation = normalizedGroups.Permute(0, 2, 3, 1, 4);
-            Tensor output = Ops.NewContiguous(outputPermutation);
+            using var outputGroups = Ops.NewContiguous(outputPermutation);
+            Tensor output = outputGroups.View(batch, height, width, channels);
             try
             {
                 using var outputRows = output.View(batch * height * width, channels);

@@ -88,6 +88,7 @@ public sealed class DirectPublicLayersTests
             bias,
             epsilon: 1e-12f);
 
+        Assert.Equal([1, 1, 1, 4], output.Sizes.ToArray());
         AssertClose([-1f, 3f, -2f, 2.5f], DirectOps.ToArray(output));
     }
 
