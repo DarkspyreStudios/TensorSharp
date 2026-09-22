@@ -9,10 +9,12 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="InferenceWeb.Tests" />
+    <InternalsVisibleTo Include="TensorSharp.Chat" />
     <!-- benchmarks/RadixTreeBench drives the internal PrefixTree directly (DESIGN §13.2). -->
     <InternalsVisibleTo Include="RadixTreeBench" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Darkspyre.Persistence" Version="1.0.0" />
     <PackageReference Include="StackExchange.Redis" Version="2.8.31" />
   </ItemGroup>
 </Project>

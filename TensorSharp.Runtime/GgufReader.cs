@@ -14,6 +14,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace TensorSharp.Runtime
@@ -82,6 +83,7 @@ namespace TensorSharp.Runtime
         private bool _mappedPointerAcquired;
         private unsafe byte* _lockedBase;
         private ulong _lockedLength;
+        private PersistenceFileLease? _persistenceLease;
 
         /// <summary>
         /// Sibling shards of a split GGUF (<c>NAME-00001-of-000NN.gguf</c>), in split
@@ -96,7 +98,30 @@ namespace TensorSharp.Runtime
         /// </summary>
         private readonly Dictionary<string, GgufFile> _tensorOwner = new(StringComparer.Ordinal);
 
-        public GgufFile(string path) : this(path, isShard: false) { }
+        public GgufFile(string path) : this(path, isShard: false, persistenceLease: null) { }
+
+        /// <summary>
+        /// Opens a GGUF artifact from an application persistence store. A file-backed
+        /// store is memory-mapped in place; another store is projected to a temporary
+        /// file owned by the returned reader.
+        /// </summary>
+        public static async Task<GgufFile> OpenAsync(
+            PersistenceFileReference source,
+            CancellationToken cancellationToken = default)
+        {
+            PersistenceFileLease lease = await PersistenceFileLease.AcquireAsync(
+                source,
+                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return new GgufFile(lease.FilePath, isShard: false, lease);
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
+        }
 
         /// <summary>
         /// Opens one GGUF and reads THIS file only, leaving its sibling shards
@@ -110,11 +135,13 @@ namespace TensorSharp.Runtime
         /// checkpoint measured ~240 ms and ~215 MB of allocation for nothing, and
         /// left every tensor attributed to the last shard opened.</para>
         /// </summary>
-        public static GgufFile OpenWithoutSiblingShards(string path) => new GgufFile(path, isShard: true);
+        public static GgufFile OpenWithoutSiblingShards(string path) =>
+            new GgufFile(path, isShard: true, persistenceLease: null);
 
-        private GgufFile(string path, bool isShard)
+        private GgufFile(string path, bool isShard, PersistenceFileLease? persistenceLease)
         {
             _path = path;
+            _persistenceLease = persistenceLease;
             _stream = File.OpenRead(path);
             try
             {
@@ -192,7 +219,7 @@ namespace TensorSharp.Runtime
                         $"{_path} is shard {selfNo} of {splitCount}, but {Path.GetFileName(shardPath)} is missing. " +
                         "Every shard of a split GGUF must sit in the same directory.", shardPath);
 
-                var shard = new GgufFile(shardPath, isShard: true);
+                var shard = new GgufFile(shardPath, isShard: true, persistenceLease: null);
                 _shards.Add(shard);
                 foreach (var kv in shard.Tensors)
                 {
@@ -987,6 +1014,8 @@ namespace TensorSharp.Runtime
             _mappedFile = null;
             _stream?.Dispose();
             _stream = null!;
+            _persistenceLease?.Dispose();
+            _persistenceLease = null;
         }
 
         private unsafe void EnsureMappedView()
