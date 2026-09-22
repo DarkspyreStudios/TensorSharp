@@ -10,8 +10,14 @@ var model = new PersistenceFileReference(store, "models", "qwen/model.gguf");
 await modelService.LoadModelAsync(model, mmProj: null, "ggml_metal", cancellationToken);
 ```
 
-`GgufFile.OpenAsync` and `SafetensorsFile.OpenAsync` expose the same source boundary for lower-level
-readers.
+`GgufFile.OpenAsync`, `SafetensorsFile.OpenAsync`, and `TorchStateDictionaryFile.OpenAsync` expose
+the same source boundary for lower-level readers.
+
+`TorchStateDictionaryFile` supports the narrow PyTorch ZIP state-dictionary shape needed by model
+publishers that do not provide GGUF or safetensors weights. It is intentionally not a general pickle
+runtime: metadata is interpreted without Python, and unknown opcodes, globals, reducers, devices,
+storage types, and non-contiguous tensor views are rejected. The accepted surface is dense CPU F32,
+BF16, and I64 tensors rebuilt through `torch._utils._rebuild_tensor_v2`.
 
 ## Lifetime and projection
 
@@ -33,5 +39,5 @@ sibling files discovered implicitly by split-GGUF naming, a safetensors index, e
 draft heads, or other path-discovered sidecars. File-backed stores continue to support those existing
 path discovery behaviors when the related files share the same physical directory.
 
-Callers must dispose `GgufFile`, `SafetensorsFile`, or `ModelService`; disposal is the ownership
-boundary that releases retained streams and temporary projections.
+Callers must dispose `GgufFile`, `SafetensorsFile`, `TorchStateDictionaryFile`, or `ModelService`;
+disposal is the ownership boundary that releases retained streams and temporary projections.
