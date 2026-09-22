@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
-    <TensorSharpVersion>2.8.6</TensorSharpVersion>
-    <TensorSharpPackageTags>tensorsharp;tensor;llm;gguf;inference</TensorSharpPackageTags>
+    <TensorSharpVersion>2.8.6-darkspyre.1</TensorSharpVersion>
+    <TensorSharpPackageTags>darkspyre;tensorsharp;tensor;llm;gguf;inference</TensorSharpPackageTags>
 
     <TensorSharpHostObjFolder Condition="$([MSBuild]::IsOSPlatform('Windows'))">obj/windows/</TensorSharpHostObjFolder>
     <TensorSharpHostObjFolder Condition="$([MSBuild]::IsOSPlatform('Linux'))">obj/linux/</TensorSharpHostObjFolder>
@@ -15,13 +15,13 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 
-    <Authors>Zhongkai Fu</Authors>
-    <PackageId Condition="'$(PackageId)' == ''">$(MSBuildProjectName)</PackageId>
+    <Authors>Darkspyre Studios; Zhongkai Fu</Authors>
+    <PackageId Condition="'$(PackageId)' == ''">Darkspyre.$(MSBuildProjectName)</PackageId>
     <Version Condition="'$(Version)' == ''">$(TensorSharpVersion)</Version>
     <PackageVersion Condition="'$(PackageVersion)' == ''">$(Version)</PackageVersion>
-    <RepositoryUrl>https://github.com/zhongkaifu/TensorSharp</RepositoryUrl>
+    <RepositoryUrl>https://github.com/DarkspyreStudios/TensorSharp</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
-    <PackageProjectUrl>https://github.com/zhongkaifu/TensorSharp</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/DarkspyreStudios/TensorSharp</PackageProjectUrl>
     <PackageLicenseExpression>BSD-3-Clause</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PackageReadmeFile>README.md</PackageReadmeFile>
