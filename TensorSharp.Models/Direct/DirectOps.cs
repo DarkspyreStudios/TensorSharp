@@ -29,8 +29,13 @@ using TensorSharp.Runtime;
 
 namespace TensorSharp.Models.Direct
 {
-    /// <summary>Shared allocator context for the direct model implementations.</summary>
-    internal sealed class DirectContext : IDisposable
+    /// <summary>
+    /// Shared allocator context for direct model implementations. This is the
+    /// public entry point for model graphs that need to run the same F32 tensor
+    /// code on the managed CPU and CUDA backends without depending on a framework
+    /// runtime.
+    /// </summary>
+    public sealed class DirectContext : IDisposable
     {
         public IAllocator Allocator { get; }
         public bool IsCuda { get; }
@@ -93,7 +98,7 @@ namespace TensorSharp.Models.Direct
     /// by the stable host pointer); on CPU it is dequantized once into an F32
     /// tensor whose transposed view feeds the BLAS matmul.
     /// </summary>
-    internal sealed class DirectLinear : IDisposable
+    public sealed class DirectLinear : IDisposable
     {
         private readonly DirectContext _ctx;
         private readonly IntPtr _host;        // stable host bytes (GGUF mmap or owned dequant/copy)
@@ -207,6 +212,38 @@ namespace TensorSharp.Models.Direct
             return lin;
         }
 
+        /// <summary>
+        /// Load a row-major <c>[out, in]</c> weight and optional <c>[out]</c>
+        /// bias from a GGUF or safetensors-backed float tensor store.
+        /// </summary>
+        public static DirectLinear FromTensorStore(
+            DirectContext ctx,
+            IFloatTensorStore store,
+            string weightName,
+            string biasName = null)
+        {
+            ArgumentNullException.ThrowIfNull(ctx);
+            ArgumentNullException.ThrowIfNull(store);
+            ArgumentException.ThrowIfNullOrEmpty(weightName);
+
+            long[] shape = store.TensorShape(weightName);
+            if (shape.Length != 2 || shape[0] <= 0 || shape[1] <= 0)
+                throw new InvalidOperationException(
+                    $"Direct linear weight '{weightName}' must have shape [out, in].");
+
+            float[] bias = null;
+            if (biasName != null && store.HasTensor(biasName))
+            {
+                long[] biasShape = store.TensorShape(biasName);
+                if (biasShape.Length != 1 || biasShape[0] != shape[0])
+                    throw new InvalidOperationException(
+                        $"Direct linear bias '{biasName}' must have shape [{shape[0]}].");
+                bias = store.ReadFloat32(biasName);
+            }
+
+            return FromFloats(ctx, store.ReadFloat32(weightName), shape[1], shape[0], bias);
+        }
+
         internal void SetCpuWeight(float[] w, long ne0, long ne1)
         {
             _wCpu = _ctx.Own(_ctx.FromFloats(w, ne1, ne0));
@@ -267,7 +304,7 @@ namespace TensorSharp.Models.Direct
     }
 
     /// <summary>Backend-dispatched primitives shared by the direct networks.</summary>
-    internal static class DirectOps
+    public static class DirectOps
     {
         /// <summary>
         /// Row-parallel loop on the persistent CPU pool rather than the ThreadPool.
