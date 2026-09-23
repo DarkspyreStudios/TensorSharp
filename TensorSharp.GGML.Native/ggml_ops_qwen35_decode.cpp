@@ -146,7 +146,7 @@ namespace
         ggml_tensor* normed_2d = ggml_reshape_2d(ctx, normed, hidden_size, 1);
         ggml_tensor* qkv_flat  = ggml_reshape_1d(
             ctx,
-            ggml_mul_mat(ctx, qkv_w, normed_2d),
+            tsg::bonsai_mul_mat(ctx, qkv_w, normed_2d, qkv_data),
             qFullDim + 2 * kDim);
 
         // 3. Slice fused QKV into Q+gate, K, V
@@ -235,7 +235,7 @@ namespace
 
         // 9. Output projection + residual: residual += matmul(attn_gated_flat, o_w)
         ggml_tensor* attn_flat = ggml_reshape_2d(ctx, attn_gated, qDim, 1);
-        ggml_tensor* o_flat    = ggml_reshape_1d(ctx, ggml_mul_mat(ctx, o_w, attn_flat), hidden_size);
+        ggml_tensor* o_flat    = ggml_reshape_1d(ctx, tsg::bonsai_mul_mat(ctx, o_w, attn_flat, o_data), hidden_size);
         ggml_tensor* result    = ggml_add(ctx, residual_in, o_flat);
 
         ggml_tensor* out_residual = ggml_cpy(ctx, result, residual_out);
@@ -1199,8 +1199,9 @@ namespace
         std::vector<tsg::HostMoeSegment> host_moe;
 
         // --- build the chained graph ---
+        tsg::BonsaiGraphScope bonsai_scope;
         ggml_tensor* hidden = token_input
-            ? ggml_reshape_1d(ctx, ggml_get_rows(ctx, token_embd_t, token_t), H)
+            ? ggml_reshape_1d(ctx, tsg::bonsai_get_rows(ctx, token_embd_t, token_t, token_embd_data), H)
             : hidden_t;
         for (int l = 0; l < num_layers; l++)
         {
@@ -1219,13 +1220,13 @@ namespace
                 ggml_tensor* v_raw;
                 if (d.separate_qkv != 0)
                 {
-                    qg_part = ggml_reshape_1d(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.qkv_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_QKV)), qFullDim);
-                    k_raw = ggml_reshape_1d(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.k_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_K)), kDim);
-                    v_raw = ggml_reshape_1d(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.v_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_V)), kDim);
+                    qg_part = ggml_reshape_1d(ctx, q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.qkv_w, normed_2d, d.qkv_w), q35_psc(ctx, t, d, TSQ35_SC_QKV)), qFullDim);
+                    k_raw = ggml_reshape_1d(ctx, q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.k_w, normed_2d, d.k_w), q35_psc(ctx, t, d, TSQ35_SC_K)), kDim);
+                    v_raw = ggml_reshape_1d(ctx, q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.v_w, normed_2d, d.v_w), q35_psc(ctx, t, d, TSQ35_SC_V)), kDim);
                 }
                 else
                 {
-                    ggml_tensor* qkv_flat = ggml_reshape_1d(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.qkv_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_QKV)), qFullDim + 2 * kDim);
+                    ggml_tensor* qkv_flat = ggml_reshape_1d(ctx, q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.qkv_w, normed_2d, d.qkv_w), q35_psc(ctx, t, d, TSQ35_SC_QKV)), qFullDim + 2 * kDim);
                     qg_part = ggml_view_1d(ctx, qkv_flat, qFullDim, 0);
                     k_raw = ggml_view_1d(ctx, qkv_flat, kDim, static_cast<std::size_t>(qFullDim) * sizeof(float));
                     v_raw = ggml_view_1d(ctx, qkv_flat, kDim, static_cast<std::size_t>(qFullDim + kDim) * sizeof(float));
@@ -1389,7 +1390,7 @@ namespace
                     g_backend_type == BACKEND_TYPE_METAL ? gate_view : ggml_cont(ctx, gate_view);
                 ggml_tensor* attn_gated = ggml_mul(ctx, attn_out_2d, ggml_sigmoid(ctx, gate_input));
                 ggml_tensor* attn_flat = ggml_reshape_2d(ctx, attn_gated, qDim, 1);
-                ggml_tensor* o_mm = q35_scaled(ctx, ggml_mul_mat(ctx, t.o_w, attn_flat), q35_psc(ctx, t, d, TSQ35_SC_O));
+                ggml_tensor* o_mm = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.o_w, attn_flat, d.o_w), q35_psc(ctx, t, d, TSQ35_SC_O));
                 block_out = ggml_reshape_1d(ctx, o_mm, H);
                 if (tp_mode) { tp_partial.push_back(o_mm); tp_boundary.push_back(block_out); }
             }
@@ -1404,7 +1405,7 @@ namespace
                 {
                     // Packed in-projection: one matmul, sliced [Q|K|V | Z | beta | alpha].
                     const std::int64_t packed_dim = d.gdn_qkv_ne1;
-                    ggml_tensor* packed = ggml_mul_mat(ctx, t.gdn_qkv_w, normed_2d);          // [packed_dim, 1]
+                    ggml_tensor* packed = tsg::bonsai_mul_mat(ctx, t.gdn_qkv_w, normed_2d, d.gdn_qkv_w);          // [packed_dim, 1]
                     ggml_tensor* packed_flat = ggml_reshape_1d(ctx, packed, packed_dim);
                     qkv_mixed = ggml_reshape_2d(ctx,
                         ggml_view_1d(ctx, packed_flat, conv_dim, 0), conv_dim, 1);
@@ -1420,10 +1421,10 @@ namespace
                 }
                 else
                 {
-                    qkv_mixed = q35_scaled(ctx, ggml_mul_mat(ctx, t.gdn_qkv_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_GDN_QKV));          // [conv_dim, 1]
-                    z = q35_scaled(ctx, ggml_mul_mat(ctx, t.gdn_gate_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_GDN_GATE));                 // [value_dim, 1]
-                    beta_raw = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_beta_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_BETA));          // [num_v_heads, 1]
-                    alpha_raw = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_alpha_w, normed_2d), q35_psc(ctx, t, d, TSQ35_SC_ALPHA));        // [num_v_heads, 1]
+                    qkv_mixed = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.gdn_qkv_w, normed_2d, d.gdn_qkv_w), q35_psc(ctx, t, d, TSQ35_SC_GDN_QKV));          // [conv_dim, 1]
+                    z = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.gdn_gate_w, normed_2d, d.gdn_gate_w), q35_psc(ctx, t, d, TSQ35_SC_GDN_GATE));                 // [value_dim, 1]
+                    beta_raw = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ssm_beta_w, normed_2d, d.ssm_beta_w), q35_psc(ctx, t, d, TSQ35_SC_BETA));          // [num_v_heads, 1]
+                    alpha_raw = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ssm_alpha_w, normed_2d, d.ssm_alpha_w), q35_psc(ctx, t, d, TSQ35_SC_ALPHA));        // [num_v_heads, 1]
                 }
 
                 ggml_tensor* beta = ggml_sigmoid(ctx, beta_raw);
@@ -1525,7 +1526,7 @@ namespace
                 ggml_tensor* z_2d = ggml_reshape_2d(ctx, z, head_v_dim, num_v_heads);
                 ggml_tensor* gated = ggml_mul(ctx, out_n, ggml_silu(ctx, z_2d));
                 ggml_tensor* gated_flat = ggml_reshape_2d(ctx, gated, value_dim, 1);
-                ggml_tensor* ssm_mm = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_out_w, gated_flat), q35_psc(ctx, t, d, TSQ35_SC_SSM_OUT));
+                ggml_tensor* ssm_mm = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ssm_out_w, gated_flat, d.ssm_out_w), q35_psc(ctx, t, d, TSQ35_SC_SSM_OUT));
                 block_out = ggml_reshape_1d(ctx, ssm_mm, H);
                 if (tp_mode) { tp_partial.push_back(ssm_mm); tp_boundary.push_back(block_out); }
             }
@@ -1543,16 +1544,16 @@ namespace
                 ggml_tensor* act_2d;
                 if (t.gu_w != nullptr)
                 {
-                    act_2d = ggml_swiglu(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.gu_w, ffn_normed_2d), q35_psc(ctx, t, d, TSQ35_SC_GU)));
+                    act_2d = ggml_swiglu(ctx, q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.gu_w, ffn_normed_2d, d.gu_w), q35_psc(ctx, t, d, TSQ35_SC_GU)));
                 }
                 else
                 {
                     // Unfused mixed-quant gate/up: two matmuls, same arithmetic.
-                    ggml_tensor* g = q35_scaled(ctx, ggml_mul_mat(ctx, t.ffn_gate_w, ffn_normed_2d), q35_psc(ctx, t, d, TSQ35_SC_FFN_GATE));
-                    ggml_tensor* u = q35_scaled(ctx, ggml_mul_mat(ctx, t.ffn_up_w, ffn_normed_2d), q35_psc(ctx, t, d, TSQ35_SC_FFN_UP));
+                    ggml_tensor* g = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ffn_gate_w, ffn_normed_2d, d.ffn_gate_w), q35_psc(ctx, t, d, TSQ35_SC_FFN_GATE));
+                    ggml_tensor* u = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ffn_up_w, ffn_normed_2d, d.ffn_up_w), q35_psc(ctx, t, d, TSQ35_SC_FFN_UP));
                     act_2d = ggml_mul(ctx, ggml_silu(ctx, g), u);
                 }
-                ggml_tensor* down_mm = q35_scaled(ctx, ggml_mul_mat(ctx, t.down_w, act_2d), q35_psc(ctx, t, d, TSQ35_SC_DOWN));
+                ggml_tensor* down_mm = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.down_w, act_2d, d.down_w), q35_psc(ctx, t, d, TSQ35_SC_DOWN));
                 ffn_down = ggml_reshape_1d(ctx, down_mm, H);
                 if (tp_mode) { tp_partial.push_back(down_mm); tp_boundary.push_back(ffn_down); }
             }
@@ -1714,7 +1715,7 @@ namespace
             // llama.cpp and avoiding an extra full-vocabulary device copy.
             ggml_tensor* fn = ggml_mul(ctx, ggml_rms_norm(ctx, hidden, eps), final_norm_t);
             ggml_tensor* fn_2d = ggml_reshape_2d(ctx, fn, H, 1);
-            hidden_out = ggml_reshape_1d(ctx, ggml_mul_mat(ctx, lm_head_t, fn_2d), vocab_size);
+            hidden_out = ggml_reshape_1d(ctx, tsg::bonsai_mul_mat(ctx, lm_head_t, fn_2d, lm_head_data), vocab_size);
             graph_out = hidden_out;
         }
         else
@@ -1976,7 +1977,7 @@ namespace
         // is a node index. Covers the explicit reorder below and the one inside
         // alloc_graph_reuse_gallocr.
         SuppressGraphReorder keep_order(tp_mode || !host_moe.empty());
-        optimize_graph_for_metal(graph);
+        optimize_graph_for_metal(ctx, graph);
 
         BufferHandle buffer(nullptr);
         ggml_backend_buffer_t persist_buf = nullptr;
@@ -2686,6 +2687,7 @@ namespace
 
         // --- build the chained graph ---
         std::vector<ggml_tensor*> gdn_state_writes; // in-place conv/delta state writes (graph outputs)
+        tsg::BonsaiGraphScope bonsai_scope;
         ggml_tensor* hidden = hidden_t;   // [H, T]
         for (int l = 0; l < num_layers; l++)
         {
@@ -2701,13 +2703,13 @@ namespace
                 ggml_tensor* qg_part; ggml_tensor* k_raw; ggml_tensor* v_raw;
                 if (d.separate_qkv != 0)
                 {
-                    qg_part = q35_scaled(ctx, ggml_mul_mat(ctx, t.qkv_w, normed), q35_psc(ctx, t, d, TSQ35_SC_QKV));   // [qFullDim, T]
-                    k_raw = q35_scaled(ctx, ggml_mul_mat(ctx, t.k_w, normed), q35_psc(ctx, t, d, TSQ35_SC_K));       // [kDim, T]
-                    v_raw = q35_scaled(ctx, ggml_mul_mat(ctx, t.v_w, normed), q35_psc(ctx, t, d, TSQ35_SC_V));       // [kDim, T]
+                    qg_part = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.qkv_w, normed, d.qkv_w), q35_psc(ctx, t, d, TSQ35_SC_QKV));   // [qFullDim, T]
+                    k_raw = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.k_w, normed, d.k_w), q35_psc(ctx, t, d, TSQ35_SC_K));       // [kDim, T]
+                    v_raw = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.v_w, normed, d.v_w), q35_psc(ctx, t, d, TSQ35_SC_V));       // [kDim, T]
                 }
                 else
                 {
-                    ggml_tensor* qkv = q35_scaled(ctx, ggml_mul_mat(ctx, t.qkv_w, normed), q35_psc(ctx, t, d, TSQ35_SC_QKV)); // [qFullDim+2kDim, T]
+                    ggml_tensor* qkv = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.qkv_w, normed, d.qkv_w), q35_psc(ctx, t, d, TSQ35_SC_QKV)); // [qFullDim+2kDim, T]
                     qg_part = ggml_cont(ctx, ggml_view_2d(ctx, qkv, qFullDim, T, qkv->nb[1], 0));
                     k_raw = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kDim, T, qkv->nb[1], static_cast<std::size_t>(qFullDim) * sizeof(float)));
                     v_raw = ggml_cont(ctx, ggml_view_2d(ctx, qkv, kDim, T, qkv->nb[1], static_cast<std::size_t>(qFullDim + kDim) * sizeof(float)));
@@ -2765,15 +2767,15 @@ namespace
                 // Sigmoid-gated output: attn * sigmoid(gate).
                 ggml_tensor* gate_flat = ggml_reshape_2d(ctx, gate_hd, qDim, T);
                 ggml_tensor* attn_gated = ggml_mul(ctx, attn_cat, ggml_sigmoid(ctx, gate_flat));
-                block_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.o_w, attn_gated), q35_psc(ctx, t, d, TSQ35_SC_O)); // [H, T]
+                block_out = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.o_w, attn_gated, d.o_w), q35_psc(ctx, t, d, TSQ35_SC_O)); // [H, T]
             }
             else
             {
                 // ===== Gated Delta Net (batched proj + per-seq recurrence) =====
-                ggml_tensor* qkv_mixed = q35_scaled(ctx, ggml_mul_mat(ctx, t.gdn_qkv_w, normed), q35_psc(ctx, t, d, TSQ35_SC_GDN_QKV));   // [conv_dim, T]
-                ggml_tensor* z_all = q35_scaled(ctx, ggml_mul_mat(ctx, t.gdn_gate_w, normed), q35_psc(ctx, t, d, TSQ35_SC_GDN_GATE));      // [value_dim, T]
-                ggml_tensor* beta_all = ggml_sigmoid(ctx, q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_beta_w, normed), q35_psc(ctx, t, d, TSQ35_SC_BETA)));   // [num_v_heads, T]
-                ggml_tensor* alpha_all = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_alpha_w, normed), q35_psc(ctx, t, d, TSQ35_SC_ALPHA)); // [num_v_heads, T]
+                ggml_tensor* qkv_mixed = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.gdn_qkv_w, normed, d.gdn_qkv_w), q35_psc(ctx, t, d, TSQ35_SC_GDN_QKV));   // [conv_dim, T]
+                ggml_tensor* z_all = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.gdn_gate_w, normed, d.gdn_gate_w), q35_psc(ctx, t, d, TSQ35_SC_GDN_GATE));      // [value_dim, T]
+                ggml_tensor* beta_all = ggml_sigmoid(ctx, q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ssm_beta_w, normed, d.ssm_beta_w), q35_psc(ctx, t, d, TSQ35_SC_BETA)));   // [num_v_heads, T]
+                ggml_tensor* alpha_all = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ssm_alpha_w, normed, d.ssm_alpha_w), q35_psc(ctx, t, d, TSQ35_SC_ALPHA)); // [num_v_heads, T]
                 // g = softplus(alpha + dt) * a  (per head, broadcast over T)
                 ggml_tensor* g_all = ggml_softplus(ctx, ggml_add(ctx, alpha_all, t.ssm_dt_w));
                 g_all = ggml_mul(ctx, g_all, t.ssm_a_w);                            // [num_v_heads, T]
@@ -2828,7 +2830,7 @@ namespace
                 ggml_tensor* gdn_cat = gdn_per_seq[0];
                 for (int s = 1; s < n_seqs; s++)
                     gdn_cat = ggml_concat(ctx, gdn_cat, gdn_per_seq[s], 1); // [value_dim, T]
-                block_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.ssm_out_w, gdn_cat), q35_psc(ctx, t, d, TSQ35_SC_SSM_OUT)); // [H, T]
+                block_out = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ssm_out_w, gdn_cat, d.ssm_out_w), q35_psc(ctx, t, d, TSQ35_SC_SSM_OUT)); // [H, T]
             }
 
             ggml_tensor* residual1 = ggml_add(ctx, hidden, block_out); // [H, T]
@@ -2843,7 +2845,7 @@ namespace
                 ggml_tensor* u_part;
                 if (t.gu_w != nullptr)
                 {
-                    ggml_tensor* gu = q35_scaled(ctx, ggml_mul_mat(ctx, t.gu_w, ffn_normed), q35_psc(ctx, t, d, TSQ35_SC_GU)); // [2*ffDense, T]
+                    ggml_tensor* gu = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.gu_w, ffn_normed, d.gu_w), q35_psc(ctx, t, d, TSQ35_SC_GU)); // [2*ffDense, T]
                     g_part = ggml_cont(ctx, ggml_view_2d(ctx, gu, ffDense, T, gu->nb[1], 0));
                     u_part = ggml_cont(ctx, ggml_view_2d(ctx, gu, ffDense, T, gu->nb[1], static_cast<std::size_t>(ffDense) * sizeof(float)));
                 }
@@ -2851,11 +2853,11 @@ namespace
                 {
                     // Unfused mixed-quant gate/up: two matmuls, and the halves are
                     // already dense so the two conts above are not needed either.
-                    g_part = q35_scaled(ctx, ggml_mul_mat(ctx, t.ffn_gate_w, ffn_normed), q35_psc(ctx, t, d, TSQ35_SC_FFN_GATE));
-                    u_part = q35_scaled(ctx, ggml_mul_mat(ctx, t.ffn_up_w, ffn_normed), q35_psc(ctx, t, d, TSQ35_SC_FFN_UP));
+                    g_part = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ffn_gate_w, ffn_normed, d.ffn_gate_w), q35_psc(ctx, t, d, TSQ35_SC_FFN_GATE));
+                    u_part = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.ffn_up_w, ffn_normed, d.ffn_up_w), q35_psc(ctx, t, d, TSQ35_SC_FFN_UP));
                 }
                 ggml_tensor* act = ggml_mul(ctx, ggml_silu(ctx, g_part), u_part); // [ffDense, T]
-                ffn_out = q35_scaled(ctx, ggml_mul_mat(ctx, t.down_w, act), q35_psc(ctx, t, d, TSQ35_SC_DOWN)); // [H, T]
+                ffn_out = q35_scaled(ctx, tsg::bonsai_mul_mat(ctx, t.down_w, act, d.down_w), q35_psc(ctx, t, d, TSQ35_SC_DOWN)); // [H, T]
             }
             else
             {

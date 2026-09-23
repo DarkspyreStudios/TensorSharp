@@ -21,7 +21,7 @@
     with SIGABRT inside load_aot_module, before any managed code runs. Measured on
     device.
 
-    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 282 symbols.
+    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 307 symbols.
   -->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'ios-arm64'">
     <ReferenceNativeSymbol Include="TSGgml_ActivationGradF32" SymbolType="Function" />
@@ -37,6 +37,8 @@
     <ReferenceNativeSymbol Include="TSGgml_AttentionSoftmaxWithSinksF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BinaryScalarF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BinaryTensorF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_BonsaiRegisterWeight" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_BonsaiUnregisterWeight" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CanInitializeBackend" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearHostBufferCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearOffloadableState" SymbolType="Function" />
@@ -319,6 +321,7 @@
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelInit" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelMatmul" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelSetGlobalGeometry" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_TranscodeBonsaiToQ2_0" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TransformerLayerDecode" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TransformerModelDecode" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_UnaryF32" SymbolType="Function" />

@@ -116,13 +116,28 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
-            ReleaseHostData();
-
-            if (_ownsCacheKeyHandle)
+            try
             {
-                _cacheKeyHandle.Free();
-                _ownsCacheKeyHandle = false;
-                CacheKey = IntPtr.Zero;
+                UnregisterBonsaiWeights();
+            }
+            finally
+            {
+                // A failed native cleanup must never strand an owned buffer or
+                // the GCHandle that roots this weight during construction.
+                try { ReleaseHostData(); }
+                finally
+                {
+                    if (_ownsCacheKeyHandle)
+                    {
+                        try { UnregisterBonsaiCacheKey(CacheKey); }
+                        finally
+                        {
+                            _cacheKeyHandle.Free();
+                            _ownsCacheKeyHandle = false;
+                            CacheKey = IntPtr.Zero;
+                        }
+                    }
+                }
             }
         }
 
@@ -250,6 +265,7 @@ namespace TensorSharp.Models
             _cacheKeyHandle = GCHandle.Alloc(this, GCHandleType.Normal);
             CacheKey = GCHandle.ToIntPtr(_cacheKeyHandle);
             _ownsCacheKeyHandle = true;
+            RegisterBonsaiCacheKey(CacheKey);
             return CacheKey;
         }
 
@@ -265,6 +281,7 @@ namespace TensorSharp.Models
             DevicePreloadTooLarge = true;
             if (_ownsCacheKeyHandle)
             {
+                UnregisterBonsaiCacheKey(CacheKey);
                 _cacheKeyHandle.Free();
                 _ownsCacheKeyHandle = false;
             }
@@ -277,17 +294,21 @@ namespace TensorSharp.Models
                 return;
 
             IntPtr currentData = _data;
-            if (_ownsBuffer)
-                FreeBuffer(currentData);
-            else if (ViewIsFileBacked)
-                AdviseExternalViewCanBePagedOut(currentData, RawBytes);
+            try { UnregisterBonsaiCacheKey(currentData); }
+            finally
+            {
+                if (_ownsBuffer)
+                    FreeBuffer(currentData);
+                else if (ViewIsFileBacked)
+                    AdviseExternalViewCanBePagedOut(currentData, RawBytes);
 
-            if (CacheKey == currentData)
-                CacheKey = IntPtr.Zero;
+                if (CacheKey == currentData)
+                    CacheKey = IntPtr.Zero;
 
-            _data = IntPtr.Zero;
-            _ownsBuffer = false;
-            _ownerToken = null;
+                _data = IntPtr.Zero;
+                _ownsBuffer = false;
+                _ownerToken = null;
+            }
         }
 
         public static unsafe IntPtr AllocateBuffer(long size)

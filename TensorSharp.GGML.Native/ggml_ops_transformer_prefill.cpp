@@ -1695,7 +1695,7 @@ TSG_EXPORT int TSGgml_Qwen35AttentionLayerPrefill(
         ggml_tensor* normed = ggml_mul(ctx, ggml_rms_norm(ctx, hidden_t, eps), attn_norm_w);
 
         // 2. Fused QKV projection -> [qFullDim + 2*kDim, seqLen]
-        ggml_tensor* qkv_out = ggml_mul_mat(ctx, qkv_w, normed);
+        ggml_tensor* qkv_out = tsg::bonsai_mul_mat(ctx, qkv_w, normed, qkvW);
 
         // 3. Slice Q+gate / K / V from the fused output. Q+gate occupies the first
         // qFullDim rows; per-token they're laid out [head0_Q (headDim), head0_gate
@@ -1828,7 +1828,7 @@ TSG_EXPORT int TSGgml_Qwen35AttentionLayerPrefill(
         ggml_tensor* attn_gated = ggml_mul(ctx, attn_flat, gate_sig);
 
         // 12. Output projection (no bias) and residual add.
-        ggml_tensor* o_out = ggml_mul_mat(ctx, o_w, attn_gated);
+        ggml_tensor* o_out = tsg::bonsai_mul_mat(ctx, o_w, attn_gated, oW);
         ggml_tensor* residual = ggml_add(ctx, hidden_t, o_out);
 
         ggml_tensor* output = ggml_cpy(ctx, residual, hidden_out_t);

@@ -38,6 +38,10 @@ namespace TensorSharp.Runtime
         MXFP4 = 39,
         NVFP4 = 40,
         Q1_0 = 41,
+        Q2_0 = 42,
+        // PrismML Bonsai2 on-disk formats; transcoded by TensorSharp, never
+        // passed to upstream ggml as ggml_type values.
+        PQ2_0 = 142, PTQ1_0 = 143,
     }
 
     public class GgufTensorInfo
@@ -771,8 +775,11 @@ namespace TensorSharp.Runtime
                 case GgmlTensorType.MXFP4:
                     return 32;
                 case GgmlTensorType.NVFP4:
+                case GgmlTensorType.Q2_0:
                     return 64;
                 case GgmlTensorType.Q1_0:
+                case GgmlTensorType.PQ2_0:
+                case GgmlTensorType.PTQ1_0:
                     return 128;
                 default:
                     return 256;
@@ -812,6 +819,9 @@ namespace TensorSharp.Runtime
                 case GgmlTensorType.MXFP4: return 1 + 32 / 2;                  // 17
                 case GgmlTensorType.NVFP4: return 4 + 64 / 2;               // 36
                 case GgmlTensorType.Q1_0: return 2 + 128 / 8;               // 18
+                case GgmlTensorType.Q2_0: return 2 + 64 / 4;                // 18
+                case GgmlTensorType.PQ2_0: return 2 + 128 / 4;              // 34
+                case GgmlTensorType.PTQ1_0: return 2 + 26;                  // 28
                 case GgmlTensorType.I8: return 1;
                 case GgmlTensorType.I16: return 2;
                 case GgmlTensorType.I32: return 4;

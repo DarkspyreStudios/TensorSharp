@@ -815,8 +815,10 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
 
             const std::size_t row_bytes = ggml_row_size(kvType, hd);
 
+            tsg::BonsaiGraphScope bonsai_scope;
+
             // ---- graph ----
-            ggml_tensor* hidden = ggml_get_rows(ctx, token_embd_t, e.token_in);   // [H, N]
+            ggml_tensor* hidden = tsg::bonsai_get_rows(ctx, token_embd_t, e.token_in, token_embd_data);   // [H, N]
             std::vector<ggml_tensor*> state_writes;
             state_writes.reserve(static_cast<std::size_t>(gdn_layers) * n_slots * 2 + attn_layers * 2);
             bool op_unsupported = false;
@@ -836,13 +838,13 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     ggml_tensor* v_raw;
                     if (d.separate_qkv != 0)
                     {
-                        qg_part = ggml_mul_mat(ctx, t.qkv_w, normed);                       // [qFullDim, N]
-                        k_raw = ggml_mul_mat(ctx, t.k_w, normed);                           // [kDim, N]
-                        v_raw = ggml_mul_mat(ctx, t.v_w, normed);
+                        qg_part = tsg::bonsai_mul_mat(ctx, t.qkv_w, normed, d.qkv_w);                       // [qFullDim, N]
+                        k_raw = tsg::bonsai_mul_mat(ctx, t.k_w, normed, d.k_w);                           // [kDim, N]
+                        v_raw = tsg::bonsai_mul_mat(ctx, t.v_w, normed, d.v_w);
                     }
                     else
                     {
-                        ggml_tensor* qkv = ggml_mul_mat(ctx, t.qkv_w, normed);              // [qFullDim+2kDim, N]
+                        ggml_tensor* qkv = tsg::bonsai_mul_mat(ctx, t.qkv_w, normed, d.qkv_w);              // [qFullDim+2kDim, N]
                         qg_part = ggml_view_2d(ctx, qkv, qFullDim, n_slots, qkv->nb[1], 0);
                         k_raw = ggml_view_2d(ctx, qkv, kDim, n_slots, qkv->nb[1],
                             static_cast<std::size_t>(qFullDim) * sizeof(float));
@@ -904,7 +906,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     ggml_tensor* gate_cont = ggml_cont(ctx, gate_view);
                     ggml_tensor* attn_gated = ggml_mul(ctx, attn_2d, ggml_sigmoid(ctx, gate_cont));
                     ggml_tensor* attn_flat = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_gated), qDim, n_slots);
-                    block_out = ggml_mul_mat(ctx, t.o_w, attn_flat);                          // [H, N]
+                    block_out = tsg::bonsai_mul_mat(ctx, t.o_w, attn_flat, d.o_w);                          // [H, N]
                 }
                 else
                 {
@@ -916,7 +918,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     if (t.gdn_gate_w == nullptr)
                     {
                         const std::int64_t packed_dim = d.gdn_qkv_ne1;
-                        ggml_tensor* packed = ggml_mul_mat(ctx, t.gdn_qkv_w, normed);         // [packed_dim, N]
+                        ggml_tensor* packed = tsg::bonsai_mul_mat(ctx, t.gdn_qkv_w, normed, d.gdn_qkv_w);         // [packed_dim, N]
                         qkv_mixed = ggml_view_2d(ctx, packed, conv_dim, n_slots, packed->nb[1], 0);
                         z = ggml_view_2d(ctx, packed, value_dim, n_slots, packed->nb[1],
                             static_cast<std::size_t>(conv_dim) * sizeof(float));
@@ -928,10 +930,10 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     }
                     else
                     {
-                        qkv_mixed = ggml_mul_mat(ctx, t.gdn_qkv_w, normed);
-                        z = ggml_mul_mat(ctx, t.gdn_gate_w, normed);
-                        beta_raw = ggml_mul_mat(ctx, t.ssm_beta_w, normed);
-                        alpha_raw = ggml_mul_mat(ctx, t.ssm_alpha_w, normed);
+                        qkv_mixed = tsg::bonsai_mul_mat(ctx, t.gdn_qkv_w, normed, d.gdn_qkv_w);
+                        z = tsg::bonsai_mul_mat(ctx, t.gdn_gate_w, normed, d.gdn_gate_w);
+                        beta_raw = tsg::bonsai_mul_mat(ctx, t.ssm_beta_w, normed, d.ssm_beta_w);
+                        alpha_raw = tsg::bonsai_mul_mat(ctx, t.ssm_alpha_w, normed, d.ssm_alpha_w);
                     }
                     ggml_tensor* qkv_cont = ggml_cont(ctx, qkv_mixed);                        // [conv_dim, N]
                     ggml_tensor* beta_all = ggml_sigmoid(ctx, ggml_cont(ctx, beta_raw));      // [num_v_heads, N]
@@ -1028,7 +1030,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     ggml_tensor* z_3d = ggml_reshape_3d(ctx, ggml_cont(ctx, z), head_v_dim, num_v_heads, n_slots);
                     ggml_tensor* gated = ggml_mul(ctx, out_n, ggml_silu(ctx, z_3d));
                     ggml_tensor* gated_flat = ggml_reshape_2d(ctx, gated, value_dim, n_slots);
-                    block_out = ggml_mul_mat(ctx, t.ssm_out_w, gated_flat);                    // [H, N]
+                    block_out = tsg::bonsai_mul_mat(ctx, t.ssm_out_w, gated_flat, d.ssm_out_w);                    // [H, N]
                 }
 
                 ggml_tensor* residual1 = ggml_add(ctx, hidden, block_out);
@@ -1040,14 +1042,14 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                 {
                     ggml_tensor* act;
                     if (t.gu_w != nullptr)
-                        act = ggml_swiglu(ctx, ggml_mul_mat(ctx, t.gu_w, ffn_normed));
+                        act = ggml_swiglu(ctx, tsg::bonsai_mul_mat(ctx, t.gu_w, ffn_normed, d.gu_w));
                     else
                     {
-                        ggml_tensor* g2 = ggml_mul_mat(ctx, t.ffn_gate_w, ffn_normed);
-                        ggml_tensor* u2 = ggml_mul_mat(ctx, t.ffn_up_w, ffn_normed);
+                        ggml_tensor* g2 = tsg::bonsai_mul_mat(ctx, t.ffn_gate_w, ffn_normed, d.ffn_gate_w);
+                        ggml_tensor* u2 = tsg::bonsai_mul_mat(ctx, t.ffn_up_w, ffn_normed, d.ffn_up_w);
                         act = ggml_mul(ctx, ggml_silu(ctx, g2), u2);
                     }
-                    ffn_down = ggml_mul_mat(ctx, t.down_w, act);                               // [H, N]
+                    ffn_down = tsg::bonsai_mul_mat(ctx, t.down_w, act, d.down_w);                               // [H, N]
                 }
                 else
                 {
@@ -1094,7 +1096,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             }
 
             ggml_tensor* fn = ggml_mul(ctx, ggml_rms_norm(ctx, hidden, eps), final_norm_t);
-            ggml_tensor* logits = ggml_mul_mat(ctx, lm_head_t, fn);                            // [vocab, N]
+            ggml_tensor* logits = tsg::bonsai_mul_mat(ctx, lm_head_t, fn, lm_head_data);                            // [vocab, N]
             e.logits_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, vocab_size, n_slots);
             ggml_tensor* out_cpy = ggml_cpy(ctx, logits, e.logits_out);
             ggml_set_output(out_cpy);

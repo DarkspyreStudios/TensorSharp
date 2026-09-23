@@ -150,6 +150,10 @@ TSG_EXPORT int TSGgml_Qwen35GdnLayerTP(
 {
     try
     {
+        if (bonsai_weight_has_transform(inproj_w_data)) {
+            set_last_error("Qwen35GdnLayerTP: Bonsai Hadamard transforms are not supported by this tensor-parallel graph.");
+            return 0;
+        }
         if (!ensure_backend()) return 0;
 
         if (hidden_data == nullptr || attn_norm_w_data == nullptr || inproj_w_data == nullptr ||

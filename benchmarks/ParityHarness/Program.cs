@@ -12,7 +12,9 @@
 //
 // Modes:
 //   parity <model.gguf> --ref <golden.json> [backend] [max_new]
-//   parity <model.gguf> --bench <backend> <pp1,pp2,...> <tg> [reps]
+//   parity <model.gguf> --bench <backend> <pp1,pp2,...> <tg> [reps] [depth]
+//       emits JSON [bench-sample]/[bench-statistics] records and the historic
+//       best-rate [bench] lines. Warmup and optional context depth are untimed.
 //   parity <model.gguf> --batched <backend> <steps> <promptA> <promptB> [...]
 //       prompts are comma-separated token ids; each runs on its own sequence
 //       slot serially first, then all together through the fused batched
@@ -278,40 +280,96 @@ public static class Program
         return matched == total ? 0 : 2;
     }
 
-    /// <summary>llama-bench-shaped throughput: synthetic prompt of P tokens
-    /// (prefill t/s), then TG greedy decode steps (decode t/s), best of reps.</summary>
+    /// <summary>llama-bench-shaped throughput with every measured sample retained.
+    /// Uses fixed decode inputs without sampling, untimed warmup, and an optional
+    /// pre-existing context. Historic [bench] output still reports the best rate.</summary>
     private static int RunBench(string modelPath, string[] args)
     {
+        if (args.Length < 4)
+        {
+            Console.Error.WriteLine("usage: parity <model.gguf> --bench <backend> <pp1,pp2,...> <tg> [reps] [depth]");
+            return 1;
+        }
         BackendType backend = ResolveBackend(args[2]);
         int[] ppLens = args[3].Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray();
         int tg = args.Length > 4 ? int.Parse(args[4]) : 64;
         int reps = args.Length > 5 ? int.Parse(args[5]) : 2;
+        int depth = args.Length > 6 ? int.Parse(args[6]) : 0;
+        if (ppLens.Length == 0 || ppLens.Any(pp => pp <= 0) || tg < 0 || reps <= 0 || depth < 0)
+        {
+            Console.Error.WriteLine("prompt lengths and repetitions must be positive; generation length and depth must be nonnegative");
+            return 1;
+        }
 
         var sw = Stopwatch.StartNew();
         using var model = ModelBase.Create(modelPath, backend, ResolveTp());
         Console.WriteLine($"[bench] loaded in {sw.Elapsed.TotalSeconds:F1}s, backend={backend}, arch={model.Config.Architecture}");
+        Console.WriteLine($"[bench] depth={depth} repeats={reps} warmup=untimed decode=fixed-inference");
 
         var rng = new Random(42);
         int vocab = Math.Max(1000, model.Config.VocabSize - 1000);
+        var depthPrompt = new int[depth];
+        for (int i = 0; i < depth; i++) depthPrompt[i] = 1000 + rng.Next(vocab - 1000);
+
+        void ResetContext()
+        {
+            model.ResetKVCache();
+            // This setup is outside every measured interval. Unlike llama-bench,
+            // which may restore a cached state, we recompute the depth prefix.
+            if (depthPrompt.Length > 0)
+                model.ForwardRefill(depthPrompt);
+        }
+
+        void RecordSample(List<double> rates, int promptTokens, int generationTokens, int run, double seconds)
+        {
+            double rate = (promptTokens + generationTokens) / seconds;
+            rates.Add(rate);
+            Console.WriteLine("[bench-sample] " + JsonSerializer.Serialize(new
+            {
+                n_prompt = promptTokens, n_gen = generationTokens, n_depth = depth,
+                run = run + 1, elapsed_seconds = seconds, tokens_per_second = rate,
+            }));
+        }
+
+        void PrintStatistics(List<double> rates, int promptTokens, int generationTokens)
+        {
+            double average = rates.Average();
+            double[] ordered = rates.OrderBy(rate => rate).ToArray();
+            int middle = ordered.Length / 2;
+            double median = ordered.Length % 2 == 0 ? (ordered[middle - 1] + ordered[middle]) / 2 : ordered[middle];
+            double standardDeviation = rates.Count > 1
+                ? Math.Sqrt(rates.Sum(rate => (rate - average) * (rate - average)) / (rates.Count - 1)) : 0;
+            Console.WriteLine("[bench-statistics] " + JsonSerializer.Serialize(new
+            {
+                n_prompt = promptTokens, n_gen = generationTokens, n_depth = depth,
+                repetitions = rates.Count, avg_ts = average, stddev_ts = standardDeviation,
+                median_ts = median, min_ts = ordered[0], max_ts = ordered[^1], samples_ts = rates,
+            }));
+        }
 
         foreach (int pp in ppLens)
         {
-            double best = 0;
+            var rates = new List<double>(reps);
             var prompt = new int[pp];
             for (int i = 0; i < pp; i++) prompt[i] = 1000 + rng.Next(vocab - 1000);
+            // Match llama-bench's full prompt warmup before measured repetitions.
+            model.ResetKVCache();
+            model.ForwardRefill(prompt);
             for (int r = 0; r < reps; r++)
             {
-                model.ResetKVCache();
+                ResetContext();
                 var t = Stopwatch.StartNew();
                 model.ForwardRefill(prompt);
                 t.Stop();
-                best = Math.Max(best, pp / t.Elapsed.TotalSeconds);
+                RecordSample(rates, pp, 0, r, t.Elapsed.TotalSeconds);
             }
-            Console.WriteLine($"[bench] pp{pp,-8} {best,10:F2} tok/s");
+            Console.WriteLine($"[bench] pp{pp,-8} {rates.Max(),10:F2} tok/s");
+            PrintStatistics(rates, pp, 0);
         }
 
+        if (tg > 0)
         {
-            double best = 0;
+            var rates = new List<double>(reps);
             // llama-bench's test_gen feeds random tokens and times
             // llama_decode+synchronize; it does not scan the returned vocabulary
             // for an argmax. Precompute the same style of inputs so this number is
@@ -322,14 +380,14 @@ public static class Program
             var tokenBox = new int[1];
 
             // Match llama-bench's one-token warm-up followed by memory_clear:
-            // the measured generation begins at position zero, rather than after
-            // an unrelated 32-token prompt with a larger attention window.
+            // the measured generation begins at the explicit context depth,
+            // zero by default, rather than after an unrelated prompt.
             model.ResetKVCache();
             tokenBox[0] = decodeTokens[0];
             model.Forward(tokenBox);
             for (int r = 0; r < reps; r++)
             {
-                model.ResetKVCache();
+                ResetContext();
                 var t = Stopwatch.StartNew();
                 for (int i = 0; i < tg; i++)
                 {
@@ -337,9 +395,10 @@ public static class Program
                     model.Forward(tokenBox);
                 }
                 t.Stop();
-                best = Math.Max(best, tg / t.Elapsed.TotalSeconds);
+                RecordSample(rates, 0, tg, r, t.Elapsed.TotalSeconds);
             }
-            Console.WriteLine($"[bench] tg{tg,-8} {best,10:F2} tok/s");
+            Console.WriteLine($"[bench] tg{tg,-8} {rates.Max(),10:F2} tok/s");
+            PrintStatistics(rates, 0, tg);
         }
         return 0;
     }

@@ -390,7 +390,7 @@ TSG_EXPORT int TSGgml_DFlashInject(
 
         // Metal: reorder for encoder concurrency before allocation (no-op on
         // other backends) - same as the trunk kernel.
-        optimize_graph_for_metal(graph);
+        optimize_graph_for_metal(ctx, graph);
 
         ggml_backend_buffer_t persist_buf = nullptr;
         if (can_persist)
@@ -925,7 +925,7 @@ TSG_EXPORT int TSGgml_DFlashDraftBlock(
 
         // Metal: reorder for encoder concurrency before allocation (no-op on
         // other backends).
-        optimize_graph_for_metal(graph);
+        optimize_graph_for_metal(ctx, graph);
 
         ggml_backend_buffer_t persist_buf = nullptr;
         if (can_persist)
