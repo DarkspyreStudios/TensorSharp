@@ -3294,6 +3294,12 @@ TSG_EXPORT void TSGgml_Shutdown()
     TSGgml_DFlashResetCaches();
     TSGgml_QwenImageResetForwardCache();
     TSGgml_WanResetForwardCache();
+#if defined(TSG_GGML_USE_METAL)
+    // MPS owns a separate command queue, staging buffers and compiled graphs.
+    // Its release function waits for its mutex-protected synchronous invocation
+    // before dropping them, independently of ggml's backend buffers.
+    tsg_mps_conv2d_release();
+#endif
 #if defined(TSG_HAVE_CUDNN)
     // cuDNN owns a device handle and scratch independently of ggml. Release
     // them before backend teardown, including callers that skip model disposal.
@@ -3403,6 +3409,11 @@ TSG_EXPORT void TSGgml_ReleaseReuseComputeBuffers()
     TSGgml_QwenImage21ResetForwardCache();
     free_reuse_compute_buffer();
     free_reuse_gallocr();
+#if defined(TSG_GGML_USE_METAL)
+    // Explicit phase/model scratch release also returns the vendor convolution
+    // staging allocations; preserve reuse within a VAE encode/decode phase.
+    tsg_mps_conv2d_release();
+#endif
 }
 
 // Mark a host data pointer as eligible for the MoE expert offload LRU.

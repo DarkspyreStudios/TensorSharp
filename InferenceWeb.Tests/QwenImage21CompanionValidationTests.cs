@@ -127,11 +127,21 @@ public sealed class QwenImage21CompanionValidationTests
     {
         string directory = Path.GetDirectoryName(Environment.GetEnvironmentVariable("TENSORSHARP_QWEN21_DIT"))!;
         using var vae = SafetensorsModel.Open(Path.Combine(directory, "qwen_image_2.1_vae_bf16.safetensors"));
-        using var text = new GgufFile(Path.Combine(directory, "Qwen3VL-8B-Instruct-Q4_K_M.gguf"));
-        using var vision = new GgufFile(Path.Combine(directory, "mmproj-Qwen3VL-8B-Instruct-F16.gguf"));
-        QwenImage21CompanionValidation.ValidateVae(vae);
+        using var text = new GgufFile(CompanionPath(directory, "TS_QWEN_IMAGE_TE",
+            "Qwen3-VL-8B-Instruct-Q4_K_M.gguf", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"));
+        using var vision = new GgufFile(CompanionPath(directory, "TS_QWEN_IMAGE_MMPROJ",
+            "mmproj-BF16.gguf", "mmproj-Qwen3VL-8B-Instruct-F16.gguf"));
+        QwenImage21CompanionValidation.ValidateVae(new QwenImage21VaeTensorStore(vae));
         QwenImage21CompanionValidation.ValidateText(text);
         QwenImage21CompanionValidation.ValidateVision(vision);
+    }
+
+    private static string CompanionPath(string directory, string variable, params string[] candidates)
+    {
+        string? explicitPath = Environment.GetEnvironmentVariable(variable);
+        if (!string.IsNullOrWhiteSpace(explicitPath)) return explicitPath;
+        return candidates.Select(name => Path.Combine(directory, name)).FirstOrDefault(File.Exists)
+            ?? throw new FileNotFoundException($"No {variable} test companion found in {directory}.");
     }
 
     private static void SetTextMetadata(GgufFile file)

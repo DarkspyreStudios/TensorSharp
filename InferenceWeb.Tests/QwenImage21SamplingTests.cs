@@ -4,6 +4,33 @@ namespace InferenceWeb.Tests;
 
 public class QwenImage21SamplingTests
 {
+    [Theory]
+    [InlineData(1f, 0.875f)]
+    [InlineData(0.75f, 0.5f)]
+    [InlineData(0.5f, 0f)]
+    public void PreviewRecoversCleanFlowLatentWithoutChangingSamplingState(float sigma, float nextSigma)
+    {
+        // For an exact linear flow, x_t = (1-t)*clean + t*noise and
+        // velocity = noise-clean. Preview must recover clean after any Euler
+        // interval, including an early step whose actual state is mostly noise.
+        float[] clean = { -3f, 0f, 1f, 4f };
+        float[] noise = { 1f, -2f, 5f, 0f };
+        float[] velocity = clean.Zip(noise, (c, n) => n - c).ToArray();
+        float[] updated = clean.Zip(noise, (c, n) => (1f - sigma) * c + sigma * n).ToArray();
+        for (int i = 0; i < updated.Length; i++) updated[i] += (nextSigma - sigma) * velocity[i];
+        float[] expectedState = (float[])updated.Clone();
+        float[] expectedVelocity = (float[])velocity.Clone();
+
+        var preview = QwenImage21Sampling.PreviewLatents(updated, velocity, nextSigma);
+
+        Assert.Equal(clean, preview);
+        Assert.Equal(expectedState, updated);
+        Assert.Equal(expectedVelocity, velocity);
+        Assert.NotSame(updated, preview);
+        if (nextSigma == 0f) Assert.Equal(updated, preview);
+        else Assert.NotEqual(updated, preview);
+    }
+
     [Fact]
     public void PhiloxNoiseMatchesStableDiffusionCppCudaRng()
     {

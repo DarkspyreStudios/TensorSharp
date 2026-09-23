@@ -76,9 +76,10 @@ namespace TensorSharp.Models.QwenImage
 
         private IFloatTensorStore OpenVaeWeightSource()
         {
-            if (IsSafetensorsPath(_vaePath))
-                return _vaeSafetensors = SafetensorsModel.Open(_vaePath);
-            return new GgufFloatTensorStore(VaeGguf);
+            IFloatTensorStore source = IsSafetensorsPath(_vaePath)
+                ? _vaeSafetensors = SafetensorsModel.Open(_vaePath)
+                : new GgufFloatTensorStore(VaeGguf);
+            return IsVersion21 ? new QwenImage21VaeTensorStore(source) : source;
         }
 
         public QwenImageModel(string ggufPath, BackendType backend) : base(ggufPath, backend)

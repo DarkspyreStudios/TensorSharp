@@ -89,6 +89,12 @@ def multipart(fields, files):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--models", type=Path, default=ROOT.parent / "models")
+    parser.add_argument("--dit", type=Path, help="Use this GGUF instead of the download configuration.")
+    parser.add_argument("--vae", type=Path)
+    parser.add_argument("--text-encoder", type=Path)
+    parser.add_argument("--mmproj", type=Path)
+    parser.add_argument("--backend", default="ggml_metal",
+                        choices=("ggml_metal", "ggml_cuda", "ggml_cpu", "ggml_vulkan"))
     parser.add_argument("--output", type=Path, default=ROOT / "docs/validation/qwen-image-2.1/http")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5017)
@@ -101,12 +107,29 @@ def main():
     executable = ROOT / "TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll"
     command = ["dotnet", str(executable), "--config", "config/qwen-image-2.1.json",
                "--host", args.host, "--port", str(args.port)]
+    if args.dit:
+        companions = (("--qwen-image-vae", args.vae), ("--qwen-image-vl", args.text_encoder),
+                      ("--qwen-image-mmproj", args.mmproj))
+        if any(path is None for _, path in companions):
+            parser.error("--dit requires --vae, --text-encoder and --mmproj to test all editing cases.")
+        command = ["dotnet", str(executable), "--model", str(args.dit.resolve()),
+                   "--host", args.host, "--port", str(args.port)]
+        for flag, path in companions:
+            command += [flag, str(path.resolve())]
+        if not args.dry_run:
+            for path in (args.dit, args.vae, args.text_encoder, args.mmproj):
+                if not path.is_file():
+                    parser.error(f"Required model file is missing: {path}")
+    elif any(path is not None for path in (args.vae, args.text_encoder, args.mmproj)):
+        parser.error("Explicit companions require --dit.")
+    command += ["--backend", args.backend]
     cases = ["health", "models", "invalid_dimensions", "invalid_prompt", "stream_error",
              "upload_rgba", "upload_second_reference", "generate_json", "edit_json", "edit_multipart",
              "edit_two_references", "generate_stream_preview", "edit_stream_preview",
-             "generate_repeated", "cancel_stream", "generate_after_cancel"]
+             "generate_repeated", "generate_eight_step_previews", "cancel_stream", "generate_after_cancel"]
     if args.dry_run:
-        print(json.dumps({"command": command, "environment": {"TENSORSHARP_MODELS": str(args.models.resolve())},
+        print(json.dumps({"command": command, "environment": {"TENSORSHARP_MODELS": str(args.models.resolve()),
+                          "TENSORSHARP_UPLOAD_DIR": str(args.output.resolve() / "server-uploads")},
                           "output": str(args.output.resolve()), "cases": cases}, indent=2))
         return 0
     if not executable.is_file():
@@ -158,7 +181,7 @@ def main():
         (output / (name + ".png")).write_bytes(data)
         return {"image": info, "elapsed_seconds_reported": value.get("elapsedSeconds")}
 
-    def stream(name, path, body, error=False, cancel=False):
+    def stream(name, path, body, error=False, cancel=False, expected_previews=None):
         started = time.monotonic()
         connection = http.client.HTTPConnection(args.host, args.port, timeout=args.timeout)
         connection.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
@@ -203,7 +226,9 @@ def main():
         assert [frame["step"] for frame in progress] == list(range(1, body["steps"] + 1))
         assert all(frame.get("total") == body["steps"] for frame in progress)
         previews = [frame for frame in progress if frame.get("image")]
-        assert previews, "Two-step streaming request must include an intermediate preview"
+        assert previews, "Streaming request must include an intermediate preview"
+        if expected_previews is not None:
+            assert len(previews) == expected_previews, f"Expected {expected_previews} finite previews, got {len(previews)}"
         for i, frame in enumerate(previews):
             prefix, encoded = frame["image"].split(",", 1)
             assert prefix == "data:image/png;base64"
@@ -235,7 +260,8 @@ def main():
     (output / "reference-rgba.png").write_bytes(first_png)
     (output / "reference-second.png").write_bytes(second_png)
     try:
-        env = dict(os.environ, TENSORSHARP_MODELS=str(args.models.resolve()))
+        env = dict(os.environ, TENSORSHARP_MODELS=str(args.models.resolve()),
+                   TENSORSHARP_UPLOAD_DIR=str(output / "server-uploads"))
         with server_log.open("w") as log:
             server = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT,
                                       start_new_session=True)
@@ -253,8 +279,19 @@ def main():
             else:
                 raise TimeoutError("Server did not become healthy")
 
-            run("health", lambda: {"status": request("/health")[0]})
-            run("models", lambda: json_request("models", "/api/models"))
+            def health():
+                status = request("/health")[0]
+                assert status == 200, f"Health endpoint returned HTTP {status}"
+                return {"status": status}
+            def models():
+                value = json_request("models", "/api/models")
+                assert value.get("architecture") == "qwen_image", value
+                assert value.get("loadedBackend") == args.backend, value
+                if args.dit:
+                    assert value.get("loaded") == args.dit.name, value
+                return value
+            run("health", health)
+            run("models", models)
             run("invalid_dimensions", lambda: json_request("invalid_dimensions", "/api/image-generate",
                 dict(options, width=args.size + 1), status=400))
             run("invalid_prompt", lambda: json_request("invalid_prompt", "/api/image-generate",
@@ -292,6 +329,8 @@ def main():
                 assert initial and value["image"]["sha256"] == initial["image"]["sha256"], "Same-process repeated seeded result changed"
                 return value
             run("generate_repeated", repeated)
+            run("generate_eight_step_previews", lambda: stream("generate_eight_step_previews",
+                "/api/image-generate/stream", dict(options, prompt="A blue cube.", steps=8), expected_previews=7))
             run("cancel_stream", lambda: stream("cancel_stream", "/api/image-generate/stream",
                 dict(options, prompt="Cancel HTTP probe: a blue cube.", steps=8), cancel=True))
             run("generate_after_cancel", lambda: image_result("generate_after_cancel",

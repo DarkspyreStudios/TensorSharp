@@ -184,11 +184,11 @@ namespace TensorSharp.Models.Architecture
             {
                 if (_builtInsLoaded)
                     return;
+                // Register() takes this same reentrant lock. Publish completion
+                // only after every built-in is visible to concurrent resolvers.
+                BuiltInArchitectures.RegisterAll();
                 _builtInsLoaded = true;
             }
-
-            // Outside the lock: registration re-enters Register(), which takes it.
-            BuiltInArchitectures.RegisterAll();
         }
     }
 }

@@ -42,7 +42,7 @@ namespace TensorSharp.Models.QwenImage
             Environment.GetEnvironmentVariable("TS_QWEN_VAE_GPU") != "0";
 
         // Qwen-Image-2.1 reaches finite activations above 65504 before the final
-        // norm. Scope F32 im2col to that synchronous call chain, including its
+        // norm. Scope F32 convolution to that synchronous call chain, including its
         // shared attention/downsample helpers, without changing other VAEs.
         [ThreadStatic] private static bool FullPrecisionConv;
         private readonly struct ConvPrecisionScope : IDisposable

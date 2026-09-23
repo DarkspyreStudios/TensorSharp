@@ -71,6 +71,12 @@ struct TSGgmlConv2dDesc
 static ggml_tensor* vae_conv_2d_f32(ggml_context* ctx, ggml_tensor* kernel, ggml_tensor* input,
                                    int sw, int sh, int pw, int ph)
 {
+    // Metal's F32/F32 matrix-matrix kernel still stages its operands in F16.
+    // The direct convolution reads and accumulates F32, including when MPS is
+    // disabled or cannot accept this node's stride/padding. A precision flag on
+    // MUL_MAT only controls accumulation and cannot prevent that conversion.
+    if (g_backend_type == BACKEND_TYPE_METAL)
+        return ggml_conv_2d_direct(ctx, kernel, input, sw, sh, pw, ph, 1, 1);
     auto columns = ggml_im2col(ctx, kernel, input, sw, sh, pw, ph, 1, 1, true, GGML_TYPE_F32);
     auto result = ggml_mul_mat(ctx,
         ggml_reshape_2d(ctx, columns, columns->ne[0], columns->ne[1] * columns->ne[2] * columns->ne[3]),
@@ -94,6 +100,7 @@ static int vae_run_conv2d(const TSGgmlConv2dDesc* d, bool full_precision)
         const int KW = d->KW, KH = d->KH, IC = d->IC, OC = d->OC;
         const int sW = d->strideW, sH = d->strideH;
         const bool symmetric = (d->padL == d->padR) && (d->padT == d->padB);
+        const bool use_fast_conv = full_precision && g_backend_type == BACKEND_TYPE_METAL && fast_conv_enabled();
 
         PooledContextHandle context;
         if (!context.init(32 * 1024 * 1024)) { set_last_error("Conv2d: ctx alloc failed."); return 0; }
@@ -115,6 +122,8 @@ static int vae_run_conv2d(const TSGgmlConv2dDesc* d, bool full_precision)
         ggml_tensor* conv = full_precision
             ? vae_conv_2d_f32(ctx, ker, x, sW, sH, p0, p1)
             : ggml_conv_2d(ctx, ker, x, sW, sH, p0, p1, 1, 1);  // [OW,OH,OC,1]
+        if (full_precision && conv->op == GGML_OP_CONV_2D)
+            conv->op_params[k_conv_full_precision_param] = 1;
         if (bias) conv = ggml_add(ctx, conv, ggml_reshape_4d(ctx, bias, 1, 1, OC, 1));
 
         const int OW = static_cast<int>(conv->ne[0]), OH = static_cast<int>(conv->ne[1]);
@@ -135,7 +144,12 @@ static int vae_run_conv2d(const TSGgmlConv2dDesc* d, bool full_precision)
         ggml_backend_tensor_set(inp, d->input, 0, static_cast<std::size_t>(W) * H * C * sizeof(float));
         if (bias) ggml_backend_tensor_set(bias, d->bias, 0, static_cast<std::size_t>(OC) * sizeof(float));
 
-        if (tsg::compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS)
+        // The full-precision Metal path uses MPS F32 convolution when possible;
+        // its direct ggml fallback also preserves inputs beyond the F16 range.
+        const auto status = use_fast_conv
+            ? graph_compute_fast_conv(graph, "qwen-vae-conv-f32")
+            : tsg::compute_graph(g_backend, graph);
+        if (status != GGML_STATUS_SUCCESS)
         { set_last_error("Conv2d: graph compute failed."); return 0; }
         // Synchronous readback. The VAE runs this conv as a long C# chain (each conv's
         // output is the next conv's input), so the result MUST be on the host before this

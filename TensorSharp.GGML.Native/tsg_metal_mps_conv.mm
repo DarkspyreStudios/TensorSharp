@@ -112,7 +112,7 @@ bool ensure_device(MpsState& s)
     return s.usable;
 }
 
-id<MTLBuffer> ensure_buffer(MpsState& s, id<MTLBuffer>& buf, std::size_t& cap, std::size_t need)
+id<MTLBuffer> ensure_buffer(MpsState& s, id<MTLBuffer> __strong& buf, std::size_t& cap, std::size_t need)
 {
     if (buf != nil && cap >= need) return buf;
     buf = [s.device newBufferWithLength:need options:MTLResourceStorageModeShared];

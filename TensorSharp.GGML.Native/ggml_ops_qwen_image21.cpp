@@ -3,7 +3,7 @@
 // Qwen-Image-2.1: single-stream, segmented causal/image attention and shared AdaLN.
 // All operations use unchanged upstream ggml. One complete graph per velocity
 // prediction keeps intermediate activations on the device and weights resident.
-// CUDA retains graph metadata and allocation addresses across denoising steps.
+// CUDA and Metal retain graph metadata and allocations across denoising steps.
 // The t=0 prefix is currently recomputed. Caching its post-RoPE K/V is exact,
 // but F32 storage costs 1 MiB per prefix token per CFG branch at 32x4096, so a
 // future implementation needs explicit request lifetimes and a device budget.
@@ -417,7 +417,8 @@ TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
     try {
         validate(d);
         if (!ensure_backend()) return 0;
-        const bool persistent = g_backend_type == BACKEND_TYPE_CUDA && option_enabled("TS_QWEN21_GRAPH_REUSE", true);
+        const bool persistent = (g_backend_type == BACKEND_TYPE_CUDA || g_backend_type == BACKEND_TYPE_METAL) &&
+            option_enabled("TS_QWEN21_GRAPH_REUSE", true);
         if (!persistent) {
             // Disabling reuse also releases previous entries before allocating
             // baseline scratch, so A/B runs do not charge both sets of buffers.
