@@ -19,6 +19,8 @@ namespace TensorSharp.Models
 
         private readonly int _minPixels;
         private readonly int _maxPixels;
+        private readonly int _maxSoftTokens;
+        private readonly bool _referenceSizing;
         // When set (e.g. the gemma4uv unified embedder declares mean=0, std=1),
         // pixels are normalized as (pixel/255 - mean) / std instead of the legacy
         // SigLIP [-1, 1] mapping used by the gemma4v path.
@@ -45,29 +47,68 @@ namespace TensorSharp.Models
         public const int DefaultSoftTokens = 280;
         public const int VideoSoftTokens = 70;
 
+        /// <summary>
+        /// The soft-token budgets the reference processor accepts
+        /// (<c>_SUPPORTED_SOFT_TOKENS</c> in <c>image_processing_gemma4.py</c>). Raising this
+        /// trades encode time for visual detail: the canvas area scales with the budget, so 560
+        /// gives the model roughly twice the pixels of the 280 default and costs roughly twice the
+        /// vision-encode time. llama.cpp defaults its own cap to 1120, which is why it reports
+        /// noticeably more image tokens than this processor for the same picture.
+        /// </summary>
+        public static readonly int[] SupportedSoftTokens = { 70, 140, 280, 560, 1120 };
+
+        /// <summary>
+        /// Rejects a budget the reference processor would not accept, rather than silently
+        /// rounding it. An off-list value produces a canvas the position-embedding table and the
+        /// 3x3 pooling were never exercised at.
+        /// </summary>
+        private static int ValidateSoftTokens(int tokens)
+        {
+            if (Array.IndexOf(SupportedSoftTokens, tokens) >= 0)
+                return tokens;
+            throw new ArgumentOutOfRangeException(nameof(tokens), tokens,
+                "Gemma-4 soft-token budget must be one of " +
+                string.Join(", ", SupportedSoftTokens) + ".");
+        }
+
+        /// <param name="referenceSizing">
+        /// True to size and resize exactly as the reference <c>Gemma4ImageProcessor</c> does:
+        /// scale to the soft-token budget (up OR down), floor each side to a multiple of
+        /// patch*pooling, and stretch to fill with an antialiased bicubic filter.
+        ///
+        /// <para>This is correct for the <c>gemma4v</c> SigLIP tower and is verified against a numpy
+        /// transcription of the reference (see Gemma4VisionOracleTests). It is deliberately NOT the
+        /// default, because the <c>gemma4uv</c> unified embedder was measured to degrade under it:
+        /// upscaling a 750x500 photo to the full budget made the model report a "very wide", "blurry"
+        /// picture and hallucinate content that was not present. That path keeps the llama.cpp-style
+        /// no-upscale + letterbox sizing, which is what it was validated on.</para>
+        /// </param>
         public Gemma4ImageProcessor(int patchSize = 16, int nMerge = 3,
             int minTokens = DefaultSoftTokens, int maxTokens = DefaultSoftTokens,
-            float[] imageMean = null, float[] imageStd = null)
+            float[] imageMean = null, float[] imageStd = null, bool referenceSizing = false)
         {
             PatchSize = patchSize;
             NMerge = nMerge;
             int patchArea = patchSize * patchSize * nMerge * nMerge;
             _minPixels = minTokens * patchArea;
             _maxPixels = maxTokens * patchArea;
+            _referenceSizing = referenceSizing;
+            _maxSoftTokens = referenceSizing ? ValidateSoftTokens(maxTokens) : maxTokens;
             _imageMean = imageMean != null && imageMean.Length >= 3 ? imageMean : null;
             _imageStd = imageStd != null && imageStd.Length >= 3 ? imageStd : null;
         }
 
         /// <summary>
-        /// Process an image file into normalized pixel values in channel-first format [C, H, W].
-        /// Mirrors llama.cpp's gemma4 vision preprocessing (mtmd_image_preprocessor_dyn_size):
-        ///   1. Pick a canvas size via "smart resize" (calc_size_preserved_ratio) that keeps
-        ///      min_pixels &lt;= W*H &lt;= max_pixels while aligning each side to patch*merge.
-        ///   2. Resize the image into that canvas preserving aspect ratio (PAD_CEIL), centering
-        ///      the content and letter-boxing the remainder with the padding colour (black).
+        /// Process an image file into normalized pixel values in channel-first format [C, H, W],
+        /// following the reference <c>Gemma4ImageProcessor</c>:
+        ///   1. Pick the canvas with <see cref="CalcAspectRatioPreservingSize"/> -- the largest
+        ///      one inside the soft-token budget with both sides a multiple of patch*pooling.
+        ///   2. Resize into it with an ANTIALIASED bicubic filter (the processor declares
+        ///      resample=3), stretching to fill. No letterboxing: see the note on
+        ///      <see cref="CalcAspectRatioPreservingSize"/> for what black bars cost.
         /// Normalization is (pixel/255 - mean) / std when the mmproj declares mean/std
-        /// (gemma4uv unified embedder, mean=0 std=1), otherwise the legacy SigLIP [-1,1] map.
-        /// Returns pixel data and the actual canvas dimensions.
+        /// (mean 0 / std 1 for this family, i.e. plain [0,1]), otherwise the legacy SigLIP
+        /// [-1,1] map. Returns pixel data and the actual canvas dimensions.
         /// </summary>
         public (float[] pixels, int width, int height) ProcessImage(string imagePath)
         {
@@ -76,11 +117,83 @@ namespace TensorSharp.Models
             byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out origWidth, out origHeight);
 
             int alignSize = PatchSize * NMerge;
+
+            if (_referenceSizing)
+            {
+                CalcAspectRatioPreservingSize(origWidth, origHeight, PatchSize, NMerge, _maxSoftTokens,
+                    out int refW, out int refH);
+
+                // The reference declares resample=3 (BICUBIC), do_rescale=1/255 and
+                // do_normalize=false (mean 0 / std 1). The tower itself does the 2*(x-0.5)
+                // recentring, so feed [0,1] when the mmproj declares identity statistics and fall
+                // back to the legacy [-1,1] map only when it does not.
+                float[] refMean = _imageMean ?? new[] { 0.5f, 0.5f, 0.5f };
+                float[] refStd = _imageStd ?? new[] { 0.5f, 0.5f, 0.5f };
+                float[] refPixels = ImageProcessorUtils.ResizeRgbaToChannelFirstBicubic(
+                    rgba, origWidth, origHeight, refW, refH, refMean, refStd);
+                return (refPixels, refW, refH);
+            }
+
             CalcSizePreservedRatio(origWidth, origHeight, alignSize, _minPixels, _maxPixels,
                 out int targetW, out int targetH);
-
             float[] pixels = BuildLetterboxedNormalized(rgba, origWidth, origHeight, targetW, targetH);
             return (pixels, targetW, targetH);
+        }
+
+        /// <summary>
+        /// Target canvas for one image, as a direct port of the reference processor's
+        /// <c>get_aspect_ratio_preserving_size</c> (transformers
+        /// <c>image_processing_gemma4.py</c>).
+        ///
+        /// <para>The largest canvas that (1) yields at most <c>maxSoftTokens * pooling^2</c>
+        /// patches and (2) has both sides divisible by <c>patch * pooling</c>. Each side is
+        /// FLOORED independently, so the aspect ratio is approximately, not exactly, preserved --
+        /// and the image is then stretched to fill it, never letterboxed.</para>
+        ///
+        /// <para>This replaced a letterboxing port of llama.cpp's
+        /// <c>calc_size_preserved_ratio</c>. Both pick the same canvas for most images, but
+        /// letterboxing pads the content with black bars that become real, unmasked, pooled
+        /// patches and shift every patch's learned position embedding. Measured end-to-end against
+        /// a numpy transcription of the reference on the TensorSharp banner image, the letterboxed
+        /// + bilinear pipeline diverged by 63.8% relative L2 with a worst-token cosine of -0.0007
+        /// (orthogonal), even though the tower itself was correct to 0.09%.</para>
+        /// </summary>
+        internal static void CalcAspectRatioPreservingSize(int width, int height,
+            int patchSize, int pooling, int maxSoftTokens, out int targetW, out int targetH)
+        {
+            int sideMult = patchSize * pooling;
+            if (width <= 0 || height <= 0 || sideMult <= 0)
+            {
+                targetW = sideMult;
+                targetH = sideMult;
+                return;
+            }
+
+            long maxPatches = (long)maxSoftTokens * pooling * pooling;
+            double targetPx = (double)maxPatches * patchSize * patchSize;
+            double factor = Math.Sqrt(targetPx / ((double)width * height));
+
+            targetH = (int)Math.Floor(factor * height / sideMult) * sideMult;
+            targetW = (int)Math.Floor(factor * width / sideMult) * sideMult;
+
+            // Either side can floor to zero for an extreme aspect ratio; the reference clamps the
+            // degenerate side to one unit and caps the other so the patch budget still holds.
+            int maxSide = (int)(maxPatches / (pooling * pooling)) * sideMult;
+            if (targetH == 0 && targetW == 0)
+            {
+                targetH = sideMult;
+                targetW = sideMult;
+            }
+            else if (targetH == 0)
+            {
+                targetH = sideMult;
+                targetW = Math.Min(Math.Max(1, (int)Math.Floor((double)width / height)) * sideMult, maxSide);
+            }
+            else if (targetW == 0)
+            {
+                targetW = sideMult;
+                targetH = Math.Min(Math.Max(1, (int)Math.Floor((double)height / width)) * sideMult, maxSide);
+            }
         }
 
         /// <summary>
@@ -89,6 +202,9 @@ namespace TensorSharp.Models
         /// <paramref name="alignSize"/> (patch_size * n_merge). Direct port of
         /// llama.cpp <c>img_tool::calc_size_preserved_ratio(..., min_pixels, max_pixels)</c>
         /// (the "smart_resize" used by the Qwen/Gemma transformers processors).
+        ///
+        /// <para>Retained for the non-Gemma-4 callers and for A/B comparison against llama.cpp;
+        /// the Gemma-4 path now uses <see cref="CalcAspectRatioPreservingSize"/>.</para>
         /// </summary>
         internal static void CalcSizePreservedRatio(int width, int height, int alignSize,
             int minPixels, int maxPixels, out int targetW, out int targetH)

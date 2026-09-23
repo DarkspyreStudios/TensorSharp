@@ -245,5 +245,135 @@ namespace TensorSharp.Models
             float composited = rgba[pixelBase + channel] * alpha + 255f * (1f - alpha);
             return composited / 255f;
         }
+
+        // ---- bicubic resampling ------------------------------------------------------------
+        //
+        // The Gemma-4 family's processor declares resample=3 (BICUBIC), and its reference
+        // implementation resizes with an ANTIALIASED bicubic: when downscaling, the filter's
+        // support widens by 1/scale so every source pixel contributes. Point-sampled bicubic
+        // (the naive "read 4x4 neighbours" form) is NOT the same operation and aliases badly on
+        // a large downscale, which is the usual case for a photo going to a ~960x624 canvas.
+        //
+        // This is the PIL/torchvision resampling formulation: a separable two-pass filter with a
+        // per-output-pixel footprint and normalized weights, Catmull-Rom-style cubic with a=-0.5.
+
+        private const double BicubicSupport = 2.0;
+
+        private static double CubicFilter(double x)
+        {
+            // PIL's bicubic kernel (a = -0.5).
+            const double a = -0.5;
+            x = Math.Abs(x);
+            if (x < 1.0)
+                return ((a + 2.0) * x - (a + 3.0)) * x * x + 1.0;
+            if (x < 2.0)
+                return (((x - 5.0) * x + 8.0) * x - 4.0) * a;
+            return 0.0;
+        }
+
+        /// <summary>
+        /// Precompute, for one axis, each output pixel's source window and normalized weights.
+        /// </summary>
+        private static void BuildCubicWeights(int srcSize, int dstSize,
+            out int[] bounds, out double[] weights, out int windowSize)
+        {
+            double scale = (double)srcSize / dstSize;
+            double filterScale = Math.Max(1.0, scale);
+            double support = BicubicSupport * filterScale;
+            windowSize = (int)Math.Ceiling(support) * 2 + 1;
+
+            bounds = new int[dstSize * 2];
+            weights = new double[(long)dstSize * windowSize <= int.MaxValue ? dstSize * windowSize : 0];
+            if (weights.Length == 0)
+                throw new InvalidOperationException($"resize window too large for {srcSize}->{dstSize}.");
+
+            for (int i = 0; i < dstSize; i++)
+            {
+                double center = (i + 0.5) * scale;
+                int xmin = (int)Math.Max(0, Math.Floor(center - support + 0.5));
+                int xmax = (int)Math.Min(srcSize, Math.Ceiling(center + support + 0.5));
+                int count = xmax - xmin;
+
+                double sum = 0;
+                int wBase = i * windowSize;
+                for (int k = 0; k < count; k++)
+                {
+                    double w = CubicFilter((xmin + k + 0.5 - center) / filterScale);
+                    weights[wBase + k] = w;
+                    sum += w;
+                }
+                if (sum != 0)
+                    for (int k = 0; k < count; k++)
+                        weights[wBase + k] /= sum;
+
+                bounds[i * 2] = xmin;
+                bounds[i * 2 + 1] = count;
+            }
+        }
+
+        /// <summary>
+        /// Antialiased bicubic resize of an RGBA buffer, compositing over white, into channel-first
+        /// [C, H, W] normalized as <c>(pixel/255 - mean) / std</c>.
+        ///
+        /// The image is stretched to fill exactly <paramref name="dstW"/> x <paramref name="dstH"/>.
+        /// It is deliberately NOT letterboxed: the Gemma-4 reference processor derives the target
+        /// canvas by flooring each side independently to a multiple of patch*pooling, which already
+        /// approximately preserves the aspect ratio, and then resizes into it. Padding to preserve
+        /// the ratio exactly would inject black bars that become real, unmasked, pooled patches and
+        /// shift every patch's learned position embedding.
+        /// </summary>
+        internal static float[] ResizeRgbaToChannelFirstBicubic(
+            byte[] rgba, int srcW, int srcH, int dstW, int dstH, float[] mean, float[] std)
+        {
+            BuildCubicWeights(srcW, dstW, out int[] xBounds, out double[] xWeights, out int xWindow);
+            BuildCubicWeights(srcH, dstH, out int[] yBounds, out double[] yWeights, out int yWindow);
+
+            // Pass 1: horizontal, into a [3][srcH][dstW] intermediate held at full precision.
+            var horizontal = new float[3 * srcH * dstW];
+            Parallel.For(0, srcH, sy =>
+            {
+                long rowBase = (long)sy * srcW;
+                for (int dx = 0; dx < dstW; dx++)
+                {
+                    int xmin = xBounds[dx * 2], count = xBounds[dx * 2 + 1];
+                    int wBase = dx * xWindow;
+                    double r = 0, g = 0, b = 0;
+                    for (int k = 0; k < count; k++)
+                    {
+                        double w = xWeights[wBase + k];
+                        int pixelBase = (int)((rowBase + xmin + k) * 4);
+                        r += w * CompositeChannel01(rgba, pixelBase, 0);
+                        g += w * CompositeChannel01(rgba, pixelBase, 1);
+                        b += w * CompositeChannel01(rgba, pixelBase, 2);
+                    }
+                    int idx = sy * dstW + dx;
+                    horizontal[idx] = (float)r;
+                    horizontal[srcH * dstW + idx] = (float)g;
+                    horizontal[2 * srcH * dstW + idx] = (float)b;
+                }
+            });
+
+            // Pass 2: vertical, straight into the channel-first output.
+            int outPixels = dstW * dstH;
+            var result = new float[3 * outPixels];
+            Parallel.For(0, dstH, dy =>
+            {
+                int ymin = yBounds[dy * 2], count = yBounds[dy * 2 + 1];
+                int wBase = dy * yWindow;
+                for (int dx = 0; dx < dstW; dx++)
+                {
+                    for (int c = 0; c < 3; c++)
+                    {
+                        int plane = c * srcH * dstW;
+                        double acc = 0;
+                        for (int k = 0; k < count; k++)
+                            acc += yWeights[wBase + k] * horizontal[plane + (ymin + k) * dstW + dx];
+                        result[c * outPixels + dy * dstW + dx] = (float)((acc - mean[c]) / std[c]);
+                    }
+                }
+            });
+
+            return result;
+        }
     }
 }

@@ -38,6 +38,7 @@ namespace TensorSharp.Models
             // F32/dequant reads, mmap faults from the sharding/upload threads)
             // otherwise reads the file at one-or-two-stream speed, which is the
             // whole cold-load time on network-backed model storage.
+            ReadBonsaiMetadata();
             _gguf.PrefaultFileCache();
             Console.Write("Loading model weights...");
             int countF32 = 0;
@@ -50,6 +51,15 @@ namespace TensorSharp.Models
             {
                 var info = kv.Value;
                 long byteCount = _gguf.GetTensorByteCount(info);
+
+                if (info.Type is GgmlTensorType.PQ2_0 or GgmlTensorType.PTQ1_0)
+                {
+                    QuantizedWeight converted = LoadBonsaiQuantizedWeight(info);
+                    _quantWeights[info.Name] = converted;
+                    countQuant++;
+                    totalQuantBytes += converted.RawBytes;
+                    continue;
+                }
 
                 if (IsQuantizedLinearWeight(info))
                 {
@@ -907,6 +917,7 @@ namespace TensorSharp.Models
                     (IntPtr)rowPtr,
                     (IntPtr)(dst + (long)i * dim),
                     dim);
+                weight.InverseBonsaiEmbeddingRow(new Span<float>(dst + (long)i * dim, dim));
             }
 
             InvalidateTensorDeviceCache(result);
@@ -994,6 +1005,9 @@ namespace TensorSharp.Models
                 string gateName = $"blk.{l}.ffn_gate.weight";
                 string upName = $"blk.{l}.ffn_up.weight";
                 string guName = $"blk.{l}.ffn_gate_up.weight";
+
+                if (BonsaiHadamard != null && !BonsaiHadamard.CanFuseProjections(gateName, upName))
+                    continue;
 
                 if (_quantWeights.TryGetValue(gateName, out var gw) &&
                     _quantWeights.TryGetValue(upName, out var uw) &&

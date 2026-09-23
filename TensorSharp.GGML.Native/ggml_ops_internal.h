@@ -41,6 +41,7 @@
 #include "ggml-cpu.h"
 #include "ggml-quants.h"
 #include "ggml_ops_flash_attn_guard.h"
+#include "ggml_ops_bonsai.h"
 
 #if defined(_WIN32)
 #define TSG_EXPORT extern "C" __declspec(dllexport)
@@ -1249,7 +1250,7 @@ namespace tsg
     // free. Paths that allocate with ggml_backend_alloc_ctx_tensors directly (the
     // persistent captured graphs, the small-N bump-allocated ones) still have to
     // call it themselves, before that allocation.
-    void optimize_graph_for_metal(ggml_cgraph* graph);
+    void optimize_graph_for_metal(ggml_context* ctx, ggml_cgraph* graph);
 
     // Some whole-model graphs are executed as ORDERED SLICES of their node array
     // (ggml_graph_view): the host-MoE seams stop at a node INDEX to run an

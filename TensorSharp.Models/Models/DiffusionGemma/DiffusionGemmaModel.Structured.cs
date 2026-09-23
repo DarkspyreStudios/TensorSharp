@@ -14,6 +14,9 @@ namespace TensorSharp.Models
         private int[] _structuredPromptTokens;
         private DiffusionSeqState _structuredPrompt;
         private bool _structuredPromptUsesFusedAttention;
+        // The retained image spans are part of what a prompt prefill bakes into the cached K/V, but they
+        // are NOT part of the token array, so the token comparison below cannot see them change.
+        private int _structuredPromptVisionSpanVersion = -1;
         private int[] _structuredLabelTokens;
         private QuantizedWeight _structuredHead;
         private Tensor _structuredFloatHead;
@@ -133,7 +136,8 @@ namespace TensorSharp.Models
             }
 
             if (_structuredPromptTokens == null || !_structuredPromptTokens.AsSpan().SequenceEqual(promptTokens)
-                || _structuredPromptUsesFusedAttention != UseFusedPromptAttention)
+                || _structuredPromptUsesFusedAttention != UseFusedPromptAttention
+                || _structuredPromptVisionSpanVersion != _visionSpanVersion)
             {
                 DisposeSeqState(_structuredPrompt);
                 _structuredPromptTokens = null;
@@ -144,6 +148,7 @@ namespace TensorSharp.Models
                         _structuredPrompt.PromptK, _structuredPrompt.PromptV, cancellationToken);
                     _structuredPromptTokens = (int[])promptTokens.Clone();
                     _structuredPromptUsesFusedAttention = UseFusedPromptAttention;
+                    _structuredPromptVisionSpanVersion = _visionSpanVersion;
                 }
                 catch
                 {

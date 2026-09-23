@@ -409,6 +409,26 @@ namespace TensorSharp.Models
                 IsTensorParallel,
                 Environment.GetEnvironmentVariable("TS_QWEN35_METAL_GDN_INPLACE_STATE"));
 
+            try
+            {
+                InitializeQwen35Model(backend, draftModelPath);
+            }
+            catch
+            {
+                if (HasBonsaiCheckpointMetadata)
+                {
+                    // Reuse the ordinary cleanup without virtual dispatch into
+                    // a subclass whose constructor has not completed. A missing
+                    // native entry point must not hide the original load error
+                    // or prevent rollback of owned transcoded weights.
+                    CleanUpFailedBonsaiConstruction(DisposeQwen35Resources, () => base.Dispose());
+                }
+                throw;
+            }
+        }
+
+        private void InitializeQwen35Model(BackendType backend, string draftModelPath)
+        {
             string arch = _gguf.GetString("general.architecture") ?? "qwen35";
             Config = new ModelConfig { Architecture = arch };
             ParseBaseConfig();
@@ -505,6 +525,7 @@ namespace TensorSharp.Models
             FuseAttentionProjectionWeights();
             FuseRecurrentInputWeights();
             FuseGateUpWeights(TotalLayerCount);
+            RegisterBonsaiWeightTransforms(_headVDim, _numKHeads, _numVHeads);
             DetectMoeLayers();
             BuildLayerKeys();
             BuildProjScaleTable();
@@ -715,6 +736,9 @@ namespace TensorSharp.Models
 
         private unsafe bool TryFuseWeights(string fusedName, bool keepSources, params string[] weightNames)
         {
+            if (BonsaiHadamard != null && !BonsaiHadamard.CanFuseProjections(weightNames))
+                return false;
+
             if (weightNames == null || weightNames.Length < 2)
                 return false;
 
@@ -6435,6 +6459,12 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeQwen35Resources();
+            base.Dispose();
+        }
+
+        private void DisposeQwen35Resources()
+        {
             // Native whole-model graphs retain backend buffers and weight/cache
             // bindings. Release them while the model tensors and Metal backend are
             // still alive; otherwise Metal residency sets retain allocations until
@@ -6502,8 +6532,6 @@ namespace TensorSharp.Models
             _attnDecodeOutBuf?.Dispose();
             _attnDecodeQkvBuf?.Dispose();
             _ffnDecodeGateUpBuf?.Dispose();
-
-            base.Dispose();
         }
     }
 }

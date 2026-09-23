@@ -9,7 +9,7 @@
 | GGUF architecture keys | `diffusion-gemma`, `diffusion_gemma` |
 | Source class | [`DiffusionGemmaModel`](../../TensorSharp.Models/Models/DiffusionGemma/DiffusionGemmaModel.cs) |
 | Sampler | [`DiffusionGemmaSampler`](../../TensorSharp.Models/Models/DiffusionGemma/DiffusionGemmaSampler.cs) |
-| Modalities | Text only |
+| Modalities | Text + **image** (audio is not supported: the checkpoint has no audio tower) |
 | Thinking / tools | Thought channel parsed out (returned only on `"think": true`); tools/tool_choice refused with HTTP 400 |
 | Generation mode | Block text diffusion, not autoregressive token decode |
 | CLI support | `TensorSharp.Cli` detects `DiffusionGemmaModel` and uses diffusion run mode |
@@ -24,8 +24,29 @@ Verified GGUF pointers:
 |---|---|---|---|
 | diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` (16.807 GB); also `Q5_K_M`, `Q6_K`, `Q8_0`, `BF16` | GGUF `general.architecture` = `diffusion-gemma`. Official upstream weights: [google/diffusiongemma-26B-A4B-it](https://huggingface.co/google/diffusiongemma-26B-A4B-it) |
 
-`Q4_K_M` is the smallest published quant. No companion files are needed
-(text only — no mmproj).
+`Q4_K_M` is the smallest published quant.
+
+**For image input you also need the vision tower, and it is NOT in any GGUF.**
+Every published GGUF of this checkpoint is text-only — the conversion drops the
+vision tower, and no mmproj was ever released. The tower does exist upstream:
+all 356 of its tensors live in a single 2.8 GB shard of the 11-shard BF16
+checkpoint, and TensorSharp loads that shard directly (no conversion step):
+
+| File | HF repo | Size |
+|---|---|---|
+| `model-00011-of-00011.safetensors` | [google/diffusiongemma-26B-A4B-it](https://huggingface.co/google/diffusiongemma-26B-A4B-it) | 2.84 GB |
+
+```bash
+hf download google/diffusiongemma-26B-A4B-it model-00011-of-00011.safetensors --local-dir models
+```
+
+Or let the config fetch it on first use — `config/diffusiongemma-26b-a4b-q4.json`
+declares it under `mmproj` with a SHA-256, so it downloads once and is reused
+afterwards. Pass `--mmproj none` to run text-only and skip the download.
+
+Audio is **not** supported and no projector can add it: the upstream config has
+no `audio_config` and the weights contain no audio tower, so the `<|audio|>`
+tokens the tokenizer inherits from Gemma 4 have nothing behind them.
 
 Command-line download (one line per file; requires `pip install -U huggingface_hub`):
 
@@ -55,7 +76,9 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --model models/diffus
 For typed decisions (`noul`, `choice`, `score`) use the native
 [`/v1/systemone` Jev endpoint](jev.md). It reads label probabilities from a seeded
 canvas in one denoising step, with a sparse output projection and no generated
-JSON parsing. Start with [`jev-diffusiongemma-q4.json`](../../config/jev-diffusiongemma-q4.json).
+JSON parsing. Its state may carry images as well as text, through the same vision
+tower this page describes. Start with
+[`jev-diffusiongemma-q4.json`](../../config/jev-diffusiongemma-q4.json).
 
 DiffusionGemma is a block text-diffusion language model built on a Gemma-4-style
 Mixture-of-Experts backbone. It is not the same runtime contract as the

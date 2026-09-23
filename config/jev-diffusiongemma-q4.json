@@ -6,6 +6,8 @@
   // use another model directory, then run:
   // dotnet run --project TensorSharp.Server.Host -c Release -- --config config/jev-diffusiongemma-q4.json
   // Sampling/read controls belong in the JSON request, not chat sampler flags.
+  // Image input travels inside the request body; TS_JEV_MAX_BODY_MB (default 8)
+  // caps that body.
   // MAX_CONTEXT is environment-only and limits prompt + canvas tokens. Set it
   // before launch for your memory budget (for example, $env:MAX_CONTEXT='4096').
   // On a 16 GiB CUDA GPU, reserve activation space before launch with
@@ -20,6 +22,27 @@
     "urls": [
       "https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF/resolve/main/diffusiongemma-26B-A4B-it-Q4_K_M.gguf"
     ]
+  },
+  // Vision tower for image input. A Jev request may carry images in "images"
+  // (base64 or data: URLs); each one is encoded here and read as part of the
+  // state, and the label logits are then conditioned on the pixels as well as
+  // the text. Without this entry the server still answers text-only requests
+  // and refuses image ones with 503 rather than guessing.
+  //
+  // Every published GGUF of this checkpoint is TEXT-ONLY, and no mmproj was
+  // released for it; the upstream repo does carry the tower, and all 356 of its
+  // tensors live in this one 2.8 GB shard (of an 11-shard, 51.6 GB checkpoint),
+  // so this downloads that shard alone. It is fetched once and reused. To run
+  // text-only decisions and skip the download entirely, pass --mmproj none.
+  //
+  // Audio is NOT supported by this checkpoint (no audio_config, no audio
+  // weights), and neither is video; both are refused by name.
+  "mmproj": {
+    "path": "${modelRoot}/diffusiongemma-26B-A4B-it-vision.safetensors",
+    "urls": [
+      "https://huggingface.co/google/diffusiongemma-26B-A4B-it/resolve/main/model-00011-of-00011.safetensors"
+    ],
+    "sha256": "afec047176bb2a05f078566576aec6bdb71ad4d041275d0d0c89473fda6d6d87"
   },
   "backend": "ggml_cuda",
   "host": "127.0.0.1",

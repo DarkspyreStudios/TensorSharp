@@ -259,7 +259,10 @@ if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
 endif()
 
 set(TSG_GGMLOPS_SOURCES
+    bonsai_quant.cpp
     ggml_ops_core.cpp
+    ggml_ops_graph_optimize.cpp
+    ggml_ops_bonsai.cpp
     ggml_ops_attention_alloc.cpp
     ggml_ops_attention_precision.cpp
     ggml_ops_flash_attn_guard.cpp
@@ -462,6 +465,44 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     set_property(SOURCE ggml_ops_deepseek4.cpp APPEND PROPERTY COMPILE_DEFINITIONS TSG_GGML_TEST_HOOKS)
     set_property(SOURCE ggml_ops_deepseek41_tp.cpp APPEND PROPERTY COMPILE_DEFINITIONS TSG_GGML_TEST_HOOKS)
     enable_testing()
+    add_executable(GgmlOpsGraphOptimizeTest tests/graph_optimize_alloc_test.cpp ggml_ops_graph_optimize.cpp)
+    target_include_directories(GgmlOpsGraphOptimizeTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/src")
+    target_link_libraries(GgmlOpsGraphOptimizeTest PRIVATE ggml-cpu ggml-base)
+    add_test(NAME graph-optimizer-allocation-dependencies COMMAND GgmlOpsGraphOptimizeTest)
+    add_executable(GgmlOpsBonsaiHadamardTest tests/bonsai_hadamard_test.cpp ggml_ops_bonsai.cpp)
+    target_include_directories(GgmlOpsBonsaiHadamardTest PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/src")
+    target_link_libraries(GgmlOpsBonsaiHadamardTest PRIVATE ggml ggml-cpu ggml-base)
+    add_test(NAME bonsai2-hadamard-cpu COMMAND GgmlOpsBonsaiHadamardTest cpu)
+    if (APPLE AND TENSORSHARP_GGML_NATIVE_ENABLE_METAL)
+        target_compile_definitions(GgmlOpsBonsaiHadamardTest PRIVATE TSG_GGML_USE_METAL=1)
+        target_link_libraries(GgmlOpsBonsaiHadamardTest PRIVATE ggml-metal)
+        add_test(NAME bonsai2-hadamard-metal COMMAND GgmlOpsBonsaiHadamardTest metal)
+        set_tests_properties(bonsai2-hadamard-metal PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+    endif()
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+        target_compile_definitions(GgmlOpsBonsaiHadamardTest PRIVATE TSG_GGML_USE_CUDA=1)
+        target_link_libraries(GgmlOpsBonsaiHadamardTest PRIVATE ggml-cuda)
+        add_test(NAME bonsai2-hadamard-cuda COMMAND GgmlOpsBonsaiHadamardTest cuda)
+        set_tests_properties(bonsai2-hadamard-cuda PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+    endif()
+    add_executable(GgmlOpsBonsaiQuantTest tests/bonsai_quant_test.cpp bonsai_quant.cpp)
+    target_include_directories(GgmlOpsBonsaiQuantTest PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(GgmlOpsBonsaiQuantTest PRIVATE ggml ggml-cpu ggml-base)
+    add_test(NAME bonsai2-lossless-quant-cpu COMMAND GgmlOpsBonsaiQuantTest cpu)
+    if (APPLE AND TENSORSHARP_GGML_NATIVE_ENABLE_METAL)
+        target_compile_definitions(GgmlOpsBonsaiQuantTest PRIVATE TSG_GGML_USE_METAL=1)
+        target_link_libraries(GgmlOpsBonsaiQuantTest PRIVATE ggml-metal)
+        add_test(NAME bonsai2-lossless-quant-metal COMMAND GgmlOpsBonsaiQuantTest metal)
+        set_tests_properties(bonsai2-lossless-quant-metal PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+    endif()
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+        target_compile_definitions(GgmlOpsBonsaiQuantTest PRIVATE TSG_GGML_USE_CUDA=1)
+        target_link_libraries(GgmlOpsBonsaiQuantTest PRIVATE ggml-cuda)
+        add_test(NAME bonsai2-lossless-quant-cuda COMMAND GgmlOpsBonsaiQuantTest cuda)
+        set_tests_properties(bonsai2-lossless-quant-cuda PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+    endif()
     add_executable(GgmlOpsDsv41EngramTest tests/dsv41_engram_test.cpp)
     add_test(NAME deepseek41-engram-hash-lookup COMMAND GgmlOpsDsv41EngramTest)
     add_executable(GgmlOpsDsv41EngramGgufTest tests/dsv41_engram_gguf_test.cpp)

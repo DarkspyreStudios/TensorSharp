@@ -1120,7 +1120,7 @@ TSG_EXPORT int TSGgml_MuseGlimmerModelForward(
         // allocator's alias plan. Skipped under tensor parallelism, whose plan
         // segments are resolved from node positions.
         if (!tp_mode && can_persist)
-            optimize_graph_for_metal(graph);
+            optimize_graph_for_metal(ctx, graph);
 
         // ---------------- allocate + upload ----------------
         // Decode (1 row) gets its own slot per tensor so the addresses are STABLE

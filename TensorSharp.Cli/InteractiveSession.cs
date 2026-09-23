@@ -480,7 +480,8 @@ namespace TensorSharp.Cli
             Console.WriteLine("  /model <path>          Load a different .gguf model (resets the session).");
             Console.WriteLine("  /backend <name>        Reload the current model on a different backend");
             Console.WriteLine("                         (cpu | cuda | ggml_cpu | ggml_metal | ggml_cuda).");
-            Console.WriteLine("  /mmproj <path>         Load a multimodal projector for the current model");
+            Console.WriteLine("  /mmproj <path>         Load a multimodal projector for the current model:");
+            Console.WriteLine("                         an mmproj .gguf, or a Gemma 4 vision .safetensors shard");
             Console.WriteLine("                         (pass an empty value to clear).");
             Console.WriteLine();
             Console.WriteLine("Sampling:");
@@ -871,7 +872,7 @@ namespace TensorSharp.Cli
                 }
                 else
                 {
-                    Console.WriteLine("Usage: /mmproj <path-to-mmproj.gguf>");
+                    Console.WriteLine("Usage: /mmproj <path-to-mmproj.gguf | path-to-vision.safetensors>");
                 }
                 return;
             }

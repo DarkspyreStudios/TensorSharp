@@ -6,6 +6,8 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using TensorSharp.Server.Hosting;
 using TensorSharp.Server.Jev;
 
 namespace TensorSharp.Server;
@@ -13,6 +15,17 @@ namespace TensorSharp.Server;
 public partial class ModelService
 {
     private readonly JevExecutionGate _jevExecution = new(ReadJevLimit("TS_JEV_MAX_PENDING", 32, 1, 1024));
+    private UploadStoragePolicy _jevMediaStorage;
+
+    /// <summary>
+    /// Where inline Jev image input is materialized before the vision tower reads it. The server
+    /// host assigns the upload policy it already governs, so an operator's <c>--upload-max-mb</c>,
+    /// quota and TTL cover these images exactly as they cover chat attachments.
+    ///
+    /// <para>Left unset (in-process callers), a process-local directory under the system temp path
+    /// is used and named once in the log, rather than silently choosing a location.</para>
+    /// </summary>
+    public UploadStoragePolicy MediaStorage { get; set; }
 
     /// <summary>Evaluate Jev noul, choice and score questions using one denoise read per sample.</summary>
     public Task<object> JevAsync(JevRequest request, CancellationToken cancellationToken = default)
@@ -26,8 +39,19 @@ public partial class ModelService
                 !string.Equals(request.Model, LoadedModelName, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(request.Model, Path.GetFileNameWithoutExtension(LoadedModelName), StringComparison.OrdinalIgnoreCase))
                 throw new JevModelNotFoundException("model must name the loaded model, jev-latest, or jev-preview");
+            if (request.Images.Length != 0 && model.VisionEncoder == null)
+                throw new JevModelUnavailableException(
+                    "Image input requires the DiffusionGemma vision tower. Start the server with the " +
+                    "vision shard declared by config/jev-diffusiongemma-q4.json, or send a text-only state.");
+
+            // Decoding and the content-addressed write need no GPU and no model, so they happen
+            // before the compute lock is taken. A text-only request never touches media storage.
+            string[] imagePaths = request.Images.Length == 0
+                ? Array.Empty<string>()
+                : JevImageInput.Materialize(request.Images, ResolveMediaStorage());
 
             bool entered = false;
+            var vision = new JevVisionBinder(new JevDiffusionVisionTarget(model), imagePaths);
             try
             {
                 // The existing chat scheduler owns this same gate for each entire
@@ -35,22 +59,48 @@ public partial class ModelService
                 while (!(entered = Monitor.TryEnter(model.GpuComputeLock, 100))) ct.ThrowIfCancellationRequested();
                 ct.ThrowIfCancellationRequested();
                 var renderer = new KVCachePromptRenderer(new GgufPromptRenderer());
-                int[] Render(string system, string state) => renderer.RenderToTokens(model.Tokenizer,
-                    model.Config.ChatTemplate, new List<ChatMessage>
+                int[] Render(string system, string state)
+                {
+                    // The images ride on the user turn, so the protocol's renderer puts one
+                    // <|image> marker per image ahead of the state text; the binder then expands
+                    // each marker into its soft-token span for THIS chunk prompt.
+                    var history = new List<ChatMessage>
                     {
                         new() { Role = "system", Content = system },
-                        new() { Role = "user", Content = state },
-                    }, model.Config.Architecture, addGenerationPrompt: true, enableThinking: false).ToArray();
+                        new() { Role = "user", Content = state, ImagePaths = vision.ImagePathsOrNull() },
+                    };
+                    int[] tokens = renderer.RenderToTokens(model.Tokenizer, model.Config.ChatTemplate, history,
+                        model.Config.Architecture, addGenerationPrompt: true, enableThinking: false).ToArray();
+                    return vision.Expand(history, tokens);
+                }
                 int eos = model.Tokenizer.LookupToken("<turn|>");
                 if (eos < 0) throw new JevModelUnavailableException("DiffusionGemma tokenizer is missing the <turn|> token.");
                 int pad = model.Tokenizer.LookupToken("<pad>");
                 if (pad < 0) pad = model.MaskTokenId;
                 return JevInference.Run(request, LoadedModelName, text => model.Tokenizer.Encode(text, false).ToArray(),
-                    Render, model.ReadStructured, Math.Min(model.CanvasLength, ReadJevLimit("TS_JEV_MAX_CANVAS", 64, 8, 4096)),
+                    Render, vision.Read, Math.Min(model.CanvasLength, ReadJevLimit("TS_JEV_MAX_CANVAS", 64, 8, 4096)),
                     model.MaxContextLength, eos, pad, model.Tokenizer.VocabSize, ct);
             }
-            finally { if (entered) Monitor.Exit(model.GpuComputeLock); }
+            finally
+            {
+                // Disposal frees model-global image spans, so it belongs inside the lock: a span
+                // left installed would be spliced into whatever prompt runs next.
+                vision.Dispose();
+                if (entered) Monitor.Exit(model.GpuComputeLock);
+            }
         }, cancellationToken);
+    }
+
+    private UploadStoragePolicy ResolveMediaStorage()
+    {
+        if (MediaStorage != null) return MediaStorage;
+        if (_jevMediaStorage != null) return _jevMediaStorage;
+        string directory = Path.Combine(Path.GetTempPath(), "tensorsharp-jev-media");
+        Directory.CreateDirectory(directory);
+        _logger.LogInformation(
+            "Jev image input is stored in {Directory}; set ModelService.MediaStorage to govern it with an upload policy.",
+            directory);
+        return _jevMediaStorage = new UploadStoragePolicy(directory);
     }
 
     private static int ReadJevLimit(string variable, int fallback, int minimum, int maximum)

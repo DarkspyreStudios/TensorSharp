@@ -3,10 +3,15 @@
 
   python eng/jev-extended-smoke.py --endpoint http://127.0.0.1:5000
   python eng/jev-extended-smoke.py --endpoint http://127.0.0.1:5000 --chat
+  python eng/jev-extended-smoke.py --endpoint http://127.0.0.1:5000 --image
 
 The default suite executes real inference for auto/fixed noise draws and compact
-question chunking. --chat also runs ordinary diffusion chat after Jev and while a
-Jev request is outstanding; it can take substantially longer than structured reads.
+question chunking, and checks that image input that is not inline bytes is refused.
+--image additionally sends a request carrying an image, which requires a server
+started with the vision tower; it screens one unambiguous synthetic picture and is
+not an image-understanding benchmark. --chat also runs ordinary diffusion chat after
+Jev and while a Jev request is outstanding; it can take substantially longer than
+structured reads.
 No server, backend or model is started or reconfigured. Outputs go to the ignored
 artifacts/jev/extended directory by default. This is an integration screen, not a
 quality benchmark, calibration assessment or comparative performance claim.
@@ -163,6 +168,23 @@ def compact_payload(model, prompt):
     return body, expected
 
 
+def image_payload(model, path):
+    """The checked-in image request, re-pointed at the model alias under test.
+
+    Its picture is a synthetic traffic light with the GREEN lamp lit, and the state
+    text says only that the vehicle is approaching an intersection. Measured on this
+    checkpoint, the same request without the image answers "red" and "must stop"
+    with high confidence, so these two gold answers are reachable only by reading
+    the pixels -- which is the failure this screen exists to catch (expanded
+    placeholders with nothing behind them read as filler tokens and still produce a
+    confident probability).
+    """
+    body = json.loads(Path(path).read_text(encoding="utf-8"))
+    body["model"] = model
+    check(isinstance(body.get("images"), list) and body["images"], f"{path} carries no images")
+    return body, {"signal": "green", "stop": False, "visibility": 2}
+
+
 class Suite:
     def __init__(self, args, output):
         self.args, self.output = args, output
@@ -225,6 +247,11 @@ def main():
     parser.add_argument("--output", default=str(ROOT / "artifacts/jev/extended"))
     parser.add_argument("--api-key-env", help="Environment variable containing the bearer token")
     parser.add_argument("--chat", action="store_true", help="Also test ordinary chat after and concurrently with Jev; potentially slow")
+    parser.add_argument("--image", action="store_true", help="Also send an image request; requires a server started with the vision tower")
+    parser.add_argument("--image-request", default=str(ROOT / "docs/examples/jev-traffic-light.json"),
+                        help="Request JSON used by --image; must carry inline images")
+    parser.add_argument("--max-body-mb", type=int, default=8,
+                        help="The server's TS_JEV_MAX_BODY_MB (default 8); the oversized-body case sends one byte more")
     parser.add_argument("--chat-model", help="Default: actual model name returned by the first Jev response")
     parser.add_argument("--chat-max-tokens", type=int, default=256, help="Default 256: one full DiffusionGemma canvas budget")
     parser.add_argument("--chat-seed", type=int, default=42, help="Fixed ordinary-chat seed for repeatability checks; default 42")
@@ -234,6 +261,8 @@ def main():
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0 or args.chat_max_tokens < 1 or not math.isfinite(args.isolation_tolerance) or args.isolation_tolerance < 0:
         parser.error("timeout/chat-max-tokens must be positive, and isolation-tolerance must be finite and nonnegative")
+    if not 1 <= args.max_body_mb <= 64:
+        parser.error("max-body-mb must be from 1 to 64, matching the server's TS_JEV_MAX_BODY_MB range")
     if not 0 <= args.chat_seed <= 2147483647:
         parser.error("chat-seed must be a nonnegative 32-bit integer")
     if not args.chat_prompt.strip() or not args.chat_expected.strip():
@@ -280,7 +309,31 @@ def main():
         return validate
 
     suite.run("malformed-json", b"{", error_validator(400))
-    suite.run("oversized-body", b" " * (1024 * 1024 + 1), error_validator(413))
+    suite.run("oversized-body", b" " * (args.max_body_mb * 1024 * 1024 + 1), error_validator(413))
+
+    # Refused whatever the server loaded: the request never reaches the tower, so this
+    # case runs even without --image. An endpoint that fetched the URL instead would be
+    # a request forger for anything its host can reach.
+    remote = dict(base, samples=1, images=["https://example.com/receipt.png"])
+    suite.run("image-remote-url-refused", remote, error_validator(422))
+
+    if args.image:
+        image_body, image_gold = image_payload(args.model, args.image_request)
+
+        def image_validator(result):
+            validate_samples(image_body, result, image_gold, "fixed")
+            scores = BENCH.validate_response(image_body, result, image_gold)
+            diagnostics = result["body"]["diagnostics"]
+            check(diagnostics.get("images") == len(image_body["images"]),
+                  "Response did not report the images it was given")
+            decisive = {score["question"]: score["correct"] for score in scores}
+            # Only the two unambiguous questions gate the result; the score question's
+            # outcome is recorded as evidence, not asserted.
+            check(decisive.get("signal") and decisive.get("stop"),
+                  "The image request answered an unambiguous visual fact incorrectly: "
+                  "either the tower is not loaded or the spans did not reach the read")
+
+        suite.run("image-request", image_body, image_validator)
 
     if args.chat:
         single = dict(base, samples=1)
@@ -320,12 +373,15 @@ def main():
     passed = all(record["passed"] for record in suite.records)
     summary = {"started_utc": started, "finished_utc": datetime.now(timezone.utc).isoformat(),
                "endpoint": suite.systemone, "model_alias": args.model, "chat_enabled": args.chat,
+               "image_enabled": args.image, "max_body_mb": args.max_body_mb,
                "chat_seed": args.chat_seed, "chat_max_tokens": args.chat_max_tokens,
                "chat_prompt": args.chat_prompt, "chat_expected": args.chat_expected,
                "passed": passed, "cases": suite.records,
                "limitations": ["Integration screen; no claim of general accuracy, calibration or reference performance parity.",
                                "Concurrent HTTP arrival exercises serialization; it does not imply simultaneous GPU execution.",
-                               "Chat checks were not executed." if not args.chat else "Ordinary chat settings come from the running server; generation may be expensive."]}
+                               "Chat checks were not executed." if not args.chat else "Ordinary chat settings come from the running server; generation may be expensive.",
+                               "Image input was not exercised." if not args.image else
+                               "One synthetic image screens that pixels reach the read; it is not an image-understanding benchmark."]}
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"{'PASS' if passed else 'FAIL'} {sum(r['passed'] for r in suite.records)}/{len(suite.records)} checks; evidence: {output}")
     return 0 if passed else 1

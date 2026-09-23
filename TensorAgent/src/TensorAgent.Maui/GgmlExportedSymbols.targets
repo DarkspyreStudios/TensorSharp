@@ -21,7 +21,7 @@
     with SIGABRT inside load_aot_module, before any managed code runs. Measured on
     device.
 
-    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 282 symbols.
+    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 313 symbols.
   -->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'ios-arm64'">
     <ReferenceNativeSymbol Include="TSGgml_ActivationGradF32" SymbolType="Function" />
@@ -37,10 +37,13 @@
     <ReferenceNativeSymbol Include="TSGgml_AttentionSoftmaxWithSinksF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BinaryScalarF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BinaryTensorF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_BonsaiRegisterWeight" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_BonsaiUnregisterWeight" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CanInitializeBackend" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearHostBufferCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearOffloadableState" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Conv2d" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Conv2dF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CopyF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CrossEntropyLossBackwardF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CrossEntropyLossF32" SymbolType="Function" />
@@ -54,6 +57,7 @@
     <ReferenceNativeSymbol Include="TSGgml_DiffusionLmHead" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_DiffusionLmHeadSample" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_DiffusionModelDecode" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_DiffusionPrefillAttentionF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv41AttachVision" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv41ForwardVision" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionEncode" SymbolType="Function" />
@@ -214,6 +218,7 @@
     <ReferenceNativeSymbol Include="TSGgml_PagedKvPoolGrow" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_PagedKvPoolScatter" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_PreloadQuantizedWeight" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Qwen21VisionEncoderF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Qwen3DropDecodeCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Qwen3ModelDecodeLogits" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Qwen3ModelPrefill" SymbolType="Function" />
@@ -274,6 +279,8 @@
     <ReferenceNativeSymbol Include="TSGgml_Qwen4ExpMtpForward" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Qwen4ExpMtpFree" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Qwen4ExpMtpCopyKv" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenImage21Forward" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenImage21ResetForwardCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImageBlock" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImageBlockCfg" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImageForward" SymbolType="Function" />
@@ -282,6 +289,7 @@
     <ReferenceNativeSymbol Include="TSGgml_QwenImageResetForwardCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImageSetOffload" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenTeTrunk" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenVaeAttention" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenVaeRun" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_RecreateBackend" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ReduceLastDimF32" SymbolType="Function" />
@@ -319,6 +327,7 @@
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelInit" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelMatmul" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelSetGlobalGeometry" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_TranscodeBonsaiToQ2_0" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TransformerLayerDecode" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TransformerModelDecode" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_UnaryF32" SymbolType="Function" />

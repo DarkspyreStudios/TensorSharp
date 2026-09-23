@@ -264,6 +264,28 @@ namespace TensorSharp.Runtime
                 // discovery began offering the shell / skills_read tools, leasing a
                 // workspace and running the skills loop for every diffusion request.
                 RendersToolDeclarations = false,
+                // The checkpoint carries Gemma 4's vision vocabulary and the same
+                // gemma4v tower, so an image renders exactly as it does for Gemma 4:
+                // one <|image> per attachment, which ModelMultimodalInjector later
+                // expands into [BOI] + N soft rows + [EOI] with N taken from the
+                // encoder's own output row count. With no entry here at all an
+                // uploaded image produced ZERO placeholder tokens, so even a loaded
+                // tower had nowhere to write its embeddings.
+                //
+                // Deliberately image-only, unlike AppendGemma4MediaPlaceholders:
+                //  - NO <|audio>. This checkpoint has no audio_config and no audio
+                //    weights upstream; the inherited <|audio> vocabulary has nothing
+                //    behind it. AudioInputSupport refuses audio for this family
+                //    instead, so a clip is never silently dropped.
+                //  - NO <|video> marker and no frame timestamps. Upstream's
+                //    get_video_features raises NotImplementedError and there is no
+                //    <|video>/<video|> BOI/EOI pair in the vocabulary, so frames can
+                //    only be offered as plain images. CapsVideoFrames stays off.
+                AppendMediaPlaceholders = (msg, sb) =>
+                {
+                    if (msg.ImagePaths != null)
+                        foreach (var _ in msg.ImagePaths) sb.Append("<|image>");
+                },
             });
 
             // ---- Others -----------------------------------------------------

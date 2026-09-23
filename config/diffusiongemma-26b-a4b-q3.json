@@ -1,15 +1,31 @@
 {
   // DiffusionGemma 26B-A4B (Q3_K_M, ~13.3 GB) — smaller quant of the
   // text-diffusion model in diffusiongemma-26b-a4b-q4.json, for tighter VRAM.
-  // Drive it with the CLI diffusion path:
+  // Images are supported (audio is not); the vision tower is shared with the
+  // Q4 config and is full precision regardless of the text quant.
   //   TensorSharp.Cli --config config/diffusiongemma-26b-a4b-q3.json --input prompt.txt \
-  //     --diffusion-steps 48 --diffusion-seed 0 --max-tokens 256
+  //     --image photo.png --diffusion-steps 48 --diffusion-seed 0 --max-tokens 256
   "variables": {
-    "root": "${TENSORSHARP_MODELS:-../models}/q3"
+    "modelRoot": "${TENSORSHARP_MODELS:-../models}",
+    "root": "${TENSORSHARP_MODELS:-../models}/q3",
+    "hf": "https://huggingface.co"
   },
 
   "backend": "ggml_cuda",
   "max-tokens": 256,
 
-  "model": "${root}/diffusiongemma-26B-A4B-it-Q3_K_M.gguf"
+  "model": "${root}/diffusiongemma-26B-A4B-it-Q3_K_M.gguf",
+
+  // Same vision tower as the Q4 config. It is full-precision BF16 and quant
+  // independent, so it lives in ${modelRoot} rather than under ${root} (q3/)
+  // and is shared with every other quant instead of downloaded again per quant.
+  // See diffusiongemma-26b-a4b-q4.json for why this comes from a raw HF shard
+  // rather than an mmproj, and for how to opt out with --mmproj none.
+  "mmproj": {
+    "path": "${modelRoot}/diffusiongemma-26B-A4B-it-vision.safetensors",
+    "urls": [
+      "${hf}/google/diffusiongemma-26B-A4B-it/resolve/main/model-00011-of-00011.safetensors"
+    ],
+    "sha256": "afec047176bb2a05f078566576aec6bdb71ad4d041275d0d0c89473fda6d6d87"
+  }
 }

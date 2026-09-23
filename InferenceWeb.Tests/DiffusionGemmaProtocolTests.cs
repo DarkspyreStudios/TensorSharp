@@ -94,6 +94,38 @@ public class DiffusionGemmaProtocolTests
             ChatGenerationPipeline.SeparateDiffusionChannels("diffusion-gemma", "", false, null));
     }
 
+    /// <summary>
+    /// The checkpoint often answers inside the thought block and never writes the closing
+    /// <c>&lt;channel|&gt;</c>. Classifying that as thinking and honouring "reasoning off"
+    /// returned an EMPTY message: measured 3 of 6 one-line questions on
+    /// diffusiongemma-26B-A4B-it Q4_K_M (ggml_cuda, A5000). A canvas is written once and
+    /// finished, so an unterminated block is the answer with a marker missing, not a
+    /// truncated thought - the turn must not come back silent.
+    /// </summary>
+    [Fact]
+    public void AnUnterminatedThoughtBlock_IsTheAnswer_NotSilence()
+    {
+        const string raw = "<|channel>thought\nThe capital of France is Paris.";
+
+        var (content, thinking) = ChatGenerationPipeline.SeparateDiffusionChannels(
+            "diffusion-gemma", raw, enableThinking: false, generationSuffix: null);
+        Assert.Equal("The capital of France is Paris.", content);
+        Assert.Null(thinking);
+
+        // Reasoning on: the same text is still the answer, and is not reported twice.
+        (content, thinking) = ChatGenerationPipeline.SeparateDiffusionChannels(
+            "diffusion-gemma", raw, enableThinking: true, generationSuffix: null);
+        Assert.Equal("The capital of France is Paris.", content);
+        Assert.Null(thinking);
+
+        // A CLOSED block still splits the usual way - the fallback must not swallow content.
+        (content, thinking) = ChatGenerationPipeline.SeparateDiffusionChannels(
+            "diffusion-gemma", "<|channel>thought\nLet me think.<channel|>Paris.",
+            enableThinking: true, generationSuffix: null);
+        Assert.Equal("Paris.", content);
+        Assert.Equal("Let me think.", thinking);
+    }
+
     [Fact]
     public void ASpontaneousToolCall_SurfacesAsText_BecauseNothingCanServiceIt()
     {

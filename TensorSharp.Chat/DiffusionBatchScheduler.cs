@@ -84,8 +84,14 @@ namespace TensorSharp.Server
         public int ActiveCount => _activeCount;
 
         /// <summary>Submit a request. Returns immediately with a handle that streams per-step previews and a
-        /// task that completes with the final token sequence. Thread-safe; callable from any request thread.</summary>
-        public DiffusionRequestHandle Submit(int[] promptTokens, DiffusionEbParams p, CancellationToken ct)
+        /// task that completes with the final token sequence. Thread-safe; callable from any request thread.
+        ///
+        /// <para><paramref name="mediaRequestId"/> names the injector bucket holding this prompt's prepared
+        /// image spans (null for a text-only turn). The worker queues them into the model immediately before
+        /// the block that prefills the prompt, which is where <c>SetVisionEmbeddings</c> is reached.</para>
+        /// </summary>
+        public DiffusionRequestHandle Submit(int[] promptTokens, DiffusionEbParams p, CancellationToken ct,
+            string mediaRequestId = null)
         {
             var channel = Channel.CreateUnbounded<DiffusionPreview>(new UnboundedChannelOptions
             {
@@ -93,7 +99,7 @@ namespace TensorSharp.Server
                 SingleWriter = false,   // the worker writes; completion may race the writer
             });
             var tcs = new TaskCompletionSource<List<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var req = new PendingRequest(promptTokens, p, ct, channel, tcs);
+            var req = new PendingRequest(promptTokens, p, ct, channel, tcs, mediaRequestId);
 
             lock (_pendingLock)
             {
@@ -139,6 +145,7 @@ namespace TensorSharp.Server
                     {
                         lock (_model.GpuComputeLock)
                         {
+                            QueuePendingMedia(active);
                             _sampler.RunBlockBatched(runs, stopCt);
                         }
                     }
@@ -194,12 +201,52 @@ namespace TensorSharp.Server
             }
         }
 
+        /// <summary>
+        /// Hand this block's image embeddings to the model, immediately before the forward
+        /// that prefills the prompt. This is the diffusion path's equivalent of
+        /// <c>BatchExecutor</c>'s per-prefill <c>QueuePromptEmbeddingsForSlice</c>: without
+        /// it the prompt's expanded image rows are forwarded as the filler token id 0 and
+        /// the answer describes an image the model never saw.
+        ///
+        /// <para>Queued once per request, at its FIRST block: the prompt is prefilled into
+        /// the sequence state then, and later blocks only extend that state with the
+        /// committed tokens. <c>reusablePrefixTokenCount</c> is 0 because a diffusion
+        /// sequence starts from an empty state, so each span's insert position is its
+        /// offset in the prompt.</para>
+        /// </summary>
+        private void QueuePendingMedia(List<ActiveRequest> active)
+        {
+            foreach (var x in active)
+            {
+                if (x.MediaQueued || x.Req.MediaRequestId == null)
+                    continue;
+                x.MediaQueued = true;
+                // Route this request's image spans onto ITS OWN sequence state rather than onto the
+                // model. That is what lets an image turn share a batch with other turns: the spans
+                // are applied only while this sequence is being prefilled, and are freed with it.
+                if (!_model.QueueSequenceVisionEmbeddings(x.Run.State, x.Req.MediaRequestId))
+                {
+                    // The bucket was empty: the prompt carries expanded image spans that
+                    // nothing will fill. Say so rather than let the model answer from the
+                    // filler rows.
+                    _logger.LogWarning(
+                        "DiffusionGemma request {RequestId} declared image input but no vision embeddings were prepared",
+                        x.Req.MediaRequestId);
+                }
+            }
+        }
+
         private void AdmitPending(List<ActiveRequest> active)
         {
             lock (_pendingLock)
             {
                 while (active.Count < _maxBatch && _pending.Count > 0)
                 {
+                    // Image turns batch normally. Each request's image spans live on its own
+                    // DiffusionSeqState and are scoped to that sequence's prefill, so a second
+                    // sequence in the same block cannot be handed another request's picture. This
+                    // used to denoise image turns alone, back when the spans were model-global.
+
                     var req = _pending.Dequeue();
                     if (req.Ct.IsCancellationRequested)
                     {
@@ -260,21 +307,34 @@ namespace TensorSharp.Server
             public Channel<DiffusionPreview> Channel { get; }
             public TaskCompletionSource<List<int>> Tcs { get; }
 
+            /// <summary>The injector bucket holding this prompt's prepared image spans,
+            /// or null for a text-only turn.</summary>
+            public string MediaRequestId { get; }
+
             public PendingRequest(int[] promptTokens, DiffusionEbParams p, CancellationToken ct,
-                Channel<DiffusionPreview> channel, TaskCompletionSource<List<int>> tcs)
+                Channel<DiffusionPreview> channel, TaskCompletionSource<List<int>> tcs,
+                string mediaRequestId)
             {
                 PromptTokens = promptTokens;
                 Params = p;
                 Ct = ct;
                 Channel = channel;
                 Tcs = tcs;
+                MediaRequestId = mediaRequestId;
             }
         }
 
-        private readonly struct ActiveRequest
+        private sealed class ActiveRequest
         {
             public DiffusionSeqRun Run { get; }
             public PendingRequest Req { get; }
+
+            /// <summary>Set once this request's image embeddings have been handed to the
+            /// model. The prompt is prefilled at the start of the FIRST block only; later
+            /// blocks extend the same sequence state, so queueing again would splice the
+            /// image rows a second time.</summary>
+            public bool MediaQueued { get; set; }
+
             public ActiveRequest(DiffusionSeqRun run, PendingRequest req) { Run = run; Req = req; }
         }
     }

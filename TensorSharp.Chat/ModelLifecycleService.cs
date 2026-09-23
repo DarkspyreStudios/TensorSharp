@@ -168,12 +168,31 @@ namespace TensorSharp.Server
 
             // A missing projector file is skipped by the load itself, but one
             // that exists must parse.
-            if (!string.IsNullOrEmpty(mmProjPath) && File.Exists(mmProjPath))
+            //
+            // A projector may also be a HuggingFace `.safetensors` vision shard rather
+            // than an mmproj GGUF: some published checkpoints (diffusiongemma-26B-A4B-it)
+            // never shipped an mmproj at all, and Gemma4VisionEncoder loads the tower
+            // straight out of the shard. Opening that file as a GGUF here failed the
+            // header check and refused the whole model load, so the one accepted form
+            // could never be passed. Its structure is validated by the encoder, which
+            // reads the safetensors header and names the missing tensor.
+            if (!string.IsNullOrEmpty(mmProjPath) && File.Exists(mmProjPath)
+                && !IsSafetensorsProjector(mmProjPath))
             {
                 using var mmProj = new GgufFile(mmProjPath);
                 mmProj.ThrowIfTruncated();
             }
         }
+
+        /// <summary>
+        /// Whether a projector path is a HuggingFace safetensors shard rather than an
+        /// mmproj GGUF. Extension only: the file's own header is what
+        /// <c>Gemma4VisionEncoder</c> validates, and a mis-named file must fail there
+        /// with the tensor name it wanted, not here with "not a GGUF".
+        /// </summary>
+        private static bool IsSafetensorsProjector(string path)
+            => !string.IsNullOrEmpty(path)
+               && path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Release the loaded model (and its projector and draft head) without loading

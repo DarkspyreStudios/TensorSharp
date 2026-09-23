@@ -1152,7 +1152,7 @@ namespace TensorSharp.Cli
                             pdfPath, pdf.PageCount);
                         Console.Error.WriteLine(
                             $"PDF \"{pdfName}\" has no selectable text (it appears to be scanned or image-only). " +
-                            "Re-run with a vision-capable model and its projector, e.g. --mmproj <projector.gguf>, " +
+                            "Re-run with a vision-capable model and its projector, e.g. --mmproj <projector.gguf|vision.safetensors>, " +
                             "so its pages can be read as images.");
                         return;
                     }
@@ -1195,8 +1195,37 @@ namespace TensorSharp.Cli
             // DiffusionGemma uses an iterative denoising sampler rather than autoregressive decode.
             if (model is DiffusionGemmaModel diffusionModel)
             {
+                // --image used to be dropped on the floor here: RunDiffusion built a
+                // text-only message list, so the picture never reached the prompt and
+                // the answer was about nothing. Pass it through when a vision tower is
+                // loaded, and say so plainly when one is not.
+                List<string> diffusionImages = null;
+                if (imagePath != null)
+                {
+                    if (!model.HasVisionEncoder())
+                    {
+                        _log.LogError(LogEventIds.CliFailed,
+                            "Image input requires a vision projector: {ImagePath}", imagePath);
+                        Console.Error.WriteLine(
+                            "This model has no vision encoder loaded, so the image cannot be analyzed. " +
+                            "Re-run with --mmproj <projector.gguf|vision.safetensors>.");
+                        return;
+                    }
+                    diffusionImages = imagePathList.Count > 0
+                        ? new List<string>(imagePathList)
+                        : new List<string> { imagePath };
+                    foreach (string p in diffusionImages)
+                    {
+                        if (File.Exists(p))
+                            continue;
+                        _log.LogError(LogEventIds.CliFailed, "Image file not found: {ImagePath}", p);
+                        Console.Error.WriteLine($"Image file not found: {p}");
+                        return;
+                    }
+                }
+
                 RunDiffusion(diffusionModel, rawText, systemPrompt, maxTokens, outputFile,
-                    diffusionSteps, diffusionSeed, diffusionBlocks);
+                    diffusionSteps, diffusionSeed, diffusionBlocks, diffusionImages);
                 return;
             }
 
@@ -2072,18 +2101,41 @@ namespace TensorSharp.Cli
         }
 
         static void RunDiffusion(DiffusionGemmaModel model, string rawText, string systemPrompt,
-            int maxTokens, string outputFile, int steps, int seed, int blocks)
+            int maxTokens, string outputFile, int steps, int seed, int blocks,
+            List<string> imagePaths = null)
         {
             var messages = new List<ChatMessage>();
             if (!string.IsNullOrEmpty(systemPrompt))
                 messages.Add(new ChatMessage { Role = "system", Content = systemPrompt });
-            messages.Add(new ChatMessage { Role = "user", Content = rawText });
+            messages.Add(new ChatMessage
+            {
+                Role = "user",
+                Content = rawText,
+                ImagePaths = imagePaths is { Count: > 0 } ? imagePaths : null,
+            });
 
             string rendered = PromptRenderer.Render(
                 model.Config.ChatTemplate, messages, addGenerationPrompt: true,
                 architecture: model.Config.Architecture);
 
-            var promptTokens = model.Tokenizer.Encode(rendered, addSpecial: true).ToArray();
+            List<int> promptTokenList = new(model.Tokenizer.Encode(rendered, addSpecial: true));
+            if (imagePaths is { Count: > 0 })
+            {
+                // Same two steps the server's diffusion path takes: expand each rendered
+                // <|image> into [BOI] + N soft rows + [EOI] (N is the encoder's own row
+                // count), then hand the projected rows to the model so the prefill
+                // overwrites those placeholder rows. One sequence, no batching, so the
+                // queue can be filled immediately before Generate prefills the prompt.
+                promptTokenList = model.MultimodalInjector.ProcessPromptTokens(messages, promptTokenList);
+                if (!model.MultimodalInjector.QueuePromptEmbeddings(0))
+                {
+                    Console.Error.WriteLine(
+                        "The image produced no vision embeddings; refusing to answer about an image the model never saw.");
+                    return;
+                }
+            }
+
+            var promptTokens = promptTokenList.ToArray();
 
             int canvas = model.CanvasLength;
             int nBlocks = blocks > 0 ? blocks : Math.Max(1, (Math.Max(1, maxTokens) + canvas - 1) / canvas);
@@ -2289,7 +2341,7 @@ namespace TensorSharp.Cli
             {
                 if (imagePaths is { Count: > 0 } && !model.HasVisionEncoder())
                     _log.LogWarning(LogEventIds.HostConfiguration,
-                        "No vision encoder loaded. Use --mmproj to specify the vision encoder GGUF.");
+                        "No vision encoder loaded. Use --mmproj <projector.gguf|vision.safetensors> to supply the vision tower.");
                 if (audioPaths is { Count: > 0 } && model is not IAudioCapableModel)
                     _log.LogWarning(LogEventIds.HostConfiguration, "This model has no audio path; the audio input will be ignored.");
                 inputTokens = model.MultimodalInjector.ProcessPromptTokens(messages, inputTokens, requestId);

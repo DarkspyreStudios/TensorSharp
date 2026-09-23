@@ -454,7 +454,7 @@ namespace {
             }
         }
 
-        ggml_tensor* mm_tensor = ggml_mul_mat(context.value, m2_binding.tensor, m1_binding.tensor);
+        ggml_tensor* mm_tensor = tsg::bonsai_mul_mat(context.value, m2_binding.tensor, m1_binding.tensor, m2_quant.data);
         if (mm_tensor == nullptr)
         {
             set_last_error("Failed to create ggml matmul node for addmm_quant.");
@@ -629,7 +629,7 @@ namespace {
         }
 
         // Build graph: get_rows(src, indices) -> copy -> result
-        ggml_tensor* rows_tensor = ggml_get_rows(context.value, src_tensor, index_tensor);
+        ggml_tensor* rows_tensor = tsg::bonsai_get_rows(context.value, src_tensor, index_tensor, src_quant.data);
         if (rows_tensor == nullptr)
         {
             set_last_error("Failed to create ggml get_rows node for get_rows_quant.");

@@ -17,7 +17,12 @@ namespace TensorSharp.Models
             DisplayName = "Qwen 3.5 / Qwen 3.6 (Gated DeltaNet + MoE)",
             Aliases = new[] { "qwen35", "qwen35moe", "qwen3next" },
             Factory = c => new Qwen35Model(c.GgufPath, c.Backend, c.TpDegree, c.TpGroup, c.DraftModelPath),
-            ProjectorFileHints = new[] { "Qwen3.5-mmproj-F16.gguf" },
+            ProjectorFileHints = new[]
+            {
+                "Qwen3.5-mmproj-F16.gguf",
+                "Ternary-Bonsai-2-27B-mmproj-BF16.gguf",
+                "Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf",
+            },
         };
     }
 }

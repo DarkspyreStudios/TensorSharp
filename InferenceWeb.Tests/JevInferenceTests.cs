@@ -55,7 +55,8 @@ public sealed class JevInferenceTests
     [InlineData("auto_threshold", "1e999")]
     [InlineData("steps", "2")]
     [InlineData("think", "1")]
-    [InlineData("images", "[]")]
+    [InlineData("images", "{}")]
+    [InlineData("images", "[\"https://example.com/a.png\"]")]
     [InlineData("ask", "[\"urgent\"]")]
     [InlineData("sequential", "true")]
     [InlineData("chunk_rows", "7")]
@@ -130,6 +131,18 @@ public sealed class JevInferenceTests
         Assert.Equal(2, response.GetProperty("diagnostics").GetProperty("timing").GetProperty("reads").GetInt32());
         Assert.DoesNotContain("label_mass", response.GetRawText());
         Assert.DoesNotContain("argmax_is_label", response.GetRawText());
+    }
+
+    [Fact]
+    public void ReportsTheImageCountItWasGiven()
+    {
+        // A 2x2 PNG: enough for the contract, no tower needed to count it.
+        const string png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM8ISfHwMDAxAAGAA0EAQijE05aAAAAAElFTkSuQmCC";
+        string body = Basic.TrimEnd()[..^1] + $",\"images\":[\"{png}\"]}}";
+        var response = Run(Parse(body), (p, c, pos, ids, ct) => [[0.9f, 0.1f]]);
+        Assert.Equal(1, response.GetProperty("diagnostics").GetProperty("images").GetInt32());
+        Assert.Equal(0, Run(Parse(Basic), (p, c, pos, ids, ct) => [[0.9f, 0.1f]])
+            .GetProperty("diagnostics").GetProperty("images").GetInt32());
     }
 
     [Theory]

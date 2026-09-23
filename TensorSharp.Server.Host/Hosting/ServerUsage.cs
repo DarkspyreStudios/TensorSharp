@@ -90,8 +90,10 @@ namespace TensorSharp.Server.Host.Hosting
                     "status process, but /api/models/load cannot select a GGUF that was not supplied at startup.",
                     "--model C:\\models\\gemma-4-E4B-it-Q8_0.gguf"),
                 new OptionHelp("--mmproj <path|none>",
-                    "Multimodal projector GGUF. A bare filename is resolved next to the model; 'none' disables it. " +
-                    "Requires --model. Default: none — pass the matching projector explicitly.",
+                    "Multimodal projector: an mmproj GGUF, or - for the Gemma 4 family - a HuggingFace " +
+                    ".safetensors shard holding the vision tower, for checkpoints published without an mmproj " +
+                    "(diffusiongemma-26B-A4B-it). A bare filename is resolved next to the model; 'none' disables " +
+                    "it. Requires --model. Default: none — pass the matching projector explicitly.",
                     "--mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf"),
                 new OptionHelp("--embeddings",
                     "Host a GGUF embedding encoder instead of a chat model. Exposes /v1/embeddings, /api/embed, and /api/embeddings. " +
@@ -774,6 +776,7 @@ namespace TensorSharp.Server.Host.Hosting
             writer.WriteLine("Examples:");
             writer.WriteLine("  TensorSharp.Server --model C:\\models\\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cpu");
             writer.WriteLine("  TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda");
+            writer.WriteLine("  TensorSharp.Server --model diffusiongemma-26B-A4B-it-Q4_K_M.gguf --mmproj diffusiongemma-vision/model-00011-of-00011.safetensors --backend ggml_metal    (vision tower straight from the HF shard)");
             writer.WriteLine("  TensorSharp.Server --model Qwen3.5-35B-A3B-Q4_K_M.gguf --backend ggml_cuda --tp 2    (split across 2 GPUs)");
             writer.WriteLine("  TensorSharp.Server --model Wan2.2-TI2V-5B-Q8_0.gguf --backend ggml_cuda --video-frames 121 --fps 24");
             writer.WriteLine("  TensorSharp.Server --backend ggml_cpu    (model-less status process; inference unavailable)");

@@ -9,6 +9,8 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 #include "ggml_ops_internal.h"
 #include "ggml_ops_attention_alloc.h"
+#include "bonsai_quant.h"
+#include "ggml_ops_graph_optimize.h"
 
 #if defined(TSG_GGML_USE_METAL)
 #include "ggml-backend-impl.h"
@@ -1849,7 +1851,7 @@ namespace tsg
     // Removing barriers is not free: the reordered schedule interleaves ops that were
     // adjacent, widening the live set the caches have to hold. So each kernel opts in
     // where it measures faster, instead of Gemma 4 paying to buy Qwen3.6 its 8%.
-    void optimize_graph_for_metal(ggml_cgraph* graph)
+    void optimize_graph_for_metal(ggml_context* ctx, ggml_cgraph* graph)
     {
 #if defined(TSG_GGML_USE_METAL)
         // A/B escape hatch. TS_METAL_GRAPH_OPTIMIZE=0 restores the unreordered order
@@ -1874,35 +1876,10 @@ namespace tsg
             graph != nullptr &&
             g_backend->iface.graph_optimize != nullptr)
         {
-            // graph_optimize also takes an allocation-dependency sink. A backend
-            // that reorders across concurrent streams uses it to say "keep TENSOR
-            // allocated until UNTIL has been computed", and ggml_backend_sched
-            // honours that by inserting GGML_OP_NONE nodes into its graph copy
-            // before it allocates. This path allocates with gallocr directly and
-            // has nowhere to put such a node, so it cannot honour one.
-            //
-            // Calling from here is sound only because Metal's implementation is
-            // GGML_UNUSED(params) and adds none. That is ggml's to change, and a
-            // dropped dependency would surface as a tensor freed while still live —
-            // wrong numbers rather than a failure. So the sink is real and it says
-            // so, rather than being the null pointer that would turn the same
-            // change into a crash inside the backend.
-            ggml_backend_graph_optimize_params opt_params = {
-                /* .add_alloc_dep = */ [](void*, ggml_tensor*, ggml_tensor*) {
-                    static std::once_flag once;
-                    std::call_once(once, []() {
-                        std::fprintf(stderr,
-                            "[TSGGML] Metal's graph_optimize asked for an allocation dependency, "
-                            "which the direct-compute path cannot honour — reordered graphs on this "
-                            "path are no longer trustworthy. Please report this.\n");
-                        std::fflush(stderr);
-                    });
-                },
-                /* .user_data     = */ nullptr,
-            };
-            g_backend->iface.graph_optimize(g_backend, graph, &opt_params);
+            tsg_optimize_graph_with_alloc_dependencies(g_backend, ctx, graph);
         }
 #else
+        (void) ctx;
         (void) graph;
 #endif
     }
@@ -3313,6 +3290,7 @@ TSG_EXPORT void TSGgml_Shutdown()
     // pool) for the host-side expert matmuls. It is independent of g_backend, so
     // it has to be released explicitly or the threads outlive the shutdown.
     tsg::moe_ffn_host_release();
+    tsg::bonsai_clear_backend();
 
     for (int r = 0; r < ranks; ++r)
     {
@@ -3962,6 +3940,8 @@ TSG_EXPORT int TSGgml_PreloadQuantizedWeight(
 
 TSG_EXPORT size_t TSGgml_RowSize(int ggml_type, int64_t ne)
 {
+    if (tsg_bonsai_quant_type(ggml_type))
+        return tsg_bonsai_row_size(ggml_type, ne);
     if (ggml_type < 0 || ggml_type >= GGML_TYPE_COUNT || ne <= 0)
         return 0;
     const enum ggml_type t = static_cast<enum ggml_type>(ggml_type);
@@ -3977,6 +3957,13 @@ TSG_EXPORT int TSGgml_DequantizeToF32(int ggml_type, const void* src, int64_t nu
         return -1;
     if (num_elements == 0)
         return 0;
+    if (tsg_bonsai_quant_type(ggml_type))
+        return tsg_bonsai_dequantize(ggml_type, src, num_elements, dst);
+    if (ggml_type < 0 || ggml_type >= GGML_TYPE_COUNT)
+        return -2;
+    const int64_t block_size = ggml_blck_size(static_cast<enum ggml_type>(ggml_type));
+    if (block_size <= 0 || num_elements % block_size != 0)
+        return -1;
     if (ggml_type == GGML_TYPE_F32)
     {
         std::memcpy(dst, src, static_cast<size_t>(num_elements) * sizeof(float));
@@ -3994,6 +3981,11 @@ TSG_EXPORT int TSGgml_DequantizeToF32(int ggml_type, const void* src, int64_t nu
         return 0;
     }
     return -2;
+}
+
+TSG_EXPORT int TSGgml_TranscodeBonsaiToQ2_0(int ggml_type, const void* src, int64_t num_elements, void* dst)
+{
+    return tsg_bonsai_transcode_q2_0(ggml_type, src, num_elements, dst);
 }
 
 // Merge a LoRA delta into a (possibly quantized) weight IN PLACE:

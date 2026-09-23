@@ -649,7 +649,7 @@ TSG_EXPORT int TSGgml_Qwen3ModelDecodeLogits(
             const char* env = std::getenv("TS_QWEN3_METAL_OPT");
             return env == nullptr || env[0] != '0';
         }();
-        if (optimize_graph) optimize_graph_for_metal(graph);
+        if (optimize_graph) optimize_graph_for_metal(ctx, graph);
 
         BufferHandle transient_buffer(nullptr);
         ggml_backend_buffer_t persistent_buffer = nullptr;

@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 #include "ggml_ops_internal.h"
+#include <chrono>   // TS_VISION_PROF per-block timing
 
 using namespace tsg;
 
@@ -165,7 +166,7 @@ int fused_rms_norm_matmul_quant_f32_impl(
         ? ggml_reshape_2d(context.value, scaled, in_dim, 1)
         : scaled;
 
-    ggml_tensor* mm = ggml_mul_mat(context.value, m2_binding.tensor, scaled_2d);
+    ggml_tensor* mm = tsg::bonsai_mul_mat(context.value, m2_binding.tensor, scaled_2d, m2_quant.data);
     ggml_tensor* output_tensor = ggml_cpy(context.value, mm, result_binding.tensor);
     ggml_set_output(output_tensor);
 
@@ -375,7 +376,7 @@ int fused_matmul_quant_add_f32_impl(
         ? ggml_reshape_2d(context.value, contiguous_input, in_dim, 1)
         : contiguous_input;
 
-    ggml_tensor* mm = ggml_mul_mat(context.value, m2_binding.tensor, input_2d);
+    ggml_tensor* mm = tsg::bonsai_mul_mat(context.value, m2_binding.tensor, input_2d, m2_quant.data);
     ggml_tensor* mm_flat = ggml_reshape_1d(context.value, mm, static_cast<int64_t>(rows) * out_dim);
     ggml_tensor* res_flat = ggml_reshape_1d(context.value, contiguous_residual, static_cast<int64_t>(rows) * out_dim);
     ggml_tensor* added = ggml_add(context.value, res_flat, mm_flat);
@@ -715,7 +716,7 @@ static int fused_ffn_swiglu_quant_f32_slab(
         : scaled;
 
     // gate_up = scaled @ gate_up_W^T -> ggml semantics: ne0=gate_up_out, ne1=rows
-    ggml_tensor* gate_up_mm = ggml_mul_mat(context.value, gate_up_binding_w.tensor, scaled_2d);
+    ggml_tensor* gate_up_mm = tsg::bonsai_mul_mat(context.value, gate_up_binding_w.tensor, scaled_2d, gate_up_quant.data);
 
     const std::size_t gu_row_bytes = static_cast<std::size_t>(gate_up_out) * sizeof(float);
     const std::size_t half_bytes = static_cast<std::size_t>(half_dim) * sizeof(float);
@@ -738,7 +739,7 @@ static int fused_ffn_swiglu_quant_f32_slab(
         ? ggml_reshape_2d(context.value, swiglu, half_dim, 1)
         : swiglu;
 
-    ggml_tensor* down_mm = ggml_mul_mat(context.value, down_binding_w.tensor, swiglu_2d);
+    ggml_tensor* down_mm = tsg::bonsai_mul_mat(context.value, down_binding_w.tensor, swiglu_2d, down_quant.data);
 
     ggml_tensor* down_flat = ggml_reshape_1d(context.value, down_mm, static_cast<int64_t>(rows) * hidden);
     ggml_tensor* res_flat = ggml_reshape_1d(context.value, contiguous_residual, static_cast<int64_t>(rows) * hidden);
@@ -1134,7 +1135,7 @@ int fused_ffn_act_project_quant_f32_impl(
         ? ggml_reshape_2d(context.value, scaled, hidden, 1)
         : scaled;
 
-    ggml_tensor* gate_up_mm = ggml_mul_mat(context.value, gate_up_binding_w.tensor, scaled_2d);
+    ggml_tensor* gate_up_mm = tsg::bonsai_mul_mat(context.value, gate_up_binding_w.tensor, scaled_2d, gate_up_quant.data);
 
     const std::size_t gu_row_bytes = static_cast<std::size_t>(gate_up_out) * sizeof(float);
     const std::size_t half_bytes = static_cast<std::size_t>(half_dim) * sizeof(float);
@@ -1153,7 +1154,7 @@ int fused_ffn_act_project_quant_f32_impl(
         ? ggml_reshape_2d(context.value, glu, half_dim, 1)
         : glu;
 
-    ggml_tensor* down_mm = ggml_mul_mat(context.value, down_binding_w.tensor, glu_2d);
+    ggml_tensor* down_mm = tsg::bonsai_mul_mat(context.value, down_binding_w.tensor, glu_2d, down_quant.data);
 
     ggml_tensor* down_flat = ggml_reshape_1d(context.value, down_mm, static_cast<int64_t>(rows) * hidden);
     ggml_tensor* output_node = ggml_cpy(context.value, down_flat, output_binding.tensor);
@@ -1259,16 +1260,41 @@ int fused_ffn_act_project_quant_f32_impl(
 // [head_dim, heads, rows]. Returns a [head_dim, heads, rows] node, the same
 // logical shape ggml_flash_attn_ext produces, so callers cont+reshape
 // identically on either path.
+//
+// kv_f16 casts K and V to F16 before the flash node, which is exactly what
+// llama.cpp's clip.cpp build_attn does (tools/mtmd/clip.cpp: ggml_cast(k, F16)
+// / ggml_cast(v, F16) before ggml_flash_attn_ext). ggml-metal's flash kernel
+// still accumulates the softmax and the PV product in F32; only the K/V operand
+// loads become half-width, which is worth ~10% of a whole Gemma-4 vision encode
+// on an M5 Pro. It is opt-in per call site because it changes numerics and only
+// the Gemma-4 tower has an oracle gate (Gemma4VisionOracleTests) to prove the
+// loss is small. Measured there, against the numpy reference, with everything
+// else held fixed: Metal 1.99051% -> 2.11059% relative L2 (bound 3.0%), CPU
+// 0.09207% -> 0.19729% (bound 0.4%). Both stay well inside a gate that catches
+// a real defect an order of magnitude sooner (the QuickGELU bug read 8.14%).
+// The headroom is structural, not luck: the tower's k and v absmax are 3.38 and
+// 8.27, four orders below the F16 max of 65504, so no value can saturate. Q
+// stays F32 (ggml requires it) and the CUDA/Vulkan explicit path is untouched.
 // ----------------------------------------------------------------------------
 ggml_tensor* build_vision_attention(
     ggml_context* ctx,
     ggml_tensor* q_perm, ggml_tensor* k_perm, ggml_tensor* v_3d,
-    int rows, int num_heads, int head_dim, float attn_scale)
+    int rows, int num_heads, int head_dim, float attn_scale,
+    bool kv_f16)
 {
     if (g_backend_type != BACKEND_TYPE_CUDA && g_backend_type != BACKEND_TYPE_VULKAN)
     {
         ggml_tensor* v_perm = ggml_permute(ctx, v_3d, 0, 2, 1, 3); // [hd, rows, heads]
-        return flash_attn_ext_guarded(ctx, "vision attention", q_perm, k_perm, v_perm, nullptr,
+        ggml_tensor* k_in = k_perm;
+        ggml_tensor* v_in = v_perm;
+        if (kv_f16)
+        {
+            // ggml_cast is a cpy, so it reads the permuted source strides itself:
+            // an explicit ggml_cont first is pure loss (measured +0.8 ms/block).
+            k_in = ggml_cast(ctx, k_perm, GGML_TYPE_F16);
+            v_in = ggml_cast(ctx, v_perm, GGML_TYPE_F16);
+        }
+        return flash_attn_ext_guarded(ctx, "vision attention", q_perm, k_in, v_in, nullptr,
             attn_scale, 0.0f, 0.0f, nullptr, GGML_PREC_F32);
     }
 
@@ -1376,8 +1402,11 @@ static ggml_tensor* build_vision_attn_subgraph(
     ggml_tensor* q_perm = ggml_permute(ctx, q_roped, 0, 2, 1, 3);
     ggml_tensor* k_perm = ggml_permute(ctx, k_roped, 0, 2, 1, 3);
 
+    // kv_f16=false: the Qwen3.5 / GLM towers have no numeric oracle gate in this
+    // repo, so they keep the F32 K/V they were validated with. See the note on
+    // build_vision_attention for what enabling it is worth and what proves it safe.
     ggml_tensor* attn_out = build_vision_attention(ctx, q_perm, k_perm, v_3d,
-        rows, num_heads, head_dim, attn_scale);
+        rows, num_heads, head_dim, attn_scale, /*kv_f16=*/ false);
     ggml_tensor* attn_flat = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_out), hidden, rows);
 
     ggml_tensor* out_proj = ggml_mul_mat(ctx, out_w_t, attn_flat);
@@ -1709,12 +1738,12 @@ int fused_vision_attention_f32_impl(
 //   q  = clampO(matmul(q_w, clampI(n1)));  k,v likewise   (no bias)
 //   q  = rms_norm_perhead(q)*q_norm_w;  k likewise;  v = rms_norm_perhead(v)  (unweighted)
 //   q,k = rope2d(q,k)        [NeoX X-rot on first half, Y-rot on second half]
-//   a  = flash_attn(q,k,v, scale=1)                       (full bidirectional)
+//   a  = flash_attn(q,k16,v16, scale=1)                   (full bidirectional)
 //   o  = clampO(matmul(out_w, clampI(a)))
 //   r1 = r0 + rms_norm(o)*attn_post_norm_w                (sandwich norm)
 //   n2 = rms_norm(r1)*ln2_w
 //   g  = clampO(matmul(gate_w, clampI(n2)));  u = clampO(matmul(up_w, clampI(n2)))
-//   h  = gelu_quick(g) * u                                (QuickGELU gated MLP)
+//   h  = gelu(g) * u                                      (gelu_pytorch_tanh gated MLP)
 //   d  = clampO(matmul(down_w, clampI(h)))
 //   out = r1 + rms_norm(d)*ffn_post_norm_w   -> hidden (in place)
 //
@@ -1733,7 +1762,7 @@ int fused_gemma4_vision_block_f32_impl(
     const float* q_norm_w, const float* k_norm_w,
     const float* attn_post_norm_w,
     const float* out_w, int out_ne0, int out_ne1, std::size_t out_bytes,
-    const float* cosx, const float* sinx, const float* cosy, const float* siny,
+    const std::int32_t* pos_x, const std::int32_t* pos_y, float rope_theta,
     const float* ln2_w,
     const float* gate_w, int gate_ne0, int gate_ne1, std::size_t gate_bytes,
     const float* up_w, int up_ne0, int up_ne1, std::size_t up_bytes,
@@ -1751,9 +1780,34 @@ int fused_gemma4_vision_block_f32_impl(
     const int D  = hidden_desc.dim1;       // hidden_size
     const int hd = head_dim;
     const int nH = num_heads;
-    const int quarter = hd / 4;
+    const int half = hd / 2;
     const int ff = gate_ne1;               // intermediate_size
-    const int cs_elems = num_patches * quarter;
+
+    // The 2D rope below rotates [0, half) by the patch X index and [half, hd) by
+    // the patch Y index, each as a NeoX pair (j, j + hd/4). ggml_rope_ext needs an
+    // even n_offs and n_offs + n_dims <= hd for that, which holds for any head_dim
+    // divisible by 4 (64 here).
+    if (hd % 4 != 0)
+    {
+        set_last_error("fused_gemma4_vision_block: head_dim must be a multiple of 4 for the 2D rope.");
+        return 0;
+    }
+
+    // TS_VISION_PROF=1: attribute the per-block cost to build / alloc / upload /
+    // compute, and report the node count and the bytes actually uploaded (which is
+    // how the zero-copy weight binding above is verified to be engaging). Inert
+    // unless set; when set it adds explicit syncs so each phase is measured rather
+    // than enqueued, which makes the block slightly slower than it really is.
+    static const bool ts_prof = [] {
+        const char* e = std::getenv("TS_VISION_PROF");
+        return e != nullptr && e[0] != '\0' && e[0] != '0';
+    }();
+    using ts_clock = std::chrono::steady_clock;
+    auto ts_now = [] { return ts_clock::now(); };
+    auto ts_ms = [](ts_clock::time_point a, ts_clock::time_point b) {
+        return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    auto ts_t0 = ts_now();
 
     const std::size_t ctx_size = 16 * 1024 * 1024;
     PooledContextHandle context;
@@ -1781,20 +1835,67 @@ int fused_gemma4_vision_block_f32_impl(
     else
         hidden_binding = create_standard_binding(ctx, hidden_desc);
 
-    // Weights are STREAMED, not cached on-device: the vision tower runs briefly
-    // (once per image) and its ~0.5 GB of F32 weights would otherwise pile into
-    // VRAM via the persistent device-copy cache, stealing residency from the
-    // (much larger) language model and triggering paging that worsens block by
-    // block on a VRAM-tight multimodal model (e.g. 26B-A4B). Each weight is a
-    // plain graph leaf uploaded fresh into the reused per-graph buffer below.
+    // Weights are never given a DEVICE COPY: the vision tower runs briefly (once
+    // per image) and its ~0.5 GB of F32 weights would otherwise pile into VRAM via
+    // the persistent device-copy cache, stealing residency from the (much larger)
+    // language model and triggering paging that worsens block by block on a
+    // VRAM-tight multimodal model (e.g. 26B-A4B).
+    //
+    // They are instead bound ZERO-COPY where that costs no device memory at all:
+    // on unified-memory Metal an MTLBuffer can wrap the weight's existing host
+    // pages (ggml_backend_dev_buffer_from_host_ptr), so the GPU reads the bytes in
+    // place. Nothing new becomes resident — the cache entry is the wrapper object,
+    // not a copy, which is why DeviceCopyCacheResidentBytes() excludes it — so the
+    // rationale above is unaffected: this bound is zero by construction rather
+    // than by a budget. On every other backend, and for any weight whose pointer
+    // the backend cannot wrap, the weight stays a plain graph leaf STREAMED fresh
+    // into the reused per-graph buffer below, exactly as before.
+    //
+    // Worth 36 MB of host->device traffic per block: the measured per-block upload
+    // drops from 36.04 MB / 0.79 ms to 0.04 MB / 0.19 ms (only the position leaves
+    // below are still streamed), 8 ms of a 329 ms encode.
+    //
+    // CONTRACT: the wrapper is cached by host pointer and outlives this call, so the
+    // owner of these weights MUST invalidate it before freeing them
+    // (Gemma4VisionEncoder.Dispose -> GgmlBasicOps.InvalidateTensorHostBuffer). Skipping
+    // that leaves a live GPU mapping over memory the allocator hands out again; measured
+    // cost of getting this wrong was 131% relative L2 on the SECOND tower built in one
+    // process, with the first still correct. Gemma4VisionOracleTests builds two towers in
+    // one process on Metal, which is what catches it.
     struct UP { ggml_tensor* t; const void* data; std::size_t bytes; };
     std::vector<UP> ups;
+
+    ggml_backend_dev_t w_dev = ggml_backend_get_device(g_backend);
+    // Only where the wrap allocates nothing: this must not fall through to
+    // try_get_cacheable_tensor_buffer's device-copy branch (see above).
+    const bool w_zero_copy_backend =
+        w_dev != nullptr && g_backend_type == BACKEND_TYPE_METAL;
+    auto bind_zero_copy = [&](ggml_tensor* t, const void* d, std::size_t bytes) -> bool {
+        if (!w_zero_copy_backend || t == nullptr || bytes < 4096) return false;
+        void* data = const_cast<void*>(d);
+        if (!host_ptr_buffer_capable(g_backend, w_dev, data, bytes)) return false;
+        ggml_backend_buffer_t buf = nullptr;
+        if (!try_get_host_ptr_buffer(g_backend, w_dev, data, bytes, /*cacheable=*/ true, buf,
+                                     /*allow_unified_weight=*/ true))
+            return false;
+        if (ggml_backend_tensor_alloc(buf, t, data) != GGML_STATUS_SUCCESS)
+        {
+            invalidate_cached_buffer(data);
+            return false;
+        }
+        return true;
+    };
+
     auto w1d = [&](const float* d, int n) {
         ggml_tensor* t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n);
-        ups.push_back({ t, d, (std::size_t)n * sizeof(float) }); return t; };
+        const std::size_t bytes = (std::size_t)n * sizeof(float);
+        if (!bind_zero_copy(t, d, bytes)) ups.push_back({ t, d, bytes });
+        return t; };
+
     auto w2d = [&](const float* d, int ne0, int ne1, std::size_t bytes) {
         ggml_tensor* t = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, ne0, ne1);
-        ups.push_back({ t, d, bytes }); return t; };
+        if (!bind_zero_copy(t, d, bytes)) ups.push_back({ t, d, bytes });
+        return t; };
 
     ggml_tensor* ln1_w_t   = w1d(ln1_w, D);
     ggml_tensor* q_w_t     = w2d(q_w, q_ne0, q_ne1, q_bytes);
@@ -1810,13 +1911,19 @@ int fused_gemma4_vision_block_f32_impl(
     ggml_tensor* down_w_t  = w2d(down_w, down_ne0, down_ne1, down_bytes);
     ggml_tensor* fpn_t     = w1d(ffn_post_norm_w, D);
 
-    // cos/sin rope tables (small, geometry-dependent): uploaded fresh each call.
-    ggml_tensor* cosx_t = w1d(cosx, cs_elems);
-    ggml_tensor* sinx_t = w1d(sinx, cs_elems);
-    ggml_tensor* cosy_t = w1d(cosy, cs_elems);
-    ggml_tensor* siny_t = w1d(siny, cs_elems);
+    // Patch (x, y) grid indices, one pair per patch: ggml_rope_ext derives the
+    // angles from these and rope_theta on-device. Two I32 [N] leaves (32 KB at
+    // N=3978) replace the four F32 [N * head_dim/4] cos/sin tables this used to
+    // upload (0.97 MB per block, 15.5 MB per encode).
+    ggml_tensor* pos_x_t = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, N);
+    ggml_tensor* pos_y_t = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, N);
+    if (pos_x_t && pos_y_t)
+    {
+        ups.push_back({ pos_x_t, pos_x, (std::size_t)N * sizeof(std::int32_t) });
+        ups.push_back({ pos_y_t, pos_y, (std::size_t)N * sizeof(std::int32_t) });
+    }
 
-    if (!hidden_binding.storage || !ln1_w_t || !q_w_t || !cosx_t)
+    if (!hidden_binding.storage || !ln1_w_t || !q_w_t || !pos_x_t || !pos_y_t)
     {
         set_last_error("fused_gemma4_vision_block: tensor alloc failed.");
         return 0;
@@ -1828,23 +1935,33 @@ int fused_gemma4_vision_block_f32_impl(
         return ggml_clamp(ctx, x, lo, hi);
     };
 
-    ggml_tensor* cosx_3d = ggml_reshape_3d(ctx, cosx_t, quarter, 1, N);
-    ggml_tensor* sinx_3d = ggml_reshape_3d(ctx, sinx_t, quarter, 1, N);
-    ggml_tensor* cosy_3d = ggml_reshape_3d(ctx, cosy_t, quarter, 1, N);
-    ggml_tensor* siny_3d = ggml_reshape_3d(ctx, siny_t, quarter, 1, N);
-
-    // 2D split RoPE: quarters [0:Q]/[Q:2Q] rotated by X angles, [2Q:3Q]/[3Q:4Q] by Y.
-    auto rope2d = [&](ggml_tensor* x3 /*[hd, nH, N]*/) -> ggml_tensor* {
-        std::size_t nb1 = x3->nb[1], nb2 = x3->nb[2], fb = sizeof(float);
-        ggml_tensor* x0 = ggml_cont(ctx, ggml_view_3d(ctx, x3, quarter, nH, N, nb1, nb2, 0));
-        ggml_tensor* x1 = ggml_cont(ctx, ggml_view_3d(ctx, x3, quarter, nH, N, nb1, nb2, (std::size_t)quarter * fb));
-        ggml_tensor* x2 = ggml_cont(ctx, ggml_view_3d(ctx, x3, quarter, nH, N, nb1, nb2, (std::size_t)2 * quarter * fb));
-        ggml_tensor* x3q = ggml_cont(ctx, ggml_view_3d(ctx, x3, quarter, nH, N, nb1, nb2, (std::size_t)3 * quarter * fb));
-        ggml_tensor* o0 = ggml_sub(ctx, ggml_mul(ctx, x0, cosx_3d), ggml_mul(ctx, x1, sinx_3d));
-        ggml_tensor* o1 = ggml_add(ctx, ggml_mul(ctx, x0, sinx_3d), ggml_mul(ctx, x1, cosx_3d));
-        ggml_tensor* o2 = ggml_sub(ctx, ggml_mul(ctx, x2, cosy_3d), ggml_mul(ctx, x3q, siny_3d));
-        ggml_tensor* o3 = ggml_add(ctx, ggml_mul(ctx, x2, siny_3d), ggml_mul(ctx, x3q, cosy_3d));
-        return ggml_concat(ctx, ggml_concat(ctx, o0, o1, 0), ggml_concat(ctx, o2, o3, 0), 0);
+    // 2D split RoPE as two ggml_rope_ext nodes instead of the ~25-node
+    // cont/mul/sub/add/concat expansion this used to build.
+    //
+    // The tower's rotation is: dims [0, hd/2) rotated by the patch's X index and
+    // dims [hd/2, hd) by its Y index, in both cases pairing element j with
+    // element j + hd/4 and using angle pos * rope_theta^(-2j / (hd/2)). That is
+    // exactly GGML_ROPE_TYPE_NEOX with n_dims = hd/2 (NeoX pairs j with
+    // j + n_dims/2 and uses freq_base^(-2j/n_dims)), applied twice: once at
+    // offset 0 with the X positions and once at offset hd/2 with the Y positions.
+    // ggml_rope_set_offset provides that second window; every backend in the tree
+    // (CPU, Metal, CUDA, Vulkan, SYCL) implements n_offs, and llama.cpp builds the
+    // same 2D rope from two ggml_rope_ext calls in tools/mtmd/clip.cpp
+    // (build_rope_2d), using two views plus a concat rather than the offset.
+    //
+    // The second rope is NOT built in place on the first one's output, although
+    // ggml_rope_ext_inplace would let the backends skip re-copying the already-final
+    // X half: measured on this tower it is worth nothing (330.3 vs 330.5 ms steady,
+    // bit-identical output), which does not pay for aliasing a node the graph
+    // allocator would otherwise be free to place anywhere.
+    // Must stay in lockstep with Gemma4VisionEncoder.Apply2DRoPE, the per-op
+    // managed fallback, which walks the same four quarters by hand.
+    auto rope2d = [&](ggml_tensor* x3 /*[hd, nH, N] contiguous*/) -> ggml_tensor* {
+        ggml_tensor* rx = ggml_rope_ext(ctx, x3, pos_x_t, nullptr, half,
+            GGML_ROPE_TYPE_NEOX, 0, rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        ggml_tensor* ry = ggml_rope_ext(ctx, rx, pos_y_t, nullptr, half,
+            GGML_ROPE_TYPE_NEOX, 0, rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
+        return ggml_rope_set_offset(ry, half);
     };
 
     // ---------------- Build graph ----------------
@@ -1862,11 +1979,17 @@ int fused_gemma4_vision_block_f32_impl(
 
     ggml_tensor* qr = rope2d(ggml_reshape_3d(ctx, qn, hd, nH, N));
     ggml_tensor* kr = rope2d(ggml_reshape_3d(ctx, kn, hd, nH, N));
+    if (!backend_supports_op(qr))
+    {
+        set_last_error("fused_gemma4_vision_block: rope(NEOX, offset) unsupported for this backend.");
+        return 0;
+    }
     ggml_tensor* v3 = ggml_reshape_3d(ctx, vn, hd, nH, N);
 
     ggml_tensor* qp = ggml_permute(ctx, qr, 0, 2, 1, 3);  // [hd, N, nH]
     ggml_tensor* kp = ggml_permute(ctx, kr, 0, 2, 1, 3);
-    ggml_tensor* flash = build_vision_attention(ctx, qp, kp, v3, N, nH, hd, 1.0f);
+    ggml_tensor* flash = build_vision_attention(ctx, qp, kp, v3, N, nH, hd, 1.0f,
+        /*kv_f16=*/ true);
     if (!backend_supports_op(flash))
     {
         set_last_error("fused_gemma4_vision_block: flash_attn unsupported for this head_dim/backend.");
@@ -1877,11 +2000,14 @@ int fused_gemma4_vision_block_f32_impl(
     ggml_tensor* postA = ggml_mul(ctx, ggml_rms_norm(ctx, o, eps), apn_t);
     ggml_tensor* r1 = ggml_add(ctx, postA, inp);
 
-    // MLP sublayer (QuickGELU gated).
+    // MLP sublayer (gated gelu_pytorch_tanh).
+    // Gemma 4's vision config declares hidden_activation = "gelu_pytorch_tanh", so this uses
+    // ggml_gelu (the tanh approximation), NOT ggml_gelu_quick. Must stay in lockstep with the
+    // managed fallback in Gemma4VisionEncoder.VisionMLP, which calls Ops.GELUMul.
     ggml_tensor* n2 = ggml_mul(ctx, ggml_rms_norm(ctx, r1, eps), ln2_w_t);
     ggml_tensor* g = clampt(ggml_mul_mat(ctx, gate_w_t, clampt(n2, clamps[16], clamps[17])), clamps[18], clamps[19]);
     ggml_tensor* u = clampt(ggml_mul_mat(ctx, up_w_t, clampt(n2, clamps[20], clamps[21])), clamps[22], clamps[23]);
-    ggml_tensor* act = ggml_mul(ctx, ggml_gelu_quick(ctx, g), u);
+    ggml_tensor* act = ggml_mul(ctx, ggml_gelu(ctx, g), u);
     ggml_tensor* dn = clampt(ggml_mul_mat(ctx, down_w_t, clampt(act, clamps[24], clamps[25])), clamps[26], clamps[27]);
     ggml_tensor* postF = ggml_mul(ctx, ggml_rms_norm(ctx, dn, eps), fpn_t);
     ggml_tensor* outv = ggml_add(ctx, postF, r1);   // normed first: lets ggml-metal fuse rms_norm+mul+add into one kernel
@@ -1915,13 +2041,32 @@ int fused_gemma4_vision_block_f32_impl(
     // buffer (no-op on the eager-sync path).
     host_read_barrier();
 
+    auto ts_t1 = ts_now();   // end of build + alloc
+
     if (!use_zero_copy)
         upload_binding(hidden_binding, hidden_desc.data, hidden_binding.raw_bytes);
+    std::size_t ts_up_bytes = 0;
     for (auto& u : ups)
+    {
         ggml_backend_tensor_set(u.t, u.data, 0, u.bytes);
+        ts_up_bytes += u.bytes;
+    }
+    if (ts_prof) sync_backend(g_backend);
+    auto ts_t2 = ts_now();   // end of weight upload
 
     ggml_status status = tsg::compute_graph(g_backend, graph);
     if (status != GGML_STATUS_SUCCESS) { set_last_error("fused_gemma4_vision_block: compute failed."); return 0; }
+    if (ts_prof)
+    {
+        sync_backend(g_backend);
+        auto ts_t3 = ts_now();
+        std::fprintf(stderr,
+            "[vision-prof] N=%d D=%d ff=%d nodes=%d build+alloc=%.2fms upload=%.2fms (%.2f MB, %.1f GB/s) compute=%.2fms total=%.2fms\n",
+            N, D, ff, ggml_graph_n_nodes(graph), ts_ms(ts_t0, ts_t1), ts_ms(ts_t1, ts_t2),
+            ts_up_bytes / 1048576.0,
+            (ts_up_bytes / 1e9) / (ts_ms(ts_t1, ts_t2) / 1000.0),
+            ts_ms(ts_t2, ts_t3), ts_ms(ts_t0, ts_t3));
+    }
     finalize_compute(use_zero_copy, hidden_binding.storage, hidden_desc.data, hidden_binding.raw_bytes);
     // Drain the queued async download before the per-call fallback buffer frees
     // (no-op on the reuse-gallocr path, where buffer.value == nullptr).
@@ -2045,7 +2190,7 @@ int fused_outproj_ffn_quant_f32_impl(
 
     // Phase 1: output projection + residual
     ggml_tensor* inp_2d = (rows == 1) ? ggml_reshape_2d(ctx, cont_input, input_desc.dim1, 1) : cont_input;
-    ggml_tensor* out_mm = ggml_mul_mat(ctx, out_w, inp_2d);
+    ggml_tensor* out_mm = tsg::bonsai_mul_mat(ctx, out_w, inp_2d, out_proj_quant.data);
     ggml_tensor* out_flat = ggml_reshape_1d(ctx, out_mm, static_cast<int64_t>(rows) * hidden);
     ggml_tensor* res_flat1 = ggml_reshape_1d(ctx, cont_res, static_cast<int64_t>(rows) * hidden);
     ggml_tensor* res_plus_out = ggml_add(ctx, res_flat1, out_flat);
@@ -2056,7 +2201,7 @@ int fused_outproj_ffn_quant_f32_impl(
     ggml_tensor* scaled = ggml_mul(ctx, normed, norm_w);
     ggml_tensor* scaled_2d = (rows == 1) ? ggml_reshape_2d(ctx, scaled, hidden, 1) : scaled;
 
-    ggml_tensor* gu_mm = ggml_mul_mat(ctx, gu_w, scaled_2d);
+    ggml_tensor* gu_mm = tsg::bonsai_mul_mat(ctx, gu_w, scaled_2d, gate_up_quant.data);
     std::size_t gu_row_bytes = static_cast<std::size_t>(gate_up_out) * sizeof(float);
     std::size_t half_bytes = static_cast<std::size_t>(half_dim) * sizeof(float);
     // One GLU node straight off the strided halves (see the note in
@@ -2066,7 +2211,7 @@ int fused_outproj_ffn_quant_f32_impl(
     ggml_tensor* up_v   = ggml_view_2d(ctx, gu_mm, half_dim, rows, gu_row_bytes, half_bytes);
     ggml_tensor* swiglu = ggml_swiglu_split(ctx, gate_v, up_v);
     ggml_tensor* swiglu_2d = (rows == 1) ? ggml_reshape_2d(ctx, swiglu, half_dim, 1) : swiglu;
-    ggml_tensor* dn_mm = ggml_mul_mat(ctx, dn_w, swiglu_2d);
+    ggml_tensor* dn_mm = tsg::bonsai_mul_mat(ctx, dn_w, swiglu_2d, down_quant.data);
 
     ggml_tensor* dn_flat = ggml_reshape_1d(ctx, dn_mm, static_cast<int64_t>(rows) * hidden);
     ggml_tensor* res_flat2 = ggml_reshape_1d(ctx, res_2d, static_cast<int64_t>(rows) * hidden);
@@ -2218,7 +2363,7 @@ int fused_outproj_norm_router_quant_f32_impl(
 
     // Phase 1: output projection + residual
     ggml_tensor* inp_2d = (rows == 1) ? ggml_reshape_2d(ctx, cont_input, input_desc.dim1, 1) : cont_input;
-    ggml_tensor* out_mm = ggml_mul_mat(ctx, out_w, inp_2d);
+    ggml_tensor* out_mm = tsg::bonsai_mul_mat(ctx, out_w, inp_2d, out_proj_quant.data);
     ggml_tensor* out_flat = ggml_reshape_1d(ctx, out_mm, (int64_t)rows * hidden);
     ggml_tensor* res_flat = ggml_reshape_1d(ctx, cont_res, (int64_t)rows * hidden);
     ggml_tensor* res_updated = ggml_add(ctx, res_flat, out_flat);
@@ -3178,8 +3323,11 @@ static ggml_tensor* build_glm_vision_attn_subgraph(
     ggml_tensor* q_perm = ggml_permute(ctx, q_roped, 0, 2, 1, 3);
     ggml_tensor* k_perm = ggml_permute(ctx, k_roped, 0, 2, 1, 3);
 
+    // kv_f16=false: the Qwen3.5 / GLM towers have no numeric oracle gate in this
+    // repo, so they keep the F32 K/V they were validated with. See the note on
+    // build_vision_attention for what enabling it is worth and what proves it safe.
     ggml_tensor* attn_out = build_vision_attention(ctx, q_perm, k_perm, v_3d,
-        rows, num_heads, head_dim, attn_scale);
+        rows, num_heads, head_dim, attn_scale, /*kv_f16=*/ false);
     ggml_tensor* attn_flat = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_out), hidden, rows);
 
     ggml_tensor* out_proj = ggml_mul_mat(ctx, out_w_t, attn_flat);
@@ -3474,7 +3622,7 @@ TSG_EXPORT int TSGgml_FusedGemma4VisionBlockF32(
     const float* q_norm_w, const float* k_norm_w,
     const float* attn_post_norm_w,
     const float* out_w, int out_ne0, int out_ne1, std::int64_t out_bytes,
-    const float* cosx, const float* sinx, const float* cosy, const float* siny,
+    const std::int32_t* pos_x, const std::int32_t* pos_y, float rope_theta,
     const float* ln2_w,
     const float* gate_w, int gate_ne0, int gate_ne1, std::int64_t gate_bytes,
     const float* up_w, int up_ne0, int up_ne1, std::int64_t up_bytes,
@@ -3490,7 +3638,7 @@ TSG_EXPORT int TSGgml_FusedGemma4VisionBlockF32(
             v_w, v_ne0, v_ne1, static_cast<std::size_t>(v_bytes),
             q_norm_w, k_norm_w, attn_post_norm_w,
             out_w, out_ne0, out_ne1, static_cast<std::size_t>(out_bytes),
-            cosx, sinx, cosy, siny, ln2_w,
+            pos_x, pos_y, rope_theta, ln2_w,
             gate_w, gate_ne0, gate_ne1, static_cast<std::size_t>(gate_bytes),
             up_w, up_ne0, up_ne1, static_cast<std::size_t>(up_bytes),
             down_w, down_ne0, down_ne1, static_cast<std::size_t>(down_bytes),

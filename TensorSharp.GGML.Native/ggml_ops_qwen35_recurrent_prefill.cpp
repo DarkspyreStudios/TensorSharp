@@ -156,6 +156,17 @@ TSG_EXPORT int TSGgml_Qwen35RecurrentLayerPrefill(
 {
     try
     {
+        // This legacy cache deliberately shares one graph across every layer
+        // of the same shape. Bonsai signs and grouped-head permutations are
+        // weight-specific, so this graph cannot safely reuse them. The caller
+        // falls back to the transform-aware projections without changing any
+        // recurrent state. Whole-model Bonsai prefill uses its own fused graph.
+        if (bonsai_weight_has_transform(gdn_qkv_w_data) || bonsai_weight_has_transform(gdn_gate_w_data) ||
+            bonsai_weight_has_transform(ssm_beta_w_data) || bonsai_weight_has_transform(ssm_alpha_w_data) ||
+            bonsai_weight_has_transform(ssm_out_w_data)) {
+            set_last_error("RecPrefill: Bonsai transforms require the transform-aware projection path.");
+            return 0;
+        }
         if (!ensure_backend()) return 0;
         if (N <= 0 || hidden_size <= 0) { set_last_error("RecPrefill: bad N/hidden."); return 0; }
         if (num_k_heads <= 0 || num_v_heads <= 0 || (num_v_heads % num_k_heads) != 0)
