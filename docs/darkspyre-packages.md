@@ -87,5 +87,10 @@ packaging policy, not removal of previously embedded runtime assets.
 The 38 focused persistence, metadata, restricted Torch and safetensors cases pass in Debug and
 Release. The Chat transitive vulnerability audit reports no known vulnerable dependency. The
 source changes are the previously verified persistence/inspection commits; this release changes
-only versioning and release documentation. Package inspection and fresh downstream Inference
-restore are required before publication to the private DarkspyreStudios feed.
+only versioning and release documentation. All nine packages were published to the private
+DarkspyreStudios feed from `eb56c0dd354b6307e44d99f607cf240874170748`, identified by local immutable
+tag `v2.8.6.4`. Archive inspection confirms the declared dependency closure and owned assemblies,
+without embedded third-party/native backend binaries. GitHub API readback confirms all nine
+versions and their private visibility. A fresh downstream four-package Inference consumer restores
+from the ordinary public/private feeds without local archive sources, and its nine downloaded fork
+archives are byte-identical to the release archives. No source or tag was pushed by this release.
