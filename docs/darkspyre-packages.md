@@ -29,7 +29,7 @@ Packages are published to the private Darkspyre GitHub Packages feed. The
 `darkspyre` branch is the long-lived integration branch; upstream synchronization
 is performed onto that branch while preserving the focused fork commits.
 
-## Unreleased: complete persistence-backed GGUF sets
+## 2.8.6.4: complete persistence-backed GGUF sets
 
 `PersistenceFileSet` names the primary artifact and an immutable map of portable relative paths
 to `PersistenceFileReference` objects. Pass the entire set to `GgufFile.OpenAsync` or
@@ -47,15 +47,14 @@ numbering/counts and duplicate tensors before native model allocation.
 Verification uses synthetic split GGUFs, including actual tensor reads from each shard, in-place
 files, memory/mixed stores, malformed sets, cancellation, service lifetime and replacement rollback.
 This is managed persistence work; no upstream ggml or native kernels change and no full-weight or
-GPU inference parity is claimed. Local-only dependency packages may be built with a unique
-`2.8.6.4-local.gguf.<commit>` version override for Inference integration. This does not publish a
-release or change the repository's published package baseline.
+GPU inference parity is claimed. The earlier local-only `2.8.6.4-local.gguf.<commit>` integration
+builds are superseded by the 2.8.6.4 release package set.
 
 Focused verification: 22 persistence tests pass in Debug and Release; both builds report zero
 warnings. Changed-file formatting verification and the Chat transitive dependency vulnerability
 audit pass. The existing single-file safetensors and replacement-rollback tests remain included.
 
-## Unreleased: bounded metadata inspection
+## 2.8.6.4: bounded metadata inspection
 
 `GgufFile.InspectMetadata`, `SafetensorsFile.InspectMetadata` and
 `TorchStateDictionaryFile.InspectMetadata` reuse the corresponding loading parsers over a caller-owned
@@ -76,3 +75,17 @@ duplicate-name rejection, declared safetensors storage validation and shared pic
 These tests and the persistence regressions require no weights, GPU or native backend changes.
 Focused verification passes 36 tests in Debug and Release with zero build warnings, including all
 22 persistence regressions, the existing synthetic safetensors reads and restricted Torch tests.
+
+## 2.8.6.4 release verification (2026-09-23)
+
+The Inference four-package release requires this managed dependency closure: Tensors,
+Runtime.Logging, Runtime, AgentHost, Backends.Cuda, Backends.GGML, Backends.MLX, Models and Chat.
+All nine use the one 2.8.6.4 version and retain declared NuGet dependencies. No native build or
+full-weight/device test is claimed. The managed-only pack switches are the existing GGML/MLX
+packaging policy, not removal of previously embedded runtime assets.
+
+The 38 focused persistence, metadata, restricted Torch and safetensors cases pass in Debug and
+Release. The Chat transitive vulnerability audit reports no known vulnerable dependency. The
+source changes are the previously verified persistence/inspection commits; this release changes
+only versioning and release documentation. Package inspection and fresh downstream Inference
+restore are required before publication to the private DarkspyreStudios feed.
