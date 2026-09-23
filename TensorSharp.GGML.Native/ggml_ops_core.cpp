@@ -1247,6 +1247,8 @@ namespace tsg
         if (data == nullptr)
             return false;
 
+        qwen_image21_invalidate_weight(data);
+
         {
             std::lock_guard<std::mutex> lock(g_preloaded_buffer_cache_mutex);
             auto it = g_preloaded_buffer_cache.find(data);
@@ -2454,6 +2456,7 @@ namespace tsg
         case UnaryOpCode::Abs:     return ggml_abs(ctx, src);
         case UnaryOpCode::Sign:    return ggml_sgn(ctx, src);
         case UnaryOpCode::GELU:    return ggml_gelu(ctx, src);
+        case UnaryOpCode::GELUErf: return ggml_gelu_erf(ctx, src);
         default:
             set_last_error("Unsupported unary ggml op code.");
             return nullptr;
@@ -2637,7 +2640,7 @@ namespace tsg
     extern "C" bool tsg_cudnn_conv2d(const void* w, int wIsF16, int kw, int kh, int ic, int oc,
                                      const void* x, int W, int H, int T,
                                      int stride, int pad,
-                                     void* dst, int OW, int OH);
+                                     void* dst, int OW, int OH, bool full_precision);
     extern "C" void tsg_cudnn_conv2d_release(void);
     #endif
 
@@ -2650,7 +2653,7 @@ namespace tsg
 
     // True when a VAE should emit single CONV_2D nodes for a vendor
     // convolution library to execute instead of ggml's im2col + mul_mat lowering.
-    bool fast_conv_enabled()
+    bool fast_conv_enabled(bool prefer_cuda)
     {
     #if defined(TSG_GGML_USE_METAL)
         if (backend_is_metal())
@@ -2666,7 +2669,7 @@ namespace tsg
     #if defined(TSG_HAVE_CUDNN)
         if (backend_is_cuda())
         {
-            // OPT-IN on CUDA (TS_VAE_CUDNN_CONV=1), unlike the Metal/MPS route above.
+            // CUDA remains opt-in unless this graph explicitly prefers it.
             //
             // cuDNN convolves directly and so removes ggml's im2col lowering AND the
             // band tiling that exists to bound its scratch. That is a win on a short
@@ -2686,16 +2689,20 @@ namespace tsg
             // convolutions per temporal chunk become ~12 200 host synchronisations at
             // 121 frames, on a device that is already paging at that size.
             //
-            // Turn it on for short clips, for the Qwen-Image VAE (single frame), or on
-            // a card with enough headroom that the decode is not memory bound.
-            static const bool on = []{
+            // Qwen-Image-2.1's single-frame F32 VAE opts in locally: its 1024px
+            // decode measured 3.98 s with cuDNN vs 36.94 s with F32 im2col on the
+            // same RTX 3080 Laptop. Do not let that preference enable long Wan
+            // clips or older VAEs in the same process. An explicit 0 always wins.
+            static const int setting = []{
                 const char* e = std::getenv("TS_VAE_CUDNN_CONV");
-                if (e == nullptr || e[0] == '0') return false;
-                return tsg_cudnn_conv2d_available();
+                return e == nullptr ? -1 : e[0] == '0' ? 0 : 1;
             }();
-            return on;
+            if (setting == 0 || (setting < 0 && !prefer_cuda)) return false;
+            static const bool available = tsg_cudnn_conv2d_available();
+            return available;
         }
     #endif
+        (void) prefer_cuda;
         return false;
     }
 
@@ -2733,7 +2740,7 @@ namespace tsg
             // writes ggml's own buffers -- no staging, no copies.
             return tsg_cudnn_conv2d(kern->data, kernF16 ? 1 : 0, kw, kh, ic, oc,
                                     act->data, W, H, T, s0, p0,
-                                    node->data, OW, OH);
+                                    node->data, OW, OH, node->op_params[k_conv_full_precision_param] != 0);
         }
     #endif
     #if defined(TSG_GGML_USE_METAL)
@@ -3128,10 +3135,12 @@ extern "C" void TSGgml_GptOssInvalidateKvCache(const void* kCacheData, const voi
 extern "C" void TSGgml_MuseGlimmerResetDecodeCache();
 extern "C" void TSGgml_DFlashResetCaches();
 extern "C" void TSGgml_QwenImageResetForwardCache();
+extern "C" void TSGgml_QwenImage21ResetForwardCache();
 extern "C" void TSGgml_WanResetForwardCache();
 
 TSG_EXPORT void TSGgml_ClearHostBufferCache()
 {
+    TSGgml_QwenImage21ResetForwardCache();
     // The slot-stable arena pools bind resident weight buffers this wipe is
     // about to free; their captured graphs must not survive it.
     TSGgml_GptOssResetBatchedDecodeCache();
@@ -3212,6 +3221,7 @@ static std::recursive_mutex g_teardown_mutex;
 TSG_EXPORT void TSGgml_Shutdown()
 {
     std::lock_guard<std::recursive_mutex> teardown(g_teardown_mutex);
+    TSGgml_QwenImage21ResetForwardCache();
     // Tear the TP communicator down first: it holds NCCL communicators and
     // pinned staging buffers that reference every rank's backend.
     tp_comm_free();
@@ -3284,6 +3294,11 @@ TSG_EXPORT void TSGgml_Shutdown()
     TSGgml_DFlashResetCaches();
     TSGgml_QwenImageResetForwardCache();
     TSGgml_WanResetForwardCache();
+#if defined(TSG_HAVE_CUDNN)
+    // cuDNN owns a device handle and scratch independently of ggml. Release
+    // them before backend teardown, including callers that skip model disposal.
+    tsg_cudnn_conv2d_release();
+#endif
     // Release the calling thread's cached prefill-attention sessions while the
     // CUDA driver is still alive; leaving them to thread_local destructors
     // aborts the process on exit ("CUDA error: driver shutting down").
@@ -3385,6 +3400,7 @@ TSG_EXPORT void TSGgml_ReleaseReuseComputeBuffers()
     // it gets round to it - long after the free returned. The barrier is a
     // single atomic when nothing was deferred.
     host_read_barrier();
+    TSGgml_QwenImage21ResetForwardCache();
     free_reuse_compute_buffer();
     free_reuse_gallocr();
 }

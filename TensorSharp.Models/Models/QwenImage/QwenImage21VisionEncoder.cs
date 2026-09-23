@@ -8,6 +8,12 @@ namespace TensorSharp.Models
 {
     public partial class Qwen35VisionEncoder
     {
+        // Restrict the new path to GGML CUDA. The switch
+        // restores the previous host-erf/per-block implementation for A/B runs.
+        private bool UseFusedVision21 => _qwenImage21 &&
+            _allocator is GgmlAllocator allocator && allocator.Context.BackendType == GgmlBackendType.Cuda &&
+            Environment.GetEnvironmentVariable("TS_QWEN21_VISION_FUSED") != "0";
+
         /// <summary>Qwen3-VL main image embedding and additions for the first language blocks.
         /// The deepstack projectors normalize merged (4*1152) features, unlike the final
         /// projector, whose normalization precedes spatial merging.</summary>
@@ -40,6 +46,11 @@ namespace TensorSharp.Models
         private void ApplyVisionGelu(Tensor tensor)
         {
             if (!_qwenImage21) { Ops.GELU(tensor, tensor); return; }
+            if (UseFusedVision21)
+            {
+                GgmlBasicOps.GELUErf(tensor, tensor);
+                return;
+            }
             // Qwen3-VL uses GELU(erf); Ops.GELU uses the tanh approximation.
             var values = tensor.GetElementsAsFloat((int)tensor.ElementCount());
             System.Threading.Tasks.Parallel.For(0, values.Length, i =>

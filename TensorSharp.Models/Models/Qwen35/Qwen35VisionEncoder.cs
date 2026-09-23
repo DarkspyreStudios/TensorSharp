@@ -238,8 +238,22 @@ namespace TensorSharp.Models
                 {
                     if (!s_traceEnabled)
                         Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
-                    blockOrdered = EncoderBlock(blockOrdered, i, numPatches, headDim, halfDim,
-                        ropeCache.CosTable, ropeCache.SinTable);
+                    // Deepstack needs the residual at three tap boundaries, not
+                    // a host round trip for every transformer block. Fuse each
+                    // range through its tap and project before starting the next.
+                    bool rangeDone = false;
+                    if (UseFusedVision21 && s_wholeEncoderFusedEnabled && !s_traceEnabled)
+                    {
+                        int end = i;
+                        while (end + 1 < _blockCount &&
+                            (deepStack == null || !_weights.ContainsKey($"v.deepstack.{end}.norm.weight"))) end++;
+                        rangeDone = TryWholeEncoderFused(blockOrdered, numPatches, headDim, halfDim,
+                            ropeCache.CosTable, ropeCache.SinTable, i, end - i + 1);
+                        if (rangeDone) i = end;
+                    }
+                    if (!rangeDone)
+                        blockOrdered = EncoderBlock(blockOrdered, i, numPatches, headDim, halfDim,
+                            ropeCache.CosTable, ropeCache.SinTable);
                     if (deepStack != null && _weights.ContainsKey($"v.deepstack.{i}.norm.weight"))
                         deepStack.Add(ProjectDeepStack(blockOrdered, i, numPatches));
                     Trace($"block{i}", blockOrdered);
@@ -623,9 +637,9 @@ namespace TensorSharp.Models
         /// path declines.
         /// </summary>
         private bool TryWholeEncoderFused(Tensor hidden, int numPatches, int headDim, int halfDim,
-            float[] cosTable, float[] sinTable)
+            float[] cosTable, float[] sinTable, int firstBlock = 0, int blockCount = -1)
         {
-            int n = _blockCount;
+            int n = blockCount < 0 ? _blockCount : blockCount;
             var ln1W = new Tensor[n]; var ln1B = new Tensor[n];
             var qkvW = new Tensor[n]; var qkvB = new Tensor[n];
             var outW = new Tensor[n]; var outB = new Tensor[n];
@@ -635,7 +649,7 @@ namespace TensorSharp.Models
 
             for (int i = 0; i < n; i++)
             {
-                string p = _blockPrefixes[i];
+                string p = _blockPrefixes[firstBlock + i];
                 if (!_weights.TryGetValue($"{p}.ln1.weight", out ln1W[i]) ||
                     !_weights.TryGetValue($"{p}.ln1.bias", out ln1B[i]) ||
                     !_weights.TryGetValue($"{p}.attn_qkv.weight", out qkvW[i]) ||
@@ -669,7 +683,8 @@ namespace TensorSharp.Models
             {
                 bool ok = GgmlBasicOps.Qwen35VisionEncoder(hidden, _eps, attnScale,
                     numPatches, _numHeads, headDim, halfDim, cosTable, sinTable,
-                    ln1W, ln1B, qkvW, qkvB, outW, outB, ln2W, ln2B, upW, upB, downW, downB);
+                    ln1W, ln1B, qkvW, qkvB, outW, outB, ln2W, ln2B, upW, upB, downW, downB,
+                    geluErf: UseFusedVision21);
                 if (ok)
                     _hostModel?.YieldGpuComputeLock();
                 return ok;

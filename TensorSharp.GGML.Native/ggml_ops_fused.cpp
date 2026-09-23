@@ -1393,7 +1393,7 @@ static ggml_tensor* build_vision_mlp_subgraph(
     ggml_tensor* ln_w_t, ggml_tensor* ln_b_t, float eps,
     ggml_tensor* up_w_t, ggml_tensor* up_b_t,
     ggml_tensor* down_w_t, ggml_tensor* down_b_t,
-    int rows, int hidden, int dff)
+    int rows, int hidden, int dff, bool gelu_erf = false)
 {
     ggml_tensor* inp = ggml_cont(ctx, cur);
 
@@ -1405,7 +1405,7 @@ static ggml_tensor* build_vision_mlp_subgraph(
     ggml_tensor* fc1 = ggml_mul_mat(ctx, up_w_t, ln_2d);
     ggml_tensor* fc1_bias = ggml_add(ctx, fc1, ggml_repeat(ctx, ggml_reshape_2d(ctx, up_b_t, dff, 1), fc1));
 
-    ggml_tensor* fc1_gelu = ggml_gelu(ctx, fc1_bias);
+    ggml_tensor* fc1_gelu = gelu_erf ? ggml_gelu_erf(ctx, fc1_bias) : ggml_gelu(ctx, fc1_bias);
 
     ggml_tensor* fc1_2d = (rows == 1) ? ggml_reshape_2d(ctx, fc1_gelu, dff, 1) : fc1_gelu;
     ggml_tensor* fc2 = ggml_mul_mat(ctx, down_w_t, fc1_2d);
@@ -2964,7 +2964,8 @@ static int fused_qwen35_vision_encoder_f32_impl(
     int qkv_ne0, int qkv_ne1, std::size_t qkv_bytes, int qkv_b_dim,
     int out_ne0, int out_ne1, std::size_t out_bytes, int out_b_dim,
     int up_ne0, int up_ne1, std::size_t up_bytes, int up_b_dim,
-    int down_ne0, int down_ne1, std::size_t down_bytes, int down_b_dim)
+    int down_ne0, int down_ne1, std::size_t down_bytes, int down_b_dim,
+    bool gelu_erf = false)
 {
     if (!ensure_backend()) return 0;
     if (!validate_desc(hidden_desc, "hidden")) return 0;
@@ -3024,7 +3025,9 @@ static int fused_qwen35_vision_encoder_f32_impl(
             {
                 if (ggml_backend_tensor_alloc(buf, t, addr) == GGML_STATUS_SUCCESS)
                 {
-                    if (need) upload_list.push_back({ t, data, bytes });
+                    // A later allocation failure must not publish an unfilled
+                    // resident weight that the per-block fallback will reuse.
+                    if (need) { host_read_barrier(); ggml_backend_tensor_set(t, resolve_upload_source(data), 0, bytes); }
                     return;
                 }
                 invalidate_cached_buffer(const_cast<void*>(data));
@@ -3069,7 +3072,7 @@ static int fused_qwen35_vision_encoder_f32_impl(
             qkvw_t, qkvb_t, outw_t, outb_t, cos_t, sin_t,
             rows, hidden, num_heads, head_dim, half_dim, attn_scale);
         cur = build_vision_mlp_subgraph(ctx, cur, ln2w_t, ln2b_t, eps,
-            upw_t, upb_t, downw_t, downb_t, rows, hidden, dff);
+            upw_t, upb_t, downw_t, downb_t, rows, hidden, dff, gelu_erf);
     }
 
     ggml_tensor* output = ggml_cpy(ctx, cur, hidden_binding.tensor);
@@ -3425,6 +3428,38 @@ TSG_EXPORT int TSGgml_Qwen35VisionEncoderF32(
             out_ne0, out_ne1, static_cast<std::size_t>(out_bytes), out_b_dim,
             up_ne0, up_ne1, static_cast<std::size_t>(up_bytes), up_b_dim,
             down_ne0, down_ne1, static_cast<std::size_t>(down_bytes), down_b_dim);
+    }
+    catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }
+    catch (...) { set_last_error("Unknown error in fused vision encoder."); return 0; }
+}
+
+// Additive ABI: Qwen3-VL uses GELU(erf); the existing Qwen3.5 export retains tanh GELU.
+TSG_EXPORT int TSGgml_Qwen21VisionEncoderF32(
+    TensorView2DDesc hidden,
+    int block_count, float eps, float attn_scale,
+    int num_patches, int num_heads, int head_dim, int half_dim,
+    const float* cos_table, const float* sin_table,
+    const float* const* ln1_w, const float* const* ln1_b,
+    const float* const* qkv_w, const float* const* qkv_b,
+    const float* const* out_w, const float* const* out_b,
+    const float* const* ln2_w, const float* const* ln2_b,
+    const float* const* up_w,  const float* const* up_b,
+    const float* const* down_w, const float* const* down_b,
+    int ln_dim,
+    int qkv_ne0, int qkv_ne1, std::int64_t qkv_bytes, int qkv_b_dim,
+    int out_ne0, int out_ne1, std::int64_t out_bytes, int out_b_dim,
+    int up_ne0, int up_ne1, std::int64_t up_bytes, int up_b_dim,
+    int down_ne0, int down_ne1, std::int64_t down_bytes, int down_b_dim)
+{
+    try {
+        return fused_qwen35_vision_encoder_f32_impl(hidden, block_count, eps, attn_scale,
+            num_patches, num_heads, head_dim, half_dim, cos_table, sin_table,
+            ln1_w, ln1_b, qkv_w, qkv_b, out_w, out_b, ln2_w, ln2_b, up_w, up_b, down_w, down_b,
+            ln_dim,
+            qkv_ne0, qkv_ne1, static_cast<std::size_t>(qkv_bytes), qkv_b_dim,
+            out_ne0, out_ne1, static_cast<std::size_t>(out_bytes), out_b_dim,
+            up_ne0, up_ne1, static_cast<std::size_t>(up_bytes), up_b_dim,
+            down_ne0, down_ne1, static_cast<std::size_t>(down_bytes), down_b_dim, true);
     }
     catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }
     catch (...) { set_last_error("Unknown error in fused vision encoder."); return 0; }

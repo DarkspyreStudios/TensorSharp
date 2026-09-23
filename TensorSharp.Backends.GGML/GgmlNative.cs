@@ -707,9 +707,10 @@ public struct Conv2dArgs
 }
 
 // One op of the fused whole-VAE graph (TSGgml_QwenVaeRun). MUST match native TSGVaeOp.
-// Kinds: 0 conv, 1 channel-RMS-norm (*gamma at W), 2 silu, 3 nearest-upsample x2,
+// Kinds: 0 conv (Aux=1 retains F32 intermediates), 1 channel-RMS-norm (*gamma at W), 2 silu, 3 nearest-upsample x2,
 // 4 save (slots[Dst] = slots[Src], alias), 5 add (slots[Dst] = slots[Src] + slots[Aux]),
 // 6 spatial single-head attention (slots[Src] = qkv [W,H,3C], Oc = C).
+// 7 Qwen21 average-down, 8 Qwen21 duplicate-up (Oc=output channels, Kh=time factor, Kw=spatial factor).
 [StructLayout(LayoutKind.Sequential)]
 public struct QwenVaeOp
 {
@@ -1466,6 +1467,7 @@ internal enum GgmlUnaryOp
     Abs = 10,
     Sign = 11,
     GELU = 12,
+    GELUErf = 13,
 }
 
 internal enum GgmlFusedActMulOp
@@ -1945,6 +1947,25 @@ internal enum GgmlIndexReductionOp
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Qwen35VisionEncoderF32(
+            GgmlTensorView2D hidden,
+            int blockCount, float eps, float attnScale,
+            int numPatches, int numHeads, int headDim, int halfDim,
+            IntPtr cosTable, IntPtr sinTable,
+            IntPtr[] ln1W, IntPtr[] ln1B,
+            IntPtr[] qkvW, IntPtr[] qkvB,
+            IntPtr[] outW, IntPtr[] outB,
+            IntPtr[] ln2W, IntPtr[] ln2B,
+            IntPtr[] upW, IntPtr[] upB,
+            IntPtr[] downW, IntPtr[] downB,
+            int lnDim,
+            int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim,
+            int outNe0, int outNe1, long outBytes, int outBDim,
+            int upNe0, int upNe1, long upBytes, int upBDim,
+            int downNe0, int downNe1, long downBytes, int downBDim);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_Qwen21VisionEncoderF32(
             GgmlTensorView2D hidden,
             int blockCount, float eps, float attnScale,
             int numPatches, int numHeads, int headDim, int halfDim,
@@ -3369,9 +3390,15 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Conv2d(in Conv2dArgs desc);
 
-        public static bool TryConv2d(in Conv2dArgs desc)
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_Conv2dF32(in Conv2dArgs desc);
+
+        public static bool TryConv2d(in Conv2dArgs desc) => TryConv2d(in desc, false);
+
+        public static bool TryConv2d(in Conv2dArgs desc, bool fullPrecision)
         {
-            int r = TSGgml_Conv2d(in desc);
+            int r = fullPrecision ? TSGgml_Conv2dF32(in desc) : TSGgml_Conv2d(in desc);
             if (r == 0)
                 Console.Error.WriteLine($"[conv2d FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
@@ -5246,8 +5273,41 @@ internal enum GgmlIndexReductionOp
             int outNe0, int outNe1, long outBytes, int outBDim,
             int upNe0, int upNe1, long upBytes, int upBDim,
             int downNe0, int downNe1, long downBytes, int downBDim)
+            => Qwen35VisionEncoder(hidden, blockCount, eps, attnScale, numPatches, numHeads, headDim, halfDim,
+                cosTable, sinTable, ln1W, ln1B, qkvW, qkvB, outW, outB,
+                ln2W, ln2B, upW, upB, downW, downB, lnDim,
+                qkvNe0, qkvNe1, qkvBytes, qkvBDim, outNe0, outNe1, outBytes, outBDim,
+                upNe0, upNe1, upBytes, upBDim, downNe0, downNe1, downBytes, downBDim,
+                geluErf: false);
+
+        public static bool Qwen35VisionEncoder(
+            GgmlTensorView2D hidden,
+            int blockCount, float eps, float attnScale,
+            int numPatches, int numHeads, int headDim, int halfDim,
+            IntPtr cosTable, IntPtr sinTable,
+            IntPtr[] ln1W, IntPtr[] ln1B,
+            IntPtr[] qkvW, IntPtr[] qkvB,
+            IntPtr[] outW, IntPtr[] outB,
+            IntPtr[] ln2W, IntPtr[] ln2B,
+            IntPtr[] upW, IntPtr[] upB,
+            IntPtr[] downW, IntPtr[] downB,
+            int lnDim,
+            int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim,
+            int outNe0, int outNe1, long outBytes, int outBDim,
+            int upNe0, int upNe1, long upBytes, int upBDim,
+            int downNe0, int downNe1, long downBytes, int downBDim, bool geluErf)
         {
-            int rc = TSGgml_Qwen35VisionEncoderF32(hidden,
+            int rc = geluErf ? TSGgml_Qwen21VisionEncoderF32(hidden,
+                blockCount, eps, attnScale,
+                numPatches, numHeads, headDim, halfDim,
+                cosTable, sinTable,
+                ln1W, ln1B, qkvW, qkvB, outW, outB, ln2W, ln2B, upW, upB, downW, downB,
+                lnDim,
+                qkvNe0, qkvNe1, qkvBytes, qkvBDim,
+                outNe0, outNe1, outBytes, outBDim,
+                upNe0, upNe1, upBytes, upBDim,
+                downNe0, downNe1, downBytes, downBDim) :
+                TSGgml_Qwen35VisionEncoderF32(hidden,
                 blockCount, eps, attnScale,
                 numPatches, numHeads, headDim, halfDim,
                 cosTable, sinTable,
