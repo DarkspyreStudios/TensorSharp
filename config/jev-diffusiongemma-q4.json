@@ -1,7 +1,9 @@
 {
   // Native Jev-compatible POST /v1/systemone using a seeded, one-step
   // DiffusionGemma logit read. No separate bridge or tokenizer download.
-  // Set TENSORSHARP_MODELS to your model directory, then run:
+  // Downloads the Q4_K_M model from Unsloth on first use and reuses it afterward.
+  // Defaults to ../models relative to this config; set TENSORSHARP_MODELS to
+  // use another model directory, then run:
   // dotnet run --project TensorSharp.Server.Host -c Release -- --config config/jev-diffusiongemma-q4.json
   // Sampling/read controls belong in the JSON request, not chat sampler flags.
   // MAX_CONTEXT is environment-only and limits prompt + canvas tokens. Set it
@@ -13,7 +15,12 @@
   "variables": {
     "modelRoot": "${TENSORSHARP_MODELS:-../models}"
   },
-  "model": "${modelRoot}/diffusiongemma-26B-A4B-it-Q4_K_M.gguf",
+  "model": {
+    "path": "${modelRoot}/diffusiongemma-26B-A4B-it-Q4_K_M.gguf",
+    "urls": [
+      "https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF/resolve/main/diffusiongemma-26B-A4B-it-Q4_K_M.gguf"
+    ]
+  },
   "backend": "ggml_cuda",
   "host": "127.0.0.1",
   "port": 5000,

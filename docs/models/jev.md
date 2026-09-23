@@ -40,9 +40,12 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --config config/jev-d
 The [configuration](../../config/jev-diffusiongemma-q4.json) binds loopback port
 5000 and uses `ggml_cuda`. Override `--backend ggml_cpu` for CPU execution or
 `--backend ggml_metal` on a supported Mac. These are execution options, not claims
-that every backend has been benchmarked. Set `TENSORSHARP_MODELS` to an absolute
-directory containing `diffusiongemma-26B-A4B-it-Q4_K_M.gguf`. Ordinary chat
-endpoints remain available on the same server.
+that every backend has been benchmarked. The configuration downloads
+`diffusiongemma-26B-A4B-it-Q4_K_M.gguf` from
+`unsloth/diffusiongemma-26B-A4B-it-GGUF` on Hugging Face when the local file is
+missing and reuses it on subsequent launches. It defaults to the repository's
+`models` directory; set `TENSORSHARP_MODELS` to an absolute directory to use a
+different location. Ordinary chat endpoints remain available on the same server.
 
 The recipe reserves 4 GiB of VRAM for activations on a 16 GiB CUDA GPU. A larger
 reserve leaves fewer weights resident but can avoid severe paging on longer
@@ -64,13 +67,18 @@ Invoke-RestMethod http://127.0.0.1:5000/v1/systemone -Method Post `
   ConvertTo-Json -Depth 12
 ```
 
-Equivalent curl request:
+Equivalent curl request from the repository root:
 
 ```bash
 curl http://127.0.0.1:5000/v1/systemone \
   -H 'Content-Type: application/json' \
   --data-binary @docs/examples/jev-ticket.json
 ```
+
+If your terminal is already in `docs/examples`, use `--data-binary @jev-ticket.json`
+instead. The `@` tells curl to read the file contents. Without it, curl sends the
+literal text `jev-ticket.json`, and the server returns `Request body must be valid
+JSON.` before running inference.
 
 ## Request examples
 
