@@ -49,6 +49,7 @@ using System.Threading.Tasks;
 using TensorSharp;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
+using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling;
 
 public static class Program
@@ -98,6 +99,24 @@ public static class Program
         }
 
         string modelPath = args[0];
+        // A model the backend refuses to load is an ANSWER, not a crash: the CLI and the
+        // server both print one stderr line and exit with HostExitCodes.ModelLoadRefused,
+        // and a validation run asking "does ggml_cuda-only Bonsai2 refuse the pure-C# cpu
+        // backend cleanly?" reads this harness's exit code. Without this it dumped a stack
+        // and aborted (SIGABRT, exit 134), which is indistinguishable from a real crash.
+        try
+        {
+            return Dispatch(modelPath, args);
+        }
+        catch (Exception ex) when (ModelLoadRefusal.TryDescribe(ex, out string refusal))
+        {
+            Console.Error.WriteLine(ModelLoadRefusal.FormatErrorLine(refusal));
+            return HostExitCodes.ModelLoadRefused;
+        }
+    }
+
+    private static int Dispatch(string modelPath, string[] args)
+    {
         if (args[1] == "--ref") return RunReference(modelPath, args);
         if (args[1] == "--bench") return RunBench(modelPath, args);
         if (args[1] == "--batched") return RunBatched(modelPath, args);

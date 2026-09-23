@@ -61,10 +61,14 @@
          (339/0 to 1730/248) and the engine comes up, but the executable grows from
          78 MB to 190 MB and the app then dies at startup: SIGABRT inside load_aot_module
          during mono_jit_init, before any managed code runs. MEASURED on device. So that
-         is not the fix; the symbols have to be kept individually instead (the
-         ReferenceNativeSymbol item group the iOS SDK exposes), which is still to do.
-         Until then a Release device build has no engine and Debug is the working
-         device configuration. -->
+         is not the fix; the symbols are kept individually instead, through the
+         ReferenceNativeSymbol item group the iOS SDK exposes. They live in
+         GgmlExportedSymbols.targets, imported at the end of this file, which names
+         every TSGgml_ export. A new native export has to be added there too:
+         TensorAgentMauiProjectTests keeps that manifest equal to the TSG_EXPORT list
+         in TensorSharp.GGML.Native, because an export missing from it survives Debug
+         and the simulator and disappears only under the Release device strip, showing
+         up as an EntryPointNotFound at runtime. -->
 
     <!-- Simulator bundles are ad-hoc signed ("-"); device builds need a real
          identity + profile passed on the command line (-p:CodesignKey=...). -->

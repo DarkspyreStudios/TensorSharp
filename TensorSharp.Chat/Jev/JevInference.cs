@@ -85,6 +85,7 @@ internal static class JevInference
             diagnostics = new
             {
                 engine = "tensorsharp", steps = 1,
+                images = request.Images.Length,
                 probability_semantics = "conditional_label_softmax_temperature_1",
                 entropy_semantics = "conditional_label_entropy_nats",
                 seed = request.Seed,

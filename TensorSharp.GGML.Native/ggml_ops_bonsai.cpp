@@ -76,6 +76,18 @@ DeviceConstants & constants(Transform & t) {
 
 ggml_tensor * fwht(ggml_context * ctx, ggml_tensor * input, const Transform & t, DeviceConstants & c) {
     auto * flat = ggml_is_contiguous(input) ? input : ggml_cont(ctx, input);
+    // The mul_mat below is tagged GGML_HINT_SRC0_IS_HADAMARD, which asks the backend to
+    // ignore c.rotation and run its own FWHT over src1 instead. ggml-cpu type-checks src1
+    // before taking that path; ggml-cuda's fwht kernel does not, and reads an F16 row as
+    // floats - wrong values, and twice the bytes. That is how the inverse direction
+    // produced 16.0 max abs error against the dense oracle on an A5000 (bonsai2-hadamard-cuda)
+    // while the CPU backend was correct. The scheduler's supports_op would have declined the
+    // op, but these graphs go straight to ggml_backend_graph_compute, so nothing catches it.
+    // Widening here covers every caller: the forward direction already widens at its own call
+    // site, for the unrelated reason that F16 would round the folded 1/sqrt(2) normalization.
+    // Model activations and get_rows output are already F32, so no path the model runs gains
+    // a node - this is a guard for the contract, not a cost.
+    if (flat->type != GGML_TYPE_F32) flat = ggml_cast(ctx, flat, GGML_TYPE_F32);
     const int64_t count = ggml_nelements(input);
     auto * x = ggml_reshape_2d(ctx, flat, c.rotation->ne[0], count / c.rotation->ne[0]);
     x = ggml_mul_mat(ctx, c.rotation, x);

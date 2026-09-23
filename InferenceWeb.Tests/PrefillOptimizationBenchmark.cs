@@ -837,12 +837,48 @@ public class PrefillOptimizationBenchmark
     // ---------------------------------------------------------------
     // 8. MoE batched vs token-by-token expert FFN
     // ---------------------------------------------------------------
+    /// <summary>
+    /// Expert-batched matmuls must stay within a small constant factor of the per-token
+    /// path on this allocator.
+    ///
+    /// <para>It is NOT a demonstration that batching is faster here, and it used to claim
+    /// to be one. Warm and measured fairly, batching 512 one-row matmuls into 8 grouped
+    /// ones is about 1.8x SLOWER on <c>CpuAllocator(BlasEnum.DotNet)</c>: a one-row
+    /// product against a transposed weight view is this BLAS's best-optimized shape, and
+    /// the win batching exists for -- collapsing ~1024 GPU graph launches into ~8, at
+    /// 0.1-0.5 ms of dispatch each -- is a win no managed CPU allocator can show. The
+    /// GGML allocators, where the real MoE path runs, register no <c>Ops.Dot</c> handler
+    /// at all, so they cannot stand in here.</para>
+    ///
+    /// <para>The old assertion (batched &lt; token * 1.5) passed only as a measurement
+    /// artifact: each arm ran once, and the token arm's single run was JIT-cold, which
+    /// inflated it about 4x (55-64 ms/iter cold against 14-15 warm). Warm, the old
+    /// assertion failed 4 runs out of 5. What remains is a real guard:
+    /// a change that made grouped matmuls catastrophically worse -- materializing the
+    /// transposed weight per call, say, which measured 5x -- still trips it.</para>
+    /// </summary>
     [Fact]
-    public void MoE_BatchedExperts_IsFasterThanTokenByToken()
+    public void MoE_BatchedExperts_StayWithinASmallFactorOfTokenByToken()
     {
         const int seqLen = 256, hiddenDim = 512, ffnDim = 1024;
         const int numExperts = 8, expertsUsed = 2;
         const int warmup = 2, iters = 10;
+        // Both arms are timed once per repeat, alternating, and compared on their BEST
+        // repeat. A wall-clock timing can only be inflated by whatever else the machine
+        // is doing, never deflated, so the minimum is the closest estimate of each arm's
+        // own cost; alternating keeps a thermal or scheduling drift from landing on one
+        // arm alone. Measured once each, in a fixed order, this test failed at 286 ms vs
+        // 152 ms purely because a model server was serving requests beside it.
+        const int repeats = 3;
+        // Measured warm on an M5 Pro: 8 grouped matmuls at 26 ms/iter against 512 one-row
+        // ones at 15 ms/iter, i.e. 1.8x on a quiet machine and 3.4x with eight cores of
+        // that machine burned by something else -- the two arms do not lose the same
+        // amount to contention, which is why this one test failed beside a running model
+        // server while its tighter-toleranced siblings in this file did not. The ceiling
+        // sits above that contended figure and still below a real collapse: feeding these
+        // matmuls a materialized transpose instead of the transposed view, the regression
+        // this kind of guard exists to catch, measures 5x.
+        const double slowdownCeiling = 4.0;
 
         using var expertWeight = RandTensor(2 * ffnDim, hiddenDim);
         using var expertDown = RandTensor(hiddenDim, ffnDim);
@@ -862,57 +898,72 @@ public class PrefillOptimizationBenchmark
 
         using var input = RandTensor(seqLen, hiddenDim);
 
-        // Warm up
-        for (int w = 0; w < warmup; w++)
+        // One input per expert group, built ONCE: filling a random tensor is test
+        // scaffolding, and inside the timed loop it charged the batched arm for RNG and
+        // an allocation that neither path performs in production.
+        var batchInputs = new Tensor[numExperts];
+        try
         {
-            using var tb = RandTensor(32, hiddenDim);
-            using var wt = expertWeight.Transpose(0, 1);
-            using var rb = Ops.Dot(null, tb, wt);
-        }
+            for (int e = 0; e < numExperts; e++)
+                batchInputs[e] = groups[e].Count == 0 ? null : RandTensor(groups[e].Count, hiddenDim);
 
-        // Token-by-token (old path): one matmul per token per expert
-        var sw = Stopwatch.StartNew();
-        for (int i = 0; i < iters; i++)
-        {
-            using var wt = expertWeight.Transpose(0, 1);
-            for (int s = 0; s < seqLen; s++)
+            // Warm up
+            for (int w = 0; w < warmup; w++)
             {
-                for (int e = 0; e < expertsUsed; e++)
+                using var tb = RandTensor(32, hiddenDim);
+                using var wt = expertWeight.Transpose(0, 1);
+                using var rb = Ops.Dot(null, tb, wt);
+            }
+
+            double tokenMs = double.MaxValue, batchedMs = double.MaxValue;
+            var sw = new Stopwatch();
+            for (int repeat = 0; repeat < repeats; repeat++)
+            {
+                // Token-by-token (old path): one matmul per token per expert
+                sw.Restart();
+                for (int i = 0; i < iters; i++)
                 {
-                    using var row = input.Narrow(0, s, 1);
-                    using var rowC = Ops.NewContiguous(row);
-                    using var r = Ops.Dot(null, rowC, wt);
+                    using var wt = expertWeight.Transpose(0, 1);
+                    for (int s = 0; s < seqLen; s++)
+                    {
+                        for (int e = 0; e < expertsUsed; e++)
+                        {
+                            using var row = input.Narrow(0, s, 1);
+                            using var rowC = Ops.NewContiguous(row);
+                            using var r = Ops.Dot(null, rowC, wt);
+                        }
+                    }
                 }
-            }
-        }
-        double tokenMs = sw.Elapsed.TotalMilliseconds;
+                tokenMs = Math.Min(tokenMs, sw.Elapsed.TotalMilliseconds);
 
-        // Batched by expert (new path): one matmul per expert
-        sw.Restart();
-        for (int i = 0; i < iters; i++)
+                // Batched by expert (new path): one matmul per expert
+                sw.Restart();
+                for (int i = 0; i < iters; i++)
+                {
+                    using var wt = expertWeight.Transpose(0, 1);
+                    for (int expertIdx = 0; expertIdx < numExperts; expertIdx++)
+                    {
+                        if (batchInputs[expertIdx] == null) continue;
+                        using var r = Ops.Dot(null, batchInputs[expertIdx], wt);
+                    }
+                }
+                batchedMs = Math.Min(batchedMs, sw.Elapsed.TotalMilliseconds);
+            }
+
+            int totalTokenCalls = seqLen * expertsUsed;
+            double speedup = tokenMs / batchedMs;
+            Console.WriteLine($"[MoE] Best of {repeats}: token-by-token ({totalTokenCalls} matmuls): {tokenMs / iters:F1} ms/iter, " +
+                              $"Batched ({numExperts} matmuls): {batchedMs / iters:F1} ms/iter, " +
+                              $"Speedup: {speedup:F2}x");
+
+            Assert.True(batchedMs < tokenMs * slowdownCeiling,
+                $"Batched matmuls are {batchedMs / tokenMs:F2}x the token-by-token cost, past the " +
+                $"{slowdownCeiling:F1}x ceiling: {batchedMs:F1} ms vs token-by-token {tokenMs:F1} ms");
+        }
+        finally
         {
-            using var wt = expertWeight.Transpose(0, 1);
-            for (int expertIdx = 0; expertIdx < numExperts; expertIdx++)
-            {
-                var batch = groups[expertIdx];
-                if (batch.Count == 0) continue;
-                using var batchInput = RandTensor(batch.Count, hiddenDim);
-                using var r = Ops.Dot(null, batchInput, wt);
-            }
+            foreach (var batchInput in batchInputs) batchInput?.Dispose();
         }
-        double batchedMs = sw.Elapsed.TotalMilliseconds;
-
-        int totalTokenCalls = seqLen * expertsUsed;
-        double speedup = tokenMs / batchedMs;
-        Console.WriteLine($"[MoE] Token-by-token ({totalTokenCalls} matmuls): {tokenMs / iters:F1} ms/iter, " +
-                          $"Batched ({numExperts} matmuls): {batchedMs / iters:F1} ms/iter, " +
-                          $"Speedup: {speedup:F2}x");
-
-        // On CPU BLAS, batching doesn't help much. The real win is on Metal/CUDA
-        // where each matmul is a separate GPU graph launch (~0.1-0.5ms overhead).
-        // Batching reduces ~1024 launches to ~8, saving ~100-500ms of dispatch overhead.
-        Assert.True(batchedMs < tokenMs * 1.5,
-            $"Batched should not be catastrophically slower: {batchedMs:F1} ms vs token-by-token {tokenMs:F1} ms");
     }
 
     // ---------------------------------------------------------------

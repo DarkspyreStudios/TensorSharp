@@ -11,7 +11,7 @@
 ## Supported model families at a glance
 
 - **Text, reasoning, and multimodal LLMs:** [DeepSeek V4 Flash](docs/models/deepseek4.md) / [V4.1 Flash](docs/models/deepseek41.md), [GLM 5.x](docs/models/glm.md), [Gemma 4](docs/models/gemma4.md), [Qwen 3.5 / 3.6](docs/models/qwen35.md), [Qwen 3.8 Flash Next](docs/models/qwen38-flash-next.md), [Bonsai (Qwen family)](docs/models/bonsai.md), [GPT OSS](docs/models/gptoss.md), [Nemotron-H](docs/models/nemotron.md), [Mistral 3](docs/models/mistral3.md), [Hunyuan Dense](docs/models/hunyuan-dense.md), and [Muse-Glimmer](docs/models/muse-glimmer.md).
-- **Text diffusion:** [DiffusionGemma](docs/models/diffusiongemma.md), including [Jev typed decision inference](docs/models/jev.md) at `/v1/systemone`.
+- **Text diffusion:** [DiffusionGemma](docs/models/diffusiongemma.md), including [Jev typed decision inference](docs/models/jev.md) at `/v1/systemone`, over text or image state.
 - **Image generation/editing and video generation:** [Qwen-Image-2.1](docs/models/qwenimage21.md), [Qwen-Image-Edit](docs/models/qwenimage.md), [MiniMax-H3 (video + stereo audio)](docs/models/minimax-h3.md), and [Wan 2.1 / 2.2](docs/models/wan.md).
 - **Text and code embeddings:** BERT / XLM-R encoders — [Snowflake Arctic Embed L v2.0 and all-MiniLM-L6-v2](docs/embeddings.md).
 
@@ -210,7 +210,7 @@ Implemented and exercised by the test/benchmark matrix. Pick a quantization that
 | Mistral 3 | [Mistral-Small-3.1-24B](https://huggingface.co/bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF) | ✅ / — / — | — | — | [mistral3.md](docs/models/mistral3.md) |
 | Hunyuan Dense | Tencent dense Hunyuan GGUFs (`hunyuan-dense`), e.g. the Hy-MT2 releases | — / — / — | — | — | [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
 | Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF) (+ mmproj) | ✅ / — / — | ✅ | ✅ | [muse-glimmer.md](docs/models/muse-glimmer.md) |
-| DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | — / — / — | — | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
+| DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) (vision tower from the upstream safetensors shard) | ✅ / — / — | — | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
 | Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF) (DiT + dedicated 2.1 VAE + Qwen3-VL-8B) | 🖼️ text→image, image editing; RGBA | — | — | [qwenimage21.md](docs/models/qwenimage21.md) |
 | Qwen-Image-Edit | [Qwen-Image-Edit-2511](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) (MMDiT + VAE + Qwen2.5-VL) · fast lane: [Lightning 4-step LoRA](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | 🖼️ image→image | — | — | [qwenimage.md](docs/models/qwenimage.md) |
 | MiniMax-H3 audio+video | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) (denoiser + Qwen3-VL-32B encoder) + [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) (video + audio VAE) | 🎬🔊 text→video, image→video, first/last frame, reference→video (image/clip/audio), **with stereo audio** | — | — | [minimax-h3.md](docs/models/minimax-h3.md) |
@@ -244,7 +244,7 @@ See the [performance guide and detailed fast lanes](docs/PROJECT_STATUS.md#make-
 | Mistral 3 | `mistral3` | Mistral-Small-3.1-24B-Instruct | Image | No | No | — | [mistral3.md](docs/models/mistral3.md) |
 | Hunyuan Dense | `hunyuan-dense` | Tencent dense Hunyuan decoders, e.g. Hy-MT2 (GQA with per-head QK-norm applied *after* NeoX RoPE, SwiGLU) | Text only | No | No | — | [hunyuan-dense.md](docs/models/hunyuan-dense.md) |
 | Muse-Glimmer | `muse-glimmer`, `muse_glimmer` | Muse-Glimmer-30B (interleaved SWA + NoPE full layers, attention output gate) | Image | Yes | Yes (ATEM) | Yes (DFlash block drafter, separate GGUF) | [muse-glimmer.md](docs/models/muse-glimmer.md) |
-| DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | diffusion-gemma text-diffusion GGUFs | Text only | No | No | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
+| DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | diffusion-gemma text-diffusion GGUFs | Image (chat and `/v1/systemone` Jev decisions); no audio or video | No | No | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
 | Qwen-Image-2.1 | `qwen_image`, `qwen-image` (2.1 detected from tensor keys) | Qwen-Image-2.1 DiT GGUFs (+ dedicated 2.1 VAE & Qwen3-VL-8B) | Text→image and image editing, RGBA output | No | No | — | [qwenimage21.md](docs/models/qwenimage21.md) |
 | Qwen-Image-Edit | `qwen_image`, `qwen-image` | qwen-image-edit MMDiT GGUFs (+ VAE & Qwen2.5-VL) | Image edit (image+text → image) | No | No | — | [qwenimage.md](docs/models/qwenimage.md) |
 | MiniMax-H3 | `minimax-h3`, `minimax_h3` (the published GGUFs carry no metadata at all, so they are detected from their tensors) | MiniMax-H3 FL2VA / Ref2VA (19.3B packed audio-video DiT + Qwen3-VL-32B text encoder, video VAE, audio VAE) | Video **+ 32 kHz stereo audio** out (text→video, image→video, first/last frame, reference→video) | No | No | — | [minimax-h3.md](docs/models/minimax-h3.md) |

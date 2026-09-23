@@ -114,7 +114,8 @@ the others run through the per-sequence KV-swap fallback inside the same engine.
 DiffusionGemma does not support autoregressive `Forward()`, so it uses
 `DiffusionGemmaSampler` and the server-side `DiffusionBatchScheduler` instead.
 Its [Jev decision API](jev.md) reads typed answer probabilities directly from a
-seeded canvas with one denoising step and a selected-label output projection.
+seeded canvas with one denoising step and a selected-label output projection, over
+a state that may include images as well as text.
 Qwen-Image-Edit is likewise not autoregressive: `Forward()` throws, editing runs
 through `QwenImageModel.EditImage()` over a FlowMatch-Euler diffusion loop, and
 concurrent edits are serialized (the diffusion nets are not thread-safe).

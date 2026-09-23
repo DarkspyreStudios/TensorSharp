@@ -11,6 +11,10 @@ namespace TensorSharp.Server.Jev;
 public sealed record JevQuestion(string Id, string Type, string Instructions,
     string[] Names, string?[] Descriptions, string[] Labels, JsonElement[]? Levels = null);
 
+/// <summary>One decoded inline image from a request, before it is written to media storage.
+/// The format is sniffed from the bytes, never taken from the declared media type.</summary>
+public sealed record JevImage(byte[] Bytes, string Format);
+
 public sealed class JevValidationException(string message) : ArgumentException(message);
 public sealed class JevQueueFullException() : InvalidOperationException("The Jev inference queue is full; retry later.");
 public sealed class JevModelUnavailableException(string message) : InvalidOperationException(message);
@@ -18,10 +22,15 @@ public sealed class JevModelNotFoundException(string message) : ArgumentExceptio
 
 public sealed record JevRequest(string? Model, string State, string? Instructions,
     JevQuestion[] Questions, int Samples, int AutoMax, double AutoThreshold, int Seed,
-    int? ChunkRows, bool SharedPrompt)
+    int? ChunkRows, bool SharedPrompt, JevImage[] Images)
 {
     public const int MaxQuestions = 64;
     public const int MaxSamples = 32;
+    /// <summary>Images per request. Each one costs its encoder's own soft-token count —
+    /// up to 280 rows for this tower, fewer for a small picture — in every chunk prompt,
+    /// so the ceiling is deliberately low; the context check rejects whatever does not
+    /// fit regardless.</summary>
+    public const int MaxImages = 8;
 
     /// <summary>Parse the public /v1/systemone JSON contract without retaining document storage.</summary>
     public static JevRequest Parse(JsonElement root)
@@ -31,11 +40,31 @@ public sealed record JevRequest(string? Model, string State, string? Instruction
         var supportedKeys = new HashSet<string>(["model", "state", "instructions", "questions", "samples", "auto_max", "auto_threshold",
             "seed", "chunk_rows", "chunk_prompt", "steps", "think", "images", "ask", "sequential"], StringComparer.Ordinal);
         foreach (var property in root.EnumerateObject())
+        {
+            // Images are the only media this checkpoint can take: it ships no audio tower
+            // (AudioInputSupport refuses audio for the family) and upstream's video feature
+            // path raises NotImplementedError, so frames can only be sent as plain images.
+            // Name the reason instead of letting the generic "unsupported field" hide it.
+            if (property.Name is "audio" or "audios" or "input_audio" or "video" or "videos")
+                throw Error($"'{property.Name}' is not supported: this checkpoint has an image tower only. " +
+                    "Send image input in 'images'; video frames must be sent as individual images.");
             if (!supportedKeys.Contains(property.Name)) throw Error($"unsupported request field '{property.Name}'");
+        }
         if (!root.TryGetProperty("state", out var state) || state.ValueKind == JsonValueKind.Null)
             throw Error("state: required");
         if (state.ValueKind is not (JsonValueKind.String or JsonValueKind.Object or JsonValueKind.Array))
             throw Error("state must be a string, object, or array");
+        var images = new List<JevImage>();
+        if (root.TryGetProperty("images", out var attachments) && attachments.ValueKind != JsonValueKind.Null)
+        {
+            if (attachments.ValueKind != JsonValueKind.Array)
+                throw Error("images must be an array of inline images");
+            foreach (var attachment in attachments.EnumerateArray())
+            {
+                if (images.Count == MaxImages) throw Error($"images: at most {MaxImages} images per request");
+                images.Add(JevImageInput.Decode(attachment, images.Count));
+            }
+        }
         string? model = OptionalString(root, "model");
         if (model != null && string.IsNullOrWhiteSpace(model)) throw Error("model must not be empty");
         if (!root.TryGetProperty("questions", out var questions) || questions.ValueKind != JsonValueKind.Object)
@@ -119,12 +148,12 @@ public sealed record JevRequest(string? Model, string State, string? Instruction
         if (chunkPrompt is not ("own" or "shared")) throw Error("chunk_prompt must be own or shared");
         if (Integer(root, "steps", 1, 1, 8) != 1) throw Error("steps: only one-step structured reads (steps=1) are supported");
         if (Integer(root, "think", 0, 0, 4096) != 0) throw Error("think: thought generation is not supported; use think=0");
-        foreach (string unsupported in new[] { "images", "ask", "sequential" })
+        foreach (string unsupported in new[] { "ask", "sequential" })
             if (root.TryGetProperty(unsupported, out var value) &&
                 !(unsupported == "sequential" && value.ValueKind == JsonValueKind.False))
-                throw Error($"'{unsupported}' is not supported by text-only one-step Jev inference");
+                throw Error($"'{unsupported}' is not supported by one-step Jev inference");
         return new(model, JsonText(state)!, Text(root, "instructions"), parsed.ToArray(), samples,
-            autoMax, threshold, seed, rows, chunkPrompt == "shared");
+            autoMax, threshold, seed, rows, chunkPrompt == "shared", images.ToArray());
     }
 
     private static string? OptionalString(JsonElement root, string key)

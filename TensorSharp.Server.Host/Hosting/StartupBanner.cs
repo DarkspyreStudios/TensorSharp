@@ -105,7 +105,7 @@ namespace TensorSharp.Server.Host.Hosting
             }
 
             logger.LogInformation(LogEventIds.HostConfiguration,
-                "Server configuration: hostedModel={HostedModel} hostedMmProj={HostedMmProj} defaultMaxTokens={DefaultMaxTokens}{MaxTokensPinned} videoFrames={VideoFrames} videoFps={VideoFps} videoSize={VideoSize} videoSteps={VideoSteps} videoMode={VideoMode} videoSampleFps={VideoSampleFps} videoMaxFrames={VideoMaxFrames} listen={ListenAddress}",
+                "Server configuration: hostedModel={HostedModel} hostedMmProj={HostedMmProj} defaultMaxTokens={DefaultMaxTokens}{MaxTokensPinned} videoFrames={VideoFrames} videoFps={VideoFps} videoSize={VideoSize} videoSteps={VideoSteps} videoMode={VideoMode} videoSampleFps={VideoSampleFps} videoMaxFrames={VideoMaxFrames} jevMaxBodyBytes={JevMaxBodyBytes} listen={ListenAddress}",
                 options.StartupModelPath ?? "(none)",
                 options.StartupMmProjPath ?? "(none)",
                 options.DefaultMaxTokens,
@@ -125,6 +125,9 @@ namespace TensorSharp.Server.Host.Hosting
                 string.IsNullOrWhiteSpace(options.DefaultVideoMode) ? "auto" : options.DefaultVideoMode,
                 MediaHelper.GetConfiguredVideoSampleFps().ToString("0.###", CultureInfo.InvariantCulture),
                 MediaHelper.GetConfiguredMaxVideoFrames(),
+                // Reading it here also validates TS_JEV_MAX_BODY_MB at startup instead of on
+                // the first /v1/systemone request; images ride inside that body.
+                ProtocolAdapters.JevAdapter.MaxRequestBodyBytes,
                 listenAddress);
 
             // Surface the resolved sampling defaults so operators can confirm

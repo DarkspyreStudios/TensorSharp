@@ -76,7 +76,9 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --model models/diffus
 For typed decisions (`noul`, `choice`, `score`) use the native
 [`/v1/systemone` Jev endpoint](jev.md). It reads label probabilities from a seeded
 canvas in one denoising step, with a sparse output projection and no generated
-JSON parsing. Start with [`jev-diffusiongemma-q4.json`](../../config/jev-diffusiongemma-q4.json).
+JSON parsing. Its state may carry images as well as text, through the same vision
+tower this page describes. Start with
+[`jev-diffusiongemma-q4.json`](../../config/jev-diffusiongemma-q4.json).
 
 DiffusionGemma is a block text-diffusion language model built on a Gemma-4-style
 Mixture-of-Experts backbone. It is not the same runtime contract as the

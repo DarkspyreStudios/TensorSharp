@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
+using TensorSharp.Server.Hosting;
 using TensorSharp.Server.Jev;
 
 namespace TensorSharp.Server.ProtocolAdapters;
@@ -13,7 +14,23 @@ namespace TensorSharp.Server.ProtocolAdapters;
 /// <summary>Jev's structured probability contract over native DiffusionGemma reads.</summary>
 public static class JevAdapter
 {
-    public const int MaxRequestBodyBytes = 1024 * 1024;
+    /// <summary>
+    /// Request-body ceiling. Images travel base64-encoded inside the JSON body, which is why the
+    /// default is megabytes rather than the kilobytes a typed text decision needs;
+    /// <c>TS_JEV_MAX_BODY_MB</c> (1 to 64) sets it for an operator who wants it tighter.
+    /// </summary>
+    public static int MaxRequestBodyBytes => _maxRequestBodyBytes ??= ResolveMaxRequestBodyBytes();
+
+    private static int? _maxRequestBodyBytes;
+
+    private static int ResolveMaxRequestBodyBytes()
+    {
+        string? raw = Environment.GetEnvironmentVariable("TS_JEV_MAX_BODY_MB");
+        if (string.IsNullOrEmpty(raw)) return 8 * 1024 * 1024;
+        if (!int.TryParse(raw, out int mb) || mb < 1 || mb > 64)
+            throw new ArgumentException("TS_JEV_MAX_BODY_MB must be an integer from 1 to 64.");
+        return mb * 1024 * 1024;
+    }
 
     public static async Task SystemOneAsync(HttpContext context)
     {
@@ -24,7 +41,9 @@ public static class JevAdapter
         {
             if (!context.Request.HasJsonContentType())
             {
-                await Error(context, 415, "unsupported_media_type", "Jev requests must use application/json; image and multipart input are not supported.");
+                await Error(context, 415, "unsupported_media_type",
+                    "Jev requests must use application/json; multipart uploads are not supported. " +
+                    "Send images inline in 'images' as base64 or a data: URL.");
                 return;
             }
             using var document = await ReadBody(context).ConfigureAwait(false);
@@ -45,6 +64,12 @@ public static class JevAdapter
         catch (JevValidationException error)
         {
             await Error(context, 422, "validation_error", error.Message);
+        }
+        catch (UploadLimitExceededException error)
+        {
+            // Image storage is governed by the operator's upload limits; answer with the
+            // status those limits declare (413 over the per-file cap, 507 over the quota).
+            await Error(context, error.StatusCode, "invalid_request_error", error.Message);
         }
         catch (JevQueueFullException error)
         {

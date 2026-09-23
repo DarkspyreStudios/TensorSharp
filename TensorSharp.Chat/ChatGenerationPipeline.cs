@@ -1038,7 +1038,11 @@ namespace TensorSharp.Server
             if (string.IsNullOrEmpty(rawText))
                 return (string.Empty, null);
             IOutputParser parser = OutputParserFactory.Create(arch);
-            parser.Init(enableThinking, null);
+            // Always let the parser RECORD the thought block, whatever the caller asked for:
+            // the flag only decides whether the parser keeps that text or discards it, and a
+            // discarded block cannot be distinguished from a turn that said nothing. What the
+            // caller asked for is applied below, once there is something to decide with.
+            parser.Init(true, null);
             parser.SetGenerationPromptSuffix(generationSuffix);
             ParsedOutput parsed = parser.Add(rawText, true);
             string content = parsed.Content ?? string.Empty;
@@ -1047,6 +1051,18 @@ namespace TensorSharp.Server
             if (content.Length == 0 && !string.IsNullOrEmpty(parsed.ToolCallText))
                 content = parsed.ToolCallText;
             string? thinking = enableThinking && !string.IsNullOrEmpty(parsed.Thinking) ? parsed.Thinking : null;
+            // The same argument as the tool call above, for the case that actually happens.
+            // This checkpoint often answers inside the thought block and never writes the
+            // closing <channel|>; the whole reply is then classified as thinking, and with
+            // reasoning off the turn came back EMPTY. Measured on diffusiongemma-26B-A4B-it
+            // Q4_K_M: 3 of 6 one-line questions returned nothing at all. A canvas is written
+            // once and finished - an unterminated block is not a truncated thought, it is the
+            // answer with a marker missing - so surface it rather than return silence.
+            if (content.Length == 0 && !string.IsNullOrEmpty(parsed.Thinking))
+            {
+                content = parsed.Thinking;
+                thinking = null;   // it is the answer now; do not report the same text twice
+            }
             return (content, thinking);
         }
 

@@ -9,7 +9,7 @@
 | GGUF 架构标识 | `diffusion-gemma`、`diffusion_gemma` |
 | 模型类 | [`DiffusionGemmaModel`](../../TensorSharp.Models/Models/DiffusionGemma/DiffusionGemmaModel.cs) |
 | 采样器 | [`DiffusionGemmaSampler`](../../TensorSharp.Models/Models/DiffusionGemma/DiffusionGemmaSampler.cs) |
-| 模态 | 仅文本 |
+| 模态 | 文本 + **图像**（不支持音频：该检查点没有音频塔） |
 | 思维链 / 工具调用 | 思维 channel 会被解析剥离（仅 `"think": true` 时返回）；tools/tool_choice 以 HTTP 400 拒绝 |
 | 生成方式 | 分块文本扩散，不是自回归 token decode |
 | CLI 支持 | `TensorSharp.Cli` 检测到 `DiffusionGemmaModel` 后进入 diffusion 运行模式 |
@@ -24,8 +24,31 @@
 |---|---|---|---|
 | diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) | `diffusiongemma-26B-A4B-it-Q4_K_M.gguf`（16.807 GB）；另有 `Q5_K_M`、`Q6_K`、`Q8_0`、`BF16` | GGUF `general.architecture` = `diffusion-gemma`。官方上游权重：[google/diffusiongemma-26B-A4B-it](https://huggingface.co/google/diffusiongemma-26B-A4B-it) |
 
-`Q4_K_M` 是已发布的最小量化版本。不需要任何配套文件
-（纯文本模型 —— 没有 mmproj）。
+`Q4_K_M` 是已发布的最小量化版本。
+
+**图像输入还需要视觉塔，而任何 GGUF 里都没有它。** 该检查点已发布的 GGUF 全部
+是纯文本的 —— 转换过程丢弃了视觉塔，官方也从未发布过 mmproj。上游权重里确实有
+这座塔：它的全部 356 个张量都在 11 分片 BF16 检查点的某一个 2.8 GB 分片中，
+TensorSharp 直接加载该分片（无需转换）：
+
+| 文件 | HF 仓库 | 大小 |
+|---|---|---|
+| `model-00011-of-00011.safetensors` | [google/diffusiongemma-26B-A4B-it](https://huggingface.co/google/diffusiongemma-26B-A4B-it) | 2.84 GB |
+
+```bash
+hf download google/diffusiongemma-26B-A4B-it model-00011-of-00011.safetensors --local-dir models
+```
+
+也可以让配置在首次使用时自动获取 —— `config/diffusiongemma-26b-a4b-q4.json` 和
+`config/jev-diffusiongemma-q4.json` 都在 `mmproj` 下声明了它并带 SHA-256，只下载
+一次，之后复用。传入 `--mmproj none` 可以只跑纯文本并跳过下载。
+
+音频**不受支持**，任何 projector 也补不上：上游 config 没有 `audio_config`，
+权重里也没有音频塔，因此 tokenizer 从 Gemma 4 继承来的 `<|audio|>` token 背后
+什么都没有。
+
+类型化判定（`noul`、`choice`、`score`）请使用原生 `/v1/systemone` Jev 端点，
+其状态同样可以携带图像；详见英文版 [jev.md](jev.md)。
 
 命令行下载（每个文件一行；需要先 `pip install -U huggingface_hub`）：
 

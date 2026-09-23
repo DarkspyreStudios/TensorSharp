@@ -21,6 +21,7 @@ namespace TensorSharp.Server
 {
     public partial class ModelService : IDisposable
     {
+        private readonly ILogger _logger;
         private readonly ModelLifecycleService _lifecycle;
         private readonly ChatSession _intrinsicSession;
         private readonly InferenceEngineHost _engineHost;
@@ -43,6 +44,7 @@ namespace TensorSharp.Server
             Func<string, BackendType, ITensorParallelGroup, string, ModelBase> createModel)
         {
             logger ??= NullLogger<ModelService>.Instance;
+            _logger = logger;
 
             var promptRenderer = new GgufPromptRenderer();
             var kvCacheRenderer = new KVCachePromptRenderer(promptRenderer);
