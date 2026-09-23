@@ -165,7 +165,14 @@ namespace TensorSharp.Runtime
 
         private static void AppendDeepSeek41ToolCalls(StringBuilder sb, List<ToolCall> calls)
         {
-            sb.Append("\n\n<｜DSML｜ calls>\n");
+            // Parsed assistant content already includes whitespace before the tool
+            // block. Reuse that separator so replaying history does not insert tokens.
+            // Preserve longer whitespace runs and all tool argument bytes.
+            int trailingNewlines = 0;
+            for (int i = sb.Length - 1; i >= 0 && sb[i] == '\n' && trailingNewlines < 2; i--)
+                trailingNewlines++;
+            sb.Append('\n', 2 - trailingNewlines);
+            sb.Append("<｜DSML｜ calls>\n");
             for (int i = 0; i < calls.Count; i++)
             {
                 ToolCall call = calls[i];

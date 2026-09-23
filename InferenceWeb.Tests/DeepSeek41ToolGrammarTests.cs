@@ -334,6 +334,29 @@ public sealed class DeepSeek41ToolGrammarTests
         Assert.Equal(JsonSerializer.Serialize(expected), JsonSerializer.Serialize(replayed.Arguments["payload"]));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void ToolHistoryReplayUsesExistingNewlineSeparator(int trailingNewlines)
+    {
+        string content = "Completed." + new string('\n', trailingNewlines);
+        var history = new List<ChatMessage>
+        {
+            new() { Role = "user", Content = "Run the check." },
+            new() { Role = "assistant", Content = content, ToolCalls = new()
+            {
+                new() { Name = "check", Arguments = new() { ["path"] = "line1\nline2" } },
+            } },
+        };
+
+        string rendered = ChatTemplate.RenderDeepSeek41(history, addGenerationPrompt: false);
+        string expected = content + new string('\n', Math.Max(0, 2 - trailingNewlines)) + Open;
+        Assert.Contains(expected, rendered);
+        Assert.Contains("line1\nline2", rendered);
+    }
+
     [Fact]
     public void OrdinaryToolHistoryRetainsRawStringsAndUnicodeJsonSpelling()
     {
