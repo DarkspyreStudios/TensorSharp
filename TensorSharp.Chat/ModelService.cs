@@ -19,7 +19,7 @@ using TensorSharp.Server.Skills;
 
 namespace TensorSharp.Server
 {
-    public class ModelService : IDisposable
+    public partial class ModelService : IDisposable
     {
         private readonly ModelLifecycleService _lifecycle;
         private readonly ChatSession _intrinsicSession;
@@ -140,6 +140,7 @@ namespace TensorSharp.Server
 
         public void LoadModel(string modelPath, string mmProjPath, string backendStr)
         {
+            using var jevLease = _jevExecution.BeginChange();
             // Tear down the per-model engine and the diffusion batch scheduler BEFORE the model is
             // unloaded so their worker threads don't race the model disposal.
             _engineHost.Reset();
@@ -157,6 +158,12 @@ namespace TensorSharp.Server
         /// pressure can free the model and keep the service, sessions and skills.
         /// </summary>
         public void UnloadModel()
+        {
+            using var jevLease = _jevExecution.BeginChange();
+            UnloadModelCore();
+        }
+
+        private void UnloadModelCore()
         {
             _engineHost.Reset();
             _generation.ResetDiffusionScheduler();
@@ -193,7 +200,8 @@ namespace TensorSharp.Server
         /// <returns>Whether a working backend is standing afterwards.</returns>
         public bool UnloadModelAndRecreateBackend()
         {
-            UnloadModel();
+            using var jevLease = _jevExecution.BeginChange();
+            UnloadModelCore();
             return TensorSharp.GGML.GgmlBasicOps.RecreateBackend();
         }
 
@@ -414,9 +422,10 @@ namespace TensorSharp.Server
             List<ChatMessage> history,
             int maxTokens,
             CancellationToken cancellationToken,
-            bool enableThinking = false)
+            bool enableThinking = false,
+            SamplingConfig samplingConfig = null)
         {
-            return _generation.DiffusionChatStreamAsync(session, history, maxTokens, cancellationToken, enableThinking);
+            return _generation.DiffusionChatStreamAsync(session, history, maxTokens, cancellationToken, enableThinking, samplingConfig);
         }
 
         /// <summary>
@@ -498,6 +507,7 @@ namespace TensorSharp.Server
 
         public void Dispose()
         {
+            using var jevLease = _jevExecution.BeginChange(shutdown: true);
             _engineHost.Dispose();
             _generation.Dispose();
             _lifecycle.Dispose();

@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics.Tensors;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using TensorSharp;
 using TensorSharp.GGML;
@@ -44,7 +45,7 @@ namespace TensorSharp.Models
     ///  - Dense gated-GELU MLP (shared expert) + 128-expert top-8 softmax MoE, summed per layer.
     ///  - Embedding scaling by sqrt(hidden), tied lm-head, final logit softcapping.
     /// </summary>
-    public sealed class DiffusionGemmaModel : ModelBase
+    public sealed partial class DiffusionGemmaModel : ModelBase
     {
         // ---- architecture configuration ----
         private bool[] _isLocal;            // per-layer: true = sliding-window (local), false = global
@@ -101,6 +102,18 @@ namespace TensorSharp.Models
         private Tensor[] _promptK, _promptV;
         private int _promptLen = -1;
         private bool _pkvEnabled;
+        // The GGML compatibility prefill kernel uses native GQA and causal/SWA masking,
+        // keeping scores inside one graph with the established per-op precision policy.
+        // Default on for the independently validated CUDA path; 0 restores the per-op
+        // reference. Other GGML GPU backends can opt in with 1 after local validation.
+        private bool UseFusedPromptAttention
+        {
+            get
+            {
+                string option = Environment.GetEnvironmentVariable("DIFFUSION_FUSED_PREFILL_ATTN");
+                return IsGgmlBackend && (option == "1" || (_backend == BackendType.GgmlCuda && option != "0"));
+            }
+        }
         // decode-phase additive masks [maskHeads, C, P+C] (null when no masking is needed, i.e. when the
         // prompt fits within the sliding window — the common case).
         private int _decodeMaskP = -1, _decodeMaskC = -1;
@@ -256,6 +269,7 @@ namespace TensorSharp.Models
             Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") };
             ParseBaseConfig();
             ParseDiffusionConfig();
+            _maxContextLength = ResolveConfiguredContextLength();
 
             ParseTokenizer();
 
@@ -613,37 +627,12 @@ namespace TensorSharp.Models
             float[] scPrevLogits = null, float scUse = 0f, float prevTempInv = 1f)
         {
             _swForward.Start();
-            int N = tokens.Length;
-            int P = promptLen;
-            int C = N - P;
-            int D = Config.HiddenSize;
-            float eps = Config.Eps;
+            int C = tokens.Length - promptLen;
+            using Tensor hidden = ForwardCanvasHidden(tokens, promptLen, scPrevLogits, scUse, prevTempInv);
+            using Tensor canvasHidden = RMSNormOp(hidden, "output_norm.weight");
 
-            // 1) embeddings, region-aware
             long ts = Stopwatch.GetTimestamp();
-            Tensor hidden = Embedding(tokens);          // [N, D]
-            Ops.Mul(hidden, hidden, MathF.Sqrt(D));     // embed_scale = sqrt(n_embd)
-            EmbedCanvasRegion(hidden, P, C, scPrevLogits, scUse, prevTempInv);
-            _tEmbed += Stopwatch.GetTimestamp() - ts;
-
-            // 2) transformer stack (all glue ops are on-device; per-N caches are rebuilt lazily)
-            for (int l = 0; l < Config.NumLayers; l++)
-            {
-                hidden = TransformerBlock(hidden, l, N, P, C);
-            }
-
-            // 4) final norm + tied lm-head over canvas positions only
-            Tensor normed = RMSNormOp(hidden, "output_norm.weight");
-            hidden.Dispose();
-
-            Tensor canvasHidden;
-            using (var view = normed.Narrow(0, P, C))
-                canvasHidden = Ops.NewContiguous(view);
-            normed.Dispose();
-
-            ts = Stopwatch.GetTimestamp();
             Tensor logits = LinearForward(canvasHidden, "token_embd.weight");   // [C, vocab]
-            canvasHidden.Dispose();
             _tLmHead += Stopwatch.GetTimestamp() - ts;
 
             if (_finalLogitSoftcap > 0f)
@@ -659,6 +648,36 @@ namespace TensorSharp.Models
 
             _swForward.Stop();
             return result;
+        }
+
+        private Tensor ForwardCanvasHidden(int[] tokens, int promptLen,
+            float[] scPrevLogits = null, float scUse = 0f, float prevTempInv = 1f,
+            CancellationToken cancellationToken = default)
+        {
+            int N = tokens.Length;
+            int P = promptLen;
+            int C = N - P;
+            int D = Config.HiddenSize;
+            // 1) embeddings, region-aware
+            long ts = Stopwatch.GetTimestamp();
+            Tensor hidden = Embedding(tokens);          // [N, D]
+            try
+            {
+                Ops.Mul(hidden, hidden, MathF.Sqrt(D));     // embed_scale = sqrt(n_embd)
+                EmbedCanvasRegion(hidden, P, C, scPrevLogits, scUse, prevTempInv);
+                _tEmbed += Stopwatch.GetTimestamp() - ts;
+
+                // 2) transformer stack (all glue ops are on-device; per-N caches are rebuilt lazily)
+                for (int l = 0; l < Config.NumLayers; l++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    hidden = TransformerBlock(hidden, l, N, P, C);
+                }
+
+                using var view = hidden.Narrow(0, P, C);
+                return Ops.NewContiguous(view);
+            }
+            finally { hidden.Dispose(); }
         }
 
         /// <summary>One device->host read of the canvas logits. On GGML the storage is host-mapped so a
@@ -707,18 +726,25 @@ namespace TensorSharp.Models
             long ts = Stopwatch.GetTimestamp();
             using var attnNormed = RMSNormOp(hidden, $"{prefix}.attn_norm.weight");
             Tensor attnOut = Attention(attnNormed, layer, prefix, N, P);
+            try
+            {
+                // post-attention norm + residual
+                Ops.RMSNorm(attnOut, attnOut, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
+                Ops.Add(attnOut, attnOut, hidden);
+                hidden.Dispose();
+                _tAttn += Stopwatch.GetTimestamp() - ts;
 
-            // post-attention norm + residual
-            Ops.RMSNorm(attnOut, attnOut, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
-            Ops.Add(attnOut, attnOut, hidden);
-            hidden.Dispose();
-            _tAttn += Stopwatch.GetTimestamp() - ts;
+                attnOut = FeedForward(attnOut, layer, prefix, N);
 
-            attnOut = FeedForward(attnOut, layer, prefix, N);
-
-            // region-aware per-layer scalar
-            ApplyRegionScalar(attnOut, layer, P, C);
-            return attnOut;
+                // region-aware per-layer scalar
+                ApplyRegionScalar(attnOut, layer, P, C);
+                return attnOut;
+            }
+            catch
+            {
+                attnOut.Dispose();
+                throw;
+            }
         }
 
         /// <summary>Dense gated-GELU MLP (shared expert) + 128-expert MoE, summed, post-norm + residual.
@@ -727,7 +753,7 @@ namespace TensorSharp.Models
         {
             float eps = Config.Eps;
             long ts = Stopwatch.GetTimestamp();
-            Tensor mlpOut = DenseMlp(attnOut, prefix, N);
+            using Tensor mlpOut = DenseMlp(attnOut, prefix, N);
             Ops.RMSNorm(mlpOut, mlpOut, _weights[$"{prefix}.post_ffw_norm_1.weight"], null, eps);
             _tDense += Stopwatch.GetTimestamp() - ts;
 
@@ -741,7 +767,6 @@ namespace TensorSharp.Models
 
             Ops.RMSNorm(mlpOut, mlpOut, _weights[$"{prefix}.post_ffw_norm.weight"], null, eps);
             Ops.Add(attnOut, attnOut, mlpOut);
-            mlpOut.Dispose();
             return attnOut;
         }
 
@@ -764,11 +789,10 @@ namespace TensorSharp.Models
         private Tensor DenseMlp(Tensor input, string prefix, int N)
         {
             using var normed = RMSNormOp(input, $"{prefix}.ffn_norm.weight");
-            Tensor gate = LinearForward(normed, $"{prefix}.ffn_gate.weight");
+            using Tensor gate = LinearForward(normed, $"{prefix}.ffn_gate.weight");
             using (Tensor up = LinearForward(normed, $"{prefix}.ffn_up.weight"))
                 Ops.GELUMul(gate, gate, up);   // gate = gelu(gate) * up
             Tensor down = LinearForward(gate, $"{prefix}.ffn_down.weight");
-            gate.Dispose();
             return down;
         }
 
@@ -1073,46 +1097,81 @@ namespace TensorSharp.Models
         /// prompt K/V (head-first [kvHeads, P, hd]) into <paramref name="outK"/>/<paramref name="outV"/>.
         /// Shared by the single-request (<see cref="PrefillPrompt"/>) and batched (<see cref="PrefillSeq"/>)
         /// paths. The caller owns/releases the K/V tensors. Returns the prompt length P.</summary>
-        private int PrefillPromptInto(int[] promptTokens, Tensor[] outK, Tensor[] outV)
+        private int PrefillPromptInto(int[] promptTokens, Tensor[] outK, Tensor[] outV,
+            CancellationToken cancellationToken = default)
         {
             int P = promptTokens.Length;
             int D = Config.HiddenSize;
             float eps = Config.Eps;
 
             Tensor hidden = Embedding(promptTokens);
-            Ops.Mul(hidden, hidden, MathF.Sqrt(D));   // prompt = embed*sqrt(n_embd) (no rms-norm, no SC)
-
-            for (int l = 0; l < Config.NumLayers; l++)
+            try
             {
-                string prefix = $"blk.{l}";
-                bool local = _isLocal[l];
-                int hd = _headDim[l];
-                int qHeads = Config.NumHeads;
-                int kvHeads = _kvHeads[l];
+                Ops.Mul(hidden, hidden, MathF.Sqrt(D));   // prompt = embed*sqrt(n_embd) (no rms-norm, no SC)
 
-                using var normed = RMSNormOp(hidden, $"{prefix}.attn_norm.weight");
-                ComputeQKVHeadFirst(normed, l, prefix, P, 0, out var qH, out var kH, out var vH);
+                for (int l = 0; l < Config.NumLayers; l++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string prefix = $"blk.{l}";
+                    bool local = _isLocal[l];
+                    int hd = _headDim[l];
+                    int qHeads = Config.NumHeads;
+                    int kvHeads = _kvHeads[l];
 
-                // cache this layer's prompt K/V for the denoising steps
-                outK[l] = Ops.NewContiguous(kH);
-                outV[l] = Ops.NewContiguous(vH);
+                    using var normed = RMSNormOp(hidden, $"{prefix}.attn_norm.weight");
+                    ComputeQKVHeadFirst(normed, l, prefix, P, 0, out var qH, out var kH, out var vH);
 
-                Tensor mask = GetAttentionMask(P, P, local);   // prompt-causal (SWA-clipped on local layers)
-                Tensor attnOut;
-                using (qH) using (kH) using (vH)
-                using (var attnRes = AttnCoreHeadFirst(qH, kH, vH, mask, P, P, qHeads, kvHeads, hd))
-                    attnOut = LinearForward(attnRes, $"{prefix}.attn_output.weight");
+                    Tensor attnOut;
+                    using (qH) using (kH) using (vH)
+                    {
+                        // cache this layer's prompt K/V for the denoising steps
+                        outK[l] = Ops.NewContiguous(kH);
+                        outV[l] = Ops.NewContiguous(vH);
 
-                Ops.RMSNorm(attnOut, attnOut, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
-                Ops.Add(attnOut, attnOut, hidden);
-                hidden.Dispose();
+                        using var attnRes = PromptAttentionCore(qH, kH, vH, P, qHeads, kvHeads, hd, local);
+                        attnOut = LinearForward(attnRes, $"{prefix}.attn_output.weight");
+                    }
 
-                attnOut = FeedForward(attnOut, l, prefix, P);
-                if (_encScale[l] != 1f) Ops.Mul(attnOut, attnOut, _encScale[l]);   // encoder scalar
-                hidden = attnOut;
+                    using Tensor residual = hidden;
+                    hidden = attnOut; // retain ownership if a norm or FFN dispatch throws
+                    Ops.RMSNorm(hidden, hidden, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
+                    Ops.Add(hidden, hidden, residual);
+                    residual.Dispose();
+
+                    hidden = FeedForward(hidden, l, prefix, P);
+                    if (_encScale[l] != 1f) Ops.Mul(hidden, hidden, _encScale[l]);   // encoder scalar
+                }
+                return P;
             }
-            hidden.Dispose();   // prompt hidden states aren't needed; only the cached K/V are
-            return P;
+            finally { hidden.Dispose(); } // only the cached K/V survive a prefill
+        }
+
+        private Tensor PromptAttentionCore(Tensor q, Tensor k, Tensor v,
+            int length, int qHeads, int kvHeads, int headDim, bool local)
+        {
+            if (!UseFusedPromptAttention)
+            {
+                Tensor mask = GetAttentionMask(length, length, local);
+                return AttnCoreHeadFirst(q, k, v, mask, length, length, qHeads, kvHeads, headDim);
+            }
+
+            var result = new Tensor(_allocator, DType.Float32, length, qHeads * headDim);
+            try
+            {
+                // Prompt queries are causal; unlike canvas queries their SWA window moves
+                // with each query. The native mask uses precisely [q-window+1,q]. No KV
+                // expansion, host score download, or separate managed mask is needed.
+                GgmlBasicOps.FusedPrefillAttention(q, k, v, result,
+                    qHeads, kvHeads, headDim, length, length,
+                    maskStartPos: 0, slidingWindow: local ? _slidingWindow : 0, scale: 1f, inputFormat: 0,
+                    matchPerOpPrecision: true);
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
         }
 
         /// <summary>Denoise one canvas step: process only the canvas (positions P..P+C-1), reading the
@@ -1130,66 +1189,7 @@ namespace TensorSharp.Models
         {
             _swForward.Start();
             int C = canvasTokens.Length;
-            int D = Config.HiddenSize;
-            float eps = Config.Eps;
-
-            long ts = Stopwatch.GetTimestamp();
-            Tensor hidden = Embedding(canvasTokens);
-            Ops.Mul(hidden, hidden, MathF.Sqrt(D));
-            if (_scEnabled && scPrevLogits != null && scUse != 0f)
-            {
-                long tsc = Stopwatch.GetTimestamp();
-                using var scSignal = ComputeSelfConditioning(scPrevLogits, C, prevTempInv);
-                Ops.Mul(scSignal, scSignal, scUse);
-                Ops.Add(hidden, hidden, scSignal);
-                _tSc += Stopwatch.GetTimestamp() - tsc;
-            }
-            Ops.RMSNorm(hidden, hidden, GetOnes(D), null, eps);   // canvas = rms_norm_noscale(embed [+ SC])
-            _tEmbed += Stopwatch.GetTimestamp() - ts;
-
-            // Fast path: all transformer layers (attention + dense + MoE) in one fused GGML graph with the
-            // canvas hidden staying on-device across all layers (the throughput win). C# does the lm_head tail.
-            bool fusedLayers = false;
-            if (IsGgmlBackend && _fusedDecodeEnabled && _fusedDecodeOk)
-            {
-                bool ok = _segmentedDecode
-                    ? TryFusedModelLayersSegmented(hidden, C, P, pk, pv)
-                    : TryFusedModelLayers(hidden, C, P, pk, pv);
-                if (ok) fusedLayers = true;
-                else _fusedDecodeOk = false;
-            }
-
-            for (int l = 0; !fusedLayers && l < Config.NumLayers; l++)
-            {
-                string prefix = $"blk.{l}";
-                bool local = _isLocal[l];
-                int hd = _headDim[l];
-                int qHeads = Config.NumHeads;
-                int kvHeads = _kvHeads[l];
-
-                long tA = Stopwatch.GetTimestamp();
-                using var normed = RMSNormOp(hidden, $"{prefix}.attn_norm.weight");
-                ComputeQKVHeadFirst(normed, l, prefix, C, P, out var qH, out var kH, out var vH);
-
-                Tensor attnOut;
-                using (qH) using (kH) using (vH)
-                using (var kFull = Ops.Concat(null, 1, pk[l], kH))   // [kvHeads, P+C, hd]
-                using (var vFull = Ops.Concat(null, 1, pv[l], vH))
-                {
-                    Tensor dmask = GetDecodeMask(P, C, local);
-                    using var attnRes = AttnCoreHeadFirst(qH, kFull, vFull, dmask, C, P + C, qHeads, kvHeads, hd);
-                    attnOut = LinearForward(attnRes, $"{prefix}.attn_output.weight");
-                }
-
-                Ops.RMSNorm(attnOut, attnOut, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
-                Ops.Add(attnOut, attnOut, hidden);
-                hidden.Dispose();
-                _tAttn += Stopwatch.GetTimestamp() - tA;
-
-                attnOut = FeedForward(attnOut, l, prefix, C);
-                if (_decScale[l] != 1f) Ops.Mul(attnOut, attnOut, _decScale[l]);   // decoder scalar
-                hidden = attnOut;
-            }
+            Tensor hidden = DecodeCanvasHidden(pk, pv, P, canvasTokens, scPrevLogits, scUse, prevTempInv);
 
             // Fused lm_head tail (output_norm + lm_head + softcap in one dispatch) - separate small graph,
             // correct, and cheaper than the per-op RMSNorm + AddmmQuant + softcap + readback chain.
@@ -1202,7 +1202,7 @@ namespace TensorSharp.Models
                     _swForward.Stop();
                     return flLogits;
                 }
-                _fusedLmHeadTailOk = false;   // latched: this branch never runs again
+                _fusedLmHeadTailOk = false;
                 Console.WriteLine("  [fused lm_head tail] disabled" +
                     (_fusedLmHeadTailError != null ? $" after error: {_fusedLmHeadTailError}" : ": kernel declined") +
                     "; using the per-op output_norm + lm_head + softcap chain (slower; on-device sampling also off). " +
@@ -1212,8 +1212,8 @@ namespace TensorSharp.Models
             Tensor normedOut = RMSNormOp(hidden, "output_norm.weight");
             hidden.Dispose();
 
-            ts = Stopwatch.GetTimestamp();
-            Tensor logits = LinearForward(normedOut, "token_embd.weight");   // [C, vocab]
+            long ts = Stopwatch.GetTimestamp();
+            Tensor logits = LinearForward(normedOut, "token_embd.weight");
             normedOut.Dispose();
             if (_finalLogitSoftcap > 0f)
             {
@@ -1226,8 +1226,87 @@ namespace TensorSharp.Models
             float[] result = ReadbackLogits(logits, C * Config.VocabSize);
             logits.Dispose();
             _swForward.Stop();
-
             return result;
+        }
+
+        private Tensor DecodeCanvasHidden(Tensor[] pk, Tensor[] pv, int P,
+            int[] canvasTokens, float[] scPrevLogits, float scUse, float prevTempInv,
+            CancellationToken cancellationToken = default)
+        {
+            int C = canvasTokens.Length;
+            int D = Config.HiddenSize;
+            float eps = Config.Eps;
+
+            long ts = Stopwatch.GetTimestamp();
+            Tensor hidden = Embedding(canvasTokens);
+            try
+            {
+                Ops.Mul(hidden, hidden, MathF.Sqrt(D));
+                if (_scEnabled && scPrevLogits != null && scUse != 0f)
+                {
+                    long tsc = Stopwatch.GetTimestamp();
+                    using var scSignal = ComputeSelfConditioning(scPrevLogits, C, prevTempInv);
+                    Ops.Mul(scSignal, scSignal, scUse);
+                    Ops.Add(hidden, hidden, scSignal);
+                    _tSc += Stopwatch.GetTimestamp() - tsc;
+                }
+                Ops.RMSNorm(hidden, hidden, GetOnes(D), null, eps);   // canvas = rms_norm_noscale(embed [+ SC])
+                _tEmbed += Stopwatch.GetTimestamp() - ts;
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Fast path: all transformer layers (attention + dense + MoE) in one fused GGML graph with the
+                // canvas hidden staying on-device across all layers (the throughput win). C# does the lm_head tail.
+                bool fusedLayers = false;
+                if (IsGgmlBackend && _fusedDecodeEnabled && _fusedDecodeOk)
+                {
+                    bool ok = _segmentedDecode
+                        ? TryFusedModelLayersSegmented(hidden, C, P, pk, pv, cancellationToken)
+                        : TryFusedModelLayers(hidden, C, P, pk, pv);
+                    if (ok) fusedLayers = true;
+                    else _fusedDecodeOk = false;
+                }
+
+                for (int l = 0; !fusedLayers && l < Config.NumLayers; l++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    string prefix = $"blk.{l}";
+                    bool local = _isLocal[l];
+                    int hd = _headDim[l];
+                    int qHeads = Config.NumHeads;
+                    int kvHeads = _kvHeads[l];
+
+                    long tA = Stopwatch.GetTimestamp();
+                    using var normed = RMSNormOp(hidden, $"{prefix}.attn_norm.weight");
+                    ComputeQKVHeadFirst(normed, l, prefix, C, P, out var qH, out var kH, out var vH);
+
+                    Tensor attnOut;
+                    using (qH) using (kH) using (vH)
+                    using (var kFull = Ops.Concat(null, 1, pk[l], kH))   // [kvHeads, P+C, hd]
+                    using (var vFull = Ops.Concat(null, 1, pv[l], vH))
+                    {
+                        Tensor dmask = GetDecodeMask(P, C, local);
+                        using var attnRes = AttnCoreHeadFirst(qH, kFull, vFull, dmask, C, P + C, qHeads, kvHeads, hd);
+                        attnOut = LinearForward(attnRes, $"{prefix}.attn_output.weight");
+                    }
+
+                    using Tensor residual = hidden;
+                    hidden = attnOut;
+                    Ops.RMSNorm(hidden, hidden, _weights[$"{prefix}.post_attention_norm.weight"], null, eps);
+                    Ops.Add(hidden, hidden, residual);
+                    residual.Dispose();
+                    _tAttn += Stopwatch.GetTimestamp() - tA;
+
+                    hidden = FeedForward(hidden, l, prefix, C);
+                    if (_decScale[l] != 1f) Ops.Mul(hidden, hidden, _decScale[l]);   // decoder scalar
+                }
+
+                return hidden;
+            }
+            catch
+            {
+                hidden.Dispose();
+                throw;
+            }
         }
 
         // ===================================================================================
@@ -1820,7 +1899,8 @@ namespace TensorSharp.Models
         /// VRAM. Costs a small per-layer hidden host round-trip ([H, C] ≈ a few MB).
         /// Returns false only on layer-0 rejection (clean fallback to the per-op path); a mid-model
         /// failure cannot fall back (hidden is partially transformed) and throws instead.</summary>
-        private unsafe bool TryFusedModelLayersSegmented(Tensor hidden, int C, int P, Tensor[] pk, Tensor[] pv)
+        private unsafe bool TryFusedModelLayersSegmented(Tensor hidden, int C, int P, Tensor[] pk, Tensor[] pv,
+            CancellationToken cancellationToken = default)
         {
             int L = Config.NumLayers;
             var args = new DiffusionDecodeLayerArgs[L];
@@ -1830,18 +1910,22 @@ namespace TensorSharp.Models
                     return false;
             }
             IntPtr hiddenPtr = (IntPtr)GetFloatPtr(hidden);
-            for (int l = 0; l < L; l++)
+            try
             {
-                args[l].Hidden = hiddenPtr;
-                if (!GgmlBasicOps.TryDiffusionDecodeLayer(in args[l]))
+                for (int l = 0; l < L; l++)
                 {
-                    if (l == 0) return false;   // hidden untouched -> caller can fall back cleanly
-                    throw new InvalidOperationException(
-                        $"Segmented diffusion decode failed at layer {l} after earlier layers ran; cannot fall back mid-model.");
+                    cancellationToken.ThrowIfCancellationRequested();
+                    args[l].Hidden = hiddenPtr;
+                    if (!GgmlBasicOps.TryDiffusionDecodeLayer(in args[l]))
+                    {
+                        if (l == 0) return false;   // hidden untouched -> caller can fall back cleanly
+                        throw new InvalidOperationException(
+                            $"Segmented diffusion decode failed at layer {l} after earlier layers ran; cannot fall back mid-model.");
+                    }
                 }
+                return true;
             }
-            InvalidateTensorDeviceCache(hidden);
-            return true;
+            finally { InvalidateTensorDeviceCache(hidden); }
         }
 
         private void AllocPromptStore()
@@ -2629,6 +2713,7 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            ClearStructuredCache();
             foreach (var t in _onesByDim.Values) t?.Dispose();
             _onesByDim.Clear();
             foreach (var t in _ropePosCache.Values) t?.Dispose();

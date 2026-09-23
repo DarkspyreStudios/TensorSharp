@@ -2277,6 +2277,11 @@ TSG_EXPORT int TSGgml_RoPEMRoPEF32(
 // ============================================================================
 namespace
 {
+    // DiffusionGemma's established per-op attention uses GGML's default matmul
+    // precision and exact sequence extents. Preserve that numerical policy in
+    // its fused compatibility entry point; other model callers remain unchanged.
+    thread_local bool g_prefill_match_per_op_precision = false;
+
     inline std::uint32_t prefill_float_bits(float v)
     {
         std::uint32_t b;
@@ -2728,7 +2733,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
 
         // Session-cached fast path (head-first only): reuse the graph + backend
         // buffer across the hundreds of per-layer/per-chunk prefill calls.
-        if (inputFormat == 0
+        if (inputFormat == 0 && !g_prefill_match_per_op_precision
             && prefill_should_cache(prefill_kv_bucket(kvLen), seqLen, numHeads))
         {
             return fused_prefill_attn_cached(
@@ -2740,7 +2745,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
         // Large-kvLen head-first path: flash attention streams K/V instead of
         // materializing the O(N^2) scores+softmax that OOMs on long prompts. The
         // flat (inputFormat==1) layout stays on the materialized graph below.
-        if (inputFormat == 0)
+        if (inputFormat == 0 && !g_prefill_match_per_op_precision)
         {
             int fr = fused_prefill_attn_flash(
                 q_data, k_data, v_data, out_data,
@@ -2834,7 +2839,7 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
             set_last_error("Failed to create Q*K^T matmul node.");
             return 0;
         }
-        ggml_prec_set_acc(scores, GGML_PREC_F32);
+        if (!g_prefill_match_per_op_precision) ggml_prec_set_acc(scores, GGML_PREC_F32);
 
         // Softmax with mask: softmax(scores * scale + mask)
         ggml_tensor* probs = ggml_soft_max_ext(ctx, scores, mask_tensor, scale, 0.0f);
@@ -2915,6 +2920,27 @@ TSG_EXPORT int TSGgml_FusedPrefillAttentionF32(
         set_last_error("Unknown fused prefill attention failure.");
         return 0;
     }
+}
+
+// Diffusion compatibility variant. Keep the legacy export's numerical policy
+// and ABI unchanged for autoregressive models sharing this native primitive.
+// Use the uncached materialized graph: exact extents/default precision preserve
+// the established diffusion attention arithmetic, whereas padding/F32 overrides
+// and F16 flash K/V can change the discrete expert routing. Avoiding persistent
+// thread-local graph buffers also bounds memory across server worker threads.
+TSG_EXPORT int TSGgml_DiffusionPrefillAttentionF32(
+    const float* q_data, const float* k_data, const float* v_data, float* out_data,
+    int num_heads, int num_kv_heads, int head_dim, int seq_len, int kv_len,
+    int mask_start_pos, int sliding_window, float scale)
+{
+    struct PrecisionScope {
+        bool previous = g_prefill_match_per_op_precision;
+        PrecisionScope() { g_prefill_match_per_op_precision = true; }
+        ~PrecisionScope() { g_prefill_match_per_op_precision = previous; }
+    } scope;
+    return TSGgml_FusedPrefillAttentionF32(q_data, k_data, v_data, out_data,
+        num_heads, num_kv_heads, head_dim, seq_len, kv_len,
+        mask_start_pos, sliding_window, scale, 0);
 }
 
 // ============================================================================

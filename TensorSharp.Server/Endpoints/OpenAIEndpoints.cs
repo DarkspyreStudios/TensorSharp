@@ -26,6 +26,7 @@ public static class OpenAIEndpoints
     {
         endpoints.MapPost("/v1/chat/completions",
             (HttpContext ctx, OpenAIChatAdapter adapter) => adapter.ChatCompletionsAsync(ctx));
+        endpoints.MapPost("/v1/systemone", (HttpContext ctx) => JevAdapter.SystemOneAsync(ctx));
         endpoints.MapGet("/v1/models",
             (HttpContext ctx) => ctx.RequestServices.GetService<EmbeddingAdapter>()?.ListModels()
                 ?? ctx.RequestServices.GetRequiredService<OpenAIChatAdapter>().ListModels());

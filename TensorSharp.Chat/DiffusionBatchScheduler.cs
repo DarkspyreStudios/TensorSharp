@@ -58,11 +58,13 @@ namespace TensorSharp.Server
         private readonly int _maxBatch;
 
         private readonly object _pendingLock = new();
+        private readonly object _disposeLock = new();
         private readonly Queue<PendingRequest> _pending = new();
         private readonly SemaphoreSlim _signal = new(0);
         private readonly CancellationTokenSource _stop = new();
         private readonly Thread _worker;
         private volatile int _activeCount;
+        private bool _disposed;
 
         public DiffusionBatchScheduler(DiffusionGemmaModel model, ILogger logger, int maxBatch)
         {
@@ -93,15 +95,20 @@ namespace TensorSharp.Server
             var tcs = new TaskCompletionSource<List<int>>(TaskCreationOptions.RunContinuationsAsynchronously);
             var req = new PendingRequest(promptTokens, p, ct, channel, tcs);
 
-            if (_stop.IsCancellationRequested)
+            lock (_pendingLock)
             {
-                tcs.TrySetCanceled(ct);
-                channel.Writer.TryComplete();
-                return new DiffusionRequestHandle(channel.Reader, tcs.Task);
+                // Admission and signaling must be atomic with shutdown. Checking
+                // stop before this lock can enqueue after the worker drained its
+                // queue and then release a semaphore that Dispose already freed.
+                if (_disposed || ct.IsCancellationRequested)
+                {
+                    tcs.TrySetCanceled(ct);
+                    channel.Writer.TryComplete();
+                    return new DiffusionRequestHandle(channel.Reader, tcs.Task);
+                }
+                _pending.Enqueue(req);
+                _signal.Release();
             }
-
-            lock (_pendingLock) { _pending.Enqueue(req); }
-            _signal.Release();
             return new DiffusionRequestHandle(channel.Reader, tcs.Task);
         }
 
@@ -226,12 +233,23 @@ namespace TensorSharp.Server
 
         public void Dispose()
         {
-            _stop.Cancel();
-            _signal.Release();
-            try { _worker.Join(TimeSpan.FromSeconds(10)); }
-            catch { /* best effort */ }
-            _signal.Dispose();
-            _stop.Dispose();
+            // A second disposer also waits for the worker instead of returning
+            // while the first disposer is still joining native model work.
+            lock (_disposeLock)
+            {
+                lock (_pendingLock)
+                {
+                    if (_disposed) return;
+                    _disposed = true;
+                    _stop.Cancel();
+                    _signal.Release();
+                }
+                // A model can take more than ten seconds to finish a native block.
+                // Returning early lets the lifecycle free weights under that worker.
+                _worker.Join();
+                _signal.Dispose();
+                _stop.Dispose();
+            }
         }
 
         private sealed class PendingRequest

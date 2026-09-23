@@ -2007,7 +2007,7 @@ namespace TensorSharp.Chat
                     });
                 }
                 OnChatRequest?.Invoke(chatSession.Id, body);
-                await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, uiThink, webUiLogger, cancellationToken))
+                await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, uiThink, webUiLogger, cancellationToken, samplingConfig))
                     yield return frame;
                 yield break;
             }
@@ -2483,7 +2483,7 @@ namespace TensorSharp.Chat
 
         private async IAsyncEnumerable<object> ChatStreamDiffusionAsync(
             ChatSession chatSession, List<ChatMessage> messages, int maxTokens, bool think, ILogger webUiLogger,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
+            [EnumeratorCancellation] CancellationToken cancellationToken, SamplingConfig samplingConfig)
         {
             var sw = Stopwatch.StartNew();
             bool aborted = false;
@@ -2495,7 +2495,7 @@ namespace TensorSharp.Chat
             // block is dropped unless the request asked for it), so the replace frames
             // show the answer rather than Gemma's raw channel markup.
             IAsyncEnumerator<DiffusionStreamUpdate> stream = _svc
-                .DiffusionChatStreamAsync(chatSession, messages, maxTokens, cancellationToken, think)
+                .DiffusionChatStreamAsync(chatSession, messages, maxTokens, cancellationToken, think, samplingConfig)
                 .GetAsyncEnumerator(cancellationToken);
             try
             {

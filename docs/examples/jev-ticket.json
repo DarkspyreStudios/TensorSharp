@@ -1,0 +1,26 @@
+{
+  "model": "jev-latest",
+  "state": "Our production dashboard is down. Every customer gets a 503 error and nobody can sign in.",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which team should handle this ticket?",
+      "criteria": {
+        "billing": "Payment, invoice or subscription questions",
+        "technical": "Bugs, outages and integration failures",
+        "sales": "Pricing and purchasing questions"
+      }
+    },
+    "urgent": {
+      "type": "noul",
+      "instructions": "Does this describe an active production outage?"
+    },
+    "severity": {
+      "type": "score",
+      "instructions": "How severe is the incident?",
+      "criteria": ["No impact", "Minor inconvenience", "Service unusable"]
+    }
+  },
+  "samples": 1,
+  "seed": 42
+}

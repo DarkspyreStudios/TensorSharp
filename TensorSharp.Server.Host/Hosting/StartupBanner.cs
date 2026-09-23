@@ -30,6 +30,7 @@ namespace TensorSharp.Server.Host.Hosting
             "POST /api/generate              - Generate text (Ollama)",
             "POST /api/chat/ollama           - Chat completion (Ollama)",
             "POST /v1/chat/completions       - Chat completion (OpenAI)",
+            "POST /v1/systemone             - Typed Jev decisions (DiffusionGemma)",
             "GET  /v1/models                 - List hosted models (OpenAI)",
             "POST /api/chat                  - Chat (Web UI SSE)",
             "POST /api/models/load           - Reload hosted model (Web UI)",
