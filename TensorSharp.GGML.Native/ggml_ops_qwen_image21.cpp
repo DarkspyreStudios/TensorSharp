@@ -3,6 +3,7 @@
 // Qwen-Image-2.1: single-stream, segmented causal/image attention and shared AdaLN.
 // All operations use unchanged upstream ggml. One complete graph per velocity
 // prediction keeps intermediate activations on the device and weights resident.
+// CUDA retains graph metadata and allocation addresses across denoising steps.
 // The t=0 prefix is currently recomputed. Caching its post-RoPE K/V is exact,
 // but F32 storage costs 1 MiB per prefix token per CFG branch at 32x4096, so a
 // future implementation needs explicit request lifetimes and a device budget.
@@ -12,10 +13,16 @@
 using namespace tsg;
 namespace {
 struct Upload { ggml_tensor* tensor; const void* data; size_t bytes; };
+struct Resident { const void* key; size_t bytes; ggml_backend_buffer_t buffer; };
+bool option_enabled(const char* name, bool default_value) {
+    const char* value = std::getenv(name);
+    return value ? value[0] != '0' : default_value;
+}
 struct Builder {
     ggml_context* ctx;
     std::vector<Upload> uploads;
     std::vector<std::vector<ggml_fp16_t>> masks;
+    std::vector<Resident> resident;
 
     void bind(ggml_tensor* t, const void* data, size_t bytes) {
         if (!data || bytes != ggml_nbytes(t)) throw std::invalid_argument("QwenImage21: invalid weight descriptor");
@@ -24,14 +31,17 @@ struct Builder {
         bool needs_upload = false;
         void* key = const_cast<void*>(data);
         if (try_get_cacheable_tensor_buffer(g_backend, ggml_backend_get_device(g_backend), t,
-                key, bytes, buffer, address, needs_upload) &&
-            ggml_backend_tensor_alloc(buffer, t, address) == GGML_STATUS_SUCCESS) {
-            // Publish initialized resident buffers immediately. A failed graph allocation
-            // must never leave a cache hit pointing to an uninitialized weight.
-            if (needs_upload) { host_read_barrier(); ggml_backend_tensor_set(t, data, 0, bytes); }
-            return;
+                key, bytes, buffer, address, needs_upload)) {
+            if (ggml_backend_tensor_alloc(buffer, t, address) == GGML_STATUS_SUCCESS) {
+                // A failed graph allocation must not leave an uninitialized resident weight.
+                if (needs_upload) { host_read_barrier(); ggml_backend_tensor_set(t, data, 0, bytes); }
+                resident.push_back({data, bytes, t->buffer});
+                return;
+            }
+            invalidate_cached_buffer(key);
         }
-        invalidate_cached_buffer(key);
+        // A residency-budget refusal does not invalidate another CFG graph's
+        // private weight copy. Each graph can retain its own constant input.
         ggml_set_input(t);
         uploads.push_back({t, data, bytes});
     }
@@ -87,9 +97,15 @@ struct Builder {
         auto qp = ggml_permute(ctx, q, 0, 2, 1, 3);
         auto kp = ggml_permute(ctx, k, 0, 2, 1, 3);
         auto vp = ggml_permute(ctx, v, 0, 2, 1, 3);
+        const bool flash = option_enabled("TS_QWEN21_FLASH", true);
+        const bool shared_half = flash && g_backend_type == BACKEND_TYPE_CUDA &&
+            !option_enabled("TS_QWEN21_PAD_MASK", false);
+        // CUDA flash attention converts F32 K/V to F16 internally. Convert once
+        // here so every segment can share them, including strided prefix views.
+        auto kflash = shared_half ? ggml_cast(ctx, kp, GGML_TYPE_F16) : kp;
+        auto vflash = shared_half ? ggml_cast(ctx, vp, GGML_TYPE_F16) : vp;
         ggml_tensor* joined = nullptr;
         const float scale = 1.f / std::sqrt(static_cast<float>(d.head_dim));
-        const char* flash_env = std::getenv("TS_QWEN21_FLASH");
         for (int i = 0; i < d.num_segments; ++i) {
             const auto& seg = d.segments[i];
             int nq = seg.end - seg.start, nk = seg.end;
@@ -97,20 +113,22 @@ struct Builder {
             auto ks = ggml_view_3d(ctx, kp, d.head_dim, nk, d.heads, kp->nb[1], kp->nb[2], 0);
             auto vs = ggml_view_3d(ctx, vp, d.head_dim, nk, d.heads, vp->nb[1], vp->nb[2], 0);
             ggml_tensor* out = nullptr;
-            if (!flash_env || flash_env[0] != '0') {
+            if (flash) {
                 // Bidirectional image segments need no mask when the backend
                 // accepts their actual KV length. Let upstream handle its own
                 // tile boundaries instead of materializing a quadratic padding
                 // mask and padded F32 K/V for every layer.
-                int pad = mask_tensors[i] ? mask_tensors[i]->ne[0] - nk : 0;
-                auto kpad = pad ? ggml_pad(ctx, ks, 0, pad, 0, 0) : ks;
-                auto vpad = pad ? ggml_pad(ctx, vs, 0, pad, 0, 0) : vs;
+                int pad = !shared_half && mask_tensors[i] ? mask_tensors[i]->ne[0] - nk : 0;
+                auto kpart = shared_half ? ggml_view_3d(ctx, kflash, d.head_dim, nk, d.heads, kflash->nb[1], kflash->nb[2], 0) : ks;
+                auto vpart = shared_half ? ggml_view_3d(ctx, vflash, d.head_dim, nk, d.heads, vflash->nb[1], vflash->nb[2], 0) : vs;
+                auto kpad = pad ? ggml_pad(ctx, kpart, 0, pad, 0, 0) : kpart;
+                auto vpad = pad ? ggml_pad(ctx, vpart, 0, pad, 0, 0) : vpart;
                 if (g_backend_type == BACKEND_TYPE_METAL) {
                     // CAST accepts the strided segment directly and produces
                     // contiguous F16, avoiding an intermediate F32 CONT copy.
                     kpad = ggml_cast(ctx, kpad, GGML_TYPE_F16);
                     vpad = ggml_cast(ctx, vpad, GGML_TYPE_F16);
-                } else {
+                } else if (!shared_half) {
                     kpad = ggml_cont(ctx, kpad);
                     vpad = ggml_cont(ctx, vpad);
                 }
@@ -138,16 +156,81 @@ struct Builder {
         return joined;
     }
 };
+
+bool same_weight(const TSGQi21Weight& a, const TSGQi21Weight& b) {
+    return a.data == b.data && a.type == b.type && a.ne0 == b.ne0 &&
+        a.ne1 == b.ne1 && a.bytes == b.bytes;
 }
 
-TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
-    try {
+std::vector<TSGQi21Weight> weights(const TSGQi21Desc& d) {
+    std::vector<TSGQi21Weight> result = {d.image_in, d.text_in, d.text_out,
+        d.time_in, d.time_out, d.modulation, d.norm_out, d.proj_out};
+    result.push_back({d.text_norm, GGML_TYPE_F32, 0, d.text_dim, 1, d.text_dim * int64_t(sizeof(float))});
+    for (int i = 0; i < d.num_layers; ++i) {
+        const auto& b = d.blocks[i];
+        for (const auto* w : {&b.q, &b.k, &b.v, &b.out, &b.gate, &b.up, &b.down}) result.push_back(*w);
+        for (void* p : {b.norm_q, b.norm_k})
+            result.push_back({p, GGML_TYPE_F32, 0, d.head_dim, 1, d.head_dim * int64_t(sizeof(float))});
+    }
+    return result;
+}
+
+struct ForwardGraph {
+    ggml_context* ctx = nullptr;
+    ggml_gallocr_t allocator = nullptr;
+    ggml_cgraph* graph = nullptr;
+    ggml_tensor* inputs[5]{};
+    ggml_tensor* output = nullptr;
+    ggml_backend_t backend = nullptr;
+    TSGQi21Desc shape{};
+    std::vector<TSGQi21Weight> weight_key;
+    std::vector<TSGQi21Segment> segments;
+    std::vector<Resident> resident;
+    bool flash = true, pad_mask = false;
+    uint64_t used = 0, runs = 0;
+
+    ~ForwardGraph() {
+        if (allocator) ggml_gallocr_free(allocator);
+        if (ctx) ggml_free(ctx);
+    }
+
+    bool matches(const TSGQi21Desc& d, const std::vector<TSGQi21Weight>& key) const {
+        if (backend != g_backend || shape.dim != d.dim || shape.heads != d.heads ||
+            shape.head_dim != d.head_dim || shape.channels != d.channels || shape.text_dim != d.text_dim ||
+            shape.image_seq != d.image_seq || shape.text_seq != d.text_seq || shape.total_seq != d.total_seq ||
+            shape.prefix_seq != d.prefix_seq || shape.num_layers != d.num_layers || shape.num_segments != d.num_segments ||
+            shape.eps != d.eps || flash != option_enabled("TS_QWEN21_FLASH", true) ||
+            pad_mask != option_enabled("TS_QWEN21_PAD_MASK", false) || key.size() != weight_key.size()) return false;
+        for (size_t i = 0; i < key.size(); ++i) if (!same_weight(key[i], weight_key[i])) return false;
+        for (int i = 0; i < d.num_segments; ++i) {
+            const auto& a = segments[i]; const auto& b = d.segments[i];
+            if (a.start != b.start || a.end != b.end || a.source_start != b.source_start || a.is_image != b.is_image) return false;
+        }
+        // Weight cache entries can be replaced outside this path. Inspect the
+        // live maps without dereferencing a possibly freed backend buffer.
+        std::scoped_lock lock(g_host_buffer_cache_mutex, g_preloaded_buffer_cache_mutex);
+        for (const auto& r : resident) {
+            auto found = [&](const auto& cache) {
+                auto it = cache.find(const_cast<void*>(r.key));
+                return it != cache.end() && it->second.buffer == r.buffer && it->second.bytes == r.bytes;
+            };
+            if (!found(g_host_buffer_cache) && !found(g_preloaded_buffer_cache)) return false;
+        }
+        return true;
+    }
+};
+
+std::recursive_mutex graph_mutex;
+std::array<std::array<std::unique_ptr<ForwardGraph>, 2>, TSG_MAX_DEVICES> graph_cache;
+uint64_t graph_use = 0;
+
+void validate(const TSGQi21Desc* d) {
         if (!d || d->struct_bytes != sizeof(TSGQi21Desc) || !d->images || !d->text || !d->output ||
             !d->time_embedding || !d->cos || !d->sin || !d->blocks || !d->segments ||
             d->dim <= 0 || d->head_dim <= 0 || d->head_dim % 2 || d->heads <= 0 ||
             d->dim != d->heads * d->head_dim || d->channels <= 0 || d->text_dim <= 0 ||
             d->num_layers <= 0 || d->num_segments <= 0 || d->image_seq <= 0 || d->text_seq <= 0 ||
-            d->prefix_seq < 0 || d->total_seq <= d->prefix_seq)
+            d->prefix_seq < 0 || d->total_seq <= d->prefix_seq || !std::isfinite(d->eps) || d->eps <= 0)
             throw std::invalid_argument("QwenImage21: invalid forward descriptor");
         int end = 0;
         for (int i = 0; i < d->num_segments; ++i) {
@@ -160,26 +243,37 @@ TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
         if (end != d->total_seq || d->segments[d->num_segments - 1].start != d->prefix_seq ||
             !d->segments[d->num_segments - 1].is_image)
             throw std::invalid_argument("QwenImage21: missing target image segment");
-        if (!ensure_backend()) return 0;
+}
+
+std::unique_ptr<ForwardGraph> build_graph(const TSGQi21Desc* d, bool persistent) {
+        auto result = std::make_unique<ForwardGraph>();
+        result->backend = g_backend;
+        result->shape = *d;
+        result->weight_key = weights(*d);
+        result->segments.assign(d->segments, d->segments + d->num_segments);
+        result->flash = option_enabled("TS_QWEN21_FLASH", true);
+        result->pad_mask = option_enabled("TS_QWEN21_PAD_MASK", false);
         size_t nodes = static_cast<size_t>(d->num_layers) * (180 + d->num_segments * 45) + 1024;
         ggml_init_params init{ggml_tensor_overhead() * (nodes + 1024) + ggml_graph_overhead_custom(nodes, false), nullptr, true};
-        ContextHandle context(ggml_init(init));
-        if (!context.value) throw std::runtime_error("QwenImage21: graph context allocation failed");
-        Builder b{context.value, {}, {}};
-        auto ctx = context.value;
+        result->ctx = ggml_init(init);
+        if (!result->ctx) throw std::runtime_error("QwenImage21: graph context allocation failed");
+        Builder b{result->ctx, {}, {}, {}};
+        auto ctx = result->ctx;
         auto images = b.input(d->images, d->channels, d->image_seq);
         auto text = b.input(d->text, d->text_dim, d->text_seq);
         auto time = b.input(d->time_embedding, 256, 2);
         auto cos = b.input(d->cos, d->head_dim / 2, d->total_seq);
         auto sin = b.input(d->sin, d->head_dim / 2, d->total_seq);
+        result->inputs[0] = images; result->inputs[1] = text; result->inputs[2] = time;
+        result->inputs[3] = cos; result->inputs[4] = sin;
         std::vector<ggml_tensor*> mask_tensors;
         b.masks.reserve(d->num_segments);
         for (int i = 0; i < d->num_segments; ++i) {
             const auto& s = d->segments[i];
-            // CPU and Metal support unpadded, mask-free flash attention. Keep
-            // the existing padded path for other backends until device tests
-            // establish their supported kernels for all segment lengths.
-            if (s.is_image && (g_backend_type == BACKEND_TYPE_CPU || g_backend_type == BACKEND_TYPE_METAL)) {
+            // Bidirectional segments attend to exactly their prefix. CUDA's
+            // tile/MMA kernels handle unpadded lengths without a dense mask.
+            if (s.is_image && (g_backend_type == BACKEND_TYPE_CPU || g_backend_type == BACKEND_TYPE_METAL ||
+                (g_backend_type == BACKEND_TYPE_CUDA && !result->pad_mask))) {
                 mask_tensors.push_back(nullptr);
                 continue;
             }
@@ -248,17 +342,109 @@ TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
         ggml_set_output(output);
         auto graph = ggml_new_graph_custom(ctx, nodes, false);
         ggml_build_forward_expand(graph, output);
-        if (!alloc_graph_reuse_gallocr(graph)) throw std::runtime_error("QwenImage21: graph allocation failed");
+        if (persistent) {
+            // Gallocr may recycle an input after its last consumer. Constants
+            // uploaded only at build time must survive every subsequent replay.
+            for (size_t i = 5; i < b.uploads.size(); ++i) ggml_set_output(b.uploads[i].tensor);
+            result->allocator = ggml_gallocr_new(ggml_backend_get_default_buffer_type(g_backend));
+            if (!result->allocator) throw std::runtime_error("QwenImage21: graph allocator creation failed");
+            size_t need = 0, free_bytes = 0, total_bytes = 0;
+            ggml_gallocr_reserve_n_size(result->allocator, graph, nullptr, nullptr, &need);
+            ggml_backend_dev_memory(ggml_backend_get_device(g_backend), &free_bytes, &total_bytes);
+            // A second CFG shape is optional: retire the other slot when both
+            // scratch arenas would overcommit VRAM and spill on Windows.
+            if (total_bytes && (need > free_bytes || free_bytes - need < size_t(512) * 1024 * 1024)) {
+                for (auto& cached : graph_cache[g_active_rank]) cached.reset();
+            }
+            // The size-only reserve populates plans without backing buffers;
+            // alloc_graph cannot detect that case, so reserve storage explicitly.
+            if (!ggml_gallocr_reserve(result->allocator, graph) || !ggml_gallocr_alloc_graph(result->allocator, graph))
+                throw std::runtime_error("QwenImage21: persistent graph allocation failed");
+        } else if (!alloc_graph_reuse_gallocr(graph)) {
+            throw std::runtime_error("QwenImage21: graph allocation failed");
+        }
         host_read_barrier();
         // Masks of a declined/disabled flash operation are not reachable from
         // the final graph and therefore have no allocator slot.
-        for (const auto& u : b.uploads)
+        for (size_t i = 5; i < b.uploads.size(); ++i) {
+            const auto& u = b.uploads[i];
             if (u.tensor->buffer) ggml_backend_tensor_set(u.tensor, u.data, 0, u.bytes);
-        if (compute_graph(g_backend, graph) != GGML_STATUS_SUCCESS) throw std::runtime_error("QwenImage21: graph compute failed");
-        sync_backend(g_backend);
-        ggml_backend_tensor_get(output, d->output, 0, ggml_nbytes(output));
+        }
+        result->graph = graph;
+        result->output = output;
+        result->resident = std::move(b.resident);
+        if (persistent && option_enabled("TS_QWEN21_GRAPH_TRACE", false))
+            std::fprintf(stderr, "[qwen21-graph] build tokens=%d segments=%d nodes=%d scratch=%.1f MiB\n",
+                d->total_seq, d->num_segments, ggml_graph_n_nodes(graph),
+                ggml_gallocr_get_buffer_size(result->allocator, 0) / (1024.0 * 1024.0));
+        return result;
+}
+
+void run_graph(ForwardGraph& entry, const TSGQi21Desc& d) {
+    const float* data[] = {d.images, d.text, d.time_embedding, d.cos, d.sin};
+    host_read_barrier();
+    for (int i = 0; i < 5; ++i)
+        if (entry.inputs[i]->buffer)
+            ggml_backend_tensor_set(entry.inputs[i], data[i], 0, ggml_nbytes(entry.inputs[i]));
+    if (compute_graph(g_backend, entry.graph) != GGML_STATUS_SUCCESS)
+        throw std::runtime_error("QwenImage21: graph compute failed");
+    ggml_backend_tensor_get(entry.output, d.output, 0, ggml_nbytes(entry.output));
+    ++entry.runs;
+    entry.used = ++graph_use;
+    if (entry.allocator && option_enabled("TS_QWEN21_GRAPH_TRACE", false))
+        std::fprintf(stderr, "[qwen21-graph] run=%llu tokens=%d\n",
+            static_cast<unsigned long long>(entry.runs), d.total_seq);
+}
+}
+
+namespace tsg {
+void qwen_image21_invalidate_weight(const void* data) {
+    std::lock_guard<std::recursive_mutex> lock(graph_mutex);
+    for (auto& device : graph_cache) for (auto& entry : device) {
+        if (entry && std::any_of(entry->weight_key.begin(), entry->weight_key.end(),
+            [data](const TSGQi21Weight& w) { return w.data == data; })) entry.reset();
+    }
+}
+}
+
+TSG_EXPORT void TSGgml_QwenImage21ResetForwardCache() {
+    std::lock_guard<std::recursive_mutex> lock(graph_mutex);
+    for (auto& device : graph_cache) for (auto& entry : device) entry.reset();
+}
+
+TSG_EXPORT int TSGgml_QwenImage21Forward(const TSGQi21Desc* d) {
+    std::lock_guard<std::recursive_mutex> lock(graph_mutex);
+    try {
+        validate(d);
+        if (!ensure_backend()) return 0;
+        const bool persistent = g_backend_type == BACKEND_TYPE_CUDA && option_enabled("TS_QWEN21_GRAPH_REUSE", true);
+        if (!persistent) {
+            // Disabling reuse also releases previous entries before allocating
+            // baseline scratch, so A/B runs do not charge both sets of buffers.
+            for (auto& entry : graph_cache[g_active_rank]) entry.reset();
+            auto transient = build_graph(d, false);
+            run_graph(*transient, *d);
+        } else {
+            auto& entries = graph_cache[g_active_rank];
+            const auto key = weights(*d);
+            ForwardGraph* selected = nullptr;
+            for (auto& entry : entries) if (entry && entry->matches(*d, key)) { selected = entry.get(); break; }
+            if (!selected) {
+                auto slot = std::min_element(entries.begin(), entries.end(), [](const auto& a, const auto& b) {
+                    return (!a ? 0 : a->used) < (!b ? 0 : b->used);
+                });
+                slot->reset();
+                auto built = build_graph(d, true);
+                selected = built.get();
+                *slot = std::move(built);
+            }
+            run_graph(*selected, *d);
+        }
         clear_last_error();
         return 1;
-    } catch (const std::exception& e) { set_last_error(e.what()); return 0; }
-    catch (...) { set_last_error("QwenImage21: unknown native error"); return 0; }
+    } catch (const std::exception& e) {
+        TSGgml_QwenImage21ResetForwardCache(); set_last_error(e.what()); return 0;
+    } catch (...) {
+        TSGgml_QwenImage21ResetForwardCache(); set_last_error("QwenImage21: unknown native error"); return 0;
+    }
 }

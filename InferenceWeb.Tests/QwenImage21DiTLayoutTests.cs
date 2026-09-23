@@ -7,6 +7,31 @@ namespace InferenceWeb.Tests;
 public sealed class QwenImage21DiTLayoutTests
 {
     [Fact]
+    public void CachedLayoutsRetainBothCfgBranchesAndObserveMutableKeys()
+    {
+        var cache = new QwenImage21DiT.LayoutCache();
+        var shapes = new[] { (2, 2), (2, 3) };
+        int[] slots = { 0, 1, 0 };
+        var first = cache.Get(3, slots, shapes);
+        var negative = cache.Get(2, new[] { 1, 0 }, shapes);
+        Assert.Same(first.Cos, cache.Get(3, slots, shapes).Cos);
+        Assert.Same(negative.Cos, cache.Get(2, new[] { 1, 0 }, shapes).Cos);
+
+        // Changing geometry without changing the number of tokens changes RoPE.
+        shapes[1] = (3, 2);
+        var reshaped = cache.Get(3, slots, shapes);
+        Assert.NotSame(first.Cos, reshaped.Cos);
+        Assert.NotEqual(first.Cos[6 * 64 + 8], reshaped.Cos[6 * 64 + 8]);
+        slots[0] = 1;
+        slots[1] = 0;
+        var moved = cache.Get(3, slots, shapes);
+        Assert.NotSame(reshaped.Cos, moved.Cos);
+        Assert.Equal(1, moved.Segments[0].IsImage);
+        cache.Clear();
+        Assert.NotSame(moved.Cos, cache.Get(3, slots, shapes).Cos);
+    }
+
+    [Fact]
     public void AutomaticReferenceGeometryMatchesHalfAwayFromZeroRounding()
     {
         // sqrt(512² * 1089/1024) = 528 = 16.5 grid cells.

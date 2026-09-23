@@ -29,6 +29,8 @@
 // accumulating in F32. Here the (small) kernel is widened to F32 once and cached,
 // and the convolution runs F32 in/out with CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION,
 // so the tensor cores still do the work at no worse accuracy than before.
+// Full-precision callers such as Qwen-Image-2.1 instead request FMA math:
+// their finite intermediate activations can exceed the F16 exponent range.
 //
 // TS_WAN_VAE_CUDNN_CONV=0 falls back to ggml's im2col+GEMM.
 //
@@ -245,6 +247,9 @@ bool ensure_handle(CudnnState& s)
     s.probed = true;
     if (const char* e = std::getenv("TS_WAN_VAE_CUDNN_CONV"); e != nullptr && e[0] == '0')
         return s.usable = false;
+    // The runtime is optional. A missing library or incomplete export table
+    // must decline offload before any dynamically resolved entry point is used.
+    if (!api().loaded) return s.usable = false;
     if (cudnnCreate(&s.handle) != CUDNN_STATUS_SUCCESS)
     {
         s.handle = nullptr;
@@ -326,7 +331,7 @@ bool tsg_cudnn_conv2d(
     const void* w, int wIsF16, int kw, int kh, int ic, int oc,
     const void* x, int W, int H, int T,
     int stride, int pad,
-    void* dst, int OW, int OH)
+    void* dst, int OW, int OH, bool full_precision)
 {
     if (w == nullptr || x == nullptr || dst == nullptr) return false;
     if (kw <= 0 || kh <= 0 || ic <= 0 || oc <= 0 || W <= 0 || H <= 0 || T <= 0) return false;
@@ -355,8 +360,10 @@ bool tsg_cudnn_conv2d(
     if (cudnnSetFilter4dDescriptor(d.w, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, oc, ic, kh, kw) != CUDNN_STATUS_SUCCESS) return false;
     if (cudnnSetConvolution2dDescriptor(d.c, pad, pad, stride, stride, 1, 1,
                                         CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT) != CUDNN_STATUS_SUCCESS) return false;
-    // Let cuDNN use the tensor cores on F32 data.
-    cudnnSetConvolutionMathType(d.c, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION);
+    // F32 descriptors alone do not forbid cuDNN from converting inputs to
+    // F16/TF32. Preserve the requested range and precision before normalization.
+    if (cudnnSetConvolutionMathType(d.c, full_precision ? CUDNN_FMA_MATH : CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION)
+        != CUDNN_STATUS_SUCCESS) return false;
 
     // Confirm cuDNN agrees with the output extent ggml allocated for this node.
     int n_ = 0, c_ = 0, h_ = 0, w_ = 0;

@@ -20,6 +20,7 @@ internal sealed class QwenImage21DiT : ModelBase
     private readonly QwenImage21Block[] _blocks;
     private readonly QwenImage21ForwardArgs _nativeWeights;
     private readonly string _prefix;
+    private readonly LayoutCache _layouts = new();
 
     public QwenImage21DiT(string ggufPath, BackendType backend) : base(ggufPath, backend)
     {
@@ -127,11 +128,17 @@ internal sealed class QwenImage21DiT : ModelBase
                 referenceTokens[i].Length != checked(referenceHeights[i] * referenceWidths[i] * Channels))
                 throw new ArgumentException($"Invalid reference latent {i}.");
         var shapes = referenceHeights.Select((h, i) => (Height: h, Width: referenceWidths[i])).Append((latentH, latentW)).ToArray();
-        var layout = BuildLayout(textSeq, imageSlots, shapes);
-        float[] images = new float[checked(referenceTokens.Sum(x => x.Length) + targetTokens.Length)];
-        int offset = 0;
-        foreach (var reference in referenceTokens) { reference.CopyTo(images, offset); offset += reference.Length; }
-        targetTokens.CopyTo(images, offset);
+        var layout = _layouts.Get(textSeq, imageSlots, shapes);
+        // Text-to-image already has the native token layout. Pin the caller's
+        // latents directly instead of copying them on every denoising step.
+        float[] images = targetTokens;
+        if (referenceTokens.Length != 0)
+        {
+            images = new float[checked(referenceTokens.Sum(x => x.Length) + targetTokens.Length)];
+            int offset = 0;
+            foreach (var reference in referenceTokens) { reference.CopyTo(images, offset); offset += reference.Length; }
+            targetTokens.CopyTo(images, offset);
+        }
         var time = new float[512];
         for (int i = 0; i < 128; ++i)
         {
@@ -162,6 +169,36 @@ internal sealed class QwenImage21DiT : ModelBase
         if (output.Any(v => !float.IsFinite(v)))
             throw new InvalidOperationException("Qwen-Image-2.1 DiT produced non-finite latent velocities.");
         return output;
+    }
+
+    /// <summary>Retains at most the two CFG layouts. Keys are copied because callers
+    /// may reuse and mutate slot/shape arrays between image requests.</summary>
+    internal sealed class LayoutCache
+    {
+        private sealed record Entry(int TextLength, int[] Slots, (int Height, int Width)[] Shapes,
+            (QwenImage21Segment[] Segments, float[] Cos, float[] Sin, int Prefix) Layout);
+        private Entry _recent, _previous;
+
+        internal (QwenImage21Segment[] Segments, float[] Cos, float[] Sin, int Prefix) Get(
+            int textLength, int[] slots, (int Height, int Width)[] shapes)
+        {
+            bool Matches(Entry entry) => entry != null && entry.TextLength == textLength &&
+                ((slots == null && entry.Slots == null) ||
+                 (slots != null && entry.Slots != null && slots.AsSpan().SequenceEqual(entry.Slots))) &&
+                shapes != null && shapes.AsSpan().SequenceEqual(entry.Shapes);
+            if (Matches(_recent)) return _recent.Layout;
+            if (Matches(_previous))
+            {
+                (_recent, _previous) = (_previous, _recent);
+                return _recent.Layout;
+            }
+            var layout = BuildLayout(textLength, slots, shapes);
+            _previous = _recent;
+            _recent = new Entry(textLength, slots?.ToArray(), shapes.ToArray(), layout);
+            return layout;
+        }
+
+        internal void Clear() => (_recent, _previous) = (null, null);
     }
 
     internal static (QwenImage21Segment[] Segments, float[] Cos, float[] Sin, int Prefix) BuildLayout(
@@ -227,6 +264,7 @@ internal sealed class QwenImage21DiT : ModelBase
     protected override void ResetKVCacheCore() { }
     public override void Dispose()
     {
+        _layouts.Clear();
         base.Dispose();
         foreach (var ptr in _owned) QuantizedWeight.FreeBuffer(ptr);
         _owned.Clear(); _pointers.Clear();

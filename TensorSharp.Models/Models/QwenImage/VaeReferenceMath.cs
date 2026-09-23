@@ -41,6 +41,21 @@ namespace TensorSharp.Models.QwenImage
         internal static bool UseGpuConv =
             Environment.GetEnvironmentVariable("TS_QWEN_VAE_GPU") != "0";
 
+        // Qwen-Image-2.1 reaches finite activations above 65504 before the final
+        // norm. Scope F32 im2col to that synchronous call chain, including its
+        // shared attention/downsample helpers, without changing other VAEs.
+        [ThreadStatic] private static bool FullPrecisionConv;
+        private readonly struct ConvPrecisionScope : IDisposable
+        {
+            private readonly bool _previous;
+            public ConvPrecisionScope(bool enabled)
+            {
+                _previous = FullPrecisionConv;
+                FullPrecisionConv = enabled;
+            }
+            public void Dispose() => FullPrecisionConv = _previous;
+        }
+
         // Fused whole-VAE graph (TSGgml_QwenVaeRun): the entire encode/decode as ONE
         // device-resident ggml graph (resident weights, direct convs, no per-op host
         // round-trips). Falls back to the per-conv path when the backend can't run it.
@@ -204,13 +219,14 @@ namespace TensorSharp.Models.QwenImage
             float[] bias, int strideH, int strideW, int padT, int padB, int padL, int padR,
             int Ho, int Wo, out Feature result)
         {
-            long im2col = (long)IC * KH * KW * Ho * Wo * 2;
+            int elementBytes = FullPrecisionConv ? 4 : 2;
+            long im2col = (long)IC * KH * KW * Ho * Wo * elementBytes;
             long budget = Im2colBudgetBytes();
             if (im2col <= budget)
                 return TryGpuConv2d(x, weight, OC, IC, KH, KW, bias, strideH, strideW,
                     padT, padB, padL, padR, Ho, Wo, out result);
 
-            long perRow = Math.Max(1, (long)IC * KH * KW * Wo * 2);
+            long perRow = Math.Max(1, (long)IC * KH * KW * Wo * elementBytes);
             int bandHo = (int)Math.Max(1, budget / perRow);
             int H = x.H;
             var outp = new Feature(OC, Ho, Wo);
@@ -325,7 +341,7 @@ namespace TensorSharp.Models.QwenImage
                     PadL = padL, PadR = padR, PadT = padT, PadB = padB,
                     StructBytes = Marshal.SizeOf<Conv2dArgs>(),
                 };
-                ok = GgmlBasicOps.TryConv2d(in d);
+                ok = GgmlBasicOps.TryConv2d(in d, FullPrecisionConv);
             }
             result = ok ? outp : null;
             return ok;

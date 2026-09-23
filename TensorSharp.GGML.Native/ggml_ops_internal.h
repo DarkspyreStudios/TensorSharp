@@ -175,7 +175,7 @@ namespace tsg
     {
         Neg = 1, Exp = 2, Log = 3, Sqrt = 4, Relu = 5,
         Sigmoid = 6, Tanh = 7, SiLU = 8, Step = 9,
-        Abs = 10, Sign = 11, GELU = 12,
+        Abs = 10, Sign = 11, GELU = 12, GELUErf = 13,
     };
 
     enum class FusedActMulOpCode : int
@@ -1103,7 +1103,12 @@ namespace tsg
     // and materialises 9x the input for a 3x3 kernel; the vendor libraries
     // convolve directly. fast_conv_enabled() says whether to emit un-lowered
     // CONV_2D nodes, and graph_compute_fast_conv() executes such a graph.
-    bool fast_conv_enabled();
+    // A single-image F32 VAE can prefer CUDA offload when cuDNN is available.
+    // The environment override still wins; other callers remain opt-in on CUDA.
+    bool fast_conv_enabled(bool prefer_cuda = false);
+    // Upstream CONV_2D uses op_params[0..6]. TensorSharp's vendor dispatch
+    // reserves the next word to prohibit reduced-precision conversion.
+    constexpr int k_conv_full_precision_param = 7;
     ggml_status graph_compute_fast_conv(ggml_cgraph* graph, const char* tag);
 
     // ------------------------------------------------------------------
@@ -1320,6 +1325,8 @@ namespace tsg
     // must invalidate downstream state keyed on that buffer use the result to skip
     // the work when the pointer had no device copy to begin with.
     bool invalidate_cached_buffer(void* data);
+    // Retire Qwen-Image-2.1 graphs before an immutable weight is changed/freed.
+    void qwen_image21_invalidate_weight(const void* data);
 
     // allow_unified_weight: when true the prefers_device_local_cache gate is
     // bypassed and only raw capability (host_ptr_buffer_capable) is required.

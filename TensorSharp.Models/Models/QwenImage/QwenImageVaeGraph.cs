@@ -36,17 +36,22 @@ namespace TensorSharp.Models.QwenImage
 {
     internal sealed class QwenImageVaeGraph : IDisposable
     {
-        private const int KConv = 0, KNorm = 1, KSilu = 2, KUp = 3, KSave = 4, KAdd = 5, KAttn = 6;
+        private const int KConv = 0, KNorm = 1, KSilu = 2, KUp = 3, KSave = 4, KAdd = 5, KAttn = 6,
+            KAverageDown21 = 7, KDuplicateUp21 = 8;
         private const int ZDim = 16;
+        private bool _qwen21;
+        private int LatentChannels => _qwen21 ? 64 : ZDim;
+        private int PixelChannels => _qwen21 ? 4 : 3;
+        private int SpatialFactor => _qwen21 ? 16 : 8;
 
         private readonly List<IntPtr> _allocs = new();
         private QwenVaeWeightRef[] _weights;
         private QwenVaeOp[] _encodeOps, _decodeOps;
         private bool _disposed;
 
-        public static QwenImageVaeGraph TryBuild(VaeWeights w)
+        public static QwenImageVaeGraph TryBuild(VaeWeights w, bool qwen21 = false)
         {
-            var g = new QwenImageVaeGraph();
+            var g = new QwenImageVaeGraph { _qwen21 = qwen21 };
             try
             {
                 g.Build(w);
@@ -62,21 +67,21 @@ namespace TensorSharp.Models.QwenImage
 
         public unsafe bool TryEncode(float[] chw, int H, int W, out float[] z32, out int lh, out int lw)
         {
-            lh = H / 8; lw = W / 8;
+            lh = H / SpatialFactor; lw = W / SpatialFactor;
             z32 = null;
-            if (H % 8 != 0 || W % 8 != 0) return false;
-            var outp = new float[2L * ZDim * lh * lw];
-            if (!Run(_encodeOps, chw, W, H, 3, outp)) return false;
+            if (H % SpatialFactor != 0 || W % SpatialFactor != 0) return false;
+            var outp = new float[2L * LatentChannels * lh * lw];
+            if (!Run(_encodeOps, chw, W, H, PixelChannels, outp) || !Finite21(outp)) return false;
             z32 = outp;
             return true;
         }
 
         public unsafe bool TryDecode(float[] latent, int lh, int lw, out float[] rgb, out int H, out int W)
         {
-            H = lh * 8; W = lw * 8;
+            H = lh * SpatialFactor; W = lw * SpatialFactor;
             rgb = null;
-            var outp = new float[3L * H * W];
-            if (!Run(_decodeOps, latent, lw, lh, ZDim, outp)) return false;
+            var outp = new float[(long)PixelChannels * H * W];
+            if (!Run(_decodeOps, latent, lw, lh, LatentChannels, outp) || !Finite21(outp)) return false;
             rgb = outp;
             return true;
         }
@@ -95,8 +100,18 @@ namespace TensorSharp.Models.QwenImage
                     Weights = (IntPtr)wPtr, NumWeights = _weights.Length,
                     StructBytes = Marshal.SizeOf<QwenVaeArgs>(),
                 };
-                return GgmlBasicOps.TryQwenVaeRun(in a);
+                bool ok = GgmlBasicOps.TryQwenVaeRun(in a);
+                if (_qwen21 && Environment.GetEnvironmentVariable("TS_QWEN21_VAE_TRACE") == "1")
+                    Console.WriteLine($"  [vae21] fused {inC}x{inH}x{inW}: ops={ops.Length} success={ok}");
+                return ok;
             }
+        }
+
+        private bool Finite21(float[] values)
+        {
+            if (!_qwen21 || !Array.Exists(values, v => !float.IsFinite(v))) return true;
+            Console.WriteLine("  [vae-fused] non-finite output, retrying the per-conv path.");
+            return false;
         }
 
         // ---- build ------------------------------------------------------------
@@ -140,7 +155,7 @@ namespace TensorSharp.Models.QwenImage
                       int src = 0, int dst = 0, int aux = 0) =>
                 ops.Add(new QwenVaeOp { Kind = kind, W = wi, B = bi, Oc = oc, Ic = ic, Kh = kh, Kw = kw,
                                         Sh = sh, Sw = sw, Pt = pt, Pb = pb, Pl = pl, Pr = pr,
-                                        Src = src, Dst = dst, Aux = aux });
+                                        Src = src, Dst = dst, Aux = kind == KConv && _qwen21 ? 1 : aux });
 
             // conv from a causal-3D weight (sliced) with symmetric spatial pad
             void CausalConv(string prefix, int oc, int ic, int kd, int k, int pad, int src = 0, int dst = 0) =>
@@ -175,6 +190,71 @@ namespace TensorSharp.Models.QwenImage
                 ResidualBlock(prefix + ".0", dim, dim);
                 AttentionBlock(prefix + ".1", dim);
                 ResidualBlock(prefix + ".2", dim, dim);
+            }
+
+            if (_qwen21)
+            {
+                void Conv21(string prefix, int pad, int src = 0, int dst = 0, int stride = 1, bool endPad = false)
+                {
+                    var shape = w.Shape(prefix + ".weight");
+                    int oc = (int)shape[0], ic = (int)shape[1], kh = (int)shape[^2], kw = (int)shape[^1];
+                    int kd = shape.Length == 5 ? (int)shape[2] : 1;
+                    Emit(KConv, RegSlice(prefix + ".weight", oc, ic, kd, kh, kw), Reg(w.Get(prefix + ".bias")),
+                        oc, ic, kh, kw, sh: stride, sw: stride, pt: pad, pb: endPad ? 1 : pad,
+                        pl: pad, pr: endPad ? 1 : pad, src: src, dst: dst);
+                }
+                void Residual21(string prefix)
+                {
+                    if (w.Has(prefix + ".shortcut.weight")) Conv21(prefix + ".shortcut", 0, dst: 1);
+                    else Emit(KSave, dst: 1);
+                    Norm(prefix + ".residual.0.gamma"); Silu();
+                    Conv21(prefix + ".residual.2", 1);
+                    Norm(prefix + ".residual.3.gamma"); Silu();
+                    Conv21(prefix + ".residual.6", 1);
+                    Emit(KAdd, aux: 1);
+                }
+                void Mid21(string prefix)
+                {
+                    Residual21(prefix + ".0");
+                    AttentionBlock(prefix + ".1", w.Get(prefix + ".1.norm.gamma").Length);
+                    Residual21(prefix + ".2");
+                }
+                ops = new List<QwenVaeOp>();
+                Conv21("encoder.conv1", 1);
+                int[] encChannels = { 96, 192, 384, 768, 768 };
+                for (int stage = 0; stage < 5; ++stage)
+                {
+                    string prefix = $"encoder.downsamples.{stage}.downsamples";
+                    Emit(KAverageDown21, oc: encChannels[stage], kh: stage is >= 1 and <= 3 ? 2 : 1,
+                        kw: stage < 4 ? 2 : 1, dst: 2);
+                    Residual21(prefix + ".0"); Residual21(prefix + ".1");
+                    if (stage < 4) Conv21(prefix + ".2.resample.1", 0, stride: 2, endPad: true);
+                    Emit(KAdd, aux: 2);
+                }
+                Mid21("encoder.middle");
+                Norm("encoder.head.0.gamma"); Silu();
+                Conv21("encoder.head.2", 1); Conv21("conv1", 0);
+                _encodeOps = ops.ToArray();
+
+                ops = new List<QwenVaeOp>();
+                Conv21("conv2", 0); Conv21("decoder.conv1", 1);
+                Mid21("decoder.middle");
+                int[] decChannels = { 1152, 1152, 576, 288, 144 };
+                for (int stage = 0; stage < 5; ++stage)
+                {
+                    string prefix = $"decoder.upsamples.{stage}.upsamples";
+                    if (stage < 4) Emit(KDuplicateUp21, oc: decChannels[stage], kh: stage < 3 ? 2 : 1, kw: 2, dst: 2);
+                    for (int j = 0; j < 3; ++j) Residual21(prefix + $".{j}");
+                    if (stage < 4)
+                    {
+                        Emit(KUp); Conv21(prefix + ".3.resample.1", 1);
+                        Emit(KAdd, aux: 2);
+                    }
+                }
+                Norm("decoder.head.0.gamma"); Silu(); Conv21("decoder.head.2", 1);
+                _decodeOps = ops.ToArray();
+                _weights = weights.ToArray();
+                return;
             }
 
             // ---- encoder (mirrors VaeReferenceMath.Encode after pixel normalize) ----
@@ -238,7 +318,11 @@ namespace TensorSharp.Models.QwenImage
         {
             if (_disposed) return;
             _disposed = true;
-            foreach (var p in _allocs) Marshal.FreeHGlobal(p);
+            foreach (var p in _allocs)
+            {
+                GgmlBasicOps.InvalidateHostBuffer(p);
+                Marshal.FreeHGlobal(p);
+            }
             _allocs.Clear();
             _weights = null;
         }

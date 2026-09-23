@@ -739,4 +739,47 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml/include"
     )
     target_link_libraries(GgmlOpsWanDitResidentCacheTest PRIVATE GgmlOps)
+
+    # Backend choice is immutable in the DLL. Generate a CPU explicit-attention
+    # oracle in a separate process, then compare the full CUDA forward against it.
+    add_executable(GgmlOpsQwenImage21Test tests/qwen_image21_test.cpp)
+    target_include_directories(GgmlOpsQwenImage21Test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(GgmlOpsQwenImage21Test PRIVATE GgmlOps)
+    set(TSG_QWEN21_REFERENCE "${CMAKE_BINARY_DIR}/artifacts/qwen-image21-cpu-reference.bin")
+    add_test(NAME qwen-image21-whole-graph-cpu
+        COMMAND GgmlOpsQwenImage21Test cpu --write-reference "${TSG_QWEN21_REFERENCE}")
+    set_tests_properties(qwen-image21-whole-graph-cpu PROPERTIES
+        FIXTURES_SETUP qwen_image21_cpu_reference SKIP_RETURN_CODE 77 TIMEOUT 300)
+    add_executable(GgmlOpsQwenImage21VaeShortcutTest tests/qwen_image21_vae_shortcut_test.cpp)
+    target_link_libraries(GgmlOpsQwenImage21VaeShortcutTest PRIVATE GgmlOps)
+    add_test(NAME qwen-image21-vae-shortcuts-cpu COMMAND GgmlOpsQwenImage21VaeShortcutTest cpu)
+    set_tests_properties(qwen-image21-vae-shortcuts-cpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
+        add_test(NAME qwen-image21-whole-graph-cuda
+            COMMAND GgmlOpsQwenImage21Test cuda --reference "${TSG_QWEN21_REFERENCE}")
+        set_tests_properties(qwen-image21-whole-graph-cuda PROPERTIES
+            FIXTURES_REQUIRED qwen_image21_cpu_reference SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 300)
+        add_test(NAME qwen-image21-vae-shortcuts-cuda COMMAND GgmlOpsQwenImage21VaeShortcutTest cuda)
+        set_tests_properties(qwen-image21-vae-shortcuts-cuda PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+        if (WIN32 AND TSG_HAVE_CUDNN)
+            # Isolated optional-runtime failure fixture. Never replace any real
+            # cuDNN installation: the loader sees only these build artifacts.
+            add_library(GgmlOpsMissingCudnnFixture SHARED tests/cudnn_missing_symbols.cpp)
+            set_target_properties(GgmlOpsMissingCudnnFixture PROPERTIES
+                OUTPUT_NAME cudnn64_9
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/artifacts/qwen-image21-missing-cudnn")
+            foreach(sibling IN ITEMS cudnn_graph64_9 cudnn_ops64_9 cudnn_heuristic64_9 cudnn_engines_precompiled64_9)
+                add_custom_command(TARGET GgmlOpsMissingCudnnFixture POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "$<TARGET_FILE:GgmlOpsMissingCudnnFixture>"
+                        "$<TARGET_FILE_DIR:GgmlOpsMissingCudnnFixture>/${sibling}.dll")
+            endforeach()
+            add_dependencies(GgmlOpsQwenImage21VaeShortcutTest GgmlOpsMissingCudnnFixture)
+            add_test(NAME qwen-image21-vae-missing-cudnn-cuda
+                COMMAND GgmlOpsQwenImage21VaeShortcutTest cuda --missing-cudnn-runtime)
+            set_tests_properties(qwen-image21-vae-missing-cudnn-cuda PROPERTIES
+                ENVIRONMENT "TS_CUDNN_DIR=$<TARGET_FILE_DIR:GgmlOpsMissingCudnnFixture>;TS_VAE_CUDNN_CONV=1;TS_WAN_VAE_CUDNN_CONV=1"
+                SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 60)
+        endif()
+    endif()
 endif()

@@ -1223,6 +1223,17 @@ namespace TensorSharp.GGML
             Tensor[] ln1W, Tensor[] ln1B, Tensor[] qkvW, Tensor[] qkvB,
             Tensor[] outW, Tensor[] outB, Tensor[] ln2W, Tensor[] ln2B,
             Tensor[] upW, Tensor[] upB, Tensor[] downW, Tensor[] downB)
+            => Qwen35VisionEncoder(hidden, eps, attnScale, numPatches, numHeads, headDim, halfDim,
+                cosTable, sinTable, ln1W, ln1B, qkvW, qkvB, outW, outB,
+                ln2W, ln2B, upW, upB, downW, downB, geluErf: false);
+
+        public static unsafe bool Qwen35VisionEncoder(
+            Tensor hidden, float eps, float attnScale,
+            int numPatches, int numHeads, int headDim, int halfDim,
+            float[] cosTable, float[] sinTable,
+            Tensor[] ln1W, Tensor[] ln1B, Tensor[] qkvW, Tensor[] qkvB,
+            Tensor[] outW, Tensor[] outB, Tensor[] ln2W, Tensor[] ln2B,
+            Tensor[] upW, Tensor[] upB, Tensor[] downW, Tensor[] downB, bool geluErf)
         {
             if (!HasNativeBufferStorage(hidden))
                 return false;
@@ -1271,7 +1282,7 @@ namespace TensorSharp.GGML
                     qkvNe0, qkvNe1, qkvBytes, qkvBDim,
                     outNe0, outNe1, outBytes, outBDim,
                     upNe0, upNe1, upBytes, upBDim,
-                    downNe0, downNe1, downBytes, downBDim);
+                    downNe0, downNe1, downBytes, downBDim, geluErf);
             }
         }
 
@@ -2198,9 +2209,12 @@ namespace TensorSharp.GGML
 
         /// <summary>Single 2D convolution on the active GGML device (ggml_conv_2d). Used to move the
         /// Qwen-Image VAE conv stack off the CPU. Layouts match VaeReferenceMath (no transposes).</summary>
-        public static bool TryConv2d(in Conv2dArgs args)
+        public static bool TryConv2d(in Conv2dArgs args) => TryConv2d(in args, false);
+
+        /// <summary>Uses F32 im2col when fullPrecision is requested, preserving large finite activations.</summary>
+        public static bool TryConv2d(in Conv2dArgs args, bool fullPrecision)
         {
-            return GgmlNative.TryConv2d(in args);
+            return GgmlNative.TryConv2d(in args, fullPrecision);
         }
 
         /// <summary>Whole conditioning-encoder transformer trunk (Qwen2.5-VL LLM or vision
@@ -4459,6 +4473,9 @@ namespace TensorSharp.GGML
 
         [RegisterOpStorageType("GELU", typeof(GgmlStorage))]
         public static Tensor GELU(Tensor result, Tensor src) => ExecuteUnary(result, src, GgmlUnaryOp.GELU, "GELU");
+
+        /// <summary>GELU with erf, as trained by Qwen3-VL's vision tower.</summary>
+        public static Tensor GELUErf(Tensor result, Tensor src) => ExecuteUnary(result, src, GgmlUnaryOp.GELUErf, "GELU(erf)");
 
         [RegisterOpStorageType("SiLUMul", typeof(GgmlStorage))]
         public static Tensor SiLUMul(Tensor result, Tensor gate, Tensor up) => ExecuteFusedActMul(result, gate, up, GgmlFusedActMulOp.SiLUMul, "SiLUMul");

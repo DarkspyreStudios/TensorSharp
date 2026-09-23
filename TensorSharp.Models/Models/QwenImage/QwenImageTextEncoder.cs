@@ -41,6 +41,8 @@ namespace TensorSharp.Models.QwenImage
         private readonly int _numHeads, _numKVHeads, _headDim, _numLayers;
         private readonly float _ropeBase, _eps;
         private readonly bool _qwenImage21;
+        private static readonly string TraceDirectory = Environment.GetEnvironmentVariable("TS_QWEN_TE_TRACE_DIR");
+        private static readonly int TraceLayer = int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_TE_TRACE_LAYER"), out int layer) ? layer : 0;
         internal IAllocator ConditionerAllocator => _allocator;
 
         public int HiddenSize => Config.HiddenSize;
@@ -91,6 +93,7 @@ namespace TensorSharp.Models.QwenImage
         /// </summary>
         public unsafe float[] EncodeHidden(int[] tokens, ImageCond[] imgs)
         {
+            if (!string.IsNullOrEmpty(TraceDirectory)) System.IO.Directory.CreateDirectory(TraceDirectory);
             int seq = tokens.Length;
             if (imgs != null && imgs.Length == 0) imgs = null;
             _mropePos = BuildPositions(tokens.Length, imgs);
@@ -116,18 +119,22 @@ namespace TensorSharp.Models.QwenImage
             for (int layer = 0; layer < _numLayers; layer++)
             {
                 string p = $"blk.{layer}";
+                TraceTensor(layer, "input", hidden);
                 using (Tensor normed = RMSNormOp(hidden, $"{p}.attn_norm.weight"))
-                using (Tensor attnOut = Attention(normed, p, seq))
+                using (Tensor attnOut = Attention(normed, p, seq, layer))
                 {
+                    TraceTensor(layer, "attn_out", attnOut);
                     Tensor res = Ops.Add(hidden, hidden, attnOut);
                     if (!ReferenceEquals(res, hidden)) { hidden.Dispose(); hidden = res; }
                 }
+                TraceTensor(layer, "attn_residual", hidden);
                 using (Tensor normed2 = RMSNormOp(hidden, $"{p}.ffn_norm.weight"))
-                using (Tensor ffnOut = SwiGluFfn(normed2, p))
+                using (Tensor ffnOut = SwiGluFfn(normed2, p, layer))
                 {
                     Tensor res = Ops.Add(hidden, hidden, ffnOut);
                     if (!ReferenceEquals(res, hidden)) { hidden.Dispose(); hidden = res; }
                 }
+                TraceTensor(layer, "output", hidden);
                 if (_qwenImage21 && imgs != null)
                 {
                     float* hp = GetFloatPtr(hidden);
@@ -182,22 +189,26 @@ namespace TensorSharp.Models.QwenImage
             return pos;
         }
 
-        private Tensor Attention(Tensor input, string prefix, int seq)
+        private Tensor Attention(Tensor input, string prefix, int seq, int layer)
         {
+            TraceTensor(layer, "norm1", input);
             int qDim = _numHeads * _headDim, kvDim = _numKVHeads * _headDim;
             float scale = 1.0f / MathF.Sqrt(_headDim);
 
             Tensor q = LinearWithBias(input, $"{prefix}.attn_q.weight", $"{prefix}.attn_q.bias");
             Tensor k = LinearWithBias(input, $"{prefix}.attn_k.weight", $"{prefix}.attn_k.bias");
             Tensor v = LinearWithBias(input, $"{prefix}.attn_v.weight", $"{prefix}.attn_v.bias");
+            TraceTensor(layer, "q", q); TraceTensor(layer, "k", k); TraceTensor(layer, "v", v);
 
             if (_qwenImage21)
             {
                 NormalizeHeads(q, $"{prefix}.attn_q_norm.weight", _numHeads, seq);
                 NormalizeHeads(k, $"{prefix}.attn_k_norm.weight", _numKVHeads, seq);
             }
+            TraceTensor(layer, "qnorm", q); TraceTensor(layer, "knorm", k);
             ApplyMRoPE(q, _numHeads, seq);
             ApplyMRoPE(k, _numKVHeads, seq);
+            TraceTensor(layer, "qrope", q); TraceTensor(layer, "krope", k);
 
             Tensor qHeads = ReshapeToHeads(q, _numHeads, seq, _headDim); q.Dispose();
             Tensor kHeads = ReshapeToHeads(k, _numKVHeads, seq, _headDim); k.Dispose();
@@ -210,6 +221,7 @@ namespace TensorSharp.Models.QwenImage
             using Tensor kT = kExp.Transpose(1, 2);
             var scores = new Tensor(_allocator, DType.Float32, _numHeads, seq, seq);
             Ops.AddmmBatch(scores, 0, scores, scale, qHeads, kT);
+            TraceTensor(layer, "scores", scores);
             qHeads.Dispose();
 
             if (IsGgmlBackend)
@@ -223,6 +235,7 @@ namespace TensorSharp.Models.QwenImage
                 Ops.AddCausalMask(scores, seq, 0, float.NegativeInfinity);
                 Ops.Softmax(scores, scores);
             }
+            TraceTensor(layer, "probs", scores);
 
             var attnOut = new Tensor(_allocator, DType.Float32, _numHeads, seq, _headDim);
             Ops.AddmmBatch(attnOut, 0, attnOut, 1.0f, scores, vExp);
@@ -230,17 +243,23 @@ namespace TensorSharp.Models.QwenImage
 
             using Tensor flat = ReshapeFromHeads(attnOut, _numHeads, seq, _headDim);
             attnOut.Dispose();
+            TraceTensor(layer, "merged", flat);
             return LinearForward(flat, $"{prefix}.attn_output.weight");
         }
 
-        private Tensor SwiGluFfn(Tensor input, string prefix)
+        private Tensor SwiGluFfn(Tensor input, string prefix, int layer)
         {
+            TraceTensor(layer, "norm2", input);
             Tensor gate = LinearForward(input, $"{prefix}.ffn_gate.weight");
+            TraceTensor(layer, "gate", gate);
             using (Tensor up = LinearForward(input, $"{prefix}.ffn_up.weight"))
             {
+                TraceTensor(layer, "up", up);
                 SiluMulInPlace(gate, up);
             }
+            TraceTensor(layer, "activated", gate);
             Tensor down = LinearForward(gate, $"{prefix}.ffn_down.weight");
+            TraceTensor(layer, "down", down);
             gate.Dispose();
             return down;
         }
@@ -335,6 +354,17 @@ namespace TensorSharp.Models.QwenImage
             fixed (float* d = dst)
                 Buffer.MemoryCopy(p, d, count * sizeof(float), count * sizeof(float));
             return dst;
+        }
+
+        // Diagnostic-only snapshots. The native path writes matching planar
+        // layouts; retaining intermediate outputs there can inhibit fusion.
+        private void TraceTensor(int layer, string stage, Tensor tensor)
+        {
+            if (string.IsNullOrEmpty(TraceDirectory) || layer != TraceLayer) return;
+            float[] values = TensorToHostFloat(tensor, tensor.ElementCount());
+            byte[] bytes = new byte[values.Length * sizeof(float)];
+            Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+            System.IO.File.WriteAllBytes(System.IO.Path.Combine(TraceDirectory, $"unfused.L{layer:D2}.{stage}.f32"), bytes);
         }
 
         protected override float[] ForwardCore(int[] tokens) =>
