@@ -154,8 +154,16 @@ namespace TensorSharp.Server
         /// persistence. File-backed stores are used in place; other stores are projected
         /// to TensorSharp-owned temporary files for the lifetime of the loaded model.
         /// </summary>
-        public async Task LoadModelAsync(
+        public Task LoadModelAsync(
             PersistenceFileReference model,
+            PersistenceFileReference? mmProj,
+            string backendStr,
+            CancellationToken cancellationToken = default)
+            => LoadModelAsync(PersistenceFileSet.Single(model), mmProj, backendStr, cancellationToken);
+
+        /// <summary>Loads a complete persistence-backed GGUF set, retaining all shards until unload.</summary>
+        public async Task LoadModelAsync(
+            PersistenceFileSet model,
             PersistenceFileReference? mmProj,
             string backendStr,
             CancellationToken cancellationToken = default)
@@ -168,6 +176,8 @@ namespace TensorSharp.Server
             PersistenceFileLease? mmProjLease = null;
             try
             {
+                using (GgufFile validation = GgufFile.OpenProjected(modelLease))
+                    validation.ThrowIfTruncated();
                 if (mmProj != null)
                 {
                     mmProjLease = await PersistenceFileLease.AcquireAsync(
@@ -175,6 +185,7 @@ namespace TensorSharp.Server
                         cancellationToken).ConfigureAwait(false);
                 }
 
+                cancellationToken.ThrowIfCancellationRequested();
                 LoadModelPaths(modelLease.FilePath, mmProjLease?.FilePath, backendStr);
             }
             catch

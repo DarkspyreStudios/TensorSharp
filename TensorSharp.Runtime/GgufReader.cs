@@ -11,6 +11,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -108,13 +109,20 @@ namespace TensorSharp.Runtime
         public static async Task<GgufFile> OpenAsync(
             PersistenceFileReference source,
             CancellationToken cancellationToken = default)
+            => await OpenAsync(PersistenceFileSet.Single(source), cancellationToken).ConfigureAwait(false);
+
+        /// <summary>Opens the complete named shard set from persistence. No unlisted siblings are read.</summary>
+        public static async Task<GgufFile> OpenAsync(
+            PersistenceFileSet source,
+            CancellationToken cancellationToken = default)
         {
             PersistenceFileLease lease = await PersistenceFileLease.AcquireAsync(
                 source,
                 cancellationToken).ConfigureAwait(false);
             try
             {
-                return new GgufFile(lease.FilePath, isShard: false, lease);
+                cancellationToken.ThrowIfCancellationRequested();
+                return new GgufFile(lease.FilePath, isShard: false, lease, lease.FilePaths);
             }
             catch
             {
@@ -138,7 +146,10 @@ namespace TensorSharp.Runtime
         public static GgufFile OpenWithoutSiblingShards(string path) =>
             new GgufFile(path, isShard: true, persistenceLease: null);
 
-        private GgufFile(string path, bool isShard, PersistenceFileLease? persistenceLease)
+        internal static GgufFile OpenProjected(PersistenceFileLease lease) =>
+            new GgufFile(lease.FilePath, isShard: false, persistenceLease: null, lease.FilePaths);
+
+        private GgufFile(string path, bool isShard, PersistenceFileLease? persistenceLease, IReadOnlyList<string>? permittedPaths = null)
         {
             _path = path;
             _persistenceLease = persistenceLease;
@@ -147,7 +158,7 @@ namespace TensorSharp.Runtime
             {
                 Parse();
                 if (!isShard)
-                    OpenSiblingShards();
+                    OpenSiblingShards(permittedPaths);
             }
             catch
             {
@@ -189,9 +200,11 @@ namespace TensorSharp.Runtime
         /// constructor, which reads as an unsupported architecture rather than as an
         /// incomplete download.</para>
         /// </summary>
-        private void OpenSiblingShards()
+        private void OpenSiblingShards(IReadOnlyList<string>? permittedPaths)
         {
-            int splitCount = (int)GetUint32("split.count", 0);
+            int splitCount = checked((int)GetUint32("split.count", 1));
+            if (splitCount < 1 || splitCount > 99999 || (permittedPaths != null && permittedPaths.Count != splitCount))
+                throw new InvalidDataException("The supplied artifacts do not match the GGUF shard count.");
             if (splitCount <= 1)
                 return;
 
@@ -204,16 +217,22 @@ namespace TensorSharp.Runtime
                 name, @"^(?<prefix>.*)-(?<no>\d{5})-of-(?<count>\d{5})\.gguf$",
                 System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (!m.Success)
-                return;
+                throw new InvalidDataException("A split GGUF must retain its numbered shard filename.");
 
             string prefix = m.Groups["prefix"].Value;
             int selfNo = int.Parse(m.Groups["no"].Value);
+            if (int.Parse(m.Groups["count"].Value) != splitCount || selfNo < 1 || selfNo > splitCount
+                || GetUint32("split.no", (uint)(selfNo - 1)) != selfNo - 1)
+                throw new InvalidDataException("GGUF shard numbering does not match its metadata.");
 
             for (int i = 1; i <= splitCount; i++)
             {
                 if (i == selfNo)
                     continue;
                 string shardPath = Path.Combine(dir, $"{prefix}-{i:D5}-of-{splitCount:D5}.gguf");
+                if (permittedPaths != null && !permittedPaths.Any(path => string.Equals(Path.GetFullPath(path), shardPath,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
+                    throw new InvalidDataException("A required GGUF sibling is not in the supplied persistence set.");
                 if (!File.Exists(shardPath))
                     throw new FileNotFoundException(
                         $"{_path} is shard {selfNo} of {splitCount}, but {Path.GetFileName(shardPath)} is missing. " +
@@ -221,9 +240,12 @@ namespace TensorSharp.Runtime
 
                 var shard = new GgufFile(shardPath, isShard: true, persistenceLease: null);
                 _shards.Add(shard);
+                if (shard.GetUint32("split.count", 1) != splitCount || shard.GetUint32("split.no", (uint)(i - 1)) != i - 1)
+                    throw new InvalidDataException("GGUF sibling shard metadata is inconsistent.");
                 foreach (var kv in shard.Tensors)
                 {
-                    Tensors[kv.Key] = kv.Value;
+                    if (!Tensors.TryAdd(kv.Key, kv.Value))
+                        throw new InvalidDataException("GGUF shards contain duplicate tensor names.");
                     _tensorOwner[kv.Key] = shard;
                 }
             }
@@ -912,77 +934,77 @@ namespace TensorSharp.Runtime
             switch (elemType)
             {
                 case GgufValueType.Uint32:
-                {
-                    var arr = new uint[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadUInt32();
-                    return arr;
-                }
+                    {
+                        var arr = new uint[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadUInt32();
+                        return arr;
+                    }
                 case GgufValueType.Int32:
-                {
-                    var arr = new int[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadInt32();
-                    return arr;
-                }
+                    {
+                        var arr = new int[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadInt32();
+                        return arr;
+                    }
                 case GgufValueType.Float32:
-                {
-                    var arr = new float[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadSingle();
-                    return arr;
-                }
+                    {
+                        var arr = new float[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadSingle();
+                        return arr;
+                    }
                 case GgufValueType.String:
-                {
-                    var arr = new string[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = ReadString(reader);
-                    return arr;
-                }
+                    {
+                        var arr = new string[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = ReadString(reader);
+                        return arr;
+                    }
                 case GgufValueType.Uint8:
-                {
-                    var arr = new byte[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadByte();
-                    return arr;
-                }
+                    {
+                        var arr = new byte[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadByte();
+                        return arr;
+                    }
                 case GgufValueType.Int8:
-                {
-                    var arr = new sbyte[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadSByte();
-                    return arr;
-                }
+                    {
+                        var arr = new sbyte[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadSByte();
+                        return arr;
+                    }
                 case GgufValueType.Uint16:
-                {
-                    var arr = new ushort[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadUInt16();
-                    return arr;
-                }
+                    {
+                        var arr = new ushort[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadUInt16();
+                        return arr;
+                    }
                 case GgufValueType.Int16:
-                {
-                    var arr = new short[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadInt16();
-                    return arr;
-                }
+                    {
+                        var arr = new short[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadInt16();
+                        return arr;
+                    }
                 case GgufValueType.Uint64:
-                {
-                    var arr = new ulong[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadUInt64();
-                    return arr;
-                }
+                    {
+                        var arr = new ulong[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadUInt64();
+                        return arr;
+                    }
                 case GgufValueType.Int64:
-                {
-                    var arr = new long[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadInt64();
-                    return arr;
-                }
+                    {
+                        var arr = new long[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadInt64();
+                        return arr;
+                    }
                 case GgufValueType.Float64:
-                {
-                    var arr = new double[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadDouble();
-                    return arr;
-                }
+                    {
+                        var arr = new double[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadDouble();
+                        return arr;
+                    }
                 case GgufValueType.Bool:
-                {
-                    var arr = new bool[count];
-                    for (ulong i = 0; i < count; i++) arr[i] = reader.ReadByte() != 0;
-                    return arr;
-                }
+                    {
+                        var arr = new bool[count];
+                        for (ulong i = 0; i < count; i++) arr[i] = reader.ReadByte() != 0;
+                        return arr;
+                    }
                 default:
                     throw new NotSupportedException($"Unknown array element type: {elemType}");
             }

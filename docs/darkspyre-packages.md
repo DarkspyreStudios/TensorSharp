@@ -28,3 +28,29 @@ Other packable projects follow the same `Darkspyre.` plus project-name rule.
 Packages are published to the private Darkspyre GitHub Packages feed. The
 `darkspyre` branch is the long-lived integration branch; upstream synchronization
 is performed onto that branch while preserving the focused fork commits.
+
+## Unreleased: complete persistence-backed GGUF sets
+
+`PersistenceFileSet` names the primary artifact and an immutable map of portable relative paths
+to `PersistenceFileReference` objects. Pass the entire set to `GgufFile.OpenAsync` or
+`ModelService.LoadModelAsync` for split GGUF models. The single-reference overload remains for
+single-file artifacts; persistence loading never discovers unlisted files beside a supplied path.
+The raw-path GGUF API still supports its existing sibling discovery.
+
+The one persistence lease implementation retains all source handles when file-backed artifacts
+already have the declared layout. Otherwise it copies the complete set into a private temporary
+directory, retaining names/subdirectories and removing the projection on reader disposal/model
+unload. Mixed stores and opaque asset keys are supported. Failure or cancellation closes opened
+streams and removes partial projections. The reader rejects missing/misnamed shards, inconsistent
+numbering/counts and duplicate tensors before native model allocation.
+
+Verification uses synthetic split GGUFs, including actual tensor reads from each shard, in-place
+files, memory/mixed stores, malformed sets, cancellation, service lifetime and replacement rollback.
+This is managed persistence work; no upstream ggml or native kernels change and no full-weight or
+GPU inference parity is claimed. Local-only dependency packages may be built with a unique
+`2.8.6.4-local.gguf.<commit>` version override for Inference integration. This does not publish a
+release or change the repository's published package baseline.
+
+Focused verification: 22 persistence tests pass in Debug and Release; both builds report zero
+warnings. Changed-file formatting verification and the Chat transitive dependency vulnerability
+audit pass. The existing single-file safetensors and replacement-rollback tests remain included.
