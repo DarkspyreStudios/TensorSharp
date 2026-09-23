@@ -5,12 +5,36 @@ Configure with `TENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON`, build
 `GgmlOpsQwenImage21Test` and `GgmlOpsQwenImage21VaeShortcutTest`, then run
 `ctest --test-dir <build-directory> -R qwen-image21 --output-on-failure`.
 
-The CPU whole-graph test writes a synthetic reference fixture under the build
-directory. The CUDA test compares 171 forwards with that reference, including
-changed inputs and shapes, graph reuse, weight invalidation, and forced
-graph-owned weights. VAE tests check independent shortcut/convolution oracles
+The CPU whole-graph test writes a synthetic explicit-attention reference fixture
+under the build directory. The CUDA test compares 171 forwards with that reference,
+including changed inputs and shapes, graph reuse, weight invalidation, and forced
+graph-owned weights. The Metal test compares 159 forwards with the same fixture;
+it excludes the device-copy-budget scenario because Metal maps host weights
+directly, so a device-copy cap cannot force graph-owned constants there.
+`TS_QWEN21_GRAPH_REUSE=0` disables graph reuse on CUDA and Metal for comparisons.
+The independent NumPy operator oracle is `eng/tests/qwen-image21-dit.py` and accepts
+`--backend cpu`, `--backend metal`, or `--backend cuda`.
+VAE tests check independent shortcut/convolution oracles
 and finite activations above the FP16 range. These are numerical regressions;
 they do not establish real-model image quality or performance parity.
+
+Metal F32 convolution tests run in separate processes with MPS enabled and with
+`TS_VAE_MPS_CONV=0`. Full-precision convolutions use MPS F32 when its shape is
+supported and ggml's direct F32 convolution otherwise. F32 im2col plus F32
+accumulation is insufficient on Metal because its matrix-matrix kernel stages
+F32 operands in F16. The scalar oracle includes 32-output-channel projections
+that exercise that matrix path, values above 65504 in both signs, changed inputs,
+right/bottom asymmetric padding with stride two, and unequal X/Y stride or
+padding that require the direct fallback. Both standalone and fused VAE calls
+are checked. `TS_GGML_NODE_PROFILE=1` reports vendor calls and direct fallbacks;
+unavailable vendor offload must not be counted as MPS coverage.
+The wide-range cases run again after explicit scratch release and after backend
+shutdown/recreation. Those operations retire the MPS graph/staging cache; the
+TensorSharp MPS bridge uses ARC so replacing buffers or clearing cache entries
+releases their Objective-C ownership.
+The Metal tests do not run the temporal shortcut fixtures, whose graph contains
+operations unsupported by unchanged upstream Metal. CPU/CUDA keep those tests;
+the default managed Metal VAE does not use the fused temporal shortcut graph.
 
 On a cuDNN-enabled Windows build, `qwen-image21-vae-missing-cudnn-cuda` runs in a
 fresh process with an isolated stub `cudnn64_9.dll` that exports no cuDNN

@@ -316,6 +316,10 @@ if (APPLE AND TENSORSHARP_GGML_NATIVE_ENABLE_METAL)
     list(APPEND TSG_GGMLOPS_SOURCES tsg_metal_msl_default.m)
     # Wan VAE convolutions on MPSGraph (see tsg_metal_mps_conv.mm).
     list(APPEND TSG_GGMLOPS_SOURCES tsg_metal_mps_conv.mm)
+    # This bridge stores Objective-C objects in C++ cache entries and releases
+    # them by clearing entries/assigning nil. ARC is required for those ownership
+    # operations, including temporary MPSGraphTensorData and grown staging buffers.
+    set_source_files_properties(tsg_metal_mps_conv.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 endif()
 if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
     list(APPEND TSG_GGMLOPS_SOURCES ggml_ops_diffusion_sample.cu)
@@ -741,7 +745,7 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     target_link_libraries(GgmlOpsWanDitResidentCacheTest PRIVATE GgmlOps)
 
     # Backend choice is immutable in the DLL. Generate a CPU explicit-attention
-    # oracle in a separate process, then compare the full CUDA forward against it.
+    # reference in a separate process, then compare GPU forwards against it.
     add_executable(GgmlOpsQwenImage21Test tests/qwen_image21_test.cpp)
     target_include_directories(GgmlOpsQwenImage21Test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(GgmlOpsQwenImage21Test PRIVATE GgmlOps)
@@ -754,6 +758,20 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
     target_link_libraries(GgmlOpsQwenImage21VaeShortcutTest PRIVATE GgmlOps)
     add_test(NAME qwen-image21-vae-shortcuts-cpu COMMAND GgmlOpsQwenImage21VaeShortcutTest cpu)
     set_tests_properties(qwen-image21-vae-shortcuts-cpu PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+    if (APPLE AND TENSORSHARP_GGML_NATIVE_ENABLE_METAL)
+        add_test(NAME qwen-image21-whole-graph-metal
+            COMMAND GgmlOpsQwenImage21Test metal --reference "${TSG_QWEN21_REFERENCE}")
+        set_tests_properties(qwen-image21-whole-graph-metal PROPERTIES
+            FIXTURES_REQUIRED qwen_image21_cpu_reference SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 300)
+        add_test(NAME qwen-image21-vae-f32-convolution-metal COMMAND GgmlOpsQwenImage21VaeShortcutTest metal)
+        set_tests_properties(qwen-image21-vae-f32-convolution-metal PROPERTIES
+            ENVIRONMENT "TS_VAE_MPS_CONV=1;TS_WAN_VAE_MPS_CONV=1"
+            SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+        add_test(NAME qwen-image21-vae-f32-convolution-metal-no-mps COMMAND GgmlOpsQwenImage21VaeShortcutTest metal)
+        set_tests_properties(qwen-image21-vae-f32-convolution-metal-no-mps PROPERTIES
+            ENVIRONMENT "TS_VAE_MPS_CONV=0"
+            SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
+    endif()
     if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
         add_test(NAME qwen-image21-whole-graph-cuda
             COMMAND GgmlOpsQwenImage21Test cuda --reference "${TSG_QWEN21_REFERENCE}")

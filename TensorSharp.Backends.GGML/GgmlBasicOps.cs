@@ -2211,7 +2211,8 @@ namespace TensorSharp.GGML
         /// Qwen-Image VAE conv stack off the CPU. Layouts match VaeReferenceMath (no transposes).</summary>
         public static bool TryConv2d(in Conv2dArgs args) => TryConv2d(in args, false);
 
-        /// <summary>Uses F32 im2col when fullPrecision is requested, preserving large finite activations.</summary>
+        /// <summary>Preserves large finite activations with F32 convolution: direct/MPS on Metal,
+        /// F32 im2col on other backends.</summary>
         public static bool TryConv2d(in Conv2dArgs args, bool fullPrecision)
         {
             return GgmlNative.TryConv2d(in args, fullPrecision);

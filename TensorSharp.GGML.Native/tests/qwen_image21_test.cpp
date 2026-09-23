@@ -2,7 +2,7 @@
 // Licensed under the BSD-3-Clause license in the repository root.
 // Whole-graph Qwen-Image-2.1 regression and explicitly synthetic timing probe.
 // Backend selection is process-wide: --write-reference on CPU produces the
-// independent explicit-attention reference consumed by CUDA --reference.
+// explicit-attention reference consumed by CUDA or Metal --reference.
 // These small synthetic weights test numerical/lifetime behavior, not image
 // quality or the throughput of a downloaded, quantized full model.
 #include "ggml_ops_qwen_image21.h"
@@ -245,7 +245,8 @@ Reference read_reference(const std::string& path) {
 }
 
 struct Options {
-    bool cuda = false, benchmark = false;
+    int backend = 2;
+    bool benchmark = false;
     int dim = 256, ff = 512, layers = 2, image_seq = 80, text_seq = 17, iterations = 10;
     std::string reference, write_reference;
 };
@@ -253,8 +254,9 @@ Options parse(int argc, char** argv) {
     Options options;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "cpu") options.cuda = false;
-        else if (arg == "cuda") options.cuda = true;
+        if (arg == "cpu") options.backend = 2;
+        else if (arg == "cuda") options.backend = 3;
+        else if (arg == "metal") options.backend = 1;
         else if (arg == "--benchmark") options.benchmark = true;
         else {
             require(i + 1 < argc, "missing value for " + arg);
@@ -274,7 +276,7 @@ Options parse(int argc, char** argv) {
         options.ff > 0 && options.ff <= 32768 && options.layers > 0 && options.layers <= 64 &&
         options.image_seq > 0 && options.image_seq <= 16384 && options.text_seq > 0 &&
         options.text_seq <= 4096 && options.iterations > 0 && options.iterations <= 1000, "invalid dimensions/counts");
-    require(!options.cuda || options.write_reference.empty(), "CPU must produce the independent reference");
+    require(options.backend == 2 || options.write_reference.empty(), "CPU must produce the explicit-attention reference");
     require(options.benchmark || (options.dim == 256 && options.ff == 512 && options.layers == 2),
         "custom model dimensions require --benchmark");
     return options;
@@ -387,9 +389,11 @@ void regression(const Options& options) {
         std::printf("PASS %-25s total=%d prefix=%d\n", shape.name,
             shape.segments.back().end, shape.segments.back().start);
     }
-    {
+    if (options.backend != 1) {
         // Force the graph-owned constant path. A zero budget disables the cap;
         // one byte positively refuses every model weight in the device cache.
+        // Metal maps host weights directly, so a device-copy cap cannot force
+        // this path there; do not report that scenario as Metal coverage.
         // INPUT alone is insufficient: gallocr can reuse a constant's slot
         // after its last consumer and corrupt later executions of the graph.
         TSGgml_ClearHostBufferCache();
@@ -437,7 +441,7 @@ void regression(const Options& options) {
     }
     if (!options.write_reference.empty()) write_reference(options.write_reference, computed);
     std::printf("PASS %d whole-graph forwards; max normalized error %.6g, relative RMS %.6g; CPU reference=%s\n",
-        calls, worst_max, worst_relative, !options.cuda ? "generated" : reference.empty() ? "NOT SUPPLIED" : "verified");
+        calls, worst_max, worst_relative, options.backend == 2 ? "generated" : reference.empty() ? "NOT SUPPLIED" : "verified");
     TSGgml_QwenImage21ResetForwardCache();
     TSGgml_ClearHostBufferCache();
 }
@@ -488,12 +492,13 @@ int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     try {
         const Options options = parse(argc, argv);
-        if (!TSGgml_IsBackendAvailable(options.cuda ? 3 : 2)) {
-            std::printf("SKIP: %s backend unavailable: %s\n", options.cuda ? "cuda" : "cpu", TSGgml_GetLastError());
+        const char* backend_name = options.backend == 1 ? "metal" : options.backend == 3 ? "cuda" : "cpu";
+        if (!TSGgml_IsBackendAvailable(options.backend)) {
+            std::printf("SKIP: %s backend unavailable: %s\n", backend_name, TSGgml_GetLastError());
             TSGgml_Shutdown();
             return 77;
         }
-        std::printf("backend=%s\n", options.cuda ? "cuda" : "cpu");
+        std::printf("backend=%s\n", backend_name);
         if (options.benchmark) benchmark(options);
         else regression(options);
         TSGgml_Shutdown();

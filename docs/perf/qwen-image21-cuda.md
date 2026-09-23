@@ -5,6 +5,10 @@ denoising steps. This removes repeated graph construction, allocation planning,
 weight binding, and mask generation, and supplies stable tensor and device
 addresses to unchanged upstream ggml's CUDA graph implementation.
 
+The same graph-lifetime optimization is enabled by default on Metal. Metal
+retains ggml metadata and scratch allocations; CUDA capture and executable
+replay discussed below are specific to CUDA.
+
 The implementation is in
 [`ggml_ops_qwen_image21.cpp`](../../TensorSharp.GGML.Native/ggml_ops_qwen_image21.cpp).
 It changes execution and storage, without skipping denoising steps, transformer
@@ -13,7 +17,7 @@ still require numerical and image validation.
 
 ## Graph and input lifetimes
 
-Each CUDA device has at most two retained graphs, allowing positive and negative
+Each CUDA or Metal device has at most two retained graphs, allowing positive and negative
 CFG layouts to coexist. Each graph owns its ggml context and a dedicated gallocr
 allocation. The key includes every weight pointer, type, shape and byte count;
 normalization epsilon; token and head dimensions; all segment boundaries and
@@ -69,7 +73,7 @@ array directly; editing still assembles reference and target tokens together.
 
 | Control | Default | Purpose |
 | --- | --- | --- |
-| `TS_QWEN21_GRAPH_REUSE` | `1` on CUDA | `0` rebuilds the native graph for each prediction. Other backends retain their existing transient execution. |
+| `TS_QWEN21_GRAPH_REUSE` | `1` on CUDA and Metal | `0` rebuilds the native graph for each prediction. CPU and Vulkan retain transient execution. |
 | `TS_QWEN21_PAD_MASK` | `0` | `1` restores the prior CUDA padded-mask/F32-KV preparation for attention comparisons. |
 | `TS_QWEN21_FLASH` | `1` | `0` uses explicit attention as a numerical reference. |
 | `TS_QWEN21_GRAPH_TRACE` | `0` | `1` logs graph builds, scratch size and execution counts; it is not CUDA capture instrumentation. |
@@ -188,11 +192,16 @@ ctest --test-dir $nativeBuild -C Release -R qwen-image21-vae-shortcuts --output-
 dotnet test InferenceWeb.Tests --filter QwenImage21
 ```
 
-The CTest fixture generates an explicit-attention CPU oracle in a separate
-process before checking CUDA. It exercises whole-graph dynamic inputs, changed
+The CTest fixture generates an explicit-attention CPU reference in a separate
+process before checking CUDA or Metal. On macOS, keep Metal enabled and configure
+`-DTENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON`; do not enable CUDA.
+The test exercises whole-graph dynamic inputs, changed
 shapes/segments/weight descriptors, fused and separate MLP layouts, zero-prefix
 input reachability, cache invalidation and recovery. These synthetic weights test
 execution correctness; they cannot establish full-model image quality.
+Metal runs 159 forwards and excludes the forced device-copy-budget scenario:
+its host weight mappings do not use that budget. The independent NumPy operator
+oracle is `python3 eng/tests/qwen-image21-dit.py --backend metal`.
 
 The end-to-end runner accepts exact model paths and writes generated evidence to
 ignored `docs/validation/` by default:

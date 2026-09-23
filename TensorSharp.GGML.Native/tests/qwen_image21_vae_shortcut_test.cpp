@@ -249,6 +249,79 @@ void high_range_convolution_cases() {
     }
     run(small,normalized,{first,second,norm},"internal large activation survives next convolution and normalization",weights);
 }
+
+void high_range_matrix_convolution_cases() {
+    // Two output channels select matrix-vector kernels and do not reproduce
+    // Metal's F16 staging inside its F32/F32 matrix-matrix kernel. These wider
+    // projections exercise that failure independently of accumulation precision.
+    Feature input(8,7,9);
+    constexpr int output_channels = 32;
+    std::vector<float> kernel(output_channels * input.c * 9, 0.f), bias(output_channels);
+    for (int oc = 0; oc < output_channels; ++oc) {
+        kernel[(oc * input.c + oc % input.c) * 9 + 4] = 1.5f;
+        kernel[(oc * input.c + (oc + 1) % input.c) * 9 + 5] = -0.25f;
+        kernel[(oc * input.c + (oc + 3) % input.c) * 9 + 1] = 0.125f;
+        bias[oc] = float(oc * 32);
+    }
+    const std::vector<TSGVaeWeightRef> weights{
+        {kernel.data(), static_cast<std::int64_t>(kernel.size() * sizeof(float))},
+        {bias.data(), static_cast<std::int64_t>(bias.size() * sizeof(float))},
+    };
+    struct Geometry { int sw, sh, pl, pr, pt, pb; const char* name; };
+    const Geometry geometries[] = {
+        {1,1,1,1,1,1,"wide symmetric high-range convolution"},
+        {2,2,0,1,0,1,"wide asymmetric end-padding high-range convolution"},
+        // Vendor dispatch accepts only equal X/Y stride and padding. These
+        // cases must retain F32 through its direct-Metal fallback as well.
+        {2,1,1,1,1,1,"wide unequal-stride high-range convolution"},
+        {1,1,1,1,0,0,"wide unequal-padding high-range convolution"},
+    };
+    for (const auto& g : geometries) {
+        Feature expected(output_channels, (input.h + g.pt + g.pb - 3) / g.sh + 1,
+            (input.w + g.pl + g.pr - 3) / g.sw + 1);
+        for (int variant = 0; variant < 2; ++variant) {
+            for (int ic = 0; ic < input.c; ++ic)
+                for (int y = 0; y < input.h; ++y) for (int x = 0; x < input.w; ++x) {
+                    const float value = 70000.f + ic * 8192.f + (y * input.w + x) * 1024.f + variant * 4096.f;
+                    input.at(ic,y,x) = ic % 2 ? -value : value;
+                }
+            // Scalar oracle: no im2col, backend kernels, or narrowed operands.
+            for (int oc = 0; oc < expected.c; ++oc)
+                for (int y = 0; y < expected.h; ++y) for (int x = 0; x < expected.w; ++x) {
+                    double sum = bias[oc];
+                    for (int ic = 0; ic < input.c; ++ic)
+                        for (int ky = 0; ky < 3; ++ky) for (int kx = 0; kx < 3; ++kx) {
+                            const int sy = y * g.sh + ky - g.pt, sx = x * g.sw + kx - g.pl;
+                            if (sy >= 0 && sy < input.h && sx >= 0 && sx < input.w)
+                                sum += double(input.at(ic,sy,sx)) * kernel[(oc * input.c + ic) * 9 + ky * 3 + kx];
+                        }
+                    expected.at(oc,y,x) = static_cast<float>(sum);
+                }
+            std::vector<float> output(expected.values.size(), std::numeric_limits<float>::quiet_NaN());
+            TSGgmlConv2dDesc desc{};
+            desc.input = input.values.data(); desc.W = input.w; desc.H = input.h; desc.C = input.c;
+            desc.weight = kernel.data(); desc.wtype = 0; desc.KW = desc.KH = 3;
+            desc.IC = input.c; desc.OC = output_channels; desc.weight_bytes = weights[0].bytes;
+            desc.bias = bias.data(); desc.output = output.data();
+            desc.strideW = g.sw; desc.strideH = g.sh;
+            desc.padL = g.pl; desc.padR = g.pr; desc.padT = g.pt; desc.padB = g.pb;
+            desc.struct_bytes = sizeof(desc);
+            if (!TSGgml_Conv2dF32(&desc))
+                throw std::runtime_error(std::string(g.name) + ": " + TSGgml_GetLastError());
+            check(output, expected.values, g.name);
+            require(*std::max_element(output.begin(),output.end()) > 65504.f &&
+                *std::min_element(output.begin(),output.end()) < -65504.f,
+                std::string(g.name) + ": convolution output was clipped to F16 range");
+
+            TSGVaeOp conv{};
+            conv.kind = 0; conv.w = 0; conv.b = 1; conv.ic = input.c; conv.oc = output_channels;
+            conv.kh = conv.kw = 3; conv.sh = g.sh; conv.sw = g.sw;
+            conv.pl = g.pl; conv.pr = g.pr; conv.pt = g.pt; conv.pb = g.pb;
+            conv.aux = 1;
+            run(input, expected, {conv}, std::string("fused ") + g.name, weights);
+        }
+    }
+}
 void invalid_cases() {
     Feature input(3,4,6);
     const std::vector<TSGVaeOp> invalid = {
@@ -275,14 +348,22 @@ void invalid_cases() {
 int main(int argc, char** argv) {
     try {
         const bool cuda = argc >= 2 && std::string(argv[1]) == "cuda";
+        const bool metal = argc >= 2 && std::string(argv[1]) == "metal";
         const bool missing_cudnn = argc == 3 && std::string(argv[2]) == "--missing-cudnn-runtime";
-        require(argc <= 3 && (argc == 1 || cuda || std::string(argv[1]) == "cpu") &&
-            (argc < 3 || (cuda && missing_cudnn)), "usage: test [cpu|cuda] [--missing-cudnn-runtime]");
-        if (!TSGgml_IsBackendAvailable(cuda ? 3 : 2)) {
-            std::printf("SKIP: %s backend unavailable: %s\n", cuda ? "cuda" : "cpu", TSGgml_GetLastError());
+        require(argc <= 3 && (argc == 1 || cuda || metal || std::string(argv[1]) == "cpu") &&
+            (argc < 3 || (cuda && missing_cudnn)), "usage: test [cpu|cuda|metal] [--missing-cudnn-runtime]");
+        const char* backend_name = cuda ? "cuda" : metal ? "metal" : "cpu";
+        if (!TSGgml_IsBackendAvailable(cuda ? 3 : metal ? 1 : 2)) {
+            std::printf("SKIP: %s backend unavailable: %s\n", backend_name, TSGgml_GetLastError());
             TSGgml_Shutdown(); return 77;
         }
-        literal_cases(); synthetic_cases(); invalid_cases(); high_range_convolution_cases();
+        // Metal's temporal shortcut graph is not supported by upstream ggml.
+        // Its dedicated CTests cover wide F32 convolutions only; do not report
+        // the CPU/CUDA shortcut or narrow-normalization fixtures as tested there.
+        if (!metal) {
+            literal_cases(); synthetic_cases(); invalid_cases(); high_range_convolution_cases();
+        }
+        high_range_matrix_convolution_cases();
         if (missing_cudnn) {
 #if defined(_WIN32)
             // Confirm this process actually probed our incomplete runtime.
@@ -297,14 +378,16 @@ int main(int argc, char** argv) {
 #endif
         }
         TSGgml_ReleaseReuseComputeBuffers();
-        literal_cases();
+        if (!metal) literal_cases();
+        high_range_matrix_convolution_cases(); // recreate vendor graphs/staging after scratch release
         TSGgml_Shutdown();
         TSGgml_Shutdown(); // teardown must also be safe with no cuDNN handle
         require(TSGgml_RecreateBackend() != 0, "backend recreation failed");
-        high_range_convolution_cases(); // recreate vendor handle after teardown
+        if (!metal) high_range_convolution_cases(); // recreate vendor handle after teardown
+        high_range_matrix_convolution_cases();
         TSGgml_Shutdown();
-        std::printf("PASS %s: VAE2.1 shortcuts, shape/reuse recovery and F32 convolution above the F16 range\n",
-            cuda ? "cuda" : "cpu");
+        std::printf("PASS %s: %sF32 convolution above the F16 range, scratch release and backend recreation\n",
+            backend_name, metal ? "" : "VAE2.1 shortcuts, shape/reuse recovery and ");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FAIL: %s\n", error.what());

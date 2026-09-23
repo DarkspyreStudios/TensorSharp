@@ -105,7 +105,11 @@ namespace TensorSharp.Models.QwenImage
                     int interval = p.PreviewCount > 0 ? Math.Max(1, (steps + p.PreviewCount) / (p.PreviewCount + 1)) : 0;
                     if (p.OnStep != null && interval > 0 && step + 1 < steps && (step + 1) % interval == 0)
                     {
-                        try { preview = DecodePreview(latents, h, w); }
+                        // The VAE expects a clean latent. Euler's current state
+                        // still contains noise at sigma_next; x0 = x_next -
+                        // sigma_next * velocity is the denoised flow estimate.
+                        // Keep the sampling state unchanged by the preview.
+                        try { preview = DecodePreview(QwenImage21Sampling.PreviewLatents(latents, velocity, sigmas[step + 1]), h, w); }
                         catch (Exception error) when (error is not OperationCanceledException)
                         {
                             Console.WriteLine($"  [qwen21] preview decode skipped: {error.Message}");
@@ -214,6 +218,18 @@ namespace TensorSharp.Models.QwenImage
 
     internal static class QwenImage21Sampling
     {
+        internal static float[] PreviewLatents(ReadOnlySpan<float> updatedLatents, ReadOnlySpan<float> velocity, float nextSigma)
+        {
+            if (updatedLatents.Length != velocity.Length)
+                throw new ArgumentException("Preview latent and velocity lengths must match.");
+            if (!float.IsFinite(nextSigma) || nextSigma < 0f || nextSigma > 1f)
+                throw new ArgumentOutOfRangeException(nameof(nextSigma));
+            var clean = new float[updatedLatents.Length];
+            for (int i = 0; i < clean.Length; i++)
+                clean[i] = updatedLatents[i] - nextSigma * velocity[i];
+            return clean;
+        }
+
         internal static float[] Sigmas(int steps, int imageTokens)
         {
             if (steps <= 0 || imageTokens <= 0) throw new ArgumentOutOfRangeException();

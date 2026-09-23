@@ -121,6 +121,22 @@ attach one or more images to edit. The page displays denoising progress and the
 output download link. Image operations are serialized because the diffusion
 pipeline shares mutable working state.
 
+Existing Unsloth downloads can be passed directly after rebuilding the host:
+
+```bash
+TensorSharp.Server.Host/bin/TensorSharp.Server.Host \
+  --model ~/work/models/qwen-image-2.1-unsloth/qwen-image-2.1-Q8_0.gguf \
+  --qwen-image-vae ~/work/models/qwen-image-2.1-unsloth/qwen_image_2.1_vae_bf16.safetensors \
+  --qwen-image-vl ~/work/models/qwen-image-2.1-unsloth/Qwen3-VL-8B-Instruct-Q4_K_M.gguf \
+  --qwen-image-mmproj ~/work/models/qwen-image-2.1-unsloth/mmproj-BF16.gguf \
+  --backend ggml_metal
+```
+
+The loader recognizes metadata-free diffusion GGUFs by their tensor layout,
+including the `model.diffusion_model.` prefix. The dedicated 2.1 VAE accepts
+both original Wan names and Diffusers names with spatial convolution kernels;
+the adapter preserves the stored weights. No model-file conversion is required.
+
 Text-to-image JSON API:
 
 ```bash
@@ -156,6 +172,7 @@ preview `image` data URL. The terminal frame contains `done: true` and the final
 `url`, dimensions and elapsed seconds, or `error`. Chat-completion routes do not
 run this diffusion model. Existing `/api/image-edit` requests still require
 at least one reference; generation has its own endpoint.
+Previews decode the estimated clean latent from the current flow prediction.
 
 The 2.1 diffusion transformer runs a complete GGML graph with resident quantized
 weights. The earlier image-edit `--offload-cpu` streaming path and Lightning LoRAs
@@ -163,7 +180,40 @@ do not apply to this implementation. Start with smaller dimensions if available
 memory is insufficient. CUDA and Vulkan are selectable GGML backends but have not
 been exercised on this local Apple Silicon validation machine.
 
-## Current full-model performance
+## Current Unsloth Q8_0 validation
+
+The metadata-free Unsloth Q8_0 diffusion model and the three companion files in
+the direct launch command above passed generation and editing on Apple M5 Pro,
+48 GiB unified memory, macOS 27.0. Both engines used Metal, Euler, CFG 1, seed 42,
+matching F32 sigma vectors and Philox noise, in serial fresh processes.
+
+| Workload | TensorSharp wall time | stable-diffusion.cpp wall time |
+|---|---:|---:|
+| 1024×1024 generation, 40 steps | 337.654 s | 383.080 s |
+| 512×512 color-change edit, 25 steps | 101.664 s | 114.186 s |
+
+TensorSharp used 11.9% and 11.0% less wall time respectively in these single-run
+comparisons. The generation images were visually close (48.38 dB RGB PSNR after
+white compositing); both editing outputs changed the teapot to blue. This does
+not establish broad quality or performance superiority. TensorSharp's 1K VAE
+decode remained slower (13.319 s versus 7.270 s), and peak process RSS was higher
+(16.50 GiB versus 13.29 GiB). File-cache and thermal state were uncontrolled.
+
+The exact files passed 17/17 real-server HTTP cases, including previews,
+multi-reference editing, cancellation and recovery. The managed suite passed
+265 tests with two explicit skips for other unavailable model fixtures; the
+native suite passed all five CTests, with zero skips. A 2048×2048 single-step
+execution check completed in 136.092 s with 34.83 GiB peak process RSS and
+48.45 GiB macOS peak memory footprint. It is not a full-quality 2K measurement.
+Neither memory metric is dedicated GPU allocation.
+
+Both benchmark builds used unchanged ggml
+`179b60f27b1019d42da01ac532cabdb8f73ba8b7`; stable-diffusion.cpp was
+`c92d73c408515c94beef32161bb5960764fde7a0`. Commands, model/binary hashes,
+images, numerical checks and limitations are recorded in ignored
+`docs/validation/qwen-image21-unsloth/REPORT.md`. CUDA and Vulkan were not tested.
+
+## Earlier Q4_K_M full-model performance
 
 On this Apple M5 Pro/48 GiB machine, the Q4_K_M model generated the same bookstore
 prompt at 1024×1024, 40 steps and seed 42 in **353.120 seconds** (353.734 seconds
@@ -180,7 +230,7 @@ caches; thermal state was uncontrolled. Visual inspection of the new PNG found
 correct “TENSORSHARP” lettering, detailed shelves, warm lighting and wet-pavement
 reflections. One image is not a general quality score.
 
-The current run's commands, model hashes, dependency revisions, phase timings,
+That run's commands, model hashes, dependency revisions, phase timings,
 memory measurement and RGBA PNG are in ignored
 `docs/validation/qwen-image-2.1/performance/quality-1024-40/`.
 
@@ -201,7 +251,7 @@ log and benchmark manifest are in
 The default 2K/40-step run, full-resolution editing, and CUDA/Vulkan generation
 were not run in this validation and are not counted as passing scenarios.
 
-The final Release build and focused suite passed **169 tests, zero skipped**,
+That earlier Release build and focused suite passed **169 tests, zero skipped**,
 including real companion-file metadata, automatic/explicit output geometry,
 reference geometry, official 1K/2K sigma golden vectors, CPU VAE primitives,
 RGBA handling, request parsing, Web UI service and upload-confinement regressions.
@@ -211,13 +261,36 @@ native operator coverage is detailed below.
 
 ## Native optimization validation
 
+CUDA and Metal retain up to two complete DiT graphs for the positive/negative
+CFG layouts. `TS_QWEN21_GRAPH_REUSE=1` is the default on both backends; `0`
+rebuilds the graph for each prediction. Reuse retains graph metadata and scratch
+allocations while refreshing all dynamic inputs. Weight invalidation, cache
+clearing and scratch release retire the graphs. `TS_QWEN21_GRAPH_TRACE=1` logs
+builds and replay counts. Scratch is released before final VAE decoding.
+
+The Metal VAE uses F32 MPS convolutions, with direct F32 ggml convolution for
+unsupported vendor shapes. This preserves activations above the FP16 range:
+upstream Metal matrix multiplication can narrow F32 operands internally even
+when accumulation is F32. `TS_VAE_MPS_CONV=0` selects the direct convolution
+baseline. TensorSharp releases its MPS graphs and staging buffers on explicit
+scratch release and backend shutdown. Upstream ggml sources remain unchanged.
+
+Metal reuse passed **159 native forwards** against the CPU explicit-attention
+reference and **16 independent NumPy cases / 80 forwards**, including multiple
+reference images and flash-attention tile boundaries. The maximum normalized
+native error was 0.00054533; the maximum NumPy absolute error was 0.00140832,
+within the existing 0.002 tile-boundary tolerance. These are synthetic numerical
+checks, not downloaded-model quality or performance measurements. The unchanged
+ggml revision for these checks was `179b60f27b1019d42da01ac532cabdb8f73ba8b7`;
+evidence is in ignored `docs/validation/qwen21-native-metal-report.md`.
+
 CPU and Metal image attention now uses each segment's exact key/value length
 without a dense padding mask. Causal text masks are retained. Metal casts the
 strided key/value tensors directly to F16, and supported backends use upstream
 fused SwiGLU to avoid intermediate feed-forward copies. These operations preserve
 the mathematical computation, with possible floating-point rounding differences;
 other backends retain the padded attention path pending device validation.
-Upstream ggml remains unchanged at
+The earlier attention optimization measurements below used unchanged ggml at
 `456172ec733a135778adcd32d00e576a58232e45`.
 
 The independent NumPy transformer oracle passed **16 cases on CPU and 16 on

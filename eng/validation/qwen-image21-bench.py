@@ -547,7 +547,9 @@ def main():
         "executables": {"cli": file_info(args.cli, not args.dry_run), "sd_cli": file_info(args.sd_cli, not args.dry_run)},
         "tensorsharp_implementation_binaries": {
             name: file_info(args.cli.parent/name, not args.dry_run)
-            for name in ("GgmlOps.dll", "TensorSharp.Models.dll")},
+            for name in (("GgmlOps.dll" if sys.platform == "win32" else
+                          "libGgmlOps.dylib" if sys.platform == "darwin" else "libGgmlOps.so"),
+                         "TensorSharp.Models.dll")},
         "environment": relevant_env,
         "extra_arguments": {"tensorsharp": args.ts_extra, "sd_cpp": args.sd_extra},
         "limitations": ["Fresh processes; OS file cache and GPU thermal state are not controlled.",
