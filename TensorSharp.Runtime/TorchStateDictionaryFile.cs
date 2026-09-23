@@ -58,7 +58,7 @@ namespace TensorSharp.Runtime
     /// </remarks>
     public sealed class TorchStateDictionaryFile : IFloatTensorStore, IDisposable
     {
-        private readonly FileStream _stream;
+        private readonly Stream _stream;
         private readonly ZipArchive _archive;
         private readonly Dictionary<string, ZipArchiveEntry> _storageEntries = new(StringComparer.Ordinal);
         private readonly Dictionary<string, TorchTensorInfo> _tensors = new(StringComparer.Ordinal);
@@ -96,6 +96,24 @@ namespace TensorSharp.Runtime
         }
 
         public string Path { get; }
+
+        private TorchStateDictionaryFile(MetadataReadStream stream)
+        {
+            Path = string.Empty;
+            _stream = stream;
+            _archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+            try { ParseArchive(); }
+            catch { _archive.Dispose(); throw; }
+        }
+
+        /// <summary>Inspects restricted ZIP/pickle metadata over a bounded seekable source. Storage entries are not read.
+        /// Leaves the caller's source open; no temporary file, tensor allocation or repository code execution occurs.</summary>
+        public static TorchStateDictionaryMetadata InspectMetadata(Stream source, int maximumBytes = 16 * 1024 * 1024)
+        {
+            using var bounded = new MetadataReadStream(source, maximumBytes);
+            using var file = new TorchStateDictionaryFile(bounded);
+            return new(file.IntegerMetadata, new System.Collections.ObjectModel.ReadOnlyDictionary<string, TorchTensorInfo>(file._tensors));
+        }
 
         public IReadOnlyDictionary<string, TorchTensorInfo> Tensors => _tensors;
 

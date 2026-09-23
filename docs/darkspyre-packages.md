@@ -54,3 +54,25 @@ release or change the repository's published package baseline.
 Focused verification: 22 persistence tests pass in Debug and Release; both builds report zero
 warnings. Changed-file formatting verification and the Chat transitive dependency vulnerability
 audit pass. The existing single-file safetensors and replacement-rollback tests remain included.
+
+## Unreleased: bounded metadata inspection
+
+`GgufFile.InspectMetadata`, `SafetensorsFile.InspectMetadata` and
+`TorchStateDictionaryFile.InspectMetadata` reuse the corresponding loading parsers over a caller-owned
+seekable stream. They return metadata only, never open sibling files, create filesystem projections,
+map weights or allocate native tensors. The stream reports the full artifact length, so a caller can
+serve bounded remote ranges without downloading the artifact. Inspection leaves the stream open and
+defaults to a 16 MiB total-read budget, including ZIP seeks. Restricted pickle interpretation retains
+the existing whitelist; no repository code is executed.
+
+GGUF strings/arrays/counts and safetensors header allocations are checked against remaining bytes
+before allocation. Duplicate tensor names, invalid GGUF rank/alignment, negative safetensors dimensions
+and overflowing safetensors shape sizes are rejected. Ordinary GGUF/safetensors file parsing uses
+the same bounded parser with a 64 MiB header budget. The API exposes metadata, not a remotely backed
+model instance. Model loading still uses the existing persistence/file APIs.
+
+Synthetic inspection tests prove header-only access and caller ownership, bounds before allocation,
+duplicate-name rejection, declared safetensors storage validation and shared pickle whitelist behavior.
+These tests and the persistence regressions require no weights, GPU or native backend changes.
+Focused verification passes 36 tests in Debug and Release with zero build warnings, including all
+22 persistence regressions, the existing synthetic safetensors reads and restricted Torch tests.

@@ -101,6 +101,19 @@ namespace TensorSharp.Runtime
 
         public GgufFile(string path) : this(path, isShard: false, persistenceLease: null) { }
 
+        private GgufFile() { _path = string.Empty; _stream = null!; }
+
+        /// <summary>Inspects one seekable artifact using the same header parser as Load, without reading tensor data.
+        /// The caller retains the stream; its Length must be the full artifact length. No sibling files are opened.</summary>
+        public static GgufMetadata InspectMetadata(Stream source, int maximumBytes = 16 * 1024 * 1024)
+        {
+            using var bounded = new MetadataReadStream(source, maximumBytes);
+            using var file = new GgufFile();
+            file.Parse(bounded);
+            return new(file.Version, new System.Collections.ObjectModel.ReadOnlyDictionary<string, object>(file.Metadata),
+                new System.Collections.ObjectModel.ReadOnlyDictionary<string, GgufTensorInfo>(file.Tensors), file.DataOffset, source.Length);
+        }
+
         /// <summary>
         /// Opens a GGUF artifact from an application persistence store. A file-backed
         /// store is memory-mapped in place; another store is projected to a temporary
@@ -156,7 +169,7 @@ namespace TensorSharp.Runtime
             _stream = File.OpenRead(path);
             try
             {
-                Parse();
+                using (var bounded = new MetadataReadStream(_stream, 64 * 1024 * 1024)) Parse(bounded);
                 if (!isShard)
                     OpenSiblingShards(permittedPaths);
             }
@@ -429,9 +442,9 @@ namespace TensorSharp.Runtime
         [LibraryImport("libc", EntryPoint = "munlock", SetLastError = true)]
         private static unsafe partial int munlock(void* addr, nuint len);
 
-        private void Parse()
+        private void Parse(Stream source)
         {
-            using var reader = new BinaryReader(_stream, Encoding.UTF8, leaveOpen: true);
+            using var reader = new BinaryReader(source, Encoding.UTF8, leaveOpen: true);
 
             uint magic = reader.ReadUInt32();
             if (magic != 0x46554747) // "GGUF" in little-endian
@@ -443,13 +456,15 @@ namespace TensorSharp.Runtime
 
             ulong tensorCount = reader.ReadUInt64();
             ulong kvCount = reader.ReadUInt64();
+            MetadataReadStream.RequireElements(reader, kvCount, 13);
+            MetadataReadStream.RequireElements(reader, tensorCount, 24);
 
             for (ulong i = 0; i < kvCount; i++)
             {
                 string key = ReadString(reader);
                 var valType = (GgufValueType)reader.ReadUInt32();
                 object value = ReadValue(reader, valType);
-                Metadata[key] = value;
+                if (!Metadata.TryAdd(key, value)) throw new InvalidDataException("Duplicate GGUF metadata key.");
             }
 
             for (ulong i = 0; i < tensorCount; i++)
@@ -457,18 +472,22 @@ namespace TensorSharp.Runtime
                 var info = new GgufTensorInfo();
                 info.Name = ReadString(reader);
                 uint dims = reader.ReadUInt32();
+                if (dims > 4) throw new InvalidDataException("GGUF tensor rank exceeds the supported maximum.");
+                MetadataReadStream.RequireElements(reader, dims, 8);
                 info.Shape = new ulong[dims];
                 for (uint d = 0; d < dims; d++)
                     info.Shape[d] = reader.ReadUInt64();
                 info.Type = (GgmlTensorType)reader.ReadUInt32();
                 info.Offset = reader.ReadUInt64();
-                Tensors[info.Name] = info;
+                if (!Tensors.TryAdd(info.Name, info)) throw new InvalidDataException("Duplicate GGUF tensor name.");
             }
 
-            long pos = _stream.Position;
+            long pos = source.Position;
             int alignment = 32;
             if (Metadata.TryGetValue("general.alignment", out var a))
                 alignment = Convert.ToInt32(a);
+            if (alignment <= 0 || alignment > 4096 || (alignment & (alignment - 1)) != 0)
+                throw new InvalidDataException("Invalid GGUF alignment.");
             _tableEnd = pos;
             DataOffset = pos + (alignment - pos % alignment) % alignment;
         }
@@ -893,6 +912,7 @@ namespace TensorSharp.Runtime
         private string ReadString(BinaryReader reader)
         {
             ulong len = reader.ReadUInt64();
+            MetadataReadStream.RequireElements(reader, len, 1);
             if (len > int.MaxValue)
                 throw new InvalidDataException($"GGUF string length {len} is out of range");
             int n = (int)len;
@@ -930,6 +950,15 @@ namespace TensorSharp.Runtime
         {
             var elemType = (GgufValueType)reader.ReadUInt32();
             ulong count = reader.ReadUInt64();
+            int minimumBytes = elemType switch
+            {
+                GgufValueType.Uint8 or GgufValueType.Int8 or GgufValueType.Bool => 1,
+                GgufValueType.Uint16 or GgufValueType.Int16 => 2,
+                GgufValueType.Uint32 or GgufValueType.Int32 or GgufValueType.Float32 => 4,
+                GgufValueType.Uint64 or GgufValueType.Int64 or GgufValueType.Float64 or GgufValueType.String => 8,
+                _ => throw new NotSupportedException("Unsupported GGUF metadata array type.")
+            };
+            MetadataReadStream.RequireElements(reader, count, minimumBytes);
 
             switch (elemType)
             {

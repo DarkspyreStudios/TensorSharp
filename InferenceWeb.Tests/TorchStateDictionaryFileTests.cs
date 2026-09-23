@@ -11,6 +11,36 @@ namespace InferenceWeb.Tests;
 public sealed class TorchStateDictionaryFileTests
 {
     [Fact]
+    public void InspectsRestrictedMetadataAndLeavesCallerStreamOpen()
+    {
+        string path = CreateCheckpoint();
+        try
+        {
+            using Stream source = File.OpenRead(path);
+            TorchStateDictionaryMetadata metadata = TorchStateDictionaryFile.InspectMetadata(source);
+            Assert.Equal(new long[] { 2, 2 }, metadata.Tensors["weight"].Shape);
+            Assert.Equal(TorchStorageDtype.BFloat16, metadata.Tensors["config.uncond_text"].Dtype);
+            Assert.Equal(2, metadata.IntegerValues["patch"]);
+            Assert.True(source.CanRead);
+            Assert.Throws<InvalidDataException>(() => TorchStateDictionaryFile.InspectMetadata(source, 16));
+            Assert.True(source.CanRead);
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public void InspectionUsesTheSamePickleWhitelistAsLoading()
+    {
+        string path = CreateCheckpoint("dangerous.module Callable");
+        try
+        {
+            using Stream source = File.OpenRead(path);
+            Assert.Throws<InvalidDataException>(() => TorchStateDictionaryFile.InspectMetadata(source));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public void ReadsWhitelistedDenseTensorsAndConfigMetadata()
     {
         string path = CreateCheckpoint();

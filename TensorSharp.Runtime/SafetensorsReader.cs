@@ -63,7 +63,7 @@ namespace TensorSharp.Runtime
             get
             {
                 long n = 1;
-                foreach (var d in Shape) n *= d;
+                foreach (var d in Shape) n = checked(n * d);
                 return n;
             }
         }
@@ -100,6 +100,19 @@ namespace TensorSharp.Runtime
             ParseHeader();
         }
 
+        private SafetensorsFile() { Path = string.Empty; }
+
+        /// <summary>Reads only the safetensors header, validating offsets against the seekable source's full length.
+        /// Leaves the source open and never maps or reads tensor data.</summary>
+        public static SafetensorsMetadata InspectMetadata(Stream source, int maximumBytes = 16 * 1024 * 1024)
+        {
+            using var bounded = new MetadataReadStream(source, maximumBytes);
+            using var file = new SafetensorsFile();
+            file.ParseHeader(bounded);
+            return new(new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(file.Metadata),
+                new System.Collections.ObjectModel.ReadOnlyDictionary<string, SafetensorTensorInfo>(file.Tensors), file.DataOffset, source.Length);
+        }
+
         private SafetensorsFile(string path, PersistenceFileLease persistenceLease)
         {
             Path = path;
@@ -133,13 +146,19 @@ namespace TensorSharp.Runtime
         private void ParseHeader()
         {
             using var fs = File.OpenRead(Path);
+            using var bounded = new MetadataReadStream(fs, 64 * 1024 * 1024);
+            ParseHeader(bounded);
+        }
+
+        private void ParseHeader(MetadataReadStream fs)
+        {
             // FileInfo.Length reports the link size for symlinks (common in model
             // caches); the opened stream's length is the real file's.
             _fileLength = fs.Length;
             Span<byte> lenBytes = stackalloc byte[8];
             fs.ReadExactly(lenBytes);
             ulong headerLen = BitConverter.ToUInt64(lenBytes);
-            if (headerLen == 0 || (long)headerLen > _fileLength - 8)
+            if (headerLen == 0 || headerLen > (ulong)Math.Max(0, Math.Min(fs.Remaining, _fileLength - 8)))
                 throw new InvalidDataException($"safetensors header length {headerLen} is out of range for '{Path}' ({_fileLength} bytes).");
 
             byte[] headerBytes = new byte[headerLen];
@@ -165,6 +184,8 @@ namespace TensorSharp.Runtime
                 var shape = new long[shapeEl.GetArrayLength()];
                 int si = 0;
                 foreach (var d in shapeEl.EnumerateArray()) shape[si++] = d.GetInt64();
+                foreach (long dimension in shape)
+                    if (dimension < 0) throw new InvalidDataException("Negative safetensors dimension.");
 
                 var off = el.GetProperty("data_offsets");
                 long begin = off[0].GetInt64();
@@ -173,10 +194,10 @@ namespace TensorSharp.Runtime
                     throw new InvalidDataException($"safetensors tensor '{prop.Name}' has data_offsets [{begin},{end}] outside the {dataBytes}-byte data section of '{Path}'.");
 
                 var info = new SafetensorTensorInfo { Name = prop.Name, Shape = shape, Dtype = dtype, Begin = begin, End = end };
-                long expected = info.NumElements * DtypeSize(dtype);
+                long expected = checked(info.NumElements * DtypeSize(dtype));
                 if (info.ByteCount != expected)
                     throw new InvalidDataException($"safetensors tensor '{prop.Name}' byte length {info.ByteCount} != {expected} expected for {dtype}{Stringify(shape)}.");
-                Tensors[prop.Name] = info;
+                if (!Tensors.TryAdd(prop.Name, info)) throw new InvalidDataException("Duplicate safetensors tensor name.");
             }
         }
 
