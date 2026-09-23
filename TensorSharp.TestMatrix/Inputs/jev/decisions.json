@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "description": "Original, deliberately simple Jev integration fixtures. These test bounded decisions and response contracts; they do not establish general accuracy or calibrated probabilities.",
+  "schemas": {
+    "ticket": {
+      "department": { "type": "choice", "instructions": "Which team should handle the customer's stated request?", "criteria": { "billing": "Invoices, charges, payments, or refunds", "technical": "Software defects, errors, or unavailable services", "sales": "Buying a new subscription or asking about pricing" } },
+      "urgent": { "type": "noul", "instructions": "Does the customer explicitly request immediate action?", "criteria": { "true": "The customer explicitly asks for action now or immediately.", "false": "The customer says it is not urgent or that there is no hurry." } },
+      "frustration": { "type": "score", "instructions": "Use the customer's explicitly stated emotional state.", "criteria": ["Calm and not upset", "Frustrated but polite", "Extremely angry"] }
+    },
+    "facts": {
+      "color": { "type": "choice", "instructions": "What color is the object?", "criteria": { "red": "Red", "blue": "Blue", "green": "Green" } },
+      "round": { "type": "noul", "instructions": "Is the object's shape a circle?" },
+      "size": { "type": "score", "instructions": "Which explicitly named size does the object have?", "criteria": ["Small", "Medium", "Large"] }
+    }
+  },
+  "cases": [
+    { "id": "billing-calm", "schema": "ticket", "state": "Please refund the duplicate payment. I am calm and not upset. This is not urgent; there is no hurry.", "expected": { "department": "billing", "urgent": false, "frustration": 0 } },
+    { "id": "outage-angry", "schema": "ticket", "state": { "message": "The service is down with a software error. Fix it immediately. I am extremely angry." }, "expected": { "department": "technical", "urgent": true, "frustration": 2 } },
+    { "id": "sales-polite", "schema": "ticket", "state": ["I want to buy a new subscription and need pricing.", "I am frustrated but polite. There is no hurry and this is not urgent."], "expected": { "department": "sales", "urgent": false, "frustration": 1 } },
+    { "id": "payment-immediate", "schema": "ticket", "state": "I need you to correct the invoice immediately. I am frustrated but polite.", "expected": { "department": "billing", "urgent": true, "frustration": 1 } },
+    { "id": "bug-calm", "schema": "ticket", "state": { "message": "The application has a software bug.", "urgency": "This is not urgent; there is no hurry.", "emotion": "Calm and not upset" }, "expected": { "department": "technical", "urgent": false, "frustration": 0 } },
+    { "id": "sales-angry", "schema": "ticket", "state": "I want to buy a subscription. Give me the price immediately. I am extremely angry.", "expected": { "department": "sales", "urgent": true, "frustration": 2 } },
+    { "id": "red-small-circle", "schema": "facts", "state": "The object is a small red circle.", "expected": { "color": "red", "round": true, "size": 0 } },
+    { "id": "blue-large-square", "schema": "facts", "state": { "object": { "color": "blue", "shape": "square", "size": "large" } }, "expected": { "color": "blue", "round": false, "size": 2 } },
+    { "id": "green-medium-circle", "schema": "facts", "state": ["Color: green", "Shape: circle", "Size: medium"], "expected": { "color": "green", "round": true, "size": 1 } },
+    { "id": "red-large-square", "schema": "facts", "state": "The object is a large red square.", "expected": { "color": "red", "round": false, "size": 2 } },
+    { "id": "blue-medium-circle", "schema": "facts", "state": "The object is a medium blue circle.", "expected": { "color": "blue", "round": true, "size": 1 } },
+    { "id": "green-small-square", "schema": "facts", "state": "The object is a small green square.", "expected": { "color": "green", "round": false, "size": 0 } }
+  ]
+}

@@ -304,7 +304,7 @@ namespace TensorSharp.Server
             // directly for a live denoising preview.
             if (model is DiffusionGemmaModel)
             {
-                await foreach (var u in DiffusionChatStreamAsync(session, history, maxTokens, cancellationToken, enableThinking)
+                await foreach (var u in DiffusionChatStreamAsync(session, history, maxTokens, cancellationToken, enableThinking, samplingConfig)
                     .ConfigureAwait(false))
                 {
                     if (u.Done)
@@ -886,7 +886,8 @@ namespace TensorSharp.Server
             List<ChatMessage> history,
             int maxTokens,
             [EnumeratorCancellation] CancellationToken cancellationToken,
-            bool enableThinking = false)
+            bool enableThinking = false,
+            SamplingConfig samplingConfig = null)
         {
             session ??= new ChatSession("__svc_intrinsic__", sharedAcrossConversations: true);
             var model = (DiffusionGemmaModel)(_lifecycle.Model
@@ -918,14 +919,7 @@ namespace TensorSharp.Server
             string generationSuffix = RecordedGenerationSuffix(model.Tokenizer, inputTokens, arch, enableThinking: false);
             promptSw.Stop();
 
-            int canvas = model.CanvasLength;
-            int blocks = Math.Max(1, (Math.Max(1, maxTokens) + canvas - 1) / canvas);
-            var ebParams = new DiffusionEbParams
-            {
-                MaxDenoisingSteps = DiffusionMaxSteps,
-                Seed = Random.Shared.Next(),
-                MaxBlocks = blocks,
-            };
+            var ebParams = CreateDiffusionParameters(maxTokens, model.CanvasLength, samplingConfig);
 
             // Submit to the shared continuous-batching scheduler. Several concurrent requests are denoised
             // together in one batched forward per step (one background thread owns the GPU lock), so a second
@@ -1041,6 +1035,19 @@ namespace TensorSharp.Server
         // terminates earlier). Overridable via the DIFFUSION_STEPS environment variable.
         private static readonly int DiffusionMaxSteps =
             int.TryParse(Environment.GetEnvironmentVariable("DIFFUSION_STEPS"), out int s) && s > 0 ? s : 48;
+
+        /// <summary>Preserve the request's seed through the separate diffusion sampler.
+        /// Negative/omitted seeds keep the ordinary nondeterministic sampling policy.</summary>
+        internal static DiffusionEbParams CreateDiffusionParameters(int maxTokens, int canvasLength, SamplingConfig samplingConfig)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(canvasLength);
+            return new DiffusionEbParams
+            {
+                MaxDenoisingSteps = DiffusionMaxSteps,
+                Seed = samplingConfig is { Seed: >= 0 } ? samplingConfig.Seed : Random.Shared.Next(),
+                MaxBlocks = (int)((Math.Max(1, maxTokens) + (long)canvasLength - 1) / canvasLength),
+            };
+        }
 
         /// <summary>Decode a denoising preview canvas for display, trimmed at the first end-of-sequence
         /// token so the live view reads cleanly as it converges.</summary>

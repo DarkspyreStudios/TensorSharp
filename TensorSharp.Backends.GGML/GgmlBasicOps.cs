@@ -2855,6 +2855,17 @@ namespace TensorSharp.GGML
             int numHeads, int numKvHeads, int headDim,
             int seqLen, int kvLen,
             int maskStartPos, int slidingWindow, float scale, int inputFormat = 0)
+            => FusedPrefillAttention(q, k, v, output, numHeads, numKvHeads, headDim,
+                seqLen, kvLen, maskStartPos, slidingWindow, scale, inputFormat, false);
+
+        /// <summary>Fused prefill variant retaining the original per-op attention's default
+        /// matmul precision and exact sequence extent when <paramref name="matchPerOpPrecision"/>
+        /// is true. The original public overload and native ABI remain unchanged.</summary>
+        public static void FusedPrefillAttention(Tensor q, Tensor k, Tensor v, Tensor output,
+            int numHeads, int numKvHeads, int headDim,
+            int seqLen, int kvLen,
+            int maskStartPos, int slidingWindow, float scale, int inputFormat,
+            bool matchPerOpPrecision)
         {
             if (q == null) throw new ArgumentNullException(nameof(q));
             if (k == null) throw new ArgumentNullException(nameof(k));
@@ -2878,7 +2889,7 @@ namespace TensorSharp.GGML
                 qPtr, kPtr, vPtr, outPtr,
                 numHeads, numKvHeads, headDim,
                 seqLen, kvLen,
-                maskStartPos, slidingWindow, scale, inputFormat);
+                maskStartPos, slidingWindow, scale, inputFormat, matchPerOpPrecision);
         }
 
         /// <summary>

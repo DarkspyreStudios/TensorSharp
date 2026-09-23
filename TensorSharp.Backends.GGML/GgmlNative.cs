@@ -2363,6 +2363,13 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_DiffusionPrefillAttentionF32(
+            IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData,
+            int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen,
+            int maskStartPos, int slidingWindow, float scale);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_FusedPrefillAttentionF16KV(
             IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData,
             int numHeads, int numKvHeads, int headDim,
@@ -5803,8 +5810,16 @@ internal enum GgmlIndexReductionOp
             int numHeads, int numKvHeads, int headDim,
             int seqLen, int kvLen,
             int maskStartPos, int slidingWindow,
-            float scale, int inputFormat = 0)
+            float scale, int inputFormat = 0, bool matchPerOpPrecision = false)
         {
+            if (matchPerOpPrecision)
+            {
+                if (inputFormat != 0) throw new ArgumentException("Diffusion prefill requires head-first inputs.", nameof(inputFormat));
+                CheckResult(TSGgml_DiffusionPrefillAttentionF32(qData, kData, vData, outData,
+                    numHeads, numKvHeads, headDim, seqLen, kvLen, maskStartPos, slidingWindow, scale),
+                    "diffusion_prefill_attention");
+                return;
+            }
             CheckResult(TSGgml_FusedPrefillAttentionF32(
                 qData, kData, vData, outData,
                 numHeads, numKvHeads, headDim,
