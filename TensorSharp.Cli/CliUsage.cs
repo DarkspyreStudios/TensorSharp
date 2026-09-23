@@ -278,7 +278,9 @@ namespace TensorSharp.Cli
                     "Video input: frames are extracted and fed to the vision encoder. Default: none.",
                     "--video clip.mp4"),
                 new OptionHelp("--mmproj <path>",
-                    "Multimodal projector (vision/audio encoder) GGUF that pairs with the model. Default: " +
+                    "Multimodal projector (vision/audio encoder) that pairs with the model: an mmproj GGUF, or " +
+                    "- for the Gemma 4 family - a HuggingFace .safetensors shard holding the vision tower, for " +
+                    "checkpoints published without an mmproj (diffusiongemma-26B-A4B-it). Default: " +
                     "auto-detected next to the model for known architectures (Gemma 4, Qwen 3.5, Mistral 3, " +
                     "Nemotron); pass it explicitly for anything else.",
                     "--mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf"),
@@ -803,6 +805,7 @@ namespace TensorSharp.Cli
             writer.WriteLine("  TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --input prompt.txt --max-tokens 512");
             writer.WriteLine("  TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --chat --think");
             writer.WriteLine("  TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf --image photo.jpg");
+            writer.WriteLine("  TensorSharp.Cli --model diffusiongemma-26B-A4B-it-Q4_K_M.gguf --mmproj diffusiongemma-vision/model-00011-of-00011.safetensors --image photo.jpg    (vision tower straight from the HF shard)");
             writer.WriteLine("  TensorSharp.Cli --model Qwen3.5-35B-A3B-Q4_K_M.gguf --backend ggml_cuda --tp 2 --chat    (split across 2 GPUs)");
             writer.WriteLine("  TensorSharp.Cli --model DeepSeek-V4-Flash-00001-of-00005.gguf --backend ggml_cuda --draft-model DSpark-drafter.gguf --temperature 0 --chat    (block speculative decoding)");
             writer.WriteLine("  TensorSharp.Cli --model Qwen-Image-Edit-2511-Q4_K_M.gguf --image in.png --prompt \"Turn it into watercolor\" --output out.png");

@@ -16,8 +16,28 @@ using TensorSharp.GGML;
 
 namespace TensorSharp.Models
 {
-    public class Gemma4VisionEncoder : IDisposable
+    public partial class Gemma4VisionEncoder : IDisposable
     {
+        /// <summary>
+        /// Tower geometry, resolved from either an mmproj GGUF's metadata or (for a raw HF shard,
+        /// which has no metadata block) from the tensor shapes themselves.
+        /// </summary>
+        private sealed class TowerSpec
+        {
+            public int HiddenSize;
+            public int IntermediateSize;
+            public int NumHeads;
+            public int BlockCount;
+            public float Eps;
+            public int ProjectionDim;
+            public int PatchSize;
+            public int NMerge;
+            public float RopeTheta;
+            public string ProjectorType = "gemma4v";
+            public float[] ImageMean = Array.Empty<float>();
+            public float[] ImageStd = Array.Empty<float>();
+        }
+
         private readonly Dictionary<string, Tensor> _weights = new();
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
@@ -65,6 +85,14 @@ namespace TensorSharp.Models
         private readonly Dictionary<long, Rope2DCache> _ropeCache = new();
         private Tensor _onesForNorm;
 
+        /// <summary>
+        /// Per-geometry 2D rope tables. The fused native block takes only PosX/PosY and
+        /// re-derives the angles on-device (ggml_rope_ext with the same rope_theta); the
+        /// precomputed Cos/Sin arrays are what the managed per-op fallback
+        /// (<see cref="Apply2DRoPE"/>) walks. The two must stay in lockstep: both rotate
+        /// head dims [0, hd/2) by the patch X index and [hd/2, hd) by its Y index, pairing
+        /// element j with element j + hd/4 at angle pos * ropeTheta^(-2j / (hd/2)).
+        /// </summary>
         private sealed class Rope2DCache
         {
             public required int[] PosX { get; init; }
@@ -92,35 +120,91 @@ namespace TensorSharp.Models
         /// blocks. Set once after construction.</summary>
         public void SetHostModel(ModelBase model) => _hostModel = model;
 
-        public Gemma4VisionEncoder(string mmProjPath, IAllocator allocator)
+        /// <param name="projectorPath">
+        /// An mmproj GGUF, or a HuggingFace <c>.safetensors</c> shard holding a
+        /// <c>model.encoder.vision_tower.*</c> tower. The safetensors form exists because some
+        /// published GGUF conversions drop the vision tower entirely (see
+        /// Gemma4VisionEncoder.Safetensors.cs).
+        /// </param>
+        public Gemma4VisionEncoder(string projectorPath, IAllocator allocator)
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
-            var gguf = new GgufFile(mmProjPath);
 
-            _hiddenSize = (int)gguf.GetUint32("clip.vision.embedding_length", 768);
-            _intermediateSize = (int)gguf.GetUint32("clip.vision.feed_forward_length", 3072);
-            _numHeads = (int)gguf.GetUint32("clip.vision.attention.head_count", 12);
-            _blockCount = (int)gguf.GetUint32("clip.vision.block_count", 16);
-            _eps = gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
-            _projectionDim = (int)gguf.GetUint32("clip.vision.projection_dim", 2560);
-            _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 16);
-            _nMerge = (int)gguf.GetUint32("clip.vision.projector_scale_factor", 0);
-            if (_nMerge == 0) _nMerge = 3;
-            _ropeTheta = 100f;
+            GgufFile gguf = null;
+            SafetensorsFile safetensors = null;
+            TowerSpec spec;
+            if (IsSafetensorsProjector(projectorPath))
+            {
+                safetensors = new SafetensorsFile(projectorPath);
+                spec = ReadSafetensorsSpec(safetensors, projectorPath);
+            }
+            else
+            {
+                gguf = new GgufFile(projectorPath);
+                spec = ReadGgufSpec(gguf);
+            }
 
-            _projectorType = gguf.GetString("clip.vision.projector_type", "gemma4v") ?? "gemma4v";
+            _hiddenSize = spec.HiddenSize;
+            _intermediateSize = spec.IntermediateSize;
+            _numHeads = spec.NumHeads;
+            _blockCount = spec.BlockCount;
+            _eps = spec.Eps;
+            _projectionDim = spec.ProjectionDim;
+            _patchSize = spec.PatchSize;
+            _nMerge = spec.NMerge;
+            _ropeTheta = spec.RopeTheta;
+            _projectorType = spec.ProjectorType;
             _isUnified = string.Equals(_projectorType, "gemma4uv", StringComparison.Ordinal);
-            _imageMean = gguf.GetFloatArray("clip.vision.image_mean");
-            _imageStd = gguf.GetFloatArray("clip.vision.image_std");
+            _imageMean = spec.ImageMean;
+            _imageStd = spec.ImageStd;
 
             Console.WriteLine($"Vision encoder: type={_projectorType}, hidden={_hiddenSize}, " +
                 $"intermediate={_intermediateSize}, heads={_numHeads}, blocks={_blockCount}, " +
                 $"projDim={_projectionDim}, patch={_patchSize}, nMerge={_nMerge}" +
-                (_isUnified ? $", unifiedPatch={_patchSize * _nMerge}" : string.Empty));
+                (_isUnified ? $", unifiedPatch={_patchSize * _nMerge}" : string.Empty) +
+                (safetensors != null ? ", source=safetensors" : string.Empty));
 
-            LoadWeights(gguf);
-            gguf.Dispose();
+            if (safetensors != null)
+            {
+                LoadWeightsFromSafetensors(safetensors);
+                safetensors.Dispose();
+            }
+            else
+            {
+                LoadWeights(gguf);
+                gguf.Dispose();
+            }
+        }
+
+        private static TowerSpec ReadGgufSpec(GgufFile gguf)
+        {
+            int nMerge = (int)gguf.GetUint32("clip.vision.projector_scale_factor", 0);
+            if (nMerge == 0)
+            {
+                // llama.cpp's canonical spelling (clip-impl.h KEY_PROJ_SCALE_FACTOR). Accept both so
+                // an mmproj produced by either toolchain resolves the pooling factor explicitly
+                // instead of silently landing on the default.
+                nMerge = (int)gguf.GetUint32("clip.vision.projector.scale_factor", 0);
+            }
+            if (nMerge == 0) nMerge = 3;
+
+            string projectorType = gguf.GetString("clip.vision.projector_type", "gemma4v") ?? "gemma4v";
+            return new TowerSpec
+            {
+                HiddenSize = (int)gguf.GetUint32("clip.vision.embedding_length", 768),
+                IntermediateSize = (int)gguf.GetUint32("clip.vision.feed_forward_length", 3072),
+                NumHeads = (int)gguf.GetUint32("clip.vision.attention.head_count", 12),
+                BlockCount = (int)gguf.GetUint32("clip.vision.block_count", 16),
+                Eps = gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f),
+                ProjectionDim = (int)gguf.GetUint32("clip.vision.projection_dim", 2560),
+                PatchSize = (int)gguf.GetUint32("clip.vision.patch_size", 16),
+                NMerge = nMerge,
+                RopeTheta = 100f,
+                ProjectorType = projectorType,
+                ImageMean = gguf.GetFloatArray("clip.vision.image_mean"),
+                ImageStd = gguf.GetFloatArray("clip.vision.image_std"),
+            };
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -192,14 +276,21 @@ namespace TensorSharp.Models
             Rope2DCache ropeCache = GetOrCreateRopeCache(patchesX, patchesY, headDim);
 
 
+            // TS_VISION_STAGE=1: per-stage wall clock.
+            var stageSw = VisionStageEnabled ? System.Diagnostics.Stopwatch.StartNew() : null;
+            double tPatch = 0, tPos = 0, tBlocks = 0, tPool = 0;
+
             var hidden = PatchEmbed(pixelValues, imgWidth, imgHeight, patchesX, patchesY);
+            if (stageSw != null) { tPatch = stageSw.Elapsed.TotalMilliseconds; stageSw.Restart(); }
             VisionTrace("patch_embed", hidden);
             AddPositionEmbedding2D(hidden, ropeCache, numPatches);
+            if (stageSw != null) { tPos = stageSw.Elapsed.TotalMilliseconds; stageSw.Restart(); }
             VisionTrace("pos_embed", hidden);
 
             for (int i = 0; i < _blockCount; i++)
             {
-                Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
+                if (!VisionStageEnabled)
+                    Console.Write($"\r  Vision encoder block {i + 1}/{_blockCount}...");
                 hidden = EncoderBlock(hidden, i, numPatches, headDim, ropeCache);
                 VisionTrace($"block{i}", hidden);
                 // Yield the GPU compute lock between encoder blocks so the
@@ -212,15 +303,29 @@ namespace TensorSharp.Models
                 // running outside a GpuComputeLock scope.
                 _hostModel?.YieldGpuComputeLock();
             }
-            Console.WriteLine(" done");
+            if (stageSw != null) { tBlocks = stageSw.Elapsed.TotalMilliseconds; stageSw.Restart(); }
+            if (!VisionStageEnabled) Console.WriteLine(" done");
 
             var projected = PoolAndProject(hidden, patchesX, patchesY, numPatches);
+            if (stageSw != null)
+            {
+                tPool = stageSw.Elapsed.TotalMilliseconds;
+                Console.Error.WriteLine(
+                    $"[vision-stage] patches={numPatches} patch_embed={tPatch:F1}ms pos_embed={tPos:F1}ms " +
+                    $"blocks({_blockCount})={tBlocks:F1}ms pool+project={tPool:F1}ms " +
+                    $"total={tPatch + tPos + tBlocks + tPool:F1}ms");
+            }
             VisionTrace("projected", projected);
             hidden.Dispose();
 
 
             return projected;
         }
+
+        // TS_VISION_STAGE=1: per-stage wall clock for the encode (patch embed / position
+        // embed / the 16 fused blocks / pool+project). Inert unless set.
+        private static readonly bool VisionStageEnabled =
+            Environment.GetEnvironmentVariable("TS_VISION_STAGE") is string sv && sv.Length > 0 && sv != "0";
 
         // TS_VISION_TRACE=1: mean / rms / min / max of a stage's activations.
         // The encoder is backend-agnostic C# over Ops, so when one backend reads
@@ -573,7 +678,7 @@ namespace TensorSharp.Models
             {
                 GgmlBasicOps.FusedGemma4VisionBlock(hidden, _eps, ln1,
                     qW, kW, vW, qNorm, kNorm, apn, outW,
-                    ropeCache.CosX, ropeCache.SinX, ropeCache.CosY, ropeCache.SinY,
+                    ropeCache.PosX, ropeCache.PosY, _ropeTheta,
                     ln2, gateW, upW, downW, fpn,
                     clamps, numPatches, _numHeads, headDim);
                 return true;
@@ -745,21 +850,16 @@ namespace TensorSharp.Models
             var gate = ClippableLinear(input, $"{prefix}.ffn_gate");
             var up = ClippableLinear(input, $"{prefix}.ffn_up");
 
-            // QuickGELU: x * sigmoid(1.702 * x)
-            ApplyQuickGELUMul(gate, up);
+            // gelu_pytorch_tanh(gate) * up. Gemma 4's vision config declares
+            // hidden_activation = "gelu_pytorch_tanh"; Ops.GELUMul is the tanh-approximate GELU and
+            // is a fused kernel on the GGML backends. (llama.cpp reaches QuickGELU here only because
+            // its mmproj files omit clip.use_gelu and clip.cpp then defaults to FFN_GELU_QUICK.)
+            Ops.GELUMul(gate, gate, up);
             up.Dispose();
 
             var down = ClippableLinear(gate, $"{prefix}.ffn_down");
             gate.Dispose();
             return down;
-        }
-
-        private void ApplyQuickGELUMul(Tensor gate, Tensor up)
-        {
-            // QuickGELU(x) * up = x * sigmoid(1.702 * x) * up
-            using var scaled = Ops.Mul(null, gate, 1.702f);
-            Ops.SigmoidMul(gate, gate, scaled);
-            Ops.Mul(gate, gate, up);
         }
 
         private unsafe Tensor ClippableLinear(Tensor input, string prefix)
@@ -873,12 +973,15 @@ namespace TensorSharp.Models
                 VisionTrace("pool.std", pooled);
             }
 
-            // Project to text dimension + unweighted RMSNorm
+            // Gemma4MultimodalEmbedder: embedding_pre_projection_norm (unweighted RMSNorm over the
+            // *vision* hidden size) runs BEFORE embedding_projection, matching
+            // Gemma4MultimodalEmbedder.forward() upstream and the gemma4uv path above (step 7/8).
+            ApplyUnweightedRMSNorm(pooled, mergedPatches, _hiddenSize);
+            VisionTrace("pool.prenorm", pooled);
+
             var projected = LinearProjection(pooled, "mm.input_projection.weight");
             VisionTrace("pool.proj", projected);
             pooled.Dispose();
-
-            ApplyUnweightedRMSNorm(projected, mergedPatches, _projectionDim);
 
             return projected;
         }
@@ -975,6 +1078,16 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            // The fused block binds each weight ZERO-COPY on unified-memory Metal: GGML
+            // keeps an MTLBuffer that wraps these exact host pages, cached by host pointer.
+            // Freeing the pages without dropping that wrapper leaves a live GPU mapping of
+            // memory the allocator is about to hand out again, and the NEXT encoder in the
+            // process then computes from whatever the GPU still sees there. That is silent
+            // and total: it was measured at 131% relative L2 (worst-token cosine -0.09)
+            // against the numpy oracle, on the second tower built in one process, while the
+            // first tower stayed correct. Invalidate before freeing, the same contract
+            // ModelBase.ReleaseGgmlDeviceResidency keeps for the language model's weights.
+            ReleaseDeviceBindings();
             _onesForNorm?.Dispose();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
@@ -983,6 +1096,27 @@ namespace TensorSharp.Models
                 w.Dispose();
             _weights.Clear();
             _ropeCache.Clear();
+        }
+
+        /// <summary>
+        /// Drop any GGML device binding (zero-copy host-pointer wrapper or device copy)
+        /// held against this tower's weight buffers. Idempotent, and a no-op on a
+        /// non-GGML allocator.
+        /// </summary>
+        private void ReleaseDeviceBindings()
+        {
+            if (!_useNativeAttention)
+                return;
+            foreach (var w in _weights.Values)
+            {
+                if (w != null)
+                    GgmlBasicOps.InvalidateTensorHostBuffer(w);
+            }
+            foreach (var w in _transposedWeights.Values)
+            {
+                if (w != null)
+                    GgmlBasicOps.InvalidateTensorHostBuffer(w);
+            }
         }
     }
 }

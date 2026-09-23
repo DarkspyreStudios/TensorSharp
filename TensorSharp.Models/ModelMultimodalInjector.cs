@@ -191,8 +191,22 @@ namespace TensorSharp.Models
                 return;
 
             (_model as IVisionCapableModel)?.LoadVisionEncoder(mmProjPath);
-            (_model as IAudioEncoderLoader)?.LoadAudioEncoder(mmProjPath);
+
+            // A HuggingFace `.safetensors` vision shard is a vision tower and nothing
+            // else: only an mmproj GGUF ever carries an audio tower beside the image
+            // one. Handing the shard to the audio loader made it open the file as a
+            // GGUF, which threw on the magic bytes and failed the whole projector load
+            // for a family that merely also KNOWS how to read audio (Gemma 4).
+            if (!IsSafetensorsProjector(mmProjPath))
+                (_model as IAudioEncoderLoader)?.LoadAudioEncoder(mmProjPath);
         }
+
+        /// <summary>Whether a projector path is a HuggingFace safetensors shard rather
+        /// than an mmproj GGUF; see <c>Gemma4VisionEncoder.IsSafetensorsProjector</c>,
+        /// which dispatches on the same extension and then validates the header.</summary>
+        private static bool IsSafetensorsProjector(string path)
+            => !string.IsNullOrEmpty(path)
+               && path.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase);
 
         public List<int> ProcessPromptTokens(List<ChatMessage> history, List<int> inputTokens, string requestId = null)
         {
@@ -207,9 +221,23 @@ namespace TensorSharp.Models
                 current.Audio.Clear();
                 if (history == null || history.Count == 0 || inputTokens == null || inputTokens.Count == 0)
                     return inputTokens;
-                return _model is IMultimodalPromptExpander expander
-                    ? expander.ExpandMultimodalPrompt(this, history, inputTokens)
-                    : inputTokens;
+                if (_model is IMultimodalPromptExpander expander)
+                    return expander.ExpandMultimodalPrompt(this, history, inputTokens);
+
+                // A model that declares it can SEE but names no expander leaves its
+                // image placeholders in the prompt as ordinary text and never queues a
+                // single embedding — the model then answers fluently about pixels it
+                // never received. Half-wiring a family is a build-time mistake, so say
+                // so instead of hallucinating.
+                if (_model is IVisionCapableModel { IsVisionEncoderLoaded: true }
+                    && HasImagePaths(history))
+                {
+                    throw new InvalidOperationException(
+                        $"'{_model.GetType().Name}' has a vision encoder loaded but declares no " +
+                        "IMultimodalPromptExpander, so its image placeholders cannot be expanded. " +
+                        "Implement ExpandMultimodalPrompt for this architecture.");
+                }
+                return inputTokens;
             }
             finally
             {
@@ -275,6 +303,32 @@ namespace TensorSharp.Models
             var audioBucket = GetOrCreateBucket(_audioByRequest, key);
             bool queued = QueuePreparedVisionEmbeddings(visionBucket, reusablePrefixTokenCount);
             queued |= QueuePreparedAudioEmbeddings(audioBucket, reusablePrefixTokenCount);
+            return queued;
+        }
+
+        /// <summary>
+        /// Hand this request's prepared image spans to <paramref name="sink"/> instead of to the model.
+        ///
+        /// <para>This is what makes concurrent image requests safe: a caller that owns per-request
+        /// state (the diffusion scheduler owns one <c>DiffusionSeqState</c> per sequence) routes the
+        /// spans onto that state, so two requests in flight cannot overwrite one another. The sink
+        /// takes ownership of each tensor it is handed.</para>
+        /// </summary>
+        public bool QueuePromptEmbeddings(int reusablePrefixTokenCount, string requestId,
+            Action<Tensor, int> sink)
+        {
+            ArgumentNullException.ThrowIfNull(sink);
+            string key = NormalizeRequestId(requestId);
+            var visionBucket = GetOrCreateBucket(_visionByRequest, key);
+
+            bool queued = false;
+            foreach (var span in visionBucket)
+            {
+                if (span.EndPosition <= reusablePrefixTokenCount)
+                    continue;
+                sink(CloneTensor(span.CacheEntry.Embeddings), span.InsertPosition - reusablePrefixTokenCount);
+                queued = true;
+            }
             return queued;
         }
 
@@ -398,6 +452,32 @@ namespace TensorSharp.Models
         }
 
         internal List<int> ProcessGemma4History(Gemma4Model model, List<ChatMessage> history, List<int> inputTokens)
+            => ProcessGemma4MediaHistory(model.VisionEncoder, model.AudioEncoder, history, inputTokens);
+
+        /// <summary>
+        /// The image half of <see cref="ProcessGemma4History"/> for a Gemma-4-family
+        /// model that carries the same gemma4v tower and the same media vocabulary but
+        /// no audio tower at all — DiffusionGemma, whose checkpoint has no
+        /// <c>audio_config</c> and no audio weights upstream (the <c>&lt;|audio&gt;</c>
+        /// ids it inherits have nothing behind them, and
+        /// <see cref="Architecture.AudioInputSupport"/> refuses audio for it rather
+        /// than letting a clip be silently dropped).
+        ///
+        /// <para>Deliberately the SAME expander, not a fork: the token layout
+        /// (<c>&lt;|image&gt;</c> expanded to [BOI] + N soft rows + [EOI]), the
+        /// <see cref="Gemma4ImageProcessor"/> preprocessing and the per-image soft-token
+        /// count — which is the encoder's own output row count, never a constant — are
+        /// identical. Only the audio branch differs, and it differs by being absent.</para>
+        /// </summary>
+        internal List<int> ProcessGemma4VisionHistory(
+            Gemma4VisionEncoder visionEncoder, List<ChatMessage> history, List<int> inputTokens)
+            => ProcessGemma4MediaHistory(visionEncoder, audioEncoder: null, history, inputTokens);
+
+        private List<int> ProcessGemma4MediaHistory(
+            Gemma4VisionEncoder visionEncoder,
+            Gemma4AudioEncoder audioEncoder,
+            List<ChatMessage> history,
+            List<int> inputTokens)
         {
             int imageStartId = _model.Tokenizer.LookupToken("<|image>");
             int imageEndId = _model.Tokenizer.LookupToken("<image|>");
@@ -410,30 +490,34 @@ namespace TensorSharp.Models
             // The gemma4uv unified embedder declares its own image_mean / image_std
             // (mean=0, std=1 -> [0,1]); the gemma4v SigLIP path keeps the legacy
             // [-1,1] normalization.
-            var imageProcessor = model.VisionEncoder != null
-                ? (model.VisionEncoder.IsUnified
-                    ? new Gemma4ImageProcessor(imageMean: model.VisionEncoder.ImageMean,
-                        imageStd: model.VisionEncoder.ImageStd)
-                    : new Gemma4ImageProcessor())
+            // gemma4v sizes exactly as the reference processor does (scale to the soft-token
+            // budget, floor to a multiple of patch*pooling, bicubic stretch-to-fill) -- verified
+            // against a numpy transcription of it. gemma4uv keeps the no-upscale + letterbox
+            // sizing it was measured on; see the referenceSizing docs for why they differ.
+            var imageProcessor = visionEncoder != null
+                ? (visionEncoder.IsUnified
+                    ? new Gemma4ImageProcessor(imageMean: visionEncoder.ImageMean,
+                        imageStd: visionEncoder.ImageStd)
+                    : new Gemma4ImageProcessor(referenceSizing: true))
                 : null;
-            var videoProcessor = model.VisionEncoder != null
+            var videoProcessor = visionEncoder != null
                 ? new Gemma4ImageProcessor(minTokens: Gemma4ImageProcessor.VideoSoftTokens,
                     maxTokens: Gemma4ImageProcessor.VideoSoftTokens,
-                    imageMean: model.VisionEncoder.IsUnified ? model.VisionEncoder.ImageMean : null,
-                    imageStd: model.VisionEncoder.IsUnified ? model.VisionEncoder.ImageStd : null)
+                    imageMean: visionEncoder.IsUnified ? visionEncoder.ImageMean : null,
+                    imageStd: visionEncoder.IsUnified ? visionEncoder.ImageStd : null)
                 : null;
             int searchFrom = 0;
 
             foreach (var message in history)
             {
-                if (message.ImagePaths != null && model.VisionEncoder != null)
+                if (message.ImagePaths != null && visionEncoder != null)
                 {
                     for (int imageIndex = 0; imageIndex < message.ImagePaths.Count; ++imageIndex)
                     {
                         string imagePath = message.ImagePaths[imageIndex];
                         bool videoFrame = message.IsVideo && (message.ImageTimestamps?.Count != message.ImagePaths.Count
                             || message.ImageTimestamps[imageIndex].HasValue);
-                        CachedEmbedding cached = GetOrCreateGemma4VisionEmbedding(model,
+                        CachedEmbedding cached = GetOrCreateGemma4VisionEmbedding(visionEncoder,
                             videoFrame ? videoProcessor : imageProcessor, imagePath, videoFrame);
                         int tokenPosition = FindTokenPosition(inputTokens, imageStartId, searchFrom);
 
@@ -450,11 +534,11 @@ namespace TensorSharp.Models
                     }
                 }
 
-                if (message.AudioPaths != null && model.AudioEncoder != null && audioStartId >= 0 && audioEndId >= 0)
+                if (message.AudioPaths != null && audioEncoder != null && audioStartId >= 0 && audioEndId >= 0)
                 {
                     foreach (var audioPath in message.AudioPaths)
                     {
-                        CachedEmbedding cached = GetOrCreateGemma4AudioEmbedding(model, audioPath);
+                        CachedEmbedding cached = GetOrCreateGemma4AudioEmbedding(audioEncoder, audioPath);
                         int tokenPosition = FindTokenPosition(inputTokens, audioStartId, searchFrom);
 
                         if (tokenPosition >= 0)
@@ -937,19 +1021,19 @@ namespace TensorSharp.Models
         }
 
         private CachedEmbedding GetOrCreateGemma4VisionEmbedding(
-            Gemma4Model model,
+            Gemma4VisionEncoder encoder,
             Gemma4ImageProcessor processor,
             string imagePath, bool videoFrame)
         {
             return GetOrCreateCachedEmbedding(videoFrame ? _videoFrameCache : _visionCache, imagePath, fullPath =>
             {
                 var (pixels, imageWidth, imageHeight) = processor.ProcessImage(fullPath);
-                Tensor embeddings = model.VisionEncoder.Encode(pixels, imageWidth, imageHeight);
+                Tensor embeddings = encoder.Encode(pixels, imageWidth, imageHeight);
                 return CreateCachedEmbedding(fullPath, embeddings);
             });
         }
 
-        private CachedEmbedding GetOrCreateGemma4AudioEmbedding(Gemma4Model model, string audioPath)
+        private CachedEmbedding GetOrCreateGemma4AudioEmbedding(Gemma4AudioEncoder audioEncoder, string audioPath)
         {
             return GetOrCreateCachedEmbedding(_audioCache, audioPath, fullPath =>
             {
@@ -959,9 +1043,9 @@ namespace TensorSharp.Models
                 // gemma-4-12b) are encoder-free: the raw waveform is chunked into
                 // 640-sample frames and projected directly, with no mel
                 // spectrogram or conformer encoder.
-                if (model.AudioEncoder.IsEncoderFree)
+                if (audioEncoder.IsEncoderFree)
                 {
-                    Tensor rawEmbeddings = model.AudioEncoder.EncodeRawWaveform(samples);
+                    Tensor rawEmbeddings = audioEncoder.EncodeRawWaveform(samples);
                     return CreateCachedEmbedding(fullPath, rawEmbeddings);
                 }
 
@@ -975,7 +1059,7 @@ namespace TensorSharp.Models
                 if (melData == null || numFrames == 0)
                     throw new InvalidOperationException($"Audio file '{fullPath}' did not produce a valid mel spectrogram.");
 
-                Tensor embeddings = model.AudioEncoder.Encode(melData, numFrames);
+                Tensor embeddings = audioEncoder.Encode(melData, numFrames);
                 return CreateCachedEmbedding(fullPath, embeddings);
             });
         }
@@ -1533,6 +1617,16 @@ namespace TensorSharp.Models
             var clone = new Tensor(source.Allocator, source.ElementType, rows.Sizes);
             Ops.Copy(clone, rows);
             return clone;
+        }
+
+        private static bool HasImagePaths(List<ChatMessage> history)
+        {
+            if (history == null)
+                return false;
+            foreach (var message in history)
+                if (message?.ImagePaths is { Count: > 0 })
+                    return true;
+            return false;
         }
 
         private static List<string> GetImagePathsInPromptOrder(List<ChatMessage> history)

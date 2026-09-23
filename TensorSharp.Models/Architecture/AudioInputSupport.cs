@@ -25,6 +25,19 @@ namespace TensorSharp.Models.Architecture
             "DeepSeek V4.1 Flash does not support audio input. Remove audio attachments or use a model with an audio encoder.";
 
         /// <summary>
+        /// DiffusionGemma inherits Gemma 4's vocabulary, <c>&lt;|audio&gt;</c> ids
+        /// included, but the published checkpoint has no <c>audio_config</c> and ships
+        /// no audio weights: there is nothing behind those ids and no projector file
+        /// could supply one. This is therefore NOT a "load the projector" message —
+        /// the refusal is permanent for this checkpoint, unlike its image input, which
+        /// a gemma4v tower (mmproj GGUF or HF safetensors shard) does enable.
+        /// </summary>
+        public const string DiffusionGemmaMessage =
+            "DiffusionGemma does not support audio input: this checkpoint has no audio encoder " +
+            "(no audio tower is published upstream, so no projector can add one). " +
+            "Remove the audio attachment. Images are supported once a vision projector is loaded.";
+
+        /// <summary>
         /// The refusal <paramref name="architecture"/> gives audio input when no
         /// optional audio tower is known to be loaded, or null when the family can
         /// consume audio or is not one this table knows (an unknown family is left
@@ -49,6 +62,9 @@ namespace TensorSharp.Models.Architecture
                 return null;
             if (string.Equals(architecture, "deepseek41", StringComparison.OrdinalIgnoreCase))
                 return DeepSeek41Message;
+            if (ModelArchitectureRegistry.TryGet(architecture, out ModelArchitectureDescriptor diffusion)
+                && string.Equals(diffusion.Id, "diffusion-gemma", StringComparison.OrdinalIgnoreCase))
+                return DiffusionGemmaMessage;
             if (!audioEncoderLoaded &&
                 ModelArchitectureRegistry.TryGet(architecture, out ModelArchitectureDescriptor descriptor) &&
                 string.Equals(descriptor.Id, "nemotron_h", StringComparison.OrdinalIgnoreCase))

@@ -21,6 +21,12 @@
       "https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF/resolve/main/diffusiongemma-26B-A4B-it-Q4_K_M.gguf"
     ]
   },
+  // Deliberately NO "mmproj" here, unlike the other diffusiongemma configs.
+  // The Jev endpoint refuses image and multipart input outright (415, see
+  // JevAdapter) because a typed decision is read from label logits, not from a
+  // described picture. Declaring a projector would download 2.8 GB for a
+  // capability this endpoint will not use. For image input, run one of the
+  // chat configs instead: config/diffusiongemma-26b-a4b-q4.json.
   "backend": "ggml_cuda",
   "host": "127.0.0.1",
   "port": 5000,

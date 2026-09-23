@@ -111,9 +111,31 @@ namespace TensorSharp.Models
             get
             {
                 string option = Environment.GetEnvironmentVariable("DIFFUSION_FUSED_PREFILL_ATTN");
-                return IsGgmlBackend && (option == "1" || (_backend == BackendType.GgmlCuda && option != "0"));
+                bool enabled = IsGgmlBackend && (option == "1" || (_backend == BackendType.GgmlCuda && option != "0"));
+                // GgmlBasicOps.FusedPrefillAttention builds its own causal/SWA mask inside the kernel and
+                // takes no external mask, so it cannot express the bidirectional block an image span
+                // needs. Fall back to the per-op mask path for image-bearing prompts rather than
+                // silently running the wrong mask. Announced once by WarnFusedPrefillDisabledForVision.
+                if (enabled && _visionSpans.Length != 0)
+                {
+                    WarnFusedPrefillDisabledForVision();
+                    return false;
+                }
+                return enabled;
             }
         }
+        private bool _warnedFusedPrefillDisabledForVision;
+
+        private void WarnFusedPrefillDisabledForVision()
+        {
+            if (_warnedFusedPrefillDisabledForVision) return;
+            _warnedFusedPrefillDisabledForVision = true;
+            Console.WriteLine("  [fused prefill attention] disabled for this turn: the prompt carries image soft " +
+                "tokens, whose bidirectional span mask the fused kernel cannot express (it masks internally and " +
+                "accepts no external mask). Using the per-op mask + AttnCoreHeadFirst path (slower prefill). " +
+                "Reported once.");
+        }
+
         // decode-phase additive masks [maskHeads, C, P+C] (null when no masking is needed, i.e. when the
         // prompt fits within the sliding window — the common case).
         private int _decodeMaskP = -1, _decodeMaskC = -1;
@@ -664,6 +686,10 @@ namespace TensorSharp.Models
             try
             {
                 Ops.Mul(hidden, hidden, MathF.Sqrt(D));     // embed_scale = sqrt(n_embd)
+                // Image soft tokens replace prompt rows in [0,P). They are spliced in AFTER the
+                // sqrt(n_embd) scale (the tower already carries its own scale) and BEFORE
+                // EmbedCanvasRegion, which only touches [P,P+C) - the two regions never overlap.
+                ApplyPendingVisionEmbeddings(hidden, P);
                 EmbedCanvasRegion(hidden, P, C, scPrevLogits, scUse, prevTempInv);
                 _tEmbed += Stopwatch.GetTimestamp() - ts;
 
@@ -892,6 +918,8 @@ namespace TensorSharp.Models
             int groupSize = qHeads / kvHeads;
             int swa = _slidingWindow;
 
+            var visionSpans = _visionSpans;
+
             Parallel.For(0, qHeads, h =>
             {
                 int kvHead = h / groupSize;
@@ -899,7 +927,7 @@ namespace TensorSharp.Models
                 for (int qi = 0; qi < N; qi++)
                 {
                     bool qCanvas = qi >= P;
-                    AllowedRange(qi, qCanvas, P, N, local, swa, out int klo, out int khi);
+                    AllowedRange(qi, qCanvas, P, N, local, swa, visionSpans, out int klo, out int khi);
                     if (khi <= klo) khi = klo + 1;
 
                     float* qVec = q + ((long)qi * qHeads + h) * hd;
@@ -1012,11 +1040,14 @@ namespace TensorSharp.Models
         /// on GGML/MLX and qHeads on cuda (which doesn't broadcast element-wise adds).</summary>
         private Tensor GetAttentionMask(int N, int P, bool local)
         {
-            if (_maskN != N || _maskP != P)
+            // The span version is part of the key: two requests can share (N,P) and differ only in
+            // where their image sits, and a stale mask would give the second image the first one's
+            // bidirectional block.
+            if (_maskN != N || _maskP != P || _maskSpanVersion != _visionSpanVersion)
             {
                 _maskLocal?.Dispose(); _maskGlobal?.Dispose();
                 _maskLocal = null; _maskGlobal = null;
-                _maskN = N; _maskP = P;
+                _maskN = N; _maskP = P; _maskSpanVersion = _visionSpanVersion;
             }
             if (local && _maskLocal != null) return _maskLocal;
             if (!local && _maskGlobal != null) return _maskGlobal;
@@ -1027,7 +1058,7 @@ namespace TensorSharp.Models
             for (int qi = 0; qi < N; qi++)
             {
                 bool qCanvas = qi >= P;
-                AllowedRange(qi, qCanvas, P, N, local, _slidingWindow, out int klo, out int khi);
+                AllowedRange(qi, qCanvas, P, N, local, _slidingWindow, _visionSpans, out int klo, out int khi);
                 if (khi <= klo) khi = klo + 1;
                 long rowBase = (long)qi * N;
                 for (int kj = 0; kj < N; kj++)
@@ -1108,6 +1139,9 @@ namespace TensorSharp.Models
             try
             {
                 Ops.Mul(hidden, hidden, MathF.Sqrt(D));   // prompt = embed*sqrt(n_embd) (no rms-norm, no SC)
+                // Image soft tokens replace prompt rows before any layer runs, so the cached prompt
+                // K/V this prefill freezes already carry the image. See DiffusionGemmaModel.Multimodal.cs.
+                ApplyPendingVisionEmbeddings(hidden, P);
 
                 for (int l = 0; l < Config.NumLayers; l++)
                 {
@@ -1435,6 +1469,9 @@ namespace TensorSharp.Models
                 for (int l = 0; l < seq.PromptK.Length; l++) ReleasePromptKvTensor(ref seq.PromptK[l]);
             if (seq.PromptV != null)
                 for (int l = 0; l < seq.PromptV.Length; l++) ReleasePromptKvTensor(ref seq.PromptV[l]);
+            // Free this sequence's image embeddings with it, so a finished request cannot leak its
+            // picture into whatever runs next.
+            seq.DisposeVision();
             seq.PromptLen = -1;
         }
 
@@ -1449,7 +1486,11 @@ namespace TensorSharp.Models
                 ReleasePromptKvTensor(ref seq.PromptK[l]);
                 ReleasePromptKvTensor(ref seq.PromptV[l]);
             }
-            seq.PromptLen = PrefillPromptInto(promptTokens, seq.PromptK, seq.PromptV);
+            // Prefill against THIS sequence's image spans, not any model-level set, so that two
+            // concurrent image requests cannot splice each other's pictures. Scoped rather than
+            // threaded because every prefill already runs serialized under GpuComputeLock.
+            using (UseSequenceVision(seq))
+                seq.PromptLen = PrefillPromptInto(promptTokens, seq.PromptK, seq.PromptV);
         }
 
         /// <summary>Single-canvas decode for a request held in a <see cref="DiffusionSeqState"/> (the batched
@@ -2007,9 +2048,13 @@ namespace TensorSharp.Models
         /// [klo, khi) per query. Mirrors the per-(q,k) rule from the llama.cpp reference:
         ///  - prompt query: causal over the prompt (SWA-clipped on local layers), never the canvas;
         ///  - canvas query (global): all positions; canvas query (local): all canvas + the last
-        ///    (swa-1) prompt positions.</summary>
+        ///    (swa-1) prompt positions.
+        /// <paramref name="visionSpans"/> (may be empty) widens a prompt query that sits inside an image
+        /// soft-token span so the whole span is visible - bidirectional image attention, on LOCAL layers
+        /// only, exactly as vLLM's gemma4_mm does. The interval stays contiguous; see
+        /// <c>ExtendKhiForVisionSpan</c> in DiffusionGemmaModel.Multimodal.cs for why.</summary>
         private static void AllowedRange(int qi, bool qCanvas, int P, int N, bool local, int swa,
-            out int klo, out int khi)
+            (int Start, int Length)[] visionSpans, out int klo, out int khi)
         {
             if (qCanvas)
             {
@@ -2020,6 +2065,9 @@ namespace TensorSharp.Models
             {
                 klo = local ? Math.Max(0, qi - swa + 1) : 0;
                 khi = qi + 1;
+                // GLOBAL (full-attention) layers keep plain causal masking over image spans.
+                if (local && visionSpans != null && visionSpans.Length != 0)
+                    khi = ExtendKhiForVisionSpan(qi, khi, swa, visionSpans);
             }
         }
 
@@ -2714,6 +2762,7 @@ namespace TensorSharp.Models
         public override void Dispose()
         {
             ClearStructuredCache();
+            DisposeVisionState();
             foreach (var t in _onesByDim.Values) t?.Dispose();
             _onesByDim.Clear();
             foreach (var t in _ropePosCache.Values) t?.Dispose();
@@ -2752,10 +2801,44 @@ namespace TensorSharp.Models
         internal readonly Tensor[] PromptV;
         internal int PromptLen = -1;
 
+        /// <summary>
+        /// This sequence's own image spans: projected embeddings <c>[nSoft, hidden]</c> and the index
+        /// of their first row in this sequence's prompt.
+        ///
+        /// <para>These live here, per sequence, rather than on the model, so that concurrent image
+        /// requests cannot overwrite each other. That is the same choice vLLM and SGLang make -- the
+        /// encoded multimodal features hang off the request, never off the runner -- and it is what
+        /// lets the scheduler batch an image turn alongside other turns instead of denoising it
+        /// alone.</para>
+        /// </summary>
+        internal List<(Tensor Embeddings, int Position)> VisionEmbeddings;
+
+        /// <summary>Soft-token spans in prompt coordinates for THIS sequence, ascending by Start.
+        /// Empty when bidirectional image attention is off.</summary>
+        internal (int Start, int Length)[] VisionSpans = Array.Empty<(int Start, int Length)>();
+
+        /// <summary>Bumped whenever this sequence's spans change, so a cached attention mask built
+        /// for a different span layout is never reused for it.</summary>
+        internal int VisionSpanVersion;
+
+        internal bool HasVision => VisionEmbeddings != null && VisionEmbeddings.Count > 0;
+
         internal DiffusionSeqState(int numLayers)
         {
             PromptK = new Tensor[numLayers];
             PromptV = new Tensor[numLayers];
+        }
+
+        /// <summary>Releases this sequence's image embeddings. Called when the sequence is freed, so a
+        /// finished request cannot leak its picture into the next one.</summary>
+        internal void DisposeVision()
+        {
+            if (VisionEmbeddings == null) return;
+            foreach (var (embeddings, _) in VisionEmbeddings)
+                embeddings?.Dispose();
+            VisionEmbeddings = null;
+            VisionSpans = Array.Empty<(int Start, int Length)>();
+            VisionSpanVersion++;
         }
     }
 }

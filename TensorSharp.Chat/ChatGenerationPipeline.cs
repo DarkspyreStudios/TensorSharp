@@ -910,8 +910,46 @@ namespace TensorSharp.Server
                 addGenerationPrompt: true, out _,
                 out string generationPromptTrailingWhitespace,
                 tools: null, enableThinking: false);
+
+            // Media preparation for the block-diffusion path. The autoregressive branch
+            // does this inside its own engine submission (see the hasMultimodal block
+            // above); a diffusion turn never reaches that code, so an uploaded image
+            // used to leave the rendered <|image> markers in the prompt with no
+            // embeddings behind them. Preparation must happen BEFORE truncation so the
+            // expanded span is what gets measured against the context, and the spans
+            // registered here are what the scheduler queues into SetVisionEmbeddings.
+            // Images are the only expandable media here: the diffusion-gemma protocol
+            // declares an image placeholder and deliberately no audio one, because this
+            // checkpoint has no audio tower (AudioInputSupport refuses audio outright).
+            bool hasImageMedia = HasImageAttachments(renderHistory);
+            string mediaRequestId = hasImageMedia
+                ? $"diffusion-{Guid.NewGuid():N}"
+                : null;
+            if (hasImageMedia)
+            {
+                // Same invariant as the AR path: placeholders that reach generation
+                // unexpanded produce a confident answer about pixels the model never
+                // received. The hosts refuse first; this protects every other caller.
+                if (!model.HasVisionEncoder())
+                {
+                    throw new InvalidOperationException(
+                        "Image input cannot be processed because the loaded model has no active vision encoder. " +
+                        "Load the matching image projector and retry.");
+                }
+
+                // The vision tower runs many GGML ops; take the model-wide compute lock
+                // so it cannot race the scheduler's denoising worker.
+                lock (model.GpuComputeLock)
+                    inputTokens = model.MultimodalInjector.ProcessPromptTokens(
+                        renderHistory, inputTokens, mediaRequestId);
+            }
+
             inputTokens = TruncatePromptToContext(
-                session, inputTokens, maxTokens, out _, preserveAllInput: preserveAttachedDocuments);
+                session, inputTokens, maxTokens, out _, mediaRequestId,
+                preserveAllInput: preserveAttachedDocuments || hasImageMedia,
+                preservedInputKind: hasImageMedia
+                    ? (preserveAttachedDocuments ? "document and media input" : "media input")
+                    : "document");
             int promptTokenCount = inputTokens.Count;
             // The publisher template may leave a thought channel open at the end of the
             // prompt; the parser then has to start inside it, exactly as it does for
@@ -919,61 +957,72 @@ namespace TensorSharp.Server
             string generationSuffix = RecordedGenerationSuffix(model.Tokenizer, inputTokens, arch, enableThinking: false);
             promptSw.Stop();
 
-            var ebParams = CreateDiffusionParameters(maxTokens, model.CanvasLength, samplingConfig);
-
-            // Submit to the shared continuous-batching scheduler. Several concurrent requests are denoised
-            // together in one batched forward per step (one background thread owns the GPU lock), so a second
-            // parallel request streams immediately instead of waiting for the first to finish.
-            var scheduler = GetDiffusionScheduler(model);
-            var handle = scheduler.Submit(inputTokens.ToArray(), ebParams, cancellationToken);
-
-            var totalSw = Stopwatch.StartNew();
-
-            // Stream previews as they arrive (cancellation surfaces as OperationCanceledException, which the
-            // adapter catches and finalizes).
-            await foreach (var preview in handle.Previews.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            try
             {
-                string previewText = DecodeDiffusionPreview(model, preview.Tokens);
-                var (previewContent, previewThinking) =
-                    SeparateDiffusionChannels(arch, previewText, enableThinking, generationSuffix);
-                yield return new DiffusionStreamUpdate(
-                    previewContent, IsPreview: true, Done: false, preview.Step + 1, preview.TotalSteps, 0, 0, 0,
-                    previewThinking);
-            }
+                var ebParams = CreateDiffusionParameters(maxTokens, model.CanvasLength, samplingConfig);
 
-            var generated = await handle.Completion.ConfigureAwait(false);
-            totalSw.Stop();
+                // Submit to the shared continuous-batching scheduler. Several concurrent requests are denoised
+                // together in one batched forward per step (one background thread owns the GPU lock), so a second
+                // parallel request streams immediately instead of waiting for the first to finish.
+                var scheduler = GetDiffusionScheduler(model);
+                var handle = scheduler.Submit(inputTokens.ToArray(), ebParams, cancellationToken, mediaRequestId);
 
-            generated ??= new List<int>();
-            string finalText = model.Tokenizer.Decode(generated);
-            // The tracked history keeps the raw text beside the raw tokens; the caller
-            // gets the channels separated.
-            var (finalContent, finalThinking) =
-                SeparateDiffusionChannels(arch, finalText, enableThinking, generationSuffix);
+                var totalSw = Stopwatch.StartNew();
 
-            RecordGeneratedTurn(session, preparedHistory, renderHistory, cacheScope: null,
-                new ChatMessage
+                // Stream previews as they arrive (cancellation surfaces as OperationCanceledException, which the
+                // adapter catches and finalizes).
+                await foreach (var preview in handle.Previews.ReadAllAsync(cancellationToken).ConfigureAwait(false))
                 {
-                    Role = "assistant",
-                    Content = finalText,
-                    RawOutputTokens = generated,
-                    RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
-                },
-                new EmittedAssistantTurn(finalContent, null, finalThinking, finalText,
-                    cancellationToken.IsCancellationRequested));
+                    string previewText = DecodeDiffusionPreview(model, preview.Tokens);
+                    var (previewContent, previewThinking) =
+                        SeparateDiffusionChannels(arch, previewText, enableThinking, generationSuffix);
+                    yield return new DiffusionStreamUpdate(
+                        previewContent, IsPreview: true, Done: false, preview.Step + 1, preview.TotalSteps, 0, 0, 0,
+                        previewThinking);
+                }
 
-            long totalNs = InferenceTelemetry.ToNanos(totalSw.ElapsedTicks);
-            _telemetry.LogChatFinished(
-                cancellationToken.IsCancellationRequested, generated.Count, promptTokenCount, 0, 0.0,
-                0, totalSw.Elapsed.TotalMilliseconds,
-                totalSw.Elapsed.TotalSeconds > 0 ? generated.Count / totalSw.Elapsed.TotalSeconds : 0,
-                cancellationToken.IsCancellationRequested ? "cancelled" : "stop", finalText);
+                var generated = await handle.Completion.ConfigureAwait(false);
+                totalSw.Stop();
 
-            // Final answer (replaces the last preview), then the terminal metrics update.
-            yield return new DiffusionStreamUpdate(finalContent, IsPreview: false, Done: false, 0, 0, 0, 0, 0,
-                finalThinking);
-            yield return new DiffusionStreamUpdate("", IsPreview: false, Done: true, 0, 0,
-                promptTokenCount, generated.Count, totalNs);
+                generated ??= new List<int>();
+                string finalText = model.Tokenizer.Decode(generated);
+                // The tracked history keeps the raw text beside the raw tokens; the caller
+                // gets the channels separated.
+                var (finalContent, finalThinking) =
+                    SeparateDiffusionChannels(arch, finalText, enableThinking, generationSuffix);
+
+                RecordGeneratedTurn(session, preparedHistory, renderHistory, cacheScope: null,
+                    new ChatMessage
+                    {
+                        Role = "assistant",
+                        Content = finalText,
+                        RawOutputTokens = generated,
+                        RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
+                    },
+                    new EmittedAssistantTurn(finalContent, null, finalThinking, finalText,
+                        cancellationToken.IsCancellationRequested));
+
+                long totalNs = InferenceTelemetry.ToNanos(totalSw.ElapsedTicks);
+                _telemetry.LogChatFinished(
+                    cancellationToken.IsCancellationRequested, generated.Count, promptTokenCount, 0, 0.0,
+                    0, totalSw.Elapsed.TotalMilliseconds,
+                    totalSw.Elapsed.TotalSeconds > 0 ? generated.Count / totalSw.Elapsed.TotalSeconds : 0,
+                    cancellationToken.IsCancellationRequested ? "cancelled" : "stop", finalText);
+
+                // Final answer (replaces the last preview), then the terminal metrics update.
+                yield return new DiffusionStreamUpdate(finalContent, IsPreview: false, Done: false, 0, 0, 0, 0, 0,
+                    finalThinking);
+                yield return new DiffusionStreamUpdate("", IsPreview: false, Done: true, 0, 0,
+                    promptTokenCount, generated.Count, totalNs);
+            }
+            finally
+            {
+                // The scheduler holds the prepared spans only until it has queued them
+                // into the model; release the request bucket (and the cloned embedding
+                // tensors it pins) whether the turn completed, faulted or was abandoned.
+                if (mediaRequestId != null)
+                    model.MultimodalInjector.ClearPreparedPromptState(mediaRequestId);
+            }
         }
 
         /// <summary>

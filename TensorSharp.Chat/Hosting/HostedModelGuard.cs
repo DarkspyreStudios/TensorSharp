@@ -90,13 +90,13 @@ namespace TensorSharp.Server.Hosting
 
             if (string.IsNullOrWhiteSpace(hostedMmProjPath))
             {
-                error = "This server was started without --mmproj. Restart TensorSharp.Server with --mmproj <path.gguf> to host a projector.";
+                error = "This server was started without --mmproj. Restart TensorSharp.Server with --mmproj <path.gguf|path.safetensors> to host a projector.";
                 return false;
             }
 
             if (!MatchesHostedFileRequest(requestedMmProj, hostedMmProjPath, allowBareModelId: false))
             {
-                error = $"mmproj '{requestedMmProj}' is not hosted by this server. Restart TensorSharp.Server with --mmproj <path.gguf> to change it.";
+                error = $"mmproj '{requestedMmProj}' is not hosted by this server. Restart TensorSharp.Server with --mmproj <path.gguf|path.safetensors> to change it.";
                 return false;
             }
 

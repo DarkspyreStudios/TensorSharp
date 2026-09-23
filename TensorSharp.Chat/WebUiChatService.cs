@@ -795,7 +795,8 @@ namespace TensorSharp.Chat
                         pageCount = pdf.PageCount,
                         textContent = "",
                         warning = $"\"{originalFileName}\" has no selectable text — it looks scanned or image-only. " +
-                                  "To analyze it, run the server with a vision-capable model and its projector (--mmproj <projector.gguf>).",
+                                  "To analyze it, run the server with a vision-capable model and its projector " +
+                                  "(--mmproj <projector.gguf|vision.safetensors>).",
                     }, storedFiles);
                 }
 
@@ -1980,6 +1981,13 @@ namespace TensorSharp.Chat
             // a host-owned tool. That case is decided after the tool plan and staging
             // below; the image channel is removed before generation, so the model is
             // never allowed to pretend that it saw pixels directly.
+            //
+            // A diffusion checkpoint is not automatically blind: DiffusionGemma carries
+            // the gemma4v tower, so once a projector is loaded `visionReady` is true and
+            // the image goes through the denoising path like any other input. The
+            // IsDiffusionModel arm below stays only to keep a diffusion family that
+            // declares NO vision capability from falling into the staged-file branch,
+            // which has no tool loop to read the file back.
             if (hasImageInputs && !visionReady &&
                 (acceptsProjector || _svc.IsDiffusionModel))
             {
@@ -2544,10 +2552,22 @@ namespace TensorSharp.Chat
                 chatSession.Id, turnPromptTokens, 0);
         }
 
+        /// <summary>
+        /// Refuse image input, saying WHY and naming the one flag that fixes it.
+        ///
+        /// <para>The two cases are genuinely different and must not share wording. A
+        /// projector-capable checkpoint (Gemma 4, Qwen-VL, DiffusionGemma, …) is merely
+        /// loaded without its tower, and <c>--mmproj</c> fixes it — for the Gemma 4
+        /// family that flag now takes an mmproj GGUF <em>or</em> a HuggingFace
+        /// <c>.safetensors</c> vision shard, which is the only form published for
+        /// diffusiongemma-26B-A4B-it. A model with no vision path at all cannot be
+        /// fixed by any file, so it is told about the staged-file route instead.</para>
+        /// </summary>
         private void RejectImageInput(ILogger logger, bool acceptsProjector)
         {
             string error = acceptsProjector
-                ? "This model is loaded without its image projector. Load the matching vision projector, then retry."
+                ? "This model is loaded without its image projector. Restart with " +
+                  "--mmproj <projector.gguf|vision.safetensors> pointing at the matching vision tower, then retry."
                 : "The loaded model cannot directly analyze this image. Load a vision-capable model and its image projector. File-conversion workflows also require an uploaded attachment and a host file tool.";
             logger.LogWarning(LogEventIds.HttpRequestRejected,
                 "/api/chat rejected: image input was supplied but vision is not ready " +

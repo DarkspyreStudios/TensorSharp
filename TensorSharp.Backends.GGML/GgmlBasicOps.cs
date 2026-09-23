@@ -1294,6 +1294,10 @@ namespace TensorSharp.GGML
         /// (each a host<->device round-trip) with one. Weights are F32. <paramref name="clamps"/>
         /// is a 28-float array {q,k,v,out,gate,up,down} x {inMin,inMax,outMin,outMax}
         /// (a |bound| >= 3e38 disables clamping on that side).
+        /// <paramref name="posX"/>/<paramref name="posY"/> are the per-patch grid indices
+        /// (one int per patch); the kernel derives the 2D rope angles from them and
+        /// <paramref name="ropeTheta"/> on-device via ggml_rope_ext, so no cos/sin table
+        /// is uploaded.
         /// </summary>
         public static unsafe void FusedGemma4VisionBlock(
             Tensor hidden, float eps,
@@ -1301,7 +1305,7 @@ namespace TensorSharp.GGML
             Tensor qW, Tensor kW, Tensor vW,
             Tensor qNormW, Tensor kNormW, Tensor attnPostNormW,
             Tensor outW,
-            float[] cosX, float[] sinX, float[] cosY, float[] sinY,
+            int[] posX, int[] posY, float ropeTheta,
             Tensor ln2W,
             Tensor gateW, Tensor upW, Tensor downW,
             Tensor ffnPostNormW,
@@ -1336,7 +1340,8 @@ namespace TensorSharp.GGML
             IntPtr ln2Ptr = GetBufferStart(ln2W);
             IntPtr fpnPtr = GetBufferStart(ffnPostNormW);
 
-            fixed (float* cxPtr = cosX, sxPtr = sinX, cyPtr = cosY, syPtr = sinY, clPtr = clamps)
+            fixed (int* pxPtr = posX, pyPtr = posY)
+            fixed (float* clPtr = clamps)
             {
                 GgmlNative.FusedGemma4VisionBlock(hiddenView, eps, ln1Ptr,
                     qPtr, qNe0, qNe1, qBytes,
@@ -1344,7 +1349,7 @@ namespace TensorSharp.GGML
                     vPtr, vNe0, vNe1, vBytes,
                     qNormPtr, kNormPtr, apnPtr,
                     oPtr, oNe0, oNe1, oBytes,
-                    (IntPtr)cxPtr, (IntPtr)sxPtr, (IntPtr)cyPtr, (IntPtr)syPtr,
+                    (IntPtr)pxPtr, (IntPtr)pyPtr, ropeTheta,
                     ln2Ptr,
                     gPtr, gNe0, gNe1, gBytes,
                     uPtr, uNe0, uNe1, uBytes,
@@ -1543,6 +1548,19 @@ namespace TensorSharp.GGML
             => GgmlNative.SetNativeEnvironmentVariable(name, value, overwrite);
         public static void ReleaseReuseComputeBuffers() => GgmlNative.ReleaseReuseComputeBuffers();
         public static void InvalidateHostBuffer(IntPtr ptr) => GgmlNative.InvalidateHostBuffer(ptr);
+
+        /// <summary>
+        /// Drop any cached GGML device binding held against <paramref name="tensor"/>'s host
+        /// buffer — a device copy, or a zero-copy wrapper around these exact host pages. Call
+        /// this BEFORE freeing a tensor the native ops may have bound, otherwise the mapping
+        /// outlives the memory and the next owner of those pages inherits a live GPU view of it.
+        /// </summary>
+        public static void InvalidateTensorHostBuffer(Tensor tensor)
+        {
+            if (tensor == null)
+                return;
+            GgmlNative.InvalidateHostBuffer(GetBufferStart(tensor));
+        }
         public static long DeviceCopyCacheResidentBytes() => GgmlNative.DeviceCopyCacheResidentBytes();
         public static bool TryGetBackendMemory(out long freeBytes, out long totalBytes) => GgmlNative.TryGetBackendMemory(out freeBytes, out totalBytes);
         /// <summary>True once a GPU command buffer has failed in this process; see
