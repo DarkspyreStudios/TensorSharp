@@ -370,7 +370,8 @@ public sealed class OllamaAdapter
         var skillPlan = SkillRequestPlan.Create(
             _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), ollamaTools,
             _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills, codeRunner: _codeRunner,
-            workspace: workspaceLease?.Workspace, logger: ollamaLogger);
+            workspace: workspaceLease?.Workspace, logger: ollamaLogger,
+            multiAgent: SkillSelectionParser.ParseMultiAgent(body));
 
         if (unknownSkills.Count > 0)
         {

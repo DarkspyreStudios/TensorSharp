@@ -67,6 +67,7 @@ namespace TensorSharp.Server.ResponseSerializers
         public static object SkillStep(SkillToolInvocation invocation) => new
         {
             skill_step = invocation.Tool,
+            agent_id = invocation.AgentId,
             skill = invocation.SkillId,
             detail = invocation.ResourcePath,
             ok = invocation.Ok,

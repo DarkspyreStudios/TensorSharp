@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Extensions.Logging;
 using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Server.Hosting;
 
@@ -93,6 +94,9 @@ namespace TensorSharp.Server.Skills
         /// UI drains this to stream a trace; the audit log reports it at the end.
         /// </summary>
         public List<SkillToolInvocation> Invocations { get; } = new();
+
+        internal MultiAgentOptions? MultiAgent { get; private set; }
+        internal MultiAgentSession? Agents { get; set; }
 
         /// <summary>
         /// Optional, host-owned proof that a routed workflow produced its promised
@@ -230,6 +234,49 @@ namespace TensorSharp.Server.Skills
         /// together with <paramref name="workspace"/>.
         /// </param>
         public static SkillRequestPlan Create(
+            SkillRegistry registry,
+            IReadOnlyList<string>? requestedSkills,
+            bool? discovery,
+            List<ToolFunction>? clientTools,
+            string architecture,
+            int contextTokens,
+            ServerHostingOptions options,
+            out IReadOnlyList<string> unknown,
+            bool allowTools = true,
+            ICodeRunner? codeRunner = null,
+            IReadOnlyList<CodeInputFile>? codeInputFiles = null,
+            SessionWorkspace? workspace = null,
+            WorkspaceFileCapture? captureProducedFiles = null,
+            ILogger? logger = null,
+            bool? multiAgent = null)
+        {
+            SkillRequestPlan plan = CreateCore(registry, requestedSkills, discovery, clientTools,
+                architecture, contextTokens, options, out unknown, allowTools, codeRunner,
+                codeInputFiles, workspace, captureProducedFiles, logger);
+            if (unknown.Count > 0 || !allowTools || multiAgent == false
+                || options?.MultiAgent is not { Enabled: true } agents
+                || !SkillCapabilities.For(architecture).ToolsRendered)
+                return plan;
+
+            // Delegation is independent of the skills catalogue and code execution.
+            // It adds no filesystem or network permissions to this request.
+            plan ??= new SkillRequestPlan(SkillPlan.Empty, Array.Empty<Skill>(),
+                new SkillToolContext(Array.Empty<Skill>())
+                {
+                    Workspace = workspace,
+                    CodeInputFiles = codeInputFiles ?? Array.Empty<CodeInputFile>(),
+                },
+                clientTools == null ? new List<ToolFunction>() : new List<ToolFunction>(clientTools),
+                new SkillAgentLoopOptions { MaxRounds = RoundsFor(options, false),
+                    ToolResultsAreRendered = SkillCapabilities.For(architecture).ToolResultsRendered },
+                toolsOffered: true, clientTools);
+            List<ToolFunction> merged = MultiAgentTools.Merge(plan.Tools);
+            plan = new SkillRequestPlan(plan.Prompt, plan.Selected, plan.ToolContext, merged,
+                plan.LoopOptions, plan.ToolsOffered, plan.ClientTools) { MultiAgent = agents };
+            return plan;
+        }
+
+        private static SkillRequestPlan CreateCore(
             SkillRegistry registry,
             IReadOnlyList<string>? requestedSkills,
             bool? discovery,

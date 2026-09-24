@@ -41,6 +41,19 @@ namespace TensorSharp.Server.RequestParsers
         /// <summary>The request field overriding whether unselected skills are advertised.</summary>
         public const string DiscoveryField = "skills_discovery";
 
+        /// <summary>A request may suppress delegation but cannot expand host permissions.</summary>
+        public static bool? ParseMultiAgent(JsonElement body)
+        {
+            if (body.ValueKind != JsonValueKind.Object
+                || !body.TryGetProperty("multi_agent", out JsonElement value)) return null;
+            return value.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => null,
+            };
+        }
+
         /// <summary>
         /// Read the selection.
         /// </summary>

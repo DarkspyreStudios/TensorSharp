@@ -22,6 +22,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using TensorSharp.Runtime.Scheduling;
 using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Server.ProtocolAdapters;
 
@@ -126,7 +127,9 @@ namespace TensorSharp.Server.Skills
                 var content = new StringBuilder();
                 var thinking = new StringBuilder();
                 var calls = new List<ToolCall>();
-                var heldAnswer = guardCompletion ? new List<ChatStreamUpdate>() : null;
+                bool holdForAgents = plan.Agents?.HasPendingResults("/root") == true;
+                bool holdAnswer = guardCompletion || holdForAgents;
+                var heldAnswer = holdAnswer ? new List<ChatStreamUpdate>() : null;
                 ChatStreamUpdate terminal = default;
                 string toolBeingWritten = null;
                 // The last few kilobytes of the RAW stream, tool markup included. When
@@ -161,7 +164,7 @@ namespace TensorSharp.Server.Skills
                     // only content still leaks the very false claim this guard rejects.
                     // A tool call does not stream as an answer either; it is ours to
                     // answer or the caller's to service.
-                    if (guardCompletion)
+                    if (holdAnswer)
                     {
                         if (!string.IsNullOrEmpty(delta.Content) || !string.IsNullOrEmpty(delta.Thinking))
                             heldAnswer.Add(ChatStreamUpdate.Parsed(delta.Content, delta.Thinking, null));
@@ -189,7 +192,7 @@ namespace TensorSharp.Server.Skills
 
                 ParsedOutput flushed = parser.Add(string.Empty, true);
                 Accumulate(flushed, content, thinking, calls);
-                if (guardCompletion)
+                if (holdAnswer)
                 {
                     if (!string.IsNullOrEmpty(flushed.Content) || !string.IsNullOrEmpty(flushed.Thinking))
                         heldAnswer.Add(ChatStreamUpdate.Parsed(flushed.Content, flushed.Thinking, null));
@@ -272,6 +275,31 @@ namespace TensorSharp.Server.Skills
 
                 if (skillCalls.Count == 0 && unknownCalls.Count == 0)
                 {
+                    if (clientCalls.Count == 0 && plan.Agents?.HasPendingResults("/root") == true)
+                    {
+                        // Do not expose a premature final answer. Results remain
+                        // unobserved even after a child finishes until the parent
+                        // explicitly waits, or this finalization barrier gathers them.
+                        // Preserve the parent's useful work and exact generation
+                        // boundary for synthesis and KV continuation. Only its public
+                        // delivery is deferred; discarding the turn would make the
+                        // parent repeat its independent analysis after the join.
+                        working.Add(new ChatMessage
+                        {
+                            Role = "assistant",
+                            Content = content.ToString(),
+                            Thinking = thinking.Length == 0 ? null : thinking.ToString(),
+                            RawOutputTokens = terminal.RawOutputTokens == null
+                                ? null : new List<int>(terminal.RawOutputTokens),
+                            RawPromptTrailingWhitespace = terminal.RawPromptTrailingWhitespace,
+                            RawGenerationSuffix = terminal.RawGenerationSuffix,
+                        });
+                        await foreach (ChatStreamUpdate progress in CollectAgentResultsAsync(
+                            plan, working, cancellationToken).ConfigureAwait(false)) yield return progress;
+                        continue;
+                    }
+                    if (holdForAgents && !guardCompletion)
+                        foreach (ChatStreamUpdate held in heldAnswer) yield return held;
                     if (guardCompletion && clientCalls.Count == 0)
                     {
                         WorkspaceArtifactCompletionResult completion =
@@ -318,6 +346,9 @@ namespace TensorSharp.Server.Skills
                     yield return Combine(terminal, promptTokens, evalTokens, reusedTokens, promptNs, evalNs, totalNs);
                     yield break;
                 }
+
+                if (holdForAgents && !guardCompletion)
+                    foreach (ChatStreamUpdate held in heldAnswer) yield return held;
 
                 working.Add(new ChatMessage
                 {
@@ -378,6 +409,8 @@ namespace TensorSharp.Server.Skills
                 // generated response cannot undo or duplicate the completed work.
                 if (plan.VerifiedArtifact is { } completedArtifact)
                 {
+                    if (plan.Agents?.HasPendingResults("/root") == true)
+                        await plan.Agents.CollectResultsAsync("/root", cancellationToken).ConfigureAwait(false);
                     yield return ChatStreamUpdate.Parsed(
                         DescribeCompletedArtifact(completedArtifact), null, null);
                     yield return Combine(
@@ -394,6 +427,11 @@ namespace TensorSharp.Server.Skills
             logger?.LogWarning(LogEventIds.SkillLoopCapped,
                 "skills.loop.capped rounds={Rounds} skills={Skills}", maxRounds, plan.DescribeSelection());
 
+            if (plan.Agents?.HasPendingResults("/root") == true)
+            {
+                await foreach (ChatStreamUpdate progress in CollectAgentResultsAsync(
+                    plan, working, cancellationToken).ConfigureAwait(false)) yield return progress;
+            }
             working.Add(BuildResult(plan,
                 "Error: the limit on tool calls for this turn has been reached. Answer now using what you have "
                 + "already read, and say which part you could not check."));
@@ -763,6 +801,27 @@ namespace TensorSharp.Server.Skills
                 finishReason: "stop") with { RepetitionExplained = correctionLooped };
         }
 
+        private static async IAsyncEnumerable<ChatStreamUpdate> CollectAgentResultsAsync(
+            SkillRequestPlan plan, List<ChatMessage> working,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var elapsed = Stopwatch.StartNew();
+            yield return ChatStreamUpdate.ToolProgress("running", MultiAgentTools.Wait);
+            Task<string> collection = plan.Agents.CollectResultsAsync("/root", cancellationToken);
+            while (await Task.WhenAny(collection, Task.Delay(1000, cancellationToken)).ConfigureAwait(false) != collection)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return ChatStreamUpdate.ToolProgress("running", MultiAgentTools.Wait,
+                    seconds: elapsed.Elapsed.TotalSeconds);
+            }
+            string reports = await collection.ConfigureAwait(false);
+            working.Add(new ChatMessage { Role = "user", Content =
+                "Host: integrate these completed subagent reports before giving your final answer. "
+                + "Check their claims against the task and resolve any conflicts.\n" + reports });
+            yield return ChatStreamUpdate.ToolProgress("finished", MultiAgentTools.Wait,
+                seconds: elapsed.Elapsed.TotalSeconds);
+        }
+
         private static string DescribeCompletedArtifact(SkillProducedFile artifact) =>
             "The requested PowerPoint report is ready: "
             + $"[Download the .pptx report]({artifact.Url}).";
@@ -825,10 +884,16 @@ namespace TensorSharp.Server.Skills
                     workspaceOperation = plan.ToolContext?.Workspace?.BeginOperation();
                     try
                     {
-                        execution = Task.Run(() =>
+                        execution = Task.Run(async () =>
                         {
                             using (workspaceOperation)
+                            {
+                                if (plan.Agents != null)
+                                    return MultiAgentTools.IsTool(call.Name)
+                                        ? await plan.Agents.ExecuteAsync(call, cancellationToken: cancellationToken).ConfigureAwait(false)
+                                        : await plan.Agents.ExecuteHostToolAsync(call, cancellationToken, liveOutput.Add).ConfigureAwait(false);
                                 return SkillTools.Execute(call, plan.ToolContext, liveOutput.Add);
+                            }
                         });
                     }
                     catch

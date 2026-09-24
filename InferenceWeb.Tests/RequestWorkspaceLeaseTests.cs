@@ -95,7 +95,7 @@ public sealed class RequestWorkspaceLeaseTests : IDisposable
                 SkillToolNames.WriteFile,
                 SkillToolNames.Shell,
             },
-            plan.Tools.Select(tool => tool.Name));
+            plan.Tools.Where(tool => SkillToolNames.IsCodeTool(tool.Name)).Select(tool => tool.Name));
         Assert.Contains(CodePrompt.Heading, plan.Prompt.Instructions, StringComparison.Ordinal);
         Assert.Contains("Never rewrite a whole file", plan.Prompt.Instructions, StringComparison.Ordinal);
     }

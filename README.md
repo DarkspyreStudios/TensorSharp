@@ -34,7 +34,7 @@ Backend, modality, feature support, and validation coverage vary by model. See t
 - **Local, native .NET inference.** Run GGUF text and multimodal models from the CLI, browser UI, or Ollama/OpenAI-compatible APIs.
 - **Broad model and media support.** Current source covers modern text models, vision/audio input, PDF, image generation/editing, and video generation; see the [model cards](docs/models/README.md).
 - **Measured performance.** TensorSharp is benchmarked against `llama.cpp` on identical models and hardware. Results are specific to the measured model, backend, and workload. See the [benchmark report](docs/engine_comparison_report.md).
-- **Agentic work, including iOS.** `TensorSharp.AgentHost` adds bounded Agent Skills and code tools. [TensorAgent](TensorAgent/README.md) brings the same local chat and agent experience to iPhone and iPad using the iOS `ggml_metal` backend.
+- **Agentic work, including iOS.** `TensorSharp.AgentHost` adds bounded Agent Skills, code tools, and [automatic subagent delegation](docs/multi_agent.md) with independent contexts and read-only defaults. [TensorAgent](TensorAgent/README.md) brings the same local chat and agent experience to iPhone and iPad using the iOS `ggml_metal` backend.
 - **Production-friendly building blocks.** Continuous batching, paged/prefix-shared KV cache, speculative decoding, tensor parallelism, and configurable security boundaries are available when you need them. See [Features](FEATURES.md), [Usage](USAGE.md), and the [current project status](docs/PROJECT_STATUS.md).
 
 The detailed implementation notes and historical benchmark claims have moved to the linked documentation so this page stays useful as a starting point.
@@ -288,6 +288,7 @@ New here? The sections above are all you need to get running. Everything else is
 | [Per-model architecture cards](docs/models/README.md) | End-to-end docs of each architecture (forward graph, components, parameters, prefill/decode optimizations) |
 | [Paged attention & continuous batching](docs/PAGED_ATTENTION_AND_CONTINUOUS_BATCHING.md) | The vLLM-style paged KV cache, prefix sharing, and iteration-level scheduler |
 | [Agent Skills & agentic work](docs/agent_skills.md) | The `SKILL.md` format, progressive disclosure and its budget, the in-process tool loop, sandboxed code execution, workspaces and artifacts, the path/ZIP/exec security model, and the HTTP + C# surfaces |
+| [Multiple agents](docs/multi_agent.md) | Automatic task delegation, isolated child contexts, concurrency and permission limits, server controls, and reproducible evaluation |
 | [Speculative decoding](docs/speculative_decoding.md) | The three-layer design (model adapter / algorithm / speculator weights), the shipped `auto` / `draft-head` / `block` / `ngram` algorithms, and what to write to add a new one |
 | [Environment variable feature matrix](docs/env_var_feature_matrix.md) | Which high-impact runtime flags affect which models, backends, and prompt types |
 | [Engine comparison report](docs/engine_comparison_report.md) | Full per-scenario TensorSharp vs llama.cpp / stable-diffusion.cpp tables |
@@ -305,7 +306,7 @@ Actively developed, and the source tree runs ahead of the published packages. Th
 | Inference hosts | CLI, interactive REPL, ASP.NET Core Web UI, Ollama-style API, OpenAI Chat Completions and Responses APIs, and the TensorAgent iOS/iPadOS app. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS, MLX Metal, and GGML CPU/Metal/CUDA/Vulkan, with per-architecture exceptions. |
 | Serving features | Continuous batching over a paged, prefix-shared KV cache; speculative decoding; single- and multi-node tensor parallelism; structured output; tool calling. |
-| Agentic work | Agent Skills and an optional bounded in-process tool loop (`--code-exec`) for sandboxed file and shell work. Both off by default. |
+| Agentic work | Agent Skills and optional sandboxed file/shell tools (`--code-exec`), plus bounded automatic subagents on supported server chat paths (`--no-multi-agent` disables delegation). Subagents are read-only by default. |
 
 Per-area detail — which architecture runs on which backend, which features each family supports, and the known limits — is in the [status matrix](docs/PROJECT_STATUS.md#status-matrix).
 

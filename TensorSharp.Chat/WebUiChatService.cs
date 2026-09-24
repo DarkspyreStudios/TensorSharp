@@ -2031,7 +2031,8 @@ namespace TensorSharp.Chat
                 codeInputFiles: codeInputFiles,
                 workspace: workspace,
                 captureProducedFiles: ScriptFileCapture(),
-                logger: webUiLogger);
+                logger: webUiLogger,
+                multiAgent: SkillSelectionParser.ParseMultiAgent(body));
 
             if (unknownSkills.Count > 0)
             {

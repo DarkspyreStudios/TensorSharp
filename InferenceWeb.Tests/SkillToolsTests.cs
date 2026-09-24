@@ -121,9 +121,7 @@ public class SkillToolsTests : IDisposable
     {
         ToolFunction list = SkillTools.BuiltIn().Single(t => t.Name == SkillTools.ListToolName);
 
-        // Parameters and Required must be empty TOGETHER: the Jinja rendering path
-        // marks every parameter required when Required is empty, so a tool with
-        // optional-only arguments is misdeclared there.
+        // Listing takes no arguments, including optional ones.
         Assert.Empty(list.Parameters);
         Assert.Empty(list.Required);
     }

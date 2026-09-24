@@ -16,6 +16,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using TensorSharp.Runtime;
+using TensorSharp.AgentHost.Agents;
 namespace TensorSharp.AgentHost.Skills
 {
     /// <summary>
@@ -37,6 +38,9 @@ namespace TensorSharp.AgentHost.Skills
     /// </param>
     public readonly record struct SkillTurnOutput(ParsedOutput Parsed, IReadOnlyList<int>? RawTokens = null)
     {
+        /// <summary>Host or endpoint termination reason. Child orchestration rejects
+        /// truncated/aborted output before executing any tool calls from it.</summary>
+        public string? FinishReason { get; init; }
         /// <summary>
         /// Exact trailing whitespace of the rendered generation prompt that preceded
         /// <see cref="RawTokens"/>. Empty is a known boundary with no whitespace;
@@ -67,6 +71,12 @@ namespace TensorSharp.AgentHost.Skills
     /// <summary>Bounds on the loop.</summary>
     public sealed class SkillAgentLoopOptions
     {
+        /// <summary>Optional model-driven delegation. Requires a child generator factory;
+        /// a stateful parent callback is never implicitly shared across agents.</summary>
+        public MultiAgentOptions? MultiAgent { get; init; }
+        public Func<string, SkillTurnGenerator>? SubagentGeneratorFactory { get; init; }
+        internal MultiAgentSession? AgentSession { get; init; }
+        internal string AgentId { get; init; } = MultiAgentSession.RootId;
         /// <summary>
         /// How many times the model may fetch skill content before it must answer.
         ///
@@ -126,6 +136,17 @@ namespace TensorSharp.AgentHost.Skills
             ToolResultsAreRendered = ToolResultsAreRendered,
             OnInvocation = OnInvocation,
             ClientTools = clientTools,
+            MultiAgent = MultiAgent,
+            SubagentGeneratorFactory = SubagentGeneratorFactory,
+            AgentSession = AgentSession,
+            AgentId = AgentId,
+        };
+
+        internal SkillAgentLoopOptions WithAgentSession(MultiAgentSession session) => new()
+        {
+            MaxRounds = MaxRounds, MaxCallsPerRound = MaxCallsPerRound,
+            ToolResultsAreRendered = ToolResultsAreRendered, OnInvocation = OnInvocation,
+            ClientTools = ClientTools, AgentSession = session, AgentId = AgentId,
         };
 
         /// <summary>Defaults.</summary>
@@ -147,6 +168,8 @@ namespace TensorSharp.AgentHost.Skills
         bool Ok,
         int ResultBytes)
     {
+        /// <summary>Agent responsible for this invocation; child callbacks may occur concurrently.</summary>
+        public string AgentId { get; init; } = MultiAgentSession.RootId;
         /// <summary>
         /// Files a <c>shell</c> call produced and kept, so a UI streaming this trace
         /// can offer the downloads itself rather than hoping the model's answer repeats
@@ -228,6 +251,17 @@ namespace TensorSharp.AgentHost.Skills
             ArgumentNullException.ThrowIfNull(generate);
             options ??= SkillAgentLoopOptions.Default;
 
+            if (options.AgentSession == null && options.MultiAgent?.Enabled == true)
+            {
+                if (options.SubagentGeneratorFactory == null)
+                    throw new ArgumentException("Multi-agent execution requires an independent SubagentGeneratorFactory.", nameof(options));
+                await using var session = new MultiAgentSession(messages, tools, context,
+                    options.SubagentGeneratorFactory, options.MultiAgent, options, cancellationToken);
+                return await RunAsync(MultiAgentPrompt.Apply(messages, options.MultiAgent),
+                    MultiAgentTools.Merge(tools), context, generate,
+                    options.WithAgentSession(session), cancellationToken).ConfigureAwait(false);
+            }
+
             var working = new List<ChatMessage>(messages.Count + 8);
             foreach (ChatMessage message in messages)
                 working.Add(message);
@@ -240,6 +274,7 @@ namespace TensorSharp.AgentHost.Skills
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 output = await generate(working, tools, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 List<ToolCall> calls = output.Parsed?.ToolCalls ?? new List<ToolCall>();
 
@@ -255,6 +290,23 @@ namespace TensorSharp.AgentHost.Skills
 
                 if (skillCalls.Count == 0 && unknownCalls.Count == 0)
                 {
+                    if (clientCalls.Count == 0 && options.AgentSession?.HasPendingResults(options.AgentId) == true)
+                    {
+                        // Keep the parent's useful work and exact generation boundary
+                        // while withholding this provisional answer until synthesis.
+                        working.Add(new ChatMessage
+                        {
+                            Role = "assistant",
+                            Content = output.Parsed?.Content ?? string.Empty,
+                            Thinking = string.IsNullOrEmpty(output.Parsed?.Thinking) ? null : output.Parsed!.Thinking,
+                            RawOutputTokens = output.RawTokens != null ? new List<int>(output.RawTokens) : null,
+                            RawPromptTrailingWhitespace = output.RawPromptTrailingWhitespace,
+                            RawGenerationSuffix = output.RawGenerationSuffix,
+                        });
+                        working.Add(new ChatMessage { Role = "user", Content = await options.AgentSession
+                            .CollectResultsAsync(options.AgentId, cancellationToken).ConfigureAwait(false) });
+                        continue;
+                    }
                     return new SkillLoopResult(
                         output, working, round, invocations, HitRoundLimit: false, clientCalls);
                 }
@@ -275,7 +327,8 @@ namespace TensorSharp.AgentHost.Skills
                 foreach (ToolCall unknownCall in unknownCalls)
                 {
                     var unknownInvocation = new SkillToolInvocation(
-                        round, unknownCall.Name ?? string.Empty, null, null, Ok: false, ResultBytes: 0);
+                        round, unknownCall.Name ?? string.Empty, null, null, Ok: false, ResultBytes: 0)
+                    { AgentId = options.AgentId };
                     invocations.Add(unknownInvocation);
                     options.OnInvocation?.Invoke(unknownInvocation);
                     working.Add(BuildResultMessage(
@@ -303,13 +356,24 @@ namespace TensorSharp.AgentHost.Skills
                         continue;
                     }
 
-                    SkillToolResult result = SkillTools.Execute(call, context);
+                    SkillToolResult result;
+                    if (MultiAgentTools.IsTool(call.Name))
+                    {
+                        result = options.AgentSession == null
+                            ? new SkillToolResult(false, "Error: multi-agent delegation is not enabled for this turn.", null, null)
+                            : await options.AgentSession.ExecuteAsync(call, options.AgentId, cancellationToken).ConfigureAwait(false);
+                    }
+                    else if (options.AgentSession != null)
+                    {
+                        result = await options.AgentSession.ExecuteHostToolAsync(call, options.AgentId, cancellationToken).ConfigureAwait(false);
+                    }
+                    else result = SkillTools.Execute(call, context);
                     executed++;
 
                     var invocation = new SkillToolInvocation(
                         round, call.Name ?? string.Empty, result.SkillId, result.ResourcePath,
                         result.Ok, result.Content?.Length ?? 0)
-                    { Files = result.Files };
+                    { Files = result.Files, AgentId = options.AgentId };
                     invocations.Add(invocation);
                     options.OnInvocation?.Invoke(invocation);
 
@@ -333,8 +397,13 @@ namespace TensorSharp.AgentHost.Skills
                 "Error: the limit on tool calls for this turn has been reached. "
                 + "Answer now using what you have already read, and say which part you could not check."));
 
+            if (options.AgentSession?.HasPendingResults(options.AgentId) == true)
+                working.Add(new ChatMessage { Role = "user", Content = await options.AgentSession
+                    .CollectResultsAsync(options.AgentId, cancellationToken).ConfigureAwait(false) });
+
             cancellationToken.ThrowIfCancellationRequested();
             output = await generate(working, tools, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
 
             // Only the caller's OWN tools may ride back out: there is no round left in
             // which the model could recover from a name nobody declared.

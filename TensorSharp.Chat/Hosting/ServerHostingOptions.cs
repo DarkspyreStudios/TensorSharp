@@ -10,6 +10,7 @@
 
 using System;
 using TensorSharp.AgentHost.Skills;
+using TensorSharp.AgentHost.Agents;
 using System.Collections.Generic;
 
 namespace TensorSharp.Server.Hosting
@@ -67,8 +68,11 @@ namespace TensorSharp.Server.Hosting
             string? prefixCacheDirectory = null,
             bool embeddingsEnabled = false,
             int embeddingThreads = 0,
-            int embeddingContextSize = 0)
+            int embeddingContextSize = 0,
+            MultiAgentOptions? multiAgent = null)
         {
+            MultiAgent = multiAgent ?? new MultiAgentOptions();
+            MultiAgent.Validate();
             EmbeddingsEnabled = embeddingsEnabled;
             EmbeddingThreads = embeddingThreads;
             EmbeddingContextSize = embeddingContextSize;
@@ -116,6 +120,9 @@ namespace TensorSharp.Server.Hosting
         /// <see cref="DefaultListenUrls"/>. Never null or empty.
         /// </summary>
         public string ListenUrls { get; }
+
+        /// <summary>Bounds for model-selected delegation. Disable to retain a single agent.</summary>
+        public MultiAgentOptions MultiAgent { get; }
 
         /// <summary>Host an embedding encoder instead of a chat/generation model.</summary>
         public bool EmbeddingsEnabled { get; }

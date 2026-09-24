@@ -226,7 +226,8 @@ public sealed partial class OpenAIChatAdapter
             _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), openaiTools,
             _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
             allowTools: responseFormat == null && !toolsDisabled, codeRunner: _codeRunner,
-            workspace: workspaceLease?.Workspace, logger: openaiLogger);
+            workspace: workspaceLease?.Workspace, logger: openaiLogger,
+            multiAgent: SkillSelectionParser.ParseMultiAgent(body));
 
         if (unknownSkills.Count > 0)
         {
