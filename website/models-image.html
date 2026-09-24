@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Image Generation &amp; Editing — TensorSharp Wiki</title>
-  <meta name="description" content="Qwen-Image-Edit: download and run the MMDiT image editor, and the Lightning LoRA and DiT cache that make it fast.">
+  <meta name="description" content="Qwen-Image-2.1: download and run text-to-image generation and reference-image editing, with its defaults and the settings that decide how long an image takes.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,42 +16,66 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index.html">Home</a> › <a href="models.html">Supported Models</a> › Image Generation &amp; Editing</div>
   <h1>Image Generation &amp; Editing</h1>
-  <p class="lede">Qwen-Image-Edit takes a prompt plus an input image and returns an edited image. This page covers the download, the run recipe, and the two levers that decide how long an edit takes.</p>
+  <p class="lede">Qwen-Image-2.1 turns a prompt into an image, or a prompt plus one or more reference images into an edited image. This page covers the download, the run recipe, the defaults, and the settings that decide how long an image takes.</p>
   <div class="callout note"><div class="ic">💡</div><p>These commands follow the same conventions as the text-model recipes — the Hugging Face CLI, a source build from the repository root, and <code>--backend</code> swapped to match your hardware. See <a href="models-text.html#download-run">Download &amp; run, per family</a>.</p></div>
 
-  <h2 id="qwen-image-edit">Qwen-Image-Edit (image + prompt → edited image)</h2>
-  <pre data-lang="bash"><code>hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
-hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
-hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf --local-dir models
-hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF mmproj-BF16.gguf --local-dir models
-hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
+  <h2 id="qwen-image-21">Qwen-Image-2.1 (prompt → image, prompt + image → edited image)</h2>
+  <p>The shortest route is the ready-made <code>config/qwen-image-2.1.json</code>. It pins repository revisions and SHA-256 checksums and downloads whatever is missing — four files, about 10.29 GiB — into <code>$TENSORSHARP_MODELS/qwen-image-2.1/</code>, or <code>models/qwen-image-2.1/</code> in the repository when <code>TENSORSHARP_MODELS</code> is unset. The configuration selects <code>ggml_metal</code>; on an NVIDIA machine with the CUDA backend built, append <code>--backend ggml_cuda</code>, and the native CPU backend is <code>ggml_cpu</code>.</p>
+  <pre data-lang="bash"><code>dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release
+dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png \
-    --prompt "Make the sky a dramatic sunset." --output edited.png \
-    --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
-    --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
-    --qwen-image-mmproj models/mmproj-BF16.gguf \
-    --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
-    --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf \
-    --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors \
-    --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf \
-    --qwen-image-mmproj models/mmproj-BF16.gguf \
-    --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors \
+# Text-to-image
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output generated.png
+
+# Image editing
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image generated.png \
+  --prompt 'Change the blue vase to a red vase. Preserve the cat, lighting and composition.' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output edited.png
+
+# Server + Web UI
+dotnet run --project TensorSharp.Server.Host -c Release --no-build -- \
+  --config config/qwen-image-2.1.json --host 127.0.0.1 --port 5000</code></pre>
+  <p>To fetch the four files yourself instead, pass the companions explicitly:</p>
+  <pre data-lang="bash"><code>hf download Abiray/Qwen-Image-2.1-GGUF qwen_image_2.1_Q4_K_M.gguf --local-dir models
+hf download Comfy-Org/Qwen-Image-2.1 vae/qwen_image_2.1_vae_bf16.safetensors --local-dir models
+hf download Qwen/Qwen3-VL-8B-Instruct-GGUF Qwen3VL-8B-Instruct-Q4_K_M.gguf mmproj-Qwen3VL-8B-Instruct-F16.gguf --local-dir models
+
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf \
+    --qwen-image-vae models/vae/qwen_image_2.1_vae_bf16.safetensors \
+    --qwen-image-vl models/Qwen3VL-8B-Instruct-Q4_K_M.gguf \
+    --qwen-image-mmproj models/mmproj-Qwen3VL-8B-Instruct-F16.gguf \
     --backend ggml_cuda</code></pre>
+  <div class="table-scroll">
+  <table>
+    <thead><tr><th>Component</th><th>File</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td>Diffusion transformer</td><td><code>qwen_image_2.1_Q4_K_M.gguf</code></td><td><a href="https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF" target="_blank" rel="noopener">Abiray/Qwen-Image-2.1-GGUF</a></td></tr>
+      <tr><td>Dedicated VAE</td><td><code>qwen_image_2.1_vae_bf16.safetensors</code></td><td><a href="https://huggingface.co/Comfy-Org/Qwen-Image-2.1/tree/main/vae" target="_blank" rel="noopener">Comfy-Org/Qwen-Image-2.1</a></td></tr>
+      <tr><td>Text encoder</td><td><code>Qwen3VL-8B-Instruct-Q4_K_M.gguf</code></td><td><a href="https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF" target="_blank" rel="noopener">Qwen/Qwen3-VL-8B-Instruct-GGUF</a></td></tr>
+      <tr><td>Vision encoder for editing</td><td><code>mmproj-Qwen3VL-8B-Instruct-F16.gguf</code></td><td>Same Qwen3-VL repository</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The download size is not peak inference memory: runtime memory also includes activations, decoding buffers and working weights, and larger images and multiple references increase it.</p>
 
-  <h2 id="imageedit">Image editing (Qwen-Image-Edit)</h2>
-  <p>Qwen-Image-Edit takes a <strong>prompt + an input image</strong> and returns an edited image — a different output modality from the text LLMs above. The loaded <code>qwen_image</code> GGUF is only the MMDiT (multimodal diffusion transformer); TensorSharp resolves two companion GGUFs alongside it:</p>
+  <h2 id="imagegen">Image generation &amp; editing (Qwen-Image-2.1)</h2>
+  <p>The loaded <code>qwen_image</code> GGUF is the Qwen-Image-2.1 diffusion transformer. TensorSharp resolves its companions next to it — the dedicated 2.1 VAE, the Qwen3-VL-8B text encoder and, for editing, the Qwen3-VL <code>mmproj</code> vision encoder — or takes them from <code>--qwen-image-vae</code> / <code>--qwen-image-vl</code> / <code>--qwen-image-mmproj</code> (env: <code>TS_QWEN_IMAGE_VAE</code> / <code>TS_QWEN_IMAGE_TE</code> / <code>TS_QWEN_IMAGE_MMPROJ</code>). Native RGBA input and PNG output preserve transparency: the Qwen3-VL conditioning branch composites the reference over white while the VAE keeps alpha.</p>
   <ul>
-    <li><strong>Qwen-Image VAE</strong> — image ↔ 16-channel latent (the original <code>.safetensors</code> works too).</li>
-    <li><strong>Qwen2.5-VL-7B text encoder</strong> — prompt → 3584-dim conditioning, with an optional <code>mmproj</code> vision tower for image-grounded edits.</li>
+    <li><strong>Generation or editing.</strong> No <code>--image</code> selects generation; one or more <code>--image</code> arguments select editing, with the references in the order given. <code>--input prompt.txt</code> can supply the prompt instead of <code>--prompt</code>.</li>
+    <li><strong>Sampling defaults.</strong> Omitted settings select 40 Euler steps and CFG 1.0, following Qwen's recommended unguided sampling — one transformer prediction per step. An explicit CFG above 1 adds the negative prediction and applies <code>--negative-prompt</code>; negative prompts have no effect at CFG 1.</li>
+    <li><strong>Geometry.</strong> Omitting dimensions selects 2048×2048 for generation, or approximately the same pixel area at the first reference's aspect ratio for editing. Set width and height together, in multiples of 32, to override it. References are conditioned at approximately 1 megapixel each, or the output area if smaller.</li>
+    <li><strong>Schedule.</strong> The official scheduler configuration: exponential dynamic shifting with the 256/0.5 and 8192/0.9 sequence-length/shift anchors, terminal stretching to 0.02, and a final Euler step to zero.</li>
+    <li><strong>Execution.</strong> The diffusion transformer runs a complete GGML graph with resident quantized weights, so it needs a GGML backend (<code>ggml_metal</code>, <code>ggml_cuda</code>, <code>ggml_vulkan</code> or <code>ggml_cpu</code>). CUDA and Metal retain the graph between predictions (<code>TS_QWEN21_GRAPH_REUSE=1</code>, the default). There is no CPU weight-streaming mode and no LoRA support; start with smaller dimensions if memory is short.</li>
   </ul>
-  <p>Place the companions next to the DiT GGUF, or point at them with <code>TS_QWEN_IMAGE_VAE</code> / <code>TS_QWEN_IMAGE_TE</code> / <code>TS_QWEN_IMAGE_MMPROJ</code> (CLI: <code>--qwen-image-vae</code> / <code>--qwen-image-vl</code> / <code>--qwen-image-mmproj</code>). The pipeline VAE-encodes the reference, builds the conditioning, runs a FlowMatch-Euler true-CFG denoise loop (reference-latent concatenation), then VAE-decodes back to pixels. The whole 60-block DiT forward is CUDA-graph-captured and flash attention is on by default; the target area auto-clamps to the device VRAM budget unless you pin a width/height.</p>
-  <p><strong>The speed lever is the Lightning distillation LoRA</strong> (<code>--qwen-image-lora</code> / <code>TS_QWEN_IMAGE_LORA</code>, a <code>.safetensors</code> file). TensorSharp parses the trained step count out of its file name (<code>…-4steps-…</code> / <code>…8step…</code>, 1–16 accepted) and switches the sampling defaults to that step count at cfg 1.0 with a fixed timestep shift of 3 — one DiT forward per step, no negative pass. Without it the base recipe is 30 steps at cfg 2.5, so the default <strong>60 DiT forwards drop to 4–8</strong>. On the project's CUDA <code>image_edit</code> scenario (Q2_K DiT + 4-step Lightning LoRA, 544×1184, identical inputs and seed) a warm edit completes in <strong>40.44 s</strong> against <code>stable-diffusion.cpp</code>'s 48.16 s.</p>
-  <p>The LoRA is applied as a runtime F32 side-path next to each targeted projection (<code>y = W·x + b + (alpha/rank)·up·(down·x)</code>) with the quantized base weights untouched — it is <em>not</em> merged into them, because the Lightning deltas are far below a low-bit quantization step and a merge would be pure requantization noise. That side-path exists only on the whole-model and fused per-block CUDA forwards, so a Lightning LoRA on a fallback path (<code>TS_QWEN_DIT_FUSED_BLOCK=0</code>, <code>TS_QWEN_DIT_NATIVE=0</code>, or a non-CUDA backend) fails loudly rather than emitting noise. Stacking it on a base DiT that is <em>already</em> few-step (a file name containing <code>rapid</code>, <code>turbo</code>, <code>hyper</code>, <code>lightning</code>, <code>lcm</code>, <code>nitro</code> or <code>step</code>) is detected and warned about — such a checkpoint needs no LoRA.</p>
-  <p>Three fused graphs carry the rest, all on by default: the CUDA-graph-captured whole-DiT forward cut the per-forward cost ~2.9× and an 8-step denoise from ~153 s to ~63 s (<code>TS_QWEN_DIT_WHOLE_CAPTURE=0</code> to disable); the fused conditioning-encoder trunks took text conditioning from 11.2 s to 2.5 s (<code>TS_QWEN_TE_FUSED=0</code>); and the fused whole-VAE graph took a 928×688 encode from 19.5 s to 0.95 s and the decode from 22.8 s to 1.35 s (<code>TS_QWEN_VAE_FUSED=0</code>). A <strong>whole-step DiT cache</strong> (<code>TS_QWEN_DIT_CACHE_MODE</code> = <code>easycache</code> / <code>fbc</code> / <code>both</code>) can skip 40–55% of the remaining steps, but it is <strong>off by default</strong>: on edit workloads it measurably softens fine detail such as faces, so quality comes first and you opt in.</p>
-  <p>Because the text and vision encoders are freed before the denoise loop starts, a larger text-encoder quantization costs nothing at denoise time while driving the whole edit's fidelity — <code>Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf</code> (4.683 GB) is the recommended choice even on low-VRAM cards; the ~2-bit <code>UD-IQ2_XXS</code> build markedly softens faces.</p>
-  <p>Run it from the <a href="cli.html#imageedit">CLI</a> (<code>--image</code> + <code>--prompt</code>), the <a href="server.html#webui">Web UI</a> image-edit flow (with live denoising previews), or in-process from <a href="code-api.html#imageedit">C# via <code>QwenImageModel.EditImage()</code></a>. Full details are in the repository's <code>docs/models/qwenimage.md</code> card.</p>
+  <p><strong>The speed levers are resolution and step count.</strong> A 2K square has four times the latent image tokens of a 1K square and more attention work, so <code>--width 1024 --height 1024</code> is the draft setting. <code>--diffusion-steps 25 --cfg 1</code> is the faster profile used by the official ComfyUI generation and editing workflows; 40 steps remains the default, and fewer steps are a quality/speed trade-off rather than equivalent quality. CFG 1 already means one transformer pass per step. For a quick smoke test, 256×256 and one step verifies loading and the end-to-end data path, not image quality.</p>
+  <p>Run it from the <a href="cli.html#imagegen">CLI</a> (<code>--prompt</code>, plus <code>--image</code> to edit), the <a href="server.html#webui">Web UI</a> (a prompt without an attachment generates an image; attach one or more images to edit, with live denoising previews), the <a href="http-api.html#image-api">HTTP API</a> (<code>/api/image-generate</code> and <code>/api/image-edit</code>, each with a <code>/stream</code> variant), or in-process from <a href="code-api.html#imagegen">C# via <code>QwenImageModel.GenerateImage()</code> / <code>EditImage()</code></a>. Image operations are serialized because the diffusion pipeline shares mutable working state. Full details and the validation history are in the repository's <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/qwenimage21.md" target="_blank" rel="noopener">Qwen-Image-2.1 card</a>.</p>
   <div class="content-footer">
     <a href="models-text.html">← Text &amp; LLM Models</a>
     <a href="models-video.html">Next: Video Generation →</a>

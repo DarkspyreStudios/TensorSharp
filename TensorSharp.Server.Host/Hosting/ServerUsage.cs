@@ -321,27 +321,18 @@ namespace TensorSharp.Server.Host.Hosting
                     "the trunk and use --spec instead. Default: none.",
                     "--draft-model Qwen3.8-27B-DFlash2-Q4_K_M.gguf"),
             }),
-            ("Qwen-Image companion models (2.1 and older image-edit DiTs)", new[]
+            ("Qwen-Image-2.1 companion models", new[]
             {
                 new OptionHelp("--qwen-image-vae <path>",
-                    "Matching VAE GGUF or safetensors (2.1 requires its own VAE). Default: same-directory scan.",
-                    "--qwen-image-vae qwen-image-vae.gguf"),
+                    "Qwen-Image-2.1 VAE (safetensors, or a converted GGUF). Default: same-directory scan for " +
+                    "qwen_image_2.1_vae*.safetensors.",
+                    "--qwen-image-vae qwen_image_2.1_vae_bf16.safetensors"),
                 new OptionHelp("--qwen-image-vl <path>",
-                    "Qwen3-VL-8B text-encoder GGUF for 2.1, Qwen2.5-VL for older models. Default: same-directory scan.",
-                    "--qwen-image-vl qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf"),
+                    "Qwen3-VL-8B text-encoder GGUF. Default: same-directory scan.",
+                    "--qwen-image-vl Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
                 new OptionHelp("--qwen-image-mmproj <path>",
-                    "Vision projector GGUF for the text encoder. Default: same-directory scan.",
-                    "--qwen-image-mmproj Qwen2.5-VL-7B-mmproj-BF16.gguf"),
-                new OptionHelp("--qwen-image-lora <path>",
-                    "DiT LoRA (e.g. a Lightning step-distillation checkpoint); also switches sampling defaults. " +
-                    "Default: none.",
-                    "--qwen-image-lora Qwen-Image-Edit-Lightning-8steps.safetensors"),
-                new OptionHelp("--offload-cpu",
-                    "Stream the DiT weights from RAM instead of holding them resident in VRAM " +
-                    "(sd.cpp --offload-to-cpu equivalent): slower per step, but the freed VRAM lets " +
-                    "native ~1 MP edits run on small cards. Default: auto (engages only when the " +
-                    "target resolution does not fit beside the resident weights).",
-                    "--offload-cpu"),
+                    "Qwen3-VL-8B vision projector GGUF, required for image editing. Default: same-directory scan.",
+                    "--qwen-image-mmproj mmproj-Qwen3VL-8B-Instruct-F16.gguf"),
             }),
             ("Video-generation defaults and companion models", new[]
             {
@@ -772,12 +763,24 @@ namespace TensorSharp.Server.Host.Hosting
                 }
             }
 
+            // Driven off the shared table the server refuses them with, so the page and
+            // the error cannot disagree. Deliberately NOT in Sections: DocumentedFlags()
+            // is what Build must accept, and these must not be accepted.
+            writer.WriteLine();
+            writer.WriteLine("Removed options (refused at startup, also as --config keys):");
+            foreach ((string flag, string advice) in TensorSharp.Runtime.RemovedCliFlags.RemovedFlags)
+            {
+                writer.WriteLine($"  {flag}");
+                WriteWrapped(writer, "Removed: " + advice, indent: "      ");
+            }
+
             writer.WriteLine();
             writer.WriteLine("Examples:");
             writer.WriteLine("  TensorSharp.Server --model C:\\models\\gemma-4-E4B-it-Q8_0.gguf --backend ggml_cpu");
             writer.WriteLine("  TensorSharp.Server --model gemma-4-E4B-it-Q8_0.gguf --mmproj mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda");
             writer.WriteLine("  TensorSharp.Server --model diffusiongemma-26B-A4B-it-Q4_K_M.gguf --mmproj diffusiongemma-vision/model-00011-of-00011.safetensors --backend ggml_metal    (vision tower straight from the HF shard)");
             writer.WriteLine("  TensorSharp.Server --model Qwen3.5-35B-A3B-Q4_K_M.gguf --backend ggml_cuda --tp 2    (split across 2 GPUs)");
+            writer.WriteLine("  TensorSharp.Server --config config/qwen-image-2.1.json    (Qwen-Image-2.1 generation and editing)");
             writer.WriteLine("  TensorSharp.Server --model Wan2.2-TI2V-5B-Q8_0.gguf --backend ggml_cuda --video-frames 121 --fps 24");
             writer.WriteLine("  TensorSharp.Server --backend ggml_cpu    (model-less status process; inference unavailable)");
             writer.WriteLine("  TensorSharp.Server --config server.json    (read options from a file)");

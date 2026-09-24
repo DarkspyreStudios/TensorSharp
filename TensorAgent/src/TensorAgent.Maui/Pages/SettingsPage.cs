@@ -177,8 +177,8 @@ public sealed class SettingsPage : ContentPage
             settings.AllowCellularDownloads,
             on => { AppSettings s = _app.Settings.Load(); s.AllowCellularDownloads = on; _app.Settings.Save(s); }));
         _body.Add(Switch("Include optional files",
-            "The image projector and the step-distilled adapter. Larger downloads, but "
-            + "without them a model cannot see pictures and image generation is many times slower.",
+            "The image projector and the speculative-decoding draft head. Larger downloads, but "
+            + "without the projector a model cannot see pictures.",
             settings.DownloadOptionalFiles,
             on => { AppSettings s = _app.Settings.Load(); s.DownloadOptionalFiles = on; _app.Settings.Save(s); }));
         // Said here because it is the thing people worry about while a download runs,

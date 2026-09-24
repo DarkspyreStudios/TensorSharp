@@ -25,7 +25,7 @@ public static class UploadEndpoints
     {
         endpoints.MapPost("/api/upload",
             (HttpRequest req, WebUiAdapter adapter) => adapter.UploadAsync(req));
-        // Qwen-Image-Edit: prompt + image -> generated (downloadable) image.
+        // Qwen-Image-2.1 editing: prompt + reference image(s) -> generated (downloadable) PNG.
         endpoints.MapPost("/api/image-edit",
             (HttpRequest req, WebUiAdapter adapter) => adapter.ImageEditAsync(req))
             .DisableRequestTimeout();

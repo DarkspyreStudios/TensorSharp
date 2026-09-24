@@ -1,7 +1,9 @@
 // Copyright (c) Zhongkai Fu. All rights reserved.
 // Licensed under the BSD-3-Clause license in the repository root.
 using System.Text;
+using TensorSharp.Models;
 using TensorSharp.Models.Architecture;
+using TensorSharp.Models.QwenImage;
 using TensorSharp.Runtime;
 
 namespace InferenceWeb.Tests;
@@ -86,6 +88,36 @@ public sealed class QwenImageArchitectureTests
         Assert.Throws<NotSupportedException>(() => ModelArchitectureRegistry.Resolve("unknown-architecture", fixture.File));
     }
 
+    [Theory]
+    [InlineData(BackendType.Cpu)]
+    [InlineData(null)] // the GGML backend this test process pins
+    public void EarlierQwenImageTransformersAreRefusedWithAMigrationNote(BackendType? requested)
+    {
+        // A Qwen-Image-Edit-2511-layout DiT (60 double-stream blocks, Qwen2.5-VL 3584-wide
+        // text input, no txt_in.text_norm) tagged general.architecture=qwen_image. The tag
+        // routes it to QwenImageModel, which must refuse it by name before anything else:
+        // not with "requires a GGML backend" and not with a missing-companion error.
+        BackendType backend = requested ?? TestGates.PinnedGgmlBackend;
+        using var fixture = new TensorHeader(LegacyEditTensors(), "qwen-image-edit-2511-Q4_K_M.gguf",
+            new() { ["general.architecture"] = "qwen_image" });
+        Assert.Equal("qwen_image", Resolve(fixture.File).Id);
+
+        bool preferManaged = NativeDequant.PreferManaged;
+        try
+        {
+            var error = Assert.Throws<ModelLoadRefusedException>(() => new QwenImageModel(fixture.Path, backend));
+            Assert.Contains("'qwen-image-edit-2511-Q4_K_M.gguf' is not a Qwen-Image-2.1 diffusion transformer", error.Message);
+            Assert.Contains("docs/models/qwenimage21.md", error.Message);
+            Assert.True(ModelLoadRefusal.TryDescribe(error, out string reason));
+            Assert.DoesNotContain("\n", reason);
+        }
+        finally
+        {
+            // Constructing a model pins the process-global dequant route; restore it.
+            NativeDequant.PreferManaged = preferManaged;
+        }
+    }
+
     [ModelFact("TENSORSHARP_QWEN21_DIT")]
     public void RealVersion21CheckpointResolvesFromItsTensorTable()
     {
@@ -95,6 +127,28 @@ public sealed class QwenImageArchitectureTests
 
     private static ModelArchitectureDescriptor Resolve(GgufFile file) =>
         ModelArchitectureRegistry.Resolve(file.GetString("general.architecture"), file);
+
+    private static Dictionary<string, (ulong[] Shape, GgmlTensorType Type)> LegacyEditTensors()
+    {
+        var tensors = new Dictionary<string, (ulong[] Shape, GgmlTensorType Type)>
+        {
+            ["img_in.weight"] = (new ulong[] { 64, 3072 }, GgmlTensorType.BF16),
+            ["txt_norm.weight"] = (new ulong[] { 3584 }, GgmlTensorType.F32),
+            ["txt_in.weight"] = (new ulong[] { 3584, 3072 }, GgmlTensorType.BF16),
+            ["time_text_embed.timestep_embedder.linear_1.weight"] = (new ulong[] { 256, 3072 }, GgmlTensorType.BF16),
+            ["norm_out.linear.weight"] = (new ulong[] { 3072, 6144 }, GgmlTensorType.BF16),
+            ["proj_out.weight"] = (new ulong[] { 3072, 64 }, GgmlTensorType.BF16),
+        };
+        for (int layer = 0; layer < 60; layer++)
+        {
+            string block = $"transformer_blocks.{layer}.";
+            tensors[block + "img_mod.1.weight"] = (new ulong[] { 3072, 18432 }, GgmlTensorType.Q4_K);
+            tensors[block + "txt_mod.1.weight"] = (new ulong[] { 3072, 18432 }, GgmlTensorType.Q4_K);
+            tensors[block + "attn.to_q.weight"] = (new ulong[] { 3072, 3072 }, GgmlTensorType.Q4_K);
+            tensors[block + "attn.add_q_proj.weight"] = (new ulong[] { 3072, 3072 }, GgmlTensorType.Q4_K);
+        }
+        return tensors;
+    }
 
     private static Dictionary<string, (ulong[] Shape, GgmlTensorType Type)> Version21Tensors(string prefix, bool fused)
     {
@@ -132,19 +186,35 @@ public sealed class QwenImageArchitectureTests
     // gigabytes of payload or allocating a native inference backend.
     private sealed class TensorHeader : IDisposable
     {
-        private readonly string _directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        private readonly string _directory = System.IO.Path.Combine(System.IO.Path.GetTempPath(), Guid.NewGuid().ToString("N"));
         internal GgufFile File { get; }
+        internal string Path { get; }
 
-        internal TensorHeader(Dictionary<string, (ulong[] Shape, GgmlTensorType Type)> tensors, string name = "weights.gguf")
+        internal TensorHeader(Dictionary<string, (ulong[] Shape, GgmlTensorType Type)> tensors, string name = "weights.gguf",
+            Dictionary<string, string>? metadata = null)
         {
             Directory.CreateDirectory(_directory);
-            string path = Path.Combine(_directory, name);
+            string path = System.IO.Path.Combine(_directory, name);
+            Path = path;
+            metadata ??= new();
             using (var writer = new BinaryWriter(System.IO.File.Create(path)))
             {
+                void WriteString(string value)
+                {
+                    byte[] bytes = Encoding.UTF8.GetBytes(value);
+                    writer.Write((ulong)bytes.Length);
+                    writer.Write(bytes);
+                }
                 writer.Write(0x46554747u);
                 writer.Write(3u);
                 writer.Write((ulong)tensors.Count);
-                writer.Write(0UL);
+                writer.Write((ulong)metadata.Count);
+                foreach (var (key, value) in metadata)
+                {
+                    WriteString(key);
+                    writer.Write(8u); // GGUF string value
+                    WriteString(value);
+                }
                 foreach (var (key, tensor) in tensors)
                 {
                     byte[] bytes = Encoding.UTF8.GetBytes(key);

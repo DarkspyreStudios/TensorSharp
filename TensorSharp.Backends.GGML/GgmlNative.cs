@@ -634,29 +634,9 @@ public struct DiffusionDecodeLayerArgs
     public float DecScale;
 }
 
-// Descriptor for the fused Qwen-Image DiT modulated-MLP kernel
-// (TSGgml_QwenImageModMlp). Field order/types MUST match the native
-// TSGgmlQwenImageModMlpDesc struct EXACTLY.
-[StructLayout(LayoutKind.Sequential)]
-public struct QwenImageModMlpArgs
-{
-    public IntPtr X;
-    public IntPtr ScalePlus1;
-    public IntPtr Shift;
-    public IntPtr Gate;
-    public IntPtr Net0W; public int Net0Type; public long Net0Ne0, Net0Ne1, Net0Bytes;
-    public IntPtr Net0B;
-    public IntPtr Net2W; public int Net2Type; public long Net2Ne0, Net2Ne1, Net2Bytes;
-    public IntPtr Net2B;
-    public int StructBytes;
-    public int Dim;
-    public int Ff;
-    public int Seq;
-    public float Eps;
-}
-
-// One projection weight (+ optional bias) for the joint-attention kernel.
-// MUST match native TSGImgAttnW exactly.
+// One projection weight (+ optional F32 bias) of the fused Qwen-Image-2.1 text-encoder
+// trunk (TSGgml_QwenTeTrunk). MUST match native TSGImgAttnW exactly (48 bytes on 64-bit;
+// pinned by QwenImageNativeAbiTests and a native static_assert).
 [StructLayout(LayoutKind.Sequential)]
 public struct QImgAttnW
 {
@@ -664,36 +644,10 @@ public struct QImgAttnW
     public int Type;
     public long Ne0, Ne1, Bytes;
     public IntPtr B;
-    // Optional runtime LoRA side-path: y = W·x + b + LoraScale * B·(A·x), computed in
-    // F32 next to the quantized base matmul (a LoRA merged into 2-bit weights is
-    // swallowed by requantization noise — the deltas are far below the quant step).
-    // LoraA = [rank, ne0] row-major F32 (lora_down), LoraB = [ne1, rank] row-major F32
-    // (lora_up); both must be STABLE allocations (resident-cached by pointer).
-    // Zero/default = no LoRA. Currently honored by the whole-model forward path.
-    public IntPtr LoraA;
-    public IntPtr LoraB;
-    public long LoraRank;
-    public float LoraScale;
 }
 
-// Descriptor for the fused Qwen-Image DiT joint-attention sub-layer
-// (TSGgml_QwenImageJointAttn). MUST match native TSGgmlQwenImageJointAttnDesc.
-[StructLayout(LayoutKind.Sequential)]
-public struct QwenImageJointAttnArgs
-{
-    public IntPtr Img, Txt;
-    public IntPtr ImgScale1, ImgShift, ImgGate;
-    public IntPtr TxtScale1, TxtShift, TxtGate;
-    public IntPtr ImgCos, ImgSin, TxtCos, TxtSin;
-    public QImgAttnW ToQ, ToK, ToV, ToOut;
-    public QImgAttnW AddQ, AddK, AddV, ToAddOut;
-    public IntPtr NormQ, NormK, NormAq, NormAk;
-    public int StructBytes, Dim, Heads, HeadDim, ImgSeq, TxtSeq;
-    public float Eps;
-}
-
-// Descriptor for a single device 2D convolution (TSGgml_Conv2d), used to move the
-// Qwen-Image VAE conv stack off the CPU. MUST match native TSGgmlConv2dDesc exactly.
+// Descriptor for a single F32 device 2D convolution (TSGgml_Conv2dF32), used to move the
+// Qwen-Image-2.1 VAE conv stack off the CPU. MUST match native TSGgmlConv2dDesc exactly.
 [StructLayout(LayoutKind.Sequential)]
 public struct Conv2dArgs
 {
@@ -741,76 +695,32 @@ public struct QwenVaeArgs
     public int StructBytes;
 }
 
-// One layer of the fused conditioning-encoder trunk (TSGgml_QwenTeTrunk).
-// MUST match native TSGTeLayerW. MaskKind: 0 full, 1 causal, 2 uploaded window mask.
+// One layer of the fused text-encoder trunk (TSGgml_QwenTeTrunk). Attention is causal.
+// MUST match native TSGTeLayerW exactly (368 bytes on 64-bit; pinned by
+// QwenImageNativeAbiTests and a native static_assert): the layer array is not size-checked.
 [StructLayout(LayoutKind.Sequential)]
 public struct QwenTeLayerW
 {
     public IntPtr Ln1, Ln2;                              // [hidden] F32 (stable ptrs)
     public QImgAttnW Q, K, V, O, Gate, Up, Down;         // .B = optional F32 bias
-    public int MaskKind;
-    public int Pad;
-    public IntPtr QNorm, KNorm; // optional [head_dim] RMS scale, Qwen3-VL
+    public IntPtr QNorm, KNorm;                          // [head_dim] F32 per-head RMS scales
 }
 
-// Descriptor for the fused transformer trunk (TSGgml_QwenTeTrunk): the Qwen2.5-VL
-// text-encoder LLM (GQA, causal) and vision tower (MHA, window masks) run their
-// whole layer stack as ONE graph. MUST match native TSGgmlQwenTeTrunkDesc.
+// Descriptor for the fused transformer trunk (TSGgml_QwenTeTrunk): the Qwen3-VL-8B
+// text encoder of Qwen-Image-2.1 (GQA, causal, Q/K head norms, DeepStack additions)
+// runs its whole layer stack as ONE graph. MUST match native TSGgmlQwenTeTrunkDesc
+// (88 bytes on 64-bit).
 [StructLayout(LayoutKind.Sequential)]
 public struct QwenTeTrunkArgs
 {
     public IntPtr X;                 // [hidden, seq] F32 input states
-    public IntPtr Out;               // [hidden, seq] F32 output (post final norm)
+    public IntPtr Out;               // [hidden, seq] F32 output (last block, before the final norm)
     public IntPtr CosF, SinF;        // [head_dim, seq] F32 rotate-half tables
-    public IntPtr WinMask;           // [seq, seq] F32 additive window mask (or zero)
-    public IntPtr FinalNorm;         // [hidden] F32 (or zero = skip)
     public IntPtr Layers; public int NumLayers;
     public int StructBytes, Hidden, Heads, KvHeads, HeadDim, Seq;
     public float Eps;
     public IntPtr DeepStack; // [DeepStackCount, seq, hidden] F32 additions after each block
     public int DeepStackCount;
-}
-
-// Descriptor for the whole fused DiT block (attn + both MLP streams in one graph)
-// (TSGgml_QwenImageBlock). MUST match native TSGgmlQwenImageBlockDesc exactly.
-[StructLayout(LayoutKind.Sequential)]
-public struct QwenImageBlockArgs
-{
-    public IntPtr Img, Txt;
-    public IntPtr IS1a, ISha, IGa, TS1a, TSha, TGa;   // attn modulation (mod index 0)
-    public IntPtr IS1m, IShm, IGm, TS1m, TShm, TGm;   // mlp modulation (mod index 1)
-    public IntPtr ICos, ISin, TCos, TSin;
-    public QImgAttnW ToQ, ToK, ToV, ToOut;
-    public QImgAttnW AddQ, AddK, AddV, ToAddOut;
-    public IntPtr NormQ, NormK, NormAq, NormAk;
-    public QImgAttnW INet0, INet2, TNet0, TNet2;       // mlp weights (+bias in .B)
-    public int StructBytes, Dim, Heads, HeadDim, Ff, ImgSeq, TxtSeq;
-    public float Eps;
-}
-
-// Per-block weight set for the whole-DiT forward (TSGgml_QwenImageForward).
-// MUST match native TSGImgBlockW exactly.
-[StructLayout(LayoutKind.Sequential)]
-public struct QImgBlockW
-{
-    public QImgAttnW ImgMod, TxtMod;                   // [dim, 6*dim] (+bias)
-    public QImgAttnW ToQ, ToK, ToV, ToOut;
-    public QImgAttnW AddQ, AddK, AddV, ToAddOut;
-    public IntPtr NormQ, NormK, NormAq, NormAk;        // [head_dim] f32
-    public QImgAttnW INet0, INet2, TNet0, TNet2;       // mlp (+bias in .B)
-}
-
-// Descriptor for the 60-block DiT body in one resident-weight graph
-// (TSGgml_QwenImageForward). Img/Txt are the post-prelude residual streams (in/out),
-// so the C# img_in/txt_in/norm_out/proj_out stay shared with the per-block path.
-// MUST match native TSGgmlQwenImageForwardDesc exactly.
-[StructLayout(LayoutKind.Sequential)]
-public struct QwenImageForwardArgs
-{
-    public IntPtr Img, Txt, Temb, ImgCos, ImgSin, TxtCos, TxtSin, ModulateIndex;
-    public IntPtr Blocks;                              // -> QImgBlockW[NumLayers]
-    public int StructBytes, Dim, Heads, HeadDim, Ff, ImgSeq, TxtSeq, NumLayers;
-    public float Eps;
 }
 
 // One (possibly quantized) weight matrix + optional F32 bias for the Wan video
@@ -3168,62 +3078,6 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenImageModMlp(in QwenImageModMlpArgs desc);
-
-        public static bool TryQwenImageModMlp(in QwenImageModMlpArgs desc) => TSGgml_QwenImageModMlp(in desc) != 0;
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenImageJointAttn(in QwenImageJointAttnArgs desc);
-
-        public static bool TryQwenImageJointAttn(in QwenImageJointAttnArgs desc)
-        {
-            int r = TSGgml_QwenImageJointAttn(in desc);
-            if (r == 0)
-                Console.Error.WriteLine($"[qwen-image-attn FAIL] {GetLastErrorMessage("(no native error)")}");
-            return r != 0;
-        }
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenImageBlock(in QwenImageBlockArgs desc);
-
-        public static bool TryQwenImageBlock(in QwenImageBlockArgs desc)
-        {
-            int r = TSGgml_QwenImageBlock(in desc);
-            if (r == 0)
-                Console.Error.WriteLine($"[qwen-image-block FAIL] {GetLastErrorMessage("(no native error)")}");
-            return r != 0;
-        }
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenImageBlockCfg(in QwenImageBlockArgs condDesc, in QwenImageBlockArgs negDesc);
-
-        // CFG-batched block: both true-CFG branches in one dispatch sharing the weights.
-        public static bool TryQwenImageBlockCfg(in QwenImageBlockArgs condDesc, in QwenImageBlockArgs negDesc)
-        {
-            int r = TSGgml_QwenImageBlockCfg(in condDesc, in negDesc);
-            if (r == 0)
-                Console.Error.WriteLine($"[qwen-image-block-cfg FAIL] {GetLastErrorMessage("(no native error)")}");
-            return r != 0;
-        }
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenImageForward(in QwenImageForwardArgs desc);
-
-        // Whole 60-block DiT forward in one resident-weight graph (in-graph modulation).
-        public static bool TryQwenImageForward(in QwenImageForwardArgs desc)
-        {
-            int r = TSGgml_QwenImageForward(in desc);
-            if (r == 0)
-                Console.Error.WriteLine($"[qwen-image-forward FAIL] {GetLastErrorMessage("(no native error)")}");
-            return r != 0;
-        }
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_WanT5Encode(in WanT5EncodeArgs desc);
 
         // Whole UMT5-XXL encoder forward in one resident-weight graph.
@@ -3385,27 +3239,11 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_QwenImageSetOffload(int on);
-
-        // CPU-offload mode for the Qwen-Image DiT kernels: disables the persistent /
-        // CUDA-graph-captured entries (whose one-time resident weight upload is their
-        // whole point) so the non-persist reuse-gallocr path streams the weights per
-        // call. Set per request by the pipeline with the device-copy residency budget.
-        public static void QwenImageSetOffload(bool on) => TSGgml_QwenImageSetOffload(on ? 1 : 0);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Conv2d(in Conv2dArgs desc);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_Conv2dF32(in Conv2dArgs desc);
 
-        public static bool TryConv2d(in Conv2dArgs desc) => TryConv2d(in desc, false);
-
-        public static bool TryConv2d(in Conv2dArgs desc, bool fullPrecision)
+        public static bool TryConv2dF32(in Conv2dArgs desc)
         {
-            int r = fullPrecision ? TSGgml_Conv2dF32(in desc) : TSGgml_Conv2d(in desc);
+            int r = TSGgml_Conv2dF32(in desc);
             if (r == 0)
                 Console.Error.WriteLine($"[conv2d FAIL] {GetLastErrorMessage("(no native error)")}");
             return r != 0;
@@ -4756,11 +4594,6 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_ApplyLoraDelta(IntPtr w, int ggmlType, long ne0, long ne1,
-            IntPtr up, IntPtr down, int rank, float scale, int nThreads);
-
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void ggml_quantize_init(int type);
 
         [LibraryImport(DllName)]
@@ -4785,7 +4618,7 @@ internal enum GgmlIndexReductionOp
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_QwenTeTrunk(in QwenTeTrunkArgs args);
 
-        /// <summary>Run a whole conditioning-encoder transformer trunk as ONE device graph
+        /// <summary>Run the whole Qwen-Image-2.1 text-encoder trunk as ONE device graph
         /// (see QwenTeTrunkArgs). Returns false when the backend can't run it (caller falls
         /// back to the per-op path).</summary>
         internal static bool TryQwenTeTrunk(in QwenTeTrunkArgs args) => TSGgml_QwenTeTrunk(in args) != 0;
@@ -6949,24 +6782,6 @@ internal enum GgmlIndexReductionOp
                 {
                     hDst.Free();
                 }
-            }
-        }
-
-        /// <summary>
-        /// Merge a LoRA delta into a (possibly quantized) weight IN PLACE:
-        /// W[r,:] += scale * up[r,:] · down (dequantize row -> add -> requantize to the
-        /// same type, the stable-diffusion.cpp apply path). <paramref name="w"/> points at
-        /// the ggml row-major weight [ne1 x ne0]; up is [ne1, rank], down is [rank, ne0].
-        /// Returns 0 on success; negative = validation/type error (weight untouched).
-        /// </summary>
-        public static unsafe int ApplyLoraDelta(IntPtr w, int ggmlType, long ne0, long ne1,
-            float[] up, float[] down, int rank, float scale, int nThreads = 0)
-        {
-            if (w == IntPtr.Zero || up == null || down == null) return -1;
-            if (up.LongLength < ne1 * rank || down.LongLength < (long)rank * ne0) return -1;
-            fixed (float* pu = up, pd = down)
-            {
-                return TSGgml_ApplyLoraDelta(w, ggmlType, ne0, ne1, (IntPtr)pu, (IntPtr)pd, rank, scale, nThreads);
             }
         }
 

@@ -725,7 +725,7 @@ public class WebUiChatServiceTests : IDisposable
 
         var edit = Assert.Throws<WebUiRequestRejectedException>(() => f.Service.EnsureImageEditAvailable());
         Assert.Equal(400, edit.StatusCode);
-        Assert.Equal("""{"error":"The loaded model is not a Qwen-Image-Edit model."}""", JsonSerializer.Serialize(edit.Payload));
+        Assert.Equal("""{"error":"The loaded model is not a Qwen-Image-2.1 model."}""", JsonSerializer.Serialize(edit.Payload));
 
         var video = Assert.Throws<WebUiRequestRejectedException>(() => f.Service.EnsureVideoGenerationAvailable());
         Assert.Equal(400, video.StatusCode);
@@ -742,7 +742,7 @@ public class WebUiChatServiceTests : IDisposable
             frames.Add(frame);
 
         Assert.Single(frames);
-        Assert.Equal("""{"done":true,"error":"The loaded model is not a Qwen-Image-Edit model."}""", JsonSerializer.Serialize(frames[0]));
+        Assert.Equal("""{"done":true,"error":"The loaded model is not a Qwen-Image-2.1 model."}""", JsonSerializer.Serialize(frames[0]));
     }
     [Fact]
     public async Task ImageGenerate_WithoutTheModel_RefusesPlainAndStreamingRequests()

@@ -2100,54 +2100,6 @@ namespace TensorSharp.GGML
             return GgmlNative.TryDiffusionDecodeLayer(in args);
         }
 
-        /// <summary>Fused Qwen-Image DiT modulated-GEGLU-MLP sub-layer (LayerNorm + AdaLN modulate +
-        /// GELU MLP + gated residual) in one on-device ggml graph. The managed QwenImageDiT MLP path
-        /// is the verified correctness reference; this is the Stage 7 native perf path.</summary>
-        public static bool TryQwenImageModMlp(in QwenImageModMlpArgs args)
-        {
-            return GgmlNative.TryQwenImageModMlp(in args);
-        }
-
-        /// <summary>Fused Qwen-Image DiT joint (double-stream) attention sub-layer (norm + AdaLN modulate +
-        /// img/txt q/k/v + QK-RMSnorm + interleaved RoPE + bidirectional joint attention + out-proj +
-        /// gated residual) in one on-device ggml graph. Managed QwenImageDiT is the correctness reference.</summary>
-        public static bool TryQwenImageJointAttn(in QwenImageJointAttnArgs args)
-        {
-            return GgmlNative.TryQwenImageJointAttn(in args);
-        }
-
-        /// <summary>Whole fused Qwen-Image DiT double-stream block (joint attention sub-layer + both img/txt
-        /// modulated-GEGLU MLP sub-layers) in ONE on-device ggml graph. Folds the 3 per-block native calls
-        /// into one dispatch. Managed QwenImageDiT.Block is the verified correctness reference.</summary>
-        public static bool TryQwenImageBlock(in QwenImageBlockArgs args)
-        {
-            return GgmlNative.TryQwenImageBlock(in args);
-        }
-
-        /// <summary>CFG-batched Qwen-Image DiT block: runs the SAME layer for both true-CFG branches
-        /// (conditional + unconditional) in ONE graph that shares the quantized weight leaves. Halves the
-        /// per-block weight upload + GPU sync/host round-trip vs two single-branch calls (the denoise is
-        /// launch-bound). Each branch keeps independent attention; txt lengths may differ.</summary>
-        public static bool TryQwenImageBlockCfg(in QwenImageBlockArgs condArgs, in QwenImageBlockArgs negArgs)
-        {
-            return GgmlNative.TryQwenImageBlockCfg(in condArgs, in negArgs);
-        }
-
-        /// <summary>Whole 60-block Qwen-Image DiT forward in ONE resident-weight ggml graph. Weights are
-        /// bound resident (cached by their stable GGUF pointer, uploaded once) and the AdaLN modulation is
-        /// computed in-graph from temb, so a denoise step uploads only the small img/txt/rope inputs and
-        /// does a single compute + sync — eliminating the ~180 per-block CPU&lt;-&gt;GPU syncs of the per-block
-        /// path. Managed QwenImageDiT.Block is the verified correctness reference.</summary>
-        public static bool TryQwenImageForward(in QwenImageForwardArgs args)
-        {
-            return GgmlNative.TryQwenImageForward(in args);
-        }
-
-        /// <summary>CPU-offload mode for the Qwen-Image DiT kernels: disables the persistent /
-        /// CUDA-graph-captured entries so the non-persist reuse-gallocr path streams the weights
-        /// from RAM per call. Set per request together with <see cref="SetDeviceCopyBudget"/>.</summary>
-        public static void QwenImageSetOffload(bool on) => GgmlNative.QwenImageSetOffload(on);
-
         /// <summary>Whole UMT5-XXL text-encoder forward (24 layers, per-layer relative attention
         /// bias) in ONE resident-weight ggml graph: token ids in, final hidden states out.</summary>
         public static bool TryWanT5Encode(in WanT5EncodeArgs args)
@@ -2225,50 +2177,31 @@ namespace TensorSharp.GGML
             return GgmlNative.TryWanVaeEncode(in args);
         }
 
-        /// <summary>Single 2D convolution on the active GGML device (ggml_conv_2d). Used to move the
-        /// Qwen-Image VAE conv stack off the CPU. Layouts match VaeReferenceMath (no transposes).</summary>
-        public static bool TryConv2d(in Conv2dArgs args) => TryConv2d(in args, false);
-
-        /// <summary>Preserves large finite activations with F32 convolution: direct/MPS on Metal,
-        /// F32 im2col on other backends.</summary>
-        public static bool TryConv2d(in Conv2dArgs args, bool fullPrecision)
+        /// <summary>Single F32 2D convolution on the active GGML device, used to move the
+        /// Qwen-Image-2.1 VAE conv stack off the CPU. Layouts match VaeReferenceMath (no transposes).
+        /// Preserves large finite activations: direct/MPS on Metal, F32 im2col on other backends.</summary>
+        public static bool TryConv2dF32(in Conv2dArgs args)
         {
-            return GgmlNative.TryConv2d(in args, fullPrecision);
+            return GgmlNative.TryConv2dF32(in args);
         }
 
-        /// <summary>Whole conditioning-encoder transformer trunk (Qwen2.5-VL LLM or vision
-        /// tower) as ONE device-resident ggml graph (TSGgml_QwenTeTrunk): resident weights,
-        /// host-precomputed rotate-half RoPE tables, per-layer full/causal/window-mask
-        /// attention. Returns false when the backend can't run it (caller falls back to
-        /// the per-op path).</summary>
+        /// <summary>Whole Qwen-Image-2.1 (Qwen3-VL-8B) text-encoder trunk as ONE device-resident
+        /// ggml graph (TSGgml_QwenTeTrunk): resident weights, host-precomputed rotate-half RoPE
+        /// tables, causal attention with per-head Q/K norms. Returns false when the backend can't
+        /// run it (caller falls back to the per-op path).</summary>
         public static bool TryQwenTeTrunk(in QwenTeTrunkArgs args)
         {
             return GgmlNative.TryQwenTeTrunk(in args);
         }
 
-        /// <summary>Whole Qwen-Image VAE encode/decode as ONE device-resident ggml graph
-        /// (TSGgml_QwenVaeRun): the op list mirrors the verified VaeReferenceMath topology,
+        /// <summary>Whole Qwen-Image-2.1 VAE encode/decode as ONE device-resident ggml graph
+        /// (TSGgml_QwenVaeRun): the op list mirrors the per-conv VaeReferenceMath topology,
         /// features stay on-device end-to-end, weights bind resident by stable pointer, and
-        /// convs run ggml_conv_2d_direct (no materialized im2col). Returns false when the
-        /// backend can't run it, so the caller falls back to the per-conv path.</summary>
+        /// convs keep F32 intermediates. Returns false when the backend can't run it, so the
+        /// caller falls back to the per-conv path.</summary>
         public static bool TryQwenVaeRun(in QwenVaeArgs args)
         {
             return GgmlNative.TryQwenVaeRun(in args);
-        }
-
-        /// <summary>
-        /// Merge a LoRA delta into a (possibly quantized) weight IN PLACE on the host:
-        /// W[r,:] += scale * up[r,:] · down. Quantized rows are dequantized to F32, updated
-        /// and requantized to the SAME type (the stable-diffusion.cpp LoRA apply path).
-        /// <paramref name="w"/> points at the ggml row-major weight [ne1 x ne0] (must be
-        /// writable — e.g. a copy-on-write GGUF mapping); up is [ne1, rank] row-major,
-        /// down is [rank, ne0] row-major. Returns 0 on success, negative on error
-        /// (the weight is untouched on validation errors).
-        /// </summary>
-        public static int ApplyLoraDelta(IntPtr w, int ggmlType, long ne0, long ne1,
-            float[] up, float[] down, int rank, float scale, int nThreads = 0)
-        {
-            return GgmlNative.ApplyLoraDelta(w, ggmlType, ne0, ne1, up, down, rank, scale, nThreads);
         }
 
         /// <summary>Fused DiffusionGemma lm_head tail (output_norm + lm_head + softcap) in one GGML graph.</summary>

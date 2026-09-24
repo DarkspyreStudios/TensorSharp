@@ -24,8 +24,8 @@ namespace TensorSharp.Models.QwenImage
             ArgumentNullException.ThrowIfNull(p);
             if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0)
                 throw new ArgumentException("Steps and CFG must be finite and nonnegative (zero selects the model default).");
-            if (!string.IsNullOrWhiteSpace(QwenImageDiT.LoraPath))
-                throw new NotSupportedException("Qwen-Image-2.1 does not support the earlier Qwen-Image Lightning LoRAs. Remove --qwen-image-lora / TS_QWEN_IMAGE_LORA.");
+            if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_LORA")))
+                throw new NotSupportedException("Qwen-Image-2.1 does not support LoRA adapters. Unset TS_QWEN_IMAGE_LORA.");
             foreach (var input in inputs) ArgumentNullException.ThrowIfNull(input);
             if (inputs.Length > 0 && _model.MmprojPath == null)
                 throw new InvalidOperationException("Qwen-Image-2.1 editing requires the Qwen3-VL-8B vision projector; set --qwen-image-mmproj or TS_QWEN_IMAGE_MMPROJ.");
@@ -167,7 +167,7 @@ namespace TensorSharp.Models.QwenImage
                     throw new ArgumentException("Qwen-Image-2.1 width and height must both be positive multiples of 32.");
                 return (width, height);
             }
-            long area = p.ResolveTargetArea(version21: true);
+            long area = p.ResolveTargetArea();
             return DimensionsForArea(reference?.Width ?? 1, reference?.Height ?? 1, area);
         }
 

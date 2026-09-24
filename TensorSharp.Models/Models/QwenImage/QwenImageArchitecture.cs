@@ -9,7 +9,7 @@ using TensorSharp.Runtime;
 
 namespace TensorSharp.Models.QwenImage
 {
-    /// <summary>Qwen-Image / Qwen-Image-Edit architecture plug-in.</summary>
+    /// <summary>Qwen-Image-2.1 architecture plug-in (any other Qwen-Image transformer is refused by <see cref="QwenImageModel"/>).</summary>
     internal static class QwenImageArchitecture
     {
         public static ModelArchitectureDescriptor Descriptor { get; } = new()

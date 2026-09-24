@@ -70,7 +70,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
     <li>思考 / 推理模式开关，以及带函数定义的工具调用。</li>
     <li>消息编辑与删除，并可从对话中任意位置重新生成。</li>
     <li>当托管 <code>diffusion-gemma</code> GGUF 时，提供 DiffusionGemma 去噪预览（每步替换整条助手消息，最后定稿）。</li>
-    <li>托管 <code>qwen_image</code> DiT 时提供 Qwen-Image-Edit：上传图像并输入编辑指令后，最多 8 帧实时去噪预览会原位刷新，最终 PNG 提供下载链接。</li>
+    <li>托管 <code>qwen_image</code> DiT 时提供 Qwen-Image-2.1：不带附件的提示词会生成图像，附加一张或多张图像则进行编辑；最多 8 帧实时去噪预览会原位刷新，最终 PNG 提供下载链接。</li>
     <li>托管视频生成模型（MiniMax-H3 或 Wan）时提供视频生成：输入提示词，附上所加载权重声明支持的条件输入，浏览器通过 SSE 实时显示逐步去噪进度，直到 MP4 出现并提供下载链接。在 MiniMax-H3 上还会同时返回一条 32&nbsp;kHz 立体声音轨 —— 它与画面出自同一次生成。<strong>所有数值仍然来自启动参数</strong> —— 详见下文<a href="#video">视频生成</a>。</li>
     <li>自由滚动 —— 在新 token 流式输出时阅读较早的回复；自动滚动会在回到底部时恢复。</li>
   </ul>
@@ -140,7 +140,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
   "model":  { "path": "${modelRoot}/gemma-4-E4B-it-Q8_0.gguf", "urls": [ "${repo}/gemma-4-E4B-it-Q8_0.gguf" ] },
   "mmproj": { "path": "${modelRoot}/gemma-4-E4B-mmproj-F16.gguf", "urls": [ "${repo}/mmproj-F16.gguf" ] }
 }</code></pre>
-  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-edit.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
+  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-2.1.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
 
   <h2 id="options">服务器选项</h2>
   <div class="table-scroll">
@@ -171,8 +171,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
       <tr><td><code>--paged-kv</code> / <code>--no-paged-kv</code></td><td>独立 <code>PagedKvCacheManager</code> 的旧兼容开关，不在当前服务请求路径上；活跃请求 KV 由引擎管理。</td></tr>
       <tr><td><code>--paged-kv-block-size / --paged-kv-ram-mb / --paged-kv-ssd-dir / --paged-kv-ssd-mb</code></td><td>旧的独立 paged-KV 调参。当前服务请求请使用下方 <code>TS_SCHED_*</code> 引擎设置。</td></tr>
       <tr><td><code>--paged-kv-quant-bits &lt;b&gt;</code></td><td>旧的独立 TurboQuant 设置；服务端参数接受 <code>0</code>、<code>4</code> 或 <code>8</code>（运行时环境变量与 CLI 还接受 <code>2</code>）。</td></tr>
-      <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-Edit 伴随 GGUF（VAE / Qwen2.5-VL 文本编码器 / mmproj）。</td></tr>
-      <tr><td><code>--qwen-image-lora &lt;path&gt;</code></td><td>Qwen-Image-Edit Lightning 蒸馏 LoRA（<code>.safetensors</code>），作为运行期旁路挂在原封不动的量化基础权重旁边（<strong>不</strong>合并）。它从文件名自动推导去噪步数并把 CFG 切换为 1.0，使默认的 60 次 DiT 前向降到 4–8 次。环境变量：<code>TS_QWEN_IMAGE_LORA</code>。</td></tr>
+      <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-2.1 伴随文件（专用 2.1 VAE / Qwen3-VL-8B 文本编码器 / Qwen3-VL-8B mmproj）。</td></tr>
+      <tr><td><code>--qwen-image-lora</code> · <code>--offload-cpu</code></td><td><strong>已移除，启动时（包括作为 <code>--config</code> 键时）会直接拒绝。</strong>没有替代参数：两者只服务于早期的 Qwen-Image-Edit 流水线，而 Qwen-Image-2.1 不加载 LoRA 适配器，DiT 权重始终常驻。</td></tr>
       <tr><td><code>--video-width &lt;px&gt;</code> / <code>--video-height &lt;px&gt;</code></td><td>请求未带 <code>width</code>/<code>height</code> 时的默认输出尺寸。<strong>视频最主要的画质杠杆</strong>，因为网页界面自己不发送尺寸；MiniMax-H3 的推荐起点是 640×384，只给出宽高之一时 H3 会按条件图像的宽高比推出另一个。别名：<code>--width</code> / <code>--height</code>。</td></tr>
       <tr><td><code>--video-steps &lt;N&gt;</code></td><td>请求未带 <code>steps</code> 时的默认去噪步数。MiniMax-H3 默认 20 步；4–8 步是快速工作点，16–24 步明显更干净，超过约 30 步收益很小。</td></tr>
       <tr><td><code>--video-mode &lt;mode&gt;</code></td><td>请求未带 <code>videoMode</code> 时的默认条件模式：<code>t2v</code>、<code>i2v</code>、<code>fl2v</code> 或 <code>ref</code>。不传它，每个请求会按自身携带的内容推断模式，通常这才是你想要的。</td></tr>

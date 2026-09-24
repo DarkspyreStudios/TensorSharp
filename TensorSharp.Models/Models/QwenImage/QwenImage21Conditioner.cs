@@ -18,7 +18,7 @@ namespace TensorSharp.Models.QwenImage
 
         public QwenImage21Conditioner(string textGguf, string visionGguf, BackendType backend)
         {
-            _text = new QwenImageTextEncoder(textGguf, backend, qwenImage21: true);
+            _text = new QwenImageTextEncoder(textGguf, backend);
             if (_text.HiddenSize != 4096)
                 throw new ArgumentException("Qwen-Image-2.1 requires a Qwen3-VL-8B encoder with 4096 hidden channels.");
             _visionPath = visionGguf;

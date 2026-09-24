@@ -134,7 +134,7 @@ def _write(results_dir: Path, res: engines.BenchResult):
 
 
 def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
-              mtp=False, concurrency=1, tp=1, results_dir=None,
+              mtp=False, concurrency=1, tp=1,
               cpu_moe=None) -> engines.BenchResult:
     cpu_moe = cpu_moe or config.CpuMoeSpec()
     res = engines.BenchResult(engine=engine_id, backend=backend,
@@ -143,36 +143,6 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
                               cpu_moe_layers=cpu_moe.layers,
                               cpu_moe_threads=cpu_moe.threads)
     sc = config.SCENARIOS[scenario_id]
-
-    # Image-edit (stable-diffusion) cells run through their own engine-native
-    # runner (multipart /api/image-edit for TensorSharp, one sd-cli process for
-    # sd.cpp) — there is no OpenAI-chat surface or token stream to measure.
-    if sc.kind == "image_edit":
-        if concurrency > 1:
-            res.status = "skipped"
-            res.detail = "image edit is single-stream (one edit saturates the GPU)"
-            return res
-        cell_name = f"{engine_id}__{backend}__{model.short_id}__{scenario_id}"
-        try:
-            m = engines.run_image_edit(engine_id, server, model, sc, backend,
-                                       results_dir, cell_name)
-        except Exception as ex:
-            res.status = "fail"
-            res.detail = f"edit error: {ex}"
-            return res
-        res.status = "ok"
-        res.requests_ok = 1
-        res.steps = int(m.get("steps", 0))
-        for k in ("edit_total_ms", "edit_first_total_ms", "edit_text_encode_ms",
-                  "edit_vae_encode_ms", "edit_sampling_ms", "edit_per_step_ms",
-                  "edit_vae_decode_ms"):
-            setattr(res, k, round(float(m.get(k, 0.0) or 0.0), 1))
-        res.edit_width = int(m.get("edit_width", 0))
-        res.edit_height = int(m.get("edit_height", 0))
-        res.edit_image = str(m.get("edit_image", ""))
-        res.total_wall_ms = round(float(m.get("total_wall_ms", 0.0) or 0.0), 1)
-        res.detail = str(m.get("note", ""))
-        return res
 
     try:
         req = scen.build_request(scenario_id, engine_id, model)
@@ -268,10 +238,6 @@ def _run_cell(server, engine_id, backend, model, scenario_id, max_tokens,
 
 
 def _warmup(server, engine_id, model):
-    # Image-edit models have no chat surface; the image_edit cell itself runs a
-    # cold + warm request pair instead (and reports both).
-    if model.is_image_edit:
-        return
     try:
         engines.run_openai_chat(
             server.base_url, engines.served_model_name(engine_id, server, model),
@@ -591,7 +557,7 @@ def main():
         header = f"[{engine_id}/{backend}/{model_id}{mtp_tag}{tp_tag}{cmoe_tag}]"
         print(f"=== {header}  scenarios={scen_ids}  concurrency={concurrency_levels} ===", flush=True)
 
-        # Pre-flight: model files (all shards + companions) and engine binary present?
+        # Pre-flight: model files (all shards + mmproj / MTP draft) and engine binary present?
         missing = None
         fetched_ok, fetch_detail = fetch_status.get(model_id, (True, ""))
         model_missing = model.missing_files()
@@ -603,9 +569,6 @@ def main():
         elif engine_id == "llamacpp" and not config.llama_server_exe_for(backend).exists():
             missing = (f"llama-server for backend '{backend}' not found: "
                        f"{config.llama_server_exe_for(backend)}")
-        elif engine_id == "sdcpp" and not config.sdcpp_exe_for(backend).exists():
-            missing = (f"sd-cli for backend '{backend}' not found: "
-                       f"{config.sdcpp_exe_for(backend)}")
         if missing:
             print(f"    SKIP group: {missing}")
             for c in cells:
@@ -685,19 +648,9 @@ def main():
                 t = time.monotonic()
                 res = _run_cell(server, engine_id, backend, model, scenario_id,
                                 max_tokens, mtp=mtp, concurrency=conc, tp=tp,
-                                results_dir=results_dir, cpu_moe=cmoe)
+                                cpu_moe=cmoe)
                 _write(results_dir, res)
                 wall = time.monotonic() - t
-                if config.SCENARIOS[scenario_id].kind == "image_edit":
-                    first = (f"  first={res.edit_first_total_ms / 1000:5.1f}s"
-                             if res.edit_first_total_ms > 0 else "")
-                    print(f"    {scenario_id:14s} c={conc:<3d} {res.status:7s}  "
-                          f"total={res.edit_total_ms / 1000:6.1f}s  "
-                          f"step={res.edit_per_step_ms / 1000:5.2f}s  "
-                          f"vae_dec={res.edit_vae_decode_ms / 1000:5.2f}s{first}  "
-                          f"{res.edit_width}x{res.edit_height}  wall={wall:5.1f}s  {res.detail[:60]}",
-                          flush=True)
-                    continue
                 extra = ""
                 # `turns=1/3` is the shape that matters: a workflow that
                 # stopped at its first turn would otherwise print nothing at all.

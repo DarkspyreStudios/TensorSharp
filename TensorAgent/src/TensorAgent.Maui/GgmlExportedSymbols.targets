@@ -21,7 +21,7 @@
     with SIGABRT inside load_aot_module, before any managed code runs. Measured on
     device.
 
-    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 313 symbols.
+    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 304 symbols.
   -->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'ios-arm64'">
     <ReferenceNativeSymbol Include="TSGgml_ActivationGradF32" SymbolType="Function" />
@@ -33,7 +33,6 @@
     <ReferenceNativeSymbol Include="TSGgml_AddmmQuantF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AlignedAlloc" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AlignedFree" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_ApplyLoraDelta" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AttentionSoftmaxWithSinksF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BinaryScalarF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BinaryTensorF32" SymbolType="Function" />
@@ -42,7 +41,6 @@
     <ReferenceNativeSymbol Include="TSGgml_CanInitializeBackend" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearHostBufferCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearOffloadableState" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_Conv2d" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Conv2dF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CopyF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CrossEntropyLossBackwardF32" SymbolType="Function" />
@@ -281,13 +279,6 @@
     <ReferenceNativeSymbol Include="TSGgml_Qwen4ExpMtpCopyKv" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImage21Forward" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImage21ResetForwardCache" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageBlock" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageBlockCfg" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageForward" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageJointAttn" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageModMlp" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageResetForwardCache" SymbolType="Function" />
-    <ReferenceNativeSymbol Include="TSGgml_QwenImageSetOffload" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenTeTrunk" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenVaeAttention" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenVaeRun" SymbolType="Function" />

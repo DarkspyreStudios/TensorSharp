@@ -14,7 +14,6 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Catalog;
-using TensorSharp.GGML;
 using TensorAgent.Core.Hosting;
 using TensorAgent.Core.Settings;
 using TensorSharp.AgentHost.Skills;
@@ -48,7 +47,7 @@ internal static class LiveMedia
     /// <summary>The projector file inside it, when it is not named as the catalog names it.</summary>
     public const string ProjectorFileVariable = "TENSORAGENT_TEST_MMPROJ_FILE";
 
-    /// <summary>A directory holding a locally supplied Qwen-Image-Edit DiT and its companion networks.</summary>
+    /// <summary>A directory holding a locally supplied Qwen-Image-2.1 DiT and its companion networks.</summary>
     public const string ImageModelDirVariable = "TENSORAGENT_TEST_IMAGE_MODEL_DIR";
 
     /// <summary>A directory holding a Wan video DiT and its companion networks.</summary>
@@ -60,7 +59,7 @@ internal static class LiveMedia
     /// <summary>
     /// Which backend a live test asks for. The chat scenarios default to the CPU, which
     /// is what a build machine has and what the rest of the live suite already assumes;
-    /// the diffusion ones default to Metal, because a single Qwen-Image edit or Wan clip
+    /// the diffusion ones default to Metal, because a single Qwen-Image-2.1 edit or Wan clip
     /// on a CPU is measured in hours and a test nobody can finish is not a test.
     /// </summary>
     public const string BackendVariable = "TENSORAGENT_TEST_BACKEND";
@@ -124,43 +123,47 @@ internal static class LiveMedia
         return null;
     }
 
-    /// <summary>The four networks a Qwen-Image-Edit run needs, found in one directory.</summary>
-    internal sealed record ImageEditFiles(string Dit, string TextEncoder, string Vae, string? Lora, string? VisionProjector);
+    /// <summary>The four networks a Qwen-Image-2.1 edit needs, found in one directory.</summary>
+    internal sealed record QwenImageFiles(string Dit, string TextEncoder, string Vae, string VisionProjector);
 
     /// <summary>Why the image-editing scenarios cannot run here, or null when they can.</summary>
-    internal static string? UnavailableImageEdit(out ImageEditFiles files)
+    internal static string? UnavailableQwenImage(out QwenImageFiles files)
     {
         files = null!;
         string? directory = Environment.GetEnvironmentVariable(ImageModelDirVariable);
         if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
-            return $"set {ImageModelDirVariable} to a directory holding a Qwen-Image-Edit DiT GGUF "
-                + "(e.g. Qwen-image-edit-2511-Q4_K_M.gguf), a Qwen2.5-VL text-encoder GGUF, and Qwen_Image-VAE.safetensors";
+            return $"set {ImageModelDirVariable} to a directory holding a Qwen-Image-2.1 DiT GGUF "
+                + "(e.g. qwen_image_2.1_Q4_K_M.gguf), qwen_image_2.1_vae_bf16.safetensors, a Qwen3-VL-8B "
+                + "text-encoder GGUF and its mmproj (the files config/qwen-image-2.1.json downloads)";
 
+        // The same names the pipeline's own directory scan accepts, so a directory this
+        // finds is one QwenImageModel would also have found.
         string[] entries = Directory.GetFiles(directory);
-        string? dit = entries.FirstOrDefault(f => Named(f, "image-edit") && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
+        string? dit = entries.FirstOrDefault(f =>
+            (Named(f, "qwen_image_2.1") || Named(f, "qwen-image-2.1")) && !Named(f, "vae")
+            && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
         string? textEncoder = entries.FirstOrDefault(f =>
-            Named(f, "qwen2.5-vl") && !Named(f, "mmproj") && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
-        string? vae = entries.FirstOrDefault(f => Named(f, "vae") && f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase));
+            IsQwen3Vl8b(f) && !Named(f, "mmproj") && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
+        string? vae = entries.FirstOrDefault(f =>
+            Named(f, "qwen_image_2.1_vae") && f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase));
+        string? projector = entries.FirstOrDefault(f =>
+            IsQwen3Vl8b(f) && Named(f, "mmproj") && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase));
 
         if (dit is null)
-            return $"no Qwen-Image-Edit DiT in {directory}: it needs a .gguf whose name contains 'image-edit'";
+            return $"no Qwen-Image-2.1 DiT in {directory}: it needs a .gguf whose name contains 'qwen_image_2.1'";
         if (textEncoder is null)
-            return $"no text encoder in {directory}: it needs a .gguf whose name contains 'qwen2.5-vl' and not 'mmproj'";
+            return $"no text encoder in {directory}: it needs a .gguf whose name contains 'qwen3vl-8b' and not 'mmproj'";
         if (vae is null)
-            return $"no VAE in {directory}: it needs Qwen_Image-VAE.safetensors";
+            return $"no VAE in {directory}: it needs qwen_image_2.1_vae_bf16.safetensors";
+        // Required, not optional: Qwen-Image-2.1 refuses to edit without its projector.
+        if (projector is null)
+            return $"no vision projector in {directory}: editing needs mmproj-Qwen3VL-8B-Instruct-F16.gguf";
 
-        // Both companions are optional, and both are picked narrowly. A directory of
-        // models holds several mmprojs and often both Lightning schedules; the 4-step
-        // one is what the catalog entry promises, and a projector belonging to another
-        // family would be handed to the Qwen2.5-VL vision tower and rejected there.
-        string[] loras = [.. entries.Where(f => Named(f, "lightning") && f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))];
-        files = new ImageEditFiles(
-            dit, textEncoder, vae,
-            loras.FirstOrDefault(f => Named(f, "4steps")) ?? loras.FirstOrDefault(),
-            entries.FirstOrDefault(f =>
-                Named(f, "mmproj") && Named(f, "qwen2.5-vl") && f.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase)));
+        files = new QwenImageFiles(dit, textEncoder, vae, projector);
         return null;
     }
+
+    private static bool IsQwen3Vl8b(string path) => Named(path, "qwen3vl-8b") || Named(path, "qwen3-vl-8b");
 
     /// <summary>The networks a Wan generation needs, found in one directory.</summary>
     internal sealed record VideoFiles(string Dit, string Vae, string TextEncoder);
@@ -238,12 +241,12 @@ public sealed class MultimodalModelFactAttribute : FactAttribute
     }
 }
 
-/// <summary>A fact that needs the Qwen-Image-Edit checkpoint and its companions.</summary>
-public sealed class ImageEditModelFactAttribute : FactAttribute
+/// <summary>A fact that needs the Qwen-Image-2.1 checkpoint and its companions.</summary>
+public sealed class QwenImageModelFactAttribute : FactAttribute
 {
-    public ImageEditModelFactAttribute()
+    public QwenImageModelFactAttribute()
     {
-        if (LiveMedia.UnavailableImageEdit(out _) is { } reason)
+        if (LiveMedia.UnavailableQwenImage(out _) is { } reason)
             Skip = reason;
     }
 }
@@ -365,26 +368,26 @@ public sealed class MediaScenarioTests : IDisposable
     }
 
     /// <summary>
-    /// Stage explicitly supplied image-edit files under the test fixture's role-aware
+    /// Stage explicitly supplied Qwen-Image-2.1 files under the test fixture's role-aware
     /// names, publish its companions, and host the DiT directly. This keeps the live
-    /// route coverage without putting a removed model back in <c>ModelCatalog.BuiltIn</c>.
+    /// route coverage without putting a diffusion model in <c>ModelCatalog.BuiltIn</c>.
     /// </summary>
-    private CatalogModel StartImageEdit(LiveMedia.ImageEditFiles files, string backend)
+    private CatalogModel StartQwenImage(LiveMedia.QwenImageFiles files, string backend)
     {
-        CatalogModel model = DiffusionModelFixture.ImageEdit;
+        CatalogModel model = DiffusionModelFixture.QwenImage21;
         _diffusionStore = new ModelStore(Path.Combine(_root, "diffusion-models"));
         Directory.CreateDirectory(_diffusionStore.DirectoryFor(model));
         foreach ((string name, string source) in LinksFor(model, files))
             File.CreateSymbolicLink(Path.Combine(_diffusionStore.DirectoryFor(model), name), source);
 
-        DiffusionCompanions.Publish(model, _diffusionStore, deviceMemoryGB: 16);
+        DiffusionCompanions.Publish(model, _diffusionStore);
         StartDirect(_diffusionStore.PathFor(model, model.Weights), backend);
         return model;
     }
 
     private static HttpClient Client(LoopbackServer server)
     {
-        // A Wan clip and a Qwen-Image edit are both minutes of work on a laptop, and an
+        // A Wan clip and a Qwen-Image-2.1 edit are both minutes of work on a laptop, and an
         // HttpClient that gives up at 100 seconds turns that into a cancelled request
         // whose failure looks nothing like the slowness that caused it.
         var client = new HttpClient { BaseAddress = new Uri(server.BaseUrl), Timeout = TimeSpan.FromHours(2) };
@@ -697,14 +700,20 @@ public sealed class MediaScenarioTests : IDisposable
         AssertMentionsOneOf(answer, "the second half", "blue", "azure", "navy");
     }
 
-    // ---- image editing and generation ------------------------------------------------
+    // ---- image editing ---------------------------------------------------------------
+    // Route tests, not quality tests: each asks for the smallest output Qwen-Image-2.1
+    // accepts and two denoising steps, so a run proves the files load, the edit runs end
+    // to end and a real PNG comes back, in minutes rather than the default 2048x2048 x 40.
 
-    [ImageEditModelFact]
+    private const int SmokeSize = 256;
+    private const int SmokeSteps = 2;
+
+    [QwenImageModelFact]
     public async Task AnEditedPictureComesBackAsARealImageAtASensibleSize()
     {
-        Assert.Null(LiveMedia.UnavailableImageEdit(out LiveMedia.ImageEditFiles files));
+        Assert.Null(LiveMedia.UnavailableQwenImage(out LiveMedia.QwenImageFiles files));
         string backend = LiveMedia.Backend("ggml_metal");
-        CatalogModel model = StartImageEdit(files, backend);
+        CatalogModel model = StartQwenImage(files, backend);
 
         await LoadAsync(model.Weights.FileName, backend);
 
@@ -716,6 +725,9 @@ public sealed class MediaScenarioTests : IDisposable
             prompt = "Change the red circle to a blue square. Keep the white background.",
             imagePaths = new[] { file },
             seed = 42,
+            width = SmokeSize,
+            height = SmokeSize,
+            steps = SmokeSteps,
         });
         string payload = await response.Content.ReadAsStringAsync();
         Assert.True(response.IsSuccessStatusCode, $"the edit failed: {(int)response.StatusCode} {payload}");
@@ -724,7 +736,7 @@ public sealed class MediaScenarioTests : IDisposable
         Assert.True(body.GetProperty("ok").GetBoolean());
         int width = body.GetProperty("width").GetInt32();
         int height = body.GetProperty("height").GetInt32();
-        Assert.True(width >= 256 && height >= 256, $"the edit came back {width}x{height}, which is not a picture anyone asked for");
+        Assert.Equal((SmokeSize, SmokeSize), (width, height));
 
         // Fetched through the URL the page would use, then decoded: a reply naming a
         // file that cannot be served or cannot be read is a broken image in the chat,
@@ -739,12 +751,12 @@ public sealed class MediaScenarioTests : IDisposable
         Assert.True(rgba.Where((_, i) => i % 4 == 0).Distinct().Count() > 4, "the edited image is a flat fill, not a picture");
     }
 
-    [ImageEditModelFact]
+    [QwenImageModelFact]
     public async Task TheStreamingEditShowsItsWorkAndThenTheFinishedPicture()
     {
-        Assert.Null(LiveMedia.UnavailableImageEdit(out LiveMedia.ImageEditFiles files));
+        Assert.Null(LiveMedia.UnavailableQwenImage(out LiveMedia.QwenImageFiles files));
         string backend = LiveMedia.Backend("ggml_metal");
-        CatalogModel model = StartImageEdit(files, backend);
+        CatalogModel model = StartQwenImage(files, backend);
 
         await LoadAsync(model.Weights.FileName, backend);
 
@@ -755,11 +767,14 @@ public sealed class MediaScenarioTests : IDisposable
             prompt = "Make the circle blue.",
             imagePaths = new[] { upload.GetProperty("file").GetString() },
             seed = 7,
+            width = SmokeSize,
+            height = SmokeSize,
+            steps = SmokeSteps,
         });
 
-        // Denoising a phone-sized image takes a minute or more. Without progress frames
-        // the page has a spinner and no way to tell a slow edit from a hung one, so the
-        // frames are the feature, not decoration.
+        // Denoising takes a minute or more at real sizes. Without progress frames the
+        // page has a spinner and no way to tell a slow edit from a hung one, so the
+        // frames are the feature, not decoration. Two steps still earn one preview.
         List<JsonElement> progress = frames.Where(f => f.TryGetProperty("imageEdit", out _)).ToList();
         Assert.NotEmpty(progress);
 
@@ -778,27 +793,22 @@ public sealed class MediaScenarioTests : IDisposable
         MediaCodecs.Image.DecodeRgba(png, out int width, out int height);
         Assert.Equal(last.GetProperty("width").GetInt32(), width);
         Assert.Equal(last.GetProperty("height").GetInt32(), height);
+        Assert.Equal((SmokeSize, SmokeSize), (width, height));
     }
 
     /// <summary>
     /// Map each file found on disk onto the name the test fixture gives its role, no
     /// matter what the local copy is called. An edit that runs then proves the VAE,
-    /// text encoder and (when supplied) LoRA were all found.
+    /// text encoder and vision projector were all found under those names.
     /// </summary>
-    private static Dictionary<string, string> LinksFor(CatalogModel model, LiveMedia.ImageEditFiles files)
-    {
-        var links = new Dictionary<string, string>(StringComparer.Ordinal)
+    private static Dictionary<string, string> LinksFor(CatalogModel model, LiveMedia.QwenImageFiles files) =>
+        new(StringComparer.Ordinal)
         {
             [model.Weights.FileName] = files.Dit,
             [NameOf(model, CatalogFileRole.TextEncoder)] = files.TextEncoder,
             [NameOf(model, CatalogFileRole.Vae)] = files.Vae,
+            [NameOf(model, CatalogFileRole.VisionProjector)] = files.VisionProjector,
         };
-        if (files.Lora is { } lora)
-            links[NameOf(model, CatalogFileRole.Lora)] = lora;
-        if (files.VisionProjector is { } projector)
-            links[NameOf(model, CatalogFileRole.VisionProjector)] = projector;
-        return links;
-    }
 
     private static string NameOf(CatalogModel model, CatalogFileRole role) =>
         model.Files.Single(f => f.Role == role).FileName;
@@ -855,83 +865,5 @@ public sealed class MediaScenarioTests : IDisposable
             Environment.SetEnvironmentVariable("TS_WAN_VAE", null);
             Environment.SetEnvironmentVariable("TS_WAN_TE", null);
         }
-    }
-
-    /// <summary>
-    /// What one edit of the reference quantization actually costs the GPU.
-    ///
-    /// <para>
-    /// Image generators load their files in stages, so the sum of the download is not
-    /// what is resident. The model is no longer offered in TensorAgent's catalog, but
-    /// retaining the measured ceiling catches a material memory regression in the
-    /// underlying Qwen-Image pipeline when explicitly supplied weights are available.
-    /// </para>
-    /// </summary>
-    [SkippableFact]
-    public async Task AReferenceEditStaysWithinItsMeasuredMemoryCeiling()
-    {
-        string? unavailable = LiveMedia.UnavailableImageEdit(out LiveMedia.ImageEditFiles files);
-        Skip.If(unavailable is not null, unavailable ?? string.Empty);
-        string backend = LiveMedia.Backend("ggml_metal");
-        CatalogModel model = StartImageEdit(files, backend);
-
-        await LoadAsync(model.Weights.FileName, backend);
-
-        long peak = 0;
-        using var watching = new CancellationTokenSource();
-        Task sampler = Task.Run(async () =>
-        {
-            while (!watching.IsCancellationRequested)
-            {
-                if (GgmlBasicOps.TryGetBackendMemory(out long free, out long total))
-                {
-                    long now = total - free;
-                    peak = Math.Max(peak, now);
-                    if (Environment.GetEnvironmentVariable("TENSORAGENT_TRACE_VRAM") is { Length: > 0 })
-                        Console.WriteLine($"vram-trace {DateTime.UtcNow:HH:mm:ss.fff} {now / 1e9:F2}");
-                }
-                try { await Task.Delay(150, watching.Token); }
-                catch (OperationCanceledException) { return; }
-            }
-        });
-
-        JsonElement upload = await UploadAsync(MediaFixtures.RedCircleOnWhitePng(512), "circle.png");
-        using HttpResponseMessage response = await _client!.PostAsJsonAsync("/api/image-edit", new
-        {
-            prompt = "Change the red circle to a blue square.",
-            imagePaths = new[] { upload.GetProperty("file").GetString()! },
-            seed = 42,
-        });
-        string payload = await response.Content.ReadAsStringAsync();
-        watching.Cancel();
-        await sampler;
-        Assert.True(response.IsSuccessStatusCode, $"the edit failed: {(int)response.StatusCode} {payload}");
-
-        // What this number is, precisely: ggml-metal reports free as
-        // recommendedMaxWorkingSetSize minus currentAllocatedSize, so total-free is this
-        // process's Metal allocation. It is an upper bound on what iOS counts against
-        // the jetsam limit because an allocated MTLBuffer that is not resident still
-        // counts here.
-        bool referenceQuant = Path.GetFileName(files.Dit).Equals(model.Weights.FileName, StringComparison.OrdinalIgnoreCase);
-        Console.WriteLine(
-            $"media edit: peak {peak / 1e9:F2} GB Metal-allocated using {Path.GetFileName(files.Dit)}"
-            + (referenceQuant ? string.Empty : " (not the reference quant — the ceiling check is skipped)"));
-
-        Assert.True(peak > 0, "nothing was allocated on the device, so this did not run on Metal");
-
-        // A different quantization measures a different model. The ceiling below was
-        // established with the fixture's Q2_K DiT, so applying it to another local copy
-        // would produce a confident answer to the wrong question.
-        Skip.IfNot(referenceQuant,
-            $"this measured {Path.GetFileName(files.Dit)}, not the reference {model.Weights.FileName}; "
-            + $"peak was {peak / 1e9:F2} GB. Point {LiveMedia.ImageModelDirVariable} at the reference files "
-            + "to check the regression ceiling.");
-
-        // 16.0 GB is what this costs today. A change that pushes it materially higher
-        // is worth knowing about even though TensorAgent no longer offers the model.
-        const double measuredCeiling = 17.5e9;
-        Assert.True(peak < measuredCeiling,
-            $"one edit allocated {peak / 1e9:F2} GB, above the {measuredCeiling / 1e9:F1} GB this "
-            + "cost when it was last measured; something got materially heavier");
     }
 }

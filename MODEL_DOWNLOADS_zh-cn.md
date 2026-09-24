@@ -4,7 +4,7 @@
 > [TensorSharp](README_zh-cn.md) 文档的一部分。另见[各模型架构卡片](docs/models/README_zh-cn.md)。
 
 
-TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核对 Hugging Face 下载入口与伴随文件。请根据硬件条件选择合适的量化版本（Q4_K_M / UD-Q4_K_XL 适合低内存，Q8_0 适合更高质量等）。标注“可选”的条目是提速用的产物——步数蒸馏 checkpoint、蒸馏 LoRA、推测解码 draft 模型。不下载也能跑通，但它们往往就是“几分钟”和“几小时”的差别，动手前请先扫一眼。
+TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核对 Hugging Face 下载入口与伴随文件。请根据硬件条件选择合适的量化版本（Q4_K_M / UD-Q4_K_XL 适合低内存，Q8_0 适合更高质量等）。标注“可选”的条目是提速用的产物——步数蒸馏 checkpoint、推测解码 draft 模型。不下载也能跑通，但它们往往就是“几分钟”和“几小时”的差别，动手前请先扫一眼。
 
 | 架构 | 模型 | GGUF 下载 |
 |---|---|---|
@@ -34,10 +34,10 @@ TensorSharp 使用 GGUF 格式模型文件。以下是各架构对应的已核�
 | GLM 5.x | GLM-5.3-Flash（320B，288 个路由专家，文本 + 图像） | [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF)；每种量化一个子目录（`UD-Q2_K_XL/` 等），均为多分片，`--model` 指向 `-00001-of-` 分片。`general.architecture` 为 `glm5next`，与 GLM-5.2 走同一个原生执行器。与 5.2 不同，它**支持图像**：同仓库的 `mmproj-BF16.gguf`（GLM-OCR ViT）启用 `--image`、多图提示与多轮图像会话。它的 NextN 块尚未接入，因此这里没有 `--spec`。不传 `--tp` 时默认按层切分到所有可见 GPU；在 GGML GPU 后端上，传入 `--tp N` 则选择仅支持本地单进程的原生张量并行 |
 | DeepSeek V4 | DSpark 推测解码 draft（可选，仅提速） | 见下方 [DSpark draft 模型](#dspark-draft-模型)，用 `--draft-model` 加载，解码约 1.3-1.4 倍 |
 | DiffusionGemma | diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF)，如 `diffusiongemma-26B-A4B-it-Q4_K_M.gguf` |
-| Qwen-Image-Edit | MMDiT DiT（必需） | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF)，如 `qwen-image-edit-2511-Q4_K_M.gguf` |
-| Qwen-Image-Edit | VAE + Qwen2.5-VL（必需） | [QuantStack VAE](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) 中的 `VAE/Qwen_Image-VAE.safetensors` + [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) |
-| Qwen-Image-Edit | 视觉 mmproj（可选） | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) 中的 `mmproj-BF16.gguf`，用 `--qwen-image-mmproj` / `TS_QWEN_IMAGE_MMPROJ` 加载，可让编辑指令参考源图内容 |
-| Qwen-Image-Edit | Lightning LoRA（可选，4/8 步） | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning)，文件 `Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`（0.850 GB）；用 `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA` 加载，会自动按文件名里的步数把采样默认值切到该步数 + CFG 1.0（基础默认为 30 步、CFG 2.5） |
+| Qwen-Image-2.1 | 扩散 Transformer（即 `--model` GGUF） | [Abiray/Qwen-Image-2.1-GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF)，文件 `qwen_image_2.1_Q4_K_M.gguf`。[`config/qwen-image-2.1.json`](config/qwen-image-2.1.json) 会以固定修订版本和 SHA-256 校验下载它以及下面三个伴随文件（共四个文件，约 10.29 GiB）。详见 [qwenimage21_zh-cn.md](docs/models/qwenimage21_zh-cn.md) |
+| Qwen-Image-2.1 | 专用 2.1 VAE（必需） | [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1/tree/main/vae) 中的 `vae/qwen_image_2.1_vae_bf16.safetensors`——放在 DiT 旁，或用 `--qwen-image-vae` / `TS_QWEN_IMAGE_VAE` 指定 |
+| Qwen-Image-2.1 | Qwen3-VL-8B 文本编码器（必需） | [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) 中的 `Qwen3VL-8B-Instruct-Q4_K_M.gguf`——放在 DiT 旁，或用 `--qwen-image-vl` / `TS_QWEN_IMAGE_TE` 指定 |
+| Qwen-Image-2.1 | 编辑用视觉编码器 | 同一 Qwen3-VL 仓库中的 `mmproj-Qwen3VL-8B-Instruct-F16.gguf`——放在 DiT 旁，或用 `--qwen-image-mmproj` / `TS_QWEN_IMAGE_MMPROJ` 指定 |
 | MiniMax-H3 音视频生成 | 去噪器（`--model` GGUF） | **两个独立的 checkpoint，不是开关**——加载哪一个决定了它接受什么条件输入。[unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF)：`minimax_h3_fl2va_pruned-Q4_K.gguf`（10.64 GiB）用于文生视频 / 图生视频 / 首尾帧，`minimax_h3_ref2va_pruned-Q4_K.gguf`（10.60 GiB）用于身份与外观参考。另有 Q8_0（19.97 GiB）到 Q2_K（6.26 GiB）。H3 是 CFG 蒸馏模型：**必须传 `--cfg 1.0`**，步数取 4-8。这些 GGUF **完全没有元数据**，TensorSharp 靠张量表识别它们，并从文件名读出分区——重命名或重新量化时请保留 `fl2va` / `ref2va`。两个 checkpoint 共用下面三个网络，所以事后再加另一个只需下它自己的约 10.6 GiB |
 | MiniMax-H3 音视频生成 | Qwen3-VL-32B 文本编码器（必需） | 同仓库：`qwen3vl_32b_minimax_h3-Q4_K_M.gguf`（16.97 GiB），或 `-Q2_K_M.gguf`（12.20 GiB）以搭配最小的那几个去噪器。截断到 50 层并去掉最后的 norm，去噪开始前即从显存释放。**它不含分词器**——还需要下一行那两个文件 |
 | MiniMax-H3 音视频生成 | `vocab.json` + `merges.txt`（必需） | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/processor)——编码器 GGUF 缺的那对 Qwen2 字节级 BPE 文件，也是配置文件唯一无法替你自动下载的东西（自动下载只能补齐“是参数”的条目，而分词器不是）。放在编码器旁边，或用 `TS_VIDEO_TOKENIZER` 指向存放它们的目录 |
@@ -90,7 +90,7 @@ Gemma 4 目前已有可用的推测解码路径：上表中的 `gemma4-assistant
 
 ### 按模型下载并运行
 
-以下命令从仓库根目录运行；请先按平台安装完整的 [.NET 10 SDK](DEVELOPMENT_zh-cn.md#安装-net-10-sdk)，再执行 `dotnet build TensorSharp.slnx -c Release`。仅安装 Runtime 无法构建下方使用的二进制文件。`hf` 来自 Hugging Face CLI（`pip install -U huggingface_hub`），所有文件都会下载到 `./models`。通用提示：单次文本提示词通过 `--input` 文件传入（`--prompt` 用于 Qwen-Image-Edit 的编辑指令，以及视频生成——MiniMax-H3 与 Wan——的提示词）；CLI 默认贪心采样，且不加 `--max-tokens` 时只生成 100 个 token；服务端固定监听 **http://localhost:5000**。按硬件把示例中的 `ggml_cuda` 换成 `ggml_metal`、`ggml_vulkan` 或 `ggml_cpu`（见 [选择后端](README_zh-cn.md#选择后端)）。
+以下命令从仓库根目录运行；请先按平台安装完整的 [.NET 10 SDK](DEVELOPMENT_zh-cn.md#安装-net-10-sdk)，再执行 `dotnet build TensorSharp.slnx -c Release`。仅安装 Runtime 无法构建下方使用的二进制文件。`hf` 来自 Hugging Face CLI（`pip install -U huggingface_hub`），所有文件都会下载到 `./models`。通用提示：单次文本提示词通过 `--input` 文件传入（`--prompt` 用于 Qwen-Image-2.1 的图像提示词，以及视频生成——MiniMax-H3 与 Wan——的提示词）；CLI 默认贪心采样，且不加 `--max-tokens` 时只生成 100 个 token；服务端固定监听 **http://localhost:5000**。按硬件把示例中的 `ggml_cuda` 换成 `ggml_metal`、`ggml_vulkan` 或 `ggml_cpu`（见 [选择后端](README_zh-cn.md#选择后端)）。
 
 ```bash
 echo "列出三条关于月球的事实。" > prompt.txt
@@ -252,18 +252,36 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/di
 
 （Web UI 会实时流式展示 DiffusionGemma 的去噪过程；兼容 API 只返回最终文本。）
 
-**Qwen-Image-Edit**（DiT + VAE + 文本编码器；Lightning LoRA 可选）：
+**Qwen-Image-2.1**（提示词 → 图像，或提示词 + 一张或多张参考图 → 编辑后的图像；需要 DiT、专用 2.1 VAE 与 Qwen3-VL-8B 文本编码器，编辑时还需要它的 mmproj）：
+
+最短路径是现成的配置文件：它固定修订版本与 SHA-256 校验，缺什么下什么（共四个文件，约 10.29 GiB），存放到 `$TENSORSHARP_MODELS/qwen-image-2.1/`；未设置 `TENSORSHARP_MODELS` 时为 `models/qwen-image-2.1/`。配置默认选择 `ggml_metal`；在 NVIDIA 机器上追加 `--backend ggml_cuda`。
 
 ```bash
-hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
-hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
-hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --local-dir models
-hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png --prompt "把天空改成壮丽的日落。" --output edited.png --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output generated.png
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image generated.png \
+  --prompt 'Change the blue vase to a red vase. Preserve the cat, lighting and composition.' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output edited.png
+dotnet run --project TensorSharp.Server.Host -c Release --no-build -- \
+  --config config/qwen-image-2.1.json --host 127.0.0.1 --port 5000
 ```
 
-（在 Web UI 里上传图片并输入编辑指令即可。Lightning LoRA 的下载与 `--qwen-image-lora` 参数是可选的——加上后去噪降到 4 步、CFG 1.0。）
+如需自己下载文件：
+
+```bash
+hf download Abiray/Qwen-Image-2.1-GGUF qwen_image_2.1_Q4_K_M.gguf --local-dir models
+hf download Comfy-Org/Qwen-Image-2.1 vae/qwen_image_2.1_vae_bf16.safetensors --local-dir models
+hf download Qwen/Qwen3-VL-8B-Instruct-GGUF Qwen3VL-8B-Instruct-Q4_K_M.gguf mmproj-Qwen3VL-8B-Instruct-F16.gguf --local-dir models
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf --qwen-image-vae models/vae/qwen_image_2.1_vae_bf16.safetensors --qwen-image-vl models/Qwen3VL-8B-Instruct-Q4_K_M.gguf --qwen-image-mmproj models/mmproj-Qwen3VL-8B-Instruct-F16.gguf --backend ggml_cuda
+```
+
+（在 Web UI 里，不带附件的提示词会生成图像；附加一张或多张图像即可编辑。省略设置时为 2048×2048、40 步 Euler、CFG 1；`--width 1024 --height 1024` 是更快的草图尺寸。详见 [qwenimage21_zh-cn.md](docs/models/qwenimage21_zh-cn.md)。）
 
 **MiniMax-H3 音视频生成**（提示词 + 可选关键帧或参考 → H.264 MP4，**外加原生 32 kHz 立体声音频，在同一个打包 latent 里一起生成**）：
 

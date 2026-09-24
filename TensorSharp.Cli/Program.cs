@@ -186,6 +186,13 @@ namespace TensorSharp.Cli
 
         static void MainCore(string[] args)
         {
+            // Options whose feature was removed outright (the Qwen-Image-Edit-2511 LoRA
+            // and CPU-offload flags) are refused first, by name and with what to do
+            // instead: the switch below has no unknown-flag trap, so a retired flag in a
+            // script would otherwise be silently dropped. The ArgumentException reaches
+            // Main's handler, which prints one "Configuration error:" line and exits 1.
+            RemovedCliFlags.RejectRemoved(args);
+
             // Parsed BEFORE the switch below and REMOVED from the argument list, the
             // same way the server does it: the code-execution flags are owned by
             // CodeExecOptions rather than by this switch, so consuming them here is
@@ -296,22 +303,20 @@ namespace TensorSharp.Cli
             // DiffusionGemma sampler knobs (used only for the diffusion-gemma architecture).
             int diffusionSteps = 48;
             int diffusionSeed = 0;
-            int imageWidth = 0, imageHeight = 0;   // explicit Qwen-Image-Edit output size (0 = auto/VRAM-clamped)
+            int imageWidth = 0, imageHeight = 0;   // explicit image/video output size (0 = the model's automatic size)
             int diffusionBlocks = 0;   // 0 => derive from --max-tokens and canvas_length
-            // Qwen-Image-Edit knobs.
+            // Image and video generation knobs.
             string editPrompt = null;
-            float cfgScale = 2.5f;   // Qwen-Image-Edit-2511 recommendation; 4.0 over-guides (distorts faces)
-            bool cfgScaleSet = false;          // explicit --cfg (image edit passes 0 = auto otherwise)
+            float cfgScale = 0f;               // read only when --cfg is given (cfgScaleSet)
+            bool cfgScaleSet = false;          // explicit --cfg (image/video generation passes 0 = auto otherwise)
             bool diffusionStepsSet = false;    // explicit --diffusion-steps (image edit passes 0 = auto otherwise)
             bool diffusionSeedSet = false;     // explicit --diffusion-seed (video draws a random seed otherwise)
-            // Qwen-Image-Edit companion GGUFs. The qwen_image DiT GGUF (passed via
+            // Qwen-Image-2.1 companion files. The qwen_image DiT GGUF (passed via
             // --model) carries none of these, so the operator can point at them
             // explicitly instead of relying on a same-directory scan / env vars.
             string qwenImageVaePath = null;
             string qwenImageVlPath = null;
             string qwenImageMmprojPath = null;
-            string qwenImageLoraPath = null;
-            bool offloadCpu = false;
             // Wan text-to-video knobs.
             int videoFrames = 0;       // 0 = model default (33)
             int videoFps = 0;          // 0 = model default (16)
@@ -356,7 +361,6 @@ namespace TensorSharp.Cli
                     case "--qwen-image-vae": qwenImageVaePath = args[++i]; break;
                     case "--qwen-image-vl": qwenImageVlPath = args[++i]; break;
                     case "--qwen-image-mmproj": qwenImageMmprojPath = args[++i]; break;
-                    case "--qwen-image-lora": qwenImageLoraPath = args[++i]; break;
                     case "--video-frames": videoFrames = int.Parse(args[++i]); break;
                     case "--fps": videoFps = int.Parse(args[++i]); break;
                     case "--flow-shift": flowShift = float.Parse(args[++i], CultureInfo.InvariantCulture); break;
@@ -377,7 +381,6 @@ namespace TensorSharp.Cli
                     case "--ref-audio": refAudioPaths.Add(args[++i]); break;
                     case "--ref-video-audio": refVideoAudioPaths.Add(args[++i]); break;
                     case "--no-audio": videoAudioEnabled = false; break;
-                    case "--offload-cpu": offloadCpu = true; break;
                     case "--audio": audioPath = args[++i]; break;
                     case "--video": videoPath = args[++i]; break;
                     case "--mmproj": mmProjPath = args[++i]; break;
@@ -775,7 +778,7 @@ namespace TensorSharp.Cli
                 }
             }
 
-            // Qwen-Image-Edit: let the operator override the companion GGUFs that
+            // Qwen-Image-2.1: let the operator override the companion files that
             // QwenImageModel otherwise resolves from a same-directory scan. These
             // are translated into the env vars QwenImageModel reads (the existing
             // override mechanism) and validated here so a typo fails fast instead
@@ -783,11 +786,6 @@ namespace TensorSharp.Cli
             ApplyQwenImageCompanionOverride("--qwen-image-vae", "TS_QWEN_IMAGE_VAE", qwenImageVaePath);
             ApplyQwenImageCompanionOverride("--qwen-image-vl", "TS_QWEN_IMAGE_TE", qwenImageVlPath);
             ApplyQwenImageCompanionOverride("--qwen-image-mmproj", "TS_QWEN_IMAGE_MMPROJ", qwenImageMmprojPath);
-            ApplyQwenImageCompanionOverride("--qwen-image-lora", "TS_QWEN_IMAGE_LORA", qwenImageLoraPath);
-            // sd.cpp --offload-to-cpu equivalent: force DiT weight streaming from RAM (the
-            // pipeline also auto-engages it when the target resolution needs the VRAM).
-            if (offloadCpu)
-                Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU", "1");
 
             // Video generation: companion overrides. Each path is published under both the
             // generic TS_VIDEO_* name and the historical TS_WAN_* one, so WanVideoModel keeps
@@ -871,17 +869,13 @@ namespace TensorSharp.Cli
                 model.MaxContextLength, model.KvCacheDtype.ToShortString(),
                 modelLoadSw.Elapsed.TotalMilliseconds);
 
-            // Qwen-Image-Edit: prompt + input image(s) -> modified image (no autoregressive path).
-            // Repeat --image for multi-image edits (e.g. --image model.png --image dress.png);
-            // the first image drives the output geometry, the prompt can reference each as
-            // "Picture 1", "Picture 2", ... in listed order.
+            // Qwen-Image-2.1: prompt -> generated image, or prompt + input image(s) -> edited
+            // image (no autoregressive path). Repeat --image for multi-image edits (e.g.
+            // --image model.png --image dress.png); the first image drives the output
+            // geometry, the prompt can reference each as "Picture 1", "Picture 2", ... in
+            // listed order.
             if (model is TensorSharp.Models.QwenImage.QwenImageModel qwenImageModel)
             {
-                if (imagePathList.Count == 0 && !qwenImageModel.IsVersion21)
-                {
-                    Console.Error.WriteLine("Qwen-Image-Edit requires --image <input.png> (repeatable for multi-image edits). Optionally --prompt, --output, --diffusion-steps, --cfg, --diffusion-seed.");
-                    return;
-                }
                 string prompt = editPrompt
                     ?? (inputFile != null && File.Exists(inputFile) ? File.ReadAllText(inputFile).Trim() : "");
                 if (imagePathList.Count == 0 && string.IsNullOrWhiteSpace(prompt))
@@ -1978,7 +1972,7 @@ namespace TensorSharp.Cli
                     return;
                 }
             }
-            Console.WriteLine(model.IsVersion21 ? "=== Qwen-Image-2.1 ===" : "=== Qwen-Image-Edit ===");
+            Console.WriteLine("=== Qwen-Image-2.1 ===");
             for (int i = 0; i < imagePaths.Count; i++)
                 Console.WriteLine($"  input{(imagePaths.Count > 1 ? $" {i + 1}" : "  ")}: {imagePaths[i]}");
             Console.WriteLine($"  prompt : {prompt}");
@@ -1986,7 +1980,7 @@ namespace TensorSharp.Cli
 
             var inputs = new List<TensorSharp.Models.QwenImage.RgbImage>();
             foreach (var path in imagePaths)
-                inputs.Add(TensorSharp.Models.QwenImage.ImageIO.Load(path, preserveAlpha: model.IsVersion21));
+                inputs.Add(TensorSharp.Models.QwenImage.ImageIO.Load(path, preserveAlpha: true));
             var p = new TensorSharp.Models.QwenImage.QwenImageParams
             {
                 Steps = steps,
@@ -1997,7 +1991,7 @@ namespace TensorSharp.Cli
                 NegativePrompt = negativePrompt ?? " ",
             };
             if (width > 0 && height > 0)
-                Console.WriteLine($"  explicit output size {width}x{height} (bypasses the VRAM area clamp)");
+                Console.WriteLine($"  explicit output size {width}x{height}");
             var sw = Stopwatch.StartNew();
             var output = inputs.Count == 0 ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
             sw.Stop();
@@ -3317,13 +3311,6 @@ namespace TensorSharp.Cli
         }
 
         /// <summary>
-        /// Translate a Qwen-Image-Edit companion-model CLI flag into the env var
-        /// QwenImageModel reads (its existing override mechanism). Validates the
-        /// path exists so a typo fails fast at startup rather than silently
-        /// falling back to the same-directory scan and surfacing as a confusing
-        /// "companion not found" later.
-        /// </summary>
-        /// <summary>
         /// Print the Vulkan devices ggml-vulkan can see (index + adapter name) so the
         /// operator knows what to pass to <c>--gpu-device</c> on multi-GPU hosts.
         /// Enumerating spins up the Vulkan instance but no backend/device state.
@@ -3517,6 +3504,13 @@ namespace TensorSharp.Cli
                 "Video companion override {Flag} -> {Path}", flag, full);
         }
 
+        /// <summary>
+        /// Translate a Qwen-Image-2.1 companion-file CLI flag into the env var
+        /// QwenImageModel reads (its existing override mechanism). Validates the
+        /// path exists so a typo fails fast at startup rather than silently
+        /// falling back to the same-directory scan and surfacing as a confusing
+        /// "companion not found" later.
+        /// </summary>
         static void ApplyQwenImageCompanionOverride(string flag, string envVar, string path)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -3525,7 +3519,7 @@ namespace TensorSharp.Cli
                 throw new FileNotFoundException($"{flag} file not found: {path}", path);
             Environment.SetEnvironmentVariable(envVar, Path.GetFullPath(path));
             _log.LogInformation(LogEventIds.HostConfiguration,
-                "Qwen-Image-Edit companion override {Flag} -> {Path}", flag, Path.GetFullPath(path));
+                "Qwen-Image companion override {Flag} -> {Path}", flag, Path.GetFullPath(path));
         }
 
         private static double Median(double[] values)

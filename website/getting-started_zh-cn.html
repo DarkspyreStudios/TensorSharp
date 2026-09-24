@@ -78,7 +78,7 @@ dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release</
   <ul>
     <li><strong>MiniMax-H3 视频 + 音频</strong> —— 这里唯一连声音一起产出的模型族：画面与原生 32 kHz 立体声音频在同一个打包潜变量里一起去噪，一次运行写出一个 <code>.mp4</code> 和一个独立的 <code>.wav</code>。它是两个仓库里的四个文件 —— FL2VA 去噪器（10.64 GiB）、共用的 Qwen3-VL-32B 文本编码器（16.97 GiB）、视频 VAE（5.21 GB）和音频 VAE（0.61 GB），合计约 33.5 GB —— 也可以只写一个 <code>--config config/minimax-h3-fl2va.json</code>，首次运行时会把四个文件全部下载好。该权重出厂即为 CFG 蒸馏版，因此必须用 <code>--cfg 1.0</code>（更高的取值 TensorSharp 会直接拒绝），相对 20 步的默认值，4–8 步是常用的快速工作点。有一处自动下载填不上：文本编码器的 GGUF 不带分词器，需要自己从 <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/processor" target="_blank" rel="noopener">MiniMaxAI/MiniMax-H3</a> 取 <code>vocab.json</code> 和 <code>merges.txt</code> 放到编码器旁边（或用 <code>TS_VIDEO_TOKENIZER</code> 指向它们所在的目录）。</li>
     <li><strong>Wan 视频，只有画面</strong> —— 基础的 <code>Wan2.2-TI2V-5B</code> 走官方配方 50 步 × 2 次 CFG = 100 次 DiT 前向；<em>Turbo</em> / <em>Lightning</em> / <em>FastWan</em> 权重在训练时就不使用引导，只需 4 次。TensorSharp 会从 DiT 文件名自动识别，不需要额外参数。在 M5 Pro 上，一段 1088×832 × 121 帧的图生视频，基础权重约需 3 h 30 m，Turbo 只需 <strong>17 m 30 s</strong> —— 命令完全相同，只是 <code>--model</code> 指向了不同的文件。</li>
-    <li><strong>Qwen-Image-Edit</strong> —— 用 <code>--qwen-image-lora</code> 加载 Lightning 蒸馏 LoRA，可把默认的 30 步 / CFG 2.5（60 次 DiT 前向）降到 4 步或 8 步。</li>
+    <li><strong>Qwen-Image-2.1</strong> —— 默认的 CFG 1 本身就是每步一次 Transformer 前向，因此杠杆在尺寸与步数：出草图时用 <code>--width 1024 --height 1024</code>（潜在图像 token 数只有 2048×2048 默认值的四分之一）或 <code>--diffusion-steps 25</code>。</li>
   </ul>
   <p>→ <a href="models-downloads_zh-cn.html#downloads">模型下载</a>（具体仓库与文件名）· <a href="benchmarks_zh-cn.html#wan">这些数字背后的实测</a></p></div>
 
@@ -86,7 +86,7 @@ dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release</
   <p>下一节的首次运行命令面向 Linux + NVIDIA。Windows + NVIDIA 请先在 PowerShell 中设置 <code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA='ON'</code>，再运行不带 Bash 赋值前缀的相同命令。Apple Silicon 请省略 CUDA 环境变量并改用 <code>ggml_metal</code>。Windows/Linux 上使用 Vulkan 时，请设置 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code>（PowerShell：<code>$env:TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN='ON'</code>）并使用 <code>ggml_vulkan</code>。没有 GPU 时使用 <code>ggml_cpu</code>（原生 CPU 内核）。纯文本不需要投影器；图像、视频或音频输入需从同一仓库下载 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>，并添加 <code>--mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。</p>
 
   <h2 id="first-run">4 · 首次运行</h2>
-  <p>一次性提示词通过 <code>--input</code> 从<em>文件</em>读取；<code>--prompt</code> 属于生成类模型族 —— Qwen-Image-Edit 的编辑指令，以及 MiniMax-H3 与 Wan 的视频提示词。CLI 默认使用 <code>ggml_cpu</code>、贪心解码和 100 个生成 token。环境变量赋值用于启用 CUDA 原生构建；首次运行会编译它，可能需要数分钟，后续为增量构建。</p>
+  <p>一次性提示词通过 <code>--input</code> 从<em>文件</em>读取；<code>--prompt</code> 属于生成类模型族 —— Qwen-Image-2.1 的图像提示词，以及 MiniMax-H3 与 Wan 的视频提示词。CLI 默认使用 <code>ggml_cpu</code>、贪心解码和 100 个生成 token。环境变量赋值用于启用 CUDA 原生构建；首次运行会编译它，可能需要数分钟，后续为增量构建。</p>
 
   <h3>方式 A —— 一次性生成（CLI）</h3>
   <pre data-lang="bash"><code>echo "简短回答：TensorSharp 是什么？" &gt; prompt.txt

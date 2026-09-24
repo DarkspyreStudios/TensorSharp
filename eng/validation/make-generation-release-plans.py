@@ -39,16 +39,6 @@ def main():
             case("reference-audio", "A calm presenter reads a verification code in a studio, matching the voice in <Audio 1>.",
                  {"videoMode": "ref", "referenceAudios": ["@speech"]}),
         ]},
-        "qwen-image": {"uploads": {key: uploads[key] for key in ("first", "last")}, "cases": [
-            {"id": "single-image-edit", "endpoint": "/api/image-edit", "request": {
-                "imagePath": "@first", "prompt": "Change the red rectangle to bright blue. Keep the four-digit code and white background unchanged.",
-                "targetArea": 307200, "steps": 0, "cfg": 0, "seed": 42},
-             "expected": {"width": 640, "height": 480}},
-            {"id": "multi-image-edit", "endpoint": "/api/image-edit", "request": {
-                "imagePaths": ["@first", "@last"], "prompt": "Combine the two verification cards side by side. Preserve both codes and rectangle colors on a white background.",
-                "targetArea": 307200, "steps": 0, "cfg": 0, "seed": 42},
-             "expected": {"width": 640, "height": 480}},
-        ]},
     }
     for name, modes in {"wan-t2v": ("t2v",), "wan-ti2v": ("t2v", "i2v"), "wan-i2v": ("i2v",)}.items():
         cases = []

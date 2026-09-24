@@ -354,7 +354,7 @@ public sealed class MediaRoutesTests : IDisposable
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         string error = (await BodyOf(response)).GetProperty("error").GetString()!;
-        Assert.Contains("Qwen-Image-Edit", error, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Qwen-Image-2.1", error, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

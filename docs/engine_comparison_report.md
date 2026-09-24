@@ -86,12 +86,6 @@ Both engines decode the **same GGUF greedily** (temperature=0) on the same backe
 
 _No overlapping ok cells with captured output to compare._
 
-## Image editing (stable-diffusion)
-
-Same input image, prompt, resolution, step count, cfg and seed for every engine. Timings are each engine's **own pipeline timers** (TensorSharp's `[pipe-timing]` phases + server `elapsedSeconds`; sd.cpp's phase logs + `generate_image` total), so weight-file loading and HTTP/process overhead are excluded on both sides. `total (warm)` is the steady-state request on an already-running server; `first request (cold)` additionally pays TensorSharp's per-request DiT rebuild + graph capture on a fresh server (a CLI engine has no such distinction). Lower is better.
-
-_No image-edit cells were run (see the `image_edit` scenario)._
-
 ## MTP / NextN speculative decoding (on vs off)
 
 Single-stream decode tok/s with MTP/NextN speculative decoding off vs on (TensorSharp only). Speedup `< 1.0×` means speculation cost more than it saved for that cell — expected when the fused full-model decode path is already the fast path.

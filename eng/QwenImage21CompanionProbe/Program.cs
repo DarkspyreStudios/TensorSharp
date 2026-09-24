@@ -302,7 +302,7 @@ string prompt = args.Length > 4 ? args[4] : "A red cube on a white table.";
 string output = Path.GetFullPath(args[2]);
 Directory.CreateDirectory(Path.GetDirectoryName(output));
 var timer = Stopwatch.StartNew();
-using (var encoder = new QwenImageTextEncoder(args[1], backend, qwenImage21: true))
+using (var encoder = new QwenImageTextEncoder(args[1], backend))
 {
     int[] tokens = encoder.Tokenizer.Encode(QwenImage21Conditioner.SystemPrompt +
         "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", addSpecial: false).ToArray();

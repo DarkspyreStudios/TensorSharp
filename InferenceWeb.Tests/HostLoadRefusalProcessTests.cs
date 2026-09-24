@@ -30,6 +30,9 @@ public class HostLoadRefusalProcessTests : IDisposable
     /// <summary>USAGE.md "Exit codes": the model load was refused.</summary>
     private const int ModelLoadRefusedExitCode = 2;
 
+    /// <summary>USAGE.md "Exit codes": a command-line or configuration-file mistake.</summary>
+    private const int ConfigurationErrorExitCode = 1;
+
     private const string ErrorPrefix = "error: model load refused: ";
 
     private readonly string _dir;
@@ -93,6 +96,132 @@ public class HostLoadRefusalProcessTests : IDisposable
         Assert.DoesNotContain("Unhandled exception", run.Stdout + run.Stderr, StringComparison.Ordinal);
     }
 
+    // ---- the Qwen-Image-Edit-2511 pipeline's options and checkpoints ----------------
+    // Removed with the pipeline. Each host must stop at startup with one line saying why,
+    // never ignore the flag (the CLI's switch has no unknown-flag trap) and never answer
+    // with a bare "Unknown option" (the server's has, but it cannot say what happened).
+
+    public static IEnumerable<object[]> RemovedFlagLines() => new[]
+    {
+        new object[] { "--offload-cpu", new[] { "--offload-cpu" } },
+        new object[] { "--qwen-image-lora", new[] { "--qwen-image-lora", "lightning.safetensors" } },
+        new object[] { "--qwen-image-lora", new[] { "--qwen-image-lora=lightning.safetensors" } },
+    };
+
+    [Theory]
+    [MemberData(nameof(RemovedFlagLines))]
+    public void Server_RemovedQwenImageFlag_IsAConfigurationErrorThatSaysWhy(string flag, string[] line)
+    {
+        HostRun run = RunServerWith(WriteJunkModel(), line);
+
+        // Refused before the model is even opened: the junk model is never reported.
+        AssertConfigurationError(run, flag + " was removed:");
+    }
+
+    [Theory]
+    [MemberData(nameof(RemovedFlagLines))]
+    public void Cli_RemovedQwenImageFlag_IsAConfigurationErrorThatSaysWhy(string flag, string[] line)
+    {
+        HostRun run = RunCliWith(WriteJunkModel(), line);
+
+        AssertConfigurationError(run, flag + " was removed:");
+    }
+
+    [Theory]
+    [InlineData("{ \"offload-cpu\": true }", "--offload-cpu")]
+    [InlineData("{ \"qwen-image-lora\": \"lightning.safetensors\" }", "--qwen-image-lora")]
+    public void BothHosts_RemovedQwenImageConfigKey_IsTheSameConfigurationError(string json, string flag)
+    {
+        string config = Path.Combine(_dir, "stale-qwen-image-edit.json");
+        File.WriteAllText(config, json);
+
+        AssertConfigurationError(RunServerWith(WriteJunkModel(), new[] { "--config", config }), flag + " was removed:");
+        AssertConfigurationError(RunCliWith(WriteJunkModel(), new[] { "--config", config }), flag + " was removed:");
+    }
+
+    [Fact]
+    public void Server_EarlierQwenImageCheckpoint_IsRefusedWithAMigrationNote()
+    {
+        HostRun run = RunServer(WriteLegacyQwenImageModel());
+
+        AssertRefused(run, "is not a Qwen-Image-2.1 diffusion transformer");
+        Assert.Contains("docs/models/qwenimage21.md", run.Stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cli_EarlierQwenImageCheckpoint_IsRefusedWithAMigrationNote()
+    {
+        HostRun run = RunCli(WriteLegacyQwenImageModel());
+
+        AssertRefused(run, "is not a Qwen-Image-2.1 diffusion transformer");
+        Assert.Contains("docs/models/qwenimage21.md", run.Stderr, StringComparison.Ordinal);
+    }
+
+    private static void AssertConfigurationError(HostRun run, string messageFragment)
+    {
+        string[] lines = run.Stderr
+            .Split('\n')
+            .Select(l => l.TrimEnd('\r'))
+            .Where(l => l.Length > 0)
+            .ToArray();
+        string context = $"exit={run.ExitCode}\n--- stderr ---\n{run.Stderr}\n--- stdout (tail) ---\n{Tail(run.Stdout)}";
+
+        Assert.True(run.ExitCode == ConfigurationErrorExitCode, context);
+        Assert.True(lines.Length == 1, context);
+        Assert.StartsWith("Configuration error: ", lines[0], StringComparison.Ordinal);
+        Assert.Contains(messageFragment, lines[0], StringComparison.Ordinal);
+        Assert.Contains("Qwen-Image-2.1", lines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown option", lines[0], StringComparison.Ordinal);
+        Assert.DoesNotContain("Unhandled exception", run.Stdout + run.Stderr, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A tiny but complete GGUF carrying tensor names from the Qwen-Image-Edit-2511 layout
+    /// (double-stream blocks, a Qwen2.5-VL text input, no <c>txt_in.text_norm</c>) and
+    /// tagged <c>general.architecture=qwen_image</c>, so the registry routes it to the
+    /// Qwen-Image loader, which must refuse it by name. The tensors are small F32 stubs:
+    /// the server checks that a file holds every byte its tensors claim before it loads,
+    /// and the refusal only needs the names.
+    /// </summary>
+    private string WriteLegacyQwenImageModel()
+    {
+        const int Alignment = 32;          // GGUF default (general.alignment absent)
+        const int Elements = 32;           // 128 bytes per tensor, already aligned
+        string path = Path.Combine(_dir, "qwen-image-edit-2511-Q4_K_M.gguf");
+        string[] names =
+        {
+            "img_in.weight", "txt_norm.weight", "txt_in.weight", "proj_out.weight",
+            "transformer_blocks.0.attn.to_q.weight", "transformer_blocks.0.attn.add_q_proj.weight",
+        };
+        using var writer = new BinaryWriter(File.Create(path));
+        void WriteString(string value)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(value);
+            writer.Write((ulong)bytes.Length);
+            writer.Write(bytes);
+        }
+        writer.Write(0x46554747u);           // "GGUF"
+        writer.Write(3u);                    // version
+        writer.Write((ulong)names.Length);
+        writer.Write(1UL);                   // one metadata pair
+        WriteString("general.architecture");
+        writer.Write(8u);                    // string
+        WriteString("qwen_image");
+        for (int i = 0; i < names.Length; i++)
+        {
+            WriteString(names[i]);
+            writer.Write(1u);                // one dimension
+            writer.Write((ulong)Elements);
+            writer.Write(0u);                // F32
+            writer.Write((ulong)(i * Elements * sizeof(float)));
+        }
+        writer.Flush();
+        long pad = (Alignment - writer.BaseStream.Position % Alignment) % Alignment;
+        writer.Write(new byte[pad]);
+        writer.Write(new byte[names.Length * Elements * sizeof(float)]);
+        return path;
+    }
+
     private static void AssertRefused(HostRun run, string reasonFragment)
     {
         string[] lines = run.Stderr
@@ -115,20 +244,27 @@ public class HostLoadRefusalProcessTests : IDisposable
         return path;
     }
 
-    private HostRun RunServer(string modelPath, string logLevel = "Information")
+    private HostRun RunServer(string modelPath, string logLevel = "Information") =>
+        RunServerWith(modelPath, Array.Empty<string>(), logLevel);
+
+    private HostRun RunServerWith(string modelPath, string[] extra, string logLevel = "Information")
     {
         string dll = HostAssembly("TensorSharp.Server.Host", "TensorSharp.Server.Host.dll");
         return Run(dll, logLevel,
-            "--model", modelPath, "--backend", "cpu", "--no-webui", "--no-skills", "--no-prefix-cache");
+            new[] { "--model", modelPath, "--backend", "cpu", "--no-webui", "--no-skills", "--no-prefix-cache" }
+                .Concat(extra).ToArray());
     }
 
-    private HostRun RunCli(string modelPath)
+    private HostRun RunCli(string modelPath) => RunCliWith(modelPath, Array.Empty<string>());
+
+    private HostRun RunCliWith(string modelPath, string[] extra)
     {
         string dll = HostAssembly("TensorSharp.Cli", "TensorSharp.Cli.dll");
         string input = Path.Combine(_dir, "prompt.txt");
         File.WriteAllText(input, "hello");
         return Run(dll, "Information",
-            "--model", modelPath, "--backend", "cpu", "--input", input, "--log-dir", Path.Combine(_dir, "cli-logs"));
+            new[] { "--model", modelPath, "--backend", "cpu", "--input", input, "--log-dir", Path.Combine(_dir, "cli-logs") }
+                .Concat(extra).ToArray());
     }
 
     private HostRun Run(string dll, string logLevel, params string[] args)

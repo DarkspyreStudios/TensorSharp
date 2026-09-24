@@ -8,15 +8,13 @@ prefill** scenarios, on any **compute backend** declared in the config's
 `backends` registry (`ggml_cuda`, `ggml_vulkan`, `ggml_metal`, `ggml_cpu`,
 `cpu`, …) — pick with `--backends`.
 
-It also benchmarks the **stable-diffusion image-editing engine**
-(Qwen-Image-Edit) — TensorSharp's `/api/image-edit` pipeline vs the
-**stable-diffusion.cpp** CLI on the same weights, image, prompt, resolution,
-steps and seed; see [Image editing](#image-editing--stable-diffusion-image_edit).
+Image generation and editing (Qwen-Image-2.1, TensorSharp vs the
+stable-diffusion.cpp CLI) is not part of this matrix; it has its own matched
+benchmark, `eng/validation/qwen-image21-bench.py`.
 
 Model families under test: **Gemma 4** (`gemma4-e4b` dense multimodal Q8_0 from
 `models/`, plus `gemma4-12b` dense + `gemma4-26b-a4b` MoE, both QAT UD-Q4_K_XL
-from `models/gemma_mtp/qat/`), **Qwen 3.6**, **DiffusionGemma**,
-**Qwen-Image-Edit 2511** (Q2_K DiT + Lightning 4-step LoRA).
+from `models/gemma_mtp/qat/`), **Qwen 3.6**, **DiffusionGemma**.
 
 ## Why an OpenAI-HTTP harness
 
@@ -93,7 +91,7 @@ that do not fit one GPU, the smallest tensor-parallel degree that can host them
 Values resolve with this precedence (highest first):
 
 1. **Command-line flags** to `run_matrix.py` / `report.py` (e.g. `--models`, `--scenarios`, `--max-tokens`).
-2. **Environment variables** — host paths only, for retargeting without editing the file (`BENCH_MODEL_ROOT`, `BENCH_TS_SERVER_DLL`, `BENCH_LLAMA_SERVER`, `BENCH_VLLM_URL`, `BENCH_SDCPP_EXE`, `BENCH_IMAGE`, `BENCH_AUDIO`, `BENCH_VIDEO`, `BENCH_RESULTS`, `BENCH_QWEN_IMAGE_DIT` / `BENCH_QWEN_IMAGE_VAE` / `BENCH_QWEN_IMAGE_VL` / `BENCH_QWEN_IMAGE_MMPROJ` / `BENCH_QWEN_IMAGE_LORA` (image-edit components), `DIFFUSION_STEPS`, ...).
+2. **Environment variables** — host paths only, for retargeting without editing the file (`BENCH_MODEL_ROOT`, `BENCH_TS_SERVER_DLL`, `BENCH_LLAMA_SERVER`, `BENCH_VLLM_URL`, `BENCH_IMAGE`, `BENCH_AUDIO`, `BENCH_VIDEO`, `BENCH_RESULTS`, `DIFFUSION_STEPS`, ...).
 3. **`benchmark_config.json`** (or the file named by `--config PATH` / `BENCH_CONFIG`).
 4. Built-in fallbacks in `config.py`.
 
@@ -113,10 +111,6 @@ Point the harness at an alternate settings file with `--config other.json`
   (e.g. a Vulkan build at `build-vulkan/.../llama-server.exe`, overridable via
   `BENCH_LLAMA_SERVER_VULKAN`); a missing build just records that column's llama.cpp cells as skipped.
 - **vLLM** (optional): start an OpenAI server yourself and point the harness at it; otherwise vLLM cells record `skipped (engine unavailable)`.
-- **stable-diffusion.cpp** (image-edit scenario): `sd-cli.exe` at
-  `C:/Works/stable-diffusion.cpp/build/bin/Release/sd-cli.exe` (CUDA build;
-  override via `paths.sdcpp_exe` / `BENCH_SDCPP_EXE`). Missing binary just
-  records the `sdcpp` cells as skipped.
 - Models under `C:/Works/models` and media at `C:/Works/{test.jpg,obama_first_45_secs.mp3,concert.mp4}`.
 
 All of these paths default to the values in `benchmark_config.json` (`paths`
@@ -308,8 +302,8 @@ plus `"visible_devices_env"`. The defaults are inferred — TensorSharp can
 tensor-parallelize on `cuda` / `ggml_cuda` / `ggml_vulkan`, llama.cpp on any
 gpu-kind backend with `-ngl > 0` — so an existing config needs no edits to gain
 the axis. Cells that cannot run a degree are recorded as skipped with the
-reason (CPU backend, an engine without a TP path, fewer configured GPUs than
-requested, or the image-edit pipeline, which is single-GPU).
+reason (CPU backend, an engine without a TP path, or fewer configured GPUs than
+requested).
 
 A model whose weights do not fit one GPU declares **`"min_tp": N`**; its cells
 below that degree are skipped ("needs `--tp N`") instead of being left to OOM
@@ -393,9 +387,9 @@ and the same keys under `llamacpp`, which additionally takes `cpu_moe_all_arg`.
 Support is inferred — any gpu-kind backend the engine can launch — so an
 existing config gains the axis without being edited. Cells that cannot offload
 are recorded as skipped with the reason: a CPU-kind backend (its experts are
-already host-resident), an engine this harness does not launch (vLLM, sd.cpp),
-the image-edit pipeline, a model whose config entry explicitly declares
-**`"is_moe": false`**, or a backend that already pins the offload itself.
+already host-resident), an engine this harness does not launch (vLLM), a model
+whose config entry explicitly declares **`"is_moe": false`**, or a backend that
+already pins the offload itself.
 
 That last one is the pre-axis way of measuring this — a cloned backend entry per
 offload point, like `ggml_cuda_layer_cpu_moe4` in
@@ -488,9 +482,9 @@ does not have them yet provisions itself and every later run reuses the files:
 }
 ```
 
-A file's `url` may also be an absolute URL from a different repo (the
-image-edit model pulls its DiT, VAE, text encoder and LoRA from four different
-places), and split GGUFs (`-00001-of-00005.gguf`) expand to every shard
+A file's `url` may also be an absolute URL from a different repo (`gemma4-e4b`
+takes its GGUF from one repo and its mmproj and MTP draft from another), and
+split GGUFs (`-00001-of-00005.gguf`) expand to every shard
 automatically — including deriving each shard's URL from the first one.
 
 `run_matrix.py` fetches whatever is missing before the matrix starts
@@ -564,53 +558,6 @@ How it works:
 Add lengths by naming them: `--scenarios prefill_1k,prefill_32k` works without a
 config edit (`prefill_<N>` / `prefill_<N>k` is parsed generically); the driver
 auto-raises llama.cpp's context to fit, so no `llama.context_size` edit is needed.
-
-### Image editing / stable diffusion (`image_edit`)
-
-The `image_edit` scenario benchmarks the **stable-diffusion image-editing
-engine** — TensorSharp's Qwen-Image-Edit pipeline against the
-**stable-diffusion.cpp** CLI (`sdcpp` engine) — on the *same* weights and the
-*same* task:
-
-- **Same everything**: the benchmark image (`paths.media.image`) is pre-resized
-  once to the exact dims TensorSharp's `ResizeToArea` picks for the scenario's
-  `edit.target_area` (aspect-preserving, multiple of 16) and saved as PNG; both
-  engines then edit those identical pixels at that identical resolution
-  (TensorSharp via `targetArea`, sd.cpp via `-W/-H`), with the same prompt,
-  steps, cfg and seed from the scenario's `edit` block.
-- **TensorSharp** runs as a server (launched with `--model <dit.gguf>
-  --qwen-image-vae/-vl/-mmproj/-lora …` from the model's `components`) and is
-  driven through multipart `POST /api/image-edit`. Each cell sends **two**
-  requests: the *cold* first request (pays the per-request DiT rebuild + graph
-  capture on a fresh server → `edit_first_total_ms`) and the *warm* steady-state
-  request (the headline `edit_total_ms`).
-- **stable-diffusion.cpp** runs one `sd-cli` process per cell
-  (`--diffusion-model … --vae … --llm … --llm_vision … --model-args
-  qwen_image_zero_cond_t=true --sampling-method euler --flow-shift 3`, LoRA via
-  the `<lora:…:1>` prompt tag; per-backend `extra_args` such as
-  `--diffusion-fa` come from the `backends.*.sdcpp` registry entry).
-- **Metrics are each engine's own pipeline timers**, so weight-file loading and
-  HTTP/process overhead are excluded on both sides: TensorSharp's
-  `[pipe-timing]` phases + the server's `elapsedSeconds`; sd.cpp's
-  `get_learned_condition` / `sampling` / `encode_first_stage` /
-  `decode_first_stage` phase logs + its `generate_image` total. Recorded per
-  cell: `edit_total_ms`, `edit_first_total_ms`, `edit_text_encode_ms`,
-  `edit_vae_encode_ms`, `edit_sampling_ms`, `edit_per_step_ms`,
-  `edit_vae_decode_ms`, output resolution, and the output image itself
-  (`results/images/…png`, for visual verification).
-
-Applicability gating keeps the matrix clean: `image_edit` only runs on
-TensorSharp + sd.cpp with the image-edit model, the image-edit model runs no
-other scenario, `sdcpp` runs no other scenario, MTP and `--concurrency > 1` are
-recorded as skips, and `report.py` renders these cells in their own **Image
-editing (stable-diffusion)** section (phase table + TensorSharp-vs-sd.cpp
-speedups) instead of the token-throughput tables.
-
-```bash
-# Just the image-edit comparison
-python run_matrix.py --engines tensorsharp,sdcpp --backends ggml_cuda \
-    --models qwen-image-edit --scenarios image_edit
-```
 
 ### Parallel requests (`--concurrency 1,4,8`)
 
@@ -736,8 +683,8 @@ To run it as a CI job instead, add a second job on the old
   declarations at all, so its `agentic` cells are skipped — `code_edit`, being
   plain multi-turn text, still runs.
 - **MoE CPU offload** (`--n-cpu-moe`) is skipped on CPU-kind backends (nothing
-  to move), on the connect-only / CLI engines, on the image-edit pipeline, on
-  models whose config entry declares `"is_moe": false`, and on backends that
+  to move), on the connect-only vLLM engine, on models whose config entry
+  declares `"is_moe": false`, and on backends that
   already pin the offload in their own `extra_args` (passing the flag twice
   would silently record the wrong point).
 

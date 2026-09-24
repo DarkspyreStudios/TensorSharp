@@ -140,9 +140,9 @@ public class ConfigFileArgsTests : IDisposable
         "paged-kv", "paged-kv-cache", "no-paged-kv", "no-paged-kv-cache", "paged-kv-block-size",
         "paged-kv-ram-mb", "paged-kv-ssd-dir", "paged-kv-ssd-mb", "paged-kv-quant-bits",
         "paged-kv-redis-url", "paged-kv-redis-ttl", "redis-url",
-        "cpu-moe", "n-cpu-moe", "cpu-moe-threads", "offload-cpu",
+        "cpu-moe", "n-cpu-moe", "cpu-moe-threads",
         "spec", "no-spec", "spec-type", "spec-draft", "spec-pmin", "draft-model",
-        "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj", "qwen-image-lora",
+        "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj",
         "video-vae", "video-text-encoder", "video-te", "video-dit2", "audio-vae",
         "video-width", "video-height", "video-steps", "video-mode", "video-frames", "fps",
         "wan-vae", "wan-te", "wan-dit2", "width", "height",
@@ -290,7 +290,7 @@ public class ConfigFileArgsTests : IDisposable
     public void Expand_BooleanTrue_BecomesBareSwitch_FalseIsSkipped()
     {
         string cfg = WriteConfig("""
-        { "continuous-batching": true, "offload-cpu": false }
+        { "continuous-batching": true, "no-prefix-cache": false }
         """);
 
         var result = ConfigFileArgs.Expand(new[] { "--config", cfg });
@@ -416,6 +416,83 @@ public class ConfigFileArgsTests : IDisposable
         { "model": { "foo": "bar" } }
         """);
         Assert.Throws<ArgumentException>(() => ConfigFileArgs.Expand(new[] { "--config", cfg }));
+    }
+
+    // ----- Removed options -----
+    // A config key IS a flag, so a stale config naming a removed option must fail with
+    // the same message the command line gets. It is refused by NAME, whatever the value:
+    // `false` expands to nothing and would otherwise slip past the hosts' own check.
+
+    [Theory]
+    [InlineData("qwen-image-lora", "\"Qwen-Image-Edit-Lightning-8steps.safetensors\"")]
+    [InlineData("offload-cpu", "true")]
+    [InlineData("offload-cpu", "false")]
+    [InlineData("--offload-cpu", "true")]
+    [InlineData("Qwen-Image-LoRA", "\"lora.safetensors\"")]
+    public void Expand_RemovedOptionKey_FailsWithTheRemovalMessage(string key, string value)
+    {
+        string cfg = WriteConfig($$"""
+        { "backend": "ggml_cpu", {{JsonQuote(key)}}: {{value}} }
+        """);
+
+        var ex = Assert.Throws<ArgumentException>(() => ConfigFileArgs.Expand(new[] { "--config", cfg }));
+
+        string flag = "--" + key.TrimStart('-').ToLowerInvariant();
+        Assert.Contains($"{flag} was removed:", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Qwen-Image-2.1", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(Path.GetFileName(cfg), ex.Message, StringComparison.Ordinal);
+        Assert.Equal(RemovedCliFlags.Describe(flag), ex.Message.Substring(ex.Message.IndexOf(flag, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void Expand_RemovedOptionKey_IsRefusedBeforeAnythingIsDownloaded()
+    {
+        // The retired 2511 configs named the LoRA as a download spec. Refusing only
+        // after expansion would fetch every file the stale config lists first, the
+        // model included, and then refuse to use any of them.
+        using var server = new TinyHttpServer();
+        server.AddFile("/model.gguf", new byte[] { 1, 2, 3 });
+        server.AddFile("/lora.safetensors", new byte[] { 4, 5, 6 });
+        string model = Path.Combine(_dir, "model.gguf");
+        string lora = Path.Combine(_dir, "lora.safetensors");
+        string cfg = WriteConfig($$"""
+        {
+          "model": { "path": {{JsonQuote(model)}}, "urls": [ {{JsonQuote(server.UrlFor("/model.gguf"))}} ] },
+          "qwen-image-lora": { "path": {{JsonQuote(lora)}}, "urls": [ {{JsonQuote(server.UrlFor("/lora.safetensors"))}} ] }
+        }
+        """);
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            ConfigFileArgs.Expand(new[] { "--config", cfg }, TextWriter.Null, interactiveProgress: false));
+
+        Assert.Contains("--qwen-image-lora was removed:", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(0, server.RequestCount("/model.gguf"));
+        Assert.Equal(0, server.RequestCount("/lora.safetensors"));
+        Assert.False(File.Exists(model));
+        Assert.False(File.Exists(lora));
+    }
+
+    [Theory]
+    [InlineData("--offload-cpu")]
+    [InlineData("--qwen-image-lora=lora.safetensors")]
+    public void Expand_RemovedFlagOnTheCommandLine_IsRefusedBeforeTheConfigDownloadsAnything(string removed)
+    {
+        // The hosts check their own command line only after expansion, so a removed
+        // flag typed next to an otherwise valid --config must not first fetch the
+        // multi-gigabyte files the configuration names.
+        using var server = new TinyHttpServer();
+        server.AddFile("/model.gguf", new byte[] { 1, 2, 3 });
+        string model = Path.Combine(_dir, "model.gguf");
+        string cfg = WriteConfig($$"""
+        { "model": { "path": {{JsonQuote(model)}}, "urls": [ {{JsonQuote(server.UrlFor("/model.gguf"))}} ] } }
+        """);
+
+        var ex = Assert.Throws<ArgumentException>(() =>
+            ConfigFileArgs.Expand(new[] { "--config", cfg, removed }, TextWriter.Null, interactiveProgress: false));
+
+        Assert.Equal(RemovedCliFlags.Describe(removed), ex.Message);
+        Assert.Equal(0, server.RequestCount("/model.gguf"));
+        Assert.False(File.Exists(model));
     }
 
     // ----- End-to-end through the real server option parser -----

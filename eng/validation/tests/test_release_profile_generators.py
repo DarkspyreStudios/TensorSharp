@@ -77,7 +77,7 @@ class ModalityProfileTests(unittest.TestCase):
             result = subprocess.run(self.command(output), capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             manifest = json.loads((output / "manifest.json").read_text())
-            self.assertEqual(len(manifest["profiles"]), 44)
+            self.assertEqual(len(manifest["profiles"]), 40)
             self.assertEqual(manifest["pending"], [])
             self.assertEqual(manifest["inventory_sha256"], hashlib.sha256(INVENTORY.read_bytes()).hexdigest())
             for entry in manifest["profiles"]:

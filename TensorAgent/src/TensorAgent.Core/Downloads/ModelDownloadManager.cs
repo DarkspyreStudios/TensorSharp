@@ -94,7 +94,7 @@ public sealed class ModelDownloadManager : IDisposable
 
     /// <summary>
     /// The optional files a download fetches when the user has asked for them: the
-    /// multimodal projector, the step-distilled LoRA and the diffusion companions.
+    /// multimodal projector, the speculative draft head and the diffusion companions.
     ///
     /// <para>
     /// One definition, because there were three — the model list's, the download
@@ -114,7 +114,6 @@ public sealed class ModelDownloadManager : IDisposable
         // optional since the start, fetched by nothing until it was wired to the
         // engine (see SpeculationPolicy).
         CatalogFileRole.Draft,
-        CatalogFileRole.Lora,
         CatalogFileRole.TextEncoder,
         CatalogFileRole.Vae,
         CatalogFileRole.VisionProjector,

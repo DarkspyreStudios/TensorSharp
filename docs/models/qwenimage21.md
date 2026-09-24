@@ -4,8 +4,9 @@ Qwen-Image-2.1 uses the `QwenImageModel` image pipeline for text-to-image genera
 and image editing. It requires a Qwen3-VL-8B text encoder and the dedicated 2.1
 VAE. Native RGBA input and PNG output preserve transparency; the Qwen3-VL
 conditioning branch composites the reference over white while the VAE keeps alpha.
-The Qwen2.5-VL encoder, earlier Qwen-Image VAE, and 2511 Lightning LoRAs
-are not interchangeable with these components.
+Earlier Qwen-Image / Qwen-Image-Edit checkpoints (such as Qwen-Image-Edit-2511) are
+no longer supported and are refused at load (exit code 2); the `--qwen-image-lora`
+and `--offload-cpu` options were removed.
 
 The download configuration is [`config/qwen-image-2.1.json`](../../config/qwen-image-2.1.json).
 It pins repository revisions and SHA-256 checksums for new downloads; existing
@@ -98,12 +99,8 @@ and [editing](https://github.com/Comfy-Org/workflow_templates/blob/main/template
 workflows. Forty steps remains the default; fewer steps are a quality/speed
 tradeoff, not a claim of equivalent image quality.
 
-No compatible Qwen-Image-2.1 acceleration LoRA was verified in the September 20,
-2026 research. The published
-[Qwen-Image Lightning](https://huggingface.co/lightx2v/Qwen-Image-Lightning)
-and [Edit-2511 Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning)
-adapters target earlier architectures and are rejected by this pipeline. The
-CFG 1 speed improvement uses the released 2.1 checkpoint directly.
+Qwen-Image-2.1 does not load LoRA adapters. The CFG 1 speed improvement uses the
+released 2.1 checkpoint directly.
 
 For a quick executable smoke test use 256×256 and one step. Such a run verifies
 loading and the end-to-end data path; it does not demonstrate image quality or
@@ -175,10 +172,9 @@ at least one reference; generation has its own endpoint.
 Previews decode the estimated clean latent from the current flow prediction.
 
 The 2.1 diffusion transformer runs a complete GGML graph with resident quantized
-weights. The earlier image-edit `--offload-cpu` streaming path and Lightning LoRAs
-do not apply to this implementation. Start with smaller dimensions if available
-memory is insufficient. CUDA and Vulkan are selectable GGML backends but have not
-been exercised on this local Apple Silicon validation machine.
+weights; there is no CPU weight-streaming mode. Start with smaller dimensions if
+available memory is insufficient. CUDA and Vulkan are selectable GGML backends
+but have not been exercised on this local Apple Silicon validation machine.
 
 ## Current Unsloth Q8_0 validation
 
@@ -255,9 +251,9 @@ That earlier Release build and focused suite passed **169 tests, zero skipped**,
 including real companion-file metadata, automatic/explicit output geometry,
 reference geometry, official 1K/2K sigma golden vectors, CPU VAE primitives,
 RGBA handling, request parsing, Web UI service and upload-confinement regressions.
-The legacy `QwenImageDiTWeightDtypeTests` GPU-forward test was outside this focused
-run. Evidence is `docs/validation/qwen-image-2.1/performance/final-managed.trx`;
-native operator coverage is detailed below.
+A legacy Qwen-Image DiT GPU-forward test was outside this focused run. Evidence
+is `docs/validation/qwen-image-2.1/performance/final-managed.trx`; native
+operator coverage is detailed below.
 
 ## Native optimization validation
 

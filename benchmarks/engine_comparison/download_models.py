@@ -7,9 +7,9 @@ script is only for provisioning a host ahead of time (a CI cache step, a fresh
 GPU box) or for re-fetching a corrupted file with `--force`.
 
 For every selected model it downloads each file the config resolves to a local
-path — `gguf` (all shards of a split GGUF), `mmproj`, `mtp_draft` and any
-`components` — from the model's declared source into exactly that path, so a
-subsequent `run_matrix.py --config <same config>` finds them locally.
+path — `gguf` (all shards of a split GGUF), `mmproj` and `mtp_draft` — from
+the model's declared source into exactly that path, so a subsequent
+`run_matrix.py --config <same config>` finds them locally.
 
 Sources are declared per model as `"source": "<hf-repo-id>"` (or
 `{"hf_repo": ..., "revision": ...}`, or a direct base URL), with optional

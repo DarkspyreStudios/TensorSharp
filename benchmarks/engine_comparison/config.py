@@ -140,12 +140,6 @@ LLAMA_SERVER_EXE = (
     or Path(r"C:/Works/llama.cpp/build-cuda/bin/Release/llama-server.exe"))
 LLAMA_PORT = int(_env_or("BENCH_LLAMA_PORT", _paths.get("llama_port", 5001)))
 
-# stable-diffusion.cpp CLI (image-edit / diffusion scenarios; run per-request,
-# no server to keep alive).
-SDCPP_EXE = (
-    _path(_paths.get("sdcpp_exe"), "BENCH_SDCPP_EXE")
-    or Path(r"C:/Works/stable-diffusion.cpp/build/bin/Release/sd-cli.exe"))
-
 # vLLM is connect-only (we never launch it): point this at a running
 # OpenAI-compatible vLLM endpoint. When unreachable, every vLLM cell is
 # recorded as skipped(engine unavailable) rather than failing the run.
@@ -245,11 +239,6 @@ class ModelSpec:
     size_class: str                   # small | medium | large
     is_diffusion: bool = False
     diffusion_steps: int = 32
-    # Image-editing diffusion pipeline (Qwen-Image-Edit): `gguf` is the DiT and
-    # `components` holds the companion weights (vae / llm text-encoder /
-    # mmproj vision tower / lora), each resolved like any other path entry.
-    is_image_edit: bool = False
-    components: dict = field(default_factory=dict)
     # MTP / NextN speculative decoding (TensorSharp only).
     mtp_supported: bool = False       # model ships a draft head we can engage
     mtp_draft: Optional[Path] = None  # separate draft GGUF (Gemma 4); None = embedded (Qwen 3.6)
@@ -287,10 +276,10 @@ class ModelSpec:
     def files(self) -> list:
         """Every local file this model needs, as (role, path, source_url).
 
-        Roles are `gguf` / `mmproj` / `mtp_draft` / `component:<name>`; split
-        GGUFs expand to one entry per shard (role `gguf#2`, ...). `source_url`
-        is None when the config declares no source for that file, in which case
-        it must already exist locally."""
+        Roles are `gguf` / `mmproj` / `mtp_draft`; split GGUFs expand to one
+        entry per shard (role `gguf#2`, ...). `source_url` is None when the
+        config declares no source for that file, in which case it must already
+        exist locally."""
         out: list = []
 
         def _add(role: str, p: Optional[Path]):
@@ -311,8 +300,6 @@ class ModelSpec:
         _add("gguf", self.gguf)
         _add("mmproj", self.mmproj)
         _add("mtp_draft", self.mtp_draft)
-        for cname, cpath in (self.components or {}).items():
-            _add(f"component:{cname}", cpath)
         return out
 
     def missing_files(self) -> list:
@@ -334,10 +321,6 @@ def _build_models(cfg: dict) -> dict:
             u = _entry_url(m.get(key))
             if u:
                 urls[role] = u
-        for cname, cval in (m.get("components") or {}).items():
-            u = _entry_url(cval)
-            if u:
-                urls[f"component:{cname}"] = u
         out[short_id] = ModelSpec(
             short_id=short_id,
             display=m["display"],
@@ -348,8 +331,6 @@ def _build_models(cfg: dict) -> dict:
             size_class=m.get("size_class", "medium"),
             is_diffusion=is_diffusion,
             diffusion_steps=int(steps),
-            is_image_edit=bool(m.get("is_image_edit", False)),
-            components={k: _path(v) for k, v in (m.get("components") or {}).items()},
             is_moe=(bool(m["is_moe"]) if m.get("is_moe") is not None else None),
             mtp_supported=bool(m.get("mtp_supported", False)),
             mtp_draft=_path(m.get("mtp_draft")),
@@ -370,13 +351,10 @@ MODELS: dict = _build_models(_CFG)
 @dataclass
 class ScenarioSpec:
     short_id: str
-    kind: str                 # text | multi_turn | function_call | json_mode | image | audio | video | image_edit
+    kind: str                 # text | multi_turn | function_call | json_mode | image | audio | video
     description: str
     modality: Optional[str] = None    # required model modality, if any
     max_tokens: int = 128
-    # image_edit scenarios: the edit request every engine must run identically
-    # (prompt / steps / cfg / seed / target_area pixel budget).
-    edit: dict = field(default_factory=dict)
 
     @property
     def is_text_only(self) -> bool:
@@ -392,7 +370,6 @@ def _build_scenarios(cfg: dict) -> dict:
             description=s.get("description", ""),
             modality=s.get("modality"),
             max_tokens=int(s.get("max_tokens", 128)),
-            edit=dict(s.get("edit") or {}),
         )
     return out
 
@@ -555,13 +532,6 @@ class BackendSpec:
     # vLLM is connect-only: nothing is launched, this flag just says the
     # external endpoint's numbers belong in this backend's column.
     vllm: bool = False
-    # stable-diffusion.cpp mapping (CLI, image-edit scenarios only). Present
-    # sub-object = the engine can run this backend; `exe` overrides the global
-    # paths.sdcpp_exe (e.g. a Vulkan sd-cli build).
-    sdcpp_enabled: bool = False
-    sdcpp_exe: Optional[Path] = None
-    sdcpp_extra_args: tuple = ()
-    sdcpp_env: dict = field(default_factory=dict)
 
 
 def _build_backend(bid: str, b: dict) -> BackendSpec:
@@ -573,9 +543,6 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
     if isinstance(llama, (int, float)):      # shorthand: "llamacpp": 999  (the -ngl value)
         llama = {"ngl": int(llama)}
     llama = llama or {}
-    sdcpp = b.get("sdcpp")
-    if sdcpp is True:                        # shorthand: "sdcpp": true
-        sdcpp = {}
     return BackendSpec(
         backend_id=bid,
         display=b.get("display", bid),
@@ -602,10 +569,6 @@ def _build_backend(bid: str, b: dict) -> BackendSpec:
         llama_cpu_moe_threads_arg=str(llama.get("cpu_moe_threads_arg", "--threads")),
         visible_devices_env=b.get("visible_devices_env"),
         vllm=bool(b.get("vllm", False)),
-        sdcpp_enabled=sdcpp is not None,
-        sdcpp_exe=_path((sdcpp or {}).get("exe")),
-        sdcpp_extra_args=tuple(str(a) for a in (sdcpp or {}).get("extra_args", [])),
-        sdcpp_env={str(k): str(v) for k, v in ((sdcpp or {}).get("env") or {}).items()},
     )
 
 
@@ -673,14 +636,6 @@ def llama_server_exe_for(backend: str) -> Path:
     spec = BACKENDS.get(backend)
     exe = spec.llama_server_exe if spec is not None else None
     return exe or LLAMA_SERVER_EXE
-
-
-def sdcpp_exe_for(backend: str) -> Path:
-    """The sd-cli binary for a backend: its per-backend build when configured,
-    else the global paths.sdcpp_exe."""
-    spec = BACKENDS.get(backend)
-    exe = spec.sdcpp_exe if spec is not None else None
-    return exe or SDCPP_EXE
 
 
 # ---------------------------------------------------------------------------
@@ -975,19 +930,6 @@ def applies(engine: str, backend: str, model: ModelSpec,
         return False, f"{b.backend_id} has no llama.cpp launch mapping"
     if engine == "vllm" and not b.vllm:
         return False, f"vLLM endpoint is not comparable on the {b.backend_id} backend"
-    if engine == "sdcpp" and not b.sdcpp_enabled:
-        return False, f"{b.backend_id} has no stable-diffusion.cpp launch mapping"
-
-    # Image editing (stable-diffusion engines): the image_edit scenario runs only
-    # on the engines with an image-edit pipeline (TensorSharp's Qwen-Image-Edit
-    # server path and the stable-diffusion.cpp CLI), and an image-edit model runs
-    # nothing else. sd.cpp conversely has no LLM/chat path at all.
-    if scenario.kind == "image_edit" and engine not in ("tensorsharp", "sdcpp"):
-        return False, f"{eng.display} has no image-edit pipeline"
-    if engine == "sdcpp" and scenario.kind != "image_edit":
-        return False, "stable-diffusion.cpp only runs image_edit scenarios"
-    if model.is_image_edit and scenario.kind != "image_edit":
-        return False, "image-edit model only runs the image_edit scenario"
 
     # MTP / NextN speculative decoding is a TensorSharp feature (Qwen 3.6's
     # embedded NextN block, or a Gemma 4 gemma4-assistant draft GGUF). When MTP
@@ -1002,7 +944,7 @@ def applies(engine: str, backend: str, model: ModelSpec,
 
     # Tensor parallelism: one model split across `tp` GPUs. Both server engines
     # can do it (TensorSharp `--tp N`, llama.cpp `--split-mode row` over N
-    # devices); the connect-only / CLI engines cannot be driven into it here.
+    # devices); the connect-only vLLM engine cannot be driven into it here.
     # A model whose weights do not fit a single GPU declares `min_tp`, and cells
     # below that degree are skipped rather than left to OOM.
     tp = int(tp or 1)
@@ -1013,13 +955,11 @@ def applies(engine: str, backend: str, model: ModelSpec,
             return False, f"TensorSharp has no tensor-parallel path on {b.backend_id}"
         if engine == "llamacpp" and not llama_tp_supported(b):
             return False, f"llama.cpp has no tensor-parallel path on {b.backend_id}"
-        if engine in ("vllm", "sdcpp"):
+        if engine == "vllm":
             return False, f"{eng.display} is not driven into tensor parallelism by this harness"
         if TP_DEVICES and len(TP_DEVICES) < tp:
             return False, (f"only {len(TP_DEVICES)} GPU(s) configured "
                            f"(defaults.tp_devices), need {tp}")
-        if scenario.kind == "image_edit":
-            return False, "image-edit pipeline is single-GPU"
     if tp < model.min_tp:
         return False, (f"{model.short_id} needs --tp {model.min_tp} "
                        f"(does not fit {tp} GPU(s))")
@@ -1041,10 +981,8 @@ def applies(engine: str, backend: str, model: ModelSpec,
             return False, f"TensorSharp has no MoE CPU-offload path on {b.backend_id}"
         if engine == "llamacpp" and not llama_cpu_moe_supported(b):
             return False, f"llama.cpp has no MoE CPU-offload path on {b.backend_id}"
-        if engine in ("vllm", "sdcpp"):
+        if engine == "vllm":
             return False, f"{eng.display} is not driven into MoE CPU offload by this harness"
-        if scenario.kind == "image_edit":
-            return False, "image-edit pipeline has no routed experts to offload"
         # A backend that already pins the offload in its own extra_args/env is
         # the pre-axis way of measuring this (one cloned backend per point).
         # Sweeping the axis on top of it would hand the engine the flag twice

@@ -101,12 +101,6 @@ def main():
         emit(model + "-audio", "audio", (model, pattern), companions=(("--mmproj", (model, "mmproj*.gguf")),),
              extra=("--no-spec", "--max-tokens", "512"))
 
-    qwen = (("--qwen-image-vae", ("qwen-image-vae", "Qwen_Image-VAE.safetensors")),
-            ("--qwen-image-vl", ("qwen-image-vl", "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf")),
-            ("--qwen-image-mmproj", ("qwen-image-vl", "mmproj-BF16.gguf")))
-    emit("qwen-image-base", "generation", ("qwen-image", "*.gguf"), qwen, plan="qwen-image")
-    emit("qwen-image-lightning", "generation", ("qwen-image", "*.gguf"),
-         qwen + (("--qwen-image-lora", ("qwen-image-lightning", "*.safetensors")),), plan="qwen-image")
     for variant in ("fl2va", "ref2va"):
         emit("h3-" + variant, "generation", ("minimax-h3", f"minimax_h3_{variant}_pruned-Q4_K.gguf"),
              (("--video-text-encoder", ("minimax-h3", "qwen3vl_32b_minimax_h3-Q4_K_M.gguf")),
