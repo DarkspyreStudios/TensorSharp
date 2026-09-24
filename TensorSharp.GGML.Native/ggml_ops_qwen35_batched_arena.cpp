@@ -49,8 +49,9 @@ extern "C" void TSGgml_Qwen35ResetVerifyCacheForHostPointer(const void* host_ptr
 //     [head_dim, cap, kv_heads, n_slots+1] (head-plane-major, IDENTICAL to
 //     this family's host cache layout [kv_heads, cap, head_dim]), ONE
 //     ggml_set_rows per K/V per layer (row = slot*kvH*cap + head*cap + pos),
-//     ONE flash_attn_ext with ne3 = n_slots, one shared causal mask
-//     [cap, 1, 1, n_slots].
+//     a shared causal mask [cap, 1, 1, n_slots], and CUDA per-slot flash_attn_ext
+//     nodes in the SAME graph (Metal retains its batched flash-attention).
+//     All QKV/output projections and FFNs read their weights once for the batch.
 //   * GDN layers (the other 3/4): per-slot recurrent-state ARENAS —
 //     conv_arena [convDim, conv_dim, n_slots+1] and delta_arena
 //     [head_k, head_v, v_heads, n_slots+1] — updated IN-GRAPH by the same
@@ -58,8 +59,10 @@ extern "C" void TSGgml_Qwen35ResetVerifyCacheForHostPointer(const void* host_ptr
 //     kernel uses. The state never crosses the bus between steps; that is
 //     exactly the piece whose absence forced the old batched path's per-step
 //     host round trip. Projections/FFN/MoE/head run batched over all N.
-//   * Graph depends only on (model, slot bucket, cap): request churn replays
-//     one captured CUDA graph. In-graph argmax serves the greedy fast path.
+//   * CUDA attention uses each holder's solo decode window. The graph also
+//     keys on these windows in stable-slot order, rebuilding at a window
+//     boundary or when a replacement holder needs a different window.
+//     In-graph argmax serves the greedy fast path.
 //
 // COHERENCE: while a sequence occupies a slot, its newest KV rows and GDN
 // state exist ONLY in the arenas. The rest of the engine reads this family's
@@ -80,7 +83,7 @@ extern "C" void TSGgml_Qwen35ResetVerifyCacheForHostPointer(const void* host_ptr
 //     discards without flushing — the host was rewritten behind us.
 //
 // Gates (decline -> engine round-robins, correctness never at risk):
-// CUDA or Metal backend, no TP, F32/F16 KV cache only, no MoE CPU offload,
+// CUDA or Metal backend, no TP, fused-graph KV cache types, no MoE CPU offload,
 // folded lm_head, uniform attention geometry across layers, no-wrap positions.
 // ============================================================================
 namespace
@@ -97,7 +100,7 @@ namespace
 
     std::int64_t qab_cap_round(std::int64_t rows)
     {
-        const std::int64_t q = 1024;
+        const std::int64_t q = g_backend_type == BACKEND_TYPE_CUDA ? 256 : 1024;
         return ((rows + q - 1) / q) * q;
     }
 
@@ -124,6 +127,7 @@ namespace
         ggml_backend_buffer_t buffer = nullptr;
         ggml_cgraph* graph = nullptr;
         ggml_tensor* token_in = nullptr;        // I32 [n_slots]
+        ggml_tensor* hidden_in = nullptr;       // optional F32 [H, n_slots], host-gathered embeddings
         ggml_tensor* pos_in = nullptr;          // I32 [n_slots]
         ggml_tensor* idx_in = nullptr;          // I64 [kvH * n_slots] set_rows targets
         ggml_tensor* attn_mask = nullptr;       // F16 [cap, 1, 1, n_slots]
@@ -141,9 +145,12 @@ namespace
         std::int64_t cap = 0;
         std::int64_t rows_per_slot = 0;         // kvH * cap
         ggml_type kv_type = GGML_TYPE_F32;
+        bool hidden_input = false;
         std::vector<QabSlot> slots;
+        std::vector<int> attn_windows;         // CUDA: effective KV lengths in stable-slot order
 
         std::vector<std::int32_t> tok_stage;
+        std::vector<float> hidden_stage;
         std::vector<std::int32_t> pos_stage;
         std::vector<std::int64_t> idx_stage;
         std::vector<ggml_fp16_t> mask_stage;
@@ -155,7 +162,7 @@ namespace
             if (buffer != nullptr) { ggml_backend_buffer_free(buffer); buffer = nullptr; }
             if (ctx != nullptr) { ggml_free(ctx); ctx = nullptr; }
             graph = nullptr;
-            token_in = pos_in = idx_in = attn_mask = logits_out = sampled_out = nullptr;
+            token_in = hidden_in = pos_in = idx_in = attn_mask = logits_out = sampled_out = nullptr;
             has_argmax = false;
             k_arena.clear(); v_arena.clear(); conv_arena.clear(); delta_arena.clear();
             valid = false;
@@ -466,7 +473,7 @@ TSG_EXPORT void TSGgml_Qwen35ArenaResetBatchedDecodeCache()
 // managed serial fallback), and -1 when graph execution failed after recurrent
 // state may have been partially advanced (the affected requests must fail).
 // ============================================================================
-TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
+static int qab_decode_batched(
     const TSGgmlQwen35LayerDesc* layers, int num_layers, int n_seqs,
     const std::int32_t* token_ids, const std::int32_t* positions,
     const std::int32_t* rope_positions,
@@ -486,8 +493,9 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
     const void* final_norm_data,
     const void* token_embd_data, int token_embd_type,
     std::int64_t token_embd_ne0, std::int64_t token_embd_ne1, std::int64_t token_embd_bytes,
-    std::int32_t* sampled_data, int want_logits)
+    std::int32_t* sampled_data, int want_logits, const float* embedding_rows)
 {
+    bool compute_started = false;
     try
     {
         if (!ensure_backend())
@@ -511,8 +519,11 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             set_last_error("Qwen3.5 arena batched decode: descriptor size mismatch.");
             return 0;
         }
+        const bool hidden_input = embedding_rows != nullptr;
         if (lm_head_data == nullptr || final_norm_data == nullptr || vocab_size <= 0 ||
-            token_embd_data == nullptr || token_embd_ne0 <= 0 || token_embd_ne1 <= 0 ||
+            (!hidden_input && token_embd_data == nullptr) ||
+            token_embd_ne0 <= 0 || token_embd_ne0 > std::numeric_limits<int>::max() ||
+            token_embd_ne1 <= 0 ||
             (logits_data == nullptr && sampled_data == nullptr) ||
             (want_logits != 0 && logits_data == nullptr))
         {
@@ -560,11 +571,16 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                 return 0;
             }
         }
+        if (!hidden_input)
         {
+            if (token_embd_type < 0 || token_embd_type >= GGML_TYPE_COUNT)
+            {
+                set_last_error("Qwen3.5 arena batched decode: bad token embedding type.");
+                return 0;
+            }
             const ggml_type emb_type = static_cast<ggml_type>(token_embd_type);
             const std::int64_t bs = ggml_blck_size(emb_type);
-            if (token_embd_type < 0 || token_embd_type >= GGML_TYPE_COUNT ||
-                bs <= 0 || token_embd_ne0 % bs != 0)
+            if (bs <= 0 || token_embd_ne0 % bs != 0)
             {
                 set_last_error("Qwen3.5 arena batched decode: bad token embedding type.");
                 return 0;
@@ -587,12 +603,13 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                 set_last_error("Qwen3.5 arena batched decode: token id out of range.");
                 return 0;
             }
-            if (positions[s] + 1 > cache_sizes[s])
+            if (positions[s] < 0 || cache_sizes[s] <= 0 ||
+                static_cast<std::int64_t>(positions[s]) + 1 > cache_sizes[s])
             {
                 set_last_error("Qwen3.5 arena batched decode: sequence exceeds its cache rows (no-wrap).");
                 return 0;
             }
-            maxTotal = std::max<std::int64_t>(maxTotal, positions[s] + 1);
+            maxTotal = std::max<std::int64_t>(maxTotal, static_cast<std::int64_t>(positions[s]) + 1);
         }
 
         static const bool qab_enabled = []{
@@ -634,13 +651,71 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             QabEntry& e = pool.entries[i];
             if (e.valid && e.sig_disc == sig_disc && e.n_slots == n_slots_req &&
                 e.num_layers == num_layers && e.H == H && e.vocab == vocab_size &&
-                e.hd == hd && e.kvH == kvH && e.kv_type == kvType)
+                e.hd == hd && e.kvH == kvH && e.kv_type == kvType &&
+                e.hidden_input == hidden_input)
             {
                 entry_idx = i;
                 break;
             }
         }
-        const bool needs_build = (entry_idx < 0) || (pool.entries[entry_idx].cap < maxTotal);
+        const bool cuda_windows = g_backend_type == BACKEND_TYPE_CUDA;
+        std::vector<int> windows_by_seq;
+        std::vector<int> desired_windows;
+        bool windows_changed = false;
+        if (cuda_windows)
+        {
+            // Match the actual whole-model solo decode policy, including its
+            // diagnostic nonpersistent mode. Captured decode normally rounds
+            // to 256 rows, capped by the holder's physical allocation.
+            static const bool solo_persist = [] {
+                const char* value = std::getenv("TS_QWEN35_FD_PERSIST");
+                return value == nullptr || value[0] != '0';
+            }();
+            windows_by_seq.resize(n_seqs);
+            for (int i = 0; i < n_seqs; i++)
+                windows_by_seq[i] = solo_persist
+                    ? static_cast<int>(std::min<std::int64_t>(cache_sizes[i],
+                        qab_cap_round(static_cast<std::int64_t>(positions[i]) + 1)))
+                    : flash_attn_kv_length(positions[i] + 1, cache_sizes[i], hd);
+
+            // Predict the assignment below without retiring or seeding state:
+            // keep resident callers, then place newcomers in the first free
+            // slots. Absent callers will be retired and count as free here.
+            // Unused slots retain their windows to avoid rebuilds on a shrink.
+            desired_windows.assign(n_slots_req, 256);
+            std::vector<int> planned_slots(n_seqs, -1);
+            std::vector<bool> occupied(n_slots_req, false);
+            if (entry_idx >= 0)
+            {
+                const QabEntry& e = pool.entries[entry_idx];
+                if (e.attn_windows.size() == desired_windows.size())
+                    desired_windows = e.attn_windows;
+                for (int i = 0; i < n_seqs; i++)
+                    for (int s = 0; s < n_slots_req; s++)
+                        if (e.slots[s].active && e.slots[s].key == k_cache_arr[i])
+                        {
+                            planned_slots[i] = s;
+                            occupied[s] = true;
+                            break;
+                        }
+            }
+            for (int i = 0; i < n_seqs; i++)
+            {
+                if (planned_slots[i] < 0)
+                    for (int s = 0; s < n_slots_req; s++)
+                        if (!occupied[s])
+                        {
+                            planned_slots[i] = s;
+                            occupied[s] = true;
+                            break;
+                        }
+                desired_windows[planned_slots[i]] = windows_by_seq[i];
+            }
+            windows_changed = entry_idx >= 0 &&
+                pool.entries[entry_idx].attn_windows != desired_windows;
+        }
+        const bool needs_build = (entry_idx < 0) ||
+            (pool.entries[entry_idx].cap < maxTotal) || windows_changed;
 
         if (needs_build)
         {
@@ -657,6 +732,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             }
             QabEntry& e = pool.entries[entry_idx];
             const std::int64_t prev_cap = e.valid ? e.cap : 0;
+            const std::vector<int> prev_windows = e.valid ? e.attn_windows : std::vector<int>{};
             qab_flush_entry(e);
             e.release_graph();
 
@@ -668,11 +744,31 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             e.hd = hd;
             e.kvH = kvH;
             e.kv_type = kvType;
+            e.hidden_input = hidden_input;
             e.conv_dim = conv_dim; e.convDim = convDim;
             e.head_k = head_k_dim; e.head_v = head_v_dim; e.v_heads = num_v_heads;
-            e.cap = std::max(qab_cap_round(maxTotal), prev_cap * 2);
+            // Window-only rebuilds preserve physical allocation. Grow the arena
+            // geometrically only when its existing capacity is insufficient.
+            e.cap = std::max(qab_cap_round(maxTotal),
+                cuda_windows && maxTotal <= prev_cap ? prev_cap : prev_cap * 2);
             e.rows_per_slot = static_cast<std::int64_t>(kvH) * e.cap;
             e.slots.assign(e.n_slots, QabSlot{});
+            e.attn_windows.clear();
+            if (cuda_windows)
+            {
+                if (e.cap > std::numeric_limits<int>::max())
+                {
+                    set_last_error("Qwen3.5 arena batched decode: KV arena capacity exceeds supported window indexing.");
+                    return 0;
+                }
+                e.attn_windows.assign(e.n_slots, 256);
+                for (int s = n_seqs; s < e.n_slots && s < static_cast<int>(prev_windows.size()); s++)
+                    e.attn_windows[s] = prev_windows[s];
+                // Full rebuilds flush every old slot; the fresh assignment
+                // below places caller i in slot i, independently of the old map.
+                for (int i = 0; i < n_seqs; i++)
+                    e.attn_windows[i] = windows_by_seq[i];
+            }
             const int n_slots = e.n_slots;
 
             const std::size_t ctx_size = 128 * 1024 * 1024;
@@ -692,11 +788,19 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
 
             const std::int64_t arena_rows = e.rows_per_slot * (n_slots + 1);
 
-            e.token_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_slots);
+            if (hidden_input)
+            {
+                e.hidden_in = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, n_slots);
+                ggml_set_input(e.hidden_in);
+            }
+            else
+            {
+                e.token_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_slots);
+                ggml_set_input(e.token_in);
+            }
             e.pos_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_slots);
             e.idx_in = ggml_new_tensor_1d(ctx, GGML_TYPE_I64, static_cast<std::int64_t>(kvH) * n_slots);
             e.attn_mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, e.cap, 1, 1, n_slots);
-            ggml_set_input(e.token_in);
             ggml_set_input(e.pos_in);
             ggml_set_input(e.idx_in);
             ggml_set_input(e.attn_mask);
@@ -809,7 +913,8 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                 }
             }
 
-            ggml_tensor* token_embd_t = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(token_embd_type), token_embd_ne0, token_embd_ne1);
+            ggml_tensor* token_embd_t = hidden_input ? nullptr :
+                ggml_new_tensor_2d(ctx, static_cast<ggml_type>(token_embd_type), token_embd_ne0, token_embd_ne1);
             ggml_tensor* lm_head_t = ggml_new_tensor_2d(ctx, static_cast<ggml_type>(lm_head_type), lm_head_ne0, lm_head_ne1);
             ggml_tensor* final_norm_t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
 
@@ -818,7 +923,17 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             tsg::BonsaiGraphScope bonsai_scope;
 
             // ---- graph ----
-            ggml_tensor* hidden = tsg::bonsai_get_rows(ctx, token_embd_t, e.token_in, token_embd_data);   // [H, N]
+            // Unsupported CUDA embedding types (including Q2_K) are gathered
+            // once per row by the caller. Only H*N floats cross the bus; every
+            // transformer projection and the LM head still runs in this graph.
+            ggml_tensor* hidden = e.hidden_in;
+            if (!hidden_input)
+            {
+                ggml_tensor* rows = ggml_get_rows(ctx, token_embd_t, e.token_in);
+                if (!backend_supports_op(rows))
+                    return abort_build("token embedding get_rows unsupported; use host-gathered embedding input.");
+                hidden = tsg::bonsai_transform(ctx, rows, token_embd_data, true);
+            }
             std::vector<ggml_tensor*> state_writes;
             state_writes.reserve(static_cast<std::size_t>(gdn_layers) * n_slots * 2 + attn_layers * 2);
             bool op_unsupported = false;
@@ -866,6 +981,18 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     ggml_tensor* q_normed = ggml_mul(ctx, ggml_rms_norm(ctx, q_2d, eps), t.q_norm_w);
                     ggml_tensor* k_normed = ggml_mul(ctx, ggml_rms_norm(ctx, k_2d, eps), t.k_norm_w);
 
+                    // Solo decode reshapes these normalized tensors before RoPE,
+                    // preventing CUDA's RMS_NORM + MUL + ROPE fusion. The arena's
+                    // direct edge otherwise permits a different fused computation;
+                    // its small differences compound through recurrent decode.
+                    // Preserve the same boundary here. RMS_NORM + MUL can still
+                    // fuse, and every heavy projection remains token-batched.
+                    if (g_backend_type == BACKEND_TYPE_CUDA)
+                    {
+                        ggml_set_output(q_normed);
+                        ggml_set_output(k_normed);
+                    }
+
                     ggml_tensor* q_rope = ggml_rope_ext(ctx, q_normed, e.pos_in, nullptr,
                         rope_n_dims, rope_mode, 0, rope_base, rope_freq_scale, 0, 1, 0, 0); // [hd, nH, N]
                     ggml_tensor* k_rope = ggml_rope_ext(ctx, k_normed, e.pos_in, nullptr,
@@ -885,24 +1012,68 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                     state_writes.push_back(k_set);
                     state_writes.push_back(v_set);
 
-                    ggml_tensor* k_view = ggml_view_4d(ctx, k_set, hd, e.cap, kvH, n_slots,
-                        row_bytes,
-                        static_cast<std::size_t>(e.cap) * row_bytes,
-                        static_cast<std::size_t>(e.rows_per_slot) * row_bytes, 0);
-                    ggml_tensor* v_view = ggml_view_4d(ctx, v_set, hd, e.cap, kvH, n_slots,
-                        row_bytes,
-                        static_cast<std::size_t>(e.cap) * row_bytes,
-                        static_cast<std::size_t>(e.rows_per_slot) * row_bytes, 0);
-
-                    ggml_tensor* q_4d = ggml_reshape_4d(ctx, q_rope, hd, 1, nH, n_slots);
-                    ggml_tensor* fa = ggml_flash_attn_ext(ctx, q_4d, k_view, v_view, e.attn_mask, attn_scale, 0.0f, 0.0f);
-                    ggml_prec_set_acc(fa, GGML_PREC_F32);
-                    if (!op_unsupported && !backend_supports_op(fa))
-                        op_unsupported = true;
                     if (op_unsupported)
-                        return abort_build("set_rows/flash_attn unsupported for the arena shapes.");
+                        return abort_build("set_rows unsupported for the arena shapes.");
 
-                    ggml_tensor* attn_2d = ggml_reshape_3d(ctx, fa, hd, nH, n_slots);        // [hd, nH, N]
+                    ggml_tensor* attn_2d = nullptr;
+                    if (g_backend_type == BACKEND_TYPE_CUDA)
+                    {
+                        // Use the solo sequence-axis geometry. CUDA's multi-sequence
+                        // attention changes the reduction topology; the recurrent
+                        // model can amplify the resulting numerical differences.
+                        // Attention has no shared weights to amortize: isolate these
+                        // nodes while projections/FFNs remain token-batched. Views
+                        // read SET_ROWS results to preserve every write/read edge.
+                        for (int s = 0; s < n_slots; s++)
+                        {
+                            const std::size_t slot_offset =
+                                static_cast<std::size_t>(s) * e.rows_per_slot * row_bytes;
+                            ggml_tensor* k_slot = ggml_view_3d(ctx, k_set, hd, e.cap, kvH,
+                                row_bytes, static_cast<std::size_t>(e.cap) * row_bytes, slot_offset);
+                            ggml_tensor* v_slot = ggml_view_3d(ctx, v_set, hd, e.cap, kvH,
+                                row_bytes, static_cast<std::size_t>(e.cap) * row_bytes, slot_offset);
+                            const int window = e.attn_windows[s];
+                            // Keep physical head pitch while exposing the same
+                            // effective length as solo. The shared helper also
+                            // protects affected CUDA F16 truncated-window reads.
+                            ggml_tensor* k_view = view_kv_cache_window(ctx, k_slot, hd,
+                                static_cast<int>(e.cap), kvH, 0, window, kv_cache_type, 1, nH / kvH);
+                            ggml_tensor* v_view = view_kv_cache_window(ctx, v_slot, hd,
+                                static_cast<int>(e.cap), kvH, 0, window, kv_cache_type, 1, nH / kvH);
+                            if (k_view == nullptr || v_view == nullptr)
+                                return abort_build("failed to create per-slot KV attention windows.");
+                            ggml_tensor* q_slot = ggml_view_3d(ctx, q_rope, hd, 1, nH,
+                                q_rope->nb[2], q_rope->nb[1],
+                                static_cast<std::size_t>(s) * q_rope->nb[2]);
+                            ggml_tensor* mask_slot = ggml_view_2d(ctx, e.attn_mask, window, 1,
+                                e.attn_mask->nb[1], static_cast<std::size_t>(s) * e.attn_mask->nb[3]);
+                            ggml_tensor* fa = flash_attn_ext_guarded(ctx,
+                                "Qwen3.5 arena slot decode", q_slot, k_view, v_view, mask_slot,
+                                attn_scale, 0.0f, 0.0f, nullptr, GGML_PREC_F32);
+                            ggml_tensor* attn_col = ggml_reshape_3d(ctx, fa, hd, nH, 1);
+                            attn_2d = attn_2d == nullptr
+                                ? attn_col
+                                : ggml_concat(ctx, attn_2d, attn_col, 2);
+                        }
+                    }
+                    else
+                    {
+                        // Preserve Metal's established batched attention graph.
+                        ggml_tensor* k_view = ggml_view_4d(ctx, k_set, hd, e.cap, kvH, n_slots,
+                            row_bytes, static_cast<std::size_t>(e.cap) * row_bytes,
+                            static_cast<std::size_t>(e.rows_per_slot) * row_bytes, 0);
+                        ggml_tensor* v_view = ggml_view_4d(ctx, v_set, hd, e.cap, kvH, n_slots,
+                            row_bytes, static_cast<std::size_t>(e.cap) * row_bytes,
+                            static_cast<std::size_t>(e.rows_per_slot) * row_bytes, 0);
+                        ggml_tensor* q_4d = ggml_reshape_4d(ctx, q_rope, hd, 1, nH, n_slots);
+                        ggml_tensor* fa = ggml_flash_attn_ext(ctx, q_4d, k_view, v_view,
+                            e.attn_mask, attn_scale, 0.0f, 0.0f);
+                        ggml_prec_set_acc(fa, GGML_PREC_F32);
+                        if (!backend_supports_op(fa))
+                            return abort_build("flash_attn unsupported for the arena shapes.");
+                        attn_2d = ggml_reshape_3d(ctx, fa, hd, nH, n_slots);
+                    }
+
                     ggml_tensor* gate_cont = ggml_cont(ctx, gate_view);
                     ggml_tensor* attn_gated = ggml_mul(ctx, attn_2d, ggml_sigmoid(ctx, gate_cont));
                     ggml_tensor* attn_flat = ggml_reshape_2d(ctx, ggml_cont(ctx, attn_gated), qDim, n_slots);
@@ -1223,6 +1394,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                 ggml_backend_tensor_set(u.tensor, resolve_upload_source(u.data), 0, u.bytes);
 
             e.tok_stage.assign(n_slots, 0);
+            e.hidden_stage.assign(hidden_input ? static_cast<std::size_t>(H) * n_slots : 0, 0.0f);
             e.pos_stage.assign(n_slots, 0);
             e.idx_stage.assign(static_cast<std::size_t>(kvH) * n_slots, 0);
             e.logits_stage.assign(static_cast<std::size_t>(vocab_size) * n_slots, 0.0f);
@@ -1432,6 +1604,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
         // ---- per-step inputs (slot order) ----
         std::vector<std::int64_t> pos_by_slot(n_slots, -1);
         std::fill(e.tok_stage.begin(), e.tok_stage.end(), 0);
+        std::fill(e.hidden_stage.begin(), e.hidden_stage.end(), 0.0f);
         std::fill(e.pos_stage.begin(), e.pos_stage.end(), 0);
         for (int s = 0; s < n_slots; s++)
             for (int h = 0; h < kvH; h++)
@@ -1443,6 +1616,10 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
             const int s = slot_of[i];
             pos_by_slot[s] = positions[i];
             e.tok_stage[s] = token_ids[i];
+            if (hidden_input)
+                std::memcpy(e.hidden_stage.data() + static_cast<std::size_t>(s) * H,
+                    embedding_rows + static_cast<std::size_t>(i) * H,
+                    static_cast<std::size_t>(H) * sizeof(float));
             e.pos_stage[s] = rope_positions != nullptr ? rope_positions[i] : positions[i];
             for (int h = 0; h < kvH; h++)
                 e.idx_stage[static_cast<std::size_t>(s) * kvH + h] =
@@ -1451,12 +1628,16 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
         }
 
         host_read_barrier();
-        decode_input_set_async(e.token_in, e.tok_stage.data(), e.tok_stage.size() * sizeof(std::int32_t));
+        if (hidden_input)
+            decode_input_set_async(e.hidden_in, e.hidden_stage.data(), e.hidden_stage.size() * sizeof(float));
+        else
+            decode_input_set_async(e.token_in, e.tok_stage.data(), e.tok_stage.size() * sizeof(std::int32_t));
         decode_input_set_async(e.pos_in, e.pos_stage.data(), e.pos_stage.size() * sizeof(std::int32_t));
         decode_input_set_async(e.idx_in, e.idx_stage.data(), e.idx_stage.size() * sizeof(std::int64_t));
         qab_fill_mask(e.mask_stage, e.cap, n_slots, pos_by_slot.data());
         decode_input_set_async(e.attn_mask, e.mask_stage.data(), e.mask_stage.size() * sizeof(ggml_fp16_t));
 
+        compute_started = true;
         ggml_status st = tsg::graph_compute_profiled(g_backend, e.graph, kQabKernel);
         if (st != GGML_STATUS_SUCCESS)
         {
@@ -1531,6 +1712,85 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
         clear_last_error();
         return 1;
     }
-    catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }
-    catch (...) { set_last_error("Unknown error in Qwen3.5 arena batched decode."); return 0; }
+    // Download/backend exceptions after submission have the same unsafe
+    // recurrent-state contract as a failed graph status: never retry serially.
+    catch (const std::exception& ex) { set_last_error(ex.what()); return compute_started ? -1 : 0; }
+    catch (...) { set_last_error("Unknown error in Qwen3.5 arena batched decode."); return compute_started ? -1 : 0; }
+}
+
+// Preserve the original ABI for libraries/callers using device GET_ROWS. The
+// sibling adds host-gathered embeddings without changing any cache/state ABI.
+TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
+    const TSGgmlQwen35LayerDesc* layers, int num_layers, int n_seqs,
+    const std::int32_t* token_ids, const std::int32_t* positions,
+    const std::int32_t* rope_positions,
+    void** k_cache_arr, void** v_cache_arr,
+    void** conv_state_arr, void** delta_state_arr,
+    const std::int32_t* gdn_host_auth, const std::int32_t* cache_sizes,
+    int num_heads, int num_kv_heads, int head_dim,
+    int rope_n_dims, int rope_mode, int kv_cache_type,
+    int conv_kernel, int head_k_dim, int head_v_dim, int num_k_heads, int num_v_heads,
+    float eps, float rope_base, float rope_freq_scale,
+    int num_experts, int num_experts_used, int expert_ff, int shared_ff,
+    int norm_topk, float expert_weights_scale,
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type,
+    std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data,
+    const void* token_embd_data, int token_embd_type,
+    std::int64_t token_embd_ne0, std::int64_t token_embd_ne1, std::int64_t token_embd_bytes,
+    std::int32_t* sampled_data, int want_logits)
+{
+    return qab_decode_batched(layers, num_layers, n_seqs, token_ids, positions, rope_positions,
+        k_cache_arr, v_cache_arr, conv_state_arr, delta_state_arr, gdn_host_auth, cache_sizes,
+        num_heads, num_kv_heads, head_dim, rope_n_dims, rope_mode, kv_cache_type,
+        conv_kernel, head_k_dim, head_v_dim, num_k_heads, num_v_heads,
+        eps, rope_base, rope_freq_scale,
+        num_experts, num_experts_used, expert_ff, shared_ff, norm_topk, expert_weights_scale,
+        logits_data, vocab_size, lm_head_data, lm_head_type, lm_head_ne0, lm_head_ne1, lm_head_bytes,
+        final_norm_data, token_embd_data, token_embd_type, token_embd_ne0, token_embd_ne1, token_embd_bytes,
+        sampled_data, want_logits, nullptr);
+}
+
+TSG_EXPORT int TSGgml_Qwen35ArenaHiddenDecodeAbi() { return 1; }
+
+// embedding_rows is F32 [n_seqs, hidden_size] in CALLER sequence order, not
+// arena-slot order. The stable staging buffer owns the asynchronous upload.
+// token_embd_ne0/ne1 retain the hidden/vocabulary dimensions; its pointer,
+// storage type, and byte count are unused by this entry point.
+TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatchedHidden(
+    const TSGgmlQwen35LayerDesc* layers, int num_layers, int n_seqs,
+    const std::int32_t* token_ids, const std::int32_t* positions,
+    const std::int32_t* rope_positions,
+    void** k_cache_arr, void** v_cache_arr,
+    void** conv_state_arr, void** delta_state_arr,
+    const std::int32_t* gdn_host_auth, const std::int32_t* cache_sizes,
+    int num_heads, int num_kv_heads, int head_dim,
+    int rope_n_dims, int rope_mode, int kv_cache_type,
+    int conv_kernel, int head_k_dim, int head_v_dim, int num_k_heads, int num_v_heads,
+    float eps, float rope_base, float rope_freq_scale,
+    int num_experts, int num_experts_used, int expert_ff, int shared_ff,
+    int norm_topk, float expert_weights_scale,
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type,
+    std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data,
+    const void* token_embd_data, int token_embd_type,
+    std::int64_t token_embd_ne0, std::int64_t token_embd_ne1, std::int64_t token_embd_bytes,
+    std::int32_t* sampled_data, int want_logits, const float* embedding_rows)
+{
+    if (embedding_rows == nullptr)
+    {
+        set_last_error("Qwen3.5 arena batched decode: host embedding rows missing.");
+        return 0;
+    }
+    return qab_decode_batched(layers, num_layers, n_seqs, token_ids, positions, rope_positions,
+        k_cache_arr, v_cache_arr, conv_state_arr, delta_state_arr, gdn_host_auth, cache_sizes,
+        num_heads, num_kv_heads, head_dim, rope_n_dims, rope_mode, kv_cache_type,
+        conv_kernel, head_k_dim, head_v_dim, num_k_heads, num_v_heads,
+        eps, rope_base, rope_freq_scale,
+        num_experts, num_experts_used, expert_ff, shared_ff, norm_topk, expert_weights_scale,
+        logits_data, vocab_size, lm_head_data, lm_head_type, lm_head_ne0, lm_head_ne1, lm_head_bytes,
+        final_norm_data, token_embd_data, token_embd_type, token_embd_ne0, token_embd_ne1, token_embd_bytes,
+        sampled_data, want_logits, embedding_rows);
 }

@@ -223,6 +223,13 @@ outcomes to measure, not guarantees of enabling the feature. Unavailable models
 or devices, skipped scenarios, and synthetic-only measurements must be recorded
 as such, never counted as successful real-model validation.
 
+For Gemma 4, prefix reuse can leave parent and child KV caches at different
+capacities. The native `Gemma4ModelDecodeBatchedEx2` path supports these mixed
+capacities without enlarging the child caches. It requires an updated native
+`GgmlOps` library as well as the managed server. The server logs a successful
+fused batch once, and includes a reason when a batch declines. See the
+[Gemma batching details](models/gemma4.md#token-batched-fused-decode-for-concurrent-requests-gemma4modeldecodebatchedex2).
+
 Generated validation reports and logs belong in ignored `docs/validation/` or
 `artifacts/`; reusable validation programs belong in `eng/`, with fixtures in
 their test project. This implementation is TensorSharp-owned managed host

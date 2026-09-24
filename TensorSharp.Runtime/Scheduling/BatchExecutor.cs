@@ -264,9 +264,17 @@ namespace TensorSharp.Runtime.Scheduling
         // console names the degradation without turning into per-token spam.
         private bool _forwardBatchDeclineWarned;
         private bool _fusedBatchedDeclineWarned;
+        private bool _fusedBatchedSuccessReported;
         private bool _specPrefixReuseDeclineWarned;
         private bool _crossSeqSerializationWarned;
         private readonly HashSet<string> _fallbackTransitionsWarned = new(StringComparer.Ordinal);
+
+        private void ReportBatchedFusedDecodeSuccess(int count)
+        {
+            if (_fusedBatchedSuccessReported) return;
+            _fusedBatchedSuccessReported = true;
+            _logger.LogInformation("Batched fused decode accepted {Count} sequences in one graph. Reported once.", count);
+        }
 
         private sealed class SpecSeqContext
         {
@@ -1327,6 +1335,7 @@ namespace TensorSharp.Runtime.Scheduling
                         var nextTokens = new int[dn];
                         if (fused.TryForwardBatchedFusedDecodeSampled(reqIds, btokens, bpositions, nextTokens))
                         {
+                            ReportBatchedFusedDecodeSuccess(dn);
                             for (int i = 0; i < dn; i++)
                             {
                                 var seq = decodeWork[i].Sequence;
@@ -1356,6 +1365,7 @@ namespace TensorSharp.Runtime.Scheduling
                         var outLogits = new float[dn][];
                         if (fused.TryForwardBatchedFusedDecode(reqIds, btokens, bpositions, outLogits))
                         {
+                            ReportBatchedFusedDecodeSuccess(dn);
                             for (int i = 0; i < dn; i++)
                             {
                                 var seq = decodeWork[i].Sequence;
@@ -1401,8 +1411,8 @@ namespace TensorSharp.Runtime.Scheduling
                             _logger.LogWarning(
                                 "The model declined the default batched fused-decode path for " +
                                 "a {Count}-sequence decode step; serving sequences round-robin on the " +
-                                "serial fused path instead (concurrency stays near 1x). Reported once.",
-                                dn);
+                                "serial fused path for this step. Reason: {Reason}. Reported once.",
+                                dn, fused.BatchedFusedDecodeDeclineReason ?? "model did not provide a reason");
                         }
                     }
                 }
@@ -4467,6 +4477,11 @@ namespace TensorSharp.Runtime.Scheduling
         /// per-sequence round-robin loop). Default false (opt-in).</summary>
         bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits) => false;
+
+        /// <summary>Reason the most recent logits batched-decode attempt declined,
+        /// when provided by the model. A decline describes one step, not every
+        /// subsequent decode step.</summary>
+        string? BatchedFusedDecodeDeclineReason => null;
 
         /// <summary>Greedy fast path of <see cref="TryForwardBatchedFusedDecode"/>:
         /// instead of materializing [vocab] host logits per sequence, the model

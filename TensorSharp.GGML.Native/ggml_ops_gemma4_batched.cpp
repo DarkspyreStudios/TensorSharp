@@ -17,8 +17,8 @@ using namespace tsg;
 
 // PERSIST / CUDA-graph capture pool for the token-batched dense decode
 // (TSGgml_Gemma4ModelDecodeBatched). Analogue of the single-stream g_g4dc_pool,
-// but each entry's identity is the SET of N per-request KV caches (sig_kc, in the
-// C#-canonicalised request-id order) + N + per-layer padded window. A recurring
+// but each dense entry identifies every per-request K/V buffer (sig_kc, in
+// C#-canonicalised request-id order), capacity, and padded per-sequence window. A recurring
 // concurrent request-set replays its captured graph (set_rows KV write + fixed
 // padded window + F16 mask inputs => identical topology + stable addresses) so
 // ggml-cuda's CUDA-graph capture engages. Dropped on prefill / KV reset
@@ -42,10 +42,11 @@ namespace
         int ple_dim = 0;
         bool ple_gather = false;
         std::vector<ggml_tensor*> kv_index;   // [num_layers * n_seqs] I64 set_rows write rows (null for shared layers)
-        std::vector<ggml_tensor*> attn_mask;  // [num_layers] F16 [win,1,1,n_seqs] (null for shared layers)
-        std::vector<int> layer_window;        // [num_layers]
+        std::vector<ggml_tensor*> attn_mask;  // dense: [num_layers*n_seqs] individual F16 masks; MoE: [num_layers]
+        std::vector<int> layer_window;        // dense: [num_layers*n_seqs]; MoE: [num_layers]
+        std::vector<int> cache_sizes;         // dense: [num_layers*n_seqs], part of captured topology
         const void* sig_disc = nullptr;
-        std::vector<const void*> sig_kc;      // [n_seqs] layer-0 K cache ptrs (canonical order)
+        std::vector<const void*> sig_kc;      // dense: all K/V pointers; MoE: layer-0 K (canonical order)
         int num_layers = 0, hidden_size = 0, n_seqs = 0, vocab = 0;
 
         void reset()
@@ -56,7 +57,7 @@ namespace
             graph = nullptr; valid = false;
             hidden_in = pos_tensor = logits_out = ple_ids = ple_input = nullptr;
             ple_dim = 0; ple_gather = false;
-            kv_index.clear(); attn_mask.clear(); layer_window.clear();
+            kv_index.clear(); attn_mask.clear(); layer_window.clear(); cache_sizes.clear();
             sig_disc = nullptr; sig_kc.clear();
             num_layers = hidden_size = n_seqs = vocab = 0;
         }
@@ -123,6 +124,9 @@ namespace
 //     pos % cache_size and reads the whole ring flat (decode softmax is
 //     permutation-invariant over keys, so the rotation is harmless). Global
 //     (linear) layers must still fit their cache; the caller grows them.
+// The Ex2 entry additionally accepts per-(layer,sequence) capacities. This
+// keeps prefix-cloned requests compact and their attention windows independent
+// while still loading projection/FFN weights once for the entire token batch.
 // The C# caller (Gemma4Model.TryForwardBatchedFusedDecode) enforces the rest
 // and otherwise falls back to the round-robin per-sequence path.
 //
@@ -142,6 +146,7 @@ namespace
     constexpr int kG4BatchedCapPle = 1;
     constexpr int kG4BatchedCapKvDonor = 2;
     constexpr int kG4BatchedCapSwaWrap = 4;
+    constexpr int kG4BatchedCapPerSequenceCacheSizes = 8;
 }
 
 // Capability bitmask of TSGgml_Gemma4ModelDecodeBatchedEx. The managed caller
@@ -149,10 +154,10 @@ namespace
 // PLE / KV-donor / SWA-wrap gates for whatever bit is missing.
 TSG_EXPORT int TSGgml_Gemma4BatchedDecodeCapabilities()
 {
-    return kG4BatchedCapPle | kG4BatchedCapKvDonor | kG4BatchedCapSwaWrap;
+    return kG4BatchedCapPle | kG4BatchedCapKvDonor | kG4BatchedCapSwaWrap | kG4BatchedCapPerSequenceCacheSizes;
 }
 
-TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
+static int gemma4_model_decode_batched_impl(
     float* hidden_data, int hidden_size, int num_layers, int n_seqs,
     void** attn_norm_arr,
     void** qkv_arr,
@@ -206,7 +211,8 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
     const int* ple_token_ids,
     const void* ple_model_proj_data, int ple_model_proj_type,
     std::int64_t ple_model_proj_ne0, std::int64_t ple_model_proj_ne1, std::int64_t ple_model_proj_bytes,
-    const float* ple_model_proj_norm_data)
+    const float* ple_model_proj_norm_data,
+    bool per_sequence_cache_sizes)
 {
     try
     {
@@ -237,12 +243,21 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
         }
         const int total_ple_dim = has_ple ? num_layers * ple_dim : 0;
 
-        struct LayerInfo { int hd; int kvHeads; int qDim; int kDim; int cacheSize; bool isLocal; int kvSource; bool isShared; int win; };
+        struct LayerInfo {
+            int hd; int kvHeads; int qDim; int kDim; bool isLocal; int kvSource; bool isShared;
+            std::vector<int> cacheSize;
+            std::vector<int> win;
+        };
         std::vector<LayerInfo> li(num_layers);
 
-        int maxTotal = 0;
         for (int s = 0; s < n_seqs; s++)
-            maxTotal = std::max(maxTotal, positions[s] + 1);
+        {
+            if (positions[s] < 0 || positions[s] == std::numeric_limits<int>::max())
+            {
+                set_last_error("Gemma4 batched decode: invalid sequence position.");
+                return 0;
+            }
+        }
 
         // Persist (CUDA-graph capture) gate: identical to the single-stream
         // g_g4dc. Capturable when on CUDA and TS_GEMMA4_FD_PERSIST != 0.
@@ -273,63 +288,68 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
             info.qDim = num_heads * info.hd;
             info.kDim = info.kvHeads * info.hd;
             // Shared layers attend the donor's cache: its size / locality.
-            info.cacheSize = cache_size_arr[info.kvSource];
             info.isLocal = is_local_arr[info.kvSource] != 0;
             if (info.isShared && (info.hd != head_dim_arr[info.kvSource] || info.kvHeads != kv_heads_arr[info.kvSource]))
             {
                 set_last_error("Gemma4 batched decode: shared layer head shape differs from its donor.");
                 return 0;
             }
-            if (info.cacheSize <= 0)
+            info.cacheSize.resize(n_seqs);
+            info.win.resize(n_seqs);
+            for (int s = 0; s < n_seqs; s++)
             {
-                set_last_error("Gemma4 batched decode: empty KV cache.");
-                return 0;
+                const int cap = cache_size_arr[per_sequence_cache_sizes ? info.kvSource * n_seqs + s : info.kvSource];
+                info.cacheSize[s] = cap;
+                if (cap <= 0)
+                {
+                    set_last_error("Gemma4 batched decode: empty KV cache.");
+                    return 0;
+                }
+                // Each request owns its allocation and window. A compact prefix
+                // clone must not be described with another request's larger
+                // capacity: that changes the KV-head stride and reads past it.
+                const int total = positions[s] + 1;
+                const int valid = info.isLocal ? std::min(total, cap) : total;
+                if (valid > cap)
+                {
+                    set_last_error("Gemma4 batched decode: sequence exceeds a global layer's cache (caller must grow it).");
+                    return 0;
+                }
+                info.win[s] = can_persist
+                    ? std::min(cap, std::max(roundup_stride(valid), flash_attn_kv_length(valid, cap, info.hd)))
+                    : std::min(cap, flash_attn_kv_length(valid, cap, info.hd));
             }
-            // Local (SWA ring) layers saturate at cache_size: past that the ring
-            // is read flat and fully valid. A global (linear) cache must still
-            // hold the whole sequence; the caller grows it before calling.
-            const int validMax = info.isLocal ? std::min(maxTotal, info.cacheSize) : maxTotal;
-            if (validMax > info.cacheSize)
-            {
-                set_last_error("Gemma4 batched decode: sequence exceeds a global layer's cache (caller must grow it).");
-                return 0;
-            }
-            // Persist: pad the window to a 256-stride (bounded by the cache) so the
-            // graph topology is identical token-to-token (only changes every 256
-            // tokens), which is what lets ggml-cuda capture engage. Non-persist
-            // uses the tight flash_attn length (clamped to the ring).
-            info.win = can_persist
-                ? std::min(info.cacheSize, std::max(roundup_stride(validMax), flash_attn_kv_length(validMax, info.cacheSize, info.hd)))
-                : std::min(info.cacheSize, flash_attn_kv_length(validMax, info.cacheSize, info.hd));
         }
 
         // Per-(layer,seq) KV write row: the ring slot for a local layer, the
         // linear position otherwise.
         auto write_row = [&](int l, int s) -> std::int64_t {
-            return li[l].isLocal ? (positions[s] % li[l].cacheSize) : positions[s];
+            return li[l].isLocal ? (positions[s] % li[l].cacheSize[s]) : positions[s];
         };
 
-        // Per-seq attention-mask fill: column s zeroes [0, pos_s+1) (clamped to
-        // win, which is the whole ring once a local layer has wrapped), -inf
-        // elsewhere. Shared by the reuse fast-path and the build path.
-        auto fill_batched_mask = [&](std::vector<ggml_fp16_t>& md, int win)
+        // Each sequence has an independent padded mask/window. A local ring
+        // becomes fully valid once wrapped; global padding remains masked.
+        auto fill_sequence_mask = [&](std::vector<ggml_fp16_t>& md, int win, int s)
         {
-            md.assign(static_cast<std::size_t>(win) * n_seqs, ggml_fp32_to_fp16(-std::numeric_limits<float>::infinity()));
+            fill_flash_attn_mask(md, win, positions[s] + 1);
+        };
+
+        // Pool identity: model instance + canonical-order K/V allocations, with
+        // capacities and individual windows checked before captured graph replay.
+        const void* sig_disc = attn_norm_arr[0];
+        // Global layers can grow without moving layer 0 (usually a SWA ring).
+        // Include every K/V pointer and capacity so no captured graph can reuse
+        // a stale global-cache binding after growth or allocator address reuse.
+        const std::size_t cache_count = static_cast<std::size_t>(num_layers) * n_seqs;
+        std::vector<const void*> sig_kc(cache_count * 2);
+        std::vector<int> winvec(cache_count), sizevec(cache_count);
+        for (int l = 0; l < num_layers; l++)
             for (int s = 0; s < n_seqs; s++)
             {
-                const int valid = std::min(positions[s] + 1, win);
-                for (int k = 0; k < valid; k++)
-                    md[static_cast<std::size_t>(s) * win + k] = static_cast<ggml_fp16_t>(0);
+                const std::size_t i = static_cast<std::size_t>(l) * n_seqs + s;
+                sig_kc[i] = k_cache_arr[i]; sig_kc[cache_count + i] = v_cache_arr[i];
+                winvec[i] = li[l].win[s]; sizevec[i] = li[l].cacheSize[s];
             }
-        };
-
-        // Pool identity: model instance + the canonical-order set of N layer-0 K
-        // caches + N + per-layer window. (C# canonicalises the request order.)
-        const void* sig_disc = attn_norm_arr[0];
-        std::vector<const void*> sig_kc(n_seqs);
-        for (int s = 0; s < n_seqs; s++) sig_kc[s] = k_cache_arr[s];   // layer 0, seq s
-        std::vector<int> winvec(num_layers);
-        for (int l = 0; l < num_layers; l++) winvec[l] = li[l].win;
 
         const std::size_t ple_upload_bytes = ple_upload
             ? static_cast<std::size_t>(n_seqs) * total_ple_dim * sizeof(float) : 0;
@@ -338,27 +358,27 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
         G4BatchedDecodeCache* dc = can_persist ? g_g4batched_pool.find(sig_disc, sig_kc, n_seqs) : nullptr;
         if (dc != nullptr && dc->graph != nullptr &&
             dc->num_layers == num_layers && dc->hidden_size == hidden_size &&
-            dc->vocab == vocab_size && dc->layer_window == winvec &&
+            dc->vocab == vocab_size && dc->layer_window == winvec && dc->cache_sizes == sizevec &&
             dc->ple_dim == (has_ple ? ple_dim : 0) && dc->ple_gather == ple_gather)
         {
             host_read_barrier();
-            ggml_backend_tensor_set(dc->hidden_in, hidden_data, 0, static_cast<std::size_t>(hidden_size) * n_seqs * sizeof(float));
-            ggml_backend_tensor_set(dc->pos_tensor, positions, 0, static_cast<std::size_t>(n_seqs) * sizeof(std::int32_t));
+            decode_input_set_async(dc->hidden_in, hidden_data, static_cast<std::size_t>(hidden_size) * n_seqs * sizeof(float));
+            decode_input_set_async(dc->pos_tensor, positions, static_cast<std::size_t>(n_seqs) * sizeof(std::int32_t));
             if (dc->ple_ids != nullptr)
-                ggml_backend_tensor_set(dc->ple_ids, ple_token_ids, 0, static_cast<std::size_t>(n_seqs) * sizeof(std::int32_t));
+                decode_input_set_async(dc->ple_ids, ple_token_ids, static_cast<std::size_t>(n_seqs) * sizeof(std::int32_t));
             else if (dc->ple_input != nullptr && ple_upload)
-                ggml_backend_tensor_set(dc->ple_input, ple_data, 0, ple_upload_bytes);
+                decode_input_set_async(dc->ple_input, ple_data, ple_upload_bytes);
             for (int l = 0; l < num_layers; l++)
             {
                 if (li[l].isShared) continue;   // no write, donor's mask
                 for (int s = 0; s < n_seqs; s++)
                 {
                     std::int64_t row = write_row(l, s);
-                    ggml_backend_tensor_set(dc->kv_index[l * n_seqs + s], &row, 0, sizeof(std::int64_t));
+                    decode_input_set_async(dc->kv_index[l * n_seqs + s], &row, sizeof(std::int64_t));
+                    std::vector<ggml_fp16_t> md;
+                    fill_sequence_mask(md, li[l].win[s], s);
+                    decode_input_set_async(dc->attn_mask[l * n_seqs + s], md.data(), md.size() * sizeof(ggml_fp16_t));
                 }
-                std::vector<ggml_fp16_t> md;
-                fill_batched_mask(md, li[l].win);
-                ggml_backend_tensor_set(dc->attn_mask[l], md.data(), 0, md.size() * sizeof(ggml_fp16_t));
             }
             if (tsg::compute_graph(g_backend, dc->graph) != GGML_STATUS_SUCCESS)
             {
@@ -470,8 +490,8 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
             std::vector<ggml_tensor*> k_src;      // per seq: the tensor the window read sees
             std::vector<ggml_tensor*> v_src;
             std::vector<ggml_tensor*> attn_col_cpy;   // per seq attention-column writes
-            ggml_tensor* attn_mask;               // own-cache layers only (shared: donor's)
-            std::vector<ggml_fp16_t> attn_mask_data;
+            std::vector<ggml_tensor*> attn_mask;  // one independent window per sequence (shared: donor's)
+            std::vector<std::vector<ggml_fp16_t>> attn_mask_data;
         };
         std::vector<LayerTensors> layers(num_layers);
 
@@ -517,16 +537,17 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
             lt.k_src.assign(n_seqs, nullptr);
             lt.v_src.assign(n_seqs, nullptr);
             lt.attn_col_cpy.assign(n_seqs, nullptr);
-            lt.attn_mask = nullptr;
+            lt.attn_mask.assign(n_seqs, nullptr);
+            lt.attn_mask_data.resize(n_seqs);
             if (!info.isShared)
             {
                 for (int s = 0; s < n_seqs; s++)
                 {
-                    lt.k_cached[s] = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kv_cache_type), info.hd, info.cacheSize, info.kvHeads);
-                    lt.v_cached[s] = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kv_cache_type), info.hd, info.cacheSize, info.kvHeads);
+                    lt.k_cached[s] = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kv_cache_type), info.hd, info.cacheSize[s], info.kvHeads);
+                    lt.v_cached[s] = ggml_new_tensor_3d(ctx, static_cast<ggml_type>(kv_cache_type), info.hd, info.cacheSize[s], info.kvHeads);
+                    lt.attn_mask[s] = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, info.win[s], 1, 1, 1);
+                    if (can_persist) ggml_set_input(lt.attn_mask[s]);
                 }
-                lt.attn_mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, info.win, 1, 1, n_seqs);
-                if (can_persist) ggml_set_input(lt.attn_mask);
             }
         }
 
@@ -664,8 +685,8 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
                 // Windowed read [0, win) straight off this sequence's cache —
                 // the single-row fattn (fattn_query_rows=1) applies the same
                 // defensive-copy logic the solo decode kernel uses.
-                ggml_tensor* k_win = view_kv_cache_window(ctx, k_src, winfo.hd, winfo.cacheSize, winfo.kvHeads, 0, winfo.win, kv_cache_type, 1);
-                ggml_tensor* v_win = view_kv_cache_window(ctx, v_src, winfo.hd, winfo.cacheSize, winfo.kvHeads, 0, winfo.win, kv_cache_type, 1);
+                ggml_tensor* k_win = view_kv_cache_window(ctx, k_src, winfo.hd, winfo.cacheSize[s], winfo.kvHeads, 0, winfo.win[s], kv_cache_type, 1);
+                ggml_tensor* v_win = view_kv_cache_window(ctx, v_src, winfo.hd, winfo.cacheSize[s], winfo.kvHeads, 0, winfo.win[s], kv_cache_type, 1);
                 if (k_win == nullptr || v_win == nullptr)
                 {
                     set_last_error("Gemma4 batched decode: failed to build KV window views.");
@@ -677,10 +698,7 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
                     q_rope_cont->nb[1], q_rope_cont->nb[2],
                     static_cast<std::size_t>(s) * q_rope_cont->nb[2]);
                 ggml_tensor* q_attn = ggml_permute(ctx, q_s, 0, 2, 1, 3);
-                // Column s of the window owner's [win, 1, 1, N] mask input.
-                ggml_tensor* mask_s = ggml_view_4d(ctx, wl.attn_mask, winfo.win, 1, 1, 1,
-                    wl.attn_mask->nb[1], wl.attn_mask->nb[2], wl.attn_mask->nb[3],
-                    static_cast<std::size_t>(s) * wl.attn_mask->nb[3]);
+                ggml_tensor* mask_s = wl.attn_mask[s];
                 ggml_tensor* fa = flash_attn_ext_guarded(ctx, "Gemma4 batched decode", q_attn, k_win, v_win, mask_s,
                     1.0f, 0.0f, 0.0f, nullptr, GGML_PREC_F32);
 
@@ -824,12 +842,12 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
             if (info.isShared) continue;   // donor's caches + mask
             for (int s = 0; s < n_seqs; s++)
             {
-                bind_or_mark(lt.k_cached[s], k_cache_arr[l * n_seqs + s], kv_cache_bytes(info.kvHeads, info.cacheSize, info.hd, kv_cache_type), true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
-                bind_or_mark(lt.v_cached[s], v_cache_arr[l * n_seqs + s], kv_cache_bytes(info.kvHeads, info.cacheSize, info.hd, kv_cache_type), true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+                bind_or_mark(lt.k_cached[s], k_cache_arr[l * n_seqs + s], kv_cache_bytes(info.kvHeads, info.cacheSize[s], info.hd, kv_cache_type), true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+                bind_or_mark(lt.v_cached[s], v_cache_arr[l * n_seqs + s], kv_cache_bytes(info.kvHeads, info.cacheSize[s], info.hd, kv_cache_type), true, GGML_BACKEND_BUFFER_USAGE_COMPUTE);
+                // Host scratch must survive until upload_list is consumed.
+                fill_sequence_mask(lt.attn_mask_data[s], info.win[s], s);
+                bind_or_mark(lt.attn_mask[s], lt.attn_mask_data[s].data(), lt.attn_mask_data[s].size() * sizeof(ggml_fp16_t), false);
             }
-            // per-seq attention mask (host scratch, not cacheable)
-            fill_batched_mask(lt.attn_mask_data, info.win);
-            bind_or_mark(lt.attn_mask, lt.attn_mask_data.data(), lt.attn_mask_data.size() * sizeof(ggml_fp16_t), false);
         }
         bind_or_mark(lm_head_t, const_cast<void*>(lm_head_data), static_cast<std::size_t>(lm_head_bytes), true);
         bind_or_mark(final_norm_t, const_cast<void*>(final_norm_data), static_cast<std::size_t>(hidden_size) * sizeof(float), true);
@@ -914,9 +932,10 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
             e.ctx = ctx; e.buffer = persist_buf; e.graph = graph;
             e.hidden_in = current; e.pos_tensor = pos_tensor; e.logits_out = logits_out;
             e.kv_index = kv_index_all;
-            e.attn_mask.resize(num_layers);
-            for (int l = 0; l < num_layers; l++) e.attn_mask[l] = layers[l].attn_mask;
-            e.layer_window = winvec;
+            e.attn_mask.resize(cache_count);
+            for (int l = 0; l < num_layers; l++)
+                for (int s = 0; s < n_seqs; s++) e.attn_mask[l * n_seqs + s] = layers[l].attn_mask[s];
+            e.layer_window = winvec; e.cache_sizes = sizevec;
             e.sig_disc = sig_disc; e.sig_kc = sig_kc;
             e.num_layers = num_layers; e.hidden_size = hidden_size; e.n_seqs = n_seqs; e.vocab = vocab_size;
             e.ple_ids = ple_ids_t;
@@ -930,6 +949,167 @@ TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
     }
     catch (const std::exception& ex) { set_last_error(ex.what()); return 0; }
     catch (...) { set_last_error("Unknown error in Gemma4 batched decode."); return 0; }
+}
+
+// Original extended ABI: one cache capacity per layer, shared by all sequences.
+TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx(
+    float* hidden_data, int hidden_size, int num_layers, int n_seqs,
+    void** attn_norm_arr,
+    void** qkv_arr,
+    void** q_norm_arr, void** k_norm_arr,
+    void** o_arr,
+    void** post_attn_norm_arr,
+    void** ffn_norm_arr,
+    void** gu_arr, void** down_arr,
+    void** post_ffn_norm_arr,
+    // Per-(layer,seq) KV caches: k_cache_arr[layer * n_seqs + seq].
+    void** k_cache_arr, void** v_cache_arr,
+    int* head_dim_arr,
+    int* kv_heads_arr,
+    int* cache_size_arr,
+    int* is_local_arr,
+    float* rope_base_arr,
+    float* layer_scalar_arr,
+    int* qkv_type_arr, std::int64_t* qkv_ne0_arr, std::int64_t* qkv_ne1_arr, std::int64_t* qkv_bytes_arr,
+    int* o_type_arr, std::int64_t* o_ne0_arr, std::int64_t* o_ne1_arr, std::int64_t* o_bytes_arr,
+    int* gu_type_arr, std::int64_t* gu_ne0_arr, std::int64_t* gu_ne1_arr, std::int64_t* gu_bytes_arr,
+    int* down_type_arr, std::int64_t* down_ne0_arr, std::int64_t* down_ne1_arr, std::int64_t* down_bytes_arr,
+    int num_heads,
+    const int* positions,           // [n_seqs]
+    float eps, int sliding_window,
+    float* rope_freq_factors, int rope_freq_factors_len,
+    int* rope_n_dims_arr,
+    int kv_cache_type,
+    // Separate K/V projection weights for mixed-quant layers (null => fused qkv).
+    void** k_arr, int* k_type_arr, std::int64_t* k_ne0_arr, std::int64_t* k_ne1_arr, std::int64_t* k_bytes_arr,
+    void** v_arr, int* v_type_arr, std::int64_t* v_ne0_arr, std::int64_t* v_ne1_arr, std::int64_t* v_bytes_arr,
+    // Folded final-norm + lm_head (required for this kernel).
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type, std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data, float logit_softcap,
+    // ---- Ex additions (all nullable; null / 0 reproduces the v1 kernel) ----
+    // KV-donor map: kv_source_arr[l] is the layer whose cache layer l attends
+    // (== l for a layer with its own K/V). null => every layer owns its cache.
+    const int* kv_source_arr,
+    // Uploaded PLE: ple_data is [n_seqs][num_layers * ple_dim] F32 (row s = seq
+    // s, C#'s ComputePLE layout), ignored when the in-kernel gather is active.
+    const float* ple_data, int ple_dim,
+    void** ple_gate_arr, int* ple_gate_type_arr, std::int64_t* ple_gate_ne0_arr, std::int64_t* ple_gate_ne1_arr, std::int64_t* ple_gate_bytes_arr,
+    void** ple_proj_arr, int* ple_proj_type_arr, std::int64_t* ple_proj_ne0_arr, std::int64_t* ple_proj_ne1_arr, std::int64_t* ple_proj_bytes_arr,
+    void** ple_post_norm_arr,
+    // In-kernel PLE gather: the resident quantized per_layer_token_embd table +
+    // the N token ids (one per sequence, canonical order), and optionally the
+    // quantized per_layer_model_proj + its F32 norm (token-embedding-only PLE
+    // when null). Mirrors TSGgml_Gemma4ModelDecode / ModelVerify.
+    const void* ple_token_embd_data, int ple_token_embd_type,
+    std::int64_t ple_token_embd_ne0, std::int64_t ple_token_embd_ne1, std::int64_t ple_token_embd_bytes,
+    const int* ple_token_ids,
+    const void* ple_model_proj_data, int ple_model_proj_type,
+    std::int64_t ple_model_proj_ne0, std::int64_t ple_model_proj_ne1, std::int64_t ple_model_proj_bytes,
+    const float* ple_model_proj_norm_data)
+{
+    return gemma4_model_decode_batched_impl(
+        hidden_data, hidden_size, num_layers, n_seqs, attn_norm_arr,
+        qkv_arr, q_norm_arr, k_norm_arr, o_arr, post_attn_norm_arr,
+        ffn_norm_arr, gu_arr, down_arr, post_ffn_norm_arr, k_cache_arr,
+        v_cache_arr, head_dim_arr, kv_heads_arr, cache_size_arr, is_local_arr,
+        rope_base_arr, layer_scalar_arr, qkv_type_arr, qkv_ne0_arr, qkv_ne1_arr,
+        qkv_bytes_arr, o_type_arr, o_ne0_arr, o_ne1_arr, o_bytes_arr,
+        gu_type_arr, gu_ne0_arr, gu_ne1_arr, gu_bytes_arr, down_type_arr,
+        down_ne0_arr, down_ne1_arr, down_bytes_arr, num_heads, positions,
+        eps, sliding_window, rope_freq_factors, rope_freq_factors_len, rope_n_dims_arr,
+        kv_cache_type, k_arr, k_type_arr, k_ne0_arr, k_ne1_arr,
+        k_bytes_arr, v_arr, v_type_arr, v_ne0_arr, v_ne1_arr,
+        v_bytes_arr, logits_data, vocab_size, lm_head_data, lm_head_type,
+        lm_head_ne0, lm_head_ne1, lm_head_bytes, final_norm_data, logit_softcap,
+        kv_source_arr, ple_data, ple_dim, ple_gate_arr, ple_gate_type_arr,
+        ple_gate_ne0_arr, ple_gate_ne1_arr, ple_gate_bytes_arr, ple_proj_arr, ple_proj_type_arr,
+        ple_proj_ne0_arr, ple_proj_ne1_arr, ple_proj_bytes_arr, ple_post_norm_arr, ple_token_embd_data,
+        ple_token_embd_type, ple_token_embd_ne0, ple_token_embd_ne1, ple_token_embd_bytes, ple_token_ids,
+        ple_model_proj_data, ple_model_proj_type, ple_model_proj_ne0, ple_model_proj_ne1, ple_model_proj_bytes,
+        ple_model_proj_norm_data,
+        false);
+}
+
+// Ex2 ABI: cache_size_arr[layer * n_seqs + seq] preserves compact per-request KV.
+// All other arrays and semantics match Ex; advertised by capability bit 8.
+TSG_EXPORT int TSGgml_Gemma4ModelDecodeBatchedEx2(
+    float* hidden_data, int hidden_size, int num_layers, int n_seqs,
+    void** attn_norm_arr,
+    void** qkv_arr,
+    void** q_norm_arr, void** k_norm_arr,
+    void** o_arr,
+    void** post_attn_norm_arr,
+    void** ffn_norm_arr,
+    void** gu_arr, void** down_arr,
+    void** post_ffn_norm_arr,
+    // Per-(layer,seq) KV caches: k_cache_arr[layer * n_seqs + seq].
+    void** k_cache_arr, void** v_cache_arr,
+    int* head_dim_arr,
+    int* kv_heads_arr,
+    int* cache_size_arr,
+    int* is_local_arr,
+    float* rope_base_arr,
+    float* layer_scalar_arr,
+    int* qkv_type_arr, std::int64_t* qkv_ne0_arr, std::int64_t* qkv_ne1_arr, std::int64_t* qkv_bytes_arr,
+    int* o_type_arr, std::int64_t* o_ne0_arr, std::int64_t* o_ne1_arr, std::int64_t* o_bytes_arr,
+    int* gu_type_arr, std::int64_t* gu_ne0_arr, std::int64_t* gu_ne1_arr, std::int64_t* gu_bytes_arr,
+    int* down_type_arr, std::int64_t* down_ne0_arr, std::int64_t* down_ne1_arr, std::int64_t* down_bytes_arr,
+    int num_heads,
+    const int* positions,           // [n_seqs]
+    float eps, int sliding_window,
+    float* rope_freq_factors, int rope_freq_factors_len,
+    int* rope_n_dims_arr,
+    int kv_cache_type,
+    // Separate K/V projection weights for mixed-quant layers (null => fused qkv).
+    void** k_arr, int* k_type_arr, std::int64_t* k_ne0_arr, std::int64_t* k_ne1_arr, std::int64_t* k_bytes_arr,
+    void** v_arr, int* v_type_arr, std::int64_t* v_ne0_arr, std::int64_t* v_ne1_arr, std::int64_t* v_bytes_arr,
+    // Folded final-norm + lm_head (required for this kernel).
+    void* logits_data, int vocab_size,
+    const void* lm_head_data, int lm_head_type, std::int64_t lm_head_ne0, std::int64_t lm_head_ne1, std::int64_t lm_head_bytes,
+    const void* final_norm_data, float logit_softcap,
+    // ---- Ex additions (all nullable; null / 0 reproduces the v1 kernel) ----
+    // KV-donor map: kv_source_arr[l] is the layer whose cache layer l attends
+    // (== l for a layer with its own K/V). null => every layer owns its cache.
+    const int* kv_source_arr,
+    // Uploaded PLE: ple_data is [n_seqs][num_layers * ple_dim] F32 (row s = seq
+    // s, C#'s ComputePLE layout), ignored when the in-kernel gather is active.
+    const float* ple_data, int ple_dim,
+    void** ple_gate_arr, int* ple_gate_type_arr, std::int64_t* ple_gate_ne0_arr, std::int64_t* ple_gate_ne1_arr, std::int64_t* ple_gate_bytes_arr,
+    void** ple_proj_arr, int* ple_proj_type_arr, std::int64_t* ple_proj_ne0_arr, std::int64_t* ple_proj_ne1_arr, std::int64_t* ple_proj_bytes_arr,
+    void** ple_post_norm_arr,
+    // In-kernel PLE gather: the resident quantized per_layer_token_embd table +
+    // the N token ids (one per sequence, canonical order), and optionally the
+    // quantized per_layer_model_proj + its F32 norm (token-embedding-only PLE
+    // when null). Mirrors TSGgml_Gemma4ModelDecode / ModelVerify.
+    const void* ple_token_embd_data, int ple_token_embd_type,
+    std::int64_t ple_token_embd_ne0, std::int64_t ple_token_embd_ne1, std::int64_t ple_token_embd_bytes,
+    const int* ple_token_ids,
+    const void* ple_model_proj_data, int ple_model_proj_type,
+    std::int64_t ple_model_proj_ne0, std::int64_t ple_model_proj_ne1, std::int64_t ple_model_proj_bytes,
+    const float* ple_model_proj_norm_data)
+{
+    return gemma4_model_decode_batched_impl(
+        hidden_data, hidden_size, num_layers, n_seqs, attn_norm_arr,
+        qkv_arr, q_norm_arr, k_norm_arr, o_arr, post_attn_norm_arr,
+        ffn_norm_arr, gu_arr, down_arr, post_ffn_norm_arr, k_cache_arr,
+        v_cache_arr, head_dim_arr, kv_heads_arr, cache_size_arr, is_local_arr,
+        rope_base_arr, layer_scalar_arr, qkv_type_arr, qkv_ne0_arr, qkv_ne1_arr,
+        qkv_bytes_arr, o_type_arr, o_ne0_arr, o_ne1_arr, o_bytes_arr,
+        gu_type_arr, gu_ne0_arr, gu_ne1_arr, gu_bytes_arr, down_type_arr,
+        down_ne0_arr, down_ne1_arr, down_bytes_arr, num_heads, positions,
+        eps, sliding_window, rope_freq_factors, rope_freq_factors_len, rope_n_dims_arr,
+        kv_cache_type, k_arr, k_type_arr, k_ne0_arr, k_ne1_arr,
+        k_bytes_arr, v_arr, v_type_arr, v_ne0_arr, v_ne1_arr,
+        v_bytes_arr, logits_data, vocab_size, lm_head_data, lm_head_type,
+        lm_head_ne0, lm_head_ne1, lm_head_bytes, final_norm_data, logit_softcap,
+        kv_source_arr, ple_data, ple_dim, ple_gate_arr, ple_gate_type_arr,
+        ple_gate_ne0_arr, ple_gate_ne1_arr, ple_gate_bytes_arr, ple_proj_arr, ple_proj_type_arr,
+        ple_proj_ne0_arr, ple_proj_ne1_arr, ple_proj_bytes_arr, ple_post_norm_arr, ple_token_embd_data,
+        ple_token_embd_type, ple_token_embd_ne0, ple_token_embd_ne1, ple_token_embd_bytes, ple_token_ids,
+        ple_model_proj_data, ple_model_proj_type, ple_model_proj_ne0, ple_model_proj_ne1, ple_model_proj_bytes,
+        ple_model_proj_norm_data,
+        true);
 }
 
 // v1 ABI (kept for older managed builds): no KV-donor map, no PLE, and the
@@ -1459,4 +1639,3 @@ TSG_EXPORT void TSGgml_Gemma4ResetMoEBatchedDecodeCache()
 {
     g_g4moebatched_pool.reset_all();
 }
-

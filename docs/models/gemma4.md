@@ -714,11 +714,11 @@ layers. `AttentionDecodeCircular()` traverses the circular buffer for read.
 SWA layers therefore allocate `slidingWindow` slots regardless of context
 length — the resident set is bounded.
 
-### Token-batched fused decode for concurrent requests (`Gemma4ModelDecodeBatchedEx`)
+### Token-batched fused decode for concurrent requests (`Gemma4ModelDecodeBatchedEx2`)
 
 With N >= 2 requests in flight the engine does not round-robin N single-token
 graphs: `Gemma4Model.TryForwardBatchedFusedDecode` decodes one token for every
-sequence in ONE fused graph (`TSGgml_Gemma4ModelDecodeBatchedEx` in
+sequence in ONE fused graph (`TSGgml_Gemma4ModelDecodeBatchedEx2` in
 [`ggml_ops_gemma4_batched.cpp`](../../TensorSharp.GGML.Native/ggml_ops_gemma4_batched.cpp)),
 so every weight is loaded once per step and applied to N tokens. Decode is
 bandwidth-bound, which is where the aggregate throughput comes from. Each
@@ -748,23 +748,49 @@ entry closes those three gaps:
 - **SWA wrap.** A local layer whose sequence is past its ring writes at
   `pos % cache_size` and reads the whole ring flat with every slot valid; decode
   softmax is permutation-invariant over keys, so the rotation needs no concat.
-  Global (linear) layers must still fit their cache; the round-robin fallback
-  grows them and the next step re-enters the batched path.
+  Global (linear) layers must still fit their cache. A sequence that needs growth
+  takes a serial step while other ready sequences can continue batching.
+
+`Ex2` additionally accepts each sequence's actual cache capacity as
+`cache_size_arr[layer * N + seq]`. Retained-prefix clones are intentionally
+smaller than fresh caches, and each request grows independently. The earlier
+uniform-capacity ABI rejected such batches even when every request had enough
+space. The new kernel uses each allocation's real KV-head stride and its own
+padded attention window and mask. It does not expand short children to the
+largest request's allocation. Shared-KV layers use their donor's capacity for
+the same sequence.
 
 The native side reports what it supports through
-`TSGgml_Gemma4BatchedDecodeCapabilities()` (bits: PLE, KV donor, SWA wrap).
+`TSGgml_Gemma4BatchedDecodeCapabilities()` (bits: PLE=1, KV donor=2, SWA wrap=4,
+per-sequence cache sizes=8).
 The managed gate keeps the v1 restriction for every bit the loaded native
 library lacks, so an older `libGgmlOps` (no probe symbol) behaves exactly as
 before, and `TSGgml_Gemma4ModelDecodeBatched` keeps its v1 ABI as a thin
-wrapper. `TS_GEMMA4_BATCHED_CAPS=0` forces the v1 gates for an A/B.
+wrapper. The old `Ex` ABI also retains its layer-only capacity array.
+`TS_GEMMA4_BATCHED_CAPS=0` forces the v1 gates for an A/B;
+`TS_GEMMA4_BATCHED_CAPS=7` restores the uniform-capacity gate while retaining
+PLE, shared-KV and SWA-wrap support. These are diagnostic overrides, not flags
+needed to enable batching. Rebuild both the managed server and native `GgmlOps`
+library to use `Ex2`; an older native library continues safely through fallback.
 
-CUDA-graph capture is unchanged: every per-step input (hidden rows,
-positions, per-(layer, seq) `set_rows` write rows, per-layer F16 masks, the
+Every per-step input (hidden rows,
+positions, per-(layer, seq) `set_rows` write rows, per-sequence F16 masks, the
 PLE token ids or uploaded PLE rows) is a graph input refreshed with
-`ggml_backend_tensor_set`, and the graph lives in its own context and own-slot
+ordered backend uploads, and the graph lives in its own context and own-slot
 buffer, so a recurring request set replays a captured graph at stable
-addresses. The MoE batched kernel (`TSGgml_Gemma4MoEModelDecodeBatched`) keeps
+addresses. Capture identity includes all K/V pointers, capacities and windows;
+cache growth invalidates captured graphs before replacing storage. The MoE
+batched kernel (`TSGgml_Gemma4MoEModelDecodeBatched`) keeps
 its no-PLE / no-donor scope.
+
+The server logs the first successful fused batch and gives a reason for the
+first declined batch. One decline does not mean every later step is serial.
+`Gemma4Model.BatchedFusedDecodeSteps` and `BatchedFusedDecodeTokens` count only
+successful native batched executions; `BatchedFusedDecodeDeclines` counts
+rejected attempts. The regression and benchmark in
+[`eng/validation/Gemma4BatchedCacheProbe`](../../eng/validation/Gemma4BatchedCacheProbe)
+exercise real prefix clones, different capacities, independent growth, reordered
+requests, and subsequent solo continuation.
 
 **Verified** ([`Gemma4BatchedFusedDecodeParityTests`](../../InferenceWeb.Tests/Gemma4BatchedFusedDecodeParityTests.cs),
 `TS_TEST_GGML_BACKEND=cuda`, gemma-4-E4B-it-Q8_0): for 2, 3 and 4 concurrent
