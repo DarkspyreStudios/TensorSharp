@@ -79,6 +79,13 @@ from completed work. Required child results must be collected before the parent
 claims completion. Request cancellation also stops the request's descendants.
 Agent state is not a durable cross-request session API.
 
+In the Web UI, click the arrow or `wait_agent` row to expand or collapse its
+details. The row also supports keyboard focus and activation.
+While `wait_agent` is running, the expanded panel shows each subagent's task,
+status, and available tool activity or result. Details update as the agents work
+without changing whether the panel is expanded. The activity panel is temporary
+and is removed when the current operation or response finishes.
+
 ## Host controls
 
 The server startup flags below configure the entire request tree. The same
@@ -178,6 +185,14 @@ uses fresh child contexts and the five tools listed above, rather than exposing
 all of Codex's history-fork, messaging, and resume options.
 
 ## Validation and performance
+
+The [Web UI activity regression](../eng/validation/validate-webui-agent-activity.py)
+serves the shipped chat page with controlled SSE frames and synthetic agents.
+With Python Playwright and Chromium installed, run
+`python eng/validation/validate-webui-agent-activity.py --browser PATH_TO_CHROMIUM`.
+It checks mouse and keyboard disclosure controls, live updates, literal text
+rendering, and terminal cleanup. Evidence goes to `artifacts/webui-agent-activity/`;
+this browser check does not require or validate a loaded model.
 
 Evaluate single-agent and automatic multi-agent modes on the same tasks,
 model, backend, hardware, sampling settings, and completion criteria. Include

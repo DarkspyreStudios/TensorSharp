@@ -59,9 +59,43 @@ public sealed class MultiAgentSession : IAsyncDisposable
 
     public int TotalChildGenerations => Volatile.Read(ref _generations);
 
+    /// <summary>Copies this request's child tree without marking reports as observed.
+    /// The host can include these snapshots in its existing progress heartbeat.</summary>
+    public IReadOnlyList<MultiAgentProgress> GetProgress()
+    {
+        lock (_sync)
+            return _agents.Values.Select(a =>
+            {
+                bool completed = a.Run.IsCompleted;
+                return new MultiAgentProgress(
+                    a.Id, a.ParentId, a.AssignedTask, a.Role,
+                    completed ? a.Status : a.Cancellation.IsCancellationRequested ? "cancelling" : "running",
+                    a.Tool, a.ToolStatus, a.ToolDetail,
+                    completed ? a.Result : null,
+                    completed ? a.Error : null);
+            }).ToArray();
+    }
+
     /// <summary>Dispatches only this session's orchestration tools, with ownership checks.</summary>
     public async Task<SkillToolResult> ExecuteAsync(ToolCall call, string callerId = RootId,
         CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(call);
+        try
+        {
+            SkillToolResult result = await ExecuteCoreAsync(call, callerId, cancellationToken).ConfigureAwait(false);
+            SetToolActivity(callerId, call.Name, result.Ok ? "completed" : "failed", result.ResourcePath);
+            return result;
+        }
+        catch
+        {
+            SetToolActivity(callerId, call.Name, "interrupted");
+            throw;
+        }
+    }
+
+    private async Task<SkillToolResult> ExecuteCoreAsync(ToolCall call, string callerId,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(call);
         cancellationToken.ThrowIfCancellationRequested();
@@ -75,6 +109,7 @@ public sealed class MultiAgentSession : IAsyncDisposable
                 if (callerId != RootId && (!_agents.TryGetValue(callerId, out Agent? caller)
                     || caller.Status != "running" || caller.Cancellation.IsCancellationRequested))
                     return Error("The calling agent is not active in this request.");
+                SetToolActivity(callerId, call.Name, "running");
             }
             switch (call.Name)
             {
@@ -133,6 +168,10 @@ public sealed class MultiAgentSession : IAsyncDisposable
         agent.Observed = false;
         agent.Result = null;
         agent.Error = null;
+        agent.AssignedTask = task;
+        agent.Tool = null;
+        agent.ToolStatus = null;
+        agent.ToolDetail = null;
         agent.Cancellation?.Dispose();
         CancellationToken parentToken = agent.ParentId == RootId ? _lifetime.Token : _agents[agent.ParentId].Cancellation.Token;
         agent.Cancellation = CancellationTokenSource.CreateLinkedTokenSource(parentToken);
@@ -363,7 +402,7 @@ public sealed class MultiAgentSession : IAsyncDisposable
         finally { _toolGate.Release(); }
     }
 
-    internal Task<SkillToolResult> ExecuteHostToolAsync(ToolCall call, string agentId, CancellationToken ct)
+    internal async Task<SkillToolResult> ExecuteHostToolAsync(ToolCall call, string agentId, CancellationToken ct)
     {
         lock (_sync)
         {
@@ -372,10 +411,32 @@ public sealed class MultiAgentSession : IAsyncDisposable
                 Agent agent = _agents[agentId];
                 if (!_tools.Any(t => t.Name == call.Name)
                     || (!agent.MutableTools && !IsReadOnlyTool(call.Name)))
-                    return Task.FromResult(Error("This tool is not available to this child. Complete the assigned task using its permitted tools."));
+                    return Error("This tool is not available to this child. Complete the assigned task using its permitted tools.");
             }
+            SetToolActivity(agentId, call.Name, "running");
         }
-        return ExecuteHostToolAsync(call, ct);
+        try
+        {
+            SkillToolResult result = await ExecuteHostToolAsync(call, ct).ConfigureAwait(false);
+            SetToolActivity(agentId, call.Name, result.Ok ? "completed" : "failed", result.ResourcePath);
+            return result;
+        }
+        catch
+        {
+            SetToolActivity(agentId, call.Name, "interrupted");
+            throw;
+        }
+    }
+
+    private void SetToolActivity(string agentId, string? tool, string status, string? detail = null)
+    {
+        lock (_sync)
+        {
+            if (!_agents.TryGetValue(agentId, out Agent? agent)) return;
+            agent.Tool = tool;
+            agent.ToolStatus = status;
+            agent.ToolDetail = detail;
+        }
     }
 
     private IEnumerable<Agent> Children(string parentId) => _agents.Values.Where(a => a.ParentId == parentId);
@@ -462,6 +523,10 @@ public sealed class MultiAgentSession : IAsyncDisposable
         public string Role { get; } = role;
         public bool MutableTools { get; } = mutableTools;
         public string Status = "running";
+        public string AssignedTask = string.Empty;
+        public string? Tool;
+        public string? ToolStatus;
+        public string? ToolDetail;
         public string? Result;
         public string? Error;
         public bool Observed;

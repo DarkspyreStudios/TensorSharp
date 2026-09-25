@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Server.Hosting;
@@ -2333,7 +2334,9 @@ namespace TensorSharp.Chat
                             yield return WebUiSseEvents.ToolProgress(
                                 update.ToolProgressPhase, update.ToolProgressName,
                                 update.ToolProgressPiece, update.ToolProgressSeconds,
-                                update.ToolProgressDetail);
+                                update.ToolProgressDetail,
+                                update.ToolProgressPhase == "running" && update.ToolProgressName == MultiAgentTools.Wait
+                                    ? skillPlan?.Agents?.GetProgress() : null);
                         continue;
                     }
 
@@ -2465,7 +2468,9 @@ namespace TensorSharp.Chat
                             yield return WebUiSseEvents.ToolProgress(
                                 update.ToolProgressPhase, update.ToolProgressName,
                                 update.ToolProgressPiece, update.ToolProgressSeconds,
-                                update.ToolProgressDetail);
+                                update.ToolProgressDetail,
+                                update.ToolProgressPhase == "running" && update.ToolProgressName == MultiAgentTools.Wait
+                                    ? skillPlan?.Agents?.GetProgress() : null);
                     }
                 }
                 finally
