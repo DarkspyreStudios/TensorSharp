@@ -102,18 +102,33 @@ static int vae_run_conv2d(const TSGgmlConv2dDesc* d)
         ggml_tensor* ker = ggml_new_tensor_4d(ctx, static_cast<ggml_type>(d->wtype), KW, KH, IC, OC);
         ggml_tensor* bias = d->bias ? ggml_new_tensor_1d(ctx, GGML_TYPE_F32, OC) : nullptr;
 
-        ggml_tensor* x = inp;
+        // ggml-vulkan multiplies F32 matrices through F16 cooperative-matrix
+        // operands (accumulating in F32) wherever the device has them, and the
+        // 2.1 VAE feeds convolutions activations far above 65504. A power-of-two
+        // scale is exact in both formats and the convolution is linear: bring the
+        // input under the F16 range, then undo the scale on the F32 result.
+        float input_scale = 1.f;
+        if (g_backend_type == BACKEND_TYPE_VULKAN)
+        {
+            const float* values = static_cast<const float*>(d->input);
+            float peak = 0.f;
+            for (std::size_t i = 0, n = static_cast<std::size_t>(W) * H * C; i < n; ++i)
+                peak = std::max(peak, std::fabs(values[i]));
+            while (std::isfinite(peak) && peak * input_scale > 32768.f) input_scale *= 0.5f;
+        }
+        ggml_tensor* x = input_scale != 1.f ? ggml_scale(ctx, inp, input_scale) : inp;
         int p0 = d->padL, p1 = d->padT;
         if (!symmetric)
         {
             // Only the encoder Downsample is asymmetric: ZeroPad2d((0,1,0,1)) = pad
             // right/bottom by 1, then conv with pad 0. ggml_pad end-pads ne0/ne1.
-            x = ggml_pad(ctx, inp, d->padR - d->padL, d->padB - d->padT, 0, 0);
+            x = ggml_pad(ctx, x, d->padR - d->padL, d->padB - d->padT, 0, 0);
             p0 = 0; p1 = 0;
         }
         ggml_tensor* conv = vae_conv_2d_f32(ctx, ker, x, sW, sH, p0, p1);  // [OW,OH,OC,1]
         if (conv->op == GGML_OP_CONV_2D)
             conv->op_params[k_conv_full_precision_param] = 1;
+        if (input_scale != 1.f) conv = ggml_scale(ctx, conv, 1.f / input_scale);
         if (bias) conv = ggml_add(ctx, conv, ggml_reshape_4d(ctx, bias, 1, 1, OC, 1));
 
         const int OW = static_cast<int>(conv->ne[0]), OH = static_cast<int>(conv->ne[1]);

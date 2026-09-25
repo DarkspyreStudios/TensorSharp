@@ -813,6 +813,12 @@ if (TENSORSHARP_GGML_NATIVE_BUILD_TESTS)
             ENVIRONMENT "TS_VAE_MPS_CONV=0"
             SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 120)
     endif()
+    if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
+        add_test(NAME qwen-image21-whole-graph-vulkan
+            COMMAND GgmlOpsQwenImage21Test vulkan --reference "${TSG_QWEN21_REFERENCE}")
+        set_tests_properties(qwen-image21-whole-graph-vulkan PROPERTIES
+            FIXTURES_REQUIRED qwen_image21_cpu_reference SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 300)
+    endif()
     if (TENSORSHARP_GGML_NATIVE_ENABLE_CUDA)
         add_test(NAME qwen-image21-whole-graph-cuda
             COMMAND GgmlOpsQwenImage21Test cuda --reference "${TSG_QWEN21_REFERENCE}")

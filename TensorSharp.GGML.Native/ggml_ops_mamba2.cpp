@@ -617,7 +617,7 @@ TSG_EXPORT int TSGgml_NemotronMamba2PrefillF32(
             }
             conv_input = ggml_reshape_3d(ctx, conv_input, conv_dim + T, xbc_size, 1);
 
-            ggml_tensor* conv = ggml_ssm_conv(ctx, conv_input, conv_weight_t); // (xBC, T, 1)
+            ggml_tensor* conv = tsg::ssm_conv_any(ctx, conv_input, conv_weight_t); // (xBC, T, 1)
             if (has_conv_bias)
                 conv = ggml_add(ctx, conv, conv_bias_t);
             conv = ggml_silu(ctx, conv);
@@ -988,7 +988,7 @@ TSG_EXPORT int TSGgml_NemotronMamba2DecodeF32(
             }
             conv_input = ggml_reshape_3d(ctx, conv_input, conv_dim + T, xbc_size, 1);
 
-            ggml_tensor* conv = ggml_ssm_conv(ctx, conv_input, conv_weight_t); // (xBC, 1, 1)
+            ggml_tensor* conv = tsg::ssm_conv_any(ctx, conv_input, conv_weight_t); // (xBC, 1, 1)
             if (has_conv_bias)
                 conv = ggml_add(ctx, conv, conv_bias_t);
             conv = ggml_silu(ctx, conv);

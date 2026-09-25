@@ -3196,7 +3196,7 @@ struct graph_builder
                     1, 3 * d_inner, 1);
             ggml_tensor * conv_in = ggml_concat(ctx,
                     ggml_reshape_3d(ctx, conv_state, dc - 1, 3 * d_inner, 1), col_t, 0);  // [dc, 3*d_inner, 1]
-            ggml_tensor * conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_in, conv_w)); // [3*d_inner, 1]
+            ggml_tensor * conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_in, conv_w)); // [3*d_inner, 1]
 
             ggml_tensor * tail = ggml_view_3d(ctx, conv_in, dc - 1, 3 * d_inner, 1,
                     conv_in->nb[1], conv_in->nb[2], conv_in->nb[0]);
@@ -4156,7 +4156,7 @@ struct graph_builder
         ggml_tensor * conv_in = ggml_concat(ctx, ggml_reshape_3d(ctx, conv_state, dc - 1, 3 * d_inner, 1),
                                             qkv_t, 0);                               // [dc-1+nt, 3*d_inner, 1]
         // SiLU on the conv output, not on the projections
-        ggml_tensor * conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_in, conv_w));   // [3*d_inner, nt]
+        ggml_tensor * conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_in, conv_w));   // [3*d_inner, nt]
         trace("kda_conv", il, rank, conv_out);
 
         // keep the last dc-1 columns for the next ubatch. The concat above has

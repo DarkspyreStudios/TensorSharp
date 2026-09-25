@@ -61,7 +61,14 @@ namespace TensorSharp.Models.QwenImage
             return new QwenImage21VaeTensorStore(source);
         }
 
-        public QwenImageModel(string ggufPath, BackendType backend) : base(ggufPath, backend)
+        /// <summary>The group the diffusion transformer shards over, or null on one device.</summary>
+        internal ITensorParallelGroup DitTensorParallelGroup => IsTensorParallel ? _tpGroup : null;
+
+        // QwenImage21DiT shards its blocks on this group when the first image is denoised.
+        protected override bool ShardsWeightsInComponents => true;
+
+        public QwenImageModel(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
+            : base(ggufPath, backend, tpDegree, tpGroup)
         {
             try
             {
@@ -75,6 +82,13 @@ namespace TensorSharp.Models.QwenImage
                         "use a Qwen-Image-2.1 GGUF (see docs/models/qwenimage21.md).");
                 if (!IsGgmlBackend)
                     throw new NotSupportedException("Qwen-Image-2.1 requires a GGML backend (ggml_metal, ggml_cuda, ggml_vulkan or ggml_cpu).");
+                if (IsTensorParallel && (TpNodeCount > 1 || GlobalTpDegree != TpDegree))
+                    throw new ModelLoadRefusedException(
+                        "Qwen-Image-2.1 tensor parallelism shards over the GPUs of one machine; a multi-node --tp group is not supported.");
+                // Refuse at load, not after the prompt has been encoded: every GPU holds whole heads.
+                if (IsTensorParallel && QwenImage21DiT.Heads % TpDegree != 0)
+                    throw new ModelLoadRefusedException(
+                        $"Qwen-Image-2.1 tensor parallelism needs a GPU count that divides its {QwenImage21DiT.Heads} attention heads (2, 4 or 8); --tp {TpDegree} does not.");
                 Config = new ModelConfig
                 {
                     Architecture = "qwen_image",

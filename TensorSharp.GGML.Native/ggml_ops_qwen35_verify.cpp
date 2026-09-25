@@ -1249,7 +1249,7 @@ namespace
                 // transpose-cont copy (cpy_scalar_transpose) is redundant (llama.cpp's
                 // build_conv_state concats the transposed view the same way).
                 ggml_tensor* conv_input = ggml_concat(ctx, t.conv_state_in, ggml_transpose(ctx, qkv_mixed), 0); // [convDim+N, conv_dim]
-                ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_input, t.conv1d_w)); // [conv_dim, N]
+                ggml_tensor* conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_input, t.conv1d_w)); // [conv_dim, N]
                 // new conv state = the last convDim timesteps (rows [N, N+convDim)).
                 ggml_tensor* new_conv_view = ggml_view_2d(ctx, conv_input, convDim, conv_dim,
                     conv_input->nb[1], static_cast<std::size_t>(N) * conv_input->nb[0]);

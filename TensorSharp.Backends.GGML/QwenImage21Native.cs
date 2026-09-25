@@ -36,6 +36,45 @@ public struct QwenImage21ForwardArgs
     public int StructBytes, Dim, Heads, HeadDim, Channels, TextDim;
     public int ImageSeq, TextSeq, TotalSeq, PrefixSeq, NumLayers, NumSegments;
     public float Eps;
+    /// <summary>Nonzero names one request's text/reference prefix; see <see cref="QwenImage21ForwardPath"/>.</summary>
+    public ulong PrefixCacheKey;
+    public QwenImage21PrefixCacheType PrefixCacheType;
+    /// <summary>Ranks the block weights are sharded over (0/1 = none); see QwenImage21ForwardTp.</summary>
+    public int TpRanks;
+}
+
+/// <summary>Storage of the prefix KV cache. <see cref="Auto"/> stores what attention reads
+/// (F16 for Metal and CUDA flash attention, F32 otherwise), so cached steps match uncached ones.
+/// <see cref="Q8_0"/> (K and V) and <see cref="Q8_0V"/> (V only) store the prefix in 8 bits.</summary>
+public enum QwenImage21PrefixCacheType
+{
+    Auto = 0,
+    F32 = 1,
+    F16 = 2,
+    Q8_0 = 3,
+    Q8_0V = 4,
+}
+
+/// <summary>Which graph produced a Qwen-Image-2.1 prediction.</summary>
+public enum QwenImage21ForwardPath
+{
+    /// <summary>The whole sequence; no cache was requested.</summary>
+    Full = 1,
+    /// <summary>The whole sequence; the prefix K/V were stored for later steps.</summary>
+    Extract = 2,
+    /// <summary>Only the target tokens, attending to the stored prefix.</summary>
+    Cached = 3,
+    /// <summary>The whole sequence; the cache did not fit the device (native logs why).</summary>
+    Declined = 4,
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct QwenImage21PrefixCacheInfo
+{
+    /// <summary>0 = none for the key, 1 = stored, 2 = declined.</summary>
+    public int State;
+    public int KeyType, ValueType, Tokens;
+    public long Bytes;
 }
 
 internal static partial class GgmlNative
@@ -44,15 +83,60 @@ internal static partial class GgmlNative
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static partial int TSGgml_QwenImage21Forward(in QwenImage21ForwardArgs desc);
 
-    public static void QwenImage21Forward(in QwenImage21ForwardArgs desc)
+    [LibraryImport(DllName)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static unsafe partial int TSGgml_QwenImage21ForwardTp(QwenImage21ForwardArgs** descs, int ranks);
+
+    [LibraryImport(DllName)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static partial void TSGgml_QwenImage21ReleasePrefixCache(ulong key);
+
+    [LibraryImport(DllName)]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static partial int TSGgml_QwenImage21GetPrefixCacheInfo(ulong key, out QwenImage21PrefixCacheInfo info);
+
+    public static QwenImage21ForwardPath QwenImage21Forward(in QwenImage21ForwardArgs desc)
     {
-        if (TSGgml_QwenImage21Forward(in desc) == 0)
+        int path = TSGgml_QwenImage21Forward(in desc);
+        if (path == 0)
             throw new InvalidOperationException(GetLastErrorMessage("Qwen-Image-2.1 native inference failed."));
+        return (QwenImage21ForwardPath)path;
+    }
+
+    public static unsafe QwenImage21ForwardPath QwenImage21ForwardTp(QwenImage21ForwardArgs[] descs)
+    {
+        ArgumentNullException.ThrowIfNull(descs);
+        fixed (QwenImage21ForwardArgs* first = descs)
+        {
+            var pointers = stackalloc QwenImage21ForwardArgs*[descs.Length];
+            for (int r = 0; r < descs.Length; r++) pointers[r] = first + r;
+            int path = TSGgml_QwenImage21ForwardTp(pointers, descs.Length);
+            if (path == 0)
+                throw new InvalidOperationException(GetLastErrorMessage("Qwen-Image-2.1 tensor-parallel inference failed."));
+            return (QwenImage21ForwardPath)path;
+        }
+    }
+
+    public static void QwenImage21ReleasePrefixCache(ulong key) => TSGgml_QwenImage21ReleasePrefixCache(key);
+
+    public static QwenImage21PrefixCacheInfo QwenImage21GetPrefixCacheInfo(ulong key)
+    {
+        TSGgml_QwenImage21GetPrefixCacheInfo(key, out var info);
+        return info;
     }
 }
 
 public partial class GgmlBasicOps
 {
     /// <summary>Complete Qwen-Image-2.1 velocity prediction in one resident-weight GGML graph.</summary>
-    public static void QwenImage21Forward(in QwenImage21ForwardArgs args) => GgmlNative.QwenImage21Forward(in args);
+    public static QwenImage21ForwardPath QwenImage21Forward(in QwenImage21ForwardArgs args) => GgmlNative.QwenImage21Forward(in args);
+
+    /// <summary>One prediction over a tensor-parallel group: descriptor r holds rank r's sharded
+    /// block weights (whole heads, a slice of the MLP) and the shared inputs. Rank 0 writes the output.</summary>
+    public static QwenImage21ForwardPath QwenImage21ForwardTp(QwenImage21ForwardArgs[] descs) => GgmlNative.QwenImage21ForwardTp(descs);
+
+    /// <summary>Frees the stored prefix K/V of one request key; the next forward with the key stores them again.</summary>
+    public static void QwenImage21ReleasePrefixCache(ulong key) => GgmlNative.QwenImage21ReleasePrefixCache(key);
+
+    public static QwenImage21PrefixCacheInfo QwenImage21GetPrefixCacheInfo(ulong key) => GgmlNative.QwenImage21GetPrefixCacheInfo(key);
 }

@@ -173,8 +173,220 @@ Previews decode the estimated clean latent from the current flow prediction.
 
 The 2.1 diffusion transformer runs a complete GGML graph with resident quantized
 weights; there is no CPU weight-streaming mode. Start with smaller dimensions if
-available memory is insufficient. CUDA and Vulkan are selectable GGML backends
-but have not been exercised on this local Apple Silicon validation machine.
+available memory is insufficient. CUDA and Vulkan were exercised on NVIDIA A40s; the
+measurements below record where.
+
+## Prefix KV cache
+
+Qwen-Image-2.1 modulates the text and reference-image tokens with the `t = 0`
+row, and its block-causal attention never lets them attend to the image being
+generated (the checkpoint's `causal_condition`). Their hidden states, and so every
+block's keys and values, are the same at every denoising step. TensorSharp
+implements the official
+[prefix KV cache](https://github.com/QwenLM/Qwen-Image-2.1#prefix-kv-cache): the
+first step runs the whole sequence and stores each block's post-RoPE keys and
+values for the prefix on the device. Every later step runs only the target
+image's tokens and attends over the stored prefix followed by the target. A CFG
+run keeps one cache per branch. The caches are released when denoising ends,
+before VAE decoding. Each step's log line ends with `prefix=extract` or
+`prefix=cached`.
+
+The cache is on by default; `TS_QWEN21_PREFIX_CACHE=0` turns it off. By default
+it stores exactly what the attention kernel reads: F16 for Metal and CUDA flash
+attention, F32 otherwise. Cached steps therefore reproduce the uncached
+computation. On Metal, one seed gives a byte-identical PNG with the cache on, with
+it off, and from the build before the cache existed. This was checked for
+generation, one- and two-reference editing, and CFG 4 with two caches. The
+diffusers `use_kv_cache` documentation notes that its PyTorch implementation does
+not reproduce images bit for bit across the two settings; TensorSharp's graphs do.
+
+The cost is memory: 512 KiB per prefix token per CFG branch in F16 (32 blocks, K
+and V, 4096 values of 2 bytes). A prompt is tens to a few hundred tokens, and
+each reference at about 1 megapixel adds 4,096 tokens, about 2 GiB. A cache may
+use at most half of the memory the device reports free, and
+`TS_QWEN21_PREFIX_CACHE_MAX_MIB` caps it further. A cache that does not fit is
+declined with a warning on stderr, and that request recomputes the prefix every
+step, as before.
+
+`TS_QWEN21_PREFIX_CACHE_TYPE` selects the storage type:
+
+| Value | K / V storage | Bytes per prefix token and branch | Output |
+|---|---|---:|---|
+| `auto` (default) | What attention reads (F16 on Metal/CUDA flash, F32 otherwise) | 512 KiB (F16) | Identical to uncached |
+| `f16`, `f32` | As named | 512 KiB / 1 MiB | Identical where attention reads that type |
+| `q8_0` | Q8_0 / Q8_0 | 272 KiB | Rounds the stored prefix |
+| `q8_0_v` | Attention type / Q8_0 | 392 KiB | Rounds the stored prefix values |
+
+The 8-bit settings correspond to vLLM-Omni's `fp8` and `fp8_v` prefix caches.
+They use ggml Q8_0 blocks, which have one scale per 32 values, instead of FP8
+E4M3 with one scale per token and head. The stored prefix is converted back to
+the attention type every step, so the target's own keys and values stay exact.
+Their measured effect on output quality is below.
+
+### Measured effect
+
+Each row compares the build before the cache with this build, in fresh processes
+with the Q4_K_M files, seed 42 and CFG 1 unless stated. Step time is the mean of
+steps 2 onward, because step 1 stores the prefix and costs the same as an uncached
+step. "Identical" means the output PNGs have the same SHA-256. Wall time is the
+whole process, including model load, encoders and VAE. References are about
+1 megapixel, or 4,096 prefix tokens each.
+
+Apple M5 Pro, 48 GiB, `ggml_metal`:
+
+| Workload | Uncached step | Cached step | Per step | Wall time | Output |
+|---|---:|---:|---:|---|---|
+| Generate 1024², 40 steps (2 rounds) | 7.91 s | 7.84 s | 1.01× | 330.5 → 327.6 s | Identical |
+| Edit, 1 reference, 1024², 40 steps (2 runs) | 17.97–18.00 s | 9.65–10.38 s | 1.73–1.86× | 747.7 → 422.4 s; 744.9 → 452.5 s | Identical |
+| Edit, 2 references, 1024², 40 steps | 33.32 s | 11.46 s | 2.91× | 1,369.7 → 512.3 s | Identical |
+| Edit, 1 reference, CFG 4, 1024², 10 steps | 36.30 s | 19.29 s | 1.88× | 390.2 → 238.0 s | Identical |
+| Edit, 1 reference, 2048², 10 steps | 73.41 s | 64.84 s | 1.13× | 813.3 → 739.0 s | Identical |
+
+The two single-reference edit runs differ because the second ran with other
+desktop applications using the GPU. Peak process RSS was unchanged within
+run-to-run variation (19.1 → 18.9 GiB for the first edit pair).
+
+NVIDIA A40, 46 GB, `ggml_cuda` on one GPU:
+
+| Workload | Uncached step | Cached step | Per step | Wall time | Output |
+|---|---:|---:|---:|---|---|
+| Generate 1024², 40 steps (2 rounds) | 1.151 s | 1.113 s | 1.03× | 57.6 → 54.5 s | Identical |
+| Edit, 1 reference, 1024², 40 steps (2 rounds) | 2.547 s | 1.328 s | 1.92× | 123.8 → 74.8 s | Identical |
+| Edit, 2 references, 1024², 40 steps | 4.106 s | 1.538 s | 2.67× | 188.4 → 87.5 s | Identical |
+| Edit, 1 reference, CFG 4, 1024², 20 steps | 5.074 s | 2.652 s | 1.91× | 122.7 → 75.8 s | Identical |
+| Edit, 1 reference, 2048², 20 steps | 8.929 s | 7.608 s | 1.17× | 205.7 → 181.3 s | Identical |
+| Generate 2048², 20 steps | 6.973 s | 6.821 s | 1.02× | 155.2 → 152.2 s | Identical |
+
+NVIDIA A40, `ggml_vulkan` on one GPU. The build before this change decoded on
+the CPU under Vulkan (see "Vulkan VAE" below), so its wall times are not
+comparable. The cache comparison therefore uses this build with
+`TS_QWEN21_PREFIX_CACHE=0` as the uncached side:
+
+| Workload | Uncached step | Cached step | Per step | Output |
+|---|---:|---:|---:|---|
+| Edit, 1 reference, 1024², 20 steps (2 rounds) | 4.93 s | 2.67 s | 1.85× | Identical |
+| Generate 1024², 20 steps | 2.07 s | 2.03 s | 1.02× | Identical |
+| Edit, 1 reference, 512², 20 steps | 0.91 s | 0.48 s | 1.90× | Identical |
+
+At 512², the build before this change took 683.5 s end to end, 557 s of it in
+the CPU VAE decode; this build took 48.7 s. Its PNG differs from the previous
+build's by 54.4 dB PSNR, from the device VAE's F16 rounding.
+
+Sampled peak GPU memory for the 1024² single-reference edit rose from 6.2 to
+8.2 GB, which is the 2.0 GiB cache. At 2048², where the target dominates, both
+peaked at 16.3 GB. The cache helps in proportion to the prefix's share of the
+sequence: generation, whose prefix is only the prompt, gains 1–3%; editing gains
+the most at 1024², and less at 2048² where the target is four times larger.
+
+8-bit storage, same 1024² single-reference edit:
+
+| Storage | Prefix cache size | Metal step | Metal PSNR | CUDA step | CUDA PSNR |
+|---|---:|---:|---:|---:|---:|
+| `auto` (F16) | 2,066 MiB | 10.38 s | Identical | 1.328 s | Identical |
+| `q8_0` | 1,098 MiB | 10.95 s | 58.9 dB | 1.499 s | 53.0 dB |
+| `q8_0_v` | 1,582 MiB | 10.90 s | 60.5 dB | 1.414 s | 52.8 dB |
+
+PSNR compares the output PNG with the default setting's (RGBA, 0–255). The 8-bit
+types save memory but are 5–13% slower per step, because the stored prefix is
+dequantized every step; CUDA dequantizes Q8_0 through F32. Use them only when a
+cache would otherwise be declined.
+
+## CUDA graphs and tensor parallelism
+
+**CUDA graphs.** Upstream ggml-cuda captures a graph as a CUDA graph once two
+consecutive executions leave it unchanged, then replays it. The cached step graph
+is retained across steps (`TS_QWEN21_GRAPH_REUSE=1`, the default) with fixed
+input and cache buffers. From a request's third step onward, each denoising step
+is therefore one graph replay. This is the effect of vLLM-Omni's CUDA-graph
+decode, without separate capture code. As in vLLM-Omni, the first step, which
+stores the prefix, runs uncaptured. Under tensor parallelism, each rank's
+segments between reductions are captured separately; vLLM-Omni disables graphs
+under TP.
+
+On an A40, counting CUDA runtime calls confirmed this: a 10-step request made 1
+capture and 8 graph launches (20 steps: 18 launches), and a two-GPU request made
+130 captures (65 segments on each GPU) and 1,040 launches. Output PNGs were
+identical with graphs on and with `GGML_CUDA_DISABLE_GRAPHS=1`. The speed benefit
+is small because each step's kernels are large: 1.5% per step at 256×256 on one
+GPU (0.0662 s against 0.0672 s), 2.6% on two, and nothing measurable at 1024²
+(1.112 s both ways).
+
+**Tensor parallelism.** With `--tp N` on `ggml_cuda` or `ggml_vulkan`, the
+diffusion transformer is sharded Megatron-style over N GPUs, following
+vLLM-Omni's layout for 2.1:
+
+- Each GPU holds 32/N whole attention heads: its Q, K and V rows and the matching
+  `to_out` input columns.
+- Each GPU holds 12,288/N MLP columns: gate and up rows and the matching
+  `img_mlp.out` input columns.
+- The input, time, modulation and output projections and all norms are
+  replicated.
+- The two row-parallel products in each block are summed across GPUs. ggml-cuda's
+  collective (NCCL or P2P) does this on the devices when available; otherwise it
+  goes through host memory.
+- Each GPU caches the prefix of its own heads, so the cache is split N ways.
+- N must divide 32 and keep quantized blocks whole: 2, 4 or 8 for the published
+  files.
+- The text encoder, vision encoder and VAE stay on the first GPU. Multi-node
+  groups are refused.
+
+Measured on two NVIDIA A40s in different CPU sockets (46 GB each). Peer access is
+not functional between them, so NCCL used its shared-memory transport. The prefix
+cache was on unless stated; step times exclude step 1:
+
+| Workload | 1 GPU step | 2 GPUs step | Speedup | Wall time | PSNR vs 1 GPU |
+|---|---:|---:|---:|---|---:|
+| Generate 1024², 40 steps (2 rounds) | 1.107 s | 0.823 s | 1.34× | 53.3 → 44.5 s | 41.5 dB |
+| Edit, 1 reference, 1024², 40 steps (2 rounds) | 1.326 s | 0.934 s | 1.42× | 73.7 → 60.1 s | 44.9 dB |
+| Generate 2048², 20 steps | 6.817 s | 4.436 s | 1.54× | 155.5 → 107.2 s | 34.2 dB |
+| Edit, 1 reference, 2048², 20 steps | 7.612 s | 4.849 s | 1.57× | 181.5 → 128.9 s | 51.5 dB |
+| `ggml_vulkan` edit, 1024², 20 steps (host reduction) | 2.670 s | 3.092 s | 0.86× | 144.8 → 156.1 s | 53.9 dB |
+
+The sharded prefix cache compounds with TP: the two-GPU 1024² edit took 1.836 s
+per step with the cache off. On one GPU, peak memory for that edit was 8.2 GB. On
+two GPUs, the first GPU peaked at 8.3 GB and the second at 4.6 GB; the first GPU
+also runs the encoders and VAE. At 2048², the VAE decode keeps the first GPU's
+peak at 16.3 GB. On Vulkan, the host round trip per reduction outweighs the split,
+so `--tp` is slower there on this hardware.
+
+TP changes the order in which each block's partial sums are added, so outputs are
+not bit-identical to one GPU. That rounding difference compounds over the
+denoising trajectory. Images keep the same composition and quality, but details
+can differ: at 2048²/20 steps, the shop sign sat in a different place. The PSNR
+column quantifies this. Forcing an exact F32 all-reduce
+(`GGML_CUDA_AR_BF16_THRESHOLD=0`) produced byte-identical PNGs to the default,
+so reduced-precision reduction is not the cause.
+
+The sharded graphs were also checked against the unsharded graph on single-GPU
+machines, with a loopback group of backend instances on one device reducing
+through host memory. Across 146 synthetic sharded forwards, the maximum
+normalized error was 9.4e-5 on Metal and 1.7e-7 on CPU. With the real Q4_K_M
+weights on Metal, relative L2 error was 0.07–0.10% of one prediction, with and
+without the prefix cache. The native test runs the same 146 forwards on a real
+two-GPU group for CUDA (4.5e-5, NCCL) and Vulkan (9.3e-5, host reduction).
+vLLM-Omni lists TP for 2.1 as unverified and publishes no 2.1 scaling numbers.
+
+**Vulkan VAE.** ggml-vulkan multiplies F32 matrices through F16
+cooperative-matrix operands on GPUs that have them, and the VAE feeds some
+convolutions activations above 65,504; on the NVIDIA A40 used for testing, one
+decoder shortcut convolution saw inputs up to about 288,000. The VAE therefore
+used to run its convolutions on the CPU under `ggml_vulkan`, and a 512×512
+decode took over 8 minutes. The native F32 convolution now scales each Vulkan
+input by an exact power of two until its magnitude is at most 32,768, then
+scales the F32 result back before the bias. The VAE runs on the Vulkan device:
+a 256×256 decode took 3.3 s and matched the F32 CPU reference to 0.14% relative
+L2 (encode: 0.22%). The remaining difference is the F16 rounding of Vulkan's
+matrix operands.
+
+**FP8 weights.** vLLM-Omni's FP8 option quantizes a BF16 checkpoint's in-block
+linear layers to FP8 W8A8 at load time. Its recipe reports this as a memory
+saving, not a speedup, on GB200. TensorSharp loads block-quantized GGUF weights
+(Q4_K_M or Q8_0). ggml has no FP8 E4M3 tensor type, and its Metal and CUDA
+backends ignore activation-precision hints, so there is no FP8 GEMM to select.
+The 8-bit weight configuration is the Q8_0 GGUF. On NVIDIA Turing and newer,
+ggml-cuda's quantized matrix kernels also quantize the activations to 8 bits, so
+this runs as int8 W8A8 on tensor cores. The part of vLLM-Omni's FP8 work that
+applies here is 8-bit prefix storage, described above.
 
 ## Current Unsloth Q8_0 validation
 

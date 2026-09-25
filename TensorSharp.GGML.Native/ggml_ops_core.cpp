@@ -3110,11 +3110,15 @@ extern "C" void TSGgml_GptOssInvalidateKvCache(const void* kCacheData, const voi
 extern "C" void TSGgml_MuseGlimmerResetDecodeCache();
 extern "C" void TSGgml_DFlashResetCaches();
 extern "C" void TSGgml_QwenImage21ResetForwardCache();
+extern "C" void TSGgml_QwenImage21ReleasePrefixCaches();
 extern "C" void TSGgml_WanResetForwardCache();
 
 TSG_EXPORT void TSGgml_ClearHostBufferCache()
 {
     TSGgml_QwenImage21ResetForwardCache();
+    // Stored Qwen-Image-2.1 prefix K/V are device memory too; a request that
+    // still wants them stores them again on its next step.
+    TSGgml_QwenImage21ReleasePrefixCaches();
     // The slot-stable arena pools bind resident weight buffers this wipe is
     // about to free; their captured graphs must not survive it.
     TSGgml_GptOssResetBatchedDecodeCache();
@@ -3195,6 +3199,8 @@ TSG_EXPORT void TSGgml_Shutdown()
 {
     std::lock_guard<std::recursive_mutex> teardown(g_teardown_mutex);
     TSGgml_QwenImage21ResetForwardCache();
+    // Prefix K/V buffers belong to the backends about to be freed.
+    TSGgml_QwenImage21ReleasePrefixCaches();
     // Tear the TP communicator down first: it holds NCCL communicators and
     // pinned staging buffers that reference every rank's backend.
     tp_comm_free();

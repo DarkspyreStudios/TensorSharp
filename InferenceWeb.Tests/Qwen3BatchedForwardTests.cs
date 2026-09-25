@@ -53,6 +53,14 @@ public sealed class Qwen3BatchedForwardTests
     [Qwen3BatchedModelFact]
     public Task BatchSize2_KeepsSequencesIndependent() => RunTwoSequencesAsync();
 
+    // The executor forwards a decode row's sampled token only through
+    // OverrideFlatTokens: it is committed to the sequence after ForwardBatch
+    // accepts the step. Reading it back with TokenAt threw on the first decode
+    // of every batched request, which is the path --tp always takes. Run once
+    // with TENSORSHARP_TP_DEGREE=2 to cover the tensor-parallel forward too.
+    [Qwen3BatchedModelFact]
+    public Task DecodeStep_ReadsTheUncommittedTokenFromOverride() => RunDecodeStepAsync();
+
     [Qwen3BatchedModelFact]
     public Task RetainedDecodeGraph_SurvivesTruncateAndResidencyRelease() =>
         RunDecodeGraphLifecycleAsync();
@@ -78,6 +86,46 @@ public sealed class Qwen3BatchedForwardTests
             Assert.Single(actual);
             _output.WriteLine($"[bonsai-8b] scalar top-1={expected}, batch top-1={ArgMax(actual[0])}");
             Assert.Equal(expected, ArgMax(actual[0]));
+        }
+        finally
+        {
+            model.Dispose();
+        }
+    }
+
+    private async Task RunDecodeStepAsync()
+    {
+        var model = await TryLoadModelAsync();
+        try
+        {
+            int[] prompt = [1, 100, 200, 300, 400, 500];
+            model.ResetKVCache();
+            int token = ArgMax(model.Forward(prompt));
+            int expected = ArgMax(model.Forward([token]));
+            model.ResetKVCache();
+
+            var pool = new BlockPool(8, 16, model.ComputeKVBlockByteSize(16));
+            var sequence = CreateSequence(pool, "r-decode", prompt);
+            var batched = (IBatchedPagedModel)model;
+            Assert.Equal(token, ArgMax(Assert.Single(batched.ForwardBatch(BuildContext([(sequence, prompt)], 16)))));
+            sequence.AdvanceComputedTokens(prompt.Length);
+
+            int position = prompt.Length, block = sequence.BlockTable.Blocks[position / 16].Id;
+            var decode = new BatchedForwardContext
+            {
+                Sequences = [sequence],
+                NumScheduledTokens = [1],
+                QueryStartLoc = [0, 1],
+                Positions = [position],
+                SlotMapping = [block * 16 + position % 16],
+                BlockTables = [sequence.BlockTable.Blocks.Select(b => b.Id).ToArray()],
+                MaxQueryLen = 1,
+                MaxSeqLen = position + 1,
+                OverrideFlatTokens = [token],
+            };
+            int actual = ArgMax(Assert.Single(batched.ForwardBatch(decode)));
+            _output.WriteLine($"[qwen3 decode] scalar top-1={expected}, batch top-1={actual}");
+            Assert.Equal(expected, actual);
         }
         finally
         {

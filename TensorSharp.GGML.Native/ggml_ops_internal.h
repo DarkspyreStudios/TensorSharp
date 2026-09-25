@@ -754,6 +754,25 @@ namespace tsg
     bool can_initialize_backend(int backend_type);
     bool backend_supports_op(ggml_tensor* op);
 
+    // ggml_ssm_conv for any channel count. ggml-cuda runs the op only for a
+    // multiple of 128 channels (its supports_op says so and its kernel asserts),
+    // which real checkpoints satisfy and small synthetic models do not. The
+    // convolution is depthwise, so zero channels change nothing: pad both inputs
+    // to the next multiple, convolve, and keep the real channels. A shape the
+    // backend accepts gets the plain op, so real models build the same graph.
+    inline ggml_tensor* ssm_conv_any(ggml_context* ctx, ggml_tensor* sx, ggml_tensor* c)
+    {
+        ggml_tensor* conv = ggml_ssm_conv(ctx, sx, c);
+        const int64_t channels = sx->ne[1];
+        const int64_t padded = (channels + 127) / 128 * 128;
+        if (padded == channels || backend_supports_op(conv))
+            return conv;
+        ggml_tensor* sxp = ggml_pad(ctx, ggml_is_contiguous(sx) ? sx : ggml_cont(ctx, sx), 0, static_cast<int>(padded - channels), 0, 0);
+        ggml_tensor* cp = ggml_pad(ctx, ggml_is_contiguous(c) ? c : ggml_cont(ctx, c), 0, static_cast<int>(padded - channels), 0, 0);
+        ggml_tensor* wide = ggml_ssm_conv(ctx, sxp, cp); // [padded, n_t, n_s]
+        return ggml_cont(ctx, ggml_view_3d(ctx, wide, channels, wide->ne[1], wide->ne[2], wide->nb[1], wide->nb[2], 0));
+    }
+
     // ggml_flash_attn_ext for the active backend, or the explicit attention
     // when the backend has no kernel for this exact shape (warned once per
     // site). Use this instead of a bare ggml_flash_attn_ext in any graph that

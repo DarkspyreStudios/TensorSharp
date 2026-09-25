@@ -597,6 +597,11 @@ namespace TensorSharp.GGML
         /// <summary>Number of GPUs the given GGML backend can address.</summary>
         public static int GetGpuDeviceCount(GgmlBackendType backendType) => GgmlNative.GetGpuDeviceCount(backendType);
 
+        /// <summary>Diagnostics only: several tensor-parallel ranks on one device (see
+        /// <c>GgmlNative.TensorParallelInitLoopback</c>); correctness, never speed.</summary>
+        public static void TensorParallelInitLoopback(GgmlBackendType backendType, int count)
+            => GgmlNative.TensorParallelInitLoopback(backendType, count);
+
         /// <summary>Adapter name of a GPU visible to the given GGML backend, or null.</summary>
         public static string GetGpuDeviceDescription(GgmlBackendType backendType, int deviceIndex)
             => GgmlNative.GetGpuDeviceDescription(backendType, deviceIndex);

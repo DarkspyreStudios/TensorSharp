@@ -21,7 +21,7 @@
     with SIGABRT inside load_aot_module, before any managed code runs. Measured on
     device.
 
-    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 304 symbols.
+    Names carry no leading underscore: the linker adds one for -u. Native source export manifest; 309 symbols.
   -->
   <ItemGroup Condition="'$(RuntimeIdentifier)' == 'ios-arm64'">
     <ReferenceNativeSymbol Include="TSGgml_ActivationGradF32" SymbolType="Function" />
@@ -278,6 +278,10 @@
     <ReferenceNativeSymbol Include="TSGgml_Qwen4ExpMtpFree" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Qwen4ExpMtpCopyKv" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImage21Forward" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenImage21ForwardTp" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenImage21GetPrefixCacheInfo" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenImage21ReleasePrefixCache" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_QwenImage21ReleasePrefixCaches" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenImage21ResetForwardCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenTeTrunk" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_QwenVaeAttention" SymbolType="Function" />
@@ -316,6 +320,7 @@
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelFusedAvailableDistributed" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelHasDeviceAllReduce" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelInit" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_TensorParallelInitLoopback" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelMatmul" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TensorParallelSetGlobalGeometry" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_TranscodeBonsaiToQ2_0" SymbolType="Function" />

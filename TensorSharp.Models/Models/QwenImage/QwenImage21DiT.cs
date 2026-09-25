@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using TensorSharp.Core;
 using TensorSharp.GGML;
 using TensorSharp.Runtime;
@@ -18,11 +19,16 @@ internal sealed class QwenImage21DiT : ModelBase
     private readonly Dictionary<string, IntPtr> _pointers = new();
     private readonly List<IntPtr> _owned = new();
     private readonly QwenImage21Block[] _blocks;
+    // Per-rank block weights when the transformer is sharded over a tensor-parallel group.
+    private readonly QwenImage21Block[][] _rankBlocks;
     private readonly QwenImage21ForwardArgs _nativeWeights;
     private readonly string _prefix;
     private readonly LayoutCache _layouts = new();
 
-    public QwenImage21DiT(string ggufPath, BackendType backend) : base(ggufPath, backend)
+    /// <param name="tpGroup">When set, the blocks are sharded Megatron-style over its GPUs:
+    /// whole attention heads and MLP columns per rank, two all-reduces per block.</param>
+    public QwenImage21DiT(string ggufPath, BackendType backend, ITensorParallelGroup tpGroup = null)
+        : base(ggufPath, backend, tpGroup?.Degree ?? 1, tpGroup)
     {
         try
         {
@@ -65,9 +71,71 @@ internal sealed class QwenImage21DiT : ModelBase
             }
             if (_gguf.Tensors.ContainsKey(_prefix + $"transformer_blocks.{Layers}.attn.to_q.weight"))
                 throw new NotSupportedException("Expected a 32-layer Qwen-Image-2.1 transformer.");
-            Console.WriteLine($"Qwen-Image-2.1 DiT: {Layers} layers, {HiddenSize} hidden, {Heads} heads, quantized resident GGML graph.");
+            if (IsTensorParallel)
+            {
+                _rankBlocks = ShardBlocks(_blocks, TpDegree, _owned);
+                Console.WriteLine($"Qwen-Image-2.1 DiT: {Layers} layers, {HiddenSize} hidden, {Heads} heads sharded over {TpDegree} GPUs " +
+                    $"({Heads / TpDegree} heads and {12288 / TpDegree} MLP columns each), quantized resident GGML graphs.");
+            }
+            else
+                Console.WriteLine($"Qwen-Image-2.1 DiT: {Layers} layers, {HiddenSize} hidden, {Heads} heads, quantized resident GGML graph.");
         }
         catch { Dispose(); throw; }
+    }
+
+    /// <summary>Megatron sharding of the blocks. Q/K/V, gate and up keep rows (outputs) per
+    /// rank, contiguous in every GGML type, so they are views; to_out and img_mlp.out keep
+    /// columns (inputs), which are copied block-aligned per row. A fused [gate; up]
+    /// projection becomes separate gate and up slices so each rank's pair stays matched.</summary>
+    internal static QwenImage21Block[][] ShardBlocks(QwenImage21Block[] blocks, int ranks, List<IntPtr> owned)
+    {
+        if (ranks < 2 || Heads % ranks != 0)
+            throw new NotSupportedException($"Qwen-Image-2.1 tensor parallelism needs a GPU count that divides its {Heads} heads, not {ranks}.");
+        var result = new QwenImage21Block[ranks][];
+        for (int r = 0; r < ranks; r++)
+        {
+            result[r] = new QwenImage21Block[blocks.Length];
+            for (int i = 0; i < blocks.Length; i++)
+            {
+                var b = blocks[i];
+                long ff = b.Down.Ne0, ffLocal = ff / ranks, local = b.Q.Ne1 / ranks;
+                result[r][i] = new QwenImage21Block
+                {
+                    Q = Rows(b.Q, r * local, local),
+                    K = Rows(b.K, r * local, local),
+                    V = Rows(b.V, r * local, local),
+                    Out = Columns(b.Out, r * local, local, ranks, owned),
+                    Gate = Rows(b.Gate, r * ffLocal, ffLocal),
+                    Up = b.Up.Data != IntPtr.Zero ? Rows(b.Up, r * ffLocal, ffLocal) : Rows(b.Gate, ff + r * ffLocal, ffLocal),
+                    Down = Columns(b.Down, r * ffLocal, ffLocal, ranks, owned),
+                    NormQ = b.NormQ,
+                    NormK = b.NormK,
+                };
+            }
+        }
+        return result;
+    }
+
+    private static QwenImage21Weight Rows(QwenImage21Weight w, long start, long count)
+    {
+        long rowBytes = w.Bytes / w.Ne1;
+        return w with { Data = w.Data + checked((nint)(start * rowBytes)), Ne1 = count, Bytes = count * rowBytes };
+    }
+
+    private static unsafe QwenImage21Weight Columns(QwenImage21Weight w, long start, long count, int ranks, List<IntPtr> owned)
+    {
+        var type = (GgmlTensorType)w.Type;
+        long block = GgufFile.GetBlockSize(type), typeSize = GgufFile.GetTypeSize(type);
+        if (w.Ne0 % (block * ranks) != 0)
+            throw new NotSupportedException(
+                $"Qwen-Image-2.1 tensor parallelism cannot split a {w.Ne0}-wide {type} row over {ranks} GPUs on {block}-element blocks.");
+        long sourceRow = w.Bytes / w.Ne1, row = count / block * typeSize, offset = start / block * typeSize;
+        IntPtr data = QuantizedWeight.AllocateBuffer(checked(row * w.Ne1));
+        owned.Add(data);
+        byte* source = (byte*)w.Data, destination = (byte*)data;
+        for (long o = 0; o < w.Ne1; o++)
+            Buffer.MemoryCopy(source + o * sourceRow + offset, destination + o * row, row, row);
+        return w with { Data = data, Ne0 = count, Bytes = row * w.Ne1 };
     }
 
     private QwenImage21Weight Weight(string name, int input, int output)
@@ -106,11 +174,84 @@ internal sealed class QwenImage21DiT : ModelBase
         return _pointers[name] = ptr;
     }
 
+    /// <summary>GPUs the blocks are sharded over (1 when unsharded).</summary>
+    internal int TensorParallelRanks => _rankBlocks?.Length ?? 1;
+
+    private static long s_prefixKeys;
+
+    /// <summary>One request's prefix KV cache: the per-layer K/V of its text and reference
+    /// tokens, which are modulated at t=0 and so do not change between denoising steps.
+    /// The first prediction stores them; later ones compute only the target tokens.
+    /// It is bound to the exact conditioning arrays it was created for.</summary>
+    internal sealed class PrefixCache : IDisposable
+    {
+        internal PrefixCache(float[] text, int[] slots, float[][] references, QwenImage21PrefixCacheType type)
+        {
+            Key = (ulong)Interlocked.Increment(ref s_prefixKeys);
+            Text = text; Slots = slots; References = references; Type = type;
+        }
+
+        internal ulong Key { get; }
+        internal float[] Text { get; }
+        internal int[] Slots { get; }
+        internal float[][] References { get; }
+        internal QwenImage21PrefixCacheType Type { get; }
+        /// <summary>The graph that produced the most recent prediction.</summary>
+        internal QwenImage21ForwardPath LastPath { get; set; }
+        private bool _disposed;
+
+        internal QwenImage21PrefixCacheInfo Info => GgmlBasicOps.QwenImage21GetPrefixCacheInfo(Key);
+
+        /// <summary>True when a prediction passes the very arrays this cache was made for.
+        /// Stored K/V encode that conditioning; other text or references would silently
+        /// condition on the wrong prompt, so identity rather than content is required.</summary>
+        internal bool Describes(float[] text, int[] slots, float[][] references) =>
+            ReferenceEquals(Text, text) && ReferenceEquals(Slots, slots) &&
+            References.AsSpan().SequenceEqual(references ?? Array.Empty<float[]>());
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            GgmlBasicOps.QwenImage21ReleasePrefixCache(Key);
+        }
+    }
+
+    /// <summary>Creates a request's prefix cache, or null when TS_QWEN21_PREFIX_CACHE=0.
+    /// TS_QWEN21_PREFIX_CACHE_TYPE selects auto (default), f32, f16, q8_0 or q8_0_v.</summary>
+    internal static PrefixCache CreatePrefixCache(float[] textCond, int[] imageSlots, float[][] referenceTokens) =>
+        CreatePrefixCache(textCond, imageSlots, referenceTokens,
+            Environment.GetEnvironmentVariable("TS_QWEN21_PREFIX_CACHE"),
+            Environment.GetEnvironmentVariable("TS_QWEN21_PREFIX_CACHE_TYPE"));
+
+    internal static PrefixCache CreatePrefixCache(float[] textCond, int[] imageSlots, float[][] referenceTokens,
+        string enabled, string type)
+    {
+        ArgumentNullException.ThrowIfNull(textCond);
+        // Parse first: a misspelled type must fail even while the cache is disabled.
+        var storage = ParsePrefixCacheType(type);
+        if (enabled != null && enabled.Trim().ToLowerInvariant() is "0" or "false" or "off" or "no") return null;
+        return new PrefixCache(textCond, imageSlots, referenceTokens ?? Array.Empty<float[]>(), storage);
+    }
+
+    internal static QwenImage21PrefixCacheType ParsePrefixCacheType(string value) =>
+        (value ?? "").Trim().ToLowerInvariant() switch
+        {
+            "" or "auto" => QwenImage21PrefixCacheType.Auto,
+            "f32" => QwenImage21PrefixCacheType.F32,
+            "f16" => QwenImage21PrefixCacheType.F16,
+            "q8_0" => QwenImage21PrefixCacheType.Q8_0,
+            "q8_0_v" => QwenImage21PrefixCacheType.Q8_0V,
+            _ => throw new ArgumentException(
+                $"TS_QWEN21_PREFIX_CACHE_TYPE='{value}' is not one of auto, f32, f16, q8_0, q8_0_v."),
+        };
+
     /// <param name="imageSlots">One tag per text token: 0=text, 1..N=reference image.
     /// Each contiguous vision-slot run is replaced by four times as many latent tokens.</param>
+    /// <param name="prefixCache">Optional cache created for these same conditioning arrays.</param>
     internal float[] Predict(float[] targetTokens, int latentH, int latentW, float[] textCond, int textSeq,
         float timestep01, int[] imageSlots = null, float[][] referenceTokens = null,
-        int[] referenceHeights = null, int[] referenceWidths = null)
+        int[] referenceHeights = null, int[] referenceWidths = null, PrefixCache prefixCache = null)
     {
         if (latentH <= 0 || latentW <= 0 || targetTokens == null || targetTokens.Length != checked(latentH * latentW * Channels))
             throw new ArgumentException("Target must contain latentH*latentW*64 token-major floats.");
@@ -127,6 +268,10 @@ internal sealed class QwenImage21DiT : ModelBase
             if (referenceHeights[i] <= 0 || referenceWidths[i] <= 0 || referenceTokens[i] == null ||
                 referenceTokens[i].Length != checked(referenceHeights[i] * referenceWidths[i] * Channels))
                 throw new ArgumentException($"Invalid reference latent {i}.");
+        // A cache stores K/V computed from its conditioning; reusing it for other
+        // text or references would silently condition on the wrong prompt.
+        if (prefixCache != null && !prefixCache.Describes(textCond, imageSlots, referenceTokens))
+            throw new ArgumentException("The prefix cache belongs to different conditioning.", nameof(prefixCache));
         var shapes = referenceHeights.Select((h, i) => (Height: h, Width: referenceWidths[i])).Append((latentH, latentW)).ToArray();
         var layout = _layouts.Get(textSeq, imageSlots, shapes);
         // Text-to-image already has the native token layout. Pin the caller's
@@ -163,7 +308,24 @@ internal sealed class QwenImage21DiT : ModelBase
             args.ImageSeq = images.Length / Channels; args.TextSeq = textSeq;
             args.TotalSeq = layout.Cos.Length / (HeadDim / 2); args.PrefixSeq = layout.Prefix;
             args.NumSegments = layout.Segments.Length;
-            GgmlBasicOps.QwenImage21Forward(in args);
+            args.PrefixCacheKey = prefixCache?.Key ?? 0;
+            args.PrefixCacheType = prefixCache?.Type ?? QwenImage21PrefixCacheType.Auto;
+            QwenImage21ForwardPath path;
+            if (_rankBlocks == null)
+                path = GgmlBasicOps.QwenImage21Forward(in args);
+            else
+            {
+                var ranks = new QwenImage21ForwardArgs[_rankBlocks.Length];
+                for (int r = 0; r < ranks.Length; r++)
+                {
+                    ranks[r] = args;
+                    ranks[r].Blocks = Pin(_rankBlocks[r]);
+                    ranks[r].Heads = Heads / ranks.Length;
+                    ranks[r].TpRanks = ranks.Length;
+                }
+                path = GgmlBasicOps.QwenImage21ForwardTp(ranks);
+            }
+            if (prefixCache != null) prefixCache.LastPath = path;
         }
         finally { foreach (var pin in pins) pin.Free(); }
         if (output.Any(v => !float.IsFinite(v)))
@@ -260,6 +422,8 @@ internal sealed class QwenImage21DiT : ModelBase
         return (segments.ToArray(), cos, sin, prefix);
     }
 
+    // The group belongs to the QwenImageModel that created this transformer.
+    protected override bool OwnsTensorParallelGroup => false;
     protected override float[] ForwardCore(int[] tokens) => throw new NotSupportedException("Use Predict for image inference.");
     protected override void ResetKVCacheCore() { }
     public override void Dispose()

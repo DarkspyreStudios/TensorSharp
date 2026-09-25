@@ -961,7 +961,7 @@ TSG_EXPORT int TSGgml_Qwen35ArenaDecodeBatched(
                             qkv_cont->nb[1], static_cast<std::size_t>(s) * qkv_cont->nb[1]);
                         ggml_tensor* conv_input = ggml_concat(ctx, conv_slice,
                             ggml_transpose(ctx, qkv_col), 0);                                  // [convDim+1, conv_dim]
-                        ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_input, t.conv1d_w)); // [conv_dim, 1]
+                        ggml_tensor* conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_input, t.conv1d_w)); // [conv_dim, 1]
                         ggml_tensor* conv_out_1d = ggml_reshape_1d(ctx, conv_out, conv_dim);
 
                         ggml_tensor* new_conv = ggml_view_2d(ctx, conv_input, convDim, conv_dim,

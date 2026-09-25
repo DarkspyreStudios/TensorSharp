@@ -39,6 +39,29 @@ public sealed class QwenImageNativeAbiTests
     }
 
     [Fact]
+    public void DiTForwardStructsKeepTheirNativeLayout()
+    {
+        // Mirrored by static_asserts in ggml_ops_qwen_image21.h. The native forward
+        // rejects a descriptor whose StructBytes differs, so a one-sided change fails
+        // loudly there; the prefix-cache fields must also land where native reads them.
+        Assert.Equal(8, IntPtr.Size);
+        Assert.Equal(40, Marshal.SizeOf<QwenImage21Weight>());      // TSGQi21Weight
+        Assert.Equal(296, Marshal.SizeOf<QwenImage21Block>());      // TSGQi21Block
+        Assert.Equal(16, Marshal.SizeOf<QwenImage21Segment>());     // TSGQi21Segment
+        Assert.Equal(464, Marshal.SizeOf<QwenImage21ForwardArgs>()); // TSGQi21Desc
+        Assert.Equal(376, (int)Marshal.OffsetOf<QwenImage21ForwardArgs>(nameof(QwenImage21ForwardArgs.Blocks)));
+        Assert.Equal(440, (int)Marshal.OffsetOf<QwenImage21ForwardArgs>(nameof(QwenImage21ForwardArgs.Eps)));
+        Assert.Equal(448, (int)Marshal.OffsetOf<QwenImage21ForwardArgs>(nameof(QwenImage21ForwardArgs.PrefixCacheKey)));
+        Assert.Equal(456, (int)Marshal.OffsetOf<QwenImage21ForwardArgs>(nameof(QwenImage21ForwardArgs.PrefixCacheType)));
+        Assert.Equal(24, Marshal.SizeOf<QwenImage21PrefixCacheInfo>()); // TSGQi21PrefixCacheInfo
+        Assert.Equal(16, (int)Marshal.OffsetOf<QwenImage21PrefixCacheInfo>(nameof(QwenImage21PrefixCacheInfo.Bytes)));
+        // Enum values are part of the ABI (TSGQi21PrefixCacheType / TSGQi21ForwardPath).
+        Assert.Equal(4, (int)QwenImage21PrefixCacheType.Q8_0V);
+        Assert.Equal(3, (int)QwenImage21ForwardPath.Cached);
+        Assert.Equal(4, (int)QwenImage21ForwardPath.Declined);
+    }
+
+    [Fact]
     public void VaeStructsKeepTheirNativeLayout()
     {
         // Mirrored by ggml_ops_qwen_image.cpp (static_asserts) and by the native test

@@ -254,6 +254,110 @@ if (args.Length >= 5 && args[0] == "dit")
     return 0;
 }
 
+// Real-weight equivalence of the prefix KV cache and tensor parallelism. One request
+// layout (text, one reference image, target) at two denoising steps is predicted by
+// the whole-sequence graph, then by the cache (step 1 stores the prefix, step 2 reads
+// it), then by the transformer sharded over a loopback group of ranks on this one
+// device. Conditioning and latents are seeded noise: this checks the kernels on the
+// real quantized weights, not image quality.
+if (args.Length >= 4 && args[0] == "dit-parity")
+{
+    var device = Enum.Parse<BackendType>(args[3], true);
+    int width = args.Length > 4 ? int.Parse(args[4]) : 512;
+    int height = args.Length > 5 ? int.Parse(args[5]) : width;
+    int reference = args.Length > 6 ? int.Parse(args[6]) : 256;
+    int ranks = args.Length > 7 ? int.Parse(args[7]) : 2;
+    if (width % 32 != 0 || height % 32 != 0 || reference % 32 != 0 || reference <= 0 || ranks < 0)
+        throw new ArgumentException("Dimensions must be positive multiples of 32.");
+    int h = height / 16, w = width / 16, rh = reference / 16, rw = reference / 16;
+    var rng = new Random(1234);
+    float[] Gaussian(int count, float scale)
+    {
+        var values = new float[count];
+        for (int i = 0; i < count; i++)
+            values[i] = scale * MathF.Sqrt(-2f * MathF.Log(1f - rng.NextSingle())) * MathF.Cos(2f * MathF.PI * rng.NextSingle());
+        return values;
+    }
+    // Text, the reference's vision slots (one per 2x2 latent tokens), more text.
+    int before = 24, slots = rh * rw / 4, after = 40, textTokens = before + slots + after;
+    var imageSlots = new int[textTokens];
+    for (int i = before; i < before + slots; i++) imageSlots[i] = 1;
+    float[] text = Gaussian(textTokens * 4096, 1f);
+    float[][] references = { Gaussian(rh * rw * 64, 1f) };
+    int[] referenceHeights = { rh }, referenceWidths = { rw };
+    float[] stepA = Gaussian(h * w * 64, 1f), stepB = Gaussian(h * w * 64, 1f);
+    var report = new List<object>();
+    float[] Predict(QwenImage21DiT dit, float[] latents, float t, QwenImage21DiT.PrefixCache cache, string label)
+    {
+        var watch = Stopwatch.StartNew();
+        float[] result = dit.Predict(latents, h, w, text, textTokens, t, imageSlots, references, referenceHeights, referenceWidths, cache);
+        Console.WriteLine(JsonSerializer.Serialize(new { label, seconds = watch.Elapsed.TotalSeconds, path = cache?.LastPath.ToString() ?? "Full" }));
+        return result;
+    }
+    void Compare(string label, float[] expected, float[] actual, double tolerance)
+    {
+        double maxError = 0, scale = 0, square = 0, referenceSquare = 0;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            double delta = actual[i] - expected[i];
+            maxError = Math.Max(maxError, Math.Abs(delta));
+            scale = Math.Max(scale, Math.Abs(expected[i]));
+            square += delta * delta;
+            referenceSquare += (double)expected[i] * expected[i];
+        }
+        bool identical = expected.AsSpan().SequenceEqual(actual);
+        double relativeL2 = Math.Sqrt(square / Math.Max(referenceSquare, 1e-30));
+        bool passed = relativeL2 <= tolerance;
+        report.Add(new { label, identical, maxError, normalizedMax = maxError / Math.Max(scale, 1e-12), relativeL2, tolerance, passed });
+        Console.WriteLine(JsonSerializer.Serialize(report[^1]));
+        if (!passed) throw new InvalidDataException($"{label}: relative L2 {relativeL2} exceeds {tolerance}.");
+    }
+    try
+    {
+        float[] fullA, fullB;
+        using (var dit = new QwenImage21DiT(args[1], device))
+        {
+            fullA = Predict(dit, stepA, 0.95f, null, "full step 1");
+            fullB = Predict(dit, stepB, 0.60f, null, "full step 2");
+            using var cache = QwenImage21DiT.CreatePrefixCache(text, imageSlots, references, "1", "auto");
+            Compare("cache extract (step 1)", fullA, Predict(dit, stepA, 0.95f, cache, "cache step 1"), 0);
+            Compare("cache cached (step 2)", fullB, Predict(dit, stepB, 0.60f, cache, "cache step 2"), 0);
+            foreach (string type in new[] { "q8_0", "q8_0_v" })
+            {
+                using var quantized = QwenImage21DiT.CreatePrefixCache(text, imageSlots, references, "1", type);
+                Predict(dit, stepA, 0.95f, quantized, $"{type} step 1");
+                Compare($"{type} cached (step 2)", fullB, Predict(dit, stepB, 0.60f, quantized, $"{type} step 2"), 0.02);
+            }
+        }
+        GgmlBasicOps.ReleaseReuseComputeBuffers();
+        GgmlBasicOps.ClearHostBufferCache();
+        if (ranks > 1)
+        {
+            GgmlBasicOps.TensorParallelInitLoopback(device == BackendType.GgmlCpu ? GgmlBackendType.Cpu : GgmlBackendType.Metal, ranks);
+            using var group = new LoopbackGroup(ranks);
+            using var sharded = new QwenImage21DiT(args[1], device, group);
+            // Reordered partial sums round differently on GPU matmuls; a missing or
+            // doubled reduction is off by O(1).
+            Compare($"tp{ranks} full (step 1)", fullA, Predict(sharded, stepA, 0.95f, null, $"tp{ranks} full step 1"), 0.01);
+            using var cache = QwenImage21DiT.CreatePrefixCache(text, imageSlots, references, "1", "auto");
+            Compare($"tp{ranks} cache extract (step 1)", fullA, Predict(sharded, stepA, 0.95f, cache, $"tp{ranks} cache step 1"), 0.01);
+            Compare($"tp{ranks} cache cached (step 2)", fullB, Predict(sharded, stepB, 0.60f, cache, $"tp{ranks} cache step 2"), 0.01);
+        }
+        string destination = Path.GetFullPath(args[2]);
+        Directory.CreateDirectory(Path.GetDirectoryName(destination));
+        File.WriteAllText(destination, JsonSerializer.Serialize(new { scenario = "real-weight-dit-parity", width, height, reference,
+            textTokens, prefixTokens = textTokens - slots + rh * rw, ranks, backend = device.ToString(), results = report },
+            new JsonSerializerOptions { WriteIndented = true }));
+    }
+    finally
+    {
+        GgmlBasicOps.ReleaseReuseComputeBuffers();
+        GgmlBasicOps.ClearHostBufferCache();
+        GgmlBasicOps.Shutdown();
+    }
+    return 0;
+}
+
 // Run twice, setting TS_QWEN_TE_FUSED=0/1 before process startup, then compare.
 // No model/device scenario is considered passing unless this tool executes it.
 if (args.Length == 3 && args[0] == "compare")
@@ -294,6 +398,7 @@ if (args.Length < 3 || args[0] != "text")
     Console.Error.WriteLine("vae <QwenImage2.1Vae.safetensors> <output.png> <Cpu|Metal|Cuda> [width=256] [height=width]");
     Console.Error.WriteLine("vae-encode <QwenImage2.1Vae.safetensors> <output.f32> <Cpu|Metal|Cuda> [width=256] [height=width]");
     Console.Error.WriteLine("vision <Qwen3VL-mmproj.gguf> <output-prefix> <Cpu|Metal|Cuda> [input.png|-] [width=512] [height=width] [iterations=1]");
+    Console.Error.WriteLine("dit-parity <QwenImage2.1.gguf> <report.json> <GgmlCpu|GgmlMetal> [width=512] [height=width] [reference=256] [ranks=2]");
     Console.Error.WriteLine("compare <reference.f32> <actual.f32>");
     return 2;
 }
@@ -320,3 +425,20 @@ GgmlBasicOps.ReleaseReuseComputeBuffers();
 GgmlBasicOps.ClearHostBufferCache();
 GgmlBasicOps.Shutdown();
 return 0;
+
+// A tensor-parallel group whose ranks the native loopback init placed on one device.
+sealed class LoopbackGroup(int degree) : TensorSharp.ITensorParallelGroup
+{
+    public int Degree => degree;
+    public bool IsActive => degree > 1;
+    public int GlobalDegree => degree;
+    public int GlobalRankOffset => 0;
+    public int NodeCount => 1;
+    public TensorSharp.IAllocator GetAllocator(int rank) => throw new NotSupportedException();
+    public void AllReduce(TensorSharp.Tensor[] tensors) => throw new NotSupportedException();
+    public void Synchronize() { }
+    public void Barrier() { }
+    public void BroadcastControl(int op, int[] payload) => throw new NotSupportedException();
+    public (int op, int[] payload) ReceiveControl() => throw new NotSupportedException();
+    public void Dispose() { }
+}

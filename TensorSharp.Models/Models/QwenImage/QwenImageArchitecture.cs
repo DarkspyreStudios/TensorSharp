@@ -17,7 +17,9 @@ namespace TensorSharp.Models.QwenImage
             Id = "qwen_image",
             DisplayName = "Qwen-Image",
             Aliases = new[] { "qwen_image", "qwen-image" },
-            Factory = c => new QwenImageModel(c.GgufPath, c.Backend),
+            // --tp shards the diffusion transformer (heads and MLP columns per GPU);
+            // the text encoder and VAE stay on the first GPU.
+            Factory = c => new QwenImageModel(c.GgufPath, c.Backend, c.TpDegree, c.TpGroup),
             DetectFromTensors = LooksLikeVersion21,
         };
 

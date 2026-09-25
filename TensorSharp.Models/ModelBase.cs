@@ -45,6 +45,11 @@ namespace TensorSharp.Models
         // ---- Tensor Parallelism ----
         protected readonly ITensorParallelGroup _tpGroup;
         protected int TpDegree => _tpGroup?.Degree ?? 1;
+        /// <summary>False for a component model that runs on a group its parent model owns.</summary>
+        protected virtual bool OwnsTensorParallelGroup => true;
+        /// <summary>True when a component model created later shards the weights on this
+        /// model's group, so nothing sharded at load does not mean the other GPUs idle.</summary>
+        protected virtual bool ShardsWeightsInComponents => false;
         protected bool IsTensorParallel => _tpGroup != null && _tpGroup.IsActive;
 
         /// <summary>Total GPUs across all nodes (for weight shard sizing).</summary>
@@ -2676,7 +2681,8 @@ namespace TensorSharp.Models
                 foreach (var w in shards) w?.Dispose();
             _tpWeights.Clear();
 
-            _tpGroup?.Dispose();
+            if (OwnsTensorParallelGroup)
+                _tpGroup?.Dispose();
 
             if (_allocator is IDisposable allocatorDisposable)
                 allocatorDisposable.Dispose();
@@ -2813,7 +2819,7 @@ namespace TensorSharp.Models
         /// </summary>
         private void WarnIfTensorParallelShardedNothing(string arch)
         {
-            if (!IsTensorParallel)
+            if (!IsTensorParallel || ShardsWeightsInComponents)
                 return;
             if (_tpQuantWeights.Count > 0 || _tpWeights.Count > 0)
                 return;

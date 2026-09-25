@@ -14,13 +14,17 @@ namespace TensorSharp.Models.QwenImage
         {
             QwenImage21CompanionValidation.ValidateVae(model.VaeWeightSource);
             _weights = VaeWeights.Load(model.VaeWeightSource);
-            bool ggml = model.Backend is BackendType.GgmlCpu or BackendType.GgmlCuda or BackendType.GgmlMetal;
+            // Vulkan convolutions run on the device too: the native F32 convolution
+            // rescales inputs past the F16 range that Vulkan's matrix units accept.
+            bool ggml = model.Backend is BackendType.GgmlCpu or BackendType.GgmlCuda or BackendType.GgmlMetal
+                or BackendType.GgmlVulkan;
             VaeReferenceMath.UseGpuConv = ggml && Environment.GetEnvironmentVariable("TS_QWEN_VAE_GPU") != "0";
             VaeReferenceMath.UseFusedGraph21 = model.Backend == BackendType.GgmlCuda;
             if (ggml) GgmlBasicOps.EnsureBackendAvailable(model.Backend switch
             {
                 BackendType.GgmlCuda => GgmlBackendType.Cuda,
                 BackendType.GgmlMetal => GgmlBackendType.Metal,
+                BackendType.GgmlVulkan => GgmlBackendType.Vulkan,
                 _ => GgmlBackendType.Cpu,
             });
         }

@@ -244,7 +244,7 @@ TSG_EXPORT int TSGgml_Qwen35RecurrentLayerPrefill(
 
             ggml_tensor* qkv_T = ggml_cont(ctx, ggml_transpose(ctx, qkv_mixed)); // [N, conv_dim]
             ggml_tensor* conv_input = ggml_concat(ctx, conv_state_in, qkv_T, 0);  // [convDim+N, conv_dim]
-            ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_input, conv1d_w)); // [conv_dim, N]
+            ggml_tensor* conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_input, conv1d_w)); // [conv_dim, N]
             ggml_tensor* new_conv = ggml_cont(ctx, ggml_view_2d(ctx, conv_input, convDim, conv_dim,
                 conv_input->nb[1], static_cast<std::size_t>(N) * conv_input->nb[0]));
 

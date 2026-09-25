@@ -1108,7 +1108,7 @@ ggml_tensor* q4e_nodes_gdn(
     ggml_tensor* qkv_t = ggml_reshape_3d(ctx, ggml_cont(ctx, ggml_transpose(ctx, qkv)),
             T, conv_dim, 1);
     ggml_tensor* conv_in = ggml_concat(ctx, conv_state, qkv_t, 0); // [hist + T, conv_dim, 1]
-    ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_in, w_conv)); // [conv_dim, T, 1]
+    ggml_tensor* conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_in, w_conv)); // [conv_dim, T, 1]
 
     // keep the last `hist` columns for the next token
     ggml_tensor* tail = ggml_cont(ctx, ggml_view_3d(ctx, conv_in, hist, conv_dim, 1,

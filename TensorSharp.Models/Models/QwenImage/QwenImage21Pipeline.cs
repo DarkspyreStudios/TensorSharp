@@ -13,7 +13,7 @@ namespace TensorSharp.Models.QwenImage
         private QwenImage21Vae _vae;
         private QwenImage21DiT _dit;
         private QwenImage21Vae Vae => _vae ??= new QwenImage21Vae(_model);
-        private QwenImage21DiT Dit => _dit ??= new QwenImage21DiT(_model.DitGgufPath, _model.Backend);
+        private QwenImage21DiT Dit => _dit ??= new QwenImage21DiT(_model.DitGgufPath, _model.Backend, _model.DitTensorParallelGroup);
 
         public QwenImage21Pipeline(QwenImageModel model) => _model = model;
 
@@ -81,41 +81,61 @@ namespace TensorSharp.Models.QwenImage
 
                 float[] latents = ToTokens(QwenImage21Sampling.Noise(checked(sequence * 64), p.Seed), h, w);
                 float[] sigmas = QwenImage21Sampling.Sigmas(steps, sequence);
-                for (int step = 0; step < steps; step++)
+                // Text and reference tokens are modulated at t=0, so their K/V are the
+                // same at every step: the first step stores them per CFG branch and the
+                // rest compute only the target image. Released before VAE decoding.
+                QwenImage21DiT.PrefixCache positiveCache = null, negativeCache = null;
+                try
                 {
-                    var timer = Stopwatch.StartNew();
-                    float[] velocity = Dit.Predict(latents, h, w, positive, positiveLength, sigmas[step],
-                        positiveSlots, refTokens, refHeights, refWidths);
-                    if (cfg > 1f)
+                    positiveCache = QwenImage21DiT.CreatePrefixCache(positive, positiveSlots, refTokens);
+                    if (cfg > 1f) negativeCache = QwenImage21DiT.CreatePrefixCache(negative, negativeSlots, refTokens);
+                    for (int step = 0; step < steps; step++)
                     {
-                        float[] unconditional = Dit.Predict(latents, h, w, negative, negativeLength, sigmas[step],
-                            negativeSlots, refTokens, refHeights, refWidths);
-                        for (int j = 0; j < velocity.Length; j++)
-                            velocity[j] = unconditional[j] + cfg * (velocity[j] - unconditional[j]);
-                    }
-                    float dt = sigmas[step + 1] - sigmas[step];
-                    for (int j = 0; j < latents.Length; j++)
-                    {
-                        if (!float.IsFinite(velocity[j]))
-                            throw new InvalidOperationException($"Qwen-Image-2.1 produced a non-finite velocity at step {step + 1}.");
-                        latents[j] += dt * velocity[j];
-                    }
-                    Console.WriteLine($"  [qwen21-step] {step + 1}/{steps}: {timer.Elapsed.TotalSeconds:F3}s sigma={sigmas[step]:F6}");
-                    RgbImage preview = null;
-                    int interval = p.PreviewCount > 0 ? Math.Max(1, (steps + p.PreviewCount) / (p.PreviewCount + 1)) : 0;
-                    if (p.OnStep != null && interval > 0 && step + 1 < steps && (step + 1) % interval == 0)
-                    {
-                        // The VAE expects a clean latent. Euler's current state
-                        // still contains noise at sigma_next; x0 = x_next -
-                        // sigma_next * velocity is the denoised flow estimate.
-                        // Keep the sampling state unchanged by the preview.
-                        try { preview = DecodePreview(QwenImage21Sampling.PreviewLatents(latents, velocity, sigmas[step + 1]), h, w); }
-                        catch (Exception error) when (error is not OperationCanceledException)
+                        var timer = Stopwatch.StartNew();
+                        float[] velocity = Dit.Predict(latents, h, w, positive, positiveLength, sigmas[step],
+                            positiveSlots, refTokens, refHeights, refWidths, positiveCache);
+                        if (cfg > 1f)
                         {
-                            Console.WriteLine($"  [qwen21] preview decode skipped: {error.Message}");
+                            float[] unconditional = Dit.Predict(latents, h, w, negative, negativeLength, sigmas[step],
+                                negativeSlots, refTokens, refHeights, refWidths, negativeCache);
+                            for (int j = 0; j < velocity.Length; j++)
+                                velocity[j] = unconditional[j] + cfg * (velocity[j] - unconditional[j]);
                         }
+                        float dt = sigmas[step + 1] - sigmas[step];
+                        for (int j = 0; j < latents.Length; j++)
+                        {
+                            if (!float.IsFinite(velocity[j]))
+                                throw new InvalidOperationException($"Qwen-Image-2.1 produced a non-finite velocity at step {step + 1}.");
+                            latents[j] += dt * velocity[j];
+                        }
+                        if (step == 0)
+                        {
+                            ReportPrefixCache(positiveCache, "conditional", Dit.TensorParallelRanks);
+                            ReportPrefixCache(negativeCache, "negative", Dit.TensorParallelRanks);
+                        }
+                        string path = positiveCache == null ? "" : $" prefix={positiveCache.LastPath.ToString().ToLowerInvariant()}";
+                        Console.WriteLine($"  [qwen21-step] {step + 1}/{steps}: {timer.Elapsed.TotalSeconds:F3}s sigma={sigmas[step]:F6}{path}");
+                        RgbImage preview = null;
+                        int interval = p.PreviewCount > 0 ? Math.Max(1, (steps + p.PreviewCount) / (p.PreviewCount + 1)) : 0;
+                        if (p.OnStep != null && interval > 0 && step + 1 < steps && (step + 1) % interval == 0)
+                        {
+                            // The VAE expects a clean latent. Euler's current state
+                            // still contains noise at sigma_next; x0 = x_next -
+                            // sigma_next * velocity is the denoised flow estimate.
+                            // Keep the sampling state unchanged by the preview.
+                            try { preview = DecodePreview(QwenImage21Sampling.PreviewLatents(latents, velocity, sigmas[step + 1]), h, w); }
+                            catch (Exception error) when (error is not OperationCanceledException)
+                            {
+                                Console.WriteLine($"  [qwen21] preview decode skipped: {error.Message}");
+                            }
+                        }
+                        p.OnStep?.Invoke(step + 1, steps, preview);
                     }
-                    p.OnStep?.Invoke(step + 1, steps, preview);
+                }
+                finally
+                {
+                    positiveCache?.Dispose();
+                    negativeCache?.Dispose();
                 }
                 Phase("denoise");
                 GgmlBasicOps.ReleaseReuseComputeBuffers();
@@ -133,6 +153,23 @@ namespace TensorSharp.Models.QwenImage
                 GgmlBasicOps.ClearHostBufferCache();
             }
         }
+
+        private static void ReportPrefixCache(QwenImage21DiT.PrefixCache cache, string branch, int ranks)
+        {
+            if (cache == null) return;
+            // Each tensor-parallel rank stores its own heads; the info describes rank 0.
+            var info = cache.Info;
+            string perGpu = ranks > 1 ? $" per GPU ({ranks} GPUs)" : "";
+            if (info.State == 1)
+                Console.WriteLine($"  [qwen21] prefix KV cache ({branch}): {info.Tokens} tokens, " +
+                    $"{info.Bytes / (1024.0 * 1024.0):F1} MiB {TypeName(info.KeyType)}/{TypeName(info.ValueType)}{perGpu}; " +
+                    "later steps compute only the target image");
+            else if (info.State == 2)
+                Console.WriteLine($"  [qwen21] prefix KV cache ({branch}) declined: {info.Tokens} tokens need " +
+                    $"{info.Bytes / (1024.0 * 1024.0):F1} MiB{perGpu}; every step recomputes the prefix");
+        }
+
+        private static string TypeName(int ggmlType) => ggmlType switch { 0 => "F32", 1 => "F16", 8 => "Q8_0", _ => ggmlType.ToString() };
 
         private RgbImage DecodePreview(float[] tokens, int height, int width)
         {
