@@ -469,6 +469,8 @@ namespace TensorSharp.AgentHost.Skills
             AudioPaths = message.AudioPaths != null ? new List<string>(message.AudioPaths) : null,
             TextFilePaths = message.TextFilePaths != null ? new List<string>(message.TextFilePaths) : null,
             TextFileNames = message.TextFileNames != null ? new List<string>(message.TextFileNames) : null,
+            AttachmentPaths = message.AttachmentPaths != null ? new List<string>(message.AttachmentPaths) : null,
+            AttachmentNames = message.AttachmentNames != null ? new List<string>(message.AttachmentNames) : null,
             HasFileBackedTextAttachments = message.HasFileBackedTextAttachments,
             IsVideo = message.IsVideo,
             ToolCalls = message.ToolCalls != null ? new List<ToolCall>(message.ToolCalls) : null,
@@ -476,6 +478,7 @@ namespace TensorSharp.AgentHost.Skills
             Thinking = message.Thinking,
             RawOutputTokens = message.RawOutputTokens != null ? new List<int>(message.RawOutputTokens) : null,
             RawPromptTrailingWhitespace = message.RawPromptTrailingWhitespace,
+            RawGenerationSuffix = message.RawGenerationSuffix,
             CacheControl = message.CacheControl != null
                 ? new CacheControlMarker { Type = message.CacheControl.Type }
                 : null,

@@ -732,12 +732,10 @@ namespace TensorSharp.Runtime
             {
                 ["type"] = "object",
                 ["properties"] = props,
+                // An empty required list means every parameter is optional.
+                // Inventing required properties prevents calls such as wait_agent().
+                ["required"] = t.Required?.Select(r => (object)r).ToList() ?? new List<object>(),
             };
-
-            if (t.Required != null && t.Required.Count > 0)
-                paramsDict["required"] = new List<object>(t.Required.Select(r => (object)r));
-            else if (t.Parameters != null && t.Parameters.Count > 0)
-                paramsDict["required"] = new List<object>(t.Parameters.Keys.Select(k => (object)k));
 
             return new Dictionary<string, object>
             {

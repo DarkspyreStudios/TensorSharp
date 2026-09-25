@@ -10,6 +10,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Linq;
 using System.Net.Http;
@@ -23,6 +24,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp.Runtime.Logging;
 
 using TensorSharp.Runtime;
+using TensorSharp.AgentHost.Agents;
 namespace TensorSharp.AgentHost.Skills
 {
     /// <summary>Who resolves the skills for a request.</summary>
@@ -86,6 +88,9 @@ namespace TensorSharp.AgentHost.Skills
         /// <summary>Loop bounds for local delivery.</summary>
         public SkillAgentLoopOptions LoopOptions { get; init; } = SkillAgentLoopOptions.Default;
 
+        /// <summary>Local delegation policy; each child uses an independent HTTP conversation.</summary>
+        public MultiAgentOptions MultiAgent { get; init; } = new();
+
         /// <summary>Advertise skills the request did not select, so the model can pick one up.</summary>
         public bool Discovery { get; init; } = true;
 
@@ -96,6 +101,8 @@ namespace TensorSharp.AgentHost.Skills
     /// <summary>One chat request, with the skills it should be answered under.</summary>
     public sealed class SkillsChatRequest
     {
+        /// <summary>False disables delegation for this request. Null follows host/client policy.</summary>
+        public bool? MultiAgent { get; init; }
         /// <summary>The conversation. A leading <c>system</c> message is merged with the skill block rather than displaced.</summary>
         public List<ChatMessage> Messages { get; init; } = new();
 
@@ -143,11 +150,11 @@ namespace TensorSharp.AgentHost.Skills
     /// request; the skill tools have already been answered.
     /// </param>
     /// <param name="Messages">The full transcript, including anything the disclosure loop appended.</param>
-    /// <param name="SkillInvocations">Every skill file the model read, in order. Empty under server delivery.</param>
+    /// <param name="SkillInvocations">Host tool invocations across the parent and children in completion order. Empty under server delivery.</param>
     /// <param name="FinishReason">Why generation stopped, as the endpoint reported it.</param>
     /// <param name="PromptTokens">Prompt tokens, summed over every round.</param>
     /// <param name="CompletionTokens">Generated tokens, summed over every round.</param>
-    /// <param name="Rounds">Generations performed. 1 means the model answered without reading anything.</param>
+    /// <param name="Rounds">Parent generations performed. Token usage includes child generations as well.</param>
     public sealed record SkillsChatResponse(
         string Content,
         string? Thinking,
@@ -351,7 +358,8 @@ namespace TensorSharp.AgentHost.Skills
             // suppression is only sent when the endpoint is known to understand it —
             // some OpenAI-compatible servers reject unrecognised request fields — which
             // is what the one-time probe below establishes.
-            bool suppressServerSkills = await EndpointHasSkillsApiAsync(cancellationToken).ConfigureAwait(false);
+            bool suppressServerSkills = await EndpointHasSkillsApiAsync(cancellationToken).ConfigureAwait(false)
+                || await EndpointIsTensorSharpAsync(cancellationToken).ConfigureAwait(false);
 
             SkillRegistry registry = _options.Registry
                 ?? throw new InvalidOperationException(
@@ -377,34 +385,60 @@ namespace TensorSharp.AgentHost.Skills
             int promptTokens = 0, completionTokens = 0;
             string? finishReason = null;
 
+            async Task<SkillTurnOutput> Generate(List<ChatMessage> turnMessages,
+                List<ToolFunction>? turnTools, CancellationToken ct, bool root)
+            {
+                string payload = BuildPayload(request, turnMessages, turnTools,
+                    includeSkillsField: false, suppressServerSkills: suppressServerSkills);
+                OpenAiReply reply = await PostAsync(payload, ct).ConfigureAwait(false);
+                Interlocked.Add(ref promptTokens, reply.PromptTokens);
+                Interlocked.Add(ref completionTokens, reply.CompletionTokens);
+                if (root) finishReason = reply.FinishReason;
+                return new SkillTurnOutput(new ParsedOutput
+                {
+                    Content = reply.Content, Thinking = reply.Thinking ?? string.Empty,
+                    ToolCalls = reply.ToolCalls.Count > 0 ? reply.ToolCalls.ToList() : null,
+                }) { FinishReason = reply.FinishReason };
+            }
+            SkillAgentLoopOptions configured = _options.LoopOptions;
+            MultiAgentOptions agents = configured.MultiAgent ?? _options.MultiAgent;
+            var invocationTrace = new ConcurrentQueue<SkillToolInvocation>();
+            var loopOptions = new SkillAgentLoopOptions
+            {
+                MaxRounds = configured.MaxRounds, MaxCallsPerRound = configured.MaxCallsPerRound,
+                ToolResultsAreRendered = configured.ToolResultsAreRendered,
+                OnInvocation = invocation =>
+                {
+                    invocationTrace.Enqueue(invocation);
+                    configured.OnInvocation?.Invoke(invocation);
+                },
+                ClientTools = request.Tools ?? new List<ToolFunction>(),
+                MultiAgent = request.MultiAgent == false ? null : agents,
+                SubagentGeneratorFactory = _ => (m, t, ct) => Generate(m, t, ct, root: false),
+            };
+
+            // The loop may insert one coordination preamble when no system/developer
+            // preamble exists. Return the caller's original prefix below, so reusing
+            // response.Messages does not accumulate host policies on every turn.
+            int preparedPrefixCount = messages.Count;
+            if (loopOptions.MultiAgent?.Enabled == true
+                && (messages.Count == 0 || (messages[0].Role != "system" && messages[0].Role != "developer")))
+                preparedPrefixCount++;
+
             SkillLoopResult loop = await SkillAgentLoop.RunAsync(
                 messages,
                 tools,
                 context,
-                async (turnMessages, turnTools, ct) =>
-                {
-                    string payload = BuildPayload(
-                        request, turnMessages, turnTools,
-                        includeSkillsField: false,
-                        suppressServerSkills: suppressServerSkills);
-                    OpenAiReply reply = await PostAsync(payload, ct).ConfigureAwait(false);
-                    promptTokens += reply.PromptTokens;
-                    completionTokens += reply.CompletionTokens;
-                    finishReason = reply.FinishReason;
-                    return new SkillTurnOutput(new ParsedOutput
-                    {
-                        Content = reply.Content,
-                        Thinking = reply.Thinking ?? string.Empty,
-                        ToolCalls = reply.ToolCalls.Count > 0 ? reply.ToolCalls.ToList() : null,
-                    });
-                },
+                (m, t, ct) => Generate(m, t, ct, root: true),
                 // The request's OWN tools, so a name the model invented is answered in
                 // the loop rather than returned to a caller that never declared it.
-                _options.LoopOptions.WithClientTools(request.Tools),
+                loopOptions,
                 cancellationToken).ConfigureAwait(false);
 
             ParsedOutput final = loop.Output.Parsed ?? new ParsedOutput();
-            loop.Messages.Add(new ChatMessage
+            var responseMessages = request.Messages.Select(SkillPrompt.Clone).ToList();
+            responseMessages.AddRange(loop.Messages.Skip(preparedPrefixCount));
+            responseMessages.Add(new ChatMessage
             {
                 Role = "assistant",
                 Content = final.Content,
@@ -416,8 +450,8 @@ namespace TensorSharp.AgentHost.Skills
                 final.Content,
                 string.IsNullOrEmpty(final.Thinking) ? null : final.Thinking,
                 loop.PendingClientToolCalls,
-                loop.Messages,
-                loop.Invocations,
+                responseMessages,
+                invocationTrace.ToArray(),
                 finishReason,
                 promptTokens,
                 completionTokens,
@@ -468,6 +502,32 @@ namespace TensorSharp.AgentHost.Skills
             }
         }
 
+        private bool? _endpointIsTensorSharp;
+
+        private async Task<bool> EndpointIsTensorSharpAsync(CancellationToken cancellationToken)
+        {
+            if (_endpointIsTensorSharp is { } cached) return cached;
+            await _probeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (_endpointIsTensorSharp is { } raced) return raced;
+                string root = _options.Endpoint.TrimEnd('/');
+                if (root.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)) root = root[..^3];
+                try
+                {
+                    using HttpResponseMessage response = await _http.GetAsync(root + "/health", cancellationToken).ConfigureAwait(false);
+                    string body = response.IsSuccessStatusCode
+                        ? (await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)).Trim() : string.Empty;
+                    // Skills may be disabled independently of agents. Match the actual
+                    // TensorSharp liveness signature, not a generic HTTP 200 or HTML fallback.
+                    _endpointIsTensorSharp = body is "\"TensorSharp.Server is running\"" or "TensorSharp.Server is running";
+                }
+                catch (HttpRequestException) { _endpointIsTensorSharp = false; }
+                return _endpointIsTensorSharp.Value;
+            }
+            finally { _probeGate.Release(); }
+        }
+
         private string BuildPayload(
             SkillsChatRequest request,
             List<ChatMessage> messages,
@@ -485,6 +545,8 @@ namespace TensorSharp.AgentHost.Skills
                 writer.WriteStartObject();
                 writer.WriteString("model", model);
                 writer.WriteBoolean("stream", false);
+                if (includeSkillsField && request.MultiAgent.HasValue)
+                    writer.WriteBoolean("multi_agent", request.MultiAgent.Value);
 
                 if (request.MaxTokens is { } maxTokens)
                     writer.WriteNumber("max_tokens", maxTokens);
@@ -514,6 +576,7 @@ namespace TensorSharp.AgentHost.Skills
                     writer.WriteStartArray("skills");
                     writer.WriteEndArray();
                     writer.WriteBoolean("skills_discovery", false);
+                    writer.WriteBoolean("multi_agent", false);
                 }
 
                 BuildMessageIds(messages, out string[][] callIds, out string?[] resultIds);

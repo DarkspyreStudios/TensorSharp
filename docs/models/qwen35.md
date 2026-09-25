@@ -972,6 +972,55 @@ before the per-layer loop, exactly as in the legacy forward.
 - **~1.83× tps at n=3** on Qwen 3.6-27B (Apple M4 Pro, GgmlMetal,
   legacy-vs-batched in-process toggle).
 
+### Concurrent decode with K/IQ-quantized embeddings on CUDA
+
+The arena fused decode path supports GGUFs whose token embedding table cannot
+use CUDA `GET_ROWS`, including the Q2_K table in
+`Qwen3.8-27B-UD-IQ3_XXS.gguf`. TensorSharp gathers only the current token's
+embedding row for each request on the CPU, then uploads those F32 rows into
+the persistent batched graph. QKV, recurrent input/output, FFN and vocabulary
+projections remain batched on the GPU. For three requests with hidden size 5120,
+the embedding payload is 60 KiB before arena padding.
+
+This needs both updated managed assemblies and a rebuilt `GgmlOps` library
+(`TSGgml_Qwen35ArenaDecodeBatchedHidden`). An older library receives an explicit
+decline reason. Embedding types supported by CUDA retain the original native
+entry point. Upstream ggml sources are unchanged.
+
+The CUDA graph also preserves the normalized Q/K tensors before RoPE. Solo
+decode already separates those operations with a reshape; without the same
+boundary, the arena can select CUDA's combined RMSNorm/multiply/RoPE kernel
+and diverge from solo decoding. Keeping these two intermediate tensors blocks
+that fusion while retaining ordinary RMSNorm/multiply fusion, batched weight
+projections and CUDA graph capture. Other models and Metal are unaffected by
+this CUDA-only boundary. Numerical agreement still needs validation for each
+model/backend/cache configuration; it is not a universal bitwise guarantee.
+
+CUDA attention uses one single-request attention node per arena slot within
+that same graph, with each holder's effective attention-window length matching
+solo decode. Masking a larger shared window can change CUDA's reduction
+partitioning and accumulate numerical drift, especially with quantized caches.
+The graph rebuilds when a window changes, flushing and restoring KV and recurrent
+state; ordinary steps retain the captured graph. The weight projections still
+process the whole batch together. Metal retains its existing batched attention
+layout.
+
+The scheduler's decline warning describes one step. A cold model may need one
+serial decode step to initialize weight descriptors, and a growing cache may
+temporarily be served separately. Persistent failures include their actual
+managed/native reason in the server log; successful batching is also logged
+once. Disabling batched decode or using unsupported configurations still
+selects the existing fallback.
+
+Run the [Qwen35 decode probe](../../eng/validation/Qwen35BatchedDecodeProbe/README.md)
+for teacher-forced distribution comparisons, explicit native engagement, reordered requests,
+different cache capacities, serial continuation and paired throughput measurements.
+It reports raw logit errors, softmax KL, and argmax changes with their reference
+margins, and counts actual requests rather than padded GPU lanes. Use the
+[two-reviewer HTTP probe](../../eng/validation/probe_qwen35_reviewers.py)
+separately to validate the reported prompt's delegation order and final answer;
+decode-only throughput does not measure a complete agent turn.
+
 ## 12. MTP / NextN speculative decoding (Qwen 3.6)
 
 Qwen 3.6 GGUFs can ship a **NextN / multi-token-prediction (MTP) draft block** that

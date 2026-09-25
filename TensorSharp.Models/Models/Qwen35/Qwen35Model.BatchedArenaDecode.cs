@@ -13,7 +13,7 @@
 // to the hybrid GDN + attention architecture. One fused graph decodes one
 // token for every concurrent request per step: weights are read once, the
 // attention KV lives in persistent per-layer arenas written by one set_rows
-// and read by one batched flash-attention, and the GDN conv/delta recurrent
+// and read by flash-attention in that graph, and the GDN conv/delta recurrent
 // state lives in per-slot device arenas updated in-graph — no per-step host
 // round trips. CUDA can capture the graph, while Metal retains and replays the
 // same slot-stable graph across request churn.
@@ -35,6 +35,8 @@ namespace TensorSharp.Models
     {
         private string _lastArenaDeclineLogged;
         private float[] _arenaLogitsStaging;
+
+        public string BatchedFusedDecodeDeclineReason { get; private set; }
 
         /// <summary>
         /// How many batched arena decode steps this model has actually served.
@@ -103,6 +105,7 @@ namespace TensorSharp.Models
 
         private bool ArenaDecline(string reason)
         {
+            BatchedFusedDecodeDeclineReason = reason;
             if (reason != _lastArenaDeclineLogged)
             {
                 _lastArenaDeclineLogged = reason;
@@ -115,23 +118,33 @@ namespace TensorSharp.Models
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions,
             float[][] outLogits, int[] outNextTokens)
         {
+            BatchedFusedDecodeDeclineReason = null;
             // The native graph is shared by CUDA and Metal. Its recurrent-slot
             // aggregation carries explicit dataflow dependencies, so Metal's
             // concurrent graph scheduler cannot race the column producers.
-            if ((_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal)
-                || IsTensorParallel || _fusedHolders == null)
-                return false;
-            if (!_fullDecodeEnabled || _fdUnsupported)
-                return false;
+            if (_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal)
+                return ArenaDecline($"backend {_backend} has no arena batched decode graph");
+            if (IsTensorParallel)
+                return ArenaDecline("tensor parallelism uses separate decode graphs");
+            if (_fusedHolders == null)
+                return ArenaDecline("per-sequence caches have not been initialized");
+            if (!_fullDecodeEnabled)
+                return ArenaDecline("TS_QWEN35_FULL_DECODE=0");
+            if (_fdUnsupported)
+                return ArenaDecline("the whole-model fused decode capability check failed");
             ExitSpecSession();   // a batched decode outside the speculative session ends it
             int n = requestIds.Count;
             if (n < 2 || tokens.Length != n || positions.Length != n)
-                return false;
+                return ArenaDecline("a batch requires at least two sequences and matching token/position arrays");
+            if ((outLogits == null && outNextTokens == null)
+                || (outLogits != null && outLogits.Length != n)
+                || (outNextTokens != null && outNextTokens.Length != n))
+                return ArenaDecline("batch output arrays do not match the sequence count");
             // The slot-invariant weight descriptors are built by the solo fused
             // decode; the first token of the first sequence always warms them
             // through the round-robin path, so declining here costs one step.
             if (_fdLayers == null)
-                return false;
+                return ArenaDecline("fused weight descriptors need one serial decode warmup step");
             if (MoeCpuOffloadConfig.IsEnabled)
                 return ArenaDecline("MoE CPU offload active");
             // NVFP4 per-tensor weight scales (the `<base>.scale` sidecars, HF
@@ -171,10 +184,17 @@ namespace TensorSharp.Models
 
             // Token embedding for the in-graph get_rows.
             (IntPtr ptr, int type, long ne0, long ne1, long bytes) emb;
+            QuantizedWeight hostEmbedding = null;
             if (_quantWeights.TryGetValue("token_embd.weight", out QuantizedWeight tokenQw))
             {
-                if (!CanUseGgmlQuantizedGetRows(tokenQw.GgmlType))
-                    return ArenaDecline($"token embedding type {tokenQw.GgmlType} lacks backend get_rows support");
+                if (!CanUseGgmlQuantizedGetRows(tokenQw.GgmlType) || tokenQw.DevicePreloadTooLarge)
+                {
+                    if (!tokenQw.HasHostData)
+                        return ArenaDecline($"token embedding type {tokenQw.GgmlType} requires host rows but no host data is available");
+                    if (!GgmlBasicOps.SupportsQwen35ArenaHiddenDecode())
+                        return ArenaDecline("the native library lacks arena host-embedding input support; rebuild GgmlOps");
+                    hostEmbedding = tokenQw;
+                }
                 emb = ResolveW(tokenQw, null);
             }
             else if (_weights.TryGetValue("token_embd.weight", out Tensor tokenF32))
@@ -203,17 +223,17 @@ namespace TensorSharp.Models
             // released, but this is the same guard every sibling hook carries): decline
             // rather than dereference a dictionary that no longer exists.
             if (_fusedHolders == null)
-                return false;
+                return ArenaDecline("per-sequence caches were released before decode");
 
             var holders = new Qwen35KvCacheHolder[n];
             for (int i = 0; i < n; i++)
             {
                 if (!_fusedHolders.TryGetValue(requestIds[i], out holders[i]) || holders[i].K == null)
-                    return false;
-                if (positions[i] + 1 > holders[i].KvCapacity)
-                    return false;   // growth is the round-robin path's job
+                    return ArenaDecline($"sequence {i} has no fused cache holder");
+                if (positions[i] < 0 || positions[i] >= holders[i].KvCapacity)
+                    return ArenaDecline($"sequence {i} needs cache growth or has an invalid position");
                 if (tokens[i] < 0 || tokens[i] >= emb.ne1)
-                    return false;
+                    return ArenaDecline($"sequence {i} has an out-of-range token id");
             }
 
             // Canonical order: ascending first-attention-layer K storage pointer.
@@ -300,11 +320,21 @@ namespace TensorSharp.Models
             var logitsBuf = _arenaLogitsStaging;
             var sampledSorted = outNextTokens != null ? new int[n] : null;
 
+            // CUDA GET_ROWS does not cover K/IQ embedding formats (the UD-IQ3
+            // model uses Q2_K). Gather just these N rows through the same host
+            // dequantizer as solo decode; all transformer/LM-head matmuls still
+            // execute together in the persistent arena graph. Use sorted order
+            // so each row follows its cache holder through native slot mapping.
+            using var embeddingRows = hostEmbedding == null ? null
+                : new Tensor(_allocator, DType.Float32, n, Config.HiddenSize);
+            if (embeddingRows != null)
+                PopulateQuantizedRows(embeddingRows, hostEmbedding, tokSorted);
+
             int arenaStatus;
             fixed (float* lp = logitsBuf)
             fixed (int* sp = sampledSorted)
             {
-                arenaStatus = GgmlBasicOps.Qwen35ArenaDecodeBatchedStatus(
+                arenaStatus = GgmlBasicOps.Qwen35ArenaDecodeBatchedHiddenStatus(
                     _fdLayers, numLayers, n,
                     tokSorted, posSorted, ropeSorted,
                     kPtrs, vPtrs, convPtrs, deltaPtrs,
@@ -320,18 +350,15 @@ namespace TensorSharp.Models
                     lmh.ptr, lmh.type, lmh.ne0, lmh.ne1, lmh.bytes,
                     TensorComputePrimitives.GetStoragePointer(_finalNormW),
                     emb.ptr, emb.type, emb.ne0, emb.ne1, emb.bytes,
-                    (IntPtr)sp, wantLogits);
+                    (IntPtr)sp, wantLogits,
+                    embeddingRows == null ? IntPtr.Zero : (IntPtr)GetFloatPtr(embeddingRows));
             }
             if (arenaStatus != 1)
             {
                 string err = GgmlBasicOps.LastNativeError();
                 ThrowIfArenaDecodeStateUnrecoverable(arenaStatus, err);
-                if (err != _lastArenaDeclineLogged)
-                {
-                    _lastArenaDeclineLogged = err;
-                    Console.Error.WriteLine($"[qwen35 arena-decode] native declined (n={n}): {err}");
-                }
-                return false;
+                return ArenaDecline($"native declined (n={n}): " +
+                    (string.IsNullOrWhiteSpace(err) ? "native library returned no diagnostic" : err));
             }
 
             for (int i = 0; i < n; i++)

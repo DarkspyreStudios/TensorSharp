@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Collections.Generic;
+using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.Skills;
 using System.Linq;
 
@@ -67,6 +68,7 @@ namespace TensorSharp.Server.ResponseSerializers
         public static object SkillStep(SkillToolInvocation invocation) => new
         {
             skill_step = invocation.Tool,
+            agent_id = invocation.AgentId,
             skill = invocation.SkillId,
             detail = invocation.ResourcePath,
             ok = invocation.Ok,
@@ -105,7 +107,8 @@ namespace TensorSharp.Server.ResponseSerializers
         /// watches a frozen page for the length of a program being written plus a pip
         /// install.
         /// </summary>
-        public static object ToolProgress(string phase, string tool, string text, double seconds, string detail) => new
+        public static object ToolProgress(string phase, string tool, string text, double seconds, string detail,
+            IReadOnlyList<MultiAgentProgress> agents = null) => new
         {
             tool_progress = phase,
             tool,
@@ -113,6 +116,20 @@ namespace TensorSharp.Server.ResponseSerializers
             seconds,
             // What is being run, in one line: "python · 2.1 KB", "scripts/extract.py 2400".
             detail,
+            // Non-observing snapshots refresh the expanded subagent panel during a wait.
+            agents = agents?.Select(a => new
+            {
+                agent_id = a.AgentId,
+                parent_id = a.ParentId,
+                task = a.Task,
+                agent_type = a.AgentType,
+                status = a.Status,
+                tool = a.Tool,
+                tool_status = a.ToolStatus,
+                detail = a.Detail,
+                result = a.Result,
+                error = a.Error,
+            }).ToArray(),
         };
 
         public static object Done(

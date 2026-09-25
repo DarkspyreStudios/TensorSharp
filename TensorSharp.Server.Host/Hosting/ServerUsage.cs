@@ -426,6 +426,18 @@ namespace TensorSharp.Server.Host.Hosting
                     "the server is reachable by untrusted clients (TS_UPLOAD_TTL_HOURS env var overrides).",
                     "--upload-ttl-hours 24"),
             }),
+            ("Subagents (automatic bounded delegation on tool-capable models)", new[]
+            {
+                new OptionHelp("--no-multi-agent", "Disable model-selected delegation (or TS_NO_MULTI_AGENT=1). Requests may also send multi_agent:false.", "--no-multi-agent"),
+                new OptionHelp("--agents-max-concurrent <N>", "Maximum active child agents across a request's tree. Default: 3.", "--agents-max-concurrent 2"),
+                new OptionHelp("--agents-max-count <N>", "Maximum child agents created per request. Default: 8.", "--agents-max-count 4"),
+                new OptionHelp("--agents-max-depth <N>", "Maximum delegation depth. Default: 2.", "--agents-max-depth 1"),
+                new OptionHelp("--agents-max-rounds <N>", "Maximum generation rounds per child. Default: 8.", "--agents-max-rounds 6"),
+                new OptionHelp("--agents-max-generations <N>", "Shared generation budget for all descendants. Default: 48.", "--agents-max-generations 24"),
+                new OptionHelp("--agents-timeout <seconds>", "Child lifetime limit. Default: 180 seconds.", "--agents-timeout 300"),
+                new OptionHelp("--agents-max-result-chars <N>", "Maximum returned characters per child report. Default: 8000.", "--agents-max-result-chars 4000"),
+                new OptionHelp("--agents-allow-worker-tools", "Allow explicit worker agents to use the parent's permitted mutable tools. Explorers and reviewers remain read-only.", "--agents-allow-worker-tools"),
+            }),
             ("Agent skills (SKILL.md bundles; repository and configured skill directories)", new[]
             {
                 new OptionHelp("--skills-dir <path>",

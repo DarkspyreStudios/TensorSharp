@@ -199,7 +199,8 @@ public sealed class OpenAIResponsesAdapter
             _skills, requestedSkills, SkillSelectionParser.ParseDiscovery(body), tools,
             _svc.Architecture, _svc.ContextTokens, _options, out var unknownSkills,
             allowTools: responseFormat == null, codeRunner: _codeRunner,
-            workspace: workspaceLease?.Workspace, logger: logger);
+            workspace: workspaceLease?.Workspace, logger: logger,
+            multiAgent: SkillSelectionParser.ParseMultiAgent(body));
 
         if (unknownSkills.Count > 0)
         {

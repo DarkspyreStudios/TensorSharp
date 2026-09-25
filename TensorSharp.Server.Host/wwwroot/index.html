@@ -1057,6 +1057,54 @@ button.primary:hover { background: var(--accent-hover); }
   word-break: break-word;
 }
 
+.current-agent-details {
+  margin: 0 8px 7px;
+  font-size: 12px;
+  white-space: normal;
+}
+
+.current-agent-details[hidden] { display: none; }
+
+.current-agent-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  color: var(--text2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.current-agent-summary::-webkit-details-marker { display: none; }
+.current-agent-summary::before { content: '\23F5'; }
+.current-agent-details[open] > .current-agent-summary::before { content: '\23F7'; }
+.current-agent-summary:hover { background: var(--surface); color: var(--text); }
+.current-agent-summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.current-agent-list {
+  max-height: min(24em, 45vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 8px;
+}
+
+.current-agent-card {
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+  color: var(--text2);
+  overflow-wrap: anywhere;
+}
+
+.current-agent-name { color: var(--text); font-weight: 600; }
+.current-agent-state { color: var(--accent); margin: 2px 0 5px; }
+.current-agent-task, .current-agent-tool, .current-agent-result, .current-agent-error {
+  white-space: pre-wrap;
+  margin-top: 4px;
+}
+.current-agent-error { color: var(--danger); }
+.current-agent-empty { color: var(--text2); padding: 8px 0; }
+
 /* Files a shell command produced: visible download chips on the reply itself,
    so getting the file never depends on the model repeating the link in prose. */
 .artifact-files {
@@ -1778,8 +1826,8 @@ async function deleteSkill(idx) {
 
 // The WebUX intentionally has no completed-operation transcript. It owns one
 // replace-in-place panel for the operation running now, then removes the panel
-// on `finished`, `done`, cancellation, failure, or a closed stream. Debugging
-// remains a server-log concern.
+// on `finished`, `done`, cancellation, failure, or a closed stream. While waiting,
+// the user can expand a live snapshot of the request's sub-agents.
 function ensureCurrentActivity(assistDiv) {
   let block = assistDiv.querySelector('.current-activity');
   if (block) return block;
@@ -1805,6 +1853,23 @@ function ensureCurrentActivity(assistDiv) {
   block.appendChild(header);
   block.appendChild(detail);
 
+  const agents = document.createElement('details');
+  agents.className = 'current-agent-details';
+  agents.hidden = true;
+  agents.open = !!assistDiv._agentDetailsOpen;
+  agents.addEventListener('toggle', () => {
+    // Remember the user's choice across consecutive waits within this reply.
+    if (agents.isConnected) assistDiv._agentDetailsOpen = agents.open;
+  });
+  const summary = document.createElement('summary');
+  summary.className = 'current-agent-summary';
+  const list = document.createElement('div');
+  list.className = 'current-agent-list';
+  list.setAttribute('role', 'list');
+  agents.appendChild(summary);
+  agents.appendChild(list);
+  block.appendChild(agents);
+
   // Before the reply text, i.e. after any reasoning block already sitting there.
   if (bubbleText && bubbleText.parentNode) bubbleText.parentNode.insertBefore(block, bubbleText);
   else bubble.appendChild(block);
@@ -1813,7 +1878,11 @@ function ensureCurrentActivity(assistDiv) {
 
 function clearCurrentActivity(assistDiv) {
   const block = assistDiv && assistDiv.querySelector('.current-activity');
-  if (block) block.remove();
+  if (block) {
+    // Native toggle events are queued; a finished frame can arrive first.
+    assistDiv._agentDetailsOpen = block.querySelector('.current-agent-details').open;
+    block.remove();
+  }
 }
 
 function activityLabel(tool, phase) {
@@ -1827,6 +1896,7 @@ function activityLabel(tool, phase) {
     case 'skills_list': return writing ? 'Preparing skill lookup…' : 'Checking skills…';
     case 'skills_read': return writing ? 'Preparing skill read…' : 'Reading skill file…';
     case 'skills_run':  return writing ? 'Preparing skill run…' : 'Running skill…';
+    case 'wait_agent':  return writing ? 'Preparing to wait for sub-agents…' : 'Waiting for sub-agents…';
     default: {
       const name = tool ? String(tool).replace(/_/g, ' ') : 'operation';
       return (writing ? 'Preparing ' : 'Running ') + name + '…';
@@ -1842,6 +1912,76 @@ function cleanToolDraft(raw) {
   if (text.trimStart().startsWith('{'))
     text = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"');
   return text;
+}
+
+// Update the existing disclosure and cards in place so streaming frames preserve
+// keyboard focus, expansion, text selection, and the user's scroll position.
+function updateAgentProgress(block, agents) {
+  const disclosure = block.querySelector('.current-agent-details');
+  const summary = disclosure.querySelector('.current-agent-summary');
+  const list = disclosure.querySelector('.current-agent-list');
+  const snapshot = Array.isArray(agents) ? agents.slice(0, 128) : [];
+  const cards = block._agentCards || (block._agentCards = new Map());
+  const seen = new Set();
+  const scrollTop = list.scrollTop;
+  const setText = (node, value) => {
+    if (node.textContent !== value) node.textContent = value;
+  };
+  const bounded = (value, limit) => {
+    const text = value == null ? '' : String(value);
+    return text.length > limit ? text.slice(0, limit) + '…' : text;
+  };
+
+  for (const agent of snapshot) {
+    if (!agent || typeof agent.agent_id !== 'string' || seen.has(agent.agent_id)) continue;
+    seen.add(agent.agent_id);
+    let card = cards.get(agent.agent_id);
+    if (!card) {
+      card = document.createElement('div');
+      card.className = 'current-agent-card';
+      card.setAttribute('role', 'listitem');
+      card._fields = {};
+      for (const field of ['name', 'state', 'task', 'tool', 'result', 'error']) {
+        const node = document.createElement('div');
+        node.className = 'current-agent-' + field;
+        card._fields[field] = node;
+        card.appendChild(node);
+      }
+      cards.set(agent.agent_id, card);
+      list.appendChild(card);
+    }
+    const fields = card._fields;
+    setText(fields.name, bounded(agent.agent_id, 300));
+    const status = bounded(agent.status || 'unknown', 40).replace(/_/g, ' ');
+    setText(fields.state, [bounded(agent.agent_type, 40), status].filter(Boolean).join(' · '));
+    setText(fields.task, agent.task ? 'Task: ' + bounded(agent.task, 4000) : '');
+    const toolStatus = agent.tool_status ? ' (' + bounded(agent.tool_status, 40).replace(/_/g, ' ') + ')' : '';
+    setText(fields.tool, agent.tool
+      ? 'Tool: ' + bounded(agent.tool, 100) + toolStatus + (agent.detail ? '\n' + bounded(agent.detail, 1000) : '')
+      : (status === 'running' ? 'Working on the task…' : ''));
+    setText(fields.result, agent.result ? 'Result: ' + bounded(agent.result, 4000) : '');
+    setText(fields.error, agent.error ? 'Error: ' + bounded(agent.error, 1000) : '');
+    for (const node of Object.values(fields)) node.hidden = !node.textContent;
+  }
+  for (const [id, card] of cards) {
+    if (!seen.has(id)) {
+      card.remove();
+      cards.delete(id);
+    }
+  }
+  let empty = disclosure.querySelector('.current-agent-empty');
+  if (cards.size === 0) {
+    if (!empty) {
+      empty = document.createElement('div');
+      empty.className = 'current-agent-empty';
+      disclosure.appendChild(empty);
+    }
+    setText(empty, Array.isArray(agents)
+      ? 'No sub-agents to show yet.'
+      : 'Sub-agent details are not available from this server.');
+  } else if (empty) empty.remove();
+  setText(summary, 'wait_agent · ' + cards.size + (cards.size === 1 ? ' sub-agent' : ' sub-agents'));
+  list.scrollTop = scrollTop;
 }
 
 // Live progress while the model writes a tool call and while the host runs it.
@@ -1872,6 +2012,8 @@ function updateToolProgress(assistDiv, data) {
   }
   block._phase = phase;
   block._tool = tool;
+  const waitingForAgents = phase === 'running' && tool === 'wait_agent';
+  block.querySelector('.current-agent-details').hidden = !waitingForAgents;
 
   if (phase === 'writing') {
     // This short-lived buffer exists only to turn escaped JSON/code deltas into
@@ -1894,6 +2036,12 @@ function updateToolProgress(assistDiv, data) {
     const secs = Math.round(Number(data.seconds) || 0);
     const what = data.detail ? String(data.detail) : (tool || 'operation');
     if (status) status.textContent = activityLabel(tool, phase) + (secs > 0 ? ' ' + secs + 's' : '');
+
+    if (waitingForAgents) {
+      detail.style.display = 'none';
+      updateAgentProgress(block, data.agents);
+      return;
+    }
 
     // Show only the current operation's short stdout/stderr tail. Long-lived
     // diagnostic history is intentionally not kept in the browser.

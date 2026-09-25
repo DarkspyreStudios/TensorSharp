@@ -16,6 +16,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using TensorSharp.AgentHost.CodeExec;
+using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime.Scheduling;
 using TensorSharp.Runtime.Speculative;
@@ -186,7 +187,47 @@ public static class ServerOptionsBuilder
             prefixCacheDirectory: ResolvePrefixCacheDirectory(baseDirectory, startupModelPath),
             embeddingsEnabled: embeddingsEnabled,
             embeddingThreads: embeddingThreads,
-            embeddingContextSize: embeddingContextSize);
+            embeddingContextSize: embeddingContextSize,
+            multiAgent: ReadMultiAgentOptions(args));
+    }
+
+    private static readonly string[] AgentValueFlags =
+    {
+        "--agents-max-concurrent", "--agents-max-count", "--agents-max-depth",
+        "--agents-max-rounds", "--agents-max-generations", "--agents-timeout",
+        "--agents-max-result-chars",
+    };
+
+    private static MultiAgentOptions ReadMultiAgentOptions(string[] args)
+    {
+        var defaults = new MultiAgentOptions();
+        int Read(string flag, int fallback)
+        {
+            int result = fallback;
+            for (int i = 0; i < args.Length; i++)
+                if (TryReadOption(args, ref i, flag, out string? value))
+                {
+                    if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out result))
+                        throw new ArgumentException($"Invalid value for {flag}: '{value}'. Expected an integer.");
+                }
+            return result;
+        }
+        string? disabled = Environment.GetEnvironmentVariable("TS_NO_MULTI_AGENT");
+        var result = new MultiAgentOptions
+        {
+            Enabled = !args.Any(a => string.Equals(a, "--no-multi-agent", StringComparison.OrdinalIgnoreCase))
+                && (string.IsNullOrEmpty(disabled) || disabled == "0"),
+            AllowWorkerTools = args.Any(a => string.Equals(a, "--agents-allow-worker-tools", StringComparison.OrdinalIgnoreCase)),
+            MaxConcurrentAgents = Read("--agents-max-concurrent", defaults.MaxConcurrentAgents),
+            MaxAgents = Read("--agents-max-count", defaults.MaxAgents),
+            MaxDepth = Read("--agents-max-depth", defaults.MaxDepth),
+            MaxRoundsPerAgent = Read("--agents-max-rounds", defaults.MaxRoundsPerAgent),
+            MaxTotalChildGenerations = Read("--agents-max-generations", defaults.MaxTotalChildGenerations),
+            AgentTimeoutSeconds = Read("--agents-timeout", defaults.AgentTimeoutSeconds),
+            MaxResultCharacters = Read("--agents-max-result-chars", defaults.MaxResultCharacters),
+        };
+        result.Validate();
+        return result;
     }
 
     private static int ReadEmbeddingIntOption(string[] args, string flag)
@@ -1237,6 +1278,11 @@ public static class ServerOptionsBuilder
                 configuredNoPrefixCache = true;
                 continue;
             }
+
+            if (string.Equals(args[i], "--no-multi-agent", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(args[i], "--agents-allow-worker-tools", StringComparison.OrdinalIgnoreCase)
+                || TryReadAnyOption(args, ref i, AgentValueFlags))
+                continue;
 
             // Agent Skills. The VALUES are read by SkillHostOptions.Parse, which
             // lives in TensorSharp.Runtime so this host and the CLI cannot drift

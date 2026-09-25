@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
+using TensorSharp.AgentHost.Agents;
 
 namespace InferenceWeb.Tests;
 
@@ -80,6 +81,94 @@ public sealed class SharedPrefixRenderTests : IDisposable
         AssertWholePrefix(model, "hi");
         model.Config.ChatTemplate = "changed-template";
         AssertWholePrefix(model, "A fresh chat after changing the template.");
+    }
+
+    [Fact]
+    public void AgentProfilesCaptureTheExactCommonAncestorBeforeDifferentToolDeclarations()
+    {
+        ModelBase model = Model(new CharTokenizer());
+        var common = new ToolFunction { Name = "skills_read", Description = new string('r', 120) };
+        var rootTools = new List<ToolFunction> { common, new() { Name = "skills_run" } };
+        var childTools = new List<ToolFunction> { common, new() { Name = "spawn_agent" } };
+        var root = new List<ChatMessage> { new() { Role = "system", Content = new string('s', 120) } };
+        var child = new List<ChatMessage> { new() { Role = "system", Content = new string('s', 120) + " Read-only reviewer." } };
+        var profiles = new[] { new MultiAgentPromptProfile(root, rootTools), new MultiAgentPromptProfile(child, childTools) };
+        List<int> rootPrompt = Render(model, root, rootTools, "Parent private task.");
+        List<int> childPrompt = Render(model, child, childTools, "Child private task.");
+        int rootShared = _pipeline.ComputeSharedPrefixTokens(model, root, rootPrompt, "qwen3", rootTools, false);
+        int childShared = _pipeline.ComputeSharedPrefixTokens(model, child, childPrompt, "qwen3", childTools, false);
+        int expected = CommonPrefix(rootPrompt, childPrompt);
+
+        int rootBoundary = Assert.Single(_pipeline.ComputePublicCheckpointBoundaries(
+            model, rootPrompt, rootShared, profiles, "qwen3", false));
+        int childBoundary = Assert.Single(_pipeline.ComputePublicCheckpointBoundaries(
+            model, childPrompt, childShared, profiles, "qwen3", false));
+        Assert.Equal(expected, rootBoundary);
+        Assert.Equal(rootBoundary, childBoundary);
+        Assert.InRange(rootBoundary, ChatGenerationPipeline.MinSharedPrefixTokens, Math.Min(rootShared, childShared) - 1);
+        Assert.Equal(rootPrompt.Take(rootBoundary), childPrompt.Take(childBoundary));
+        Assert.NotEqual(rootPrompt[rootBoundary], childPrompt[childBoundary]);
+    }
+
+    [Fact]
+    public void AgentProfilesKeepOneAncestorUnderTheDefaultTwoCheckpointBudget()
+    {
+        ModelBase model = Model(new CharTokenizer());
+        var root = new List<ChatMessage> { new() { Role = "system", Content = new string('s', 200) } };
+        var longer = new List<ChatMessage> { new() { Role = "system", Content = new string('s', 150) + "worker" } };
+        var shorter = new List<ChatMessage> { new() { Role = "system", Content = new string('s', 90) + "reviewer" } };
+        List<int> prompt = Render(model, root, [], "Private parent task.");
+        int shared = _pipeline.ComputeSharedPrefixTokens(model, root, prompt, "qwen3", [], false);
+        int expected = CommonPrefix(prompt, Render(model, shorter, [], "Private child task."));
+        var profiles = new[] { new MultiAgentPromptProfile(longer, []), new MultiAgentPromptProfile(shorter, []) };
+        Assert.Equal(expected, Assert.Single(_pipeline.ComputePublicCheckpointBoundaries(
+            model, prompt, shared, profiles, "qwen3", false)));
+    }
+
+    [Fact]
+    public void AgentProfileCheckpointsNeverExtendPastTheCurrentPublicPrefix()
+    {
+        ModelBase model = Model(new CharTokenizer());
+        var messages = new List<ChatMessage>
+        {
+            new() { Role = "system", Content = new string('s', 100) },
+            new() { Role = "user", Content = new string('p', 200) },
+        };
+        List<int> prompt = _renderer.RenderToTokens(model.Tokenizer, model.Config.ChatTemplate, messages,
+            "qwen3", addGenerationPrompt: true);
+        var profiles = new[] { new MultiAgentPromptProfile(messages, []) };
+        int shared = _pipeline.ComputeSharedPrefixTokens(model, messages, prompt, "qwen3", [], false);
+        Assert.True(shared < prompt.Count - 200);
+        Assert.Empty(_pipeline.ComputePublicCheckpointBoundaries(model, prompt, shared, profiles, "qwen3", false));
+        Assert.Empty(_pipeline.ComputePublicCheckpointBoundaries(model, prompt, 64, profiles, "qwen3", false));
+        Assert.Empty(_pipeline.ComputePublicCheckpointBoundaries(model, prompt, 0, profiles, "qwen3", false));
+    }
+
+    [Fact]
+    public void UnusableAgentProfileDoesNotInventACommonCheckpoint()
+    {
+        ModelBase model = Model(new CharTokenizer());
+        var root = new List<ChatMessage> { new() { Role = "system", Content = new string('s', 100) } };
+        List<int> prompt = Render(model, root, [], "Parent task.");
+        int shared = _pipeline.ComputeSharedPrefixTokens(model, root, prompt, "qwen3", [], false);
+        var mismatched = new[] { new MultiAgentPromptProfile(
+            [new() { Role = "system", Content = "A different system prompt." }], []) };
+        Assert.Empty(_pipeline.ComputePublicCheckpointBoundaries(model, prompt, shared, mismatched, "qwen3", false));
+        var media = new[] { new MultiAgentPromptProfile(
+            [new() { Role = "system", Content = new string('s', 100), ImagePaths = new() { "image.png" } }], []) };
+        Assert.Empty(_pipeline.ComputePublicCheckpointBoundaries(model, prompt, shared, media, "qwen3", false));
+    }
+
+    private List<int> Render(ModelBase model, List<ChatMessage> governing, List<ToolFunction> tools, string user) =>
+        _renderer.RenderToTokens(model.Tokenizer, model.Config.ChatTemplate,
+            new List<ChatMessage>(governing) { new() { Role = "user", Content = user } },
+            "qwen3", addGenerationPrompt: true, tools: tools);
+
+    private static int CommonPrefix(IReadOnlyList<int> a, IReadOnlyList<int> b)
+    {
+        int count = 0;
+        while (count < a.Count && count < b.Count && a[count] == b[count]) count++;
+        return count;
     }
 
     private int AssertWholePrefix(ModelBase model, string user, List<ToolFunction> tools = null)

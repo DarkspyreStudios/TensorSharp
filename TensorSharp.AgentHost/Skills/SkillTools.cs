@@ -75,7 +75,8 @@ namespace TensorSharp.AgentHost.Skills
         /// </para>
         /// </summary>
         public static bool IsBuiltInTool(string? name) =>
-            IsSkillTool(name) || SkillToolNames.IsCodeTool(name);
+            IsSkillTool(name) || SkillToolNames.IsCodeTool(name)
+            || Agents.MultiAgentTools.IsTool(name);
 
         /// <summary>
         /// Split one round's tool calls three ways: the ones this host answers, the ones
@@ -283,10 +284,8 @@ namespace TensorSharp.AgentHost.Skills
                         "List the agent skills available in this conversation, with each skill's name, "
                         + "description and bundled files. Call this when you need a skill that was not "
                         + "already described to you, or to find the exact path of a file inside a skill.",
-                    // No parameters at all. Note that Required must stay empty AND
-                    // Parameters must stay empty together: the Jinja rendering path marks
-                    // every parameter required when Required is empty, so a tool with
-                    // optional-only arguments would be misdeclared there.
+                    // Listing has no parameters; the empty required list also
+                    // remains empty in the rendered tool schema.
                     Parameters = new Dictionary<string, ToolParameter>(),
                     Required = new List<string>(),
                 },

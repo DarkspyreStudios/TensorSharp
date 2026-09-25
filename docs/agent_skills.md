@@ -14,10 +14,11 @@ the server, next to the weights.
 
 Everything described here lives in `TensorSharp.AgentHost/Skills/` and
 `TensorSharp.AgentHost/CodeExec/` and is shared by the CLI,
-`TensorSharp.Server` and the public C# API. This is one model in a bounded,
-in-process tool loop. TensorSharp does not implement subagents, multi-agent
-delegation, or an interactive per-command approval queue; the operator grants
-the execution surfaces once at startup, and they remain unavailable otherwise.
+`TensorSharp.Server` and the public C# API. Skills run in a bounded, in-process
+tool loop. Supported server chat paths also provide [multiple agents](multi_agent.md):
+the model can delegate independent tasks to children with separate conversations,
+bounded lifecycle tools, and read-only access by default. The operator grants
+execution surfaces at startup; there is no interactive per-command approval queue.
 
 ## What a skill is
 

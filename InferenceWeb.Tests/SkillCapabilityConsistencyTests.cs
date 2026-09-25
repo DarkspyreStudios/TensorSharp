@@ -193,7 +193,11 @@ public class SkillCapabilityConsistencyTests
                 out IReadOnlyList<string> unknown);
 
             Assert.Empty(unknown);
-            Assert.Null(plan);
+            Assert.NotNull(plan);
+            Assert.Empty(plan.ToolContext.Reachable);
+            Assert.DoesNotContain(plan.Tools, tool => SkillTools.IsSkillTool(tool.Name));
+            // Delegation is independent of an explicit empty skill selection.
+            Assert.All(plan.Tools, tool => Assert.True(TensorSharp.AgentHost.Agents.MultiAgentTools.IsTool(tool.Name)));
         }
         finally
         {

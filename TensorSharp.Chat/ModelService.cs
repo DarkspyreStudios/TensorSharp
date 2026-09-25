@@ -366,15 +366,22 @@ namespace TensorSharp.Server
             SamplingConfig turnSampling =
                 skills.ToolContext?.CodeRunner?.ForCodingTurn(samplingConfig) ?? samplingConfig;
 
+            SkillChatGeneration generate =
+                (turnMessages, turnTools, ct) => _generation.ChatStreamWithMetricsAsync(
+                    session, turnMessages, maxTokens, ct,
+                    SamplingForDeepSeek41SkillRound(Architecture, turnSampling, samplingConfig), turnTools, enableThinking,
+                    turn);
+
+            if (skills.MultiAgent is { Enabled: true })
+                return MultiAgentChatStreamAsync(history, skills, generate, maxTokens,
+                    turnSampling, samplingConfig, enableThinking, logger, turn, cancellationToken);
+
             return SkillChatLoop.RunAsync(
                 Architecture,
                 history,
                 skills,
                 enableThinking,
-                (turnMessages, turnTools, ct) => _generation.ChatStreamWithMetricsAsync(
-                    session, turnMessages, maxTokens, ct,
-                    SamplingForDeepSeek41SkillRound(Architecture, turnSampling, samplingConfig), turnTools, enableThinking,
-                    turn),
+                generate,
                 logger,
                 cancellationToken);
         }

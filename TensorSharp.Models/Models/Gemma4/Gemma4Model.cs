@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using TensorSharp;
 using TensorSharp.Cpu;
 using TensorSharp.Cuda;
@@ -935,6 +936,17 @@ namespace TensorSharp.Models
             // Tear them down before replacing any global-cache storage; a new
             // graph will be captured against the resized buffers.
             InvalidateCudaDecodeGraphs();
+            if (IsGgmlBackend)
+            {
+                // Native captured graphs also retain these addresses. Drop them
+                // before freeing any cache storage, including when only a global
+                // layer moves and the layer-0 SWA buffer remains unchanged.
+                GgmlBasicOps.Gemma4ResetDecodeCache();
+                GgmlBasicOps.Gemma4ResetBatchedDecodeCache();
+                GgmlBasicOps.Gemma4MoEResetDecodeCache();
+                GgmlBasicOps.Gemma4ResetMoEBatchedDecodeCache();
+                CountDecodeGraphReset();
+            }
 
             DType kvDtype = _kvCacheDtype.ToDType();
             var resized = new HashSet<int>();
@@ -3198,6 +3210,33 @@ namespace TensorSharp.Models
         // reference observes the owner without extending its lifetime itself.
         internal Action<WeakReference<Storage>> BeforeBatchedDecodeNativeForTest { get; set; }
 
+        private long _batchedFusedDecodeSteps;
+        private long _batchedFusedDecodeTokens;
+        private long _batchedFusedDecodeDeclines;
+        /// <summary>Successful native token-batched graph executions, excluding serial fallback.</summary>
+        public long BatchedFusedDecodeSteps => Interlocked.Read(ref _batchedFusedDecodeSteps);
+        public long BatchedFusedDecodeTokens => Interlocked.Read(ref _batchedFusedDecodeTokens);
+        public long BatchedFusedDecodeDeclines => Interlocked.Read(ref _batchedFusedDecodeDeclines);
+        public string BatchedFusedDecodeDeclineReason { get; private set; }
+
+        private bool DeclineBatchedFusedDecode(string reason)
+        {
+            BatchedFusedDecodeDeclineReason = reason;
+            Interlocked.Increment(ref _batchedFusedDecodeDeclines);
+            return false;
+        }
+
+        public bool CanBatchDecode(string requestId, int position)
+        {
+            if (position < 0 || _fusedHolders == null
+                || !_fusedHolders.TryGetValue(requestId, out var holder)) return false;
+            // A checked-out holder's dictionary snapshot can predate its most
+            // recent growth. Consult the active fields until it is checked in.
+            int capacity = string.Equals(_activeFusedKey, requestId, StringComparison.Ordinal)
+                ? _kvCacheGlobalCapacity : holder.GlobalCapacity;
+            return position < capacity;
+        }
+
         /// <summary>
         /// TRUE token-batched dense decode: decode one token for each of N
         /// concurrent sequences in ONE fused graph (one compute buffer, weights
@@ -3207,7 +3246,7 @@ namespace TensorSharp.Models
         /// Each sequence decodes through its own per-request KV holder. Returns
         /// false (caller falls back to the round-robin per-seq path) when any
         /// precondition fails: dense fused-decode eligible, folded quantized lm_head
-        /// available, all holders present + uniform cache sizes, every global
+        /// available, all holders present, every global
         /// (linear) cache large enough for its sequence, and — for what the native
         /// kernel reports it cannot do (<see cref="GgmlBasicOps.Gemma4BatchedDecodeCapabilities"/>,
         /// e.g. an older native build) — no PLE, no KV-donor layers, no SWA wrap.
@@ -3219,14 +3258,18 @@ namespace TensorSharp.Models
         public unsafe bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
         {
+            BatchedFusedDecodeDeclineReason = null;
             // ---- gates (any failure => round-robin fallback) ----
-            if (!IsGgmlBackend) return false;
-            if (_decodeArrays == null || _fusedHolders == null) return false;
+            if (!IsGgmlBackend) return DeclineBatchedFusedDecode("requires a GGML backend");
+            if (_decodeArrays == null || _fusedHolders == null)
+                return DeclineBatchedFusedDecode("decode descriptors or sequence caches are not initialized");
             var batchedCaps = BatchedDecodeCaps;
             bool batchedPle = _pleDim != 0;
             bool batchedKvDonor = _kvDonorMap.Count != 0;
-            if (batchedPle && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.Ple) == 0) return false;
-            if (batchedKvDonor && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.KvDonor) == 0) return false;
+            if (batchedPle && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.Ple) == 0)
+                return DeclineBatchedFusedDecode("native library lacks batched per-layer embeddings");
+            if (batchedKvDonor && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.KvDonor) == 0)
+                return DeclineBatchedFusedDecode("native library lacks batched shared-KV layers");
             bool batchedSwaWrap = (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.SwaWrap) != 0;
 
             // MoE vs dense: an all-MoE model (e.g. 26B-A4B) routes through the MoE
@@ -3242,7 +3285,7 @@ namespace TensorSharp.Models
                         && _pleDim == 0 && _kvDonorMap.Count == 0
                         && !_kvCacheDtype.IsBlockQuantized() && AllLayersMoE();
                 }
-                if (!_canUseFusedMoEModelDecode) return false;
+                if (!_canUseFusedMoEModelDecode) return DeclineBatchedFusedDecode("model is not eligible for fused MoE decode");
                 // The MoE batched-decode kernel (TSGgml_Gemma4MoEModelDecodeBatched)
                 // is functionally CORRECT (coherent output; it diverges from the
                 // single-stream greedy reference only via benign batched-vs-single FP
@@ -3261,37 +3304,45 @@ namespace TensorSharp.Models
                 // OFF by default (round-robin is correct + faster here); opt in with
                 // TS_BATCHED_FUSED_MOE=1 (e.g. on a higher-VRAM GPU).
                 if (Environment.GetEnvironmentVariable("TS_BATCHED_FUSED_MOE") != "1")
-                return false;
+                    return DeclineBatchedFusedDecode("batched MoE decode is disabled by its memory policy");
             }
-            else if (!_canUseFusedFullModelDecode) return false;
+            else if (!_canUseFusedFullModelDecode) return DeclineBatchedFusedDecode("full-model fused decode is unavailable");
 
             int N = requestIds.Count;
-            if (N < 2 || tokens.Length != N || positions.Length != N) return false;
+            if (N < 2 || tokens.Length != N || positions.Length != N || outLogits.Length != N)
+                return DeclineBatchedFusedDecode("batch arrays must have the same length of at least two");
 
             // Folded quantized lm_head (this kernel requires the fold).
-            if (!_fdFoldLmHead) return false;
+            if (!_fdFoldLmHead) return DeclineBatchedFusedDecode("folded output projection is disabled");
             // The batched kernel takes only the FUSED gate_up weight. When the fusion
             // was declined to save the copy (see BuildGemma4DecodeArrays) there is no
             // such weight, so this path declines and the caller round-robins through
             // the single-token decode, which does understand the split pair. Nothing
             // on a phone reaches here -- N is 1 -- and nothing that does reaches it
             // with the fusion declined, since the decline is an iOS default.
-            if (_gateUpSplit) return false;
-            if (!_weights.TryGetValue("output_norm.weight", out var finalNormT)) return false;
+            if (_gateUpSplit) return DeclineBatchedFusedDecode("batched decode requires fused gate/up weights");
+            if (!_weights.TryGetValue("output_norm.weight", out var finalNormT))
+                return DeclineBatchedFusedDecode("output normalization weights are unavailable");
             if (!_quantWeights.TryGetValue(_hasTiedOutput ? "token_embd.weight" : "output.weight", out var lmqw))
-                return false;
+                return DeclineBatchedFusedDecode("quantized output projection is unavailable");
 
+            // Checking in can replace the active holder's snapshot after growth.
+            // Resolve holder references only after this, so updates below reach
+            // the live dictionary entry and never mark a stale snapshot dirty.
+            RestorePrimaryCache();
             int numLayers = Config.NumLayers;
             var holders = new Gemma4KvCacheHolder[N];
             for (int s = 0; s < N; s++)
                 if (!_fusedHolders.TryGetValue(requestIds[s], out holders[s]) || holders[s].K == null)
-                    return false;
+                    return DeclineBatchedFusedDecode("a requested sequence cache is unavailable");
 
-            // Uniform cache sizes + capacity gate. Use holders[0].Sizes as the
-            // per-layer cache size passed to the kernel. A global (linear) cache
-            // must hold the whole sequence (the round-robin fallback grows it, and
-            // the next step re-enters here); a local SWA ring may wrap when the
-            // kernel supports it (write pos % size, read the ring flat).
+            // Ex2 uses each holder's real capacity/strides. Compact prefix clones
+            // can therefore batch with larger or independently grown caches,
+            // without expanding them or treating their buffers as equally sized.
+            // Older native libraries and the separate MoE ABI still require
+            // uniform capacities; retain the safe fallback for those libraries.
+            bool perSequenceCacheSizes = !isMoE
+                && (batchedCaps & GgmlBasicOps.Gemma4BatchedDecodeCaps.PerSequenceCacheSizes) != 0;
             var cacheSize = holders[0].Sizes;
             var a = _decodeArrays;
             for (int s = 0; s < N; s++)
@@ -3299,14 +3350,14 @@ namespace TensorSharp.Models
                 var hz = holders[s].Sizes;
                 for (int l = 0; l < numLayers; l++)
                 {
-                    if (hz[l] != cacheSize[l]) return false;
-                    if (positions[s] + 1 > cacheSize[l] && !(batchedSwaWrap && a.IsLocal[l] != 0)) return false;
+                    if (!perSequenceCacheSizes && hz[l] != cacheSize[l])
+                        return DeclineBatchedFusedDecode(isMoE
+                            ? "the MoE batched kernel requires uniform KV-cache capacities"
+                            : "unequal KV-cache capacities require the newer native per-sequence batched kernel; rebuild GgmlOps");
+                    if (positions[s] < 0 || (positions[s] >= hz[l] && !(batchedSwaWrap && a.IsLocal[l] != 0)))
+                        return DeclineBatchedFusedDecode("a sequence needs cache growth or unsupported sliding-window wrap");
                 }
             }
-
-            // Check in any holder still bound to the active fields so its SeqLen is
-            // current and the active cache won't alias a holder we read directly.
-            RestorePrimaryCache();
 
             // Canonicalise the sequence order by RequestId so the native persist
             // pool key (the SET of per-request KV caches) is STABLE across steps
@@ -3323,12 +3374,14 @@ namespace TensorSharp.Models
             // Per-(layer,seq) KV cache device pointers: [layer * N + seq], canonical order.
             var kCache = new IntPtr[numLayers * N];
             var vCache = new IntPtr[numLayers * N];
+            if (perSequenceCacheSizes) cacheSize = new int[numLayers * N];
             for (int l = 0; l < numLayers; l++)
                 for (int s = 0; s < N; s++)
                 {
                     var h = holders[order[s]];
                     kCache[l * N + s] = TensorComputePrimitives.GetStoragePointer(h.K[l]);
                     vCache[l * N + s] = TensorComputePrimitives.GetStoragePointer(h.V[l]);
+                    if (perSequenceCacheSizes) cacheSize[l * N + s] = h.Sizes[l];
                 }
 
             IntPtr freqFactorsPtr = IntPtr.Zero;
@@ -3389,7 +3442,7 @@ namespace TensorSharp.Models
                 else
                 {
                     pleRows = ComputePLE(tokSorted, hidden, N);   // [N, numLayers*pleDim]
-                    if (pleRows == null) return false;
+                    if (pleRows == null) return DeclineBatchedFusedDecode("per-layer embedding rows could not be prepared");
                     pleDataPtr = (IntPtr)GetFloatPtr(pleRows);
                 }
             }
@@ -3402,7 +3455,7 @@ namespace TensorSharp.Models
                 _moeModelArgs ??= new Gemma4MoELayerDecodeArgs[numLayers];
                 for (int l = 0; l < numLayers; l++)
                     if (!TryBuildMoELayerArgs(l, (IntPtr)hiddenPtr, 0, out _moeModelArgs[l]))
-                    return false;
+                    return DeclineBatchedFusedDecode("MoE layer descriptors could not be prepared");
             }
 
             BeforeBatchedDecodeNativeForTest?.Invoke(new WeakReference<Storage>(hidden.Storage));
@@ -3456,7 +3509,7 @@ namespace TensorSharp.Models
                         pleTableData, pleTableType, pleTableNe0, pleTableNe1, pleTableBytes,
                         pleIds,
                         pleProjWData, pleProjWType, pleProjWNe0, pleProjWNe1, pleProjWBytes,
-                        pleProjNormData);
+                        pleProjNormData, perSequenceCacheSizes: perSequenceCacheSizes);
                     }
                     catch (EntryPointNotFoundException)
                     {
@@ -3493,7 +3546,7 @@ namespace TensorSharp.Models
             }
             pleRows?.Dispose();
 
-            if (!ok) return false;
+            if (!ok) return DeclineBatchedFusedDecode("native batched graph declined or its entry point is unavailable");
 
             // Distribute per-seq logits (un-permute) and advance each holder.
             for (int s = 0; s < N; s++)
@@ -3507,6 +3560,8 @@ namespace TensorSharp.Models
                 // must sync first.
                 holders[order[s]].HostDirty = true;
             }
+            Interlocked.Increment(ref _batchedFusedDecodeSteps);
+            Interlocked.Add(ref _batchedFusedDecodeTokens, N);
             return true;
         }
 
