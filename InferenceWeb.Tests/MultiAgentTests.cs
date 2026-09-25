@@ -173,6 +173,44 @@ public sealed class MultiAgentTests
         Assert.DoesNotContain("Parent private", prefix + firstTask + secondTask);
     }
 
+    [Theory]
+    [InlineData("explorer", false)]
+    [InlineData("reviewer", true)]
+    [InlineData("worker", false)]
+    [InlineData("worker", true)]
+    public async Task PredictedPublicProfilesExactlyMatchExecutedChildPrompts(string role, bool allowWorkerTools)
+    {
+        List<ChatMessage>? seenMessages = null;
+        List<ToolFunction>? seenTools = null;
+        await using var session = Session(_ => (messages, tools, _) =>
+        {
+            seenMessages = messages;
+            seenTools = tools;
+            return Answer("checked");
+        }, new() { Enabled = true, AllowWorkerTools = allowWorkerTools });
+        IReadOnlyList<MultiAgentPromptProfile> profiles = session.GetPromptProfiles();
+        Assert.Equal(allowWorkerTools ? 4 : 3, profiles.Count);
+        Assert.All(profiles, profile => Assert.All(profile.Messages, message =>
+        {
+            Assert.True(message.Role is "system" or "developer");
+            Assert.DoesNotContain("Parent private", message.Content);
+            Assert.DoesNotContain("/root/", message.Content);
+        }));
+
+        string child = Id(await session.ExecuteAsync(Spawn("predicted", role, "Private assigned task.")));
+        await Wait(session, child);
+        string actual = ChatTemplate.RenderQwen35(
+            seenMessages!.TakeWhile(message => message.Role is "system" or "developer").ToList(),
+            addGenerationPrompt: false, tools: seenTools);
+        MultiAgentPromptProfile match = Assert.Single(profiles, profile =>
+            ChatTemplate.RenderQwen35(profile.Messages.ToList(), addGenerationPrompt: false,
+                tools: profile.Tools.ToList()) == actual);
+        Assert.Equal(JsonSerializer.Serialize(seenTools), JsonSerializer.Serialize(match.Tools));
+        Assert.DoesNotContain("Private assigned task.", actual);
+        if (!allowWorkerTools || role != "worker")
+            Assert.DoesNotContain(match.Tools, tool => tool.Name == SkillTools.RunToolName);
+    }
+
     [Fact]
     public async Task DifferentChildRolesKeepDistinctPolicyAndToolPermissions()
     {

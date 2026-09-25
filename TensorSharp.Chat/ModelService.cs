@@ -374,7 +374,7 @@ namespace TensorSharp.Server
 
             if (skills.MultiAgent is { Enabled: true })
                 return MultiAgentChatStreamAsync(history, skills, generate, maxTokens,
-                    turnSampling, samplingConfig, enableThinking, logger, cancellationToken);
+                    turnSampling, samplingConfig, enableThinking, logger, turn, cancellationToken);
 
             return SkillChatLoop.RunAsync(
                 Architecture,

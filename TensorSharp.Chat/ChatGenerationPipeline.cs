@@ -22,6 +22,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using TensorSharp.AgentHost.Agents;
 using TensorSharp.Models.Architecture;
 using TensorSharp.Runtime.Scheduling;
 
@@ -224,6 +225,11 @@ namespace TensorSharp.Server
         /// <summary>The engine cache scope (<see cref="SequenceState.CacheScope"/>), set by
         /// the first generation of the turn.</summary>
         public string CacheScope { get; set; }
+
+        /// <summary>Governing prompts that this request's agent tree can render.
+        /// Only exact matches within the current public prefix become checkpoint
+        /// boundaries; this never grants another agent access to private history.</summary>
+        public IReadOnlyList<MultiAgentPromptProfile> PublicPrefixCandidates { get; set; }
     }
 
     internal sealed class ChatGenerationPipeline : IDisposable
@@ -603,6 +609,9 @@ namespace TensorSharp.Server
             // from a copy (see SequenceState.SharedPrefixTokens).
             int sharedPrefixTokens = ComputeSharedPrefixTokens(
                 model, renderHistory, inputTokens, arch, tools, enableThinking, reasoningEffort);
+            IReadOnlyList<int> publicCheckpointBoundaries = ComputePublicCheckpointBoundaries(
+                model, inputTokens, sharedPrefixTokens, turnContext.PublicPrefixCandidates,
+                arch, enableThinking, reasoningEffort);
 
             var seq = new SequenceState(
                 requestId: requestId,
@@ -614,7 +623,8 @@ namespace TensorSharp.Server
                 mediaSpans: mediaSpans,
                 cacheBreakpoints: explicitBreakpoints,
                 sharedPrefixTokens: sharedPrefixTokens,
-                cacheScope: cacheScope);
+                cacheScope: cacheScope,
+                publicCheckpointBoundaries: publicCheckpointBoundaries);
 
             promptSw.Stop();
             long promptNs = InferenceTelemetry.ToNanos(promptSw.ElapsedTicks);
@@ -1262,6 +1272,35 @@ namespace TensorSharp.Server
                 _logger.LogDebug(ex, "shared prefix could not be measured; no checkpoint for this turn");
                 return 0;
             }
+        }
+
+        /// <summary>Find one public ancestor shared by all prompt profiles in an
+        /// agent tree. Recurrent models must capture their state at that exact
+        /// boundary while the parent prefills; a later snapshot cannot be trimmed
+        /// backwards. One ancestor plus the complete public prefix fits the default
+        /// two-checkpoint budget without an intermediate profile evicting it.</summary>
+        internal IReadOnlyList<int> ComputePublicCheckpointBoundaries(
+            ModelBase model, List<int> promptTokens, int sharedPrefixTokens,
+            IReadOnlyList<MultiAgentPromptProfile> candidates, string arch,
+            bool enableThinking, string reasoningEffort = null)
+        {
+            if (sharedPrefixTokens < MinSharedPrefixTokens || candidates is not { Count: > 0 })
+                return Array.Empty<int>();
+
+            int common = sharedPrefixTokens;
+            foreach (MultiAgentPromptProfile candidate in candidates)
+            {
+                // ComputeSharedPrefixTokens renders only leading governing messages,
+                // rejects media, and caches by tokenizer, template, full tool schema
+                // and reasoning settings. The current public length is an independent
+                // upper bound: neither a task nor a private transcript can be exposed.
+                int matching = ComputeSharedPrefixTokens(model,
+                    new List<ChatMessage>(candidate.Messages), promptTokens, arch,
+                    new List<ToolFunction>(candidate.Tools), enableThinking, reasoningEffort);
+                common = Math.Min(common, matching);
+                if (common < MinSharedPrefixTokens) return Array.Empty<int>();
+            }
+            return common < sharedPrefixTokens ? new[] { common } : Array.Empty<int>();
         }
 
         /// <summary>

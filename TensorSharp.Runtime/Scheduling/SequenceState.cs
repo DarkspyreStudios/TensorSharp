@@ -33,7 +33,8 @@ namespace TensorSharp.Runtime.Scheduling
             IReadOnlyList<PromptMediaSpan>? mediaSpans = null,
             IReadOnlyList<int>? cacheBreakpoints = null,
             int sharedPrefixTokens = 0,
-            string? cacheScope = null)
+            string? cacheScope = null,
+            IReadOnlyList<int>? publicCheckpointBoundaries = null)
         {
             if (promptTokens == null) throw new ArgumentNullException(nameof(promptTokens));
             if (promptTokens.Count == 0) throw new ArgumentException("Prompt must be non-empty.", nameof(promptTokens));
@@ -74,6 +75,14 @@ namespace TensorSharp.Runtime.Scheduling
             // checkpoint serves a later, longer chat prompt. Admission separately
             // leaves one token to forward when matching the current request.
             SharedPrefixTokens = Math.Clamp(sharedPrefixTokens, 0, promptTokens.Count);
+            var boundaries = new SortedSet<int>();
+            if (publicCheckpointBoundaries is not null)
+                foreach (int boundary in publicCheckpointBoundaries)
+                    if (boundary > 0 && boundary <= SharedPrefixTokens) boundaries.Add(boundary);
+            if (SharedPrefixTokens > 0) boundaries.Add(SharedPrefixTokens);
+            var boundaryCopy = new int[boundaries.Count];
+            boundaries.CopyTo(boundaryCopy);
+            PublicCheckpointBoundaries = Array.AsReadOnly(boundaryCopy);
         }
 
         /// <summary>
@@ -84,6 +93,25 @@ namespace TensorSharp.Runtime.Scheduling
         /// prefix from a clone of it. See <c>IBatchedPagedModel.SupportsPrefixCheckpoints</c>.
         /// </summary>
         public int SharedPrefixTokens { get; }
+
+        /// <summary>Exact state checkpoints within the declared public prefix, in
+        /// ascending order. Earlier boundaries allow recurrent models to reuse a
+        /// common ancestor of prompts whose later system instructions or tools differ.
+        /// These hints never expand <see cref="SharedPrefixTokens"/> or override an
+        /// explicit <see cref="CacheBreakpoints"/> policy.</summary>
+        public IReadOnlyList<int> PublicCheckpointBoundaries { get; }
+
+        internal bool IsPublicCheckpointBoundary(int length)
+        {
+            bool declared = false;
+            foreach (int boundary in PublicCheckpointBoundaries)
+                if (boundary == length) { declared = true; break; }
+            if (!declared) return false;
+            if (CacheBreakpoints is null) return true;
+            foreach (int boundary in CacheBreakpoints)
+                if (boundary == length) return true;
+            return false;
+        }
 
         /// <summary>Set once the executor has taken (or found) a checkpoint for this
         /// sequence's shared prefix, so the prefill stops aligning to it.</summary>

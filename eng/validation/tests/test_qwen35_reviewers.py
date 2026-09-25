@@ -49,6 +49,35 @@ class Qwen35ReviewersTests(unittest.TestCase):
             self.assertEqual(result[label], {key: REVIEWERS.EXPECTED[label][key]
                                              for key in REVIEWERS.REQUIRED})
 
+    def test_per_unit_input_rows_do_not_replace_total_cost_metrics(self):
+        table = LITERAL_TABLE.replace(
+            "| Total cost |", "| Variable cost per unit / customer | $13 | $7 |\n"
+            "| Total variable cost | $1,560 | $1,400 |\n| Total cost |")
+        result = REVIEWERS.verify_table(table)
+        self.assertEqual(result["A"]["variable_cost"], 1560)
+        self.assertEqual(result["B"]["variable_cost"], 1400)
+        with self.assertRaisesRegex(ValueError, "Proposal A variable_cost"):
+            REVIEWERS.verify_table(table.replace("$1,560", "$1,500"))
+
+    def test_per_customer_input_column_is_not_a_total_cost_column(self):
+        table = """| Proposal | Revenue | Variable cost per customer | Total variable cost | Total cost | Actual profit | Profit overstatement |
+|---|---|---|---|---|---|---|
+| A | $3,000 | $13 | $1,560 | $1,860 | $1,140 | $160 |
+| B | $3,600 | $7 | $1,400 | $1,800 | $1,800 | $100 |
+"""
+        result = REVIEWERS.verify_table(table)
+        self.assertEqual(result["A"]["variable_cost"], 1560)
+        self.assertEqual(result["B"]["variable_cost"], 1400)
+
+    def test_overstated_literal_qualifier_preserves_exact_amount_and_direction(self):
+        table = LITERAL_TABLE.replace("| $160 | $100 |", "| **$160 overstated** | $100 overstated |")
+        self.assertEqual(REVIEWERS.verify_table(table), REVIEWERS.verify_table(LITERAL_TABLE))
+        for incorrect in (table.replace("$160", "$159"), table.replace("overstated**", "understated**"),
+                          table.replace("**$3,000**", "**$3,000 overstated**")):
+            with self.subTest(incorrect=incorrect):
+                with self.assertRaises(ValueError):
+                    REVIEWERS.verify_table(incorrect)
+
     def test_literals_and_annotations_remain_supported(self):
         for cell in ("$3,000", "**$3,000**", "*$3,000*", "_3000_",
                      "`$3,000`", "$3,000 USD", "$3,000 (120 x $25)"):

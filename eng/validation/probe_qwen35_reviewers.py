@@ -67,6 +67,10 @@ def metric(cell):
     if "revenue" in label:
         return "revenue"
     if "cost" in label:
+        # Per-unit inputs are not the aggregate cost metrics checked below. A
+        # detailed comparison can legitimately include both rows/columns.
+        if re.search(r"\bper[\s-]+(?:unit|customer)\b", label):
+            return None
         if "variable" in label:
             return "variable_cost"
         if "fixed" in label:
@@ -140,7 +144,7 @@ def arithmetic_value(expression):
         raise ValueError(f"Invalid table arithmetic: {expression!r}") from error
 
 
-def monetary_value(cell):
+def monetary_value(cell, *, allow_overstated=False):
     # Remove paired Markdown emphasis, retaining single arithmetic '*'.
     cleaned = re.sub(r"(?<![\d.)])(?:\*\*(.+?)\*\*|__(.+?)__)(?![\d.(])", lambda match:
                      match.group(1) or match.group(2), cell).replace("`", "").strip()
@@ -161,7 +165,8 @@ def monetary_value(cell):
     # "$3,000 (120 x $25)"; an annotation is not itself an asserted equation.
     match = re.fullmatch(
         r"\s*\$?\s*([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
-        r"\s*(?:USD)?\s*(?:\([^\n]*\))?\s*", cleaned, re.I)
+        r"\s*(?:USD)?\s*(?:\([^\n]*\))?"
+        + (r"(?:\s+overstated)?" if allow_overstated else "") + r"\s*", cleaned, re.I)
     if not match:
         raise ValueError(f"Cannot verify table monetary value: {cell!r}")
     return Decimal(match.group(1).replace(",", ""))
@@ -191,7 +196,7 @@ def verify_table(answer):
         def record(label, name, cell):
             if name in values[label]:
                 raise ValueError(f"Duplicate {label} / {name} entry in comparison table")
-            value = monetary_value(cell)
+            value = monetary_value(cell, allow_overstated=name == "overstatement")
             if value != EXPECTED[label][name]:
                 raise ValueError(f"Proposal {label} {name}: expected {EXPECTED[label][name]}, got {value}")
             values[label][name] = float(value)

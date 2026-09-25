@@ -74,6 +74,251 @@ public class RadixHolderEngineTests
         Assert.Equal(16, (await Run(restarted, after)).PrefixCacheReusedTokens);
     }
 
+    [Fact]
+    public void PublicCheckpointBoundaries_AreImmutableHintsWithinThePublicPrefix()
+    {
+        var hints = new List<int> { 19, -1, 0, 19, 70, 11 };
+        var sequence = new SequenceState("hints", Tokens(61), 3, 8, SamplingConfig.Greedy,
+            sharedPrefixTokens: 37, publicCheckpointBoundaries: hints);
+        hints.Clear();
+        Assert.Equal(new[] { 11, 19, 37 }, sequence.PublicCheckpointBoundaries);
+        Assert.Equal(37, sequence.SharedPrefixTokens);
+    }
+
+    [Fact]
+    public async Task ParentAndChildren_ReuseExactAncestorThenFullBranches_WithinTwoPublicSlots()
+    {
+        const string setting = "TS_PREFIX_CHECKPOINTS_MAX";
+        string? previous = Environment.GetEnvironmentVariable(setting);
+        Environment.SetEnvironmentVariable(setting, "2");
+        try
+        {
+            const int ancestor = 19, parentPublic = 47, childPublic = 43;
+            var parentPrompt = Tokens(61);
+            var childPrefix = Tokens(ancestor).Concat(Tokens(childPublic - ancestor, 81)).ToList();
+            var prompts = new[] { childPrefix.Concat(Tokens(18, 121)).ToList(), childPrefix.Concat(Tokens(19, 151)).ToList() };
+            var gate = new ComputeGate();
+            var model = new CountingRecurrentOracle();
+            using var engine = new InferenceEngine(model, Configuration()) { ComputeGate = gate };
+            var parent = new SequenceState("parent", parentPrompt, 3, 8, SamplingConfig.Greedy,
+                cacheScope: "root", sharedPrefixTokens: parentPublic, publicCheckpointBoundaries: new[] { ancestor });
+            await Run(engine, parent);
+            Assert.Contains(model.RetainedPayloadKeys, key => model.MeasureEndState(key).Tokens == ancestor);
+
+            gate.Close();
+            int before = model.ForwardedTokens;
+            var children = prompts.Select((prompt, index) => new SequenceState("child-" + index, prompt, 3, 8,
+                SamplingConfig.Greedy, cacheScope: "child-scope-" + index, sharedPrefixTokens: childPublic,
+                publicCheckpointBoundaries: new[] { ancestor })).ToArray();
+            var handles = children.Select(child => engine.SubmitRequest(child)).ToArray();
+            gate.Open();
+            var completions = await Task.WhenAll(handles.Select(handle => handle.Completion)).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(ancestor, completions[0].PrefixCacheReusedTokens);
+            Assert.Equal(childPublic, completions[1].PrefixCacheReusedTokens);
+            int forwarded = model.ForwardedTokens - before;
+
+            var coldModel = new CountingRecurrentOracle();
+            using var cold = new InferenceEngine(coldModel, Configuration(false));
+            foreach (var child in children)
+            {
+                var reference = Request("cold-" + child.RequestId, child.PromptTokens);
+                await Run(cold, reference);
+                Assert.Equal(reference.OutputTokens, child.OutputTokens);
+            }
+            Assert.Equal(ancestor + childPublic, coldModel.ForwardedTokens - forwarded);
+            // Three public states cannot fit. Once both branches are available,
+            // the shorter ancestor is evicted instead of either warm endpoint.
+            Assert.DoesNotContain(model.RetainedPayloadKeys, key => model.MeasureEndState(key).Tokens == ancestor);
+            var warmParent = Request("warm-parent", parentPrompt, "new-root", shared: parentPublic);
+            Assert.Equal(parentPublic, (await Run(engine, warmParent)).PrefixCacheReusedTokens);
+            Assert.Equal(parent.OutputTokens, warmParent.OutputTokens);
+            var warmChild = Request("warm-child", prompts[0], "new-child", shared: childPublic);
+            Assert.Equal(childPublic, (await Run(engine, warmChild)).PrefixCacheReusedTokens);
+            Assert.Equal(children[0].OutputTokens, warmChild.OutputTokens);
+        }
+        finally { Environment.SetEnvironmentVariable(setting, previous); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AncestorCheckpoint_RespectsExplicitProducerPolicy(bool marked)
+    {
+        using var engine = new InferenceEngine(OracleFakes.R(8), Configuration());
+        var parent = new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+            cacheScope: "root", sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 },
+            cacheBreakpoints: marked ? new[] { 19 } : Array.Empty<int>());
+        await Run(engine, parent);
+        var child = new SequenceState("child", Tokens(19).Concat(Tokens(42, 81)).ToList(), 3, 8,
+            SamplingConfig.Greedy, cacheScope: "child", sharedPrefixTokens: 43,
+            publicCheckpointBoundaries: new[] { 19 });
+        Assert.Equal(marked ? 19 : 0, (await Run(engine, child)).PrefixCacheReusedTokens);
+        using var cold = new InferenceEngine(OracleFakes.R(8), Configuration(false));
+        var reference = Request("reference", child.PromptTokens);
+        await Run(cold, reference);
+        Assert.Equal(reference.OutputTokens, child.OutputTokens);
+    }
+
+    [Fact]
+    public async Task AncestorCheckpoint_IsRestoredForADifferentFullPrefixAfterRestart()
+    {
+        var store = new MultipleCheckpointStore();
+        using (var seed = new InferenceEngine(OracleFakes.R(8), Configuration()))
+        {
+            seed.PrefixCheckpointStore = store;
+            await Run(seed, new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+                sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 }));
+        }
+        Assert.Equal(new[] { 19, 47 }, store.SavedLengths.Order());
+        using var engine = new InferenceEngine(OracleFakes.R(8), Configuration());
+        engine.PrefixCheckpointStore = store;
+        var child = new SequenceState("child", Tokens(19).Concat(Tokens(42, 81)).ToList(), 3, 8,
+            SamplingConfig.Greedy, cacheScope: "child", sharedPrefixTokens: 43,
+            publicCheckpointBoundaries: new[] { 19 });
+        Assert.Equal(19, (await Run(engine, child)).PrefixCacheReusedTokens);
+        Assert.Equal(new[] { 43, 19 }, store.OpenedLengths.TakeLast(2));
+        using var cold = new InferenceEngine(OracleFakes.R(8), Configuration(false));
+        var reference = Request("reference", child.PromptTokens);
+        await Run(cold, reference);
+        Assert.Equal(reference.OutputTokens, child.OutputTokens);
+    }
+
+    [Fact]
+    public async Task ResidentFullCheckpoint_PreventsImportingAnEvictedShorterAncestor_AfterEarlierDiskMiss()
+    {
+        const string setting = "TS_PREFIX_CHECKPOINTS_MAX";
+        string? previous = Environment.GetEnvironmentVariable(setting);
+        Environment.SetEnvironmentVariable(setting, "2");
+        try
+        {
+            var store = new MultipleCheckpointStore();
+            using var engine = new InferenceEngine(OracleFakes.R(8), Configuration());
+            engine.PrefixCheckpointStore = store;
+            await Run(engine, new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+                cacheScope: "parent", sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 }));
+            await Run(engine, new SequenceState("child", Tokens(19).Concat(Tokens(42, 81)).ToList(), 3, 8,
+                SamplingConfig.Greedy, cacheScope: "child", sharedPrefixTokens: 43,
+                publicCheckpointBoundaries: new[] { 19 }));
+            int opens = store.OpenedLengths.Count;
+            var next = new SequenceState("next-parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+                cacheScope: "next-parent", sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 });
+            Assert.Equal(47, (await Run(engine, next)).PrefixCacheReusedTokens);
+            Assert.Equal(opens, store.OpenedLengths.Count);
+        }
+        finally { Environment.SetEnvironmentVariable(setting, previous); }
+    }
+
+    [Fact]
+    public async Task SavedAncestor_ClearsEarlierDiskMiss_AndRestoresForAThirdBranchWithinTwoPublicSlots()
+    {
+        const string setting = "TS_PREFIX_CHECKPOINTS_MAX";
+        string? previous = Environment.GetEnvironmentVariable(setting);
+        Environment.SetEnvironmentVariable(setting, "2");
+        try
+        {
+            var store = new MultipleCheckpointStore();
+            var model = OracleFakes.R(8);
+            using var engine = new InferenceEngine(model, Configuration());
+            engine.PrefixCheckpointStore = store;
+            await Run(engine, new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+                cacheScope: "parent", sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 }));
+            Assert.Contains(19, store.OpenedLengths); // Missed before the parent captured it.
+            await Run(engine, new SequenceState("child", Tokens(19).Concat(Tokens(42, 81)).ToList(), 3, 8,
+                SamplingConfig.Greedy, cacheScope: "child", sharedPrefixTokens: 43,
+                publicCheckpointBoundaries: new[] { 19 }));
+            Assert.DoesNotContain(model.RetainedPayloadKeys, key => model.MeasureEndState(key).Tokens == 19);
+            int previousAncestorOpens = store.OpenedLengths.Count(length => length == 19);
+            var third = new SequenceState("third-role", Tokens(19).Concat(Tokens(42, 141)).ToList(), 3, 8,
+                SamplingConfig.Greedy, cacheScope: "third-role", sharedPrefixTokens: 41,
+                publicCheckpointBoundaries: new[] { 19 });
+            Assert.Equal(19, (await Run(engine, third)).PrefixCacheReusedTokens);
+            Assert.Equal(previousAncestorOpens + 1, store.OpenedLengths.Count(length => length == 19));
+            Assert.DoesNotContain(model.RetainedPayloadKeys, key => model.MeasureEndState(key).Tokens == 19);
+            Assert.InRange(model.RetainedPayloadKeys.Count(key => model.MeasureEndState(key).Tokens is 19 or 41 or 43 or 47), 1, 2);
+            using var cold = new InferenceEngine(OracleFakes.R(8), Configuration(false));
+            var reference = Request("reference", third.PromptTokens);
+            await Run(cold, reference);
+            Assert.Equal(reference.OutputTokens, third.OutputTokens);
+        }
+        finally { Environment.SetEnvironmentVariable(setting, previous); }
+    }
+
+    [Fact]
+    public async Task LegacyFullCheckpoint_DoesNotInventAnEarlierRecurrentState()
+    {
+        var store = new MultipleCheckpointStore();
+        using (var legacy = new InferenceEngine(OracleFakes.R(8), Configuration()))
+        {
+            legacy.PrefixCheckpointStore = store;
+            await Run(legacy, Request("legacy-parent", Tokens(61), "root", shared: 47));
+        }
+        Assert.Equal(new[] { 47 }, store.SavedLengths);
+        using var engine = new InferenceEngine(OracleFakes.R(8), Configuration());
+        engine.PrefixCheckpointStore = store;
+        var parent = new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+            cacheScope: "root", sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 });
+        Assert.Equal(47, (await Run(engine, parent)).PrefixCacheReusedTokens);
+        var prompt = Tokens(19).Concat(Tokens(42, 81)).ToList();
+        var child = new SequenceState("child", prompt, 3, 8, SamplingConfig.Greedy,
+            cacheScope: "child", sharedPrefixTokens: 43, publicCheckpointBoundaries: new[] { 19 });
+        Assert.Equal(0, (await Run(engine, child)).PrefixCacheReusedTokens);
+        var warm = Request("warm-child", prompt, "new-child", shared: 43);
+        Assert.Equal(43, (await Run(engine, warm)).PrefixCacheReusedTokens);
+        using var cold = new InferenceEngine(OracleFakes.R(8), Configuration(false));
+        var reference = Request("reference", prompt);
+        await Run(cold, reference);
+        Assert.Equal(reference.OutputTokens, child.OutputTokens);
+        Assert.Equal(reference.OutputTokens, warm.OutputTokens);
+    }
+
+    [Fact]
+    public void PendingAncestorCheckpoint_CanServeADifferentFullPublicPrefix()
+    {
+        using var model = OracleFakes.R(8);
+        var (_, cache) = PendingCheckpointScheduler(model);
+        var parent = new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+            sharedPrefixTokens: 47, publicCheckpointBoundaries: new[] { 19 });
+        parent.Status = SequenceStatus.Running;
+        var child = new SequenceState("child", Tokens(19).Concat(Tokens(42, 81)).ToList(), 3, 8,
+            SamplingConfig.Greedy, sharedPrefixTokens: 43, publicCheckpointBoundaries: new[] { 19 });
+        Assert.True(cache!.CanSharePendingPublicCheckpoint(child, parent));
+        Assert.False(cache.CanSharePendingPublicCheckpoint(child, parent, reusableLength: 19));
+        var noReuse = new SequenceState("disabled", child.PromptTokens, 3, 8, SamplingConfig.Greedy,
+            sharedPrefixTokens: 43, publicCheckpointBoundaries: new[] { 19 }, cacheBreakpoints: Array.Empty<int>());
+        Assert.False(cache.CanSharePendingPublicCheckpoint(noReuse, parent));
+        parent.Status = SequenceStatus.FinishedAborted;
+        Assert.False(cache.CanSharePendingPublicCheckpoint(child, parent));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DisabledPublicCheckpoints_DoNotSplitPrefill_ButPreservePrivateBreakpoints(bool privateBreakpoint)
+    {
+        const string publicSetting = "TS_PREFIX_CHECKPOINTS", retainedSetting = "TS_RETAINED_FUSED_CACHE";
+        string? previousPublic = Environment.GetEnvironmentVariable(publicSetting);
+        string? previousRetained = Environment.GetEnvironmentVariable(retainedSetting);
+        Environment.SetEnvironmentVariable(publicSetting, "0");
+        Environment.SetEnvironmentVariable(retainedSetting, "1");
+        try
+        {
+            using var model = OracleFakes.R(8);
+            var (scheduler, cache) = PendingCheckpointScheduler(model);
+            Assert.True(cache!.CheckpointsSupported);
+            Assert.False(cache.PublicCheckpointsSupported);
+            var sequence = new SequenceState("parent", Tokens(61), 3, 8, SamplingConfig.Greedy,
+                sharedPrefixTokens: 37, publicCheckpointBoundaries: new[] { 11 },
+                cacheBreakpoints: privateBreakpoint ? new[] { 53 } : null);
+            scheduler.Submit(sequence);
+            Assert.Equal(privateBreakpoint ? 53 : 61, Assert.Single(scheduler.Schedule().ScheduledWork).NumScheduledTokens);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(publicSetting, previousPublic);
+            Environment.SetEnvironmentVariable(retainedSetting, previousRetained);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -571,6 +816,32 @@ public class RadixHolderEngineTests
             writePayload(stream);
             _tokens = prefixTokens.ToArray();
             Bytes = stream.ToArray();
+            return true;
+        }
+    }
+
+    private sealed class MultipleCheckpointStore : IPrefixCheckpointStore
+    {
+        private readonly Dictionary<string, byte[]> _payloads = new();
+        internal readonly List<int> SavedLengths = new();
+        internal readonly List<int> OpenedLengths = new();
+        public bool TryOpen(string modelFingerprint, ReadOnlySpan<int> prefixTokens, out Stream payload)
+        {
+            OpenedLengths.Add(prefixTokens.Length);
+            if (_payloads.TryGetValue(modelFingerprint + ":" + string.Join(',', prefixTokens.ToArray()), out byte[]? bytes))
+            {
+                payload = new MemoryStream(bytes, writable: false);
+                return true;
+            }
+            payload = null!;
+            return false;
+        }
+        public bool Save(string modelFingerprint, ReadOnlySpan<int> prefixTokens, Action<Stream> writePayload)
+        {
+            using var stream = new MemoryStream();
+            writePayload(stream);
+            _payloads[modelFingerprint + ":" + string.Join(',', prefixTokens.ToArray())] = stream.ToArray();
+            SavedLengths.Add(prefixTokens.Length);
             return true;
         }
     }

@@ -1507,16 +1507,53 @@ internal sealed class PrefixTree
     }
 
     /// <summary>Count sub-caps (DEC-20): scoped end states, public end states, native slots. Oldest first, ceiling ScopeNewest.</summary>
-    internal bool EnforceCountSubCaps()
+    internal bool EnforceCountSubCaps(RadixNode? requestedPublicState = null)
     {
         bool ok = true;
         ok &= EnforceCount(() => _options.ScopedEndStateLeavesMax > 0 && _scopedEndStates > _options.ScopedEndStateLeavesMax,
                            n => n.ScopeIx != 0 && n.EndState!.Kind != EndStateKind.PrimaryResident);
+        while (_publicEndStates > _options.PublicMax && FindCoveredPublicAncestor(requestedPublicState) is { } ancestor)
+        {
+            // Once both branches have their own exact checkpoints, keeping the
+            // shorter common state at the expense of a longer endpoint makes
+            // every warm request recompute that endpoint. Before both branches
+            // exist the ancestor remains available for the first new branch.
+            DetachEndState(ancestor, ReleaseReason.Evicted);
+            CollectFrom(ancestor);
+            Counters.Evictions++;
+        }
         ok &= EnforceCount(() => _publicEndStates > _options.PublicMax,
                            n => n.ScopeIx == 0 && n.EndState!.Kind != EndStateKind.PrimaryResident);
         ok &= EnforceCount(() => Caps.MaxRetainedNativeSlots > 0 && _nativeSlots > Caps.MaxRetainedNativeSlots,
                            n => n.EndState!.Kind == EndStateKind.NativeSlot);
         return ok;
+    }
+
+    private RadixNode? FindCoveredPublicAncestor(RadixNode? requestedPublicState)
+    {
+        RadixNode? victim = null;
+        foreach (RadixNode candidate in _publicBoundaries)
+        {
+            if (candidate.EndState is null || candidate.EndState.Kind == EndStateKind.PrimaryResident
+                || candidate.StateLockRef != 0 || candidate.PinRef != 0 || candidate.IsDonationPending
+                || ReferenceEquals(candidate, requestedPublicState))
+                continue;
+            RadixNode? firstBranch = null;
+            foreach (RadixNode descendant in _publicBoundaries)
+            {
+                if (descendant.EndState is null || descendant.Depth <= candidate.Depth) continue;
+                RadixNode branch = descendant;
+                while (branch.Parent is { } parent && parent.Depth > candidate.Depth) branch = parent;
+                if (!ReferenceEquals(branch.Parent, candidate)) continue;
+                if (firstBranch is null) firstBranch = branch;
+                else if (!ReferenceEquals(branch, firstBranch))
+                {
+                    if (victim is null || candidate.LastAccess < victim.LastAccess) victim = candidate;
+                    break;
+                }
+            }
+        }
+        return victim;
     }
 
     private bool EnforceCount(Func<bool> exceeded, Func<RadixNode, bool> category)

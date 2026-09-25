@@ -11,6 +11,71 @@ namespace InferenceWeb.Tests;
 
 public sealed class MultiAgentToolSchemaTests
 {
+    [Fact]
+    public void MergeUsesAStableSharedToolPrefixWithoutChangingSchemasOrInputs()
+    {
+        var suppliedWait = new ToolFunction { Name = MultiAgentTools.Wait, Description = "Keep this existing schema." };
+        var input = new List<ToolFunction>
+        {
+            new() { Name = "client_lookup" },
+            new() { Name = SkillTools.ReadToolName },
+            new() { Name = SkillTools.RunToolName },
+            suppliedWait,
+            new() { Name = SkillToolNames.ReadFile },
+            new() { Name = "client_submit" },
+        };
+        ToolFunction[] originalObjects = input.ToArray();
+        string originalSchemas = JsonSerializer.Serialize(input);
+        List<ToolFunction> merged = MultiAgentTools.Merge(input);
+        Assert.Equal(new[]
+        {
+            SkillTools.ReadToolName, MultiAgentTools.Wait, SkillToolNames.ReadFile,
+            MultiAgentTools.Spawn, MultiAgentTools.Send, MultiAgentTools.Close, MultiAgentTools.List,
+            "client_lookup", SkillTools.RunToolName, "client_submit",
+        }, merged.Select(tool => tool.Name));
+        Assert.Equal(originalObjects, input);
+        Assert.Equal(originalSchemas, JsonSerializer.Serialize(input));
+        foreach (ToolFunction original in originalObjects)
+            Assert.Same(original, Assert.Single(merged, tool => tool.Name == original.Name));
+        Assert.Same(suppliedWait, Assert.Single(merged, tool => tool.Name == MultiAgentTools.Wait));
+        Assert.Equal(merged, MultiAgentTools.Merge(merged));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ParentAndReadOnlyProfilesShareAllToolDeclarationsWithoutGrantingMutation(bool allowWorkerTools)
+    {
+        var tools = SkillTools.BuiltIn(allowScripts: true);
+        tools.Add(new() { Name = SkillToolNames.Shell, Description = "Execute a workspace command." });
+        tools.Add(new() { Name = "client_submit", Description = "An external client tool." });
+        List<ToolFunction> parentTools = MultiAgentTools.Merge(tools);
+        var messages = new List<ChatMessage> { new() { Role = "system", Content = "Preserve governing instructions." } };
+        await using var session = new MultiAgentSession(messages, parentTools, new SkillToolContext([]),
+            _ => (_, _, _) => Task.FromResult(new SkillTurnOutput(new ParsedOutput { Content = "unused" })),
+            new MultiAgentOptions { Enabled = true, AllowWorkerTools = allowWorkerTools });
+        string parent = ChatTemplate.RenderQwen35(messages, tools: parentTools);
+        IReadOnlyList<MultiAgentPromptProfile> profiles = session.GetPromptProfiles();
+        foreach (MultiAgentPromptProfile profile in profiles)
+        {
+            Assert.DoesNotContain(profile.Tools, tool => tool.Name == "client_submit");
+            bool readOnly = profile.Messages[0].Content!.Contains("You are read-only.");
+            if (!readOnly)
+            {
+                Assert.True(allowWorkerTools);
+                Assert.Contains(profile.Tools, tool => tool.Name == SkillTools.RunToolName);
+                Assert.Contains(profile.Tools, tool => tool.Name == SkillToolNames.Shell);
+                continue;
+            }
+            Assert.DoesNotContain(profile.Tools, tool => tool.Name is SkillTools.RunToolName or SkillToolNames.Shell);
+            Assert.Equal(JsonSerializer.Serialize(parentTools.Take(profile.Tools.Count)), JsonSerializer.Serialize(profile.Tools));
+            string child = ChatTemplate.RenderQwen35(profile.Messages.ToList(), tools: profile.Tools.ToList());
+            int childToolsEnd = child.IndexOf("\n</tools>", StringComparison.Ordinal);
+            Assert.True(childToolsEnd > 0);
+            Assert.StartsWith(child[..childToolsEnd], parent);
+        }
+    }
+
     [Theory]
     [InlineData("system")]
     [InlineData("developer")]

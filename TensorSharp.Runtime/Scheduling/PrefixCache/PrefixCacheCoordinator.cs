@@ -75,6 +75,7 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
     private static bool PublicCheckpointsEnabled
         => ExecutionOptions.FromEnvironment() is { PrefixCheckpointsEnabled: true, PrefixCheckpointBudget: > 0 };
     internal bool CheckpointsSupported => _tree.Caps.CanCaptureCopy && (PublicCheckpointsEnabled || RetentionEnabled);
+    internal bool PublicCheckpointsSupported => PublicCheckpointsEnabled && CheckpointsSupported;
     internal string? LastSource { get; private set; }
     internal int LastBlockedByScope { get; private set; }
     internal IPrefixCheckpointStore? CheckpointStore
@@ -167,29 +168,29 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         return _plan.Length;
     }
 
-    /// <summary>A cold request can wait for an exact public checkpoint that this step's
+    /// <summary>A new request can wait for a longer exact public checkpoint that this step's
     /// producer is still computing. This is only a scheduling hint: admission must
     /// subsequently match and materialize the published payload through the tree.</summary>
-    internal bool CanSharePendingPublicCheckpoint(SequenceState sequence, SequenceState producer)
+    internal bool CanSharePendingPublicCheckpoint(SequenceState sequence, SequenceState producer, int reusableLength = 0)
     {
-        int length = sequence.SharedPrefixTokens;
         if (!PublicCheckpointsEnabled || !CheckpointsSupported
             || PredictRoute() != ExpectedRoute.PerSequenceFused
-            || length <= 0 || sequence.FirstScheduledAt is not null || sequence.NumComputedTokens != 0
+            || sequence.SharedPrefixTokens <= 0 || sequence.FirstScheduledAt is not null || sequence.NumComputedTokens != 0
             || sequence.PrefixCacheReusedTokens != 0 || ReferenceEquals(sequence, producer)
-            || producer.Status != SequenceStatus.Running || producer.SharedPrefixTokens != length
-            || producer.PrefixCheckpointTaken || producer.NumComputedTokens >= length)
+            || producer.Status != SequenceStatus.Running)
             return false;
 
-        // Explicit breakpoint lists suppress all unmarked captures, including an
-        // empty list. Do not wait for a checkpoint the producer will never publish.
-        if (producer.CacheBreakpoints is not null)
+        foreach (int length in producer.PublicCheckpointBoundaries)
         {
-            bool marked = false;
-            foreach (int boundary in producer.CacheBreakpoints)
-                if (boundary == length) { marked = true; break; }
-            if (!marked) return false;
+            if (length <= reusableLength || length <= producer.NumComputedTokens
+                || length > sequence.SharedPrefixTokens || !producer.IsPublicCheckpointBoundary(length)) continue;
+            if (MatchesPublicPrefix(sequence, producer, length)) return true;
         }
+        return false;
+    }
+
+    private bool MatchesPublicPrefix(SequenceState sequence, SequenceState producer, int length)
+    {
         var request = BuildRequest(sequence, ExpectedRoute.PerSequenceFused);
         if (_tree.Rules.ClampLength(length, request) != length) return false;
         KeyRope source = GetKey(producer);
@@ -289,7 +290,7 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
     {
         if (!CheckpointsSupported) return;
         int length = sequence.NumComputedTokens;
-        bool publicBoundary = length == sequence.SharedPrefixTokens && !sequence.PrefixCheckpointTaken;
+        bool publicBoundary = sequence.IsPublicCheckpointBoundary(length);
         // Recurrent caches cannot rewind the generated tail. Keep the exact prompt
         // boundary in its private scope so retries and branches can resume there.
         bool promptBoundary = length == sequence.PromptTokens.Count && sequence.CacheScope is not null;
@@ -302,9 +303,10 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         }
         if (length <= 0 || (!publicBoundary && !explicitBoundary && !promptBoundary)) return;
         if (length <= sequence.SharedPrefixTokens ? !PublicCheckpointsEnabled : !RetentionEnabled) return;
-        if (publicBoundary) sequence.PrefixCheckpointTaken = true;
+        if (publicBoundary && length == sequence.SharedPrefixTokens) sequence.PrefixCheckpointTaken = true;
         Drain();
-        RadixNode node = _tree.Insert(GetKey(sequence), length, GetScope(sequence), sequence.SharedPrefixTokens,
+        RadixNode node = _tree.Insert(GetKey(sequence), length, GetScope(sequence),
+            publicBoundary ? length : sequence.SharedPrefixTokens,
             explicitBoundary ? NodeFlags.EndsAtBreakpoint : promptBoundary ? NodeFlags.PromptEnd : NodeFlags.None,
             GetSpans(sequence));
         if (node.EndState is not null) return;
@@ -454,10 +456,10 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
                 _tree.RetireScope(scope.Id);
     }
 
-    private void Trim()
+    private void Trim(RadixNode? requestedPublicState = null)
     {
         Drain();
-        _tree.EnforceCountSubCaps();
+        _tree.EnforceCountSubCaps(requestedPublicState);
         // Public prefixes have eviction priority, not an exemption from byte caps.
         _tree.EnforceCaps(EvictionTier.PublicTop);
         Drain();
@@ -494,19 +496,37 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         return tokens;
     }
 
+    private static long PrefixStoreHash(ReadOnlySpan<int> tokens)
+    {
+        long hash = 1469598103934665603L;
+        foreach (int token in tokens) hash = unchecked((hash ^ token) * 1099511628211L);
+        return hash;
+    }
+
     private void TryRestoreCheckpoint(SequenceState sequence)
     {
         var store = CheckpointStore;
-        int length = sequence.SharedPrefixTokens;
-        if (store is null || !PublicCheckpointsEnabled || !CheckpointsSupported || !_tree.Caps.Persistable || length <= 0
+        if (store is null || !PublicCheckpointsEnabled || !CheckpointsSupported || !_tree.Caps.Persistable
             || sequence.CacheBreakpoints is not null || sequence.MediaSpans.Count > 0) return;
+        // Longest first: loading a shorter ancestor must not evict an already
+        // usable descendant when the checkpoint budget is small.
+        _tree.Plan(BuildRequest(sequence, PredictRoute()), _plan);
+        int residentLength = _plan.Length;
+        for (int i = sequence.PublicCheckpointBoundaries.Count - 1; i >= 0; i--)
+            if (sequence.PublicCheckpointBoundaries[i] > residentLength
+                && TryRestoreCheckpoint(sequence, store, sequence.PublicCheckpointBoundaries[i])) return;
+    }
+
+    private bool TryRestoreCheckpoint(SequenceState sequence, IPrefixCheckpointStore store, int length)
+    {
         int[] tokens = PrefixTokens(sequence, length);
-        long hash = 1469598103934665603L;
-        foreach (int token in tokens) hash = unchecked((hash ^ token) * 1099511628211L);
-        if (_storeMisses.Contains(hash)) return;
+        long hash = PrefixStoreHash(tokens);
+        if (_storeMisses.Contains(hash)) return false;
         RadixNode node = _tree.Insert(GetKey(sequence), length, GetScope(sequence), length,
             NodeFlags.None, GetSpans(sequence));
-        if (node.EndState is not null) return;
+        // A resident state that could be materialized was accounted for by the
+        // plan above. A non-materializable payload must not hide a shorter hit.
+        if (node.EndState is not null) return false;
         string key = _tree.MintKey();
         try
         {
@@ -516,8 +536,12 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
                     if (_cacheModel.TryImport(key, length, stream, out var footprint)
                         && Publish(node, key, footprint, length, PayloadOrigin.DiskImport))
                     {
-                        Trim();
-                        return;
+                        // This ancestor may serve a new branch beyond the two
+                        // already resident endpoints. Prefer normal LRU for this
+                        // import, without exempting it from any count or byte cap.
+                        Trim(requestedPublicState: node);
+                        _tree.Plan(BuildRequest(sequence, PredictRoute()), _plan);
+                        return _plan.Length >= length;
                     }
             }
             _storeMisses.Add(hash);
@@ -529,6 +553,7 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         }
         _tree.CollectIfEmpty(node);
         Drain();
+        return false;
     }
 
     private void SaveCheckpoint(SequenceState sequence, string key, int length)
@@ -537,10 +562,11 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         if (store is null || !_tree.Caps.Persistable || sequence.MediaSpans.Count > 0) return;
         try
         {
-            store.Save(_tree.Caps.NamespaceFingerprint, PrefixTokens(sequence, length), stream =>
+            int[] tokens = PrefixTokens(sequence, length);
+            if (store.Save(_tree.Caps.NamespaceFingerprint, tokens, stream =>
             {
                 if (!_cacheModel.TryExport(key, stream)) throw new InvalidOperationException("The model declined prefix export.");
-            });
+            })) _storeMisses.Remove(PrefixStoreHash(tokens));
         }
         catch (Exception ex) { _logger.LogWarning(ex, "Saving radix prefix checkpoint failed."); }
     }

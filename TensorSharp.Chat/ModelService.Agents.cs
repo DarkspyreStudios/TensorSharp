@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -18,7 +19,7 @@ public partial class ModelService
     private async IAsyncEnumerable<ChatStreamUpdate> MultiAgentChatStreamAsync(
         List<ChatMessage> history, SkillRequestPlan plan, SkillChatGeneration generate,
         int maxTokens, SamplingConfig turnSampling, SamplingConfig sourceSampling,
-        bool enableThinking, ILogger logger,
+        bool enableThinking, ILogger logger, ChatTurnContext rootTurn,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         var sessions = new ConcurrentBag<ChatSession>();
@@ -26,6 +27,7 @@ public partial class ModelService
         long promptNs = 0, evalNs = 0;
         var elapsed = Stopwatch.StartNew();
         List<ChatMessage> messages = MultiAgentPrompt.Apply(history, plan.MultiAgent);
+        IReadOnlyList<MultiAgentPromptProfile> publicProfiles = null;
 
         SkillTurnGenerator CreateChildGenerator(string agentId)
         {
@@ -33,7 +35,7 @@ public partial class ModelService
             // can still reuse the public prefix and schedule independent sequences.
             var childSession = new ChatSession();
             sessions.Add(childSession);
-            var childTurn = new ChatTurnContext();
+            var childTurn = new ChatTurnContext { PublicPrefixCandidates = publicProfiles };
             return async (childMessages, childTools, ct) =>
             {
                 var parser = OutputParserFactory.Create(Architecture);
@@ -100,6 +102,15 @@ public partial class ModelService
                         lock (plan.Invocations) plan.Invocations.Add(invocation);
                     },
                 }, cancellationToken);
+            // Predict the public boundary before the root's first prefill, using
+            // the exact policies and tool subsets that children will receive.
+            // Include the root so descendants also keep that common ancestor.
+            var profiles = new List<MultiAgentPromptProfile>(agents.GetPromptProfiles())
+            {
+                new(messages.TakeWhile(message => message.Role is "system" or "developer").ToArray(), plan.Tools),
+            };
+            publicProfiles = profiles;
+            rootTurn.PublicPrefixCandidates = profiles;
             plan.Agents = agents;
             await foreach (ChatStreamUpdate update in SkillChatLoop.RunAsync(
                 Architecture, messages, plan, enableThinking, generate, logger, cancellationToken)

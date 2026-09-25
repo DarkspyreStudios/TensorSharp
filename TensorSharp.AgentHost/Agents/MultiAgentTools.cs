@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using TensorSharp.AgentHost.Skills;
 using TensorSharp.Runtime;
 
 namespace TensorSharp.AgentHost.Agents;
@@ -19,13 +20,23 @@ public static class MultiAgentTools
 
     public static bool IsTool(string? name) => name is Spawn or Wait or Send or Close or List;
 
+    // Keep ordering and enforcement tied to the same allowlist. Coordination
+    // tools are handled separately: they do not grant filesystem permissions.
+    internal static bool IsReadOnlyTool(string? name) =>
+        name is SkillTools.ReadToolName or SkillTools.ListToolName or SkillToolNames.ReadFile;
+
     public static List<ToolFunction> Merge(IReadOnlyList<ToolFunction>? tools)
     {
         var result = tools?.ToList() ?? new List<ToolFunction>();
         var names = new HashSet<string>(result.Select(t => t.Name), StringComparer.OrdinalIgnoreCase);
         foreach (ToolFunction tool in Create())
             if (names.Add(tool.Name)) result.Add(tool);
-        return result;
+        // Templates can render tools before all system instructions. Put tools
+        // shared with read-only children first so their declarations form one long
+        // exact prefix. This stable partition preserves schemas, objects, and the
+        // relative order within each group; it never expands a child's allowlist.
+        return result.Where(tool => IsReadOnlyTool(tool.Name) || IsTool(tool.Name))
+            .Concat(result.Where(tool => !IsReadOnlyTool(tool.Name) && !IsTool(tool.Name))).ToList();
     }
 
     public static List<ToolFunction> Create() => new()

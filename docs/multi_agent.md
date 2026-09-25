@@ -32,8 +32,8 @@ and tool access, not another set of model weights:
 
 There is no automatic selection among local or remote models in this version.
 Sharing the loaded model avoids loading a separate copy of its weights for each
-child. It does not imply shared mutable conversation state or a fork of the
-parent's KV cache.
+child. Each child has its own writable conversation state and can restore
+compatible public-prefix checkpoints from the parent or another child.
 
 ## Context, tools, and lifecycle
 
@@ -54,13 +54,37 @@ requests and active decoders can continue running. If capture fails or the
 producer stops, the sibling can prefill normally.
 
 For Qwen 3.5-family recurrent models, reuse requires a checkpoint at the exact
-shared boundary, including both attention KV and recurrent state. The first
-child with a new prefix still has to prefill it; later matching children can
-reuse it while it remains cached. A parent's different tool list or role policy
-does not provide that checkpoint. Each active child receives an independent
-mutable state copy: this saves repeated prefill, but does not share physical KV
-pages between children or guarantee lower peak VRAM. The existing prefix-cache
-controls also apply to children.
+shared boundary, including both attention KV and recurrent state. Before parent
+prefill, the host renders the possible child system/tool profiles and identifies
+their common leading tokens. It captures an earlier public checkpoint there,
+as well as the parent's complete public prefix. The first child can reuse this
+common parent checkpoint and compute its different suffix. A sibling can then
+reuse the child's longer checkpoint, even when the shorter ancestor was already
+available at admission. No private parent transcript is included.
+
+Tool declarations shared with read-only children are ordered first, followed by
+parent-only or mutable tools. The model's normal template and each role's tool
+permissions still apply. Different tools or instructions limit the identical
+leading portion; matching text after a difference does not make the corresponding
+KV state reusable.
+Checkpoints remain subject to count and memory limits. Under the default count
+budget of two, a shorter common checkpoint may be evicted once both branches
+have longer public checkpoints. An older saved parent checkpoint without the
+earlier state cannot be rewound; the first missing branch prefills safely and
+becomes reusable afterward. Explicit cache opt-outs remain effective.
+
+Each active child receives an independent mutable state copy: this saves
+repeated prefill, but does not share physical KV pages between children or
+guarantee lower peak VRAM. The existing prefix-cache controls also apply to
+children. The approach follows the hybrid-cache distinction used in SGLang:
+a matching radix path must also have an actual recurrent-state snapshot at its
+branch boundary. TensorSharp implements its own checkpoint planning and
+retention; it does not depend on SGLang or modify ggml.
+
+The [parent-prefix validation probe](../eng/validation/Qwen35ParentPrefixProbe/README.md)
+compares parent-plus-two-child workflows with and without the earlier checkpoint,
+including its capture cost and exact generated-token comparisons. Both arms keep
+ordinary radix caching and the default public checkpoint count of two enabled.
 
 Agents belong to a request-scoped tree with parent identity and depth. Limits
 apply across that tree, including children created by other children. The

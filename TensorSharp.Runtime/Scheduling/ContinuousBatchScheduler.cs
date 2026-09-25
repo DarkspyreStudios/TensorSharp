@@ -136,10 +136,10 @@ namespace TensorSharp.Runtime.Scheduling
         public void EnablePrefixCheckpoints() => _alignToSharedPrefix = true;
 
         /// <summary>
-        /// Cut a prefill chunk at the sequence's shared-prefix boundary when the chunk
+        /// Cut a prefill chunk at the sequence's public checkpoint boundaries when the chunk
         /// would otherwise run past it, so the state the executor checkpoints is the
-        /// state after exactly those tokens. Costs one extra chunk boundary per new
-        /// conversation, and only until a checkpoint exists.
+        /// state after exactly those tokens. Reused boundaries are already behind
+        /// the sequence's computed position and need no additional forward pass.
         /// </summary>
         private int AlignSharedPrefixBoundary(SequenceState seq, int want)
         {
@@ -151,6 +151,14 @@ namespace TensorSharp.Runtime.Scheduling
                 foreach (int breakpoint in seq.CacheBreakpoints)
                     if (breakpoint > start && breakpoint <= seq.PromptTokens.Count && breakpoint < start + want)
                         want = breakpoint - start;
+            }
+            if (_radixCache != null)
+            {
+                if (_radixCache.PublicCheckpointsSupported)
+                    foreach (int boundary in seq.PublicCheckpointBoundaries)
+                        if (boundary > start && boundary < start + want && seq.IsPublicCheckpointBoundary(boundary))
+                            want = boundary - start;
+                return want;
             }
             if (seq.SharedPrefixTokens > 0 && !seq.PrefixCheckpointTaken)
             {
@@ -528,15 +536,10 @@ namespace TensorSharp.Runtime.Scheduling
                     {
                         _radixCache.PrimaryAvailable = _running.Count == 0 && output.ScheduledWork.Count == 0;
                         int length = _fusedContinuationLcp?.Invoke(seq) ?? 0;
-                        if (length > 0 && _fusedContinuationAdopt?.Invoke(seq, length) == true)
-                        {
-                            plannedFusedContinuation = true;
-                            plannedLiveContinuation = _radixCache.RequiresSoleAdmission;
-                        }
-                        else if (length == 0 && WaitForScheduledPublicCheckpoint(seq, output))
+                        if (WaitForScheduledPublicCheckpoint(seq, output, length))
                         {
                             // The producer is already scheduled to advance this step.
-                            // Let its first prefill publish the common prefix before
+                            // Let its prefill publish the longer common prefix before
                             // admitting a sibling that would compute the same tokens.
                             // Visit each waiter once so unrelated requests behind it
                             // can still run and a stalled producer never blocks work.
@@ -544,6 +547,11 @@ namespace TensorSharp.Runtime.Scheduling
                             _waiting.AddLast(node);
                             prefillCandidatesRemaining = Math.Max(0, prefillCandidatesRemaining - 1);
                             continue;
+                        }
+                        if (length > 0 && _fusedContinuationAdopt?.Invoke(seq, length) == true)
+                        {
+                            plannedFusedContinuation = true;
+                            plannedLiveContinuation = _radixCache.RequiresSoleAdmission;
                         }
                         _logger.LogInformation(
                             "Radix prompt reuse for {RequestId}: {Reused}/{Prompt} tokens; {Prefill} token(s) to prefill.",
@@ -671,12 +679,12 @@ namespace TensorSharp.Runtime.Scheduling
             return output;
         }
 
-        private bool WaitForScheduledPublicCheckpoint(SequenceState sequence, SchedulerOutput output)
+        private bool WaitForScheduledPublicCheckpoint(SequenceState sequence, SchedulerOutput output, int reusableLength)
         {
             if (_radixCache == null || !_alignToSharedPrefix) return false;
             foreach (ScheduledSequenceWork work in output.ScheduledWork)
                 if (work.NumScheduledTokens > 0
-                    && _radixCache.CanSharePendingPublicCheckpoint(sequence, work.Sequence))
+                    && _radixCache.CanSharePendingPublicCheckpoint(sequence, work.Sequence, reusableLength))
                     return true;
             return false;
         }
