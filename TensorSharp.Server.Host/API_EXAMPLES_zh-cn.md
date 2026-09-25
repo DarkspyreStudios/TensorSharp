@@ -6,7 +6,7 @@ TensorSharp.Server.Host 提供三种 API 风格以及若干工具型接口：
 
 - **兼容 Ollama**（`/api/generate`、`/api/chat/ollama`、`/api/tags`、`/api/show`）
 - **兼容 OpenAI**（`/v1/chat/completions`、`/v1/responses`、`/v1/models`）
-- **Web UI**（`/api/chat`、`/api/sessions`、`/api/models`、`/api/models/load`、`/api/upload`、`/api/skills`、`/api/image-edit`、`/api/image-edit/stream`）
+- **Web UI**（`/api/chat`、`/api/sessions`、`/api/models`、`/api/models/load`、`/api/upload`、`/api/skills`、`/api/image-edit`、`/api/image-edit/stream`、`/api/image-generate`、`/api/image-generate/stream`）
 - **工具型接口**（`/api/version`、`/api/queue/status`）
 
 启动服务时通过 `--model` 指定承载的模型文件，必要时通过 `--mmproj` **显式**指定多模态投影器；`TensorSharp.Server.Host` 不会自动探测投影器。Web UI 与兼容接口仅暴露启动时指定的模型 / 投影器组合；`/api/models/load` 可以用受支持的后端重新加载同一组合，但无模型启动时不能用它选择模型，也不能在运行时切换到其他文件。
@@ -37,7 +37,7 @@ curl http://127.0.0.1:5000/api/embeddings -H 'Content-Type: application/json' \
 | 生成模式 | 自回归模型流式追加 token chunk。DiffusionGemma 在 append-only 兼容端点返回最终文本，在 Web UI `/api/chat` 上提供整条消息替换式实时去噪预览。 |
 | 会话 | Web UI 使用每个浏览器 tab 独立聊天会话。Ollama/OpenAI 兼容端点保留现有的默认推理会话行为，但代码执行工作区绝不会跨 HTTP 请求延续。 |
 | 上传 | `/api/upload` 接受图像 / 视频 / 音频 / 文本 / **PDF** 文件；原生数字 PDF 返回抽取出的文本，扫描版 PDF 在加载了具备视觉能力的模型时返回逐页图像（`TS_PDF_MAX_PAGES` 限制读取页数） |
-| 图像编辑 | Qwen-Image-Edit（`qwen_image`）模型通过 `/api/image-edit` 与 `/api/image-edit/stream` 提供服务，而不是聊天端点 |
+| 图像生成与编辑 | Qwen-Image-2.1（`qwen_image`）通过 `/api/image-generate`、`/api/image-edit` 及其 `/stream` 变体提供服务，而不是聊天端点 |
 | 视频生成 | 任何视频生成模型 —— MiniMax-H3（`minimax-h3`）、Wan 2.1 / 2.2（`wan`）—— 都通过 `/api/video-generate`、`/api/video-generate/stream` 与 `/v1/videos/generations` 提供服务；MiniMax-H3 在 MP4 之外还会返回一个 32 kHz 立体声 `.wav` 旁挂文件，`/api/models` 会告知当前加载的检查点接受哪些条件输入 |
 | Agent Skills | 技能目录来自 `--skills-dir`（或二进制文件旁的 `skills` 目录），在 `/v1/skills` 与 `/api/skills` 列出，也可通过 `POST /api/skills` 以 `.zip` 安装。所有聊天端点都可用 `"skills": [...]` 按请求选中。对同时支持工具声明与输出解析的模型族（包括 Qwen 3.8 Flash Next，`qwen4exp`），模型自己的技能调用在服务端内部应答，因此客户端拿到完整回复；不支持完整工具闭环的模型族则以内联方式获得选中技能说明。`skills_run` 只有在服务启动时传入 `--skills-allow-exec` 才可用。 |
 | Agent 式代码执行 | `--code-exec` 会为支持工具调用的模型族加入进程内执行的 `shell`、`read_file`、`write_file` 与 `apply_patch`。Web UI 每个聊天会话保留一个工作区；每个 OpenAI/Ollama HTTP 请求在内部轮次间使用私有工作区，响应结束后由服务删除。联网与安装软件包是相互独立且默认关闭的权限。 |
@@ -1032,14 +1032,40 @@ curl -X DELETE http://localhost:5000/api/skills/pdf
 
 服务端关闭了技能功能时该字段为 `null`，Web UI 据此决定是否显示技能控件。
 
-### 图像编辑（`/api/image-edit`，Qwen-Image-Edit）
+### Qwen-Image-2.1 文生图
 
-当通过 `--model` 承载的是 Qwen-Image-Edit DiT GGUF（架构 `qwen_image`）时，
+用 `--config config/qwen-image-2.1.json` 启动 `TensorSharp.Server.Host`。下载、CLI 命令
+与模型相关的默认值见 [Qwen-Image-2.1 指南](../docs/models/qwenimage21_zh-cn.md)。
+
+```bash
+curl --fail-with-body http://localhost:5000/api/image-generate \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"A cat beside a blue vase, soft daylight","width":2048,"height":2048,"steps":40,"cfg":1,"seed":42}'
+```
+
+响应包含 `ok`、`url`、`width`、`height` 与 `elapsedSeconds`。
+`/api/image-generate/stream` 接受相同的 JSON，并通过 SSE 发送去噪进度
+（`imageGenerate: true`）以及最终的 `done: true` 结果。需要以参考图为条件的编辑时，
+使用下文的图像编辑路由。宽高须同时设置，且都取 32 的倍数。省略尺寸时，生成为原生
+2048×2048，编辑则取与第一张参考图宽高比一致、面积大致相同的尺寸。
+`targetArea: 1048576` 选择约 1K 的输出并自动选择宽高比；显式尺寸优先。编辑时每张参考图
+以约 1 百万像素（若输出面积更小，则以输出面积）作为条件输入。
+
+省略 `steps`/`cfg` 时使用 40 步 Euler 和 CFG 1，遵循已发布 2.1 模型的推荐。CFG 1 每步
+只需一次 Transformer 预测；`negativePrompt` 只在显式设置大于 1 的 CFG 时生效，此时还会
+运行一次负向预测。需要更快的草图时，请求 1024×1024，或像官方 ComfyUI 工作流那样显式
+选择 25 步；更少的步数可能改变质量。[模型指南](../docs/models/qwenimage21_zh-cn.md)
+记录了官方调度器设置与来源链接，完整的验证记录见[英文版](../docs/models/qwenimage21.md)。
+Qwen-Image-2.1 不加载 LoRA 适配器。
+
+### 图像编辑（`/api/image-edit`，Qwen-Image-2.1）
+
+当通过 `--model` 承载的是 Qwen-Image-2.1 DiT GGUF（架构 `qwen_image`）时，
 图像 + 提示词的轮次走图像编辑端点，而不是 `/api/chat`：
 
 ```bash
-# 一次性编辑（multipart）。steps=0 / cfg=0 表示自动
-# （30 步 / cfg 2.5，或 Lightning LoRA 的步数 / cfg 1.0）。
+# 一次性编辑（multipart）。steps=0 / cfg=0 表示自动（40 步 / CFG 1）。
+# 重复 image 部分即可传入多张参考图。
 curl -X POST http://localhost:5000/api/image-edit \
   -F "image=@photo.png" \
   -F "prompt=Replace the background with a sunny beach" \
@@ -1048,13 +1074,15 @@ curl -X POST http://localhost:5000/api/image-edit \
 
 响应：
 
-```json
-{"ok": true, "url": "/uploads/edit-<guid>.png", "width": 1184, "height": 544, "elapsedSeconds": 40.4}
+```text
+{"ok": true, "url": "/uploads/edit-<guid>.png", "width": ..., "height": ..., "elapsedSeconds": ...}
 ```
 
-也接受 JSON body `{ "imagePath": "<file from /api/upload>", "prompt": "...",
-"steps": 0, "cfg": 0, "seed": 42 }`（`imagePath` 为先前上传文件的服务端文件名；为兼容旧客户端也接受上传目录内的
-文件）。流式变体通过 SSE 发送进度事件与实时去噪预览：
+不显式指定 `width` / `height` 时，输出保持第一张参考图的宽高比，面积约为 2048×2048 像素。
+
+也接受 JSON body `{ "imagePaths": ["<file from /api/upload>"], "prompt": "...",
+"steps": 0, "cfg": 0, "seed": 42 }`（`imagePaths` 按参考图顺序列出先前上传文件的服务端文件名；
+旧的单个 `imagePath` 字段仍然可用；为兼容旧客户端也接受上传目录内的文件）。流式变体通过 SSE 发送进度事件与实时去噪预览：
 
 ```bash
 curl -N -X POST http://localhost:5000/api/image-edit/stream \
@@ -1063,10 +1091,10 @@ curl -N -X POST http://localhost:5000/api/image-edit/stream \
 ```
 
 每步事件形如
-`{"imageEdit": true, "step": 2, "total": 4, "image": "data:image/png;base64,...", "width": 1184, "height": 544}`
+`{"imageEdit": true, "step": 2, "total": 40, "image": "data:image/png;base64,...", "width": ..., "height": ...}`
 （`image` 预览快照只在节流后的步骤上出现，每次编辑最多 8 张），最后是一条
-`{"done": true, "url": "/uploads/edit-<guid>.png", "width": 1184, "height": 544, "elapsedSeconds": 40.4}`。
-对非 Qwen-Image-Edit 模型发起的请求返回 400；并发编辑由进程级锁串行执行。
+`{"done": true, "url": "/uploads/edit-<guid>.png", "width": ..., "height": ..., "elapsedSeconds": ...}`。
+对非 Qwen-Image-2.1 模型发起的请求返回 400；并发编辑由进程级锁串行执行。
 
 ### 视频生成（`/api/video-generate`、`/v1/videos/generations`）
 

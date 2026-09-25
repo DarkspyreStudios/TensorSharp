@@ -101,6 +101,11 @@ try
     // unknown-option trap with no pointer; reject them first so the error names
     // the surviving spelling. Then let Build validate everything else.
     TensorSharp.Runtime.Speculative.SpeculativeCliFlags.RejectRemoved(args);
+    // Options whose feature was removed outright (--qwen-image-lora, --offload-cpu:
+    // the retired Qwen-Image-Edit-2511 pipeline) have no survivor; the error says
+    // why they went and what to do instead. Checked against the ORIGINAL line, like
+    // the code-execution family below.
+    TensorSharp.Runtime.RemovedCliFlags.RejectRemoved(originalArgs);
     // Same reason, for the code-execution family: --code-exec-packages and
     // --code-exec-languages could not be enforced once the tool surface became a shell,
     // so they are refused by name with a pointer at what replaced them rather than
@@ -191,8 +196,8 @@ bool continuousBatchingFlagApplied = ServerOptionsBuilder.ApplyContinuousBatchin
 // read by SchedulerConfig.FromEnvironment when the engine is constructed.
 bool specFlagsApplied = ServerOptionsBuilder.ApplySpeculativeCliFlags(args);
 // Translate --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj into the
-// TS_QWEN_IMAGE_* env vars QwenImageModel reads to locate the VAE, Qwen2.5-VL
-// text-encoder, and mmproj GGUFs. Must run before the startup model is loaded.
+// TS_QWEN_IMAGE_* env vars QwenImageModel reads to locate the Qwen-Image-2.1 VAE,
+// Qwen3-VL-8B text encoder and mmproj. Must run before the startup model is loaded.
 bool qwenImageFlagsApplied = ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(args);
 // Translate --kv-cache-dtype into the process-wide KvCacheDtypeConfig (or honor
 // the KV_CACHE_DTYPE env var) so block-quantized / half-precision KV caches are
@@ -442,7 +447,7 @@ if (moeCpuOffloadFlagsApplied || TensorSharp.Models.MoeCpuOffloadConfig.IsEnable
 if (qwenImageFlagsApplied)
 {
     startupLogger.LogInformation(LogEventIds.HostConfiguration,
-        "Qwen-Image-Edit companions configured via CLI: vae={Vae} vl={Vl} mmproj={Mmproj}",
+        "Qwen-Image companions configured via CLI: vae={Vae} vl={Vl} mmproj={Mmproj}",
         Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_VAE") ?? "(scan)",
         Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_TE") ?? "(scan)",
         Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_MMPROJ") ?? "(scan)");

@@ -111,8 +111,7 @@ class ConfigRegistryTests(unittest.TestCase):
                     engine_id for engine_id in cfg.DEFAULT_ENGINES
                     if (engine_id == "tensorsharp" and spec.ts_backend)
                     or (engine_id == "llamacpp" and spec.llama_ngl is not None)
-                    or (engine_id == "vllm" and spec.vllm)
-                    or (engine_id == "sdcpp" and spec.sdcpp_enabled)]
+                    or (engine_id == "vllm" and spec.vllm)]
                 with self.subTest(config=path.name, backend=backend_id):
                     self.assertTrue(launchable,
                                     "no default engine has a launch mapping for this backend")
@@ -125,7 +124,7 @@ class ConfigRegistryTests(unittest.TestCase):
             for backend_id, backend in (raw(path).get("backends") or {}).items():
                 if backend_id.startswith("_") or not isinstance(backend, dict):
                     continue
-                for engine_id in ("tensorsharp", "llamacpp", "sdcpp"):
+                for engine_id in ("tensorsharp", "llamacpp"):
                     mapping = backend.get(engine_id)
                     if not isinstance(mapping, dict):
                         continue

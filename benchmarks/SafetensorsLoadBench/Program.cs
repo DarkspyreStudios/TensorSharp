@@ -9,6 +9,11 @@
 // kernel from disk/mmap so its raw conversion bandwidth is visible.
 //
 // Usage: SafetensorsLoadBench [model.safetensors] [model.gguf] [iters]
+//
+// With no arguments it reads the Qwen-Image-2.1 BF16 VAE from the model root the shipped configs use
+// (`$TENSORSHARP_MODELS`, else `../models` relative to the working directory), i.e.
+// <root>/qwen-image-2.1/qwen_image_2.1_vae_bf16.safetensors. The F32 GGUF comparison (step 2) only
+// runs when a GGUF path is passed; pass "" as the second argument to set [iters] without one.
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using TensorSharp.Runtime;
@@ -16,13 +21,16 @@ using TensorSharp.Runtime;
 static double Gb(long bytes) => bytes / 1024.0 / 1024.0 / 1024.0;
 static double Mb(long bytes) => bytes / 1024.0 / 1024.0;
 
-string stPath = args.Length > 0 ? args[0] : @"C:\Works\models\Qwen_Image-VAE.safetensors";
-string ggPath = args.Length > 1 ? args[1] : @"C:\Works\models\qwen_image_vae.gguf";
+string modelRoot = Environment.GetEnvironmentVariable("TENSORSHARP_MODELS");
+if (string.IsNullOrEmpty(modelRoot)) modelRoot = Path.Combine("..", "models");
+string stPath = args.Length > 0 ? args[0]
+    : Path.Combine(modelRoot, "qwen-image-2.1", "qwen_image_2.1_vae_bf16.safetensors");
+string ggPath = args.Length > 1 ? args[1] : "";
 int iters = args.Length > 2 ? int.Parse(args[2]) : 8;
 
 Console.WriteLine("=== safetensors load/convert benchmark ===");
 Console.WriteLine($"safetensors: {stPath}");
-Console.WriteLine($"gguf       : {ggPath}");
+Console.WriteLine($"gguf       : {(string.IsNullOrEmpty(ggPath) ? "(none; F32 GGUF parity check skipped)" : ggPath)}");
 Console.WriteLine($"iters      : {iters}   Vector256.HW={System.Runtime.Intrinsics.Vector256.IsHardwareAccelerated}  " +
                   $"Vector512.HW={System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated}");
 Console.WriteLine();

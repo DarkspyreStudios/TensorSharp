@@ -31,7 +31,7 @@ dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
 curl.exe --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
 Set-Content prompt.txt "Explain local inference in one paragraph."
 dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
-  <p>Omit <code>--input</code> and the CLI falls back to its built-in <code>What is 1+1?</code> prompt; for your own one-shot text prompt, save the text to a file and pass <code>--input</code>. <code>--prompt</code> is only the Qwen-Image-Edit instruction.</p>
+  <p>Omit <code>--input</code> and the CLI falls back to its built-in <code>What is 1+1?</code> prompt; for your own one-shot text prompt, save the text to a file and pass <code>--input</code>. <code>--prompt</code> is only the prompt for the image- and video-generation models.</p>
 
   <h2 id="e4b-fast-lane">Gemma 4 E4B on other native backends</h2>
   <p>On Apple Silicon, omit the CUDA environment assignment and use <code>ggml_metal</code>; on a supported Windows/Linux Vulkan GPU, request <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> instead and use <code>ggml_vulkan</code>; <code>ggml_cpu</code> runs the native CPU kernels and needs no GPU. The lower-memory <code>gemma-4-E4B-it-Q4_K_M.gguf</code> is in the same repository. Text needs no <code>mmproj</code>. Add the matching <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code> with <code>--mmproj</code> only for image, video, or audio input. See <a href="getting-started.html#e4b-fast-lane">Getting Started</a> for full platform syntax.</p>
@@ -123,14 +123,22 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 200 --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42</code></pre>
 
-  <h3 id="imageedit">Image editing (Qwen-Image-Edit)</h3>
-  <pre data-lang="bash"><code># Prompt + input image -> edited image. The VAE + Qwen2.5-VL text-encoder
-# companions are resolved next to the DiT GGUF (or pass --qwen-image-vae /
-# --qwen-image-vl / --qwen-image-mmproj).
-dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
-    --model &lt;qwen-image-edit-DiT.gguf&gt; --image input.png \
-    --prompt "Make the sky a dramatic sunset." --output edited.png \
-    --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0</code></pre>
+  <h3 id="imagegen">Image generation &amp; editing (Qwen-Image-2.1)</h3>
+  <pre data-lang="bash"><code># Qwen-Image-2.1: no --image generates an image, --image edits one (repeat it for
+# several references). The config downloads the DiT, the dedicated 2.1 VAE and the
+# Qwen3-VL-8B text encoder + mmproj. Defaults: 2048x2048, 40 Euler steps, CFG 1.
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output generated.png
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image generated.png \
+  --prompt 'Change the blue vase to a red vase. Preserve the cat, lighting and composition.' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output edited.png</code></pre>
+  <p>Companions, geometry and the draft settings are on <a href="models-image.html#imagegen">Image Generation</a>.</p>
 
   <h3 id="video">Video generation</h3>
   <p><strong>MiniMax-H3</strong> denoises the video and a native 32&nbsp;kHz stereo soundtrack in <em>one</em> packed latent, so the audio comes out of the same forward pass as the picture. It is CFG-distilled, so <code>--cfg 1.0</code> is required — TensorSharp refuses anything higher — and 4–8 steps is the fast operating point against a 20-step default:</p>
@@ -229,7 +237,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     "urls": [ "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf" ]
   }
 }</code></pre>
-  <p>Ready-to-use examples live in the repository's <code>config/</code> folder (<code>cli-basic.json</code>, <code>server-basic.json</code>, <code>variables.json</code>, <code>auto-download.json</code>, <code>qwen-image-edit.json</code>) — each uses real, public, ungated URLs, so it works on a fresh machine. See <code>config/README.md</code> for the full reference.</p>
+  <p>Ready-to-use examples live in the repository's <code>config/</code> folder (<code>cli-basic.json</code>, <code>server-basic.json</code>, <code>variables.json</code>, <code>auto-download.json</code>, <code>qwen-image-2.1.json</code>) — each uses real, public, ungated URLs, so it works on a fresh machine. See <code>config/README.md</code> for the full reference.</p>
 
   <h2 id="options">Command-line options</h2>
   <p>Running the CLI with no arguments — or with <code>--help</code> (also <code>-h</code>, <code>-?</code>, <code>/?</code>) — prints the full parameter reference: every option with its description, default, range, and an example. It exits before any logging or model machinery starts. Unknown arguments are ignored, so copy option names carefully—a misspelling may otherwise appear to succeed.</p>
@@ -239,7 +247,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     <thead><tr><th>Option</th><th>Description</th></tr></thead>
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>Path to a GGUF model file (required).</td></tr>
-      <tr><td><code>--input &lt;path&gt;</code></td><td>Text file containing the user prompt. One-shot text prompts always come from a file — <code>--prompt</code> is reserved for the Qwen-Image-Edit edit instruction.</td></tr>
+      <tr><td><code>--input &lt;path&gt;</code></td><td>Text file containing the user prompt. One-shot text prompts always come from a file — <code>--prompt</code> is reserved for the image- and video-generation prompt.</td></tr>
       <tr><td><code>--pdf &lt;path&gt;</code></td><td>PDF document input (one-shot mode). Born-digital PDFs are inlined with their complete extracted text; scanned/image-only PDFs are rasterized to page images and require a vision model + <code>--mmproj</code>. <code>--input</code> becomes the question about the document; <code>TS_PDF_MAX_PAGES</code> caps the pages read (default: all).</td></tr>
       <tr><td><code>--input-jsonl &lt;path&gt;</code></td><td>JSONL file with batch requests (one JSON per line).</td></tr>
       <tr><td><code>--multi-turn-jsonl &lt;path&gt;</code></td><td>JSONL file for multi-turn chat simulation with KV-cache reuse.</td></tr>
@@ -319,12 +327,11 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--diffusion-steps &lt;N&gt;</code></td><td>DiffusionGemma denoising steps per block (default: 48).</td></tr>
       <tr><td><code>--diffusion-seed &lt;N&gt;</code></td><td>DiffusionGemma deterministic sampler seed (default: 0).</td></tr>
       <tr><td><code>--diffusion-blocks &lt;N&gt;</code></td><td>Block-autoregressive canvas count (<code>0</code> derives it from <code>--max-tokens</code>).</td></tr>
-      <tr><td><code>--image &lt;path&gt;</code> / <code>--prompt &lt;text&gt;</code> / <code>--output &lt;path&gt;</code></td><td>Qwen-Image-Edit: input image, edit instruction, and output PNG (default <code>edited.png</code>). Reuses <code>--diffusion-steps</code> / <code>--diffusion-seed</code>.</td></tr>
-      <tr><td><code>--cfg &lt;F&gt;</code></td><td>Qwen-Image-Edit true-CFG guidance scale (omit for auto: 2.5, or 1.0 when a Lightning LoRA is loaded; <code>&lt;= 1</code> disables the negative pass).</td></tr>
-      <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>Override the resolved Qwen-Image-Edit companion GGUFs (VAE / Qwen2.5-VL text encoder / mmproj).</td></tr>
-      <tr><td><code>--qwen-image-lora &lt;path&gt;</code></td><td>Qwen-Image-Edit Lightning distillation LoRA (<code>.safetensors</code>). It is applied as a runtime F32 side-path beside each targeted projection — the quantized base weights are left untouched, never merged — and auto-derives the denoise step count from the file name (<code>…-4steps-…</code> / <code>…8step…</code>, 1–16), switching CFG to 1.0 with a fixed timestep shift of 3. That takes the default 30 steps at CFG 2.5 (60 DiT forwards) down to 4–8. Requires the whole-model or fused per-block CUDA forward: on a path without the side-path the model throws rather than emitting noise. Env: <code>TS_QWEN_IMAGE_LORA</code>.</td></tr>
-      <tr><td><code>--width &lt;px&gt;</code> / <code>--height &lt;px&gt;</code></td><td>Fixed Qwen-Image-Edit output size (default <code>0</code> = auto: the source size, clamped to what VRAM allows).</td></tr>
-      <tr><td><code>--offload-cpu</code></td><td>Stream the Qwen-Image-Edit DiT weights from RAM instead of holding them resident in VRAM: slower per step, but native ~1 MP edits fit on small cards. Default: auto — engages only when the target resolution does not fit beside the resident weights.</td></tr>
+      <tr><td><code>--image &lt;path&gt;</code> / <code>--prompt &lt;text&gt;</code> / <code>--output &lt;path&gt;</code></td><td>Qwen-Image-2.1: reference image for editing (repeatable; omit <code>--image</code> to generate), the prompt, and the output PNG (default <code>generated.png</code>, or <code>edited.png</code> when editing). Reuses <code>--diffusion-steps</code> (default 40) / <code>--diffusion-seed</code>.</td></tr>
+      <tr><td><code>--cfg &lt;F&gt;</code></td><td>Qwen-Image-2.1 true-CFG guidance scale (omit for auto: 1.0, one transformer prediction per step; <code>&lt;= 1</code> disables the negative pass).</td></tr>
+      <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>Override the resolved Qwen-Image-2.1 companions (dedicated 2.1 VAE / Qwen3-VL-8B text encoder / Qwen3-VL-8B mmproj).</td></tr>
+      <tr><td><code>--qwen-image-lora</code> · <code>--offload-cpu</code></td><td><strong>Removed and rejected at startup, including as <code>--config</code> keys.</strong> There is no replacement: both served only the earlier Qwen-Image-Edit pipeline, and Qwen-Image-2.1 loads no LoRA adapters and keeps its DiT weights resident.</td></tr>
+      <tr><td><code>--width &lt;px&gt;</code> / <code>--height &lt;px&gt;</code></td><td>Fixed Qwen-Image-2.1 output size, in multiples of 32 (default <code>0</code> = auto: 2048×2048 for generation, or about that area at the first reference's aspect ratio for editing).</td></tr>
       <tr><td><code>--benchmark</code></td><td>Run a synthetic prefill/decode throughput benchmark.</td></tr>
       <tr><td><code>--bench-prefill / --bench-decode / --bench-runs &lt;N&gt;</code></td><td>Synthetic prefill length, decode length, and run count.</td></tr>
       <tr><td><code>--bench-kvcache</code> / <code>--bench-kv-turns &lt;N&gt;</code></td><td>Multi-turn KV-cache reuse benchmark (with-cache vs forced-reset).</td></tr>

@@ -135,3 +135,23 @@ not proof that an optimized kernel ran; inspect fallback logs too. Compare all
 four outputs and report actual errors; the generic `compare` command's 1%
 diagnostic limit alone does not establish image-quality equivalence. Rebuild the
 probe after production changes so its copied dependencies are current.
+
+## Prefix KV cache and tensor-parallel parity (real DiT weights)
+
+`dit-parity` loads the real diffusion transformer and predicts one request layout
+(text, one reference image and the target) at two denoising steps. Each step is
+predicted three ways: by the whole-sequence graph, through the prefix KV cache
+(default, `q8_0` and `q8_0_v` storage), and with the blocks sharded over a
+loopback tensor-parallel group of ranks on this one device. It fails when the
+default cache is not bit-identical, when 8-bit storage exceeds 2% relative L2,
+or when the sharded prediction exceeds 1% relative L2. Conditioning and latents
+are seeded noise, so it checks kernels on the real quantized weights, not image
+quality or multi-GPU speed. On macOS, stage the current native library first,
+because the project reference does not refresh a previously copied one:
+
+```sh
+dotnet build eng/QwenImage21CompanionProbe -c Release
+cp TensorSharp.GGML.Native/build/libGgmlOps.dylib eng/QwenImage21CompanionProbe/bin/Release/net10.0/
+dotnet eng/QwenImage21CompanionProbe/bin/Release/net10.0/QwenImage21CompanionProbe.dll dit-parity \
+  ../models/qwen-image-2.1/qwen_image_2.1_Q4_K_M.gguf artifacts/qwen21/dit-parity.json GgmlMetal 512 512 256 2
+```

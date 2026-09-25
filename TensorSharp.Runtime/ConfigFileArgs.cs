@@ -148,6 +148,12 @@ namespace TensorSharp.Runtime
             if (configPaths.Count == 0)
                 return args;
 
+            // A removed option on the command line is refused here too, before any file
+            // the configuration names is resolved or downloaded: the hosts' own check runs
+            // after this expansion, which would otherwise fetch multi-gigabyte companions
+            // first and only then report a configuration error.
+            RemovedCliFlags.RejectRemoved(passThrough);
+
             var merged = new List<string>(args.Length);
             var context = new ExpandContext(log ?? TextWriter.Null, interactiveProgress);
             foreach (string configPath in configPaths)
@@ -195,6 +201,16 @@ namespace TensorSharp.Runtime
                 JsonElement root = document.RootElement;
                 if (root.ValueKind != JsonValueKind.Object)
                     throw new ArgumentException($"Configuration file '{fullPath}' must contain a JSON object at its root, but found {root.ValueKind}.");
+
+                // A removed option is refused by name before any value is resolved: the
+                // same key's download spec would otherwise fetch a file nothing can use,
+                // and a `false` value (which expands to nothing) would hide the key from
+                // the hosts' own check entirely.
+                foreach (JsonProperty property in root.EnumerateObject())
+                {
+                    if (!ReservedKeys.Contains(property.Name) && RemovedCliFlags.Describe(property.Name) is { } removed)
+                        throw new ArgumentException($"Configuration file '{fullPath}': {removed}");
+                }
 
                 var variables = VariableResolver.FromConfig(fullPath, root);
 

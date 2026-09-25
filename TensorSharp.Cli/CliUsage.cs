@@ -11,6 +11,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using TensorSharp.Runtime;
 
 namespace TensorSharp.Cli
 {
@@ -260,15 +261,15 @@ namespace TensorSharp.Cli
                     "non-interactive generation. Interactive chat requires a positive limit. Default: 100.",
                     "--max-tokens 1024"),
                 new OptionHelp("--output <file>",
-                    "Write the generated text to a file instead of stdout (for Qwen-Image-Edit: the output image, " +
-                    "default edited.png). Default: print to stdout.",
+                    "Write the generated text to a file instead of stdout (for Qwen-Image-2.1: the output image, " +
+                    "default generated.png, or edited.png when --image is given). Default: print to stdout.",
                     "--output answer.txt"),
             }),
             ("Multimodal input (vision / audio / video models)", new[]
             {
                 new OptionHelp("--image <file>",
-                    "Image input for a vision model (PNG/JPEG/...). Repeatable: for Qwen-Image-Edit each extra " +
-                    "--image adds a source picture the prompt can reference as \"Picture 1\", \"Picture 2\", ... " +
+                    "Image input for a vision model (PNG/JPEG/...). Repeatable: for Qwen-Image-2.1 editing each " +
+                    "extra --image adds a reference picture the prompt can refer to as \"Picture 1\", \"Picture 2\", ... " +
                     "Default: none.",
                     "--image photo.jpg"),
                 new OptionHelp("--audio <file>",
@@ -578,12 +579,11 @@ namespace TensorSharp.Cli
                     "Repeat --image for multiple references. Default: empty.",
                     "--prompt \"Make the sky look like sunset\""),
                 new OptionHelp("--cfg <f>",
-                    "Classifier-free guidance scale. Default: 1.0 for Qwen-Image-2.1 (one prediction per step); 2.5 for older " +
-                    "Qwen-Image-Edit checkpoints (1.0 with a Lightning LoRA).",
-                    "--cfg 2.5"),
+                    "Classifier-free guidance scale. Default: 1.0 for Qwen-Image-2.1 (one prediction per step; " +
+                    "a value above 1 adds the negative-prompt pass); the model's own for video.",
+                    "--cfg 4"),
                 new OptionHelp("--diffusion-steps <N>",
-                    "Denoising steps. Range: >= 1. Default: 48 for DiffusionGemma, 40 for Qwen-Image-2.1; " +
-                    "30 for older Qwen-Image-Edit (model/LoRA-dependent).",
+                    "Denoising steps. Range: >= 1. Default: 48 for DiffusionGemma, 40 for Qwen-Image-2.1.",
                     "--diffusion-steps 20"),
                 new OptionHelp("--diffusion-seed <N>",
                     "Random seed for the diffusion sampler. Default: 0.",
@@ -597,23 +597,15 @@ namespace TensorSharp.Cli
                     "Default: 0 — automatic (native 2048x2048 for Qwen-Image-2.1 text-to-image). Use 1024x1024 for faster drafts.",
                     "--width 1024 --height 768"),
                 new OptionHelp("--qwen-image-vae <path>",
-                    "Matching VAE GGUF or safetensors (2.1 requires its own VAE). Default: same-directory scan next to the DiT model.",
-                    "--qwen-image-vae qwen-image-vae.gguf"),
+                    "Qwen-Image-2.1 VAE (safetensors, or a converted GGUF). Default: same-directory scan next to the " +
+                    "DiT model for qwen_image_2.1_vae*.safetensors.",
+                    "--qwen-image-vae qwen_image_2.1_vae_bf16.safetensors"),
                 new OptionHelp("--qwen-image-vl <path>",
-                    "Text encoder GGUF: Qwen3-VL-8B for 2.1; Qwen2.5-VL for older models. Default: same-directory scan.",
-                    "--qwen-image-vl qwen-image-te-Qwen2.5-VL-7B-Q4_K_M.gguf"),
+                    "Qwen3-VL-8B text-encoder GGUF for Qwen-Image-2.1. Default: same-directory scan.",
+                    "--qwen-image-vl Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
                 new OptionHelp("--qwen-image-mmproj <path>",
-                    "Matching vision projector GGUF, required for image editing. Default: same-directory scan.",
-                    "--qwen-image-mmproj Qwen2.5-VL-7B-mmproj-BF16.gguf"),
-                new OptionHelp("--qwen-image-lora <path>",
-                    "Earlier Qwen-Image DiT LoRA (not compatible with 2.1), merged into the weights at load; " +
-                    "also switches the sampling defaults (steps, cfg 1.0). Default: none.",
-                    "--qwen-image-lora Qwen-Image-Edit-Lightning-8steps.safetensors"),
-                new OptionHelp("--offload-cpu",
-                    "Stream the DiT weights from RAM instead of holding them resident in VRAM: slower per step, " +
-                    "but native ~1 MP edits fit on small cards. Default: auto (engages only when the target " +
-                    "resolution does not fit beside the resident weights).",
-                    "--offload-cpu"),
+                    "Qwen3-VL-8B vision projector GGUF, required for image editing. Default: same-directory scan.",
+                    "--qwen-image-mmproj mmproj-Qwen3VL-8B-Instruct-F16.gguf"),
                 new OptionHelp("--video-frames <N>",
                     "Video generation: number of output frames, snapped to the model's temporal grid " +
                     "(4k+1 for Wan, 17k+5 for MiniMax-H3); 1 = a single still image where the model allows it. " +
@@ -785,7 +777,7 @@ namespace TensorSharp.Cli
             writer.WriteLine("Usage: TensorSharp.Cli --model <path.gguf> [options]");
             writer.WriteLine();
             writer.WriteLine("Runs local LLM inference from the terminal: single-shot generation, interactive chat,");
-            writer.WriteLine("multimodal input (image/audio/video/PDF), JSONL batches, image editing, and benchmarks.");
+            writer.WriteLine("multimodal input (image/audio/video/PDF), JSONL batches, image generation and editing, and benchmarks.");
             writer.WriteLine("Options may also come from a JSON file via --config (command line wins).");
 
             foreach (var (section, options) in Sections)
@@ -800,6 +792,17 @@ namespace TensorSharp.Cli
                 }
             }
 
+            // Driven off the shared table the hosts refuse them with, so the page and the
+            // error cannot disagree. Deliberately NOT in Sections: DocumentedFlags() is
+            // what a live option is, and these only error.
+            writer.WriteLine();
+            writer.WriteLine("Removed options (refused at startup, also as --config keys):");
+            foreach ((string flag, string advice) in RemovedCliFlags.RemovedFlags)
+            {
+                writer.WriteLine($"  {flag}");
+                WriteWrapped(writer, "Removed: " + advice, indent: "      ");
+            }
+
             writer.WriteLine();
             writer.WriteLine("Examples:");
             writer.WriteLine("  TensorSharp.Cli --model gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --input prompt.txt --max-tokens 512");
@@ -808,7 +811,8 @@ namespace TensorSharp.Cli
             writer.WriteLine("  TensorSharp.Cli --model diffusiongemma-26B-A4B-it-Q4_K_M.gguf --mmproj diffusiongemma-vision/model-00011-of-00011.safetensors --image photo.jpg    (vision tower straight from the HF shard)");
             writer.WriteLine("  TensorSharp.Cli --model Qwen3.5-35B-A3B-Q4_K_M.gguf --backend ggml_cuda --tp 2 --chat    (split across 2 GPUs)");
             writer.WriteLine("  TensorSharp.Cli --model DeepSeek-V4-Flash-00001-of-00005.gguf --backend ggml_cuda --draft-model DSpark-drafter.gguf --temperature 0 --chat    (block speculative decoding)");
-            writer.WriteLine("  TensorSharp.Cli --model Qwen-Image-Edit-2511-Q4_K_M.gguf --image in.png --prompt \"Turn it into watercolor\" --output out.png");
+            writer.WriteLine("  TensorSharp.Cli --config config/qwen-image-2.1.json --prompt \"A small orange cat beside a blue vase\" --width 1024 --height 1024 --output generated.png");
+            writer.WriteLine("  TensorSharp.Cli --config config/qwen-image-2.1.json --image generated.png --prompt \"Change the blue vase to a red vase\" --output edited.png");
             writer.WriteLine("  TensorSharp.Cli --model model.gguf --backend ggml_cuda --benchmark --bench-prefill 512 --bench-decode 128");
             writer.WriteLine("  TensorSharp.Cli --config run.json    (read options from a file)");
         }

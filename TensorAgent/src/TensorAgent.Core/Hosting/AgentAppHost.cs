@@ -253,15 +253,15 @@ public sealed class AgentAppHost : IDisposable
         if (settings.SelectedModelId is { Length: > 0 } startupId && ModelCatalog.Find(startupId) is { } startupModel)
             Options.RepointSamplingDefaults(SamplingDefaultsFor(startupModel));
 
-        // A diffusion entry is five files, not one, and only three of them are found by
-        // the scan the pipeline does next to the weights. Publishing all of them here —
-        // before anything can ask for a load — is what makes the catalog's file list the
-        // whole story rather than most of it. See DiffusionCompanions.
+        // A diffusion entry is four files, not one: the DiT plus the companions the
+        // pipeline otherwise finds only by scanning next to the weights. Publishing them
+        // here — before anything can ask for a load — is what makes the catalog's file
+        // list the whole story rather than a naming convention. See DiffusionCompanions.
         CatalogModel? selected = settings.SelectedModelId is { Length: > 0 } selectedId
             ? ModelCatalog.Find(selectedId)
             : null;
         IReadOnlyDictionary<string, string> companions = DiffusionCompanions.Publish(
-            selected?.Kind == CatalogArchitectureKind.Diffusion ? selected : null, Models, paths.DeviceMemoryGB);
+            selected?.Kind == CatalogArchitectureKind.Diffusion ? selected : null, Models);
         if (companions.Count > 0)
         {
             _loggerFactory.CreateLogger("TensorAgent.Host").LogInformation(

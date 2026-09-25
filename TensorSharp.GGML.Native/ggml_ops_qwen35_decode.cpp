@@ -1439,7 +1439,7 @@ namespace
                 // from the non-contiguous transpose view (ggml_concat writes a contiguous
                 // result for ssm_conv) — drops a redundant transpose-cont copy.
                 ggml_tensor* conv_input = ggml_concat(ctx, t.conv_state_in, ggml_transpose(ctx, qkv_mixed), 0); // [convDim+1, conv_dim]
-                ggml_tensor* conv_out = ggml_ssm_conv(ctx, conv_input, t.conv1d_w);           // [conv_dim, 1]
+                ggml_tensor* conv_out = tsg::ssm_conv_any(ctx, conv_input, t.conv1d_w);           // [conv_dim, 1]
                 conv_out = ggml_silu(ctx, conv_out);
                 ggml_tensor* conv_out_1d = ggml_reshape_1d(ctx, conv_out, conv_dim);
 
@@ -2787,7 +2787,7 @@ namespace
                     ggml_tensor* conv_state_s = ggml_view_2d(ctx, t.conv_state_in, convDim, conv_dim, t.conv_state_in->nb[1], static_cast<std::size_t>(s) * t.conv_state_in->nb[2]); // [convDim, conv_dim]
                     ggml_tensor* qkv_T = ggml_cont(ctx, ggml_transpose(ctx, qkv_s));   // [1, conv_dim]
                     ggml_tensor* conv_input = ggml_concat(ctx, conv_state_s, qkv_T, 0); // [convDim+1, conv_dim]
-                    ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_input, t.conv1d_w)); // [conv_dim, 1]
+                    ggml_tensor* conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_input, t.conv1d_w)); // [conv_dim, 1]
                     ggml_tensor* conv_out_1d = ggml_reshape_1d(ctx, conv_out, conv_dim);
                     ggml_tensor* new_conv = ggml_cont(ctx, ggml_view_2d(ctx, conv_input, convDim, conv_dim, conv_input->nb[1], static_cast<std::size_t>(1) * conv_input->nb[0]));
                     ggml_tensor* conv_save = ggml_cpy(ctx, new_conv, conv_state_s);

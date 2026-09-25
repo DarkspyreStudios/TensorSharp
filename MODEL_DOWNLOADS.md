@@ -4,7 +4,7 @@
 > Part of the [TensorSharp](README.md) documentation. See also the [per-model architecture cards](docs/models/README.md).
 
 
-TensorSharp loads models in GGUF format. Below are verified Hugging Face repos for every supported architecture, including the multimodal-projector (mmproj) and MTP-draft companion files each family uses. Pick a quantization that fits your hardware (Q4_K_M / UD-Q4_K_XL for low memory, Q8_0 for higher quality, etc.). Rows marked *optional* are the speed artifacts — step-distilled checkpoints, distillation LoRAs and speculative-decoding drafters. Nothing breaks without them, but they are usually the difference between minutes and hours, so skim them before you start a long download.
+TensorSharp loads models in GGUF format. Below are verified Hugging Face repos for every supported architecture, including the multimodal-projector (mmproj) and MTP-draft companion files each family uses. Pick a quantization that fits your hardware (Q4_K_M / UD-Q4_K_XL for low memory, Q8_0 for higher quality, etc.). Rows marked *optional* are the speed artifacts — step-distilled checkpoints and speculative-decoding drafters. Nothing breaks without them, but they are usually the difference between minutes and hours, so skim them before you start a long download.
 
 | Architecture | Model | GGUF Download |
 |---|---|---|
@@ -37,11 +37,10 @@ TensorSharp loads models in GGUF format. Below are verified Hugging Face repos f
 | GLM 5.x | GLM-5.3-Flash (320B, 288 routed experts, text + image) | [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) — one subdirectory per quant (`UD-Q2_K_XL/`, …), each a multi-shard set; point `--model` at the `-00001-of-` shard. `general.architecture` = `glm5next`, and it loads through the same native executor as GLM-5.2. Unlike 5.2 it **takes images**: `mmproj-BF16.gguf` (the GLM-OCR ViT, same repo) enables `--image`, multi-image prompts and multi-turn image sessions. Its NextN block is not wired up yet, so there is no `--spec` here. Omitting `--tp` uses the default layer split across every visible GPU; on GGML GPU backends, `--tp N` selects native local/single-process tensor parallelism |
 | DeepSeek V4 | DSpark speculative drafters (optional — speed only) | see [DSpark drafters](#dspark-drafters) below — a separate GGUF loaded with `--draft-model` for ~1.3-1.4x decode |
 | DiffusionGemma | diffusiongemma-26B-A4B-it | [unsloth/diffusiongemma-26B-A4B-it-GGUF](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) (`general.architecture` = `diffusion-gemma`) |
-| Qwen-Image-Edit | MMDiT DiT (the `--model` GGUF) | [unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) (e.g. `qwen-image-edit-2511-Q4_K_M.gguf`; `general.architecture` = `qwen_image`) |
-| Qwen-Image-Edit | Qwen-Image VAE (required) | `VAE/Qwen_Image-VAE.safetensors` from [QuantStack/Qwen-Image-Edit-GGUF](https://huggingface.co/QuantStack/Qwen-Image-Edit-GGUF) — place next to the DiT or point `--qwen-image-vae` / `TS_QWEN_IMAGE_VAE` at it (the `.safetensors` VAE loads directly) |
-| Qwen-Image-Edit | Qwen2.5-VL-7B text encoder (required) | [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) — place next to the DiT or set `--qwen-image-vl` / `TS_QWEN_IMAGE_TE` |
-| Qwen-Image-Edit | Vision mmproj (optional) | `mmproj-BF16.gguf` from [unsloth/Qwen2.5-VL-7B-Instruct-GGUF](https://huggingface.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF) — image-grounded conditioning via `--qwen-image-mmproj` / `TS_QWEN_IMAGE_MMPROJ` |
-| Qwen-Image-Edit | Lightning LoRA (optional, 4/8-step) | [lightx2v/Qwen-Image-Edit-2511-Lightning](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) (`Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors`) — `--qwen-image-lora` / `TS_QWEN_IMAGE_LORA`; auto-switches to the LoRA's step count and CFG 1.0 |
+| Qwen-Image-2.1 | Diffusion transformer (the `--model` GGUF) | [Abiray/Qwen-Image-2.1-GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF) — `qwen_image_2.1_Q4_K_M.gguf`. [`config/qwen-image-2.1.json`](config/qwen-image-2.1.json) downloads this file and the three companions below with pinned revisions and SHA-256 checksums (four files, about 10.29 GiB). See [qwenimage21.md](docs/models/qwenimage21.md) |
+| Qwen-Image-2.1 | Dedicated 2.1 VAE (required) | `vae/qwen_image_2.1_vae_bf16.safetensors` from [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1/tree/main/vae) — place next to the DiT or point `--qwen-image-vae` / `TS_QWEN_IMAGE_VAE` at it |
+| Qwen-Image-2.1 | Qwen3-VL-8B text encoder (required) | `Qwen3VL-8B-Instruct-Q4_K_M.gguf` from [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) — place next to the DiT or set `--qwen-image-vl` / `TS_QWEN_IMAGE_TE` |
+| Qwen-Image-2.1 | Vision encoder for editing | `mmproj-Qwen3VL-8B-Instruct-F16.gguf` from the same Qwen3-VL repository — place next to the DiT or set `--qwen-image-mmproj` / `TS_QWEN_IMAGE_MMPROJ` |
 | MiniMax-H3 audio+video | denoiser (the `--model` GGUF) | **Two separate checkpoints, not settings** — which one you load decides what conditioning it accepts. [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF): `minimax_h3_fl2va_pruned-Q4_K.gguf` (10.64 GiB) for text / image-to-video / first-and-last-frame, or `minimax_h3_ref2va_pruned-Q4_K.gguf` (10.60 GiB) for identity/appearance references. Also Q8_0 (19.97 GiB) down to Q2_K (6.26 GiB). H3 is CFG-distilled: **pass `--cfg 1.0`** and 4-8 steps. The GGUFs carry **no metadata at all**, so TensorSharp identifies them by their tensors, and the partition off the file name — keep `fl2va` / `ref2va` in it if you rename or requantize. Both checkpoints share the three networks below, so adding the second one later costs only its own ~10.6 GiB |
 | MiniMax-H3 audio+video | Qwen3-VL-32B text encoder (required) | Same repo: `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` (16.97 GiB), or `-Q2_K_M.gguf` (12.20 GiB) to pair with the two smallest denoisers. Truncated to 50 layers with the final norm removed. Freed before the denoise starts. **It ships no tokenizer** — also download `vocab.json` and `merges.txt` from [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/processor) and put them beside it (or set `TS_VIDEO_TOKENIZER`) |
 | MiniMax-H3 audio+video | `vocab.json` + `merges.txt` (required) | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/processor) — the Qwen2 byte-level BPE pair the encoder GGUF omits, and the one thing a config cannot auto-download for you (auto-download fills in options that are flags; the tokenizer is not one). `curl -L -o models/vocab.json https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/processor/vocab.json` and the same for `merges.txt` |
@@ -101,7 +100,7 @@ Those are different drafters from DSpark.
 
 These commands run from the repository root. First install the [.NET 10 SDK](DEVELOPMENT.md#install-the-net-10-sdk) for your platform and run `dotnet build TensorSharp.slnx -c Release`; a runtime-only installation cannot build the binaries used below.
 
-The `hf download` commands need the Hugging Face CLI (`pip install -U huggingface_hub`) and drop every file into `./models`. Reminders that apply to all blocks: the CLI reads its one-shot prompt from a **file** via `--input` (`--prompt` is the Qwen-Image-Edit edit instruction and the video-generation prompt, MiniMax-H3 and Wan alike), samples **greedily** by default, and generates only 100 tokens unless you raise `--max-tokens`; the server always listens on **http://localhost:5000**. Swap `--backend ggml_cuda` for the backend that fits your hardware (see [Pick a Backend](README.md#pick-a-backend)). Create a prompt file first:
+The `hf download` commands need the Hugging Face CLI (`pip install -U huggingface_hub`) and drop every file into `./models`. Reminders that apply to all blocks: the CLI reads its one-shot prompt from a **file** via `--input` (`--prompt` is the Qwen-Image-2.1 image prompt and the video-generation prompt, MiniMax-H3 and Wan alike), samples **greedily** by default, and generates only 100 tokens unless you raise `--max-tokens`; the server always listens on **http://localhost:5000**. Swap `--backend ggml_cuda` for the backend that fits your hardware (see [Pick a Backend](README.md#pick-a-backend)). Create a prompt file first:
 
 ```bash
 echo "Give me three facts about the Moon." > prompt.txt
@@ -278,19 +277,37 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/di
 
 (The Web UI streams live denoising previews for DiffusionGemma; the compat APIs return the final text.)
 
-**Qwen-Image-Edit** — image + prompt → edited image; needs the DiT + VAE + text encoder, Lightning LoRA optional ([unsloth/Qwen-Image-Edit-2511-GGUF](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF))
+**Qwen-Image-2.1** — prompt → image, or prompt + one or more reference images → edited image; needs the DiT, the dedicated 2.1 VAE and the Qwen3-VL-8B text encoder, plus its mmproj for editing ([Abiray/Qwen-Image-2.1-GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF))
+
+The shortest route is the ready-made config: it pins revisions and SHA-256 checksums and downloads whatever is missing (four files, about 10.29 GiB) into `$TENSORSHARP_MODELS/qwen-image-2.1/`, or `models/qwen-image-2.1/` when `TENSORSHARP_MODELS` is unset. It selects `ggml_metal`; append `--backend ggml_cuda` on an NVIDIA machine.
 
 ```bash
-hf download unsloth/Qwen-Image-Edit-2511-GGUF qwen-image-edit-2511-Q4_K_M.gguf --local-dir models
-hf download QuantStack/Qwen-Image-Edit-GGUF VAE/Qwen_Image-VAE.safetensors --local-dir models
-hf download unsloth/Qwen2.5-VL-7B-Instruct-GGUF Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --local-dir models
-hf download lightx2v/Qwen-Image-Edit-2511-Lightning Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --local-dir models
-
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --image input.png --prompt "Make the sky a dramatic sunset." --output edited.png --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen-image-edit-2511-Q4_K_M.gguf --qwen-image-vae models/VAE/Qwen_Image-VAE.safetensors --qwen-image-vl models/Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf --qwen-image-lora models/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors --backend ggml_cuda
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output generated.png
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image generated.png \
+  --prompt 'Change the blue vase to a red vase. Preserve the cat, lighting and composition.' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output edited.png
+dotnet run --project TensorSharp.Server.Host -c Release --no-build -- \
+  --config config/qwen-image-2.1.json --host 127.0.0.1 --port 5000
 ```
 
-(In the Web UI, attach an image and type the edit instruction. The Lightning LoRA download and `--qwen-image-lora` flag are optional — they cut the denoise to 4 steps at CFG 1.0.)
+To fetch the files yourself instead:
+
+```bash
+hf download Abiray/Qwen-Image-2.1-GGUF qwen_image_2.1_Q4_K_M.gguf --local-dir models
+hf download Comfy-Org/Qwen-Image-2.1 vae/qwen_image_2.1_vae_bf16.safetensors --local-dir models
+hf download Qwen/Qwen3-VL-8B-Instruct-GGUF Qwen3VL-8B-Instruct-Q4_K_M.gguf mmproj-Qwen3VL-8B-Instruct-F16.gguf --local-dir models
+
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf --qwen-image-vae models/vae/qwen_image_2.1_vae_bf16.safetensors --qwen-image-vl models/Qwen3VL-8B-Instruct-Q4_K_M.gguf --qwen-image-mmproj models/mmproj-Qwen3VL-8B-Instruct-F16.gguf --backend ggml_cuda
+```
+
+(In the Web UI, a prompt without an attachment generates an image; attach one or more images to edit. Omitted settings select 2048×2048, 40 Euler steps and CFG 1; `--width 1024 --height 1024` is the faster draft size. See [qwenimage21.md](docs/models/qwenimage21.md).)
 
 **MiniMax-H3 audio+video generation** — prompt (+ optional keyframes or references) → H.264 MP4 **and native 32 kHz stereo audio, generated together in one packed latent** ([unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF))
 

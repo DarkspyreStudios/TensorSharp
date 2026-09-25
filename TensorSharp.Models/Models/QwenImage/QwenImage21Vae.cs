@@ -14,13 +14,17 @@ namespace TensorSharp.Models.QwenImage
         {
             QwenImage21CompanionValidation.ValidateVae(model.VaeWeightSource);
             _weights = VaeWeights.Load(model.VaeWeightSource);
-            bool ggml = model.Backend is BackendType.GgmlCpu or BackendType.GgmlCuda or BackendType.GgmlMetal;
+            // Vulkan convolutions run on the device too: the native F32 convolution
+            // rescales inputs past the F16 range that Vulkan's matrix units accept.
+            bool ggml = model.Backend is BackendType.GgmlCpu or BackendType.GgmlCuda or BackendType.GgmlMetal
+                or BackendType.GgmlVulkan;
             VaeReferenceMath.UseGpuConv = ggml && Environment.GetEnvironmentVariable("TS_QWEN_VAE_GPU") != "0";
             VaeReferenceMath.UseFusedGraph21 = model.Backend == BackendType.GgmlCuda;
             if (ggml) GgmlBasicOps.EnsureBackendAvailable(model.Backend switch
             {
                 BackendType.GgmlCuda => GgmlBackendType.Cuda,
                 BackendType.GgmlMetal => GgmlBackendType.Metal,
+                BackendType.GgmlVulkan => GgmlBackendType.Vulkan,
                 _ => GgmlBackendType.Cpu,
             });
         }
@@ -52,7 +56,7 @@ namespace TensorSharp.Models.QwenImage
                 Environment.GetEnvironmentVariable("TS_QWEN21_VAE_FUSED") == "0") return null;
             if (weights.FusedGraph == null)
             {
-                weights.FusedGraph = QwenImageVaeGraph.TryBuild(weights, qwen21: true);
+                weights.FusedGraph = QwenImageVaeGraph.TryBuild(weights);
                 if (weights.FusedGraph == null) weights.FusedGraphBuildFailed = true;
             }
             return weights.FusedGraph;
@@ -95,7 +99,7 @@ namespace TensorSharp.Models.QwenImage
         private static Feature Mid21(VaeWeights w, string prefix, Feature x)
         {
             x = Residual21(w, prefix + ".0", x);
-            x = AttentionBlock(w, prefix + ".1", x, nativeAttention: true);
+            x = AttentionBlock(w, prefix + ".1", x);
             Trace21(prefix + ".1.output", x.D);
             return Residual21(w, prefix + ".2", x);
         }
@@ -142,7 +146,6 @@ namespace TensorSharp.Models.QwenImage
 
         internal static VaeLatent Encode21(VaeWeights w, RgbImage image)
         {
-            using var precision = new ConvPrecisionScope(true);
             if (image.Width % 16 != 0 || image.Height % 16 != 0)
                 throw new ArgumentException("Qwen-Image-2.1 VAE dimensions must be multiples of 16.");
             int hw = image.Width * image.Height;
@@ -184,7 +187,6 @@ namespace TensorSharp.Models.QwenImage
 
         internal static RgbImage Decode21(VaeWeights w, VaeLatent latent)
         {
-            using var precision = new ConvPrecisionScope(true);
             if (latent.Channels != 64 || latent.Data.Length != 64L * latent.Height * latent.Width)
                 throw new ArgumentException("Qwen-Image-2.1 VAE requires 64 latent channels.");
             int pixels = latent.Height * latent.Width;

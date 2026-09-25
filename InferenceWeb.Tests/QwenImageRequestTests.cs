@@ -17,7 +17,7 @@ public sealed class QwenImageRequestTests
         var p = WebUiChatService.ParseImageParameters(Json("""
             {"width":1024,"height":768,"steps":40,"cfg":6,"seed":9223372036854775807,
              "negativePrompt":"blur","targetArea":786432}
-            """), version21: true);
+            """));
         Assert.Equal(1024, p.Width);
         Assert.Equal(768, p.Height);
         Assert.Equal(40, p.Steps);
@@ -40,47 +40,36 @@ public sealed class QwenImageRequestTests
     public void Image21Parameters_RejectInvalidRequestsBeforeInference(string json)
     {
         var error = Assert.Throws<WebUiRequestRejectedException>(() =>
-            WebUiChatService.ParseImageParameters(Json(json), version21: true));
+            WebUiChatService.ParseImageParameters(Json(json)));
         Assert.Equal(400, error.StatusCode);
-    }
-
-    [Fact]
-    public void LegacyEditParameters_KeepThe16PixelGrid()
-    {
-        var p = WebUiChatService.ParseImageParameters(Json("{\"width\":1008,\"height\":768}"), version21: false);
-        Assert.Equal(1008, p.Width);
     }
 
     [Fact]
     public void ImageParameters_UnspecifiedSamplingIsResolvedByModel()
     {
-        var p = WebUiChatService.ParseImageParameters(Json("{}"), version21: true);
+        var p = WebUiChatService.ParseImageParameters(Json("{}"));
         Assert.Equal(0, p.Steps);
         Assert.Equal(0f, p.CfgScale);
         Assert.Equal(0, p.Width);
         Assert.Equal(0, p.Height);
     }
 
-    [Theory]
-    [InlineData(true, 4194304)]
-    [InlineData(false, 1048576)]
-    public void ImageParameters_OmittedAreaUsesTheLoadedModelResolution(bool version21, long expectedArea)
+    [Fact]
+    public void ImageParameters_OmittedAreaUsesTheModelsNativeResolution()
     {
         // Both plain and streaming routes share this parser; the Web UI omits geometry.
-        var p = WebUiChatService.ParseImageParameters(Json("{}"), version21);
-        Assert.Equal(expectedArea, p.TargetArea);
+        var p = WebUiChatService.ParseImageParameters(Json("{}"));
+        Assert.Equal(4194304, p.TargetArea);
         Assert.Equal(0, p.Width);
         Assert.Equal(0, p.Height);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void ImageParameters_ExplicitDraftAreaOverridesModelDefaults(bool version21)
+    [Fact]
+    public void ImageParameters_ExplicitDraftAreaOverridesModelDefaults()
     {
-        var p = WebUiChatService.ParseImageParameters(Json("{\"targetArea\":1048576}"), version21);
+        var p = WebUiChatService.ParseImageParameters(Json("{\"targetArea\":1048576}"));
         Assert.Equal(1048576, p.TargetArea);
-        Assert.Equal(1048576, p.ResolveTargetArea(version21));
+        Assert.Equal(1048576, p.ResolveTargetArea());
     }
 
     [Theory]

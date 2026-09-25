@@ -6,13 +6,13 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 Qwen-Image-Edit 图像编辑、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills，以及用于沙箱化文件和 shell 操作的、有界进程内“模型→工具”循环。
+**面向 GGUF 模型的原生 .NET LLM 推理引擎** —— 覆盖自回归 LLM *与* DiffusionGemma 风格的文本扩散模型，以及 [Qwen-Image-2.1 图像生成与编辑](docs/models/qwenimage21_zh-cn.md)、MiniMax-H3 视频 + 原生 32 kHz 立体声音频联合生成（Wan 2.1/2.2 则只生成视频）。提供控制台应用、浏览器聊天界面，以及兼容 Ollama/OpenAI 的 HTTP API。.NET 运行时提供纯托管 CPU 与原生加速后端；已发布的对比使用相同 GGUF 文件和硬件。可选的 `TensorSharp.AgentHost` 层还提供 Agent Skills，以及用于沙箱化文件和 shell 操作的、有界进程内“模型→工具”循环。
 
 ## 支持的模型家族一览
 
 - **文本、推理与多模态 LLM：** [DeepSeek V4 Flash](docs/models/deepseek4_zh-cn.md) / [V4.1 Flash](docs/models/deepseek41_zh-cn.md)、[GLM 5.x](docs/models/glm_zh-cn.md)、[Gemma 4](docs/models/gemma4_zh-cn.md)、[Qwen 3.5 / 3.6](docs/models/qwen35_zh-cn.md)、[Qwen 3.8 Flash Next](docs/models/qwen38-flash-next_zh-cn.md)、[Bonsai（Qwen 家族）](docs/models/bonsai_zh-cn.md)、[GPT OSS](docs/models/gptoss_zh-cn.md)、[Nemotron-H](docs/models/nemotron_zh-cn.md)、[Mistral 3](docs/models/mistral3_zh-cn.md)、[Hunyuan Dense](docs/models/hunyuan-dense_zh-cn.md) 与 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)。
 - **文本扩散：** [DiffusionGemma](docs/models/diffusiongemma_zh-cn.md)，包含 `/v1/systemone` 上的 Jev 类型化判定（状态可为文本或图像）。
-- **图像编辑与视频生成：** [Qwen-Image-Edit](docs/models/qwenimage_zh-cn.md)、[MiniMax-H3（视频 + 立体声音频）](docs/models/minimax-h3_zh-cn.md) 与 [Wan 2.1 / 2.2](docs/models/wan_zh-cn.md)。
+- **图像生成/编辑与视频生成：** [Qwen-Image-2.1](docs/models/qwenimage21_zh-cn.md)、[MiniMax-H3（视频 + 立体声音频）](docs/models/minimax-h3_zh-cn.md) 与 [Wan 2.1 / 2.2](docs/models/wan_zh-cn.md)。
 - **文本与代码嵌入：** BERT / XLM-R 编码器——[Snowflake Arctic Embed L v2.0 与 all-MiniLM-L6-v2](docs/embeddings_zh-cn.md)。
 
 各模型的后端、模态、功能支持与验证覆盖范围不同，详见[模型卡片](docs/models/README_zh-cn.md)、[嵌入指南](docs/embeddings_zh-cn.md)及[完整架构矩阵](#支持的模型架构)。
@@ -32,7 +32,7 @@
 
 - **文本与代码嵌入。** GGUF BERT/XLM-R 编码器，兼容 OpenAI/Ollama 的批量嵌入 API，支持 Snowflake Arctic Embed 与 MiniLM；见[嵌入指南](docs/embeddings_zh-cn.md)。
 - **本地原生 .NET 推理。** 可通过 CLI、浏览器 Web UI，以及兼容 Ollama/OpenAI 的 API 运行 GGUF 文本与多模态模型。
-- **模型与媒体覆盖广。** 当前源码支持现代文本模型、视觉/音频输入、PDF、图像编辑和视频生成；详见[模型卡片](docs/models/README_zh-cn.md)。
+- **模型与媒体覆盖广。** 当前源码支持现代文本模型、视觉/音频输入、PDF、图像生成/编辑和视频生成；详见[模型卡片](docs/models/README_zh-cn.md)。
 - **性能经过实测。** TensorSharp 在相同模型与硬件上对比 `llama.cpp`；结果对应所测的模型、后端与工作负载。详见[性能报告](docs/engine_comparison_report.md)。
 - **智能体能力覆盖 iOS。** `TensorSharp.AgentHost` 提供有界的 Agent Skills 与代码工具；[TensorAgent](TensorAgent/README.md) 使用 iOS 的 `ggml_metal` 后端，把同一套本地聊天与智能体体验带到 iPhone 和 iPad。
 - **可扩展的工程能力。** 连续批处理、分页/前缀共享 KV 缓存、投机解码、张量并行和可配置的安全边界，按需启用。详见[功能说明](FEATURES_zh-cn.md)、[使用指南](USAGE_zh-cn.md)与[当前状态](docs/PROJECT_STATUS_zh-cn.md)。
@@ -196,7 +196,7 @@ curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
 | Hunyuan Dense | 腾讯稠密 Hunyuan GGUF（`hunyuan-dense`），例如 Hy-MT2 系列 | — / — / — | — | — | [hunyuan-dense](docs/models/hunyuan-dense_zh-cn.md) |
 | DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF)（视觉塔取自上游 safetensors 分片） | ✅ / — / — | — | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
 | Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF)（+ mmproj） | ✅ / — / — | ✅ | ✅ | [muse-glimmer](docs/models/muse-glimmer_zh-cn.md) |
-| Qwen-Image-Edit | [Qwen-Image-Edit-2511](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF)（MMDiT + VAE + Qwen2.5-VL）· 快速路径：[Lightning 4 步 LoRA](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | 🖼️ 图像→图像 | — | — | [qwenimage](docs/models/qwenimage_zh-cn.md) |
+| Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF)（DiT + 专用 2.1 VAE + Qwen3-VL-8B） | 🖼️ 文本→图像、图像编辑；RGBA | — | — | [qwenimage21](docs/models/qwenimage21_zh-cn.md) |
 | MiniMax-H3 音视频 | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF)（去噪器 + Qwen3-VL-32B 文本编码器）+ [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)（视频 VAE + 音频 VAE） | 🎬🔊 文本→视频、图像→视频、首尾帧、参考（图像/片段/音轨）→视频，**带立体声音频** | — | — | [minimax-h3](docs/models/minimax-h3_zh-cn.md) |
 | Wan 2.1 / 2.2 视频 | [Wan2.2-TI2V-5B](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF)（另有 [T2V-A14B](https://huggingface.co/QuantStack/Wan2.2-T2V-A14B-GGUF)、[I2V-A14B](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF)、[Wan2.1-T2V-14B](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf)）+ UMT5-XXL + 视频 VAE · 快速路径：[TI2V-5B-Turbo](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF)（4 步，DiT 前向次数减少 25×） | 🎬 文本→视频、图像→视频 | — | — | [wan](docs/models/wan_zh-cn.md) |
 
@@ -204,7 +204,7 @@ curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
 
 按这个顺序选择：
 
-1. **先选对 checkpoint。** Wan 视频优先使用 Turbo/Lightning/4-step 蒸馏 GGUF；Qwen-Image-Edit 使用 Lightning LoRA。
+1. **先选对 checkpoint。** Wan 视频优先使用 Turbo/Lightning/4-step 蒸馏 GGUF。
 2. **使用匹配的后端。** NVIDIA：`ggml_cuda`；Apple Silicon 和 iOS：`ggml_metal`；CPU：`ggml_cpu`（需要可移植性时使用纯托管 `cpu`）。
 3. **先减少工作量，再调参数。** H3 使用 `--cfg 1.0` 和 4–8 步；媒体任务优先降低分辨率、帧数或步数。
 4. **最后再扩展或投机。** 根据模型和负载尝试 `--draft-model` / `--spec`、`--n-cpu-moe` 或 `--tp N`。
@@ -229,7 +229,7 @@ curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
 | Hunyuan Dense | `hunyuan-dense` | 腾讯稠密 Hunyuan 解码器，例如 Hy-MT2（GQA，per-head QK-norm 在 NeoX RoPE **之后**，SwiGLU） | 仅文本 | 不支持 | 不支持 | — | [hunyuan-dense](docs/models/hunyuan-dense_zh-cn.md) |
 | Muse-Glimmer | `muse-glimmer`、`muse_glimmer` | Muse-Glimmer-30B（交错滑动窗口 + NoPE 全注意力层，注意力输出门控） | 图像 | 支持 | 支持（ATEM） | 支持（DFlash 块级草稿，独立 GGUF） | [muse-glimmer](docs/models/muse-glimmer_zh-cn.md) |
 | DiffusionGemma | `diffusion-gemma`、`diffusion_gemma` | diffusion-gemma 文本扩散 GGUF | 图像（聊天与 `/v1/systemone` Jev 判定）；不支持音频与视频 | 不支持 | 不支持 | — | [diffusiongemma](docs/models/diffusiongemma_zh-cn.md) |
-| Qwen-Image-Edit | `qwen_image`、`qwen-image` | qwen-image-edit MMDiT GGUF（+ VAE 与 Qwen2.5-VL） | 图像编辑（图像+文本 → 图像） | 不支持 | 不支持 | — | [qwenimage](docs/models/qwenimage_zh-cn.md) |
+| Qwen-Image-2.1 | `qwen_image`、`qwen-image`（通过张量键识别 2.1） | Qwen-Image-2.1 DiT GGUF（+ 专用 2.1 VAE 与 Qwen3-VL-8B） | 文本→图像与图像编辑，RGBA 输出 | 不支持 | 不支持 | — | [qwenimage21](docs/models/qwenimage21_zh-cn.md) |
 | MiniMax-H3 | `minimax-h3`、`minimax_h3`（官方发布的 GGUF 完全没有元数据，因此靠张量表识别） | MiniMax-H3 FL2VA / Ref2VA（193 亿参数的打包音视频 DiT + Qwen3-VL-32B 文本编码器、视频 VAE、音频 VAE） | 视频输出 **+ 32 kHz 立体声音频**（文本→视频、图像→视频、首尾帧、参考→视频） | 不支持 | 不支持 | — | [minimax-h3](docs/models/minimax-h3_zh-cn.md) |
 | Wan 视频 | `wan`、`wan2.1`、`wan2.2` | Wan 2.1 T2V 1.3B/14B、Wan 2.2 TI2V-5B、Wan 2.2 A14B T2V/I2V（双专家） | 视频输出（文本→视频、图像→视频） | 不支持 | 不支持 | — | [wan](docs/models/wan_zh-cn.md) |
 
@@ -252,7 +252,7 @@ TensorSharp 的 .NET 运行时与原生 GGML 执行路径对比 `llama.cpp`：**
 | Qwen 3.6 27B（UD-IQ2_XXS，dense） | CUDA | **1.07×** | 0.96× | 0.95× |
 | Qwen 3.6 27B（UD-IQ2_XXS，dense） | Vulkan | 1.02× | 0.85× | 0.84× |
 
-TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 prefill **每个模型**都获胜，最高 **1.49×**），CUDA decode 保持持平或更快，Vulkan 上 dense 12B 的 decode 明显胜出（长上下文最高 **1.32×**）——即便在 2-bit IQ2_XXS 量化下亦然。剩余低于 1.0× 的项仍是正在优化的目标。该框架还提供工具调用、结构化输出、图像编辑（对比 `stable-diffusion.cpp`）、MTP 开/关与并发场景，可通过 [`benchmarks/engine_comparison`](benchmarks/engine_comparison) 在你自己的硬件上运行。完整报告见 [此处](docs/engine_comparison_report.md)。
+TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 prefill **每个模型**都获胜，最高 **1.49×**），CUDA decode 保持持平或更快，Vulkan 上 dense 12B 的 decode 明显胜出（长上下文最高 **1.32×**）——即便在 2-bit IQ2_XXS 量化下亦然。剩余低于 1.0× 的项仍是正在优化的目标。该框架还提供工具调用、结构化输出、MTP 开/关与并发场景，可通过 [`benchmarks/engine_comparison`](benchmarks/engine_comparison) 在你自己的硬件上运行。完整报告见 [此处](docs/engine_comparison_report.md)。
 
 放不进这台 16 GB 机器的模型，会在各自的卡片里给出同样方式测得的正面对比（两个引擎、同一份 GGUF、同一台机器、背靠背）：[GLM-5.2 744B-A40B，3× RTX PRO 6000](docs/models/glm_zh-cn.md#性能) —— 从约 1k prompt token 起 TensorSharp 的 prefill 领先（pp2048 **1.20×**、pp4096 **1.21×**），decode 领先 1.04×，短 prefill 上则是 llama.cpp 快几个百分点。非 Flash 的 [GLM-5.3](docs/models/glm_zh-cn.md#glm-53glm-dsa) 另有一份自己的对比，测于 8 张 A40 46 GB（无 NVLink，UD-Q2_K_XL，10,531 token 提示，300 个 decode token，3 次取中位数，整层放置）：decode 打平，**20.48** tok/s 对 llama.cpp 的 20.28；TensorSharp 的 prefill 为 251.6 tok/s，加载这份 236.4 GiB 的 checkpoint **快 2.9×**（264 秒对 753 秒）；真正的差距在首 token 延迟——41.9 秒对 29.0 秒，约**慢 1.4×**。该组数据没有记录 llama.cpp 的 prefill tok/s。完整方法与逐次数据见 [`docs/validation/cross-engine-2026-09/README.md`](docs/validation/cross-engine-2026-09/README.md)。llama.cpp 可以作为 `glm-dsa` 的参照引擎，但不能作为 `glm5next`（GLM-5.3-Flash）的参照引擎。
 
@@ -273,7 +273,7 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 | [Agent Skills 与智能体工作](docs/agent_skills.md)（英文） | `SKILL.md` 格式、渐进式披露与其预算、进程内工具循环、沙箱化代码执行、工作区与产物、路径 / ZIP / 执行安全模型，以及 HTTP 与 C# 两套接口 |
 | [投机解码](docs/speculative_decoding.md)（英文） | 三层设计（模型适配层 / 算法 / 草稿权重）、已内置的 `auto` / `draft-head` / `block` / `ngram` 四种算法，以及新增一种算法需要写什么 |
 | [环境变量功能矩阵](docs/env_var_feature_matrix_zh-cn.md) | 哪些高影响运行时开关影响哪些模型、后端与提示类型 |
-| [引擎对比报告](docs/engine_comparison_report.md) | TensorSharp 对比 llama.cpp / stable-diffusion.cpp 的完整逐场景表格 |
+| [引擎对比报告](docs/engine_comparison_report.md) | TensorSharp 对比 llama.cpp 的完整逐场景表格 |
 | [ggml_metal 对比 llama.cpp](docs/perf/metal-vs-llama-cpp.md) | Apple Silicon 上 prefill / decode 的正面对比，找到的四处计算图构建差距，以及每一处的实际收益 |
 | [测试 / 基准矩阵运行器](TensorSharp.TestMatrix/README_zh-cn.md) | 扫描 model × backend × feature × env-var 组合并生成回归报告 |
 | [服务端 API 示例](TensorSharp.Server.Host/API_EXAMPLES_zh-cn.md) | 完整的 curl 与 Python 示例 |
@@ -284,7 +284,7 @@ TensorSharp 在 CUDA 的 prefill / 首 token 延迟上明显领先（多轮 pref
 
 | 范围 | 当前情况 |
 |---|---|
-| 模型 | 十余个自回归家族，另有文本扩散、图像编辑，以及带音频的视频生成——见[支持的模型架构](#支持的模型架构)。 |
+| 模型 | 十余个自回归家族，另有文本扩散、图像生成/编辑，以及带音频的视频生成——见[支持的模型架构](#支持的模型架构)。 |
 | 推理宿主 | CLI、交互式 REPL、ASP.NET Core Web UI、Ollama 风格 API、OpenAI Chat Completions 与 Responses 风格 API，以及 TensorAgent iOS/iPadOS 应用。 |
 | 后端 | 纯 C# CPU、Direct CUDA/cuBLAS、MLX Metal，以及 GGML CPU/Metal/CUDA/Vulkan，各架构另有例外。 |
 | 服务能力 | 基于分页、前缀共享 KV 缓存的连续批处理；投机解码；单机与多节点张量并行；结构化输出；工具调用。 |

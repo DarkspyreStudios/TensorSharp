@@ -37,6 +37,10 @@ namespace TensorSharp.GGML
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int TSGgml_TensorParallelInitLoopback(int backendType, int count);
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int TSGgml_SetActiveDevice(int rank);
 
         [LibraryImport(DllName)]
@@ -175,6 +179,20 @@ namespace TensorSharp.GGML
                 throw new InvalidOperationException(GetLastErrorMessage(
                     $"Failed to initialize {deviceIndices.Length} GGML device(s) for a layer split."));
             }
+            s_cachedRankValid = false;
+        }
+
+        /// <summary>
+        /// Diagnostics only: a tensor-parallel group of <paramref name="count"/> ranks that are
+        /// all backend instances on ONE device, reducing through host staging. The ranks
+        /// serialize on that device, so it measures nothing about speed; it lets sharded
+        /// kernels be compared with their unsharded forward on a single-GPU machine.
+        /// </summary>
+        public static void TensorParallelInitLoopback(GgmlBackendType backendType, int count)
+        {
+            if (TSGgml_TensorParallelInitLoopback((int)backendType, count) == 0)
+                throw new InvalidOperationException(GetLastErrorMessage(
+                    $"Failed to initialize a {count}-rank loopback tensor-parallel group."));
             s_cachedRankValid = false;
         }
 

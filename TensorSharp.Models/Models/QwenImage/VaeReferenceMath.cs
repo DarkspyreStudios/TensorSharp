@@ -5,11 +5,11 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
-// Managed CPU reference for AutoencoderKLQwenImage (single image / T=1). See
-// QwenImageVae.Reference.cs for the single-frame simplification rationale. Every
-// operation follows the diffusers/sglang reference; large CPU elementwise passes
-// use spatial tiling/parallel ranges, and supported backends accelerate convolution
-// and Qwen-Image-2.1 spatial attention. The scalar equations remain the oracle.
+// Managed primitives for the single-image (T=1) Qwen-Image-2.1 VAE (QwenImage21Vae
+// holds the encoder/decoder drivers). Every operation follows the diffusers/sglang
+// reference; large CPU elementwise passes use spatial tiling/parallel ranges, and
+// supported backends accelerate convolution and spatial attention. The scalar
+// equations remain the oracle.
 //
 // Tensor convention here: a feature map is a flat float[] in planar CHW order
 // (channel c, row y, col x at index (c*H + y)*W + x). Time is degenerate (T=1).
@@ -34,27 +34,12 @@ namespace TensorSharp.Models.QwenImage
 
     internal static partial class VaeReferenceMath
     {
-        // When set (by QwenImageVae on a GGML backend), the conv stack runs on the
-        // device via TSGgml_Conv2d instead of the pure-C# scalar loops. This is THE
-        // fix for the ~459 s/1 MP CPU-bound, GPU-idle VAE encode. Disable with
-        // TS_QWEN_VAE_GPU=0.
+        // When set (by QwenImage21Vae on a GGML backend), the conv stack runs on the
+        // device via TSGgml_Conv2dF32 instead of the pure-C# scalar loops. Disable with
+        // TS_QWEN_VAE_GPU=0. Every device conv is F32 end to end: the Qwen-Image-2.1
+        // VAE reaches finite activations above 65504 before its final norm.
         internal static bool UseGpuConv =
             Environment.GetEnvironmentVariable("TS_QWEN_VAE_GPU") != "0";
-
-        // Qwen-Image-2.1 reaches finite activations above 65504 before the final
-        // norm. Scope F32 convolution to that synchronous call chain, including its
-        // shared attention/downsample helpers, without changing other VAEs.
-        [ThreadStatic] private static bool FullPrecisionConv;
-        private readonly struct ConvPrecisionScope : IDisposable
-        {
-            private readonly bool _previous;
-            public ConvPrecisionScope(bool enabled)
-            {
-                _previous = FullPrecisionConv;
-                FullPrecisionConv = enabled;
-            }
-            public void Dispose() => FullPrecisionConv = _previous;
-        }
 
         // Fused whole-VAE graph (TSGgml_QwenVaeRun): the entire encode/decode as ONE
         // device-resident ggml graph (resident weights, direct convs, no per-op host
@@ -62,23 +47,6 @@ namespace TensorSharp.Models.QwenImage
         // TS_QWEN_VAE_FUSED=0 disables.
         internal static readonly bool UseFusedGraph =
             Environment.GetEnvironmentVariable("TS_QWEN_VAE_FUSED") != "0";
-
-        private static QwenImageVaeGraph FusedGraph(VaeWeights w)
-        {
-            if (!UseGpuConv || !UseFusedGraph || w.FusedGraphBuildFailed) return null;
-            if (w.FusedGraph == null)
-            {
-                w.FusedGraph = QwenImageVaeGraph.TryBuild(w);
-                if (w.FusedGraph == null) w.FusedGraphBuildFailed = true;
-            }
-            return w.FusedGraph;
-        }
-
-        private const int BaseDim = 96;
-        private const int ZDim = 16;
-        private static readonly int[] DimMult = { 1, 2, 4, 4 };
-        private const int NumRes = 2;
-        // temperal_downsample (encoder) = (False,True,True); temperal_upsample (decoder) = (True,True,False)
 
         // ---- primitive ops ----------------------------------------------------
 
@@ -147,7 +115,8 @@ namespace TensorSharp.Models.QwenImage
         }
 
         // General 2D convolution. weight is OC*IC*KH*KW row-major (oc,ic,kh,kw).
-        private static Feature Conv2d(Feature x, float[] weight, int OC, int IC, int KH, int KW,
+        // Internal (with TryGpuConv2dMaybeTiled) for QwenVaeConvTilingTests.
+        internal static Feature Conv2d(Feature x, float[] weight, int OC, int IC, int KH, int KW,
             float[] bias, int strideH, int strideW, int padT, int padB, int padL, int padR)
         {
             if (x.C != IC) throw new ArgumentException($"conv IC {IC} != input C {x.C}");
@@ -197,8 +166,8 @@ namespace TensorSharp.Models.QwenImage
             return outp;
         }
 
-        // im2col scratch budget (bytes). ggml_conv_2d materializes an F16 im2col tensor of
-        // ~IC*KH*KW * OH * OW * 2 bytes; at high resolution that is several GB and either
+        // im2col scratch budget (bytes). The F32 device conv materializes an im2col tensor of
+        // ~IC*KH*KW * OH * OW * 4 bytes; at high resolution that is several GB and either
         // spills into WDDM shared VRAM (≈3x slower VAE) or OOMs. When the estimate exceeds
         // this budget the conv is split into horizontal output bands (below). Override with
         // TS_QWEN_VAE_CONV_TILE_BYTES.
@@ -215,11 +184,11 @@ namespace TensorSharp.Models.QwenImage
         // is bit-identical to the un-tiled conv — only the transient im2col is bounded. The
         // surrounding group-norm / feature maps are never split, so there are NO tile seams
         // (unlike whole-VAE tiling).
-        private static bool TryGpuConv2dMaybeTiled(Feature x, float[] weight, int OC, int IC, int KH, int KW,
+        internal static bool TryGpuConv2dMaybeTiled(Feature x, float[] weight, int OC, int IC, int KH, int KW,
             float[] bias, int strideH, int strideW, int padT, int padB, int padL, int padR,
             int Ho, int Wo, out Feature result)
         {
-            int elementBytes = FullPrecisionConv ? 4 : 2;
+            const int elementBytes = sizeof(float);
             long im2col = (long)IC * KH * KW * Ho * Wo * elementBytes;
             long budget = Im2colBudgetBytes();
             if (im2col <= budget)
@@ -266,60 +235,7 @@ namespace TensorSharp.Models.QwenImage
             return new Feature(C, oh, ow, d);
         }
 
-        private static double RelL2(float[] a, float[] b)
-        {
-            int n = Math.Min(a.Length, b.Length); double num = 0, den = 0;
-            for (int i = 0; i < n; i++) { double d = a[i] - b[i]; num += d * d; den += (double)a[i] * a[i]; }
-            return Math.Sqrt(num / Math.Max(den, 1e-12));
-        }
-
-        // Self-test: band-tiled conv must equal the un-tiled conv (bit-identical apart from
-        // ggml's shape-dependent float reduction order). Runs several (stride, pad, 1x1) cases
-        // and returns the worst relative-L2 error across them. Requires a GGML backend + UseGpuConv.
-        internal static double ConvTileSelfTest()
-        {
-            bool savedGpu = UseGpuConv; UseGpuConv = true;
-            string savedEnv = Environment.GetEnvironmentVariable("TS_QWEN_VAE_CONV_TILE_BYTES");
-            double worst = 0;
-            try
-            {
-                var rng = new Random(1234);
-                (int IC, int OC, int KH, int KW, int sH, int sW, int pT, int pB, int pL, int pR, int H, int W)[] cases =
-                {
-                    (8, 6, 3, 3, 1, 1, 1, 1, 1, 1, 37, 41),   // standard pad-1 stride-1
-                    (8, 6, 3, 3, 2, 2, 0, 1, 0, 1, 38, 40),   // downsample: asym pad, stride 2
-                    (8, 6, 1, 1, 1, 1, 0, 0, 0, 0, 37, 41),   // 1x1
-                    (4, 5, 3, 3, 1, 1, 1, 1, 1, 1, 9, 64),    // wide, few rows
-                };
-                foreach (var t in cases)
-                {
-                    var x = new Feature(t.IC, t.H, t.W);
-                    for (int i = 0; i < x.D.Length; i++) x.D[i] = (float)(rng.NextDouble() * 2 - 1);
-                    var w = new float[(long)t.OC * t.IC * t.KH * t.KW];
-                    for (int i = 0; i < w.Length; i++) w[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
-                    var b = new float[t.OC];
-                    for (int i = 0; i < b.Length; i++) b[i] = (float)(rng.NextDouble() * 2 - 1) * 0.1f;
-
-                    Environment.SetEnvironmentVariable("TS_QWEN_VAE_CONV_TILE_BYTES", "999999999999");
-                    var full = Conv2d(x, w, t.OC, t.IC, t.KH, t.KW, b, t.sH, t.sW, t.pT, t.pB, t.pL, t.pR);
-                    Environment.SetEnvironmentVariable("TS_QWEN_VAE_CONV_TILE_BYTES", "256");   // ~1 row/band
-                    var tiled = Conv2d(x, w, t.OC, t.IC, t.KH, t.KW, b, t.sH, t.sW, t.pT, t.pB, t.pL, t.pR);
-
-                    if (full.D.Length != tiled.D.Length) { worst = 1e9; continue; }
-                    double rel = RelL2(full.D, tiled.D);
-                    Console.WriteLine($"  conv-tile case IC{t.IC} OC{t.OC} {t.KH}x{t.KW} s{t.sH} pad({t.pT},{t.pB},{t.pL},{t.pR}) {t.H}x{t.W}: tiled-vs-full relL2={rel:E3} (out {full.C}x{full.H}x{full.W})");
-                    worst = Math.Max(worst, rel);
-                }
-            }
-            finally
-            {
-                Environment.SetEnvironmentVariable("TS_QWEN_VAE_CONV_TILE_BYTES", savedEnv);
-                UseGpuConv = savedGpu;
-            }
-            return worst;
-        }
-
-        // Device convolution via TSGgml_Conv2d. C# Feature [C,H,W] == ggml [W,H,C];
+        // Device convolution via TSGgml_Conv2dF32. C# Feature [C,H,W] == ggml [W,H,C];
         // weight [OC,IC,KH,KW] == ggml [KW,KH,IC,OC]; output [OC,OH,OW] == ggml
         // [OW,OH,OC] — same byte order, no transposes. Returns false (falls back to
         // the C# path) if the device op can't run it.
@@ -341,7 +257,7 @@ namespace TensorSharp.Models.QwenImage
                     PadL = padL, PadR = padR, PadT = padT, PadB = padB,
                     StructBytes = Marshal.SizeOf<Conv2dArgs>(),
                 };
-                ok = GgmlBasicOps.TryConv2d(in d, FullPrecisionConv);
+                ok = GgmlBasicOps.TryConv2dF32(in d);
             }
             result = ok ? outp : null;
             return ok;
@@ -388,27 +304,7 @@ namespace TensorSharp.Models.QwenImage
 
         // ---- composite blocks -------------------------------------------------
 
-        private static Feature ResidualBlock(VaeWeights w, string prefix, Feature x, int inDim, int outDim)
-        {
-            Feature h;
-            if (inDim != outDim)
-                h = CausalConv3dT1(x, w.Get(prefix + ".shortcut.weight"), outDim, inDim, 1, 1, 1,
-                        w.Get(prefix + ".shortcut.bias"), 0);
-            else
-                h = new Feature(x.C, x.H, x.W, (float[])x.D.Clone());
-
-            var t = RmsNormChannel(x, w.Get(prefix + ".residual.0.gamma"));
-            SiluInPlace(t.D);
-            t = CausalConv3dT1(t, w.Get(prefix + ".residual.2.weight"), outDim, inDim, 3, 3, 3,
-                    w.Get(prefix + ".residual.2.bias"), 1);
-            t = RmsNormChannel(t, w.Get(prefix + ".residual.3.gamma"));
-            SiluInPlace(t.D);
-            t = CausalConv3dT1(t, w.Get(prefix + ".residual.6.weight"), outDim, outDim, 3, 3, 3,
-                    w.Get(prefix + ".residual.6.bias"), 1);
-            return AddInPlace(t, h);
-        }
-
-        private static Feature AttentionBlock(VaeWeights w, string prefix, Feature x, bool nativeAttention = false)
+        private static Feature AttentionBlock(VaeWeights w, string prefix, Feature x)
         {
             int C = x.C, H = x.H, W = x.W, hw = H * W;
             var identity = x;
@@ -419,7 +315,7 @@ namespace TensorSharp.Models.QwenImage
             // q,k,v: [C, hw] each (channel-planar). attention over hw positions, single head, dim=C.
             float scale = 1f / MathF.Sqrt(C);
             var outp = new Feature(C, H, W);
-            if (nativeAttention && UseGpuConv && Environment.GetEnvironmentVariable("TS_QWEN21_VAE_ATTN") != "0" &&
+            if (UseGpuConv && Environment.GetEnvironmentVariable("TS_QWEN21_VAE_ATTN") != "0" &&
                 GgmlBasicOps.TryQwenVaeAttention(qkv.D, outp.D, C, hw))
             {
                 var projected = Conv2d(outp, w.Get(prefix + ".proj.weight"), C, C, 1, 1,
@@ -460,121 +356,6 @@ namespace TensorSharp.Models.QwenImage
         {
             return Conv2d(x, w.Get(prefix + ".resample.1.weight"), dim, dim, 3, 3,
                 w.Get(prefix + ".resample.1.bias"), 2, 2, /*padT*/0, /*padB*/1, /*padL*/0, /*padR*/1);
-        }
-
-        // Upsample (decoder): nearest x2 + Conv2d(dim, dim/2, 3, pad1).
-        private static Feature Upsample(VaeWeights w, string prefix, Feature x, int dim)
-        {
-            var up = NearestUpsample2x(x);
-            return Conv2d(up, w.Get(prefix + ".resample.1.weight"), dim / 2, dim, 3, 3,
-                w.Get(prefix + ".resample.1.bias"), 1, 1, 1, 1, 1, 1);
-        }
-
-        private static Feature MidBlock(VaeWeights w, string prefix, Feature x, int dim)
-        {
-            x = ResidualBlock(w, prefix + ".0", x, dim, dim);
-            x = AttentionBlock(w, prefix + ".1", x);
-            x = ResidualBlock(w, prefix + ".2", x, dim, dim);
-            return x;
-        }
-
-        // ---- encoder / decoder drivers ---------------------------------------
-
-        public static VaeLatent Encode(VaeWeights w, RgbImage image)
-        {
-            int H = image.Height, Wd = image.Width;
-            var x = new Feature(3, H, Wd, image.ToPlanarChw());
-            // normalize pixels [0,1] -> [-1,1]
-            for (long i = 0; i < x.D.Length; i++) x.D[i] = x.D[i] * 2f - 1f;
-
-            // Fused whole-encoder graph (one device round-trip); DiagonalGaussian.mode()
-            // (the first z_dim channels of the 32-channel head output) applied here.
-            var fused = FusedGraph(w);
-            if (fused != null && fused.TryEncode(x.D, H, Wd, out float[] z32, out int flh, out int flw))
-            {
-                var fl = new float[(long)ZDim * flh * flw];
-                Array.Copy(z32, 0, fl, 0, fl.Length);
-                return new VaeLatent(ZDim, flh, flw, fl);
-            }
-
-            // conv_in (encoder.conv1): 3 -> 96
-            x = CausalConv3dT1(x, w.Get("encoder.conv1.weight"), BaseDim, 3, 3, 3, 3,
-                    w.Get("encoder.conv1.bias"), 1);
-
-            int[] dims = { 96, 96, 192, 384, 384 };
-            int idx = 0;
-            for (int i = 0; i < 4; i++)
-            {
-                int inDim = dims[i], outDim = dims[i + 1];
-                x = ResidualBlock(w, $"encoder.downsamples.{idx++}", x, inDim, outDim);
-                x = ResidualBlock(w, $"encoder.downsamples.{idx++}", x, outDim, outDim);
-                if (i != 3) x = Downsample(w, $"encoder.downsamples.{idx++}", x, outDim);
-            }
-
-            x = MidBlock(w, "encoder.middle", x, 384);
-
-            x = RmsNormChannel(x, w.Get("encoder.head.0.gamma"));
-            SiluInPlace(x.D);
-            x = CausalConv3dT1(x, w.Get("encoder.head.2.weight"), ZDim * 2, 384, 3, 3, 3,
-                    w.Get("encoder.head.2.bias"), 1);
-
-            // quant_conv (conv1): 32 -> 32, 1x1x1
-            x = CausalConv3dT1(x, w.Get("conv1.weight"), ZDim * 2, ZDim * 2, 1, 1, 1,
-                    w.Get("conv1.bias"), 0);
-
-            // DiagonalGaussian.mode(): take the mean (first z_dim channels)
-            int lh = x.H, lw = x.W, lhw = lh * lw;
-            var latent = new float[(long)ZDim * lhw];
-            Array.Copy(x.D, 0, latent, 0, (long)ZDim * lhw);
-            return new VaeLatent(ZDim, lh, lw, latent);
-        }
-
-        public static RgbImage Decode(VaeWeights w, VaeLatent latent)
-        {
-            // Fused whole-decoder graph (one device round-trip); [-1,1] -> [0,1] applied here.
-            var fusedG = FusedGraph(w);
-            if (fusedG != null && fusedG.TryDecode(latent.Data, latent.Height, latent.Width,
-                    out float[] rgb, out int fh, out int fw))
-            {
-                for (long i = 0; i < rgb.Length; i++) rgb[i] = (rgb[i] + 1f) * 0.5f;
-                return RgbImage.FromPlanarChw(fw, fh, rgb);
-            }
-
-            var x = new Feature(latent.Channels, latent.Height, latent.Width, (float[])latent.Data.Clone());
-
-            // post_quant_conv (conv2): 16 -> 16, 1x1x1
-            x = CausalConv3dT1(x, w.Get("conv2.weight"), ZDim, ZDim, 1, 1, 1, w.Get("conv2.bias"), 0);
-
-            // conv_in (decoder.conv1): 16 -> 384
-            x = CausalConv3dT1(x, w.Get("decoder.conv1.weight"), 384, ZDim, 3, 3, 3,
-                    w.Get("decoder.conv1.bias"), 1);
-
-            x = MidBlock(w, "decoder.middle", x, 384);
-
-            // up_blocks (flat decoder.upsamples), temperal_upsample (True,True,False):
-            //   stage in/out + upsample(dim->dim/2) at i=0,1,2; none at i=3.
-            int[] inDims = { 384, 192, 192, 96 };
-            int[] outDims = { 384, 384, 192, 96 };
-            int idx = 0;
-            for (int i = 0; i < 4; i++)
-            {
-                int cur = inDims[i];
-                for (int r = 0; r < NumRes + 1; r++)   // num_res_blocks + 1 = 3
-                {
-                    x = ResidualBlock(w, $"decoder.upsamples.{idx++}", x, cur, outDims[i]);
-                    cur = outDims[i];
-                }
-                if (i != 3) x = Upsample(w, $"decoder.upsamples.{idx++}", x, outDims[i]);
-            }
-
-            x = RmsNormChannel(x, w.Get("decoder.head.0.gamma"));
-            SiluInPlace(x.D);
-            x = CausalConv3dT1(x, w.Get("decoder.head.2.weight"), 3, 96, 3, 3, 3,
-                    w.Get("decoder.head.2.bias"), 1);
-
-            // [-1,1] -> [0,1] (clamp happens at PNG encode)
-            for (long i = 0; i < x.D.Length; i++) x.D[i] = (x.D[i] + 1f) * 0.5f;
-            return RgbImage.FromPlanarChw(x.W, x.H, x.D);
         }
     }
 }

@@ -12,23 +12,16 @@ using System.Text;
 using System.Text.Json.Nodes;
 using TensorSharp.Runtime;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace InferenceWeb.Tests
 {
     /// <summary>
     /// Tests for the native safetensors reader (<see cref="SafetensorsFile"/> / <see cref="SafetensorsModel"/>).
-    /// The synthetic tests are self-contained (build a tiny file on disk) and always run. The parity tests
-    /// against the Qwen-Image VAE require the model files and skip when they are absent.
+    /// The synthetic tests are self-contained (build a tiny file on disk) and always run. The real
+    /// Qwen-Image-2.1 VAE header is read by QwenImage21CompanionValidationTests.
     /// </summary>
     public class SafetensorsReaderTests
     {
-        private readonly ITestOutputHelper _out;
-        public SafetensorsReaderTests(ITestOutputHelper o) { _out = o; }
-
-        private const string SafetensorsVae = @"C:\Works\models\Qwen_Image-VAE.safetensors";
-        private const string GgufVae = @"C:\Works\models\qwen_image_vae.gguf";
-
         // ---- self-contained synthetic tests (no model files needed) -----------------------------
 
         [Fact]
@@ -98,59 +91,6 @@ namespace InferenceWeb.Tests
             }
             try { Assert.ThrowsAny<Exception>(() => new SafetensorsFile(path)); }
             finally { File.Delete(path); }
-        }
-
-        // ---- parity against the converted GGUF (the trusted existing path) -----------------------
-
-        [Trait("Requires", "Models")]
-        [Fact]
-        public void Vae_Safetensors_BitIdentical_To_Gguf()
-        {
-            if (!File.Exists(SafetensorsVae) || !File.Exists(GgufVae))
-            {
-                _out.WriteLine($"missing VAE model files; skipping parity test");
-                return;
-            }
-
-            using var st = new SafetensorsFile(SafetensorsVae);
-            using var gg = new GgufFile(GgufVae);
-            var ggStore = new GgufFloatTensorStore(gg);
-
-            Assert.Equal(194, st.Tensors.Count);
-            Assert.All(st.Tensors.Values, t => Assert.Equal(SafetensorDtype.BF16, t.Dtype));
-
-            int compared = 0;
-            long elems = 0;
-            foreach (var (name, info) in st.Tensors)
-            {
-                Assert.True(ggStore.HasTensor(name), $"GGUF missing tensor {name}");
-                float[] a = st.ReadFloat32(name);
-                float[] b = ggStore.ReadFloat32(name);
-                Assert.Equal(b.Length, a.Length);
-                // BF16 upcast (top-16-bit widen) must be bit-identical to the GGUF's stored F32.
-                for (long i = 0; i < a.LongLength; i++)
-                {
-                    if (BitConverter.SingleToUInt32Bits(a[i]) != BitConverter.SingleToUInt32Bits(b[i]))
-                        Assert.Fail($"tensor {name}[{i}] mismatch: safetensors {a[i]} (0x{BitConverter.SingleToUInt32Bits(a[i]):X8}) != gguf {b[i]} (0x{BitConverter.SingleToUInt32Bits(b[i]):X8})");
-                }
-                compared++;
-                elems += a.LongLength;
-            }
-            _out.WriteLine($"verified {compared} tensors, {elems:N0} elements bit-identical between safetensors (BF16) and GGUF (F32)");
-            Assert.Equal(194, compared);
-        }
-
-        [Trait("Requires", "Models")]
-        [Fact]
-        public void Vae_Header_Shapes_AreCorrect()
-        {
-            if (!File.Exists(SafetensorsVae)) { _out.WriteLine("missing safetensors VAE; skipping"); return; }
-            using var st = new SafetensorsFile(SafetensorsVae);
-            Assert.Equal(new long[] { 32 }, st.TensorShape("conv1.bias"));
-            Assert.Equal(new long[] { 32, 32, 1, 1, 1 }, st.TensorShape("conv1.weight"));
-            // 5D conv weight: NumElements must equal the product of all dims.
-            Assert.Equal(32L * 32 * 1 * 1 * 1, st.Tensors["conv1.weight"].NumElements);
-            Assert.Equal(new long[] { 384, 16, 3, 3, 3 }, st.TensorShape("decoder.conv1.weight"));
         }
 
         // ---- helpers ------------------------------------------------------------------------------

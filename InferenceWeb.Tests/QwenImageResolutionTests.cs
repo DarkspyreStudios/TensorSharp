@@ -60,12 +60,4 @@ public sealed class QwenImageResolutionTests : IDisposable
         Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_HEIGHT", "1024");
         Assert.Equal((1536, 1024), QwenImage21Pipeline.ResolveDimensions(new QwenImageParams(), null));
     }
-
-    [Fact]
-    public void EarlierModelsRetainTheirOriginalAreaAndExplicitOverrides()
-    {
-        Assert.Equal(1024L * 1024, new QwenImageParams().ResolveTargetArea(version21: false));
-        Assert.Equal(512L * 512,
-            new QwenImageParams { TargetArea = 512L * 512 }.ResolveTargetArea(version21: false));
-    }
 }

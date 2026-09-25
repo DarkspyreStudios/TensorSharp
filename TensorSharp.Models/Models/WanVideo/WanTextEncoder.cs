@@ -227,8 +227,8 @@ namespace TensorSharp.Models.WanVideo
         }
 
         // Stable F32 pointer for small tensors: zero-copy mmap for F32, else a
-        // one-time dequantized copy (same contract as QwenImageDiT.F32Ptr — the
-        // native side resident-caches by pointer, so the address must not move).
+        // one-time dequantized copy (the native side resident-caches by pointer,
+        // so the address must not move).
         private IntPtr F32Ptr(string name)
         {
             lock (_f32Copies)

@@ -6,13 +6,13 @@
 
 [English](README.md) | [中文](README_zh-cn.md)
 
-**Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus [Qwen-Image-2.1 generation and editing](docs/models/qwenimage21.md), Qwen-Image-Edit, and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills and a bounded, in-process model-to-tool loop for sandboxed file and shell work.
+**Native .NET LLM inference engine for GGUF models** — autoregressive LLMs *and* DiffusionGemma-style text-diffusion, plus [Qwen-Image-2.1 generation and editing](docs/models/qwenimage21.md) and MiniMax-H3 video with native 32 kHz stereo audio (and Wan 2.1/2.2 for video alone). Ships a console app, a browser chat UI, and Ollama/OpenAI-compatible HTTP APIs. The .NET runtime offers managed CPU and native accelerator backends; published comparisons use identical GGUF files and hardware. The optional `TensorSharp.AgentHost` layer adds Agent Skills and a bounded, in-process model-to-tool loop for sandboxed file and shell work.
 
 ## Supported model families at a glance
 
 - **Text, reasoning, and multimodal LLMs:** [DeepSeek V4 Flash](docs/models/deepseek4.md) / [V4.1 Flash](docs/models/deepseek41.md), [GLM 5.x](docs/models/glm.md), [Gemma 4](docs/models/gemma4.md), [Qwen 3.5 / 3.6](docs/models/qwen35.md), [Qwen 3.8 Flash Next](docs/models/qwen38-flash-next.md), [Bonsai (Qwen family)](docs/models/bonsai.md), [GPT OSS](docs/models/gptoss.md), [Nemotron-H](docs/models/nemotron.md), [Mistral 3](docs/models/mistral3.md), [Hunyuan Dense](docs/models/hunyuan-dense.md), and [Muse-Glimmer](docs/models/muse-glimmer.md).
 - **Text diffusion:** [DiffusionGemma](docs/models/diffusiongemma.md), including [Jev typed decision inference](docs/models/jev.md) at `/v1/systemone`, over text or image state.
-- **Image generation/editing and video generation:** [Qwen-Image-2.1](docs/models/qwenimage21.md), [Qwen-Image-Edit](docs/models/qwenimage.md), [MiniMax-H3 (video + stereo audio)](docs/models/minimax-h3.md), and [Wan 2.1 / 2.2](docs/models/wan.md).
+- **Image generation/editing and video generation:** [Qwen-Image-2.1](docs/models/qwenimage21.md), [MiniMax-H3 (video + stereo audio)](docs/models/minimax-h3.md), and [Wan 2.1 / 2.2](docs/models/wan.md).
 - **Text and code embeddings:** BERT / XLM-R encoders — [Snowflake Arctic Embed L v2.0 and all-MiniLM-L6-v2](docs/embeddings.md).
 
 Backend, modality, feature support, and validation coverage vary by model. See the [model cards](docs/models/README.md), [embedding guide](docs/embeddings.md), and [full architecture matrix](#supported-model-architectures) for details.
@@ -212,7 +212,6 @@ Implemented and exercised by the test/benchmark matrix. Pick a quantization that
 | Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF) (+ mmproj) | ✅ / — / — | ✅ | ✅ | [muse-glimmer.md](docs/models/muse-glimmer.md) |
 | DiffusionGemma | [diffusiongemma-26B-A4B-it](https://huggingface.co/unsloth/diffusiongemma-26B-A4B-it-GGUF) (vision tower from the upstream safetensors shard) | ✅ / — / — | — | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
 | Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF) (DiT + dedicated 2.1 VAE + Qwen3-VL-8B) | 🖼️ text→image, image editing; RGBA | — | — | [qwenimage21.md](docs/models/qwenimage21.md) |
-| Qwen-Image-Edit | [Qwen-Image-Edit-2511](https://huggingface.co/unsloth/Qwen-Image-Edit-2511-GGUF) (MMDiT + VAE + Qwen2.5-VL) · fast lane: [Lightning 4-step LoRA](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning) | 🖼️ image→image | — | — | [qwenimage.md](docs/models/qwenimage.md) |
 | MiniMax-H3 audio+video | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) (denoiser + Qwen3-VL-32B encoder) + [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) (video + audio VAE) | 🎬🔊 text→video, image→video, first/last frame, reference→video (image/clip/audio), **with stereo audio** | — | — | [minimax-h3.md](docs/models/minimax-h3.md) |
 | Wan 2.1 / 2.2 video | [Wan2.2-TI2V-5B](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF) (also [T2V-A14B](https://huggingface.co/QuantStack/Wan2.2-T2V-A14B-GGUF), [I2V-A14B](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF), [Wan2.1-T2V-14B](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf)) + UMT5-XXL + video VAE · fast lane: [TI2V-5B-Turbo](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF) (4-step, 25× fewer DiT passes) | 🎬 text→video, image→video | — | — | [wan.md](docs/models/wan.md) |
 
@@ -220,7 +219,7 @@ Implemented and exercised by the test/benchmark matrix. Pick a quantization that
 
 Start with these choices, in order:
 
-1. **Choose the right checkpoint.** For Wan video, use a Turbo/Lightning/4-step distilled GGUF. For Qwen-Image-Edit-2511, use its Lightning LoRA; this recommendation does not apply to Qwen-Image-2.1.
+1. **Choose the right checkpoint.** For Wan video, use a Turbo/Lightning/4-step distilled GGUF.
 2. **Use the matching backend.** NVIDIA: `ggml_cuda`; Apple Silicon and iOS: `ggml_metal`; CPU: `ggml_cpu` (use managed `cpu` for portability).
 3. **Reduce work before tuning flags.** For H3 use `--cfg 1.0` and 4–8 steps; for media, lower resolution, frame count, or steps.
 4. **Then scale or speculate.** Try `--draft-model` / `--spec`, `--n-cpu-moe`, or `--tp N` when the model or workload calls for it.
@@ -246,7 +245,6 @@ See the [performance guide and detailed fast lanes](docs/PROJECT_STATUS.md#make-
 | Muse-Glimmer | `muse-glimmer`, `muse_glimmer` | Muse-Glimmer-30B (interleaved SWA + NoPE full layers, attention output gate) | Image | Yes | Yes (ATEM) | Yes (DFlash block drafter, separate GGUF) | [muse-glimmer.md](docs/models/muse-glimmer.md) |
 | DiffusionGemma | `diffusion-gemma`, `diffusion_gemma` | diffusion-gemma text-diffusion GGUFs | Image (chat and `/v1/systemone` Jev decisions); no audio or video | No | No | — | [diffusiongemma.md](docs/models/diffusiongemma.md) |
 | Qwen-Image-2.1 | `qwen_image`, `qwen-image` (2.1 detected from tensor keys) | Qwen-Image-2.1 DiT GGUFs (+ dedicated 2.1 VAE & Qwen3-VL-8B) | Text→image and image editing, RGBA output | No | No | — | [qwenimage21.md](docs/models/qwenimage21.md) |
-| Qwen-Image-Edit | `qwen_image`, `qwen-image` | qwen-image-edit MMDiT GGUFs (+ VAE & Qwen2.5-VL) | Image edit (image+text → image) | No | No | — | [qwenimage.md](docs/models/qwenimage.md) |
 | MiniMax-H3 | `minimax-h3`, `minimax_h3` (the published GGUFs carry no metadata at all, so they are detected from their tensors) | MiniMax-H3 FL2VA / Ref2VA (19.3B packed audio-video DiT + Qwen3-VL-32B text encoder, video VAE, audio VAE) | Video **+ 32 kHz stereo audio** out (text→video, image→video, first/last frame, reference→video) | No | No | — | [minimax-h3.md](docs/models/minimax-h3.md) |
 | Wan video | `wan`, `wan2.1`, `wan2.2` | Wan 2.1 T2V 1.3B/14B, Wan 2.2 TI2V-5B, Wan 2.2 A14B T2V/I2V (two experts) | Video out (text→video, image→video) | No | No | — | [wan.md](docs/models/wan.md) |
 
@@ -269,7 +267,7 @@ TensorSharp’s .NET runtime and native GGML execution are compared with `llama.
 | Qwen 3.6 27B (UD-IQ2_XXS, dense) | CUDA | **1.07×** | 0.96× | 0.95× |
 | Qwen 3.6 27B (UD-IQ2_XXS, dense) | Vulkan | 1.02× | 0.85× | 0.84× |
 
-TensorSharp pulls clearly ahead on CUDA prefill / first-token latency (multi-turn prefill wins on **every** model, up to **1.49×**), holds decode parity-or-better on CUDA, and wins Vulkan decode on the dense 12B (up to **1.32×** on long context) — even at 2-bit IQ2_XXS quantization. The remaining sub-1.0× cells are active optimization targets. The harness also covers tool-calling, structured-output, image-edit (vs `stable-diffusion.cpp`), MTP on/off, and parallel-request scenarios you can run yourself via [`benchmarks/engine_comparison`](benchmarks/engine_comparison). Every cell is in the [full report](docs/engine_comparison_report.md).
+TensorSharp pulls clearly ahead on CUDA prefill / first-token latency (multi-turn prefill wins on **every** model, up to **1.49×**), holds decode parity-or-better on CUDA, and wins Vulkan decode on the dense 12B (up to **1.32×** on long context) — even at 2-bit IQ2_XXS quantization. The remaining sub-1.0× cells are active optimization targets. The harness also covers tool-calling, structured-output, MTP on/off, and parallel-request scenarios you can run yourself via [`benchmarks/engine_comparison`](benchmarks/engine_comparison). Every cell is in the [full report](docs/engine_comparison_report.md).
 
 Models too large for that 16 GB rig carry their own head-to-head in their card, measured the same way (both engines, same GGUF, same machine, back to back): [GLM-5.2 744B-A40B on 3x RTX PRO 6000](docs/models/glm.md#performance) — TensorSharp leads prefill from ~1k prompt tokens up (pp2048 **1.20×**, pp4096 **1.21×**) and decode by 1.04×, with llama.cpp a few percent ahead on short prefills. The non-Flash [GLM-5.3](docs/models/glm.md#glm-53-glm-dsa) has its own, on 8× A40 46 GB without NVLink (UD-Q2_K_XL, 10,531-token prompt, 300 decode tokens, median of 3, whole-layer placement): decode is a tie at **20.48** tok/s against llama.cpp's 20.28, TensorSharp prefills at 251.6 tok/s and loads the 236.4 GiB checkpoint **2.9× faster** (264 s against 753 s), and the honest gap is time to first token — 41.9 s against 29.0 s, about **1.4× slower**. llama.cpp's prefill tok/s was not recorded for that cell. Full method and per-repeat numbers: [`docs/validation/cross-engine-2026-09/README.md`](docs/validation/cross-engine-2026-09/README.md). llama.cpp is a valid reference engine for `glm-dsa`, but not for `glm5next` (GLM-5.3-Flash).
 
@@ -291,7 +289,7 @@ New here? The sections above are all you need to get running. Everything else is
 | [Multiple agents](docs/multi_agent.md) | Automatic task delegation, isolated child contexts, concurrency and permission limits, server controls, and reproducible evaluation |
 | [Speculative decoding](docs/speculative_decoding.md) | The three-layer design (model adapter / algorithm / speculator weights), the shipped `auto` / `draft-head` / `block` / `ngram` algorithms, and what to write to add a new one |
 | [Environment variable feature matrix](docs/env_var_feature_matrix.md) | Which high-impact runtime flags affect which models, backends, and prompt types |
-| [Engine comparison report](docs/engine_comparison_report.md) | Full per-scenario TensorSharp vs llama.cpp / stable-diffusion.cpp tables |
+| [Engine comparison report](docs/engine_comparison_report.md) | Full per-scenario TensorSharp vs llama.cpp tables |
 | [ggml_metal vs llama.cpp](docs/perf/metal-vs-llama-cpp.md) | Head-to-head prefill/decode on Apple Silicon, the four graph-construction gaps it found, and what each was worth |
 | [Test/benchmark matrix runner](TensorSharp.TestMatrix/README.md) | Sweep model × backend × feature × env-var cells and generate regression reports |
 | [Server API examples](TensorSharp.Server.Host/API_EXAMPLES.md) | Complete curl and Python examples for the server surface |
@@ -302,7 +300,7 @@ Actively developed, and the source tree runs ahead of the published packages. Th
 
 | Area | Where it stands |
 |---|---|
-| Models | A dozen autoregressive families plus text-diffusion, image editing, and video-with-audio generation — see [Supported Model Architectures](#supported-model-architectures). |
+| Models | A dozen autoregressive families plus text-diffusion, image generation/editing, and video-with-audio generation — see [Supported Model Architectures](#supported-model-architectures). |
 | Inference hosts | CLI, interactive REPL, ASP.NET Core Web UI, Ollama-style API, OpenAI Chat Completions and Responses APIs, and the TensorAgent iOS/iPadOS app. |
 | Backends | Pure C# CPU, direct CUDA/cuBLAS, MLX Metal, and GGML CPU/Metal/CUDA/Vulkan, with per-architecture exceptions. |
 | Serving features | Continuous batching over a paged, prefix-shared KV cache; speculative decoding; single- and multi-node tensor parallelism; structured output; tool calling. |

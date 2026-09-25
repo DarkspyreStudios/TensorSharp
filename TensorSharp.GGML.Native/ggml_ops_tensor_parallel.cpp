@@ -1528,6 +1528,52 @@ TSG_EXPORT int TSGgml_MultiDeviceInit(int backendType, const int* deviceIndices,
     return tsg_multi_device_init(backendType, deviceIndices, count, /*concurrentRanks*/ 1, false);
 }
 
+// A tensor-parallel group whose ranks are all backend instances on ONE device,
+// reducing through host staging. The ranks serialize on that device, so this is
+// never a performance mode: it lets sharded kernels be checked against their
+// unsharded forward on a single-GPU machine (Apple Silicon has one Metal device),
+// exercising the same per-rank graphs, segment schedule and reduction as a real
+// group. Only the device collective (NCCL/P2P) is not exercised.
+TSG_EXPORT int TSGgml_TensorParallelInitLoopback(int backendType, int count)
+{
+    try
+    {
+        tsg::clear_last_error();
+        if (count < 2 || count > tsg::TSG_MAX_DEVICES)
+        {
+            tsg::set_last_error("Invalid loopback tensor-parallel rank count.");
+            return 0;
+        }
+        if (!tsg::ensure_backend(backendType))
+            return 0;
+        tsg::dev(0).device_index = 0;
+        for (int r = 1; r < count; ++r)
+        {
+            tsg::ScopedRank rank(r);
+            if (g_backend != nullptr)
+            {
+                tsg::sync_backend(g_backend);
+                ggml_backend_free(g_backend);
+                g_backend = nullptr;
+            }
+            ggml_backend_t backend = tsg::create_backend_instance(backendType);
+            if (backend == nullptr)
+                return 0;
+            g_backend = backend;
+            tsg::dev(r).device_index = 0;
+        }
+        tsg::g_device_count.store(count, std::memory_order_release);
+        std::fprintf(stderr, "[TP] loopback tensor parallelism: %d ranks on one device, AllReduce=host\n", count);
+        std::fflush(stderr);
+        return 1;
+    }
+    catch (const std::exception& ex)
+    {
+        tsg::set_last_error(ex.what());
+        return 0;
+    }
+}
+
 // 1 when the fused tensor-parallel path can run (several ranks spanning every
 // initialized device). The per-layer partials reduce with the backend's device
 // collective when it has one (ggml-cuda: NCCL / P2P) and through host staging

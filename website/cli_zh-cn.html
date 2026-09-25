@@ -31,7 +31,7 @@ dotnet build TensorSharp.slnx -c Release -p:TensorSharpSkipMlxNative=true
 curl.exe --create-dirs --fail -L "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
 Set-Content -Encoding utf8 prompt.txt "请用一段话说明本地推理。"
 dotnet run --project TensorSharp.Cli -c Release --no-build -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda</code></pre>
-  <p>省略 <code>--input</code> 时，CLI 会退回内置的 <code>What is 1+1?</code> 提示词；若要进行自定义的单次文本推理，请把提示词保存到文件并通过 <code>--input</code> 传入。<code>--prompt</code> 仅用于 Qwen-Image-Edit 的编辑指令。</p>
+  <p>省略 <code>--input</code> 时，CLI 会退回内置的 <code>What is 1+1?</code> 提示词；若要进行自定义的单次文本推理，请把提示词保存到文件并通过 <code>--input</code> 传入。<code>--prompt</code> 仅用于图像与视频生成模型的提示词。</p>
 
   <h2 id="e4b-fast-lane">在其他原生后端上运行 Gemma 4 E4B</h2>
   <p>Apple Silicon 请省略 CUDA 环境变量并使用 <code>ggml_metal</code>；受支持的 Windows/Linux Vulkan GPU 请改为请求 <code>TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON</code> 并使用 <code>ggml_vulkan</code>；<code>ggml_cpu</code> 运行原生 CPU 内核，无需 GPU。同一仓库还提供内存占用更低的 <code>gemma-4-E4B-it-Q4_K_M.gguf</code>。纯文本不需要 <code>mmproj</code>；只有图像、视频或音频输入才需要通过 <code>--mmproj</code> 添加匹配的 <code>mmproj-gemma-4-E4B-it-Q8_0.gguf</code>。完整平台语法见<a href="getting-started_zh-cn.html#e4b-fast-lane">快速开始</a>。</p>
@@ -121,14 +121,22 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     --model &lt;model.gguf&gt; --input prompt.txt --max-tokens 200 --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42</code></pre>
 
-  <h3 id="imageedit">图像编辑（Qwen-Image-Edit）</h3>
-  <pre data-lang="bash"><code># 提示词 + 输入图像 -> 编辑后的图像。VAE + Qwen2.5-VL 文本编码器伴随文件
-# 会在 DiT GGUF 旁解析（或用 --qwen-image-vae / --qwen-image-vl /
-# --qwen-image-mmproj 指定）。
-dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
-    --model &lt;qwen-image-edit-DiT.gguf&gt; --image input.png \
-    --prompt "Make the sky a dramatic sunset." --output edited.png \
-    --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0</code></pre>
+  <h3 id="imagegen">图像生成与编辑（Qwen-Image-2.1）</h3>
+  <pre data-lang="bash"><code># Qwen-Image-2.1：不带 --image 时生成图像，带 --image 时编辑图像（重复该参数
+# 可传入多张参考图）。该配置会下载 DiT、专用 2.1 VAE 以及 Qwen3-VL-8B 文本编码器
+# 与 mmproj。默认：2048x2048、40 步 Euler、CFG 1。
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --prompt 'A small orange cat beside a blue ceramic vase, soft daylight, detailed photograph' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output generated.png
+dotnet run --project TensorSharp.Cli -c Release --no-build -- \
+  --config config/qwen-image-2.1.json \
+  --image generated.png \
+  --prompt 'Change the blue vase to a red vase. Preserve the cat, lighting and composition.' \
+  --width 2048 --height 2048 --diffusion-steps 40 --cfg 1 \
+  --diffusion-seed 42 --output edited.png</code></pre>
+  <p>伴随文件、尺寸与草图设置见<a href="models-image_zh-cn.html#imagegen">图像生成</a>。</p>
 
   <h3 id="video">视频生成</h3>
   <p><strong>MiniMax-H3</strong> 在<em>同一个</em>打包潜变量里同时去噪视频与原生 32&nbsp;kHz 立体声音轨，所以声音和画面来自同一次前向。它经过 CFG 蒸馏，因此必须传 <code>--cfg 1.0</code>（更高的取值会被直接拒绝），默认 20 步，而 4–8 步是它的快速工作点：</p>
@@ -227,7 +235,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     "urls": [ "${hf}/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-Q8_0.gguf" ]
   }
 }</code></pre>
-  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-edit.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
+  <p>开箱即用的示例见仓库 <code>config/</code> 目录（<code>cli-basic.json</code>、<code>server-basic.json</code>、<code>variables.json</code>、<code>auto-download.json</code>、<code>qwen-image-2.1.json</code>）——每个都使用真实、公开、无需授权的 URL，因此在全新机器上也能直接运行。完整说明见 <code>config/README.md</code>。</p>
 
   <h2 id="options">命令行选项</h2>
   <p>不带任何参数运行 CLI —— 或使用 <code>--help</code>（也支持 <code>-h</code>、<code>-?</code>、<code>/?</code>）—— 会打印完整的参数参考：逐项列出说明、默认值、取值范围与示例，并在日志与模型机制启动之前退出。未知参数会被忽略，因此请准确复制选项名，否则拼写错误也可能看起来执行成功。</p>
@@ -237,7 +245,7 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
     <thead><tr><th>选项</th><th>说明</th></tr></thead>
     <tbody>
       <tr><td><code>--model &lt;path&gt;</code></td><td>GGUF 模型文件路径（必需）。</td></tr>
-      <tr><td><code>--input &lt;path&gt;</code></td><td>包含用户提示词的文本文件。单次文本提示词只能来自文件；<code>--prompt</code> 保留用于 Qwen-Image-Edit 的编辑指令。</td></tr>
+      <tr><td><code>--input &lt;path&gt;</code></td><td>包含用户提示词的文本文件。单次文本提示词只能来自文件；<code>--prompt</code> 保留用于图像与视频生成的提示词。</td></tr>
       <tr><td><code>--pdf &lt;path&gt;</code></td><td>单次模式的 PDF 文档输入。含文本的 PDF 会完整提取并内联文本；扫描件/纯图像 PDF 会光栅化为页面图像，并需要视觉模型 + <code>--mmproj</code>。<code>--input</code> 变为针对文档的问题；<code>TS_PDF_MAX_PAGES</code> 限制读取页数（默认：全部）。</td></tr>
       <tr><td><code>--input-jsonl &lt;path&gt;</code></td><td>含批量请求的 JSONL 文件（每行一个 JSON）。</td></tr>
       <tr><td><code>--multi-turn-jsonl &lt;path&gt;</code></td><td>用于带 KV 缓存复用的多轮对话模拟的 JSONL 文件。</td></tr>
@@ -317,12 +325,11 @@ dotnet run --project TensorSharp.Cli/TensorSharp.Cli.csproj -- \
       <tr><td><code>--diffusion-steps &lt;N&gt;</code></td><td>DiffusionGemma 每块去噪步数（默认：48）。</td></tr>
       <tr><td><code>--diffusion-seed &lt;N&gt;</code></td><td>DiffusionGemma 确定性采样器种子（默认：0）。</td></tr>
       <tr><td><code>--diffusion-blocks &lt;N&gt;</code></td><td>块自回归画布数量（<code>0</code> 由 <code>--max-tokens</code> 推导）。</td></tr>
-      <tr><td><code>--image &lt;path&gt;</code> / <code>--prompt &lt;text&gt;</code> / <code>--output &lt;path&gt;</code></td><td>Qwen-Image-Edit：输入图像、编辑指令与输出 PNG（默认 <code>edited.png</code>）。复用 <code>--diffusion-steps</code> / <code>--diffusion-seed</code>。</td></tr>
-      <tr><td><code>--cfg &lt;F&gt;</code></td><td>Qwen-Image-Edit true-CFG 引导尺度（省略则自动取值：2.5，加载 Lightning LoRA 时为 1.0；<code>&lt;= 1</code> 关闭负向分支）。</td></tr>
-      <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-Edit 伴随 GGUF（VAE / Qwen2.5-VL 文本编码器 / mmproj）。</td></tr>
-      <tr><td><code>--qwen-image-lora &lt;path&gt;</code></td><td>Qwen-Image-Edit Lightning 蒸馏 LoRA（<code>.safetensors</code>）。它作为运行期 F32 旁路挂在每个目标投影旁边 —— 量化后的基础权重原封不动，<strong>不会</strong>被合并 —— 并从文件名自动推导去噪步数（<code>…-4steps-…</code> / <code>…8step…</code>，取值 1–16），同时把 CFG 切换为 1.0 并固定 timestep shift 为 3。这会把默认的 30 步 / CFG 2.5（60 次 DiT 前向）降到 4–8 次。它要求整模或融合分块的 CUDA 前向路径：在没有旁路的路径上模型会直接抛错，而不是输出噪声。环境变量：<code>TS_QWEN_IMAGE_LORA</code>。</td></tr>
-      <tr><td><code>--width &lt;px&gt;</code> / <code>--height &lt;px&gt;</code></td><td>Qwen-Image-Edit 的固定输出尺寸（默认 <code>0</code> = 自动：源图尺寸，并按显存上限收敛）。</td></tr>
-      <tr><td><code>--offload-cpu</code></td><td>把 Qwen-Image-Edit 的 DiT 权重从内存流式读取，而不是常驻显存：每步更慢，但小显存卡也能做原生约 1 MP 的编辑。默认自动 —— 仅当目标分辨率放不下常驻权重时才启用。</td></tr>
+      <tr><td><code>--image &lt;path&gt;</code> / <code>--prompt &lt;text&gt;</code> / <code>--output &lt;path&gt;</code></td><td>Qwen-Image-2.1：编辑用的参考图（可重复；省略 <code>--image</code> 即为生成）、提示词与输出 PNG（默认 <code>generated.png</code>，编辑时为 <code>edited.png</code>）。复用 <code>--diffusion-steps</code>（默认 40）/ <code>--diffusion-seed</code>。</td></tr>
+      <tr><td><code>--cfg &lt;F&gt;</code></td><td>Qwen-Image-2.1 true-CFG 引导尺度（省略则自动取 1.0，即每步一次 Transformer 预测；<code>&lt;= 1</code> 关闭负向分支）。</td></tr>
+      <tr><td><code>--qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj &lt;path&gt;</code></td><td>覆盖解析到的 Qwen-Image-2.1 伴随文件（专用 2.1 VAE / Qwen3-VL-8B 文本编码器 / Qwen3-VL-8B mmproj）。</td></tr>
+      <tr><td><code>--qwen-image-lora</code> · <code>--offload-cpu</code></td><td><strong>已移除，启动时（包括作为 <code>--config</code> 键时）会直接拒绝。</strong>没有替代参数：两者只服务于早期的 Qwen-Image-Edit 流水线，而 Qwen-Image-2.1 不加载 LoRA 适配器，DiT 权重始终常驻。</td></tr>
+      <tr><td><code>--width &lt;px&gt;</code> / <code>--height &lt;px&gt;</code></td><td>Qwen-Image-2.1 的固定输出尺寸，须为 32 的倍数（默认 <code>0</code> = 自动：生成为 2048×2048，编辑则取与第一张参考图宽高比一致、面积大致相同的尺寸）。</td></tr>
       <tr><td><code>--benchmark</code></td><td>运行合成的 prefill/decode 吞吐基准。</td></tr>
       <tr><td><code>--bench-prefill / --bench-decode / --bench-runs &lt;N&gt;</code></td><td>合成的 prefill 长度、decode 长度与运行次数。</td></tr>
       <tr><td><code>--bench-kvcache</code> / <code>--bench-kv-turns &lt;N&gt;</code></td><td>多轮 KV 缓存复用基准（带缓存 vs 强制重置）。</td></tr>

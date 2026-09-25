@@ -49,7 +49,7 @@ dotnet run --project TensorSharp.Cli\TensorSharp.Cli.csproj `
 
 在 AMD/Intel GPU 上，请设置 `TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN=ON` 并使用 `--backend ggml_vulkan`；没有 GPU 时使用 `--backend ggml_cpu`，无需设置环境变量。
 
-未指定 `--input` 时，CLI 会使用 `What is 1+1?`。自定义的单次文本提示词必须保存到文件，并通过 `--input <file>` 传入；`--prompt` 仅用于 Qwen-Image-Edit。默认值为 `--max-tokens 100` 和 `--backend ggml_cpu`。CLI 没有完整的 `--help` 页面，而且目前会忽略未知参数，因此请准确复制参数名。
+未指定 `--input` 时，CLI 会使用 `What is 1+1?`。自定义的单次文本提示词必须保存到文件，并通过 `--input <file>` 传入；`--prompt` 仅用于图像与视频生成模型（Qwen-Image-2.1、MiniMax-H3、Wan）。默认值为 `--max-tokens 100` 和 `--backend ggml_cpu`。CLI 没有完整的 `--help` 页面，而且目前会忽略未知参数，因此请准确复制参数名。
 
 ## 控制台应用
 

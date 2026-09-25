@@ -18,8 +18,7 @@
 //                          single-stream blocks with self-attn + cross-attn,
 //                          head) as ONE resident-weight graph. On CUDA the
 //                          graph is kept persistent per shape so ggml-cuda's
-//                          CUDA-graph capture engages (same design as
-//                          TSGgml_QwenImageForward).
+//                          CUDA-graph capture engages.
 //   TSGgml_WanVaeDecode  – the Wan causal 3D video VAE decoder: latent
 //                          [w,h,t,zc] -> pixels as one graph that iterates the
 //                          temporal chunks internally with the causal feature
@@ -450,7 +449,9 @@ ggml_tensor* wan_rms(ggml_context* ctx, ggml_tensor* x, ggml_tensor* w, float ep
 
 // Interleaved RoPE with pair-duplicated cos/sin tables [head_dim, seq]; the
 // output uses the half-split channel layout, which is dot-product-invariant when
-// applied to both q and k (see qi_rope for the launch-count rationale).
+// applied to both q and k. The half-split form needs only a 3-D dim0 concat
+// (one kernel launch); the interleaved concat of 4-D pair views launches one
+// kernel per ne3 slice on ggml-cuda.
 ggml_tensor* wan_rope(ggml_context* ctx, ggml_tensor* x, ggml_tensor* cosf, ggml_tensor* sinf,
                       int head_dim, int heads, int seq)
 {
@@ -921,8 +922,7 @@ int g_wanDitRR = 0;
 // Shapes whose persistent graph does not fit in device memory. Building one costs
 // a full 30-block graph construction plus a multi-GB gallocr allocation that is
 // then thrown away; without this memo a 121-frame request pays that on EVERY
-// denoise pass and reprints the fallback notice each time. Mirrors
-// qi_fwd_mark_too_big in ggml_ops_qwen_image.cpp.
+// denoise pass and reprints the fallback notice each time.
 struct WanDitTooBig { int seq, cl, nl, seq0; const void* wkey; };
 std::vector<WanDitTooBig> g_wanDitTooBig;
 
@@ -1007,9 +1007,9 @@ int wan_dit_run_persist(WanDitPersist* e, const TSGgmlWanDitDesc* d)
         set_last_error("WanDitForward: gallocr realloc failed.");
         return 0;
     }
-    // Re-upload the input-slot leaves living in the gallocr buffer (see qi_fwd_run:
-    // the buffer is not cleared here because this graph never reads an intermediate
-    // before writing it, but input-slot weights must be refreshed after a re-plan).
+    // Re-upload the input-slot leaves living in the gallocr buffer: the buffer is not
+    // cleared here because this graph never reads an intermediate before writing it,
+    // but input-slot weights must be refreshed after a re-plan.
     host_read_barrier();
     if (g.outT != nullptr && g.outT->buffer != nullptr)
     {
@@ -1054,7 +1054,8 @@ WanDitPersist* wan_dit_build_persist(const TSGgmlWanDitDesc* d)
     if (galloc == nullptr) { ggml_free(ctx); return nullptr; }
     if (!ggml_gallocr_alloc_graph(galloc, g.graph)) { ggml_gallocr_free(galloc); ggml_free(ctx); return nullptr; }
 
-    // VRAM spill guard (see qi_fwd_build_persist).
+    // VRAM spill guard: refuse the persistent graph when its allocation left the
+    // device nearly full (the per-call path runs instead).
     {
         ggml_backend_dev_t mdev = ggml_backend_get_device(g_backend);
         std::size_t freeb = 0, totalb = 0;

@@ -171,7 +171,7 @@ public sealed class WebUiAdapter
         }
     }
 
-    // ---- Image editing (Qwen-Image-Edit) ---------------------------------
+    // ---- Image editing (Qwen-Image-2.1) ----------------------------------
 
     /// <summary>
     /// <c>POST /api/image-edit</c> — multipart form with one or more <c>image</c> files and a
@@ -197,8 +197,8 @@ public sealed class WebUiAdapter
                 if (fileList.Count == 0)
                     return Results.Json(new { error = "No image uploaded (field 'image')." }, statusCode: 400);
                 string prompt = form["prompt"].ToString();
-                int steps = int.TryParse(form["steps"], out int s) ? s : 0;   // 0 = auto (30, or the Lightning LoRA's step count)
-                float cfg = float.TryParse(form["cfg"], out float c) ? c : 0f;  // 0 = auto (2.5, or 1.0 with a Lightning LoRA)
+                int steps = int.TryParse(form["steps"], out int s) ? s : 0;   // 0 = auto (40 for Qwen-Image-2.1)
+                float cfg = float.TryParse(form["cfg"], out float c) ? c : 0f;  // 0 = auto (CFG 1.0 for Qwen-Image-2.1)
                 long seed = long.TryParse(form["seed"], out long sd) ? sd : 0;
                 long targetArea = long.TryParse(form["targetArea"], out long taf) && taf > 0 ? taf : 0;
                 int width = int.TryParse(form["width"], out int wi) ? wi : 0;

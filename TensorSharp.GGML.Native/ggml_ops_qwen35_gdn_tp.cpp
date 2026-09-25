@@ -296,7 +296,7 @@ TSG_EXPORT int TSGgml_Qwen35GdnLayerTP(
             // Conv window: [convDim + N, qkv_dim] with time along ne0.
             ggml_tensor* qkv_T = ggml_cont(ctx, ggml_transpose(ctx, ggml_cont(ctx, qkv_v)));
             ggml_tensor* conv_input = ggml_concat(ctx, conv_state_t, qkv_T, 0);
-            ggml_tensor* conv_out = ggml_silu(ctx, ggml_ssm_conv(ctx, conv_input, conv1d_w)); // [qkv_dim, N]
+            ggml_tensor* conv_out = ggml_silu(ctx, tsg::ssm_conv_any(ctx, conv_input, conv1d_w)); // [qkv_dim, N]
             ggml_tensor* new_conv = ggml_cont(ctx, ggml_view_2d(ctx, conv_input, convDim, qkv_dim,
                 conv_input->nb[1], static_cast<std::size_t>(N) * conv_input->nb[0]));
 

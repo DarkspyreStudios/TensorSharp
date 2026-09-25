@@ -90,7 +90,7 @@ freshly downloaded file.
 ```
 
 Ready-to-use examples live in [`config/`](config/) (`cli-basic.json`,
-`server-basic.json`, `variables.json`, `auto-download.json`, `qwen-image-edit.json`)
+`server-basic.json`, `variables.json`, `auto-download.json`, `qwen-image-2.1.json`)
 — each uses real, public, ungated URLs, so it works on a fresh machine. See
 [`config/README.md`](config/README.md) for the full reference.
 
@@ -139,12 +139,14 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
-# Qwen-Image-Edit image editing (prompt + input image -> edited image)
-# The VAE + Qwen2.5-VL text-encoder companions are resolved next to the DiT GGUF
-# (or set --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj).
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <qwen-image-edit-DiT.gguf> --image input.png \
-    --prompt "Make the sky a dramatic sunset." --output edited.png \
-    --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0
+# Qwen-Image-2.1: no --image generates an image, --image edits one (repeat --image
+# for multiple references). The config auto-downloads the DiT, the dedicated 2.1 VAE
+# and the Qwen3-VL-8B text encoder + mmproj. Defaults: 2048x2048, 40 Euler steps,
+# CFG 1; use --width 1024 --height 1024 for faster drafts.
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
+    --prompt "A small orange cat beside a blue ceramic vase, soft daylight" --output generated.png
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json --image generated.png \
+    --prompt "Change the blue vase to a red vase. Preserve the cat, lighting and composition." --output edited.png
 
 # MiniMax-H3 video generation with sound (prompt -> H.264 MP4 plus a 32 kHz
 # stereo .wav sidecar). One diffusion transformer denoises a packed video+audio
@@ -392,19 +394,18 @@ script gets that error instead of watching a setting be ignored.
 | `--test-chunked-prefill` | Run the chunked-prefill correctness check (compares chunked vs non-chunked logits) |
 | `--correct-prefill <N>` | Prompt length used by `--test-chunked-prefill` |
 | `--correct-decode <N>` | Decode length used by `--test-chunked-prefill` |
-| `--diffusion-steps <N>` | DiffusionGemma denoising steps per block (default: 48). For Qwen-Image-Edit, the FlowMatch-Euler step count — omit for auto (30, or the step count of a loaded Lightning LoRA). |
-| `--diffusion-seed <N>` | Noise seed for the diffusion paths: DiffusionGemma's deterministic sampler (default: 0), Qwen-Image-Edit, and video generation (Wan, MiniMax-H3), where leaving it out draws a fresh random seed each run. This is the seed that decides what a clip looks like — `--seed` is the text sampling seed and does not affect it. |
+| `--diffusion-steps <N>` | DiffusionGemma denoising steps per block (default: 48). For Qwen-Image-2.1, the FlowMatch-Euler step count — omit for auto (40). |
+| `--diffusion-seed <N>` | Noise seed for the diffusion paths: DiffusionGemma's deterministic sampler and Qwen-Image-2.1 (default: 0), and video generation (Wan, MiniMax-H3), where leaving it out draws a fresh random seed each run. This is the seed that decides what a clip looks like — `--seed` is the text sampling seed and does not affect it. |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas count. `0` derives the count from `--max-tokens` and the model canvas length. |
-| `--image <path>` | Input image for Qwen-Image-Edit (also the image input for multimodal chat). Required to trigger image-edit mode on a `qwen_image` DiT GGUF. |
-| `--prompt <text>` | Qwen-Image-Edit edit instruction (falls back to `--input` file contents if omitted). |
-| `--output <path>` | Qwen-Image-Edit output PNG path (default: `edited.png`). |
-| `--cfg <F>` | Qwen-Image-Edit true-CFG guidance scale (`<= 1` disables the negative pass). Omit for auto: 2.5 (the Qwen-Image-Edit-2511 recommendation; 4.0 over-guides and distorts faces), or 1.0 when a Lightning LoRA is loaded. Shares `--diffusion-steps` / `--diffusion-seed` for step count and seed. On MiniMax-H3 the only accepted value is `1.0` (its default): the checkpoint ships CFG-distilled and anything higher is refused up front rather than run and degraded. `TensorSharp.Server` has no `--cfg` at all — a request body can still carry `cfg`. |
-| `--qwen-image-vae <path>` | Override the resolved Qwen-Image VAE companion (`.gguf` or `.safetensors`). |
-| `--qwen-image-vl <path>` | Override the resolved Qwen2.5-VL-7B text-encoder GGUF. |
-| `--qwen-image-mmproj <path>` | Override the resolved Qwen2.5-VL mmproj (vision grounding) GGUF. |
-| `--qwen-image-lora <path>` | Qwen-Image-Edit Lightning distillation LoRA (`.safetensors`). Applied as a runtime F32 side-path next to each targeted projection (`y = W_quant·x + b + (alpha/rank)·up·(down·x)`) with the quantized base weights left untouched — **not** merged into them. Auto-derives the step count from the file name (e.g. 4 or 8), switches CFG to 1.0 and pins the timestep shift to 3, so the default 30 steps × 2 CFG passes (60 DiT forwards) become 4–8. Needs the whole-model or fused per-block CUDA forward — on a path without the side-path it throws rather than emitting noise. Env: `TS_QWEN_IMAGE_LORA`. |
-| `--offload-cpu` | Stream the DiT weights from RAM instead of holding them resident in VRAM: slower per step, but native ~1 MP edits fit on small cards. Default: auto — it engages by itself only when the target resolution does not fit beside the resident weights |
-| `--width <px>` / `--height <px>` | Output size for Qwen-Image-Edit and video generation. Default: `0` — auto (Qwen-Image-Edit: the source size, VRAM-clamped; MiniMax-H3: 640×384, or that area at the conditioning image's aspect ratio, rounded up to a multiple of 32; Wan: the model's native area at the input image's aspect ratio, 1280×704 for TI2V-5B and 832×480 otherwise). |
+| `--image <path>` | Input image for Qwen-Image-2.1 editing (also the image input for multimodal chat); repeat it for multiple references. Without `--image`, a Qwen-Image-2.1 DiT generates an image from the prompt instead. |
+| `--prompt <text>` | Qwen-Image-2.1 generation prompt or edit instruction (falls back to `--input` file contents if omitted). |
+| `--output <path>` | Qwen-Image-2.1 output PNG path (default: `generated.png` for generation, `edited.png` for editing). |
+| `--cfg <F>` | Qwen-Image-2.1 true-CFG guidance scale (`<= 1` disables the negative pass). Omit for auto: 1.0 for Qwen-Image-2.1 (one transformer prediction per step); a value above 1 adds the negative pass. Shares `--diffusion-steps` / `--diffusion-seed` for step count and seed. On MiniMax-H3 the only accepted value is `1.0` (its default): the checkpoint ships CFG-distilled and anything higher is refused up front rather than run and degraded. `TensorSharp.Server` has no `--cfg` at all — a request body can still carry `cfg`. |
+| `--qwen-image-vae <path>` | Override the resolved Qwen-Image-2.1 VAE companion (default: the `qwen_image_2.1_vae*.safetensors` file next to the DiT GGUF). Env: `TS_QWEN_IMAGE_VAE`. |
+| `--qwen-image-vl <path>` | Override the resolved Qwen3-VL-8B text-encoder GGUF (default: a `Qwen3VL-8B` / `Qwen3-VL-8B` GGUF next to the DiT). Env: `TS_QWEN_IMAGE_TE`. |
+| `--qwen-image-mmproj <path>` | Override the resolved Qwen3-VL-8B mmproj (vision grounding for edits) GGUF (default: a matching `mmproj` GGUF next to the DiT). Env: `TS_QWEN_IMAGE_MMPROJ`. |
+| `--qwen-image-lora` / `--offload-cpu` | **Removed and rejected at startup, including as config-file keys; no replacement.** Both served only the earlier Qwen-Image-Edit pipeline: Qwen-Image-2.1 loads no LoRA adapters and keeps its DiT weights resident. |
+| `--width <px>` / `--height <px>` | Output size for Qwen-Image-2.1 and video generation. Default: `0` — auto (Qwen-Image-2.1: 2048×2048 for generation, or about that area at the first reference's aspect ratio for editing, and explicit sizes must be multiples of 32; MiniMax-H3: 640×384, or that area at the conditioning image's aspect ratio, rounded up to a multiple of 32; Wan: the model's native area at the input image's aspect ratio, 1280×704 for TI2V-5B and 832×480 otherwise). |
 | `--video-frames <N>` | Video frame count, snapped to the model's temporal grid (`4k+1` for Wan; `17k+5` for MiniMax-H3 — 5, 22, 39, 56, 73, 90 …). Default: 33; 49 for Wan2.2-TI2V, 22 for MiniMax-H3. `1` generates a still image where the model supports it (use `--output out.png`). |
 | `--fps <N>` | Playback frame rate of the saved MP4 (default: 16; 24 for Wan2.2-TI2V). Models trained at a fixed rate (MiniMax-H3, 24 fps) override any other value. |
 | `--flow-shift <F>` | FlowMatch timestep shift (default: the model's official recipe — 5.0 for Wan 2.2, 12.0 for A14B T2V, 8.0/3.0/5.0 for Wan 2.1, 12.0 for MiniMax-H3). On models with a joint audio stream this shifts the video stream only. |
@@ -424,7 +425,7 @@ script gets that error instead of watching a setting be ignored.
 | `--ref-audio <file>` | Reference audio clip. Repeatable; referred to as `<Audio 1>`, `<Audio 2>`, … Resampled to the audio VAE's 32 kHz stereo and truncated to the generated clip's duration. |
 | `--no-audio` | Skip audio decoding on models that generate an audio track jointly with the video (MiniMax-H3), saving the audio VAE's time and memory. Ignored by video-only models. |
 | _(renamed flags)_ | `--wan-vae`, `--wan-te` and `--wan-dit2` became `--video-vae`, `--video-text-encoder` and `--video-dit2` when video generation stopped being Wan-only. The old spellings are still accepted everywhere — on the CLI, on the server, and as config-file keys — so existing configs keep working unchanged. |
-| `--tp <N>` | Multi-GPU degree — how many GPUs to spread the model over in a single process (default: `1`). Which of the two multi-GPU modes you get is the architecture's business, not yours: **tensor parallelism** (the weights split *inside* every layer) where it is implemented, and a **layer split** (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. GLM 5.x layer-splits when this flag is omitted; on GGML GPU backends the flag selects its native local/single-process TP path for GLM-5.2, GLM-5.3 and GLM-5.3-Flash alike (on GLM-5.3 that is an accepted mode rather than a validated configuration — the caches replicate per rank — and `--spec` is refused there whenever `--tp N>1`, so speculation engages on the default layer split). An architecture that supports neither says so on stderr and runs on one GPU. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
+| `--tp <N>` | Multi-GPU degree — how many GPUs to spread the model over in a single process (default: `1`). Which of the two multi-GPU modes you get is the architecture's business, not yours: **tensor parallelism** (the weights split *inside* every layer) where it is implemented, and a **layer split** (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. GLM 5.x layer-splits when this flag is omitted; on GGML GPU backends the flag selects its native local/single-process TP path for GLM-5.2, GLM-5.3 and GLM-5.3-Flash alike (on GLM-5.3 that is an accepted mode rather than a validated configuration — the caches replicate per rank — and `--spec` is refused there whenever `--tp N>1`, so speculation engages on the default layer split). On Qwen-Image-2.1 it shards the diffusion transformer (32/N heads and 12288/N MLP columns per GPU, N = 2, 4 or 8); the text encoder, vision encoder and VAE stay on the first GPU. An architecture that supports neither says so on stderr and runs on one GPU. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
 | `--tp-node-id <N>` | This node's 0-based ID for multi-node (distributed) tensor parallelism. Requires `--tp-peers`. |
 | `--tp-peers <list>` | Comma-separated `host:port` list of all nodes in the distributed TP cluster (e.g. `192.168.1.10:9500,192.168.1.11:9500`). Requires `--tp-node-id`. |
 | `--test` | Run built-in tokenizer, ChatML-template, and Ollama-comparison tests |
@@ -590,7 +591,7 @@ Running `TensorSharp.Server` with no arguments prints the full parameter referen
 | `--model <path>` | GGUF file to host (required for inference; when other options are passed without it, the server starts but `/api/models/load` will report no hosted model) |
 | `--mmproj <path>` | Multimodal projector GGUF (resolved relative to the model directory when only a filename is given; pass `none` to disable). Requires `--model`. |
 | `--backend <type>` | Default compute backend: `cpu`, `cuda`, `mlx`, `ggml_cpu`, `ggml_metal`, `ggml_cuda`, or `ggml_vulkan` |
-| `--tp <N>` | Multi-GPU degree — how many local GPUs to spread the hosted model over (default: `1`). Tensor parallelism where the architecture implements it; a layer split (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. GLM 5.x layer-splits when this flag is omitted; on GGML GPU backends the flag selects its native local/single-process TP path for GLM-5.2, GLM-5.3 and GLM-5.3-Flash alike (on GLM-5.3 an accepted mode rather than a validated configuration — the caches replicate per rank, so `--tp` multiplies the KV footprint). Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. Env: `TENSORSHARP_TP_DEGREE`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
+| `--tp <N>` | Multi-GPU degree — how many local GPUs to spread the hosted model over (default: `1`). Tensor parallelism where the architecture implements it; a layer split (whole layers per GPU — capacity, not speed) on Qwen 3.8 Flash Next (`qwen4exp`) and DeepSeek V4. GLM 5.x layer-splits when this flag is omitted; on GGML GPU backends the flag selects its native local/single-process TP path for GLM-5.2, GLM-5.3 and GLM-5.3-Flash alike (on GLM-5.3 an accepted mode rather than a validated configuration — the caches replicate per rank, so `--tp` multiplies the KV footprint). On Qwen-Image-2.1 it shards the diffusion transformer (32/N heads and 12288/N MLP columns per GPU, N = 2, 4 or 8); the encoders and VAE stay on the first GPU. Requires `--backend cuda`, `ggml_cuda`, or `ggml_vulkan`. Env: `TENSORSHARP_TP_DEGREE`. See [Tensor Parallelism & Distributed Inference](#tensor-parallelism--distributed-inference). |
 | `--tp-node-id <N>` | This node's 0-based ID for multi-node (distributed) tensor parallelism. The server can only be node `0` (the driver that serves HTTP); start worker nodes with `TensorSharp.Cli`. Requires `--tp-peers`. Env: `TENSORSHARP_TP_NODE_ID`. |
 | `--tp-peers <list>` | Comma-separated `host:port` list of all nodes in the distributed TP cluster, ordered by node ID (e.g. `192.168.1.10:9500,192.168.1.11:9500`). Requires `--tp-node-id`. Env: `TENSORSHARP_TP_PEERS`. |
 | `--gpu-device <N>` | Vulkan device index for the `ggml_vulkan` backend on multi-GPU hosts (e.g. an integrated Intel GPU next to a discrete NVIDIA one). Defaults to device 0; use `--list-gpus` to see the indices. Also settable via the `TS_GGML_VULKAN_DEVICE` env var. |
@@ -670,6 +671,7 @@ of quietly losing a setting.
 | `--video-text-encoder <path>` | Override the resolved text-encoder GGUF (UMT5-XXL for Wan, Qwen3-VL-32B for MiniMax-H3). Also spelled `--video-te`. Env: `TS_VIDEO_TEXT_ENCODER`; `--wan-te` still accepted. |
 | `--video-dit2 <path>` | Second diffusion expert on dual-expert models (Wan 2.2 A14B's high/low-noise partner of `--model`). Auto-resolved by name when the pair is co-located. Env: `TS_VIDEO_DIT2`; `--wan-dit2` still accepted. |
 | `--audio-vae <path>` | Audio VAE for models that generate an audio track jointly with the video (`minimax_h3_audio_vae_fp32.safetensors`). Without it such a model still runs and produces video, just no audio. Env: `TS_VIDEO_AUDIO_VAE`. |
+| `--qwen-image-lora` / `--offload-cpu` | **Removed and rejected at startup, including as config-file keys; no replacement.** Both served only the earlier Qwen-Image-Edit pipeline: Qwen-Image-2.1 loads no LoRA adapters and keeps its DiT weights resident. |
 | `--temperature <f>` | Sampling temperature (`0` = greedy) |
 | `--top-k <N>` | Top-K filtering (`0` = disabled) |
 | `--top-p <f>` | Nucleus sampling threshold (`1.0` = disabled) |
@@ -1637,7 +1639,7 @@ must be reachable between all nodes.
 | DeepSeek V4.1 Flash | layer split (+ experimental routed-MoE TP) | Layer placement is the default and the measured path. `TS_DSV41_TP=N` (2-8, and equal to the GPU count selected by `--tp` / `TS_DSV4_NGPU`) shards routed-expert gate/up along the FFN intermediate dimension and down along its input, reducing partials through host-staged F32 buffers; attention, shared experts and caches keep their layer placement. Block-aligned unequal partitions (the 2304-wide intermediate is nine 256-element K-quant blocks: 1280+1024 on two ranks, 768+512+512+512 on four). The first full Q2_K run was slower than the layer split, so treat it as experimental. Attention TP and distributed groups are not implemented |
 | Hunyuan Dense | — | Single device: no TP and no layer split. Startup says so on stderr rather than leaving extra GPUs idle |
 | DiffusionGemma | — | Not applicable (diffusion model) |
-| Qwen-Image-Edit | — | Not applicable (image generation) |
+| Qwen-Image-2.1 | — | Not applicable (image generation) |
 
 ### Backend support
 
@@ -2085,7 +2087,8 @@ purpose, with a reason you can act on: not enough VRAM for the requested context
 or `--n-cpu-moe` (the message names the number that fits), a `--tp` layout the
 devices cannot hold, a KV cache dtype the architecture does not support (for
 example `KV_CACHE_DTYPE=q8_0` on DeepSeek V4.1), a backend the model or this
-machine does not support, a missing, truncated or non-GGUF model file, missing or
+machine does not support, a `qwen_image` GGUF that is not a Qwen-Image-2.1
+diffusion transformer, a missing, truncated or non-GGUF model file, missing or
 invalid DeepSeek V4.1 Engram metadata, or an explicit `--draft-model`
 that cannot be activated. The native loaders' own diagnostic lines (`[dsv4] ...`,
 `[glm] ...`) may still appear above the error line; the error line repeats the

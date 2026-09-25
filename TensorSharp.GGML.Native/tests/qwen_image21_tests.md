@@ -6,12 +6,33 @@ Configure with `TENSORSHARP_GGML_NATIVE_BUILD_TESTS=ON`, build
 `ctest --test-dir <build-directory> -R qwen-image21 --output-on-failure`.
 
 The CPU whole-graph test writes a synthetic explicit-attention reference fixture
-under the build directory. The CUDA test compares 171 forwards with that reference,
+under the build directory; the CUDA, Vulkan and Metal whole-graph tests compare
+against it. On Vulkan, the test skips process teardown after printing its verdict:
+upstream ggml-vulkan keeps its VkInstance until exit, and NVIDIA's driver threads
+can fault while libraries unload (reproduced with ggml alone). The CUDA test compares 171 forwards with that reference,
 including changed inputs and shapes, graph reuse, weight invalidation, and forced
 graph-owned weights. The Metal test compares 159 forwards with the same fixture;
 it excludes the device-copy-budget scenario because Metal maps host weights
 directly, so a device-copy cap cannot force graph-owned constants there.
 `TS_QWEN21_GRAPH_REUSE=0` disables graph reuse on CUDA and Metal for comparisons.
+
+Every shape with a prefix also runs the prefix KV cache. Each forward with a cache
+key is compared with the uncached graph on the same inputs: the first stores the
+prefix (extract), and later steps with a new target and timestep read it (cached).
+This covers every storage type (the default must match bit for bit; F16, F32,
+Q8_0 and Q8_0_V are held to rounding tolerances), retained and transient graphs,
+flash and explicit attention, a graph reset and a scratch release mid-request,
+release and re-extraction, two interleaved CFG keys, a key reused for another
+layout, and a cache declined by `TS_QWEN21_PREFIX_CACHE_MAX_MIB=0`, which must
+fall back to the uncached graph. The test then shards the model over two ranks:
+a real two-GPU group on CUDA (device collective) and Vulkan (host reduction), or,
+on CPU and Metal, a loopback group (`TSGgml_TensorParallelInitLoopback`: backend
+instances on the one device, host reduction); a single-GPU CUDA or Vulkan machine
+prints a SKIP for this part. It compares sharded forwards, with
+and without the cache, against the unsharded graph, and checks that ranks
+disagreeing on a descriptor are refused. The loopback group exercises the
+per-rank graphs, segment schedule and reduction but not NCCL or P2P, and says
+nothing about multi-GPU speed.
 The independent NumPy operator oracle is `eng/tests/qwen-image21-dit.py` and accepts
 `--backend cpu`, `--backend metal`, or `--backend cuda`.
 VAE tests check independent shortcut/convolution oracles

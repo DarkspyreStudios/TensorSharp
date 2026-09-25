@@ -75,6 +75,40 @@ public class CliUsageTests
     }
 
     [Fact]
+    public void PrintUsage_ListsRemovedQwenImageFlagsOnlyAsRemoved()
+    {
+        // The CLI has no unknown-flag trap, so the removed-options note is the one place
+        // a user reading --help learns these went; as live entries they would advertise
+        // a flag that only errors.
+        var documented = new HashSet<string>(CliUsage.DocumentedFlags(), StringComparer.OrdinalIgnoreCase);
+        string flattened = System.Text.RegularExpressions.Regex.Replace(Usage(), @"\s+", " ");
+
+        Assert.Contains("Removed options", flattened, StringComparison.Ordinal);
+        Assert.NotEmpty(RemovedCliFlags.RemovedFlags);
+        foreach ((string flag, string advice) in RemovedCliFlags.RemovedFlags)
+        {
+            Assert.DoesNotContain(flag, documented);
+            Assert.Contains(flag + " Removed: " + advice, flattened, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void PrintUsage_QwenImageExamplesNameOnlyQwenImage21Files()
+    {
+        string usage = Usage();
+
+        Assert.Contains("config/qwen-image-2.1.json", usage, StringComparison.Ordinal);
+        // The removed-options note may name the retired pipeline; nothing else may.
+        string options = usage.Substring(0, usage.IndexOf("Removed options", StringComparison.Ordinal));
+        string examples = usage.Substring(usage.IndexOf("Examples:", StringComparison.Ordinal));
+        foreach (string retired in new[] { "2511", "Qwen2.5-VL", "Qwen-Image-Edit" })
+        {
+            Assert.DoesNotContain(retired, options, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(retired, examples, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
     public void DocumentedFlags_YieldsARealList()
     {
         // Guard against a vacuous inverse test: an accessor that yielded nothing

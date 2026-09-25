@@ -11,7 +11,7 @@ using TensorSharp.Models.Media;
 namespace TensorSharp.Models.QwenImage
 {
     /// <summary>
-    /// Image load/save/resize helpers for the Qwen-Image edit pipeline (and the Wan and
+    /// Image load/save/resize helpers for the Qwen-Image-2.1 pipeline (and the Wan and
     /// MiniMax-H3 pipelines, which share them), backed by the platform image codec on
     /// <see cref="MediaCodecs.Image"/> — Magick.NET on desktop, so the results the
     /// pipelines were validated against are unchanged.
@@ -117,7 +117,7 @@ namespace TensorSharp.Models.QwenImage
         /// <summary>
         /// Resize so the area is approximately <paramref name="targetArea"/> pixels while
         /// preserving aspect ratio, snapping both dimensions to a multiple of
-        /// <paramref name="multiple"/> (Qwen-Image needs dims divisible by VAE-scale*patch = 16).
+        /// <paramref name="multiple"/>.
         /// </summary>
         public static RgbImage ResizeToArea(RgbImage img, long targetArea, int multiple = 16)
         {

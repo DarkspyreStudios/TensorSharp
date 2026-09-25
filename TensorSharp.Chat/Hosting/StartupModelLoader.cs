@@ -45,7 +45,7 @@ namespace TensorSharp.Server.Hosting
                     " [--temperature F] [--top-k N] [--top-p F] [--min-p F] [--repeat-penalty F]" +
                     " [--presence-penalty F] [--frequency-penalty F] [--seed N] [--stop <text>]" +
                     " [--prefill-chunk-size N]" +
-                    " [--qwen-image-vae <vae.gguf>] [--qwen-image-vl <qwen2.5-vl.gguf>] [--qwen-image-mmproj <mmproj.gguf>]" +
+                    " [--qwen-image-vae <vae.safetensors>] [--qwen-image-vl <qwen3-vl-8b.gguf>] [--qwen-image-mmproj <mmproj.gguf>]" +
                     " to use the Web UI.");
                 return;
             }

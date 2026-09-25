@@ -38,6 +38,12 @@ public static class ServerOptionsBuilder
         ArgumentNullException.ThrowIfNull(args);
         if (string.IsNullOrEmpty(baseDirectory)) throw new ArgumentNullException(nameof(baseDirectory));
 
+        // A removed option is refused by name with what to do instead, before the
+        // unknown-option trap in ParseArgs can reduce it to a bare "Unknown option".
+        // Program.cs checks the same table before this is called; checking here too
+        // keeps every caller of Build on the same message.
+        TensorSharp.Runtime.RemovedCliFlags.RejectRemoved(args);
+
         ParseArgs(args,
             out string? configuredModel,
             out string? configuredMmProj,
@@ -867,16 +873,18 @@ public static class ServerOptionsBuilder
     }
 
     /// <summary>
-    /// Translate the Qwen-Image-Edit companion-model flags
+    /// Translate the Qwen-Image-2.1 companion flags
     /// (<c>--qwen-image-vae</c> / <c>--qwen-image-vl</c> /
     /// <c>--qwen-image-mmproj</c>) into the env vars that
     /// <c>QwenImageModel</c> reads (<c>TS_QWEN_IMAGE_VAE</c> /
     /// <c>TS_QWEN_IMAGE_TE</c> / <c>TS_QWEN_IMAGE_MMPROJ</c>) — the existing
     /// override mechanism for the three networks the qwen_image DiT GGUF does
-    /// not itself contain. Each path is validated here so a typo fails fast at
-    /// startup instead of silently falling back to the same-directory scan.
-    /// Must run before the startup model is loaded. Returns true when at least
-    /// one flag was applied so the caller can emit a startup-log line.
+    /// not itself contain — plus the output-size defaults and the video
+    /// companions, which use the same env-var mechanism. Each path is validated
+    /// here so a typo fails fast at startup instead of silently falling back to
+    /// the same-directory scan. Must run before the startup model is loaded.
+    /// Returns true when at least one flag was applied so the caller can emit a
+    /// startup-log line.
     /// </summary>
     public static bool ApplyQwenImageCompanionCliFlags(string[] args)
     {
@@ -901,16 +909,6 @@ public static class ServerOptionsBuilder
             if (TryReadOption(args, ref i, "--qwen-image-mmproj", out string? mmprojOpt))
             {
                 SetQwenImageCompanionEnv("--qwen-image-mmproj", "TS_QWEN_IMAGE_MMPROJ", mmprojOpt);
-                changed = true;
-                continue;
-            }
-            if (TryReadOption(args, ref i, "--qwen-image-lora", out string? loraOpt))
-            {
-                // DiT LoRA (e.g. a lightx2v Lightning step-distillation checkpoint),
-                // merged into the quantized weights at model load. A Lightning LoRA
-                // also switches the sampling defaults (its step count, cfg 1.0,
-                // fixed timestep shift 3).
-                SetQwenImageCompanionEnv("--qwen-image-lora", "TS_QWEN_IMAGE_LORA", loraOpt);
                 changed = true;
                 continue;
             }
@@ -955,10 +953,10 @@ public static class ServerOptionsBuilder
                 changed = true;
                 continue;
             }
-            // Fixed output size for every edit (bypasses the auto VRAM area clamp, but is still
-            // capped at the hardware memory ceiling so an oversized request can't OOM into
-            // garbage). Read by QwenImagePipeline as TS_QWEN_IMAGE_WIDTH/HEIGHT. Per-request
-            // sizes from the Web UI / API still override this default.
+            // Default output size for image requests that name none. Read by
+            // QwenImage21Pipeline.ResolveDimensions as TS_QWEN_IMAGE_WIDTH/HEIGHT, which
+            // requires both, each a multiple of 32. Per-request sizes from the Web UI / API
+            // still override this default.
             if (TryReadOption(args, ref i, "--width", out string? widthOpt))
             {
                 SetQwenImageSizeEnv("--width", "TS_QWEN_IMAGE_WIDTH", widthOpt);
@@ -968,17 +966,6 @@ public static class ServerOptionsBuilder
             if (TryReadOption(args, ref i, "--height", out string? heightOpt))
             {
                 SetQwenImageSizeEnv("--height", "TS_QWEN_IMAGE_HEIGHT", heightOpt);
-                changed = true;
-                continue;
-            }
-            // CPU offload (sd.cpp --offload-to-cpu equivalent): stream the DiT weights
-            // from RAM per block instead of holding them resident in VRAM, so high
-            // (native ~1 MP) resolutions fit on VRAM-limited cards. Without the flag the
-            // pipeline engages offload automatically only when the target resolution
-            // does not fit beside the resident weights; the flag forces it always on.
-            if (string.Equals(args[i], "--offload-cpu", StringComparison.OrdinalIgnoreCase))
-            {
-                Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU", "1");
                 changed = true;
                 continue;
             }
@@ -1122,7 +1109,7 @@ public static class ServerOptionsBuilder
             // --video-width / --video-height seed the size of every video request.
             // --width / --height ALSO seed them: an operator who starts the server
             // with a size reasonably expects video to use it, and the Web UI sends
-            // no size of its own. (They keep their Qwen-Image-Edit meaning too;
+            // no size of its own. (They keep their Qwen-Image meaning too;
             // that pass reads them separately and leaves them in argv.)
             if (TryReadOption(args, ref i, "--video-width", out string? videoWidthOption)
                 || TryReadOption(args, ref i, "--width", out videoWidthOption))
@@ -1450,14 +1437,13 @@ public static class ServerOptionsBuilder
             {
                 continue;
             }
-            // Qwen-Image-Edit companion-model flags are consumed by
-            // ApplyQwenImageCompanionCliFlags(args) in a separate earlier
+            // Qwen-Image-2.1 companion flags are consumed by
+            // ApplyQwenImageCompanionCliFlags(args) in a separate
             // pass. Recognise + skip them here so they don't trip the
             // unknown-arg trap below.
             if (TryReadOption(args, ref i, "--qwen-image-vae", out _)
                 || TryReadOption(args, ref i, "--qwen-image-vl", out _)
                 || TryReadOption(args, ref i, "--qwen-image-mmproj", out _)
-                || TryReadOption(args, ref i, "--qwen-image-lora", out _)
                 || TryReadOption(args, ref i, "--width", out _)
                 || TryReadOption(args, ref i, "--height", out _))
             {
@@ -1481,10 +1467,6 @@ public static class ServerOptionsBuilder
                 || TryReadOption(args, ref i, "--video-mode", out _))
             {
                 continue;
-            }
-            if (string.Equals(args[i], "--offload-cpu", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;   // consumed by ApplyQwenImageCompanionCliFlags (boolean flag)
             }
 
             // Anything else that starts with `--` is an unknown flag and we
@@ -1532,11 +1514,10 @@ public static class ServerOptionsBuilder
             "--draft-model",
             "--redis-url", "--paged-kv-redis-url", "--paged-kv-redis-ttl",
             "--n-cpu-moe", "--cpu-moe", "--cpu-moe-threads",
-            "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
+            "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj",
             "--video-vae", "--video-text-encoder", "--video-te", "--video-dit2", "--audio-vae",
             "--video-width", "--video-height", "--video-steps", "--video-mode",
             "--wan-vae", "--wan-te", "--wan-dit2",
-            "--offload-cpu",
             "--kv-cache-dtype", "--gpu-device", "--list-gpus", "--help",
             "--tp", "--tp-node-id", "--tp-peers",
             "--upload-max-mb", "--upload-quota-mb", "--upload-ttl-hours",

@@ -929,8 +929,8 @@ checked and these were not:
   iOS produces (a stem with no extension, no content type, HEIC and MP4 bytes behind
   the same absent name), but the picker itself has only been run by hand.
 - **Image editing.** `/api/image-edit` remains bound to the same service the desktop
-  uses, but the built-in catalog no longer offers a Qwen-Image-Edit checkpoint and
-  no image has been generated on iOS.
+  uses, but the built-in catalog offers no image-generation checkpoint and no image
+  has been generated on iOS.
 - **Video generation.** The routes exist because they are part of the shared
   surface. No video model is small enough for the catalog, so nothing offers one.
 - **Package installation.** `WheelInstaller` refuses without the network switch and

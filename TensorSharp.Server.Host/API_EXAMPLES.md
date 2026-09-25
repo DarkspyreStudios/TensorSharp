@@ -37,7 +37,7 @@ See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs
 | Generation modes | Autoregressive models stream appended token chunks. DiffusionGemma returns final text on append-only compatibility endpoints and exposes live whole-message denoising previews on Web UI `/api/chat`. |
 | Sessions | Web UI uses per-tab chat sessions. Ollama/OpenAI compatibility endpoints retain their existing default-session inference behavior, but code-execution workspaces never span HTTP requests. |
 | Uploads | `/api/upload` accepts image / video / audio / text / **PDF** files; born-digital PDFs return extracted text, scanned PDFs return page images for vision-capable models (`TS_PDF_MAX_PAGES` caps pages read) |
-| Image editing | Qwen-Image-Edit (`qwen_image`) models are served through `/api/image-edit` and `/api/image-edit/stream`, not the chat endpoints |
+| Image generation and editing | Qwen-Image-2.1 (`qwen_image`) is served through `/api/image-generate`, `/api/image-edit` and their `/stream` variants, not the chat endpoints |
 | Video generation | Any video-generation model — MiniMax-H3 (`minimax-h3`), Wan 2.1 / 2.2 (`wan`) — is served through `/api/video-generate`, `/api/video-generate/stream` and `/v1/videos/generations`; MiniMax-H3 returns a 32 kHz stereo `.wav` sidecar alongside the MP4, and `/api/models` advertises what conditioning the loaded checkpoint takes |
 | Agent Skills | Skill directories from `--skills-dir` (or a `skills` folder beside the binary), listed at `/v1/skills` and `/api/skills` and installable as a `.zip` through `POST /api/skills`. Selected per request with `"skills": [...]` on every chat endpoint. On families with both declaration and output-parser support, including Qwen 3.8 Flash Next (`qwen4exp`), the model's own skill calls are answered inside the server, so clients receive a finished completion. Families without usable tool support receive selected skill instructions inline instead. `skills_run` is off unless the server starts with `--skills-allow-exec`. |
 | Agentic code execution | `--code-exec` adds the in-process `shell`, `read_file`, `write_file`, and `apply_patch` tools on tool-capable model families. Web UI keeps one workspace per chat session; each OpenAI/Ollama HTTP request gets a private workspace across its internal rounds and the server deletes it after the response. Network and package installation are separate, off-by-default permissions. |
@@ -1104,18 +1104,18 @@ Omitted `steps`/`cfg` select 40 Euler steps and CFG 1, following the released
 negative prediction. For faster drafts, request 1024×1024 or explicitly select
 25 steps, as in the official ComfyUI workflow; fewer steps can change quality.
 The [model guide](../docs/models/qwenimage21.md) records the official scheduler
-settings, source links and measured validation. Earlier Qwen-Image Lightning
-LoRAs are incompatible with 2.1; no compatible acceleration adapter was verified.
+settings, source links and measured validation. Qwen-Image-2.1 does not load
+LoRA adapters.
 
-### Image Editing (`/api/image-edit`, Qwen-Image-Edit)
+### Image Editing (`/api/image-edit`, Qwen-Image-2.1)
 
-When the hosted `--model` is a Qwen-Image-Edit DiT GGUF (architecture
+When the hosted `--model` is a Qwen-Image-2.1 DiT GGUF (architecture
 `qwen_image`), image+prompt turns go to the image-edit endpoints instead of
 `/api/chat`:
 
 ```bash
-# One-shot edit (multipart). steps=0 / cfg=0 mean auto
-# (30 steps / cfg 2.5, or the Lightning LoRA's step count / cfg 1.0).
+# One-shot edit (multipart). steps=0 / cfg=0 mean auto (40 steps / CFG 1).
+# Repeat the image part for multiple references.
 curl -X POST http://localhost:5000/api/image-edit \
   -F "image=@photo.png" \
   -F "prompt=Replace the background with a sunny beach" \
@@ -1124,13 +1124,17 @@ curl -X POST http://localhost:5000/api/image-edit \
 
 Response:
 
-```json
-{"ok": true, "url": "/uploads/edit-<guid>.png", "width": 1184, "height": 544, "elapsedSeconds": 40.4}
+```text
+{"ok": true, "url": "/uploads/edit-<guid>.png", "width": ..., "height": ..., "elapsedSeconds": ...}
 ```
 
-A JSON body `{ "imagePath": "<file from /api/upload>", "prompt": "...",
-"steps": 0, "cfg": 0, "seed": 42 }` is also accepted (`imagePath` is the
-server filename of a previously uploaded file; absolute paths inside the
+Without explicit `width` / `height`, the output keeps the first reference's aspect
+ratio at approximately 2048×2048 pixels of area.
+
+A JSON body `{ "imagePaths": ["<file from /api/upload>"], "prompt": "...",
+"steps": 0, "cfg": 0, "seed": 42 }` is also accepted (`imagePaths` lists the
+server filenames of previously uploaded files, in reference order; the older
+single `imagePath` field still works; absolute paths inside the
 upload directory are still accepted for older clients). The
 streaming variant emits SSE progress with live denoising previews:
 
@@ -1141,11 +1145,11 @@ curl -N -X POST http://localhost:5000/api/image-edit/stream \
 ```
 
 Per-step events look like
-`{"imageEdit": true, "step": 2, "total": 4, "image": "data:image/png;base64,...", "width": 1184, "height": 544}`
+`{"imageEdit": true, "step": 2, "total": 40, "image": "data:image/png;base64,...", "width": ..., "height": ...}`
 (the `image` preview snapshot appears on throttled steps, up to 8 per edit),
 followed by a final
-`{"done": true, "url": "/uploads/edit-<guid>.png", "width": 1184, "height": 544, "elapsedSeconds": 40.4}`.
-Requests against a model that is not Qwen-Image-Edit return 400; concurrent
+`{"done": true, "url": "/uploads/edit-<guid>.png", "width": ..., "height": ..., "elapsedSeconds": ...}`.
+Requests against a model that is not Qwen-Image-2.1 return 400; concurrent
 edits are serialized by a process-wide lock.
 
 ### Video Generation (`/api/video-generate`, `/v1/videos/generations`)

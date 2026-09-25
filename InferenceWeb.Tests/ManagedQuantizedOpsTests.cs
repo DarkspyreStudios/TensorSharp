@@ -55,9 +55,9 @@ public class ManagedQuantizedOpsTests
             Type = type,
         };
 
-        // Managed CPU quantized storage now covers the K-quants AND the i-quants used by
-        // Qwen-Image-Edit (Q2_K/Q3_K DiT, IQ2_XXS/IQ2_S/IQ3_S text encoder) — these must be
-        // stored quantized (and matmul'd via the managed path), not dequantized to F32 at load.
+        // Managed CPU quantized storage now covers the K-quants AND the low-bit i-quants
+        // (Q2_K/Q3_K, IQ2_XXS/IQ2_S/IQ3_S) — these must be stored quantized (and matmul'd
+        // via the managed path), not dequantized to F32 at load.
         foreach (var t in new[]
                  {
                      GgmlTensorType.Q4_K, GgmlTensorType.Q2_K, GgmlTensorType.Q3_K,

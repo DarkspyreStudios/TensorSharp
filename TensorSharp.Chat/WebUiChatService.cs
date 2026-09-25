@@ -49,12 +49,12 @@ namespace TensorSharp.Chat
 
     /// <summary>
     /// The Web UI's request handlers with the transport taken out: queue status,
-    /// session lifecycle, model state and reload, file upload, Qwen-Image-Edit, Wan
-    /// video generation, and the chat stream — every reply is the JSON payload object
-    /// the browser expects (built with <see cref="WebUiSseEvents"/> where it is a
-    /// stream frame), every refusal is a <see cref="WebUiRequestRejectedException"/>
-    /// carrying the status code, and every stream is an <see cref="IAsyncEnumerable{T}"/>
-    /// of frames.
+    /// session lifecycle, model state and reload, file upload, Qwen-Image-2.1 image
+    /// generation and editing, video generation, and the chat stream — every reply
+    /// is the JSON payload object the browser expects (built with
+    /// <see cref="WebUiSseEvents"/> where it is a stream frame), every refusal is a
+    /// <see cref="WebUiRequestRejectedException"/> carrying the status code, and every
+    /// stream is an <see cref="IAsyncEnumerable{T}"/> of frames.
     ///
     /// <para>
     /// This exists so that TensorSharp.Server (ASP.NET Core: <c>HttpContext</c> in,
@@ -1106,14 +1106,14 @@ namespace TensorSharp.Chat
             }
         }
 
-        // ---- Image editing (Qwen-Image-Edit) ---------------------------------
+        // ---- Image generation and editing (Qwen-Image-2.1) ------------------
 
         // The model is not thread-safe; edit requests are serialised process-wide.
         private static readonly object _imageEditLock = new();
 
         /// <summary>
         /// The two refusals every image-edit route starts with, in order: 400 when the
-        /// loaded model is not Qwen-Image-Edit, 507 when the upload directory has no
+        /// loaded model is not Qwen-Image-2.1, 507 when the upload directory has no
         /// room for the result PNG (checked BEFORE the slow diffusion runs, not after).
         /// Exposed so a transport can refuse before it reads a multipart body; the edit
         /// methods repeat the checks, so calling it first is optional.
@@ -1124,10 +1124,15 @@ namespace TensorSharp.Chat
             EnsureImageEditHeadroom(_loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit"), "Image edit rejected: {Reason}");
         }
 
+        // Every loadable QwenImageModel is a Qwen-Image-2.1 model: earlier Qwen-Image
+        // checkpoints are refused at load, so the model type is the whole check.
+        private const string NotAnImageModelError = "The loaded model is not a Qwen-Image-2.1 model.";
+        private const string NotAGenerationModelError = "Text-to-image generation requires a Qwen-Image-2.1 model.";
+
         private TensorSharp.Models.QwenImage.QwenImageModel RequireImageEditModel()
         {
             if (_svc.Model is not TensorSharp.Models.QwenImage.QwenImageModel editModel)
-                throw new WebUiRequestRejectedException(400, new { error = "The loaded model is not a Qwen-Image-Edit model." });
+                throw new WebUiRequestRejectedException(400, new { error = NotAnImageModelError });
             return editModel;
         }
 
@@ -1145,7 +1150,7 @@ namespace TensorSharp.Chat
         /// <summary>
         /// <c>POST /api/image-edit</c> with a JSON body: <c>{ imagePaths[] | imagePath,
         /// prompt, steps?, cfg?, seed?, targetArea? }</c> where the paths are the bare
-        /// server file names <c>/api/upload</c> returned. Runs the loaded Qwen-Image-Edit
+        /// server file names <c>/api/upload</c> returned. Runs the loaded Qwen-Image-2.1
         /// model and returns <c>{ ok, url, width, height, elapsedSeconds }</c>. With
         /// multiple images the first drives the output geometry and the prompt can
         /// reference them as "Picture 1", "Picture 2", ... in upload order.
@@ -1165,14 +1170,14 @@ namespace TensorSharp.Chat
 
         private TensorSharp.Models.QwenImage.QwenImageModel RequireImageGenerationModel()
         {
-            if (_svc.Model is not TensorSharp.Models.QwenImage.QwenImageModel model || !model.IsVersion21)
-                throw new WebUiRequestRejectedException(400, new { error = "Text-to-image generation requires a Qwen-Image-2.1 model." });
+            if (_svc.Model is not TensorSharp.Models.QwenImage.QwenImageModel model)
+                throw new WebUiRequestRejectedException(400, new { error = NotAGenerationModelError });
             return model;
         }
 
         // Shared by plain and streaming routes so size, sampling and negative-prompt
         // settings cannot silently disappear when a client switches transport.
-        internal static TensorSharp.Models.QwenImage.QwenImageParams ParseImageParameters(JsonElement body, bool version21)
+        internal static TensorSharp.Models.QwenImage.QwenImageParams ParseImageParameters(JsonElement body)
         {
             if (body.ValueKind != JsonValueKind.Object)
                 throw new WebUiRequestRejectedException(400, new { error = "Expected a JSON object." });
@@ -1185,22 +1190,22 @@ namespace TensorSharp.Chat
                 if (body.TryGetProperty("width", out var width)) p.Width = width.GetInt32();
                 if (body.TryGetProperty("height", out var height)) p.Height = height.GetInt32();
                 p.TargetArea = body.TryGetProperty("targetArea", out var area)
-                    ? area.GetInt64() : p.ResolveTargetArea(version21);
+                    ? area.GetInt64() : p.ResolveTargetArea();
                 if (body.TryGetProperty("negativePrompt", out var negative)) p.NegativePrompt = negative.GetString() ?? " ";
             }
             catch (Exception ex) when (ex is InvalidOperationException or FormatException or OverflowException)
             {
                 throw new WebUiRequestRejectedException(400, new { error = "Invalid image-generation parameters: " + ex.Message });
             }
-            ValidateImageParameters(p, version21);
+            ValidateImageParameters(p);
             return p;
         }
 
-        private static void ValidateImageParameters(TensorSharp.Models.QwenImage.QwenImageParams p, bool version21)
+        private static void ValidateImageParameters(TensorSharp.Models.QwenImage.QwenImageParams p)
         {
             if (p.Steps < 0 || !float.IsFinite(p.CfgScale) || p.CfgScale < 0 || p.TargetArea <= 0)
                 throw new WebUiRequestRejectedException(400, new { error = "steps and cfg must be nonnegative; targetArea must be positive." });
-            int alignment = version21 ? 32 : 16;
+            const int alignment = 32;
             if (p.Width < 0 || p.Height < 0 || (p.Width == 0) != (p.Height == 0)
                 || p.Width % alignment != 0 || p.Height % alignment != 0)
                 throw new WebUiRequestRejectedException(400, new { error = $"width and height must both be zero (automatic) or positive multiples of {alignment}." });
@@ -1227,7 +1232,7 @@ namespace TensorSharp.Chat
             var logger = _loggerFactory.CreateLogger("TensorSharp.Server.ImageEdit");
             var model = generate ? RequireImageGenerationModel() : RequireImageEditModel();
             EnsureImageEditHeadroom(logger, "Image request rejected: {Reason}");
-            var p = ParseImageParameters(body, model.IsVersion21);
+            var p = ParseImageParameters(body);
             string prompt = ParseImagePrompt(body, generate);
             var images = new List<byte[]>();
             if (!generate)
@@ -1253,8 +1258,8 @@ namespace TensorSharp.Chat
                 Steps = steps, CfgScale = cfg, Seed = seed, Width = width, Height = height,
                 TargetArea = targetArea, NegativePrompt = negativePrompt ?? " ",
             };
-            p.TargetArea = p.ResolveTargetArea(model.IsVersion21);
-            ValidateImageParameters(p, model.IsVersion21);
+            p.TargetArea = p.ResolveTargetArea();
+            ValidateImageParameters(p);
             return await RunImageEditAsync(model, prompt ?? "", p, images.ToList(), logger, false, cancellationToken);
         }
 
@@ -1274,7 +1279,7 @@ namespace TensorSharp.Chat
                 lock (_imageEditLock)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: model.IsVersion21));
+                    var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
                     p.OnStep = (_, _, _) => cancellationToken.ThrowIfCancellationRequested();
                     var output = generate ? model.GenerateImage(prompt, p) : model.EditImage(prompt, inputs, p);
                     TensorSharp.Models.QwenImage.ImageIO.SavePng(outPath, output);
@@ -1354,13 +1359,7 @@ namespace TensorSharp.Chat
 
             if (_svc.Model is not TensorSharp.Models.QwenImage.QwenImageModel editModel)
             {
-                yield return new { done = true, error = generate ? "Text-to-image generation requires a Qwen-Image-2.1 model." : "The loaded model is not a Qwen-Image-Edit model." };
-                yield break;
-            }
-
-            if (generate && !editModel.IsVersion21)
-            {
-                yield return new { done = true, error = "Text-to-image generation requires a Qwen-Image-2.1 model." };
+                yield return new { done = true, error = generate ? NotAGenerationModelError : NotAnImageModelError };
                 yield break;
             }
 
@@ -1377,7 +1376,7 @@ namespace TensorSharp.Chat
             string parseError = null;
             try
             {
-                p = ParseImageParameters(body, editModel.IsVersion21);
+                p = ParseImageParameters(body);
                 prompt = ParseImagePrompt(body, generate);
                 if (!generate)
                     parseError = await ReadUploadedImagesAsync(body, imageBytesList, ct);
@@ -1399,10 +1398,10 @@ namespace TensorSharp.Chat
             // The edit worker pushes frames into this channel; the stream drains it. The callback
             // never blocks on the consumer (unbounded TryWrite) so it can't stall the denoise.
             var channel = Channel.CreateUnbounded<EditFrame>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-            // steps == 0 means "auto": the pipeline resolves the real count only later (e.g. a
-            // Lightning LoRA's trained step count), so request the full preview budget and let
-            // the pipeline's interval math fit it to the resolved steps. Clamping against the
-            // raw 0 here disabled previews entirely for auto-step requests (the Web UI default).
+            // steps == 0 means "auto": the pipeline resolves the real count itself (40 for
+            // Qwen-Image-2.1), so request the full preview budget and let the pipeline's
+            // interval math fit it to the resolved steps. Clamping against the raw 0 here
+            // disabled previews entirely for auto-step requests (the Web UI default).
             int previewCount = p.Steps > 0 ? Math.Clamp(p.Steps - 1, 0, 8) : 8;
 
             var editTask = Task.Run(() =>
@@ -1413,7 +1412,7 @@ namespace TensorSharp.Chat
                     // The model is not thread-safe; serialize edit requests (shared with ImageEditAsync).
                     lock (_imageEditLock)
                     {
-                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: editModel.IsVersion21));
+                        var inputs = imageBytesList.ConvertAll(bytes => TensorSharp.Models.QwenImage.ImageIO.Decode(bytes, preserveAlpha: true));
                         ct.ThrowIfCancellationRequested();
                         p.PreviewCount = previewCount;
                         p.OnStep = (step, total, preview) =>

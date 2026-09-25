@@ -92,11 +92,12 @@ live in different folders each get their own root:
 ```json
 {
   "variables": {
-    "ditRoot": "${TENSORSHARP_MODELS:-../models}/qwen-image-edit",
-    "companionRoot": "${TENSORSHARP_MODELS:-../models}"
+    "ditRoot": "${TENSORSHARP_MODELS:-../models}/qwen-image-2.1",
+    "encoderRoot": "${TENSORSHARP_MODELS:-../models}/qwen3-vl"
   },
-  "model": { "path": "${ditRoot}/qwen-image-edit-2511-Q4_K_M.gguf", "urls": ["..."] },
-  "qwen-image-vae": "${companionRoot}/Qwen_Image-VAE.safetensors"
+  "model": { "path": "${ditRoot}/qwen_image_2.1_Q4_K_M.gguf", "urls": ["..."] },
+  "qwen-image-vae": "${ditRoot}/qwen_image_2.1_vae_bf16.safetensors",
+  "qwen-image-vl": "${encoderRoot}/Qwen3VL-8B-Instruct-Q4_K_M.gguf"
 }
 ```
 
@@ -144,7 +145,6 @@ are reused afterward. If you already have a file at that `path`, it is used as-i
 | [`variables.json`](variables.json) | Gemma-4 26B-A4B: model + mmproj + MTP draft | One shared root/repo reused across three related files |
 | [`auto-download.json`](auto-download.json) | Qwen3.5-9B (~8.9 GB) | Auto-download demo using a public GGUF |
 | [`qwen-image-2.1.json`](qwen-image-2.1.json) | Qwen-Image-2.1 Q4_K_M + dedicated VAE + Qwen3-VL-8B + projector | Text-to-image and editing; pinned, checksum-verified downloads |
-| [`qwen-image-edit.json`](qwen-image-edit.json) | Qwen-Image-Edit 2511: DiT + VAE + text encoder + mmproj + Lightning LoRA | Multi-file image pipeline, all auto-downloaded |
 | [`minimax-h3-fl2va.json`](minimax-h3-fl2va.json) | MiniMax-H3 FL2VA: DiT + Qwen3-VL-32B + video VAE + audio VAE (~33.5 GB) | **Video and 32 kHz stereo audio in one packed latent**; text-to-video, image-to-video, first/last frame |
 | [`minimax-h3-ref2va.json`](minimax-h3-ref2va.json) | MiniMax-H3 Ref2VA: DiT + Qwen3-VL-32B + video VAE + audio VAE (~33.4 GB) | The same four networks, reference checkpoint: up to nine stills, clips and soundtracks |
 | [`wan-video-ti2v-5b-turbo.json`](wan-video-ti2v-5b-turbo.json) | Wan 2.2 TI2V-5B Turbo: DiT + video VAE + UMT5 (~9.5 GB) | Video only, 4-step distilled, text- **and** image-to-video |
@@ -156,8 +156,8 @@ your own file to host a different variant.
 
 ## Ready-made configs, one per runnable model
 
-One config per runnable model, with its companions (vision projector, image-edit
-VAE / text encoder, MTP draft head, LoRA) already wired in. Each points at the
+One config per runnable model, with its companions (vision projector, MTP draft
+head) already wired in. Each points at the
 existing local file, so no download happens — just run it. Every file works with
 **both** hosts (only host-recognized keys are used):
 
@@ -180,8 +180,6 @@ TensorSharp.Server --config config/gemma-4-26b-a4b.json
 | [`jev-diffusiongemma-q4.json`](jev-diffusiongemma-q4.json) | DiffusionGemma 26B-A4B (Q4_K_M) + vision | [Jev typed decisions](../docs/models/jev.md) over text or image state, native `/v1/systemone` server |
 | [`diffusiongemma-26b-a4b-q4.json`](diffusiongemma-26b-a4b-q4.json) | DiffusionGemma 26B-A4B (Q4_K_M) | Text diffusion + image input (CLI/server); auto-downloads the vision shard |
 | [`diffusiongemma-26b-a4b-q3.json`](diffusiongemma-26b-a4b-q3.json) | DiffusionGemma 26B-A4B (Q3_K_M) | Text diffusion + image input, smaller; shares the Q4 vision shard |
-| [`qwen-image-edit-2511.json`](qwen-image-edit-2511.json) | Qwen-Image-Edit 2511 + VAE/TE/mmproj + Lightning LoRA | Image edit |
-| [`qwen-image-rapid-nsfw.json`](qwen-image-rapid-nsfw.json) | Qwen-Rapid v9.0 DiT + VAE/TE/mmproj | Image edit (few-step) |
 
 For the agent-enabled counterparts of four of these models — skills, code execution,
 network and package installs switched on — see [Agent configs](#agent-configs) below.
@@ -200,8 +198,11 @@ Notes:
   needed beside it. Qwen3.6, GLM 5.2 and GLM-5.3 embed theirs in the trunk, so
   `"spec": true` is all they need. `"spec-type": "ngram"` needs no drafter at
   all, so it works with any config in this folder.
-- **Image-edit** configs run the DiT pipeline: `--image in.png --prompt "…" --output
-  out.png`. Per-edit `--diffusion-steps` / `--cfg` / `--diffusion-seed` are CLI flags.
+- **Qwen-Image-2.1** ([`qwen-image-2.1.json`](qwen-image-2.1.json)): `--prompt "…"
+  --output out.png` generates an image, and adding `--image in.png` edits it instead.
+  `--diffusion-steps` (default 40), `--cfg` (default 1), `--diffusion-seed` and
+  `--width` / `--height` (multiples of 32) are CLI flags. See
+  [the Qwen-Image-2.1 guide](../docs/models/qwenimage21.md).
 - **DiffusionGemma** uses the CLI's iterative denoising path; tune it with
   `--diffusion-steps` / `--diffusion-seed` on the command line.
 - To make any of these auto-download on another machine, turn a `"model": "…path…"`

@@ -6,17 +6,16 @@
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 //
 // ============================================================================
-// Qwen2.5-VL-7B text encoder for Qwen-Image-Edit. We only need a single forward
-// pass over the (already-tokenized) prompt to produce the 3584-dim conditioning
+// Qwen3-VL-8B text encoder for Qwen-Image-2.1. We only need a single forward
+// pass over the (already-tokenized) prompt to produce the 4096-dim conditioning
 // hidden states the DiT consumes — no generation, no KV cache, no logits.
 //
-// This is a standard Qwen2.5 decoder trunk: RMSNorm -> GQA attention (separate
-// q/k/v projections WITH bias, no q/k-norm, NeoX RoPE theta=1e6, 28 q-heads / 4
-// kv-heads / head_dim 128) -> RMSNorm -> SwiGLU MLP -> final RMSNorm. For
-// text-only input (Stage 2) Qwen2.5-VL's M-RoPE degenerates to 1D RoPE, so the
-// vision position deltas are irrelevant here (added with the vision tower in
-// Stage 4). It is its own ModelBase instance over the text-encoder GGUF so it
-// reuses the fast quantized matmul / ggml primitives.
+// This is a Qwen3-VL decoder trunk: RMSNorm -> GQA attention (separate q/k/v
+// projections, per-head Q/K RMS norms, interleaved M-RoPE) -> RMSNorm -> SwiGLU
+// MLP, with the vision tower's DeepStack embeddings added after the first three
+// blocks. The conditioning is the last block's output, before the final RMSNorm.
+// It is its own ModelBase instance over the text-encoder GGUF so it reuses the
+// fast quantized matmul / ggml primitives.
 // ============================================================================
 using System;
 using System.Threading.Tasks;
@@ -40,22 +39,17 @@ namespace TensorSharp.Models.QwenImage
     {
         private readonly int _numHeads, _numKVHeads, _headDim, _numLayers;
         private readonly float _ropeBase, _eps;
-        private readonly bool _qwenImage21;
         private static readonly string TraceDirectory = Environment.GetEnvironmentVariable("TS_QWEN_TE_TRACE_DIR");
         private static readonly int TraceLayer = int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_TE_TRACE_LAYER"), out int layer) ? layer : 0;
         internal IAllocator ConditionerAllocator => _allocator;
 
         public int HiddenSize => Config.HiddenSize;
 
-        public QwenImageTextEncoder(string ggufPath, BackendType backend, bool qwenImage21 = false) : base(ggufPath, backend)
+        public QwenImageTextEncoder(string ggufPath, BackendType backend) : base(ggufPath, backend)
         {
-            _qwenImage21 = qwenImage21;
-            if (qwenImage21)
-            {
-                try { QwenImage21CompanionValidation.ValidateText(_gguf); }
-                catch { base.Dispose(); throw; }
-            }
-            Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") ?? "qwen2vl" };
+            try { QwenImage21CompanionValidation.ValidateText(_gguf); }
+            catch { base.Dispose(); throw; }
+            Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") ?? "qwen3vl" };
             ParseBaseConfig();
             _numHeads = Config.NumHeads;
             _numKVHeads = Config.NumKVHeads;
@@ -68,28 +62,20 @@ namespace TensorSharp.Models.QwenImage
             LoadWeights();
         }
 
-        /// <summary>
-        /// Run the trunk over <paramref name="tokens"/> and return row-major
-        /// <c>[seqLen, hidden]</c> conditioning. The original Qwen-Image uses final-normalized
-        /// hidden states; Qwen-Image-2.1 uses the last block before final RMSNorm.
-        /// Caller drops the appropriate model-specific template prefix.
-        /// </summary>
         // M-RoPE 3D positions [3*seq] = (t[seq], h[seq], w[seq]); for text-only all three equal.
         private int[] _mropePos;
-        private static readonly int[] MRopeSection = { 16, 24, 24 };   // sums to head_dim/2 = 64
 
         /// <summary>Text-only conditioning (M-RoPE degenerates to 1D RoPE).</summary>
         public float[] EncodeHidden(int[] tokens) => EncodeHidden(tokens, (ImageCond[])null);
 
-        /// <summary>Single-image convenience overload.</summary>
-        public float[] EncodeHidden(int[] tokens, ImageCond img) =>
-            EncodeHidden(tokens, img != null ? new[] { img } : null);
-
         /// <summary>
-        /// Image-grounded conditioning: each <paramref name="imgs"/> entry (ordered by
-        /// <see cref="ImageCond.Start"/>, non-overlapping) replaces its <c>&lt;|image_pad|&gt;</c>
-        /// span's token embeddings with the vision encoder's merged embeds and applies 3D
-        /// M-RoPE positions for that span (Qwen2.5-VL <c>get_rope_index</c> semantics).
+        /// Run the trunk over <paramref name="tokens"/> and return row-major
+        /// <c>[seqLen, hidden]</c> conditioning: the last block's output, before the final
+        /// RMSNorm. Each <paramref name="imgs"/> entry (ordered by <see cref="ImageCond.Start"/>,
+        /// non-overlapping) replaces its <c>&lt;|image_pad|&gt;</c> span's token embeddings with
+        /// the vision encoder's merged embeds, applies 3D M-RoPE positions for that span
+        /// (<c>get_rope_index</c> semantics) and adds its DeepStack embeddings after the first
+        /// blocks. The caller drops the template prefix.
         /// </summary>
         public unsafe float[] EncodeHidden(int[] tokens, ImageCond[] imgs)
         {
@@ -135,7 +121,7 @@ namespace TensorSharp.Models.QwenImage
                     if (!ReferenceEquals(res, hidden)) { hidden.Dispose(); hidden = res; }
                 }
                 TraceTensor(layer, "output", hidden);
-                if (_qwenImage21 && imgs != null)
+                if (imgs != null)
                 {
                     float* hp = GetFloatPtr(hidden);
                     foreach (var img in imgs)
@@ -149,17 +135,9 @@ namespace TensorSharp.Models.QwenImage
                     InvalidateTensorDeviceCache(hidden);
                 }
             }
-            if (_qwenImage21)
-            {
-                var output = TensorToHostFloat(hidden, (long)seq * Config.HiddenSize);
-                hidden.Dispose();
-                return output; // Qwen-Image-2.1 uses the last block before output_norm.
-            }
-            using (Tensor finalNorm = RMSNormOp(hidden, "output_norm.weight"))
-            {
-                hidden.Dispose();
-                return TensorToHostFloat(finalNorm, (long)seq * Config.HiddenSize);
-            }
+            var output = TensorToHostFloat(hidden, (long)seq * Config.HiddenSize);
+            hidden.Dispose();
+            return output; // Qwen-Image-2.1 uses the last block before output_norm.
         }
 
         // get_rope_index: text tokens get sequential positions (all 3 equal); image tokens get
@@ -200,11 +178,8 @@ namespace TensorSharp.Models.QwenImage
             Tensor v = LinearWithBias(input, $"{prefix}.attn_v.weight", $"{prefix}.attn_v.bias");
             TraceTensor(layer, "q", q); TraceTensor(layer, "k", k); TraceTensor(layer, "v", v);
 
-            if (_qwenImage21)
-            {
-                NormalizeHeads(q, $"{prefix}.attn_q_norm.weight", _numHeads, seq);
-                NormalizeHeads(k, $"{prefix}.attn_k_norm.weight", _numKVHeads, seq);
-            }
+            NormalizeHeads(q, $"{prefix}.attn_q_norm.weight", _numHeads, seq);
+            NormalizeHeads(k, $"{prefix}.attn_k_norm.weight", _numKVHeads, seq);
             TraceTensor(layer, "qnorm", q); TraceTensor(layer, "knorm", k);
             ApplyMRoPE(q, _numHeads, seq);
             ApplyMRoPE(k, _numKVHeads, seq);
@@ -265,25 +240,22 @@ namespace TensorSharp.Models.QwenImage
         }
 
         // Multimodal RoPE (rotate_half / NeoX) over [seq, numHeads*headDim]. Each of the
-        // headDim/2 frequency indices belongs to a t/h/w section (mrope_section 16/24/24);
-        // the rotation angle uses that section's 3D position component. Text tokens have all
-        // three components equal, so this is identical to standard 1D RoPE.
+        // headDim/2 frequency indices is assigned a t/h/w axis by the interleaved layout
+        // (InterleavedRopeAxis); the rotation angle uses that axis's 3D position component.
+        // Text tokens have all three components equal, so this is identical to standard 1D RoPE.
         private unsafe void ApplyMRoPE(Tensor data, int numHeads, int seq)
         {
             int half = _headDim / 2;     // 64
             int[] pos = _mropePos;       // [3*seq]
-            // section id per freq index i: 0=t (i<16), 1=h (i<40), 2=w (else)
             float* p = GetFloatPtr(data);
             Parallel.For(0, seq, s =>
             {
                 for (int hh = 0; hh < numHeads; hh++)
                 {
                     float* head = p + (long)s * (numHeads * _headDim) + (long)hh * _headDim;
-                    int acc = 0, sec = 0;
                     for (int i = 0; i < half; i++)
                     {
-                        if (i >= acc + MRopeSection[sec]) { acc += MRopeSection[sec]; sec++; }
-                        int comp = _qwenImage21 ? InterleavedRopeAxis(i) : sec; // 0/1/2 -> t/h/w
+                        int comp = InterleavedRopeAxis(i); // 0/1/2 -> t/h/w
                         int position = pos[comp * seq + s];
                         float freq = (float)Math.Pow(_ropeBase, -2.0 * i / _headDim);
                         float ang = position * freq;
@@ -372,15 +344,14 @@ namespace TensorSharp.Models.QwenImage
         protected override void ResetKVCacheCore() { }
 
         // ---- fused whole-trunk path (TSGgml_QwenTeTrunk) --------------------------------
-        // The per-op loop above pays ~10 device<->host round-trips per layer (M-RoPE, bias
-        // adds, SiLU as host loops) x 28 layers. The fused path assembles the embeddings and
+        // The per-op loop above pays ~10 device<->host round-trips per layer (M-RoPE, head
+        // norms, SiLU as host loops) x 36 layers. The fused path assembles the embeddings and
         // rotate-half M-RoPE tables on the host, then runs the whole causal GQA trunk as one
         // device graph (weights resident by GGUF mmap ptr). TS_QWEN_TE_FUSED=0 disables.
         private static readonly bool FusedTrunkOn =
             Environment.GetEnvironmentVariable("TS_QWEN_TE_FUSED") != "0";
         private QwenTeLayerW[] _fusedLayers;
         private readonly System.Collections.Generic.List<IntPtr> _fusedAllocs = new();
-        private IntPtr _fusedFinalNorm;
         private bool _fusedFailed;
 
         private unsafe bool TryFusedEncode(int[] tokens, ImageCond[] imgs, out float[] result)
@@ -401,26 +372,24 @@ namespace TensorSharp.Models.QwenImage
                         Array.Copy(img.Embeds, (long)i * H, x, (long)(img.Start + i) * H, H);
 
             // rotate-half M-RoPE tables [seq, head_dim] (duplicated halves), from the same
-            // 3D positions/sections as ApplyMRoPE.
+            // 3D positions/axes as ApplyMRoPE.
             var cos = new float[(long)seq * hd];
             var sin = new float[(long)seq * hd];
             int[] pos = _mropePos;
             Parallel.For(0, seq, s =>
             {
-                int acc = 0, sec = 0;
                 long b = (long)s * hd;
                 for (int i = 0; i < half; i++)
                 {
-                    if (i >= acc + MRopeSection[sec]) { acc += MRopeSection[sec]; sec++; }
                     float freq = (float)Math.Pow(_ropeBase, -2.0 * i / hd);
-                    float ang = pos[(_qwenImage21 ? InterleavedRopeAxis(i) : sec) * seq + s] * freq;
+                    float ang = pos[InterleavedRopeAxis(i) * seq + s] * freq;
                     float c = MathF.Cos(ang), sn = MathF.Sin(ang);
                     cos[b + i] = c; cos[b + half + i] = c;
                     sin[b + i] = sn; sin[b + half + i] = sn;
                 }
             });
 
-            int deepCount = _qwenImage21 && imgs != null ? 3 : 0;
+            int deepCount = imgs != null ? 3 : 0;
             var deep = new float[(long)deepCount * seq * H];
             if (imgs != null)
                 foreach (var img in imgs)
@@ -434,7 +403,6 @@ namespace TensorSharp.Models.QwenImage
                 var a = new QwenTeTrunkArgs
                 {
                     X = (IntPtr)xp, Out = (IntPtr)op, CosF = (IntPtr)cp, SinF = (IntPtr)sp,
-                    WinMask = IntPtr.Zero, FinalNorm = _fusedFinalNorm,
                     Layers = (IntPtr)lp, NumLayers = _numLayers,
                     StructBytes = System.Runtime.InteropServices.Marshal.SizeOf<QwenTeTrunkArgs>(),
                     Hidden = H, Heads = _numHeads, KvHeads = _numKVHeads, HeadDim = hd, Seq = seq,
@@ -492,12 +460,10 @@ namespace TensorSharp.Models.QwenImage
                         Gate = W($"{p}.ffn_gate.weight", null),
                         Up = W($"{p}.ffn_up.weight", null),
                         Down = W($"{p}.ffn_down.weight", null),
-                        QNorm = _qwenImage21 ? F32Stable($"{p}.attn_q_norm.weight") : IntPtr.Zero,
-                        KNorm = _qwenImage21 ? F32Stable($"{p}.attn_k_norm.weight") : IntPtr.Zero,
-                        MaskKind = 1,   // causal
+                        QNorm = F32Stable($"{p}.attn_q_norm.weight"),
+                        KNorm = F32Stable($"{p}.attn_k_norm.weight"),
                     };
                 }
-                _fusedFinalNorm = _qwenImage21 ? IntPtr.Zero : F32Stable("output_norm.weight");
                 _fusedLayers = layers;
                 return true;
             }

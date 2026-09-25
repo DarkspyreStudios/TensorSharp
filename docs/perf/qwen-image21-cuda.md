@@ -146,7 +146,7 @@ matrix multiplication, matching the per-operation implementation. The older
 trunk divided every quantized projection input by 1024 and restored the scale
 after multiplication. That transformation can underflow CUDA's F16 activation
 quantization scales for small normalized inputs. Layers with Q/K head norms
-identify the Qwen3-VL path; Qwen2.5-VL retains its existing behavior.
+identify the Qwen3-VL path.
 `TS_QWEN21_TE_PRESCALE=1` restores the former scaling for numerical comparisons.
 Use `TS_QWEN_TE_FUSED=0` as the per-operation reference, and compare on the same
 backend before interpreting cross-backend quantization differences.

@@ -12,7 +12,7 @@ def tensorsharp_command(cpu_moe=None, **kwargs):
     spec = engines.config.BackendSpec(
         backend_id="test_moe", display="test", kind="gpu", ts_backend="ggml_cuda")
     model = SimpleNamespace(gguf=Path("/tmp/model.gguf"), mmproj=None,
-                            is_image_edit=False, is_diffusion=False)
+                            is_diffusion=False)
     server = engines.TensorSharpServer(model, "test_moe", Path("/tmp/unused.log"),
                                        cpu_moe=cpu_moe, **kwargs)
     with patch.object(engines, "_port_open", return_value=False), \
@@ -47,7 +47,7 @@ class BackendLaunchTests(unittest.TestCase):
             backend_id="test_tp", display="test", kind="gpu", ts_backend="ggml_cuda",
             ts_tp=True, ts_env={"TS_DSV41_TP": "{tp}", "TS_DSV4_UBATCH": "256"})
         model = SimpleNamespace(gguf=Path("/tmp/model.gguf"), mmproj=None,
-                                is_image_edit=False, is_diffusion=False)
+                                is_diffusion=False)
         server = engines.TensorSharpServer(model, "test_tp", Path("/tmp/unused.log"), tp=4)
         with patch.object(engines, "_port_open", return_value=False), \
              patch.object(engines.config, "BACKENDS", {"test_tp": spec}), \

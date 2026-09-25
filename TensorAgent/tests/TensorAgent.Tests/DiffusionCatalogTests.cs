@@ -15,40 +15,39 @@ using TensorAgent.Core.Settings;
 namespace TensorAgent.Tests;
 
 /// <summary>
-/// A representative Qwen-Image entry used only by the test assembly.
+/// A representative Qwen-Image-2.1 entry used only by the test assembly.
 ///
 /// <para>
-/// TensorAgent intentionally no longer offers a diffusion checkpoint in its built-in
-/// catalog. The companion publisher is still production infrastructure, though, and
-/// needs a complete multi-file model to exercise it without making a removed download
-/// appear to be supported. Live media tests also use this fixture to give explicitly
-/// supplied local files the names and roles the pipeline expects.
+/// TensorAgent intentionally offers no diffusion checkpoint in its built-in catalog.
+/// The companion publisher is still production infrastructure, though, and needs a
+/// complete multi-file model to exercise it without making a download appear to be
+/// supported. Live media tests also use this fixture to give explicitly supplied local
+/// files the names and roles the pipeline expects. The names, sizes and hashes are the
+/// ones <c>config/qwen-image-2.1.json</c> downloads.
 /// </para>
 /// </summary>
 internal static class DiffusionModelFixture
 {
-    internal static CatalogModel ImageEdit { get; } = new()
+    internal static CatalogModel QwenImage21 { get; } = new()
     {
-        Id = "test-qwen-image-edit-2511",
-        DisplayName = "Qwen-Image-Edit 2511 test fixture",
+        Id = "test-qwen-image-2.1",
+        DisplayName = "Qwen-Image-2.1 test fixture",
         Family = CatalogFamily.QwenImage,
         Kind = CatalogArchitectureKind.Diffusion,
-        Parameters = "20B DiT + 7B text encoder",
-        Quantization = "Q2_K (DiT) / IQ2_XXS (text encoder)",
+        Parameters = "Qwen-Image-2.1 DiT + Qwen3-VL-8B text encoder",
+        Quantization = "Q4_K_M (DiT) / Q4_K_M (text encoder)",
         Files = new[]
         {
-            new CatalogFile(CatalogFileRole.Weights, "qwen-image-edit-2511-Q2_K.gguf", string.Empty,
-                7_468_022_368, "a3d09042b64657970654941aa08d895de29b4d98edf3632a89e70d4d6e23c47c"),
-            new CatalogFile(CatalogFileRole.TextEncoder, "Qwen2.5-VL-7B-Instruct-UD-IQ2_XXS.gguf", string.Empty,
-                2_398_444_416, "9fdde01492c884464ec3713aa02993c7b56711ee392904f2a53dd92cbe9f1967"),
-            new CatalogFile(CatalogFileRole.Vae, "Qwen_Image-VAE.safetensors", string.Empty,
-                253_806_246, "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"),
-            new CatalogFile(CatalogFileRole.Lora,
-                "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors", string.Empty,
-                849_608_296, "22226e8d05d354bb356627d428809f5afd7819399b077238a2b70a82883a904f"),
+            new CatalogFile(CatalogFileRole.Weights, "qwen_image_2.1_Q4_K_M.gguf", string.Empty,
+                4_189_343_904, "dc956c958fbfa1d5c64ec316d7e865283d17d97a9eb332a4a74a4d63afaae9a5"),
+            new CatalogFile(CatalogFileRole.TextEncoder, "Qwen3VL-8B-Instruct-Q4_K_M.gguf", string.Empty,
+                5_027_784_800, "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2"),
+            new CatalogFile(CatalogFileRole.Vae, "qwen_image_2.1_vae_bf16.safetensors", string.Empty,
+                675_509_688, "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"),
+            // Optional for loading and text-to-image; editing refuses to run without it.
             new CatalogFile(CatalogFileRole.VisionProjector,
-                "Qwen2.5-VL-7B-Instruct-mmproj-BF16.gguf", string.Empty,
-                1_354_163_040, "f0edf43c09b69d6e5dd24262f33b356a1e9dd978e7c3299b3e69141fcbb87553",
+                "mmproj-Qwen3VL-8B-Instruct-F16.gguf", string.Empty,
+                1_159_029_824, "ca524100ebf825c9a870db1c580d03879e0da0ab2541697e2458e64891cf9d38",
                 Optional: true),
         },
         Modalities = CatalogModalities.Image | CatalogModalities.ImageOutput,
@@ -80,7 +79,7 @@ public sealed class ProcessEnvironmentCollection
 }
 
 /// <summary>
-/// Whether a representative image-generation model's five files are the five files
+/// Whether a representative image-generation model's four files are the four files
 /// the pipeline goes looking for, under names it will recognise.
 ///
 /// <para>
@@ -97,47 +96,60 @@ public sealed class ProcessEnvironmentCollection
 [Collection(ProcessEnvironmentCollection.Name)]
 public sealed class DiffusionCatalogTests
 {
-    private static CatalogModel ImageEdit =>
-        DiffusionModelFixture.ImageEdit;
+    private static CatalogModel QwenImage21 =>
+        DiffusionModelFixture.QwenImage21;
+
+    /// <summary>What <c>DiffusionCompanions</c> publishes, and all it publishes.</summary>
+    private static readonly string[] CompanionVariables =
+    [
+        "TS_QWEN_IMAGE_VAE", "TS_QWEN_IMAGE_TE", "TS_QWEN_IMAGE_MMPROJ",
+    ];
+
+    /// <summary>
+    /// Variables only the retired Qwen-Image-Edit-2511 pipeline read. Nothing may publish
+    /// them: nothing reads the area cap any more, and a set <c>TS_QWEN_IMAGE_LORA</c> makes
+    /// Qwen-Image-2.1 refuse to run at all.
+    /// </summary>
+    private static readonly string[] RetiredVariables =
+    [
+        "TS_QWEN_IMAGE_LORA", "TS_QWEN_IMAGE_MAX_AREA",
+    ];
 
     private static string NameOf(CatalogModel model, CatalogFileRole role) =>
         model.Files.Single(f => f.Role == role).FileName;
 
-    /// <summary>The VAE scan: <c>QwenImageModel.ResolveVaeCompanion</c> — one of three
-    /// preferred names, or any file whose name contains "vae".</summary>
+    /// <summary>The VAE scan in <c>QwenImageModel</c>'s constructor: a safetensors file
+    /// naming the 2.1 VAE.</summary>
     private static bool VaeScanFinds(string fileName)
     {
         string n = fileName.ToLowerInvariant();
-        return n is "qwen_image_vae.gguf" or "qwen_image_vae.safetensors" or "qwen_image-vae.safetensors"
-            || (n.Contains("vae") && (n.EndsWith(".gguf") || n.EndsWith(".safetensors")));
+        return n.Contains("qwen_image_2.1_vae") && n.EndsWith(".safetensors");
     }
 
-    /// <summary>The text-encoder scan: <c>QwenImageModel.ResolveTeCompanion</c> — the
-    /// largest GGUF naming a Qwen2.5-VL and not a projector.</summary>
+    /// <summary>The text-encoder scan: the largest GGUF naming Qwen3-VL-8B that is not
+    /// a projector.</summary>
     private static bool TextEncoderScanFinds(string fileName)
     {
         string n = fileName.ToLowerInvariant();
-        return n.EndsWith(".gguf")
-            && (n.Contains("qwen2.5-vl") || n.Contains("qwen2_5_vl") || n.Contains("qwen-image-te"))
-            && !n.Contains("mmproj");
+        return (n.Contains("qwen3vl-8b") || n.Contains("qwen3-vl-8b")) && !n.Contains("mmproj") && n.EndsWith(".gguf");
     }
 
-    /// <summary>The vision-projector scan: <c>QwenImageModel</c>'s constructor —
-    /// a GGUF naming both a projector and the family it belongs to.</summary>
+    /// <summary>The vision-projector scan: a GGUF naming both a projector and
+    /// Qwen3-VL-8B.</summary>
     private static bool VisionProjectorScanFinds(string fileName)
     {
         string n = fileName.ToLowerInvariant();
-        return n.EndsWith(".gguf") && n.Contains("mmproj") && (n.Contains("qwen2") || n.Contains("qwen-image"));
+        return n.Contains("mmproj") && (n.Contains("qwen3vl-8b") || n.Contains("qwen3-vl-8b")) && n.EndsWith(".gguf");
     }
 
     [Fact]
-    public void TheImageEditFixtureCarriesEveryNetworkTheDiTDoesNotContain()
+    public void TheQwenImage21FixtureCarriesEveryNetworkTheDiTDoesNotContain()
     {
-        CatalogModel model = ImageEdit;
+        CatalogModel model = QwenImage21;
         foreach (CatalogFileRole role in new[]
                  {
                      CatalogFileRole.Weights, CatalogFileRole.TextEncoder,
-                     CatalogFileRole.Vae, CatalogFileRole.Lora, CatalogFileRole.VisionProjector,
+                     CatalogFileRole.Vae, CatalogFileRole.VisionProjector,
                  })
         {
             Assert.True(model.Files.Any(f => f.Role == role), $"{model.Id} has no {role}");
@@ -153,18 +165,18 @@ public sealed class DiffusionCatalogTests
     [Fact]
     public void EveryFixtureCompanionIsNamedSomethingThePipelinesOwnScanWillMatch()
     {
-        CatalogModel model = ImageEdit;
+        CatalogModel model = QwenImage21;
 
         Assert.True(VaeScanFinds(NameOf(model, CatalogFileRole.Vae)),
-            $"the VAE '{NameOf(model, CatalogFileRole.Vae)}' is not a name ResolveVaeCompanion looks for");
+            $"the VAE '{NameOf(model, CatalogFileRole.Vae)}' is not a name the 2.1 VAE scan looks for");
 
         Assert.True(TextEncoderScanFinds(NameOf(model, CatalogFileRole.TextEncoder)),
-            $"the text encoder '{NameOf(model, CatalogFileRole.TextEncoder)}' is not a name ResolveTeCompanion looks for");
+            $"the text encoder '{NameOf(model, CatalogFileRole.TextEncoder)}' is not a name the Qwen3-VL-8B scan looks for");
 
         Assert.True(VisionProjectorScanFinds(NameOf(model, CatalogFileRole.VisionProjector)),
             $"the vision projector '{NameOf(model, CatalogFileRole.VisionProjector)}' is not a name the mmproj scan "
-            + "looks for — it needs 'mmproj' AND 'qwen2' (or 'qwen-image') in it, or the image grounding is "
-            + "silently dropped and the edit runs on the prompt alone");
+            + "looks for — it needs 'mmproj' AND 'qwen3vl-8b' (or 'qwen3-vl-8b') in it, or editing refuses to run "
+            + "for want of a projector that is sitting right there");
     }
 
     [Fact]
@@ -174,7 +186,7 @@ public sealed class DiffusionCatalogTests
         // hands one network to the wrong loader. The text-encoder scan in particular
         // takes the LARGEST matching GGUF, which is what the projector would be if its
         // name did not say "mmproj".
-        CatalogModel model = ImageEdit;
+        CatalogModel model = QwenImage21;
         string weights = NameOf(model, CatalogFileRole.Weights);
         string textEncoder = NameOf(model, CatalogFileRole.TextEncoder);
         string projector = NameOf(model, CatalogFileRole.VisionProjector);
@@ -182,6 +194,7 @@ public sealed class DiffusionCatalogTests
         Assert.False(TextEncoderScanFinds(projector), $"the projector '{projector}' would be loaded as the text encoder");
         Assert.False(TextEncoderScanFinds(weights), $"the DiT '{weights}' would be loaded as the text encoder");
         Assert.False(VisionProjectorScanFinds(textEncoder), $"the text encoder '{textEncoder}' would be loaded as the projector");
+        Assert.False(VisionProjectorScanFinds(weights), $"the DiT '{weights}' would be loaded as the projector");
         Assert.False(VaeScanFinds(weights));
         Assert.False(VaeScanFinds(textEncoder));
         Assert.False(VaeScanFinds(projector));
@@ -199,66 +212,86 @@ public sealed class DiffusionCatalogTests
         foreach (string literal in new[]
                  {
                      "\"TS_QWEN_IMAGE_VAE\"", "\"TS_QWEN_IMAGE_TE\"", "\"TS_QWEN_IMAGE_MMPROJ\"",
-                     "\"qwen_image_vae.safetensors\"", "\"Qwen_Image-VAE.safetensors\"",
-                     "n.Contains(\"qwen2.5-vl\")", "n.Contains(\"mmproj\")",
+                     "n.Contains(\"qwen_image_2.1_vae\") && n.EndsWith(\".safetensors\")",
+                     "(n.Contains(\"qwen3vl-8b\") || n.Contains(\"qwen3-vl-8b\")) && !n.Contains(\"mmproj\") && n.EndsWith(\".gguf\")",
+                     "n.Contains(\"mmproj\") && (n.Contains(\"qwen3vl-8b\") || n.Contains(\"qwen3-vl-8b\")) && n.EndsWith(\".gguf\")",
                  })
         {
             Assert.Contains(literal, model, StringComparison.Ordinal);
         }
-
-        string dit = ReadSource("TensorSharp.Models/Models/QwenImage/QwenImageDiT.cs");
-        Assert.Contains("\"TS_QWEN_IMAGE_LORA\"", dit, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TheStepDistillationLoraIsPublishedBecauseNothingScansForIt()
+    public void EveryInstalledCompanionIsPublishedUnderTheVariableTheModelReads()
     {
-        // QwenImageDiT.LoraPath reads TS_QWEN_IMAGE_LORA and nothing else. A supplied
-        // 850 MB Lightning LoRA is therefore inert unless the host says where it is.
-        using var installation = new FakeInstall(ImageEdit, install: model => model.Files);
+        using var installation = new FakeInstall(QwenImage21, install: model => model.Files);
 
-        IReadOnlyDictionary<string, string> published = DiffusionCompanions.Publish(ImageEdit, installation.Store);
+        IReadOnlyDictionary<string, string> published = DiffusionCompanions.Publish(QwenImage21, installation.Store);
 
-        Assert.Equal(
-            installation.PathOf(CatalogFileRole.Lora),
-            Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_LORA"));
         Assert.Equal(installation.PathOf(CatalogFileRole.Vae), published["TS_QWEN_IMAGE_VAE"]);
         Assert.Equal(installation.PathOf(CatalogFileRole.TextEncoder), published["TS_QWEN_IMAGE_TE"]);
         Assert.Equal(installation.PathOf(CatalogFileRole.VisionProjector), published["TS_QWEN_IMAGE_MMPROJ"]);
+        foreach (string variable in CompanionVariables)
+            Assert.Equal(published[variable], Environment.GetEnvironmentVariable(variable));
+        Assert.Equal(CompanionVariables.Order(StringComparer.Ordinal), published.Keys.Order(StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void NothingOnlyTheRetiredPipelineReadIsEverPublished()
+    {
+        // A host that still published the LoRA path would stop every Qwen-Image-2.1 run
+        // with "does not support LoRA adapters" the moment such a file was installed.
+        // The variables are process-wide and a developer shell may still export them, so
+        // start from a known state and hand the caller's values back afterwards.
+        var saved = RetiredVariables.ToDictionary(v => v, Environment.GetEnvironmentVariable);
+        try
+        {
+            foreach (string variable in RetiredVariables)
+                Environment.SetEnvironmentVariable(variable, null);
+            using var installation = new FakeInstall(QwenImage21, install: model => model.Files);
+
+            IReadOnlyDictionary<string, string> published = DiffusionCompanions.Publish(QwenImage21, installation.Store);
+
+            foreach (string variable in RetiredVariables)
+            {
+                Assert.False(published.ContainsKey(variable), $"{variable} was published");
+                Assert.Null(Environment.GetEnvironmentVariable(variable));
+            }
+        }
+        finally
+        {
+            foreach ((string variable, string? value) in saved)
+                Environment.SetEnvironmentVariable(variable, value);
+        }
     }
 
     [Fact]
     public void ACompanionThatWasNeverDownloadedIsClearedRatherThanPointedAt()
     {
         // Companion files may be absent from a partial or deliberately minimal local
-        // installation, and the environment is process-wide. Leaving a variable from
-        // a previous selection would point the next load at unrelated state.
-        Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_LORA", "/somewhere/from/before.safetensors");
-        using var installation = new FakeInstall(ImageEdit,
-            install: model => model.Files.Where(f => f.Role != CatalogFileRole.Lora));
+        // installation (the projector is optional), and the environment is
+        // process-wide. Leaving a variable from a previous selection would point the
+        // next load at unrelated state.
+        Environment.SetEnvironmentVariable("TS_QWEN_IMAGE_MMPROJ", "/somewhere/from/before.gguf");
+        using var installation = new FakeInstall(QwenImage21,
+            install: model => model.Files.Where(f => f.Role != CatalogFileRole.VisionProjector));
 
-        IReadOnlyDictionary<string, string> published = DiffusionCompanions.Publish(ImageEdit, installation.Store);
+        IReadOnlyDictionary<string, string> published = DiffusionCompanions.Publish(QwenImage21, installation.Store);
 
-        Assert.Null(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_LORA"));
-        Assert.False(published.ContainsKey("TS_QWEN_IMAGE_LORA"));
+        Assert.Null(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_MMPROJ"));
+        Assert.False(published.ContainsKey("TS_QWEN_IMAGE_MMPROJ"));
         Assert.Equal(installation.PathOf(CatalogFileRole.Vae), published["TS_QWEN_IMAGE_VAE"]);
     }
 
     [Fact]
     public void SelectingSomethingThatIsNotADiffusionModelLeavesNothingBehind()
     {
-        using var installation = new FakeInstall(ImageEdit, install: model => model.Files);
-        DiffusionCompanions.Publish(ImageEdit, installation.Store);
+        using var installation = new FakeInstall(QwenImage21, install: model => model.Files);
+        DiffusionCompanions.Publish(QwenImage21, installation.Store);
         DiffusionCompanions.Publish(null, installation.Store);
 
-        foreach (string variable in new[]
-                 {
-                     "TS_QWEN_IMAGE_VAE", "TS_QWEN_IMAGE_TE", "TS_QWEN_IMAGE_MMPROJ",
-                     "TS_QWEN_IMAGE_LORA", "TS_QWEN_IMAGE_MAX_AREA",
-                 })
-        {
+        foreach (string variable in CompanionVariables)
             Assert.Null(Environment.GetEnvironmentVariable(variable));
-        }
     }
 
     /// <summary>The repo's own copy of a file, so a test can read the source it mirrors.</summary>
@@ -316,7 +349,9 @@ public sealed class DiffusionCatalogTests
     [Fact]
     public void BuildingTheHostClearsCompanionsForARemovedDiffusionSelection()
     {
-        CatalogModel model = ImageEdit;
+        CatalogModel model = QwenImage21;
+        // The id the catalog's Qwen-Image-Edit entry used before it was withdrawn: a
+        // device that installed it still has it saved as its selection.
         const string removedId = "qwen-image-edit-2511-q2k";
         Assert.Null(ModelCatalog.Find(removedId));
 
@@ -334,14 +369,10 @@ public sealed class DiffusionCatalogTests
 
         using (var host = new AgentAppHost(paths))
         {
-            foreach (string variable in new[]
-                     {
-                         "TS_QWEN_IMAGE_VAE", "TS_QWEN_IMAGE_TE", "TS_QWEN_IMAGE_MMPROJ",
-                         "TS_QWEN_IMAGE_LORA", "TS_QWEN_IMAGE_MAX_AREA",
-                     })
-            {
+            // Only the published companions are the host's to clear; nothing sets the
+            // retired variables any more (NothingOnlyTheRetiredPipelineReadIsEverPublished).
+            foreach (string variable in CompanionVariables)
                 Assert.Null(Environment.GetEnvironmentVariable(variable));
-            }
         }
 
         try { Directory.Delete(root, true); } catch (Exception) { /* scratch */ }

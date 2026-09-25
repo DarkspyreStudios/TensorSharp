@@ -19,14 +19,12 @@ public enum CatalogFileRole
     Weights,
     /// <summary>Vision/audio projector (mmproj) for a multimodal model.</summary>
     Projector,
-    /// <summary>Qwen-Image text encoder GGUF.</summary>
+    /// <summary>Qwen-Image-2.1 text encoder GGUF (Qwen3-VL-8B).</summary>
     TextEncoder,
-    /// <summary>Qwen-Image vision mmproj (image-grounded conditioning).</summary>
+    /// <summary>Qwen-Image-2.1 vision mmproj (image-grounded conditioning; required for editing).</summary>
     VisionProjector,
-    /// <summary>Qwen-Image VAE safetensors.</summary>
+    /// <summary>Qwen-Image-2.1 VAE safetensors.</summary>
     Vae,
-    /// <summary>Step-distillation LoRA safetensors.</summary>
-    Lora,
     /// <summary>Speculative-decoding draft head.</summary>
     Draft,
 }

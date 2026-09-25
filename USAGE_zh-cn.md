@@ -86,7 +86,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll       --config config/cli-basic.j
 ```
 
 开箱即用的示例见 [`config/`](config/)（`cli-basic.json`、`server-basic.json`、`variables.json`、
-`auto-download.json`、`qwen-image-edit.json`）——每个都使用真实、公开、无需授权的 URL，
+`auto-download.json`、`qwen-image-2.1.json`）——每个都使用真实、公开、无需授权的 URL，
 因此在全新机器上也能直接运行。完整说明见 [`config/README.md`](config/README.md)。
 
 ## 控制台应用
@@ -132,12 +132,13 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.
 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
-# Qwen-Image-Edit 图像编辑（提示词 + 输入图像 -> 编辑后的图像）
-# VAE + Qwen2.5-VL 文本编码器伴随文件会在 DiT GGUF 旁解析
-# （或用 --qwen-image-vae / --qwen-image-vl / --qwen-image-mmproj 指定）。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <qwen-image-edit-DiT.gguf> --image input.png \
-    --prompt "Make the sky a dramatic sunset." --output edited.png \
-    --backend ggml_cuda --diffusion-steps 30 --cfg 2.5 --diffusion-seed 0
+# Qwen-Image-2.1：不带 --image 时生成图像，带 --image 时编辑图像（重复 --image
+# 可传入多张参考图）。该配置会自动下载 DiT、专用 2.1 VAE 以及 Qwen3-VL-8B 文本编码器
+# 与 mmproj。默认：2048x2048、40 步 Euler、CFG 1；出草图可用 --width 1024 --height 1024。
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
+    --prompt "A small orange cat beside a blue ceramic vase, soft daylight" --output generated.png
+dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json --image generated.png \
+    --prompt "Change the blue vase to a red vase. Preserve the cat, lighting and composition." --output edited.png
 
 # MiniMax-H3 带声音的视频生成（提示词 -> H.264 MP4，外加一个 32 kHz 立体声 .wav
 # 旁挂文件）。一个扩散 Transformer 在同一条 token 序列上对打包好的“视频+音频”
@@ -266,7 +267,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | `--cpu-moe` / `-cmoe` | `--n-cpu-moe all` 的简写。默认：关闭（环境变量 `TS_CPU_MOE`）。 |
 | `--cpu-moe-threads <N>` | 主机侧专家矩阵乘的工作线程数。默认：在核数多于 8 的主机上取本进程实际可用 CPU 并行度（`hardware_concurrency`，再受调度亲和性掩码与 cgroup CPU 配额约束）的**一半**，低于 8 时取「全部减一」。另一半并非浪费——加速器提交线程，以及 `TensorSharp.Server` 里的 Kestrel 与调度器，同样需要可被调度，而 .NET 自己的线程池是按机器 CPU 数而不是 cgroup 配额来定的。把它设到接近配额是悬崖而不是缓坡：在 95 CPU 配额下，托管的 26B MoE 在 64 线程时实测 20.7 tok/s，71 线程时只剩 8.2。独占机器上可以调高（环境变量 `TS_CPU_MOE_THREADS`）。 |
 | `--kv-cache-dtype <type>` | KV 缓存精度：`f32`（默认）、`f16`、`q8_0` 或 `q4_0`。量化 / 半精度 KV 缓存以微小数值漂移换取内存节省；`q4_0`（约 0.56 字节/元素，约为 f32 的 1/7）是最激进的档位，面向 KV 缓存占主导内存的超长（128K–256K）上下文。块量化缓存（`q8_0`/`q4_0`）需要原生 GGML flash 路径；DeepSeek V4 / V4.1 会在加载时拒绝它们（其执行器的 cache 固定为 F16，由自己的内核读取），显式的 `f32` 会按 `f16` 报告。 |
-| `--tp <N>` | 多卡度 —— 单个进程内把模型摊到几张 GPU 上（默认：`1`）。到底走哪一种多卡模式由架构决定，而不是由你决定：实现了张量并行的走**张量并行**（在层*内部*切权重），Qwen 3.8 Flash Next（`qwen4exp`）与 DeepSeek V4 走**按层切分**（整层落在单卡 —— 买的是容量，不是速度）。GLM 5.x 不传此参数时按层切分；在 GGML GPU 后端上，传入它则为 GLM-5.2、GLM-5.3 与 GLM-5.3-Flash 一律选择原生本地单进程 TP（在 GLM-5.3 上这只是一个被接受的模式，而不是已验证的配置——各 rank 会复制 cache——而且只要 `--tp N>1`，`--spec` 就会被拒绝，投机只在默认的按层切分下生效）。两种模式都不支持的架构会在 stderr 上明确说明并只用一张卡。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。详见[张量并行与分布式推理](#张量并行与分布式推理)。 |
+| `--tp <N>` | 多卡度 —— 单个进程内把模型摊到几张 GPU 上（默认：`1`）。到底走哪一种多卡模式由架构决定，而不是由你决定：实现了张量并行的走**张量并行**（在层*内部*切权重），Qwen 3.8 Flash Next（`qwen4exp`）与 DeepSeek V4 走**按层切分**（整层落在单卡 —— 买的是容量，不是速度）。GLM 5.x 不传此参数时按层切分；在 GGML GPU 后端上，传入它则为 GLM-5.2、GLM-5.3 与 GLM-5.3-Flash 一律选择原生本地单进程 TP（在 GLM-5.3 上这只是一个被接受的模式，而不是已验证的配置——各 rank 会复制 cache——而且只要 `--tp N>1`，`--spec` 就会被拒绝，投机只在默认的按层切分下生效）。在 Qwen-Image-2.1 上，它切分扩散 Transformer（每张卡 32/N 个注意力头与 12288/N 个 MLP 列，N 取 2、4 或 8）；文本编码器、视觉编码器与 VAE 留在第一张卡上。两种模式都不支持的架构会在 stderr 上明确说明并只用一张卡。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。详见[张量并行与分布式推理](#张量并行与分布式推理)。 |
 | `--tp-node-id <N>` | 多节点分布式张量并行中本节点的 0 起始编号。必须与 `--tp-peers` 一起使用。 |
 | `--tp-peers <list>` | 集群中所有节点的 `host:port` 列表（逗号分隔，例如 `192.168.1.10:9500,192.168.1.11:9500`）。所有节点必须使用完全相同的列表。必须与 `--tp-node-id` 一起使用。 |
 | `--interactive` / `-i` / `--chat` | 进入交互式 REPL 聊天会话（逐轮输入/输出），支持 KV 缓存复用、斜杠命令、运行时热切换 模型/后端/投影器、文件附件（图像、音频、视频、文本）以及实时调整采样参数。完整命令列表见下文「**交互式 REPL 命令**」一节 |
@@ -363,19 +364,18 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--test-chunked-prefill` | 运行分块 prefill 正确性检查（对比分块与非分块 logits） |
 | `--correct-prefill <N>` | `--test-chunked-prefill` 使用的 prompt 长度 |
 | `--correct-decode <N>` | `--test-chunked-prefill` 使用的 decode 长度 |
-| `--diffusion-steps <N>` | DiffusionGemma 每个 block 的去噪步数（默认：48）。对 Qwen-Image-Edit 则是 FlowMatch-Euler 步数——省略时自动选择（30，或已加载 Lightning LoRA 的步数）。 |
-| `--diffusion-seed <N>` | 扩散路径的噪声种子：DiffusionGemma 的确定性采样器（默认：0）、Qwen-Image-Edit，以及视频生成（Wan、MiniMax-H3）——视频不传时每次运行都会取一个新的随机种子。决定一段视频长什么样的是这个种子，`--seed` 是文本采样种子，对它没有影响。 |
+| `--diffusion-steps <N>` | DiffusionGemma 每个 block 的去噪步数（默认：48）。对 Qwen-Image-2.1 则是 FlowMatch-Euler 步数——省略时自动选择（40）。 |
+| `--diffusion-seed <N>` | 扩散路径的噪声种子：DiffusionGemma 的确定性采样器与 Qwen-Image-2.1（默认：0），以及视频生成（Wan、MiniMax-H3）——视频不传时每次运行都会取一个新的随机种子。决定一段视频长什么样的是这个种子，`--seed` 是文本采样种子，对它没有影响。 |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas 数量。`0` 表示根据 `--max-tokens` 与模型 canvas 长度推导。 |
-| `--image <path>` | Qwen-Image-Edit 的输入图像（也是多模态聊天的图像输入）。在 `qwen_image` DiT GGUF 上触发图像编辑模式所必需。 |
-| `--prompt <text>` | Qwen-Image-Edit 编辑指令（省略时回退到 `--input` 文件内容）。 |
-| `--output <path>` | Qwen-Image-Edit 输出 PNG 路径（默认：`edited.png`）。 |
-| `--cfg <F>` | Qwen-Image-Edit true-CFG 引导尺度（`<= 1` 关闭负向分支）。省略时自动选择：2.5（Qwen-Image-Edit-2511 的推荐值；4.0 会过度引导并扭曲人脸），加载 Lightning LoRA 时为 1.0。步数与种子复用 `--diffusion-steps` / `--diffusion-seed`。在 MiniMax-H3 上唯一可接受的取值是 `1.0`（也是它的默认值）：该检查点是 CFG 蒸馏的，更高的值会被直接拒绝，而不是照跑然后出劣化结果。`TensorSharp.Server` 根本没有 `--cfg` 参数——但请求体里仍然可以带 `cfg`。 |
-| `--qwen-image-vae <path>` | 覆盖解析到的 Qwen-Image VAE 伴随文件（`.gguf` 或 `.safetensors`）。 |
-| `--qwen-image-vl <path>` | 覆盖解析到的 Qwen2.5-VL-7B 文本编码器 GGUF。 |
-| `--qwen-image-mmproj <path>` | 覆盖解析到的 Qwen2.5-VL mmproj（视觉接地）GGUF。 |
-| `--qwen-image-lora <path>` | Qwen-Image-Edit 的 Lightning 蒸馏 LoRA（`.safetensors`）。它以运行期 F32 旁路的形式接在每个目标投影旁（`y = W_quant·x + b + (alpha/rank)·up·(down·x)`），量化基权重原样保留——**不会**被合并进权重。步数从文件名自动推导（例如 4 或 8），并把 CFG 切换为 1.0、时间步 shift 固定为 3，于是默认的 30 步 × 2 次 CFG 前向（60 次 DiT 前向）变成 4–8 次。它需要整模型或融合逐块的 CUDA 前向路径；在没有该旁路的路径上会直接报错而不是输出噪声。环境变量：`TS_QWEN_IMAGE_LORA`。 |
-| `--offload-cpu` | 从内存流式读取 DiT 权重，而不是常驻显存：每步更慢，但小显存卡也能做原生约 1 MP 的编辑。默认：自动——只有当目标分辨率与常驻权重放不下时才会自动启用 |
-| `--width <px>` / `--height <px>` | Qwen-Image-Edit 与视频生成的输出尺寸。默认 `0` —— 自动（Qwen-Image-Edit：源图尺寸，按 VRAM 钳制；MiniMax-H3：640×384，有条件图时按该面积取图片宽高比，并向上取整到 32 的倍数；Wan：按输入图的宽高比取模型原生面积，TI2V-5B 为 1280×704，其余为 832×480）。 |
+| `--image <path>` | Qwen-Image-2.1 编辑用的输入图像（也是多模态聊天的图像输入）；重复该参数可传入多张参考图。不带 `--image` 时，Qwen-Image-2.1 DiT 改为根据提示词生成图像。 |
+| `--prompt <text>` | Qwen-Image-2.1 的生成提示词或编辑指令（省略时回退到 `--input` 文件内容）。 |
+| `--output <path>` | Qwen-Image-2.1 输出 PNG 路径（默认：生成为 `generated.png`，编辑为 `edited.png`）。 |
+| `--cfg <F>` | Qwen-Image-2.1 true-CFG 引导尺度（`<= 1` 关闭负向分支）。省略时自动选择：Qwen-Image-2.1 为 1.0（每步只做一次 Transformer 预测）；大于 1 的值会增加负向分支。步数与种子复用 `--diffusion-steps` / `--diffusion-seed`。在 MiniMax-H3 上唯一可接受的取值是 `1.0`（也是它的默认值）：该检查点是 CFG 蒸馏的，更高的值会被直接拒绝，而不是照跑然后出劣化结果。`TensorSharp.Server` 根本没有 `--cfg` 参数——但请求体里仍然可以带 `cfg`。 |
+| `--qwen-image-vae <path>` | 覆盖解析到的 Qwen-Image-2.1 VAE 伴随文件（默认：DiT GGUF 旁的 `qwen_image_2.1_vae*.safetensors` 文件）。环境变量：`TS_QWEN_IMAGE_VAE`。 |
+| `--qwen-image-vl <path>` | 覆盖解析到的 Qwen3-VL-8B 文本编码器 GGUF（默认：DiT 旁的 `Qwen3VL-8B` / `Qwen3-VL-8B` GGUF）。环境变量：`TS_QWEN_IMAGE_TE`。 |
+| `--qwen-image-mmproj <path>` | 覆盖解析到的 Qwen3-VL-8B mmproj（编辑时的视觉接地）GGUF（默认：DiT 旁匹配的 `mmproj` GGUF）。环境变量：`TS_QWEN_IMAGE_MMPROJ`。 |
+| `--qwen-image-lora` / `--offload-cpu` | **已移除，启动时（包括作为配置文件键时）直接拒绝；没有替代项。** 两者只服务于早期的 Qwen-Image-Edit 流水线：Qwen-Image-2.1 不加载 LoRA 适配器，DiT 权重始终常驻。 |
+| `--width <px>` / `--height <px>` | Qwen-Image-2.1 与视频生成的输出尺寸。默认 `0` —— 自动（Qwen-Image-2.1：生成为 2048×2048，编辑则取与第一张参考图宽高比一致、面积大致相同的尺寸，显式尺寸须为 32 的倍数；MiniMax-H3：640×384，有条件图时按该面积取图片宽高比，并向上取整到 32 的倍数；Wan：按输入图的宽高比取模型原生面积，TI2V-5B 为 1280×704，其余为 832×480）。 |
 | `--video-frames <N>` | 视频帧数，会对齐到模型自己的时间网格（Wan 为 `4k+1`；MiniMax-H3 为 `17k+5` —— 5、22、39、56、73、90…）。默认：33；Wan2.2-TI2V 为 49，MiniMax-H3 为 22。`1` 生成一张静态图（配合 `--output out.png`）。 |
 | `--fps <N>` | 保存的 MP4 的播放帧率（默认：16；Wan2.2-TI2V 为 24）。以固定帧率训练的模型（MiniMax-H3，24 fps）会覆盖任何其他取值。 |
 | `--flow-shift <F>` | FlowMatch 时间步 shift（默认：模型官方配方 —— Wan 2.2 为 5.0，A14B T2V 为 12.0，Wan 2.1 为 8.0/3.0/5.0，MiniMax-H3 为 12.0）。在带联合音频流的模型上，该 shift 只作用于视频流。 |
@@ -554,7 +554,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
 | `--model <path>` | 需要托管的 GGUF 文件（推理时必填；如传入了其他参数但未指定该项，服务仍可启动，但 `/api/models/load` 会报告未加载模型） |
 | `--mmproj <path>` | 多模态投影器 GGUF（仅给文件名时按模型目录解析；传 `none` 可显式禁用）。需要先指定 `--model`。 |
 | `--backend <type>` | 默认计算后端：`cpu`、`cuda`、`mlx`、`ggml_cpu`、`ggml_metal`、`ggml_cuda` 或 `ggml_vulkan` |
-| `--tp <N>` | 多卡度 —— 把托管的模型摊到本机几张 GPU 上（默认：`1`）。架构实现了张量并行就走张量并行；Qwen 3.8 Flash Next（`qwen4exp`）与 DeepSeek V4 走按层切分（整层落在单卡 —— 买的是容量，不是速度）。GLM 5.x 不传此参数时按层切分；在 GGML GPU 后端上，传入它则为 GLM-5.2、GLM-5.3 与 GLM-5.3-Flash 一律选择原生本地单进程 TP（在 GLM-5.3 上这只是一个被接受的模式，而不是已验证的配置——各 rank 会复制 cache，因此 `--tp` 会成倍放大 KV 占用）。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。环境变量：`TENSORSHARP_TP_DEGREE`。详见[张量并行与分布式推理](#张量并行与分布式推理)。 |
+| `--tp <N>` | 多卡度 —— 把托管的模型摊到本机几张 GPU 上（默认：`1`）。架构实现了张量并行就走张量并行；Qwen 3.8 Flash Next（`qwen4exp`）与 DeepSeek V4 走按层切分（整层落在单卡 —— 买的是容量，不是速度）。GLM 5.x 不传此参数时按层切分；在 GGML GPU 后端上，传入它则为 GLM-5.2、GLM-5.3 与 GLM-5.3-Flash 一律选择原生本地单进程 TP（在 GLM-5.3 上这只是一个被接受的模式，而不是已验证的配置——各 rank 会复制 cache，因此 `--tp` 会成倍放大 KV 占用）。在 Qwen-Image-2.1 上，它切分扩散 Transformer（每张卡 32/N 个注意力头与 12288/N 个 MLP 列，N 取 2、4 或 8）；编码器与 VAE 留在第一张卡上。需要 `--backend cuda`、`ggml_cuda` 或 `ggml_vulkan`。环境变量：`TENSORSHARP_TP_DEGREE`。详见[张量并行与分布式推理](#张量并行与分布式推理)。 |
 | `--tp-node-id <N>` | 多节点（分布式）张量并行中本节点的 0 起始编号。服务端只能是节点 `0`（对外提供 HTTP 的 driver）；其余节点请用 `TensorSharp.Cli` 启动。必须与 `--tp-peers` 一起使用。环境变量：`TENSORSHARP_TP_NODE_ID`。 |
 | `--tp-peers <list>` | 分布式 TP 集群中所有节点的 `host:port` 列表（逗号分隔，按节点 ID 排序，例如 `192.168.1.10:9500,192.168.1.11:9500`）。必须与 `--tp-node-id` 一起使用。环境变量：`TENSORSHARP_TP_PEERS`。 |
 | `--gpu-device <N>` | `ggml_vulkan` 后端使用的 Vulkan 设备索引，用于多 GPU 主机（例如同时装有 Intel 集成显卡和 NVIDIA 独立显卡的机器）。默认使用设备 0；可用 `--list-gpus` 查看索引。也可通过环境变量 `TS_GGML_VULKAN_DEVICE` 设置。 |
@@ -627,6 +627,7 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 | `--video-text-encoder <path>` | 覆盖解析到的文本编码器 GGUF（Wan 用 UMT5-XXL，MiniMax-H3 用 Qwen3-VL-32B）。亦可写作 `--video-te`。环境变量：`TS_VIDEO_TEXT_ENCODER`；`--wan-te` 仍然兼容。 |
 | `--video-dit2 <path>` | 双专家模型的第二个扩散专家（Wan 2.2 A14B 中与 `--model` 配对的 high/low-noise 搭档）。两者同目录时按文件名自动解析。环境变量：`TS_VIDEO_DIT2`；`--wan-dit2` 仍然兼容。 |
 | `--audio-vae <path>` | 与视频联合生成音轨的模型所用的音频 VAE（`minimax_h3_audio_vae_fp32.safetensors`）。不提供时该类模型仍能出图，只是没有音频。环境变量：`TS_VIDEO_AUDIO_VAE`。 |
+| `--qwen-image-lora` / `--offload-cpu` | **已移除，启动时（包括作为配置文件键时）直接拒绝；没有替代项。** 两者只服务于早期的 Qwen-Image-Edit 流水线：Qwen-Image-2.1 不加载 LoRA 适配器，DiT 权重始终常驻。 |
 | `--temperature <f>` | 采样温度（`0` = 贪心） |
 | `--top-k <N>` | Top-K 过滤（`0` = 关闭） |
 | `--top-p <f>` | Nucleus 采样阈值（`1.0` = 关闭） |
@@ -1458,7 +1459,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | DeepSeek V4.1 Flash | 按层切分（+ 实验性 routed-MoE TP） | 按层放置是默认路径，也是有实测数据的路径。`TS_DSV41_TP=N`（2–8，且必须等于 `--tp` / `TS_DSV4_NGPU` 选中的 GPU 数）会把路由专家的 gate/up 沿 FFN 中间维、down 沿输入维切分，partial 结果经主机中转的 F32 缓冲归约；注意力、共享专家与各类 cache 仍按层放置。切分按块对齐且不等宽（2304 的中间维是 9 个 256 元素的 K-quant 块：两 rank 为 1280+1024，四 rank 为 768+512+512+512）。首次完整 Q2_K 实测比按层切分更慢，因此仍属实验性。注意力 TP 与分布式组尚未实现 |
 | Hunyuan Dense | — | 单设备：既没有 TP 也没有按层切分。启动时会在 stderr 上明说，而不是让多余的 GPU 闲置 |
 | DiffusionGemma | — | 不适用（扩散模型） |
-| Qwen-Image-Edit | — | 不适用（图像生成） |
+| Qwen-Image-2.1 | — | 不适用（图像生成） |
 
 ### 后端支持
 
@@ -1844,8 +1845,8 @@ shell 能够到达 PATH 上的每一个解释器——于是手上还拿着旧�
 
 **什么算"加载被拒绝"**（退出码 `2`）：加载器有意做出的、给出可操作原因的决定——显存不足以容纳
 请求的上下文或 `--n-cpu-moe` 设置（消息会给出放得下的数值）、设备装不下的 `--tp` 布局、架构不支持的
-KV 缓存类型（例如 DeepSeek V4.1 上的 `KV_CACHE_DTYPE=q8_0`）、模型或本机不支持的后端、缺失/截断/
-不是 GGUF 的模型文件、缺失或无效的 DeepSeek V4.1 Engram 元数据，或者显式指定却无法
+KV 缓存类型（例如 DeepSeek V4.1 上的 `KV_CACHE_DTYPE=q8_0`）、模型或本机不支持的后端、不是 Qwen-Image-2.1
+扩散 Transformer 的 `qwen_image` GGUF、缺失/截断/不是 GGUF 的模型文件、缺失或无效的 DeepSeek V4.1 Engram 元数据，或者显式指定却无法
 启用的 `--draft-model`。原生加载器自己的诊断行（`[dsv4] ...`、`[glm] ...`）仍可能出现在错误行之前；
 错误行会重复原因，单独读也能看懂。加载过程中其他任何失败——`NullReferenceException`、CUDA 错误、
 内存不足导致的中止——都不算拒绝，会保留堆栈信息。唯一的例外：DeepSeek V4/V4.1 与 GLM 的原生整模型加载器

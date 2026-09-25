@@ -457,8 +457,8 @@ TSG_EXPORT int TSGgml_MiniMaxH3VideoVaeDecode(const TSGgmlMiniMaxH3VideoVaeDecod
 // chat template and no lm_head; this is a pure prefill that returns hidden
 // states.
 //
-// Differences from the Qwen-Image (Qwen2.5-VL) trunk that made a separate op
-// worthwhile: this encoder adds per-head QK-RMSNorm, and the MLP keeps gate/up/down as
+// Differences from the original Qwen-Image (Qwen2.5-VL) trunk, since removed, that
+// made a separate op worthwhile: this encoder adds per-head QK-RMSNorm, and the MLP keeps gate/up/down as
 // three separate matrices. RoPE is supplied as host-built cos/sin tables, which
 // also means interleaved M-RoPE needs no special casing here: for text tokens all
 // three position axes are equal, so M-RoPE collapses to ordinary RoPE and the
@@ -563,7 +563,7 @@ TSG_EXPORT int TSGgml_MiniMaxH3TextEncode(const TSGgmlMiniMaxH3TextEncodeDesc* d
             bind(t, data, static_cast<std::size_t>(n) * sizeof(float));
             return t;
         };
-        // The proven Qwen trunk prescales EVERY quantized matmul, not just the two
+        // The original Qwen-Image trunk prescaled EVERY quantized matmul, not just the two
         // with unbounded inputs; follow it rather than second-guessing which
         // activations stay inside q8_1's FP16 block-sum range.
         auto lin = [&](ggml_tensor* w, ggml_tensor* x, ggml_tensor* b, bool guard = true) {

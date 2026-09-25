@@ -530,9 +530,8 @@ public class ServerOptionsBuilderTests : IDisposable
             "--paged-kv-ssd-dir", "--paged-kv-ssd-mb", "--paged-kv-quant-bits",
             "--continuous-batching", "--prefill-chunk-size",
             "--spec", "--spec-type", "--spec-draft", "--spec-pmin", "--draft-model",
-            "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj", "--qwen-image-lora",
+            "--qwen-image-vae", "--qwen-image-vl", "--qwen-image-mmproj",
             "--wan-vae", "--wan-te", "--wan-dit2",
-            "--offload-cpu",
             "--n-cpu-moe", "--cpu-moe", "--cpu-moe-threads",
             "--skill", "--list-skills",
             "--code-exec", "--code-exec-allow-install", "--code-exec-install-domains",
@@ -846,15 +845,97 @@ public class ServerOptionsBuilderTests : IDisposable
         Assert.NotNull(options);
     }
 
-    [Fact]
-    public void ApplyQwenImageCompanionCliFlags_OffloadCpu_SetsEnvAndDoesNotTripUnknownArgTrap()
+    // ----- Options removed with the Qwen-Image-Edit-2511 pipeline -----
+
+    /// <summary>Every spelling a removed flag can arrive in: spaced, joined and case-folded.</summary>
+    public static IEnumerable<object[]> RemovedFlagSpellings()
     {
+        foreach ((string flag, _) in RemovedCliFlags.RemovedFlags)
+        {
+            yield return new object[] { flag, new[] { flag, "lora.safetensors" } };
+            yield return new object[] { flag, new[] { flag + "=lora.safetensors" } };
+            yield return new object[] { flag, new[] { flag.ToUpperInvariant() } };
+            yield return new object[] { flag, new[] { "--backend", "ggml_cpu", flag } };
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(RemovedFlagSpellings))]
+    public void Build_RemovedQwenImageFlags_FailWithWhyAndWhatToDoInstead(string flag, string[] args)
+    {
+        // Not a bare "Unknown option": the operator needs to know the option went with
+        // the retired pipeline, and that nothing replaces it.
+        var ex = Assert.Throws<ArgumentException>(() => ServerOptionsBuilder.Build(args, _baseDir));
+
+        Assert.Equal(RemovedCliFlags.Describe(flag), ex.Message);
+        Assert.StartsWith(flag + " was removed:", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("Qwen-Image-2.1", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown option", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RemovedQwenImageFlags_AreNoLongerAppliedOrPublished()
+    {
+        // Their env vars had no reader left, and a published TS_QWEN_IMAGE_LORA now makes
+        // Qwen-Image-2.1 refuse to run, so the companion pass must not know them at all.
+        _env.Set("TS_QWEN_IMAGE_LORA", null);
         _env.Set("TS_QWEN_IMAGE_OFFLOAD_CPU", null);
-        bool applied = ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(new[] { "--offload-cpu" });
-        Assert.True(applied);
-        Assert.Equal("1", Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU"));
-        // The boolean flag has no value; the main parser must skip it, not abort.
-        Assert.NotNull(ServerOptionsBuilder.Build(new[] { "--offload-cpu" }, _baseDir));
+
+        bool applied = ServerOptionsBuilder.ApplyQwenImageCompanionCliFlags(
+            new[] { "--qwen-image-lora", "lora.safetensors", "--offload-cpu" });
+
+        Assert.False(applied);
+        Assert.Null(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_LORA"));
+        Assert.Null(Environment.GetEnvironmentVariable("TS_QWEN_IMAGE_OFFLOAD_CPU"));
+    }
+
+    [Theory]
+    [InlineData("--offload-cpuu")]
+    [InlineData("--offload-cp")]
+    [InlineData("--qwen-image-lor")]
+    [InlineData("--qwen-image-loraa")]
+    public void Build_NearMissOfARemovedFlag_IsNeverSuggestedIt(string typo)
+    {
+        // The typo hint must not steer anyone back to an option that only errors.
+        var ex = Assert.Throws<ArgumentException>(() => ServerOptionsBuilder.Build(new[] { typo }, _baseDir));
+
+        Assert.StartsWith("Unknown option", ex.Message, StringComparison.Ordinal);
+        foreach ((string flag, _) in RemovedCliFlags.RemovedFlags)
+            Assert.DoesNotContain($"'{flag}'", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServerUsage_ListsRemovedQwenImageFlagsOnlyAsRemoved()
+    {
+        // Documented as live options they would be advertised and then refused; the
+        // page names them once, in the removed-options note, with the same advice.
+        var documented = new HashSet<string>(ServerUsage.DocumentedFlags(), StringComparer.OrdinalIgnoreCase);
+        var sw = new StringWriter();
+        ServerUsage.PrintUsage(sw);
+        string flattened = System.Text.RegularExpressions.Regex.Replace(sw.ToString(), @"\s+", " ");
+
+        Assert.Contains("Removed options", flattened, StringComparison.Ordinal);
+        Assert.NotEmpty(RemovedCliFlags.RemovedFlags);
+        foreach ((string flag, string advice) in RemovedCliFlags.RemovedFlags)
+        {
+            Assert.DoesNotContain(flag, documented);
+            Assert.Contains(flag + " Removed: " + advice, flattened, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("{ \"qwen-image-lora\": \"Qwen-Image-Edit-Lightning-8steps.safetensors\" }", "--qwen-image-lora")]
+    [InlineData("{ \"offload-cpu\": true }", "--offload-cpu")]
+    public void ConfigFile_RemovedQwenImageKeys_FailWithTheSameMessage(string json, string flag)
+    {
+        // The shipped qwen-image-edit*.json configs carried both keys, so a copy of one
+        // kept from before must stop with the same advice the command line gets.
+        string cfg = Path.Combine(_baseDir, "stale-qwen-image.json");
+        File.WriteAllText(cfg, json);
+
+        var ex = Assert.Throws<ArgumentException>(() => ConfigFileArgs.Expand(new[] { "--config", cfg }));
+
+        Assert.EndsWith(RemovedCliFlags.Describe(flag)!, ex.Message, StringComparison.Ordinal);
     }
 
     // ----- Tensor-parallelism CLI flags -----

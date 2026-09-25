@@ -340,6 +340,20 @@ void invalid_cases() {
     std::vector<TSGVaeOp> ops{shortcut(7,3,1,2)};
     auto desc = descriptor(odd,output,ops);
     require(TSGgml_QwenVaeRun(&desc) == 0, "nondivisible spatial downsample accepted");
+    // Every convolution must keep F32 intermediates (aux=1); the F16-im2col
+    // lowering is gone, so a conv without that request is refused, not lowered.
+    {
+        std::vector<float> kernel(3 * 3, 0.f);
+        std::vector<TSGVaeWeightRef> weights{{kernel.data(), static_cast<std::int64_t>(kernel.size() * sizeof(float))}};
+        TSGVaeOp conv{};
+        conv.kind = 0; conv.w = 0; conv.b = -1; conv.oc = conv.ic = 3;
+        conv.kh = conv.kw = 1; conv.sh = conv.sw = 1; conv.aux = 0;
+        std::vector<TSGVaeOp> conv_ops{conv};
+        auto conv_desc = descriptor(input, output, conv_ops);
+        conv_desc.weights = weights.data(); conv_desc.num_weights = static_cast<int>(weights.size());
+        require(TSGgml_QwenVaeRun(&conv_desc) == 0, "convolution without F32 intermediates accepted");
+        require(TSGgml_GetLastError() && *TSGgml_GetLastError(), "convolution without F32 intermediates supplied no error");
+    }
     // Failure may not poison the next graph or leave reused storage invalid.
     literal_cases();
 }

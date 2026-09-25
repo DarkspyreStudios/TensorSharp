@@ -9,7 +9,7 @@ using TensorSharp.Runtime;
 
 namespace TensorSharp.Models.QwenImage
 {
-    /// <summary>Qwen-Image / Qwen-Image-Edit architecture plug-in.</summary>
+    /// <summary>Qwen-Image-2.1 architecture plug-in (any other Qwen-Image transformer is refused by <see cref="QwenImageModel"/>).</summary>
     internal static class QwenImageArchitecture
     {
         public static ModelArchitectureDescriptor Descriptor { get; } = new()
@@ -17,7 +17,9 @@ namespace TensorSharp.Models.QwenImage
             Id = "qwen_image",
             DisplayName = "Qwen-Image",
             Aliases = new[] { "qwen_image", "qwen-image" },
-            Factory = c => new QwenImageModel(c.GgufPath, c.Backend),
+            // --tp shards the diffusion transformer (heads and MLP columns per GPU);
+            // the text encoder and VAE stay on the first GPU.
+            Factory = c => new QwenImageModel(c.GgufPath, c.Backend, c.TpDegree, c.TpGroup),
             DetectFromTensors = LooksLikeVersion21,
         };
 

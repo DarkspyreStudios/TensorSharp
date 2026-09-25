@@ -276,7 +276,7 @@ public sealed class BackgroundGenerationTests : IDisposable
     [InlineData("")]
     [InlineData("No model is loaded.")]
     [InlineData("network access is disabled by the user")]
-    [InlineData("The loaded model is not a Qwen-Image-Edit model.")]
+    [InlineData("The loaded model is not a Qwen-Image-2.1 model.")]
     [InlineData("Bad request: expected an object")]
     [InlineData("The context is full; start a new conversation.")]
     [InlineData("Out of memory allocating the KV cache.")]
