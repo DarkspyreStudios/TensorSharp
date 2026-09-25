@@ -45,6 +45,23 @@ evidence needed for the assignment. Follow-up turns reuse the child's own
 conversation. The parent receives bounded result reports rather than the
 child's full tool transcript.
 
+Children with the same role, governing instructions, and offered tools share a
+stable system/tool prefix. Their unique agent IDs and assignments follow it in
+the first task message; each child keeps its own conversation and cache scope.
+When an identical public prefix is still being computed, the radix scheduler
+defers a cold sibling until the producer can publish its checkpoint. Other
+requests and active decoders can continue running. If capture fails or the
+producer stops, the sibling can prefill normally.
+
+For Qwen 3.5-family recurrent models, reuse requires a checkpoint at the exact
+shared boundary, including both attention KV and recurrent state. The first
+child with a new prefix still has to prefill it; later matching children can
+reuse it while it remains cached. A parent's different tool list or role policy
+does not provide that checkpoint. Each active child receives an independent
+mutable state copy: this saves repeated prefill, but does not share physical KV
+pages between children or guarantee lower peak VRAM. The existing prefix-cache
+controls also apply to children.
+
 Agents belong to a request-scoped tree with parent identity and depth. Limits
 apply across that tree, including children created by other children. The
 runtime manages their background tasks, status, cancellation, and completion;

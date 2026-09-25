@@ -116,12 +116,17 @@ public sealed class MultiAgentClientTests
             var messages = doc.RootElement.GetProperty("messages").EnumerateArray().ToArray();
             string user = messages.First(m => m.GetProperty("role").GetString() == "user").GetProperty("content").GetString()!;
             if (user == "simple") return Reply("simple answer");
-            if (user.StartsWith("CHILD_", StringComparison.Ordinal))
+            const string assignedTaskMarker = "\n\n[Assigned task]\n";
+            int assignedTaskStart = user.IndexOf(assignedTaskMarker, StringComparison.Ordinal);
+            string task = assignedTaskStart >= 0 ? user[(assignedTaskStart + assignedTaskMarker.Length)..] : user;
+            if (task.StartsWith("CHILD_", StringComparison.Ordinal))
             {
                 Assert.DoesNotContain("PARENT_PRIVATE_TASK", payload);
+                Assert.StartsWith("[TensorSharp subagent identity]\n", user);
+                Assert.Contains("Your parent is /root.", user);
                 if (Interlocked.Increment(ref _children) == 2) _both.TrySetResult();
                 await _both.Task.WaitAsync(TimeSpan.FromSeconds(5), ct);
-                return Reply(user == "CHILD_alpha" ? "alpha" : "beta");
+                return Reply(task == "CHILD_alpha" ? "alpha" : "beta");
             }
             int results = messages.Count(m => m.GetProperty("role").GetString() == "tool");
             if (results == 0)

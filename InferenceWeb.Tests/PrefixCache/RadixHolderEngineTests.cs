@@ -16,9 +16,9 @@ namespace InferenceWeb.Tests.PrefixCache;
 
 public class RadixHolderEngineTests
 {
-    private static SchedulerConfig Configuration(bool enabled = true) => new()
+    private static SchedulerConfig Configuration(bool enabled = true, int numBlocks = 256) => new()
     {
-        BlockSize = 8, NumBlocks = 256, MaxNumBatchedTokens = 64,
+        BlockSize = 8, NumBlocks = numBlocks, MaxNumBatchedTokens = 64,
         MaxPrefillChunkSize = 16, SoloPrefillChunkSize = 64,
         EnablePrefixCaching = enabled, StopRepetition = false,
     };
@@ -72,6 +72,186 @@ public class RadixHolderEngineTests
         restarted.PrefixCheckpointStore = store;
         var after = Request("restart", Tokens(16).Concat(Tokens(16, 61)).ToList(), "c", shared: 16);
         Assert.Equal(16, (await Run(restarted, after)).PrefixCacheReusedTokens);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConcurrentSiblings_ComputeTheirPublicPrefixOnce_AndMatchColdOutputs(bool warm)
+    {
+        const int shared = 37; // Deliberately neither a page nor a prefill boundary.
+        var prefix = Tokens(shared);
+        var prompts = new[] { prefix.Concat(Tokens(24, 81)).ToList(), prefix.Concat(Tokens(25, 111)).ToList() };
+        var cached = await RunConcurrentSiblings(prompts, shared, enabled: true, warm: warm);
+        var cold = await RunConcurrentSiblings(prompts, shared, enabled: false);
+
+        Assert.Equal(warm ? shared : 0, cached.Completions[0].PrefixCacheReusedTokens);
+        Assert.Equal(shared, cached.Completions[1].PrefixCacheReusedTokens);
+        Assert.All(cold.Completions, completion => Assert.Equal(0, completion.PrefixCacheReusedTokens));
+        for (int i = 0; i < prompts.Length; i++)
+            Assert.Equal(cold.Requests[i].OutputTokens, cached.Requests[i].OutputTokens);
+        Assert.Equal((warm ? 2 : 1) * shared, cold.ForwardedTokens - cached.ForwardedTokens);
+    }
+
+    [Fact]
+    public async Task RefusedPublicCapture_ReleasesTheSiblingToPrefillCorrectly()
+    {
+        const int shared = 37;
+        var prompts = new[] { Tokens(shared).Concat(Tokens(24, 81)).ToList(), Tokens(shared).Concat(Tokens(25, 111)).ToList() };
+        var refused = await RunConcurrentSiblings(prompts, shared, enabled: true, failCapture: true);
+        var cold = await RunConcurrentSiblings(prompts, shared, enabled: false);
+        Assert.All(refused.Completions, completion => Assert.Equal(0, completion.PrefixCacheReusedTokens));
+        Assert.Equal(cold.ForwardedTokens, refused.ForwardedTokens);
+        for (int i = 0; i < prompts.Length; i++)
+            Assert.Equal(cold.Requests[i].OutputTokens, refused.Requests[i].OutputTokens);
+    }
+
+    [Fact]
+    public async Task PublicPrefixSiblings_WithCapacityForOnlyOnePrompt_CompleteCorrectly()
+    {
+        const int shared = 37;
+        var prompts = new[] { Tokens(shared).Concat(Tokens(24, 81)).ToList(), Tokens(shared).Concat(Tokens(25, 111)).ToList() };
+        // Seventy-two token slots fit either request, but not both prompts. The
+        // sibling must not hold resources that prevent its producer finishing.
+        var pressured = await RunConcurrentSiblings(prompts, shared, enabled: true, numBlocks: 9);
+        var cold = await RunConcurrentSiblings(prompts, shared, enabled: false, numBlocks: 9);
+        Assert.Equal(0, pressured.Completions[0].PrefixCacheReusedTokens);
+        Assert.Equal(shared, pressured.Completions[1].PrefixCacheReusedTokens);
+        Assert.Equal(shared, cold.ForwardedTokens - pressured.ForwardedTokens);
+        for (int i = 0; i < prompts.Length; i++)
+            Assert.Equal(cold.Requests[i].OutputTokens, pressured.Requests[i].OutputTokens);
+    }
+
+    [Fact]
+    public void DeferredSibling_DoesNotBlockAnUnrelatedWaitingRequest()
+    {
+        using var model = OracleFakes.R(8);
+        var (scheduler, _) = PendingCheckpointScheduler(model);
+        var first = Request("producer", Tokens(61), "a", shared: 37);
+        var sibling = Request("sibling", Tokens(37).Concat(Tokens(24, 81)).ToList(), "b", shared: 37);
+        var unrelated = Request("unrelated", Tokens(48, 101), "c", shared: 37);
+        scheduler.Submit(first);
+        scheduler.Submit(sibling);
+        scheduler.Submit(unrelated);
+
+        SchedulerOutput step = scheduler.Schedule();
+        Assert.Equal(new[] { "producer", "unrelated" }, step.ScheduledWork.Select(work => work.Sequence.RequestId));
+        Assert.Equal(SequenceStatus.Waiting, sibling.Status);
+        Assert.Equal(1, scheduler.WaitingCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FinishedProducer_DoesNotKeepItsSiblingWaiting(bool error)
+    {
+        using var model = OracleFakes.R(8);
+        var (scheduler, _) = PendingCheckpointScheduler(model);
+        var first = Request("producer", Tokens(61), "a", shared: 37);
+        var sibling = Request("sibling", Tokens(37).Concat(Tokens(24, 81)).ToList(), "b", shared: 37);
+        scheduler.Submit(first);
+        scheduler.Submit(sibling);
+        Assert.Single(scheduler.Schedule().ScheduledWork);
+        Assert.Equal(SequenceStatus.Waiting, sibling.Status);
+        if (error) scheduler.NotifyError(first, new InvalidOperationException("producer failed"));
+        else Assert.True(scheduler.Abort(first.RequestId));
+
+        Assert.Same(sibling, Assert.Single(scheduler.Schedule().ScheduledWork).Sequence);
+        Assert.Equal(0, sibling.PrefixCacheReusedTokens);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void MissingEligiblePublicCheckpoint_DoesNotDeferSiblings(bool enabled, bool explicitNone)
+    {
+        using var model = OracleFakes.R(8);
+        var (scheduler, _) = PendingCheckpointScheduler(model, enabled);
+        var first = Request("producer", Tokens(61), "a", shared: explicitNone ? 37 : 0,
+            breaks: explicitNone ? Array.Empty<int>() : null);
+        var sibling = Request("sibling", Tokens(61), "b", shared: 37);
+        scheduler.Submit(first);
+        scheduler.Submit(sibling);
+        Assert.Equal(2, scheduler.Schedule().ScheduledWork.Count);
+        Assert.Equal(0, scheduler.WaitingCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PendingPublicCheckpoint_RequiresExactMediaIdentityAndAnEligibleConsumer(bool sameMedia)
+    {
+        using var model = new CountingRecurrentOracle();
+        var (_, cache) = PendingCheckpointScheduler(model);
+        string image = new string('0', 63) + "1";
+        string differentImageWithSameAbbreviatedKey = "1" + new string('0', 62) + "1";
+        var producer = new SequenceState("producer", Tokens(61), 3, 8, SamplingConfig.Greedy,
+            mediaSpans: new[] { new PromptMediaSpan(8, 12, image) }, sharedPrefixTokens: 37);
+        producer.Status = SequenceStatus.Running;
+        var consumer = new SequenceState("consumer", Tokens(61), 3, 8, SamplingConfig.Greedy,
+            mediaSpans: new[] { new PromptMediaSpan(8, 12, sameMedia ? image : differentImageWithSameAbbreviatedKey) },
+            sharedPrefixTokens: 37);
+        Assert.Equal(sameMedia, cache!.CanSharePendingPublicCheckpoint(consumer, producer));
+
+        var disabled = Request("disabled", Tokens(61), "b", shared: 37, breaks: Array.Empty<int>());
+        Assert.False(cache.CanSharePendingPublicCheckpoint(disabled, producer));
+        var pool = new BlockPool(8, 8, 64);
+        foreach (var block in pool.AllocateNew(5)!) producer.BlockTable.AppendBlock(block);
+        producer.AdvanceComputedTokens(37);
+        Assert.False(cache.CanSharePendingPublicCheckpoint(consumer, producer));
+    }
+
+    private static (ContinuousBatchScheduler Scheduler, PrefixCacheCoordinator? Cache) PendingCheckpointScheduler(
+        OracleModel model, bool enabled = true)
+    {
+        SchedulerConfig cfg = Configuration(enabled);
+        var pool = new BlockPool(cfg.NumBlocks, cfg.BlockSize, 64);
+        var scheduler = new ContinuousBatchScheduler(cfg, pool, model.KVStateFingerprint);
+        var executor = new BatchExecutor(model, pool, scheduler);
+        executor.InitializeRadixCache(cfg);
+        if (executor.PrefixCheckpointsSupported) scheduler.EnablePrefixCheckpoints();
+        return (scheduler, executor.RadixCache);
+    }
+
+    private sealed record ConcurrentResult(SequenceState[] Requests, InferenceCompletion[] Completions, int ForwardedTokens);
+
+    private static async Task<ConcurrentResult> RunConcurrentSiblings(List<int>[] prompts, int shared,
+        bool enabled, bool warm = false, bool failCapture = false, int numBlocks = 256)
+    {
+        var gate = new ComputeGate();
+        var model = new CountingRecurrentOracle();
+        using var engine = new InferenceEngine(model, Configuration(enabled, numBlocks)) { ComputeGate = gate };
+        if (warm)
+            await Run(engine, new SequenceState("warmup", prompts[0].Take(shared).ToList(), 1, 8,
+                SamplingConfig.Greedy, sharedPrefixTokens: shared));
+        gate.Close();
+        if (failCapture) model.FailNext("capture");
+        int before = model.ForwardedTokens;
+        var requests = prompts.Select((prompt, index) => Request("sibling-" + index, prompt,
+            "separate-scope-" + index, shared: shared)).ToArray();
+        var handles = requests.Select(request => engine.SubmitRequest(request)).ToArray();
+        gate.Open();
+        var completions = await Task.WhenAll(handles.Select(handle => handle.Completion)).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.All(completions, completion => Assert.Equal(SequenceStatus.FinishedLengthCapped, completion.Status));
+        return new ConcurrentResult(requests, completions, model.ForwardedTokens - before);
+    }
+
+    private sealed class CountingRecurrentOracle() : OracleModel(new OracleTraits
+    {
+        Name = "counted-recurrent", Class = FamilyClass.R, EndState = EndStateSupport.CopyAndDonate,
+        CanCaptureCopy = true, AdoptPrimaryOnDisplacement = true, Truncation = TruncationKind.None,
+        DeviceDirtyOnForward = true,
+    }, 8), IModelArchitecture
+    {
+        private int _forwardedTokens;
+        internal int ForwardedTokens => Volatile.Read(ref _forwardedTokens);
+        float[] IModelArchitecture.Forward(int[] tokens)
+        {
+            float[] logits = base.Forward(tokens);
+            Interlocked.Add(ref _forwardedTokens, tokens.Length);
+            return logits;
+        }
     }
 
     [Theory]

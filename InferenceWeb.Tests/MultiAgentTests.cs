@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using TensorSharp.AgentHost.Agents;
 
@@ -112,13 +113,90 @@ public sealed class MultiAgentTests
         await Wait(session, child);
         Assert.Contains(seenMessages!, m => m.Role == "system" && m.Content!.Contains("Preserve source evidence."));
         Assert.Single(seenMessages!, m => m.Role == "system");
-        Assert.Contains("You are subagent /root/scope, role explorer.", seenMessages![0].Content);
+        Assert.Contains("You are a subagent, role explorer.", seenMessages![0].Content);
+        Assert.DoesNotContain("/root/scope", seenMessages[0].Content);
+        Assert.Contains("Your agent ID is /root/scope. Your parent is /root.",
+            Assert.Single(seenMessages, m => m.Role == "user").Content);
         Assert.Contains("You are read-only.", seenMessages[0].Content);
         Assert.Contains(seenMessages!, m => m.Content!.Contains("Respect workspace boundaries."));
         Assert.Contains(seenMessages!, m => m.Content!.Contains("Only inspect this module."));
         Assert.DoesNotContain(seenMessages!, m => (m.Content ?? "").Contains("Parent private"));
         Assert.Contains(seenTools!, t => t.Name == "skills_read");
         Assert.DoesNotContain(seenTools!, t => t.Name is "shell" or "send_email" or "skills_run");
+    }
+
+    [Theory]
+    [InlineData("explorer")]
+    [InlineData("reviewer")]
+    [InlineData("worker")]
+    public async Task SameRoleChildrenShareRenderedPreamble_WhileIdentityAndTasksStayPrivate(string role)
+    {
+        var captured = new ConcurrentDictionary<string, (List<ChatMessage> Messages, List<ToolFunction> Tools)>();
+        await using var session = Session(id => (messages, tools, _) =>
+        {
+            captured[id] = (new(messages), new(tools!));
+            return Answer("checked");
+        }, new() { Enabled = true, AllowWorkerTools = true });
+        string first = Id(await session.ExecuteAsync(Spawn("proposal_a", role, "Sell 120 units at $25. Costs: $13 per unit and $300 fixed. Claimed profit: $1,300.")));
+        string second = Id(await session.ExecuteAsync(Spawn("proposal_b", role, "Serve 200 customers paying $18. Costs: $7 per customer and $400 fixed. Claimed profit: $1,900.")));
+        await Wait(session);
+
+        var a = captured[first];
+        var b = captured[second];
+        static List<ChatMessage> Preamble(List<ChatMessage> messages) =>
+            messages.TakeWhile(m => m.Role is "system" or "developer").ToList();
+        Assert.Equal(JsonSerializer.Serialize(Preamble(a.Messages)), JsonSerializer.Serialize(Preamble(b.Messages)));
+        string renderedA = ChatTemplate.RenderQwen35(a.Messages, tools: a.Tools);
+        string renderedB = ChatTemplate.RenderQwen35(b.Messages, tools: b.Tools);
+        const string userHeader = "<|im_start|>user\n";
+        int boundaryA = renderedA.IndexOf(userHeader, StringComparison.Ordinal);
+        int boundaryB = renderedB.IndexOf(userHeader, StringComparison.Ordinal);
+        Assert.True(boundaryA > 0 && boundaryB > 0);
+        string prefix = renderedA[..boundaryA];
+        Assert.Equal(prefix, renderedB[..boundaryB]);
+        Assert.Contains("<tools>", prefix);
+        Assert.Contains("Preserve source evidence.", prefix);
+        Assert.Contains("Respect workspace boundaries.", prefix);
+        Assert.DoesNotContain(first, prefix);
+        Assert.DoesNotContain(second, prefix);
+        Assert.DoesNotContain("Sell 120", prefix);
+        Assert.DoesNotContain("Serve 200", prefix);
+
+        string firstTask = Assert.Single(a.Messages, m => m.Role == "user").Content!;
+        string secondTask = Assert.Single(b.Messages, m => m.Role == "user").Content!;
+        Assert.Contains($"Your agent ID is {first}. Your parent is /root.", firstTask);
+        Assert.Contains($"Your agent ID is {second}. Your parent is /root.", secondTask);
+        Assert.EndsWith("Sell 120 units at $25. Costs: $13 per unit and $300 fixed. Claimed profit: $1,300.", firstTask);
+        Assert.EndsWith("Serve 200 customers paying $18. Costs: $7 per customer and $400 fixed. Claimed profit: $1,900.", secondTask);
+        Assert.DoesNotContain(second, firstTask);
+        Assert.DoesNotContain(first, secondTask);
+        Assert.DoesNotContain("Parent private", prefix + firstTask + secondTask);
+    }
+
+    [Fact]
+    public async Task DifferentChildRolesKeepDistinctPolicyAndToolPermissions()
+    {
+        var captured = new ConcurrentDictionary<string, (List<ChatMessage> Messages, List<ToolFunction> Tools)>();
+        var runner = new CountingRunner();
+        await using var session = Session(id => (messages, tools, _) =>
+        {
+            captured[id] = (new(messages), new(tools!));
+            return Answer("checked");
+        }, new() { Enabled = true, AllowWorkerTools = true },
+            context: new SkillToolContext([]) { CodeRunner = runner }, tools: [runner.Declare()]);
+        string reviewer = Id(await session.ExecuteAsync(Spawn("review", "reviewer")));
+        string worker = Id(await session.ExecuteAsync(Spawn("edit", "worker")));
+        await Wait(session);
+
+        var readOnly = captured[reviewer];
+        var mutable = captured[worker];
+        Assert.Contains("role reviewer.", readOnly.Messages[0].Content);
+        Assert.Contains("You are read-only.", readOnly.Messages[0].Content);
+        Assert.Contains("role worker.", mutable.Messages[0].Content);
+        Assert.Contains("Edit only files explicitly assigned to you", mutable.Messages[0].Content);
+        Assert.NotEqual(readOnly.Messages[0].Content, mutable.Messages[0].Content);
+        Assert.DoesNotContain(readOnly.Tools, t => t.Name == "shell");
+        Assert.Contains(mutable.Tools, t => t.Name == "shell");
     }
 
     [Theory]
@@ -398,7 +476,12 @@ public sealed class MultiAgentTests
         Assert.True((await session.ExecuteAsync(Call("send_input", ("agent_id", child), ("message", "Check the edge case")))).Ok);
         JsonElement result = (await Wait(session, child)).GetProperty("agents")[0];
         Assert.Equal("Report: Check the edge case", result.GetProperty("result").GetString());
-        Assert.Contains(resumed!, m => m.Role == "assistant" && m.Content == "Report: Initial inspection");
+        Assert.Contains(resumed!, m => m.Role == "assistant"
+            && m.Content!.EndsWith("[Assigned task]\nInitial inspection", StringComparison.Ordinal));
+        ChatMessage initialTask = Assert.Single(resumed!, m => m.Role == "user"
+            && m.Content!.Contains("[TensorSharp subagent identity]", StringComparison.Ordinal));
+        Assert.Contains($"Your agent ID is {child}. Your parent is /root.", initialTask.Content);
+        Assert.Equal("Check the edge case", resumed!.Last(m => m.Role == "user").Content);
         Assert.Equal(1, factories);
     }
 

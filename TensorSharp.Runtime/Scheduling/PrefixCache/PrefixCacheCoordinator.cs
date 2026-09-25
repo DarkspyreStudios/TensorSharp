@@ -167,6 +167,53 @@ internal sealed partial class PrefixCacheCoordinator : IPrefixPayloadSink, IPayl
         return _plan.Length;
     }
 
+    /// <summary>A cold request can wait for an exact public checkpoint that this step's
+    /// producer is still computing. This is only a scheduling hint: admission must
+    /// subsequently match and materialize the published payload through the tree.</summary>
+    internal bool CanSharePendingPublicCheckpoint(SequenceState sequence, SequenceState producer)
+    {
+        int length = sequence.SharedPrefixTokens;
+        if (!PublicCheckpointsEnabled || !CheckpointsSupported
+            || PredictRoute() != ExpectedRoute.PerSequenceFused
+            || length <= 0 || sequence.FirstScheduledAt is not null || sequence.NumComputedTokens != 0
+            || sequence.PrefixCacheReusedTokens != 0 || ReferenceEquals(sequence, producer)
+            || producer.Status != SequenceStatus.Running || producer.SharedPrefixTokens != length
+            || producer.PrefixCheckpointTaken || producer.NumComputedTokens >= length)
+            return false;
+
+        // Explicit breakpoint lists suppress all unmarked captures, including an
+        // empty list. Do not wait for a checkpoint the producer will never publish.
+        if (producer.CacheBreakpoints is not null)
+        {
+            bool marked = false;
+            foreach (int boundary in producer.CacheBreakpoints)
+                if (boundary == length) { marked = true; break; }
+            if (!marked) return false;
+        }
+        var request = BuildRequest(sequence, ExpectedRoute.PerSequenceFused);
+        if (_tree.Rules.ClampLength(length, request) != length) return false;
+        KeyRope source = GetKey(producer);
+        for (int offset = 0; offset < length;)
+        {
+            ReadOnlySpan<long> part = request.Key.Segment(offset, length - offset);
+            if (!part.SequenceEqual(source.Segment(offset, part.Length))) return false;
+            offset += part.Length;
+        }
+
+        // Media key elements are abbreviated hashes. Compare full identities and
+        // span boundaries as well; equal placeholder tokens alone are insufficient.
+        MediaSpanRecord[] producerSpans = GetSpans(producer);
+        int index = 0;
+        foreach (MediaSpanRecord span in request.Spans)
+        {
+            if (span.Start >= length) break;
+            if (span.End > length || index >= producerSpans.Length || producerSpans[index] != span)
+                return false;
+            index++;
+        }
+        return index >= producerSpans.Length || producerSpans[index].Start >= length;
+    }
+
     internal bool TryAdopt(SequenceState sequence, int length, Action<SequenceState, int> pendingTruncation)
     {
         if (length <= 0 || sequence.BlockTable.NumBlocks != 0 || ComputeReusablePrefix(sequence) != length)

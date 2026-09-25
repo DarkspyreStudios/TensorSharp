@@ -487,7 +487,9 @@ namespace TensorSharp.Runtime.Scheduling
 
             // -------------------------------------------------------------- 3. Admit waiting sequences.
             // --------------------------------------------------------------
-            while (_waiting.First is { } node && tokenBudget > 0 && _running.Count < _cfg.MaxNumRunningSequences)
+            int waitingVisitsRemaining = _waiting.Count;
+            while (_waiting.First is { } node && tokenBudget > 0 && _running.Count < _cfg.MaxNumRunningSequences
+                && waitingVisitsRemaining-- > 0)
             {
                 var seq = node.Value;
 
@@ -530,6 +532,18 @@ namespace TensorSharp.Runtime.Scheduling
                         {
                             plannedFusedContinuation = true;
                             plannedLiveContinuation = _radixCache.RequiresSoleAdmission;
+                        }
+                        else if (length == 0 && WaitForScheduledPublicCheckpoint(seq, output))
+                        {
+                            // The producer is already scheduled to advance this step.
+                            // Let its first prefill publish the common prefix before
+                            // admitting a sibling that would compute the same tokens.
+                            // Visit each waiter once so unrelated requests behind it
+                            // can still run and a stalled producer never blocks work.
+                            _waiting.Remove(node);
+                            _waiting.AddLast(node);
+                            prefillCandidatesRemaining = Math.Max(0, prefillCandidatesRemaining - 1);
+                            continue;
                         }
                         _logger.LogInformation(
                             "Radix prompt reuse for {RequestId}: {Reused}/{Prompt} tokens; {Prefill} token(s) to prefill.",
@@ -655,6 +669,16 @@ namespace TensorSharp.Runtime.Scheduling
             }
 
             return output;
+        }
+
+        private bool WaitForScheduledPublicCheckpoint(SequenceState sequence, SchedulerOutput output)
+        {
+            if (_radixCache == null || !_alignToSharedPrefix) return false;
+            foreach (ScheduledSequenceWork work in output.ScheduledWork)
+                if (work.NumScheduledTokens > 0
+                    && _radixCache.CanSharePendingPublicCheckpoint(sequence, work.Sequence))
+                    return true;
+            return false;
         }
 
         /// <summary>
