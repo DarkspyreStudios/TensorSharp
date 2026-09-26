@@ -16,6 +16,13 @@ The fork is based on upstream `main` (`v2026.09.01-41-gcff7ea39`). It adds:
 
 Model files load from file paths through the upstream path APIs.
 
+`Darkspyre.TensorSharp.Backends.GGML` ships the macOS arm64 native bridge as
+`runtimes/osx-arm64/native/libGgmlOps.dylib`, built from the same commit with
+`TensorSharp.GGML.Native/build-macos.sh`. A consuming app therefore loads the GGML CPU and Metal
+backends on Apple silicon without building natives. The release packs it by passing
+`-p:DarkspyreGgmlNativeOsxArm64=<path>`; ordinary builds are unchanged. Other platforms still build
+their bridge with their own `build-*` script.
+
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.
 

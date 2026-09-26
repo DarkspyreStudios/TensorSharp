@@ -133,6 +133,12 @@
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Touch Files="$(IntermediateOutputPath)$(GgmlNativeBuildStampName)" AlwaysCreate="true" />
   </Target>
+  <!-- Darkspyre fork: a pack that passes -p:DarkspyreGgmlNativeOsxArm64=<path to libGgmlOps.dylib>
+       ships the macOS arm64 native bridge, so a consuming app needs no native build. The library
+       must be built from this commit with TensorSharp.GGML.Native/build-macos.sh. -->
+  <ItemGroup Condition="'$(DarkspyreGgmlNativeOsxArm64)' != ''">
+    <None Include="$(DarkspyreGgmlNativeOsxArm64)" Pack="true" PackagePath="runtimes/osx-arm64/native/libGgmlOps.dylib" Visible="false" />
+  </ItemGroup>
   <!-- iOS links GgmlOps statically from GgmlOps.xcframework (built by
        TensorSharp.GGML.Native/build-ios.sh and referenced by the app head via
        NativeReference), so there is no loose binary to build or copy here. -->

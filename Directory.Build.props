@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <TensorSharpVersion>2.8.6.5</TensorSharpVersion>
+    <TensorSharpVersion>2.8.6.6</TensorSharpVersion>
     <TensorSharpPackageTags>darkspyre;tensorsharp;tensor;llm;gguf;inference</TensorSharpPackageTags>
 
     <TensorSharpHostObjFolder Condition="$([MSBuild]::IsOSPlatform('Windows'))">obj/windows/</TensorSharpHostObjFolder>
