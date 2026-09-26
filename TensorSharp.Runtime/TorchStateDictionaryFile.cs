@@ -12,8 +12,6 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace TensorSharp.Runtime
 {
@@ -62,19 +60,12 @@ namespace TensorSharp.Runtime
         private readonly ZipArchive _archive;
         private readonly Dictionary<string, ZipArchiveEntry> _storageEntries = new(StringComparer.Ordinal);
         private readonly Dictionary<string, TorchTensorInfo> _tensors = new(StringComparer.Ordinal);
-        private PersistenceFileLease? _persistenceLease;
         private bool _disposed;
 
         public TorchStateDictionaryFile(string path)
-            : this(path, persistenceLease: null)
-        {
-        }
-
-        private TorchStateDictionaryFile(string path, PersistenceFileLease? persistenceLease)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(path);
             Path = path;
-            _persistenceLease = persistenceLease;
             FileStream? stream = null;
             ZipArchive? archive = null;
 
@@ -90,7 +81,6 @@ namespace TensorSharp.Runtime
             {
                 archive?.Dispose();
                 stream?.Dispose();
-                persistenceLease?.Dispose();
                 throw;
             }
         }
@@ -119,16 +109,6 @@ namespace TensorSharp.Runtime
 
         public IReadOnlyDictionary<string, long> IntegerMetadata { get; private set; }
             = new Dictionary<string, long>(StringComparer.Ordinal);
-
-        public static async Task<TorchStateDictionaryFile> OpenAsync(
-            PersistenceFileReference source,
-            CancellationToken cancellationToken = default)
-        {
-            PersistenceFileLease lease = await PersistenceFileLease.AcquireAsync(
-                source,
-                cancellationToken).ConfigureAwait(false);
-            return new TorchStateDictionaryFile(lease.FilePath, lease);
-        }
 
         public bool HasTensor(string name) => _tensors.ContainsKey(name);
 
@@ -373,8 +353,6 @@ namespace TensorSharp.Runtime
             _disposed = true;
             _archive.Dispose();
             _stream.Dispose();
-            _persistenceLease?.Dispose();
-            _persistenceLease = null;
         }
 
         private sealed record GlobalReference(string Module, string Name);

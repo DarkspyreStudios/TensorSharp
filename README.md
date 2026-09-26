@@ -278,7 +278,6 @@ New here? The sections above are all you need to get running. Everything else is
 | Doc | What's inside |
 |---|---|
 | [TensorSharp and TensorAgent book guide](docs/BOOK.md) | Building LLM Inference Engines and Agentic Runtimes from Scratch, plus From Tensors to Tokens: introductions, Amazon links, and repository reading paths |
-| [Persistence-backed model sources](docs/persistence-model-sources.md) | Load GGUF and safetensors artifacts from `IPersistenceStore`, including file-backed zero-copy use, temporary projection ownership, and current sidecar limits |
 | [Direct model primitives](docs/direct-model-primitives.md) | Public CPU/CUDA tensor building blocks for framework-free model libraries, including linear, embedding, convolution, attention, normalization, and image operations |
 | [Darkspyre package identity](docs/darkspyre-packages.md) | Fork-owned NuGet IDs, immutable versioning, retained assembly names, and the long-lived branch policy |
 | [Model Downloads](MODEL_DOWNLOADS.md) | Per-model `huggingface-cli` download + run quick reference (quant tiers, projectors, companions) |

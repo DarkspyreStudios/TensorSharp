@@ -11,11 +11,9 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace TensorSharp.Runtime
@@ -84,7 +82,6 @@ namespace TensorSharp.Runtime
         private bool _mappedPointerAcquired;
         private unsafe byte* _lockedBase;
         private ulong _lockedLength;
-        private PersistenceFileLease? _persistenceLease;
 
         /// <summary>
         /// Sibling shards of a split GGUF (<c>NAME-00001-of-000NN.gguf</c>), in split
@@ -99,7 +96,7 @@ namespace TensorSharp.Runtime
         /// </summary>
         private readonly Dictionary<string, GgufFile> _tensorOwner = new(StringComparer.Ordinal);
 
-        public GgufFile(string path) : this(path, isShard: false, persistenceLease: null) { }
+        public GgufFile(string path) : this(path, isShard: false) { }
 
         private GgufFile() { _path = string.Empty; _stream = null!; }
 
@@ -114,35 +111,6 @@ namespace TensorSharp.Runtime
                 new System.Collections.ObjectModel.ReadOnlyDictionary<string, GgufTensorInfo>(file.Tensors), file.DataOffset, source.Length);
         }
 
-        /// <summary>
-        /// Opens a GGUF artifact from an application persistence store. A file-backed
-        /// store is memory-mapped in place; another store is projected to a temporary
-        /// file owned by the returned reader.
-        /// </summary>
-        public static async Task<GgufFile> OpenAsync(
-            PersistenceFileReference source,
-            CancellationToken cancellationToken = default)
-            => await OpenAsync(PersistenceFileSet.Single(source), cancellationToken).ConfigureAwait(false);
-
-        /// <summary>Opens the complete named shard set from persistence. No unlisted siblings are read.</summary>
-        public static async Task<GgufFile> OpenAsync(
-            PersistenceFileSet source,
-            CancellationToken cancellationToken = default)
-        {
-            PersistenceFileLease lease = await PersistenceFileLease.AcquireAsync(
-                source,
-                cancellationToken).ConfigureAwait(false);
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                return new GgufFile(lease.FilePath, isShard: false, lease, lease.FilePaths);
-            }
-            catch
-            {
-                lease.Dispose();
-                throw;
-            }
-        }
 
         /// <summary>
         /// Opens one GGUF and reads THIS file only, leaving its sibling shards
@@ -156,22 +124,17 @@ namespace TensorSharp.Runtime
         /// checkpoint measured ~240 ms and ~215 MB of allocation for nothing, and
         /// left every tensor attributed to the last shard opened.</para>
         /// </summary>
-        public static GgufFile OpenWithoutSiblingShards(string path) =>
-            new GgufFile(path, isShard: true, persistenceLease: null);
+        public static GgufFile OpenWithoutSiblingShards(string path) => new GgufFile(path, isShard: true);
 
-        internal static GgufFile OpenProjected(PersistenceFileLease lease) =>
-            new GgufFile(lease.FilePath, isShard: false, persistenceLease: null, lease.FilePaths);
-
-        private GgufFile(string path, bool isShard, PersistenceFileLease? persistenceLease, IReadOnlyList<string>? permittedPaths = null)
+        private GgufFile(string path, bool isShard)
         {
             _path = path;
-            _persistenceLease = persistenceLease;
             _stream = File.OpenRead(path);
             try
             {
                 using (var bounded = new MetadataReadStream(_stream, 64 * 1024 * 1024)) Parse(bounded);
                 if (!isShard)
-                    OpenSiblingShards(permittedPaths);
+                    OpenSiblingShards();
             }
             catch
             {
@@ -213,10 +176,10 @@ namespace TensorSharp.Runtime
         /// constructor, which reads as an unsupported architecture rather than as an
         /// incomplete download.</para>
         /// </summary>
-        private void OpenSiblingShards(IReadOnlyList<string>? permittedPaths)
+        private void OpenSiblingShards()
         {
             int splitCount = checked((int)GetUint32("split.count", 1));
-            if (splitCount < 1 || splitCount > 99999 || (permittedPaths != null && permittedPaths.Count != splitCount))
+            if (splitCount < 1 || splitCount > 99999)
                 throw new InvalidDataException("The supplied artifacts do not match the GGUF shard count.");
             if (splitCount <= 1)
                 return;
@@ -243,15 +206,12 @@ namespace TensorSharp.Runtime
                 if (i == selfNo)
                     continue;
                 string shardPath = Path.Combine(dir, $"{prefix}-{i:D5}-of-{splitCount:D5}.gguf");
-                if (permittedPaths != null && !permittedPaths.Any(path => string.Equals(Path.GetFullPath(path), shardPath,
-                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
-                    throw new InvalidDataException("A required GGUF sibling is not in the supplied persistence set.");
                 if (!File.Exists(shardPath))
                     throw new FileNotFoundException(
                         $"{_path} is shard {selfNo} of {splitCount}, but {Path.GetFileName(shardPath)} is missing. " +
                         "Every shard of a split GGUF must sit in the same directory.", shardPath);
 
-                var shard = new GgufFile(shardPath, isShard: true, persistenceLease: null);
+                var shard = new GgufFile(shardPath, isShard: true);
                 _shards.Add(shard);
                 if (shard.GetUint32("split.count", 1) != splitCount || shard.GetUint32("split.no", (uint)(i - 1)) != i - 1)
                     throw new InvalidDataException("GGUF sibling shard metadata is inconsistent.");
@@ -1065,8 +1025,6 @@ namespace TensorSharp.Runtime
             _mappedFile = null;
             _stream?.Dispose();
             _stream = null!;
-            _persistenceLease?.Dispose();
-            _persistenceLease = null;
         }
 
         private unsafe void EnsureMappedView()

@@ -12,7 +12,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using TensorSharp.Runtime.Scheduling;
@@ -27,8 +26,6 @@ namespace TensorSharp.Server
         private readonly ChatSession _intrinsicSession;
         private readonly InferenceEngineHost _engineHost;
         private readonly ChatGenerationPipeline _generation;
-        private PersistenceFileLease? _modelPersistenceLease;
-        private PersistenceFileLease? _mmProjPersistenceLease;
 
         public ModelService()
             : this(NullLogger<ModelService>.Instance)
@@ -145,66 +142,6 @@ namespace TensorSharp.Server
 
         public void LoadModel(string modelPath, string mmProjPath, string backendStr)
         {
-            LoadModelPaths(modelPath, mmProjPath, backendStr);
-            ReleasePersistenceLeases();
-        }
-
-        /// <summary>
-        /// Loads a model, and optionally its multimodal projector, from application-owned
-        /// persistence. File-backed stores are used in place; other stores are projected
-        /// to TensorSharp-owned temporary files for the lifetime of the loaded model.
-        /// </summary>
-        public Task LoadModelAsync(
-            PersistenceFileReference model,
-            PersistenceFileReference? mmProj,
-            string backendStr,
-            CancellationToken cancellationToken = default)
-            => LoadModelAsync(PersistenceFileSet.Single(model), mmProj, backendStr, cancellationToken);
-
-        /// <summary>Loads a complete persistence-backed GGUF set, retaining all shards until unload.</summary>
-        public async Task LoadModelAsync(
-            PersistenceFileSet model,
-            PersistenceFileReference? mmProj,
-            string backendStr,
-            CancellationToken cancellationToken = default)
-        {
-            ArgumentNullException.ThrowIfNull(model);
-
-            PersistenceFileLease modelLease = await PersistenceFileLease.AcquireAsync(
-                model,
-                cancellationToken).ConfigureAwait(false);
-            PersistenceFileLease? mmProjLease = null;
-            try
-            {
-                using (GgufFile validation = GgufFile.OpenProjected(modelLease))
-                    validation.ThrowIfTruncated();
-                if (mmProj != null)
-                {
-                    mmProjLease = await PersistenceFileLease.AcquireAsync(
-                        mmProj,
-                        cancellationToken).ConfigureAwait(false);
-                }
-
-                cancellationToken.ThrowIfCancellationRequested();
-                LoadModelPaths(modelLease.FilePath, mmProjLease?.FilePath, backendStr);
-            }
-            catch
-            {
-                mmProjLease?.Dispose();
-                modelLease.Dispose();
-                throw;
-            }
-
-            PersistenceFileLease? previousModelLease = _modelPersistenceLease;
-            PersistenceFileLease? previousMmProjLease = _mmProjPersistenceLease;
-            _modelPersistenceLease = modelLease;
-            _mmProjPersistenceLease = mmProjLease;
-            previousMmProjLease?.Dispose();
-            previousModelLease?.Dispose();
-        }
-
-        private void LoadModelPaths(string modelPath, string? mmProjPath, string backendStr)
-        {
             using var jevLease = _jevExecution.BeginChange();
             // Tear down the per-model engine and the diffusion batch scheduler BEFORE the model is
             // unloaded so their worker threads don't race the model disposal.
@@ -234,14 +171,7 @@ namespace TensorSharp.Server
             _generation.ResetDiffusionScheduler();
             lock (_intrinsicSession.HistoryLock)
                 _intrinsicSession.Transcripts.Clear();
-            try
-            {
-                _lifecycle.Unload();
-            }
-            finally
-            {
-                ReleasePersistenceLeases();
-            }
+            _lifecycle.Unload();
         }
 
         /// <summary>
@@ -589,25 +519,8 @@ namespace TensorSharp.Server
             using var jevLease = _jevExecution.BeginChange(shutdown: true);
             _engineHost.Dispose();
             _generation.Dispose();
-            try
-            {
-                _lifecycle.Dispose();
-            }
-            finally
-            {
-                ReleasePersistenceLeases();
-                _intrinsicSession.Dispose();
-            }
-        }
-
-        private void ReleasePersistenceLeases()
-        {
-            PersistenceFileLease? mmProjLease = _mmProjPersistenceLease;
-            PersistenceFileLease? modelLease = _modelPersistenceLease;
-            _mmProjPersistenceLease = null;
-            _modelPersistenceLease = null;
-            mmProjLease?.Dispose();
-            modelLease?.Dispose();
+            _lifecycle.Dispose();
+            _intrinsicSession.Dispose();
         }
 
         private static bool IsMmProjFile(string fileName)

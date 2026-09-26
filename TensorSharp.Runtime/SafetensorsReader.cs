@@ -15,8 +15,6 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace TensorSharp.Runtime
 {
@@ -92,7 +90,6 @@ namespace TensorSharp.Runtime
         private MemoryMappedViewAccessor? _mappedView;
         private unsafe byte* _mappedBase;
         private bool _mappedPointerAcquired;
-        private PersistenceFileLease? _persistenceLease;
 
         public SafetensorsFile(string path)
         {
@@ -111,36 +108,6 @@ namespace TensorSharp.Runtime
             file.ParseHeader(bounded);
             return new(new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(file.Metadata),
                 new System.Collections.ObjectModel.ReadOnlyDictionary<string, SafetensorTensorInfo>(file.Tensors), file.DataOffset, source.Length);
-        }
-
-        private SafetensorsFile(string path, PersistenceFileLease persistenceLease)
-        {
-            Path = path;
-            _persistenceLease = persistenceLease;
-            try
-            {
-                ParseHeader();
-            }
-            catch
-            {
-                Dispose();
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// Opens a safetensors artifact from an application persistence store. A
-        /// file-backed store is memory-mapped in place; another store is projected to
-        /// a temporary file owned by the returned reader.
-        /// </summary>
-        public static async Task<SafetensorsFile> OpenAsync(
-            PersistenceFileReference source,
-            CancellationToken cancellationToken = default)
-        {
-            PersistenceFileLease lease = await PersistenceFileLease.AcquireAsync(
-                source,
-                cancellationToken).ConfigureAwait(false);
-            return new SafetensorsFile(lease.FilePath, lease);
         }
 
         private void ParseHeader()
@@ -352,8 +319,6 @@ namespace TensorSharp.Runtime
             _mappedView = null;
             _mappedFile?.Dispose();
             _mappedFile = null;
-            _persistenceLease?.Dispose();
-            _persistenceLease = null;
         }
     }
 
