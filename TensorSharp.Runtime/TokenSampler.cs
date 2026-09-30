@@ -20,6 +20,7 @@ namespace TensorSharp.Runtime
     {
         private readonly SamplingConfig _config;
         private readonly Random _rng;
+        private readonly string[] _stopSequences;
         private float[]? _scoreBuffer;
         private int[]? _indexBuffer;
         // Reused top-k heap. Sized k (typically 20-40), so this is only about
@@ -41,6 +42,7 @@ namespace TensorSharp.Runtime
         public TokenSampler(SamplingConfig config)
         {
             _config = config ?? SamplingConfig.Default;
+            _stopSequences = StopSequenceMatcher.Snapshot(_config.StopSequences);
             _rng = config?.Seed >= 0 ? new Random(config.Seed) : new Random();
         }
 
@@ -286,16 +288,8 @@ namespace TensorSharp.Runtime
         /// </summary>
         public (string text, bool shouldStop) CheckStopSequences(string decodedSoFar)
         {
-            if (_config.StopSequences == null || _config.StopSequences.Count == 0)
-                return (decodedSoFar, false);
-
-            foreach (string stop in _config.StopSequences)
-            {
-                int idx = decodedSoFar.IndexOf(stop, StringComparison.Ordinal);
-                if (idx >= 0)
-                    return (decodedSoFar.Substring(0, idx), true);
-            }
-            return (decodedSoFar, false);
+            int match = StopSequenceMatcher.FirstMatch(decodedSoFar, _stopSequences);
+            return match < 0 ? (decodedSoFar, false) : (decodedSoFar[..match], true);
         }
 
         private bool HasPenalties()

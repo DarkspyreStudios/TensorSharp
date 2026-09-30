@@ -95,6 +95,7 @@ namespace TensorSharp.Runtime
         /// <summary>
         /// Stop sequences: generation stops when any of these strings is produced.
         /// The stop string itself is not included in the output.
+        /// Each string must be non-empty. Stop matching snapshots this list for a request.
         /// </summary>
         public List<string>? StopSequences { get; set; }
 

@@ -18,7 +18,7 @@ public sealed class QwenImage21PrefixCacheTests
     [InlineData("f32", QwenImage21PrefixCacheType.F32)]
     [InlineData("q8_0", QwenImage21PrefixCacheType.Q8_0)]
     [InlineData("Q8_0_V", QwenImage21PrefixCacheType.Q8_0V)]
-    public void StorageTypeParses(string value, QwenImage21PrefixCacheType expected) =>
+    public void StorageTypeParses(string? value, QwenImage21PrefixCacheType expected) =>
         Assert.Equal(expected, QwenImage21DiT.ParsePrefixCacheType(value));
 
     [Theory]

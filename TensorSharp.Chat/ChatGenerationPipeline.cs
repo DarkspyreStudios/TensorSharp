@@ -294,6 +294,8 @@ namespace TensorSharp.Server
                 ChatTurnContext turnContext = null)
         {
             session ??= new ChatSession("__svc_intrinsic__", sharedAcrossConversations: true);
+            StreamingStopSequenceFilter stopFilter = samplingConfig?.StopSequences is { Count: > 0 } stops
+                ? new StreamingStopSequenceFilter(stops) : null;
             var model = _lifecycle.Model
                 ?? throw new InvalidOperationException("No model is loaded.");
 
@@ -638,13 +640,6 @@ namespace TensorSharp.Server
             var generatedTokens = new List<int>();
             var rawBytes = new List<byte>();
             int prevValidLen = 0;
-            // Stop-sequence matching needs the full decoded text; only the rare
-            // request that configures string stop sequences pays for accumulating
-            // it. The common path decodes just the newly-completed bytes per token
-            // (below) instead of re-decoding the whole buffer every step (O(n^2)).
-            bool hasStopSequences = cfg.StopSequences != null && cfg.StopSequences.Count > 0;
-            StringBuilder decodedForStops = hasStopSequences ? new StringBuilder() : null;
-            TokenSampler stopSampler = hasStopSequences ? new TokenSampler(cfg) : null;
             string finishReason = "max_tokens";
 
             // The thinking budget. A reasoning model can spend an ENTIRE token
@@ -722,19 +717,14 @@ namespace TensorSharp.Server
                 }
 
                 bool stopRequested = false;
-                if (hasStopSequences)
+                string emittedPiece = stopFilter?.Append(piece) ?? piece;
+                if (stopFilter?.Stopped == true)
                 {
-                    if (piece.Length > 0)
-                        decodedForStops.Append(piece);
-                    var (_, shouldStop) = stopSampler.CheckStopSequences(decodedForStops.ToString());
-                    if (shouldStop)
-                    {
-                        stopRequested = true;
-                        finishReason = "stop_sequence";
-                    }
+                    stopRequested = true;
+                    finishReason = "stop_sequence";
                 }
 
-                if (thinkingScan != null && !thinkingClosed)
+                if (!stopRequested && thinkingScan != null && !thinkingClosed)
                 {
                     if (piece.Length > 0)
                         thinkingScan.Append(piece);
@@ -758,14 +748,12 @@ namespace TensorSharp.Server
                     }
                 }
 
-                if (piece.Length > 0)
-                    yield return ChatStreamUpdate.Text(piece);
-
                 if (stopRequested)
-                {
                     engine.Abort(seq.RequestId);
+                if (emittedPiece.Length > 0)
+                    yield return ChatStreamUpdate.Text(emittedPiece);
+                if (stopRequested)
                     break;
-                }
             }
             if (cancellationToken.IsCancellationRequested && finishReason != "stop_sequence" && finishReason != "thinking_budget")
             {
@@ -795,19 +783,20 @@ namespace TensorSharp.Server
                 throw;
             }
 
-            if (wasCancelled)
+            if (stopFilter?.Complete() is { Length: > 0 } tail)
+                yield return ChatStreamUpdate.Text(tail);
+
+            if (wasCancelled || stopFilter?.Stopped == true)
             {
-                // The engine may have forwarded a step or two past the last token that
-                // was streamed before the abort landed. Those tokens are in the live
-                // cache, so the transcript records them too; otherwise the next
-                // render diverges from the cache at the end of this answer. The user
-                // never saw their text and the streamed answer stays as it was.
+                // An abort can race already-forwarded tokens. Preserve the settled
+                // cache boundary without exposing their text in the emitted turn.
                 IReadOnlyList<int> forwarded = seq.OutputTokens;
                 for (int i = generatedTokens.Count; i < forwarded.Count; i++)
                     generatedTokens.Add(forwarded[i]);
             }
 
             string assistantText = Encoding.UTF8.GetString(rawBytes.ToArray());
+            string emittedText = stopFilter?.Trim(assistantText) ?? assistantText;
             evalSw.Stop();
             totalSw.Stop();
 
@@ -823,7 +812,7 @@ namespace TensorSharp.Server
                     RawPromptTrailingWhitespace = generationPromptTrailingWhitespace,
                     RawGenerationSuffix = recordedSuffix,
                 },
-                BuildEmittedTurn(arch, assistantText, enableThinking, tools,
+                BuildEmittedTurn(arch, emittedText, enableThinking, tools,
                     // Parsers are primed with the prompt's open channel exactly when this
                     // pipeline announced it (above); mirror that, or the recorded content
                     // would differ from what the adapters parsed.

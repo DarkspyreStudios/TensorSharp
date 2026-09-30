@@ -110,3 +110,27 @@ remaining bytes before allocation. Duplicate tensor names, invalid GGUF rank or 
 safetensors dimensions and overflowing safetensors shape sizes are rejected. Ordinary GGUF and
 safetensors file parsing uses the same bounded parser with a 64 MiB header budget. The API exposes
 metadata, not a remotely backed model instance.
+
+## Chat stop sequences
+
+The autoregressive chat pipeline honors `SamplingConfig.StopSequences` before publishing decoded
+text. It withholds the longest suffix that can become a stop string in the next chunk. A completed
+match ends generation and excludes the stop string and the rest of its chunk. The first match in
+the decoded text wins, independently of the configured list order. An unmatched prefix is flushed
+on natural completion or cancellation. The pending buffer is shorter than the longest stop string;
+it does not accumulate the whole response. Empty or null stop strings fail before execution.
+
+Stop matching snapshots the configured list. Mutating that list during a request does not change
+its stop policy. The full-text `TokenSampler.CheckStopSequences` uses the same first-match rule.
+The transcript retains raw generated tokens separately from the emitted text, including tokens
+hidden by a stop or forwarded before an abort settles. Continuation uses that raw-token boundary;
+it does not add hidden stop text to the public assistant content.
+
+The deterministic stop tests drive the managed scheduling engine with a scripted model/tokenizer.
+They do not load weights or qualify native backends:
+
+```sh
+dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true \
+  --filter FullyQualifiedName~StreamingStopSequenceTests
+```
