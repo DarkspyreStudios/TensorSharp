@@ -16,12 +16,24 @@ The fork is based on upstream `main` (`v2026.09.01-41-gcff7ea39`). It adds:
 
 Model files load from file paths through the upstream path APIs.
 
-`Darkspyre.TensorSharp.Backends.GGML` ships the macOS arm64 native bridge as
-`runtimes/osx-arm64/native/libGgmlOps.dylib`, built from the same commit with
-`TensorSharp.GGML.Native/build-macos.sh`. A consuming app therefore loads the GGML CPU and Metal
-backends on Apple silicon without building natives. The release packs it by passing
-`-p:DarkspyreGgmlNativeOsxArm64=<path>`; ordinary builds are unchanged. Other platforms still build
-their bridge with their own `build-*` script.
+`Darkspyre.TensorSharp.Backends.GGML` ships prebuilt native bridges, so a consuming app loads the GGML
+backends without building natives:
+
+| Runtime | File | Backends | Toolchain |
+|---|---|---|---|
+| `osx-arm64` | `libGgmlOps.dylib` | CPU, Metal | `build-macos.sh` |
+| `linux-x64` | `libGgmlOps.so` | CPU | CMake, Ubuntu 24.04, gcc 13 |
+| `linux-arm64` | `libGgmlOps.so` | CPU | CMake, Ubuntu 24.04, gcc 13 |
+| `win-x64` | `GgmlOps.dll` | CPU | CMake, Ninja, MSVC 14.51 |
+
+Each file sits at `runtimes/<rid>/native/`. All are built from the same commit and export the same
+`TSGgml_*` functions. The Linux libraries need glibc 2.39 or later, libstdc++ and libgomp. The Windows
+library ships beside `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` and `vcomp140.dll` from
+the MSVC 14.51 redistributable. CUDA, Vulkan and win-arm64 bridges are not shipped; those platforms
+build their bridge with their own `build-*` script.
+
+The release packs the bridges by passing `-p:DarkspyreGgmlNatives=<directory>`, where the directory
+holds `runtimes/<rid>/native/<files>` in the package layout. Ordinary builds are unchanged.
 
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.
