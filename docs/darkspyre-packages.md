@@ -16,8 +16,9 @@ The fork is based on upstream `main` (`v2026.09.01-41-gcff7ea39`). It adds:
 
 Model files load from file paths through the upstream path APIs.
 
-`Darkspyre.TensorSharp.Backends.GGML` ships prebuilt native bridges, so a consuming app loads the GGML
-backends without building natives:
+`Darkspyre.TensorSharp.Backends.GGML` contains managed code only. A consumer installs a separate
+`Darkspyre.TensorSharp.Backends.GGML.Native.<rid>` baseline package for default native probing.
+The native packaging tool selects these baseline variants from its staged input:
 
 | Runtime | File | Backends | Toolchain |
 |---|---|---|---|
@@ -26,14 +27,32 @@ backends without building natives:
 | `linux-arm64` | `libGgmlOps.so` | CPU | CMake, Ubuntu 24.04, gcc 13 |
 | `win-x64` | `GgmlOps.dll` | CPU | CMake, Ninja, MSVC 14.51 |
 
-Each file sits at `runtimes/<rid>/native/`. All are built from the same commit and export the same
-`TSGgml_*` functions. The Linux libraries need glibc 2.39 or later, libstdc++ and libgomp. The Windows
-library ships beside `msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` and `vcomp140.dll` from
-the MSVC 14.51 redistributable. CUDA, Vulkan and win-arm64 bridges are not shipped; those platforms
-build their bridge with their own `build-*` script.
+Each baseline package places its bridge at `runtimes/<rid>/native/`. Optional variant packages
+place their files under `ggml/<variant>/` and copy them into that separate output directory.
+The artifact manifest records each binary's actual identity, dependencies and notices. A package
+layout or successful cross-build does not establish runtime qualification on the target device.
 
-The release packs the bridges by passing `-p:DarkspyreGgmlNatives=<directory>`, where the directory
-holds `runtimes/<rid>/native/<files>` in the package layout. Ordinary builds are unchanged.
+The managed GGML project excludes native binaries from its package. `eng/pack-ggml-natives.py`
+packages staged bridges into separate per-RID native packages and variant archives. Ordinary source
+builds still build and copy the platform bridge unless `TensorSharpSkipGgmlNative=true` is set.
+
+## Native candidate validation
+
+`GgmlNativeLoader.Check` inspects a candidate without loading native code. It checks the managed
+package build, current process RID, declared backend, variant, absolute directory and bridge file.
+A supplied file list must name the bridge. Every entry has a unique relative path, a nonnegative
+size and a lowercase SHA-256 digest that matches the file. Paths cannot contain traversal segments,
+control characters or alternate separators. Candidate directories, their ancestors, listed files
+and intermediate directories cannot be symbolic links. Filesystem inspection failures return a
+structured refusal. The caller owns keeping the validated directory immutable through loading;
+validation does not lock the filesystem against another writer.
+
+The focused loader tests use ordinary files and symbolic links. They do not load a bridge or qualify
+a CPU or accelerator backend:
+
+```sh
+dotnet test eng/tests/ggml-native-loader/ggml-native-loader.csproj -p:TensorSharpSkipGgmlNative=true
+```
 
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.

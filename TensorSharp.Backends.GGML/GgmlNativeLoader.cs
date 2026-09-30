@@ -48,7 +48,7 @@ namespace TensorSharp.GGML
         GgmlBackendType Backend,
         IReadOnlyList<GgmlNativeFile> Files);
 
-    /// <summary>Refusal codes. The values equal the driver refusal codes of the consuming host.</summary>
+    /// <summary>Refusal codes for candidate validation and loading.</summary>
     public static class GgmlNativeRefusalCodes
     {
         /// <summary>A library the candidate depends on is absent, for example a GPU driver or loader.</summary>
@@ -198,6 +198,24 @@ namespace TensorSharp.GGML
         {
             ArgumentNullException.ThrowIfNull(candidate);
 
+            try
+            {
+                return CheckCandidate(candidate);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                return Refuse(candidate, GgmlNativeRefusalCodes.LoadFailed,
+                    $"The candidate files could not be inspected: {ex.Message}");
+            }
+        }
+
+        private static GgmlNativeRefusal? CheckCandidate(GgmlNativeCandidate candidate)
+        {
+            if (!Enum.IsDefined(candidate.Backend))
+                return Refuse(candidate, GgmlNativeRefusalCodes.IncompatibleHardware, "The candidate names an unknown backend.");
+            if (string.IsNullOrWhiteSpace(candidate.Variant))
+                return Refuse(candidate, GgmlNativeRefusalCodes.NotSelected, "The candidate has no variant identity.");
+
             if (!string.Equals(candidate.Rid, RuntimeIdentifier, StringComparison.Ordinal))
             {
                 return Refuse(candidate, GgmlNativeRefusalCodes.IncompatibleHardware,
@@ -216,32 +234,56 @@ namespace TensorSharp.GGML
                     $"The candidate directory '{candidate.Directory}' is not an absolute path.");
             }
 
-            string entryPath = Path.Combine(candidate.Directory, EntryLibraryName);
+            string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(candidate.Directory));
+            for (DirectoryInfo? directory = new(root); directory != null; directory = directory.Parent)
+            {
+                if (directory.LinkTarget != null)
+                    return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, $"The candidate directory traverses a link at '{directory.FullName}'.");
+            }
+
+            string entryPath = Path.Combine(root, EntryLibraryName);
             IReadOnlyList<GgmlNativeFile> files = candidate.Files ?? Array.Empty<GgmlNativeFile>();
             if (files.Count == 0)
             {
+                if (new FileInfo(entryPath).LinkTarget != null)
+                    return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, $"The library '{entryPath}' is a link.");
                 return File.Exists(entryPath)
                     ? null
                     : Refuse(candidate, GgmlNativeRefusalCodes.LoadFailed, $"{entryPath} does not exist.");
             }
 
-            if (!files.Any(f => string.Equals(f.Path, EntryLibraryName, StringComparison.Ordinal)))
+            if (!files.Any(f => f != null && string.Equals(f.Path, EntryLibraryName, StringComparison.Ordinal)))
             {
                 return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch,
                     $"The file list does not name the library {EntryLibraryName}.");
             }
 
-            string root = Path.GetFullPath(candidate.Directory);
             string rootWithSeparator = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+            var paths = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             foreach (GgmlNativeFile file in files)
             {
+                if (file == null)
+                    return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, "The file list contains a null entry.");
                 string? pathProblem = CheckRelativePath(file.Path);
                 if (pathProblem != null)
                     return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, pathProblem);
+                if (!paths.Add(file.Path))
+                    return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, $"The file list repeats '{file.Path}'.");
+                if (file.Size < 0 || file.Sha256 == null || file.Sha256.Length != 64 ||
+                    file.Sha256.Any(c => !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')))
+                    return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, $"'{file.Path}' has an invalid size or SHA-256.");
 
                 string fullPath = Path.GetFullPath(Path.Combine(root, file.Path.Replace('/', Path.DirectorySeparatorChar)));
                 if (!fullPath.StartsWith(rootWithSeparator, StringComparison.Ordinal))
                     return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, $"'{file.Path}' resolves outside the candidate directory.");
+
+                for (DirectoryInfo? directory = new FileInfo(fullPath).Directory;
+                     directory != null && !string.Equals(directory.FullName, root, StringComparison.Ordinal);
+                     directory = directory.Parent)
+                {
+                    if (directory.LinkTarget != null)
+                        return Refuse(candidate, GgmlNativeRefusalCodes.HashMismatch, $"'{file.Path}' traverses a linked directory.");
+                }
 
                 var info = new FileInfo(fullPath);
                 if (!info.Exists)
@@ -453,7 +495,7 @@ namespace TensorSharp.GGML
         {
             if (string.IsNullOrEmpty(path))
                 return "A file list entry has an empty path.";
-            if (path.StartsWith('/') || path.Contains('\\') || path.Contains(':') || Path.IsPathRooted(path))
+            if (path.StartsWith('/') || path.Contains('\\') || path.Contains(':') || path.Any(char.IsControl) || Path.IsPathRooted(path))
                 return $"'{path}' is not a relative path with '/' separators.";
             foreach (string segment in path.Split('/'))
             {
