@@ -333,6 +333,8 @@ def check(inputs):
                     findings.append({"severity": "warning", "input": label, "file": f["path"],
                                      "message": f"dependency {dep['name']} is {dep['resolution']}"})
             for rp in f.get("runpath", []):
+                if rp == "$ORIGIN":
+                    continue
                 findings.append({"severity": "warning", "input": label, "file": f["path"],
                                  "message": f"build-machine search path embedded: {rp}"})
     return findings

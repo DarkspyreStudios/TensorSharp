@@ -1430,7 +1430,7 @@ internal enum GgmlIndexReductionOp
 
         static GgmlNative()
         {
-            NativeLibrary.SetDllImportResolver(typeof(GgmlNative).Assembly, ImportResolver);
+            GgmlNativeLoader.EnsureImportResolverRegistered();
             ApplyEarlyNativeTunables();
         }
 
@@ -4538,6 +4538,17 @@ internal enum GgmlIndexReductionOp
 
         [LibraryImport(DllName)]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial IntPtr TSGgml_GetBuildIdentity();
+
+        /// <summary>The build identity string of the bound GgmlOps library, or null when it returns none.</summary>
+        internal static string ReadBuildIdentity()
+        {
+            IntPtr text = TSGgml_GetBuildIdentity();
+            return text == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(text);
+        }
+
+        [LibraryImport(DllName)]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial void TSGgml_ReleaseReuseComputeBuffers();
 
         [LibraryImport(DllName)]
@@ -6975,11 +6986,19 @@ internal enum GgmlIndexReductionOp
             throw new InvalidOperationException($"Native GGML {opName} failed. {GetLastErrorMessage("Unknown native GGML error.")}");
         }
 
-        private static IntPtr ImportResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
+        internal static IntPtr ImportResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
         {
             if (!string.Equals(libraryName, DllName, StringComparison.Ordinal))
             {
                 return IntPtr.Zero;
+            }
+
+            // A library chosen by GgmlNativeLoader.Select binds every GgmlOps
+            // import. Without a selection the probing below and the runtime's
+            // default probing (runtimes/<rid>/native from the NuGet package) apply.
+            if (GgmlNativeLoader.TryGetSelectedHandle(out IntPtr selected))
+            {
+                return selected;
             }
 
             if (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS())
@@ -7041,7 +7060,7 @@ internal enum GgmlIndexReductionOp
             }
         }
 
-        private static IEnumerable<string> GetCandidateFileNames()
+        internal static IEnumerable<string> GetCandidateFileNames()
         {
             yield return OperatingSystem.IsWindows() ? "GgmlOps.dll" :
                 OperatingSystem.IsMacOS() ? "libGgmlOps.dylib" :
@@ -7066,7 +7085,7 @@ internal enum GgmlIndexReductionOp
             return OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
         }
 
-        private static void EnsureWindowsNativeDependencySearchPaths()
+        internal static void EnsureWindowsNativeDependencySearchPaths()
         {
             if (!OperatingSystem.IsWindows())
                 return;

@@ -7,7 +7,7 @@
     <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Nullable>disable</Nullable>
-    <Description>GGML backend integration for TensorSharp, including native interop for CPU, Metal, and GGML CUDA execution.</Description>
+    <Description>GGML backend integration for TensorSharp: managed interop and versioned native selection. The GgmlOps native libraries ship in the per-RID Darkspyre.TensorSharp.Backends.GGML.Native.&lt;rid&gt; packages.</Description>
     <PackageTags>$(TensorSharpPackageTags);backend;ggml;metal;native;cuda</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'ReleaseCpuOnly|AnyCPU'">
@@ -133,13 +133,22 @@
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Touch Files="$(IntermediateOutputPath)$(GgmlNativeBuildStampName)" AlwaysCreate="true" />
   </Target>
-  <!-- Darkspyre fork: a pack that passes -p:DarkspyreGgmlNatives=<directory> ships every native bridge
-       under <directory>/runtimes/<rid>/native/ at the same path in the package, so a consuming app needs
-       no native build. Each library must be built from this commit with its TensorSharp.GGML.Native
-       build script; docs/darkspyre-packages.md lists the shipped runtimes. -->
-  <ItemGroup Condition="'$(DarkspyreGgmlNatives)' != ''">
-    <None Include="$(DarkspyreGgmlNatives)/runtimes/**/*" Pack="true" PackagePath="runtimes/" Visible="false" />
-  </ItemGroup>
+  <!-- The package is managed-only. Each RID's baseline GgmlOps build ships in its own
+       native package (eng/pack-ggml-natives.py), and optional variants ship as
+       archives; docs/darkspyre-packages.md describes the layout. The assembly records
+       its TensorSharp build, which GgmlNativeLoader compares with every candidate. -->
+  <Target Name="_GenerateGgmlBuildIdentity" BeforeTargets="CoreCompile">
+    <PropertyGroup>
+      <_GgmlBuildIdentityFile>$(IntermediateOutputPath)GgmlBuildIdentity.g.cs</_GgmlBuildIdentityFile>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_GgmlBuildIdentityFile)"
+                      Lines="[assembly: System.Reflection.AssemblyMetadata(&quot;TensorSharpBuild&quot;, &quot;$(TensorSharpVersion)&quot;)]"
+                      Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(_GgmlBuildIdentityFile)" />
+      <FileWrites Include="$(_GgmlBuildIdentityFile)" />
+    </ItemGroup>
+  </Target>
   <!-- iOS links GgmlOps statically from GgmlOps.xcframework (built by
        TensorSharp.GGML.Native/build-ios.sh and referenced by the app head via
        NativeReference), so there is no loose binary to build or copy here. -->
