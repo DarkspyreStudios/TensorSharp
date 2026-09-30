@@ -26,6 +26,7 @@ The native packaging tool selects these baseline variants from its staged input:
 | `linux-x64` | `libGgmlOps.so` | CPU | CMake, Ubuntu 24.04, gcc 13 |
 | `linux-arm64` | `libGgmlOps.so` | CPU | CMake, Ubuntu 24.04, gcc 13 |
 | `win-x64` | `GgmlOps.dll` | CPU | CMake, Ninja, MSVC 14.51 |
+| `win-arm64` | `GgmlOps.dll` | CPU | CMake, Ninja, clang-cl 23.1.2; OpenMP off |
 
 Each baseline package places its bridge at `runtimes/<rid>/native/`. Optional variant packages
 place their files under `ggml/<variant>/` and copy them into that separate output directory.
@@ -35,6 +36,27 @@ layout or successful cross-build does not establish runtime qualification on the
 The managed GGML project excludes native binaries from its package. `eng/pack-ggml-natives.py`
 packages staged bridges into separate per-RID native packages and variant archives. Ordinary source
 builds still build and copy the platform bridge unless `TensorSharpSkipGgmlNative=true` is set.
+
+The packer validates all staged inputs before writing release output. It accepts the five baseline
+RIDs above, Vulkan and CUDA13 on Linux and Windows x64, and Vulkan on Windows ARM64. It rejects
+unknown pairs, links and special files, nonportable paths, missing licenses, unresolved or uninspected
+dependencies, wrong binary architecture, and a bridge without the exact `TSGgml_GetBuildIdentity`
+export. Binary identity must match the source, ggml, RID, variant and version in the build record.
+Inspection-tool failures do not count as empty dependency lists. A supplied managed package must
+have the release's exact identity/version and no native payload.
+
+`--validate-only` runs those checks without creating an output directory, package, archive or
+manifest. Validation does not require a fetched ggml checkout. Staged inputs remain caller-owned
+and must stay immutable through packaging. Existing output is not removed on validation failure.
+
+```sh
+python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only
+python3 -B -m unittest discover -s eng/tests -p test_pack_ggml_natives.py
+```
+
+The packaging tests inspect actual native headers and exports from a tiny compiled identity
+fixture, ordinary files and symbolic links. The fixture contains no GGML backend. These tests do
+not qualify model loading, native lifecycle or accelerator execution.
 
 ## Native candidate validation
 

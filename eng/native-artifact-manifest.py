@@ -9,7 +9,8 @@ sit directly in native/.
 For every native file the tool records size, SHA-256, binary format and
 architecture, build identity (ELF build ID, Mach-O UUID and minimum OS, PE
 timestamp, CodeView PDB identity and file version), direct dependencies,
-ELF symbol-version needs and the count of exported TSGgml_* functions.
+ELF symbol-version needs, the count of exported TSGgml_* functions and whether
+TSGgml_GetBuildIdentity is exported.
 Dependencies resolve against sibling files first and then a fixed list of
 operating-system, runtime and driver libraries. Anything else is reported as
 unresolved.
@@ -66,7 +67,8 @@ def sha256(path):
 
 def run(args):
     try:
-        return subprocess.run(args, capture_output=True, text=True, errors="replace", check=False).stdout
+        result = subprocess.run(args, capture_output=True, text=True, errors="replace", check=False)
+        return result.stdout if result.returncode == 0 else None
     except FileNotFoundError:
         return None
 
@@ -186,6 +188,7 @@ def elf_dynamic(path):
         "runpath": runpath,
         "maxSymbolVersions": sorted(v[1] for v in versions.values()),
         "tsggmlExports": len(re.findall(r"\.text\s+\S+\s+(?:Base\s+)?TSGgml_", exports)),
+        "tsggmlBuildIdentityExport": bool(re.search(r"\.text\s+\S+\s+(?:Base\s+)?TSGgml_GetBuildIdentity\s*$", exports, re.M)),
     }
 
 
@@ -197,6 +200,7 @@ def pe_dynamic(path):
     return {
         "needed": re.findall(r"DLL Name:\s+(\S+)", text),
         "tsggmlExports": len(re.findall(r"\sTSGgml_\w+", exports)),
+        "tsggmlBuildIdentityExport": bool(re.search(r"\sTSGgml_GetBuildIdentity(?:\s|$)", exports)),
     }
 
 
@@ -211,6 +215,7 @@ def macho_dynamic(path):
         "installName": own[0] if own else None,
         "needed": [d for d in deps if d not in own],
         "tsggmlExports": len(re.findall(r"\s_TSGgml_\w+$", exports, re.M)),
+        "tsggmlBuildIdentityExport": bool(re.search(r"\s_TSGgml_GetBuildIdentity$", exports, re.M)),
     }
 
 
