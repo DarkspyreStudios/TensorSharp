@@ -111,3 +111,6 @@ TensorAgent/python-runtime/
 
 # Generated validation evidence stays local; keep reusable tools and fixtures elsewhere.
 /docs/validation/
+
+# Repository scratch folder
+tmp/
