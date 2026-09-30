@@ -102,6 +102,76 @@ set(GGML_ZDNN OFF CACHE BOOL "" FORCE)
 set(GGML_ZENDNN OFF CACHE BOOL "" FORCE)
 set(GGML_HEXAGON OFF CACHE BOOL "" FORCE)
 set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+# Release natives use the portable CPU profile. GgmlOps links ggml statically
+# (GGML_BACKEND_DL is OFF), and ggml selects CPU kernels only at compile time in
+# that configuration, so a binary built with GGML_NATIVE runs only on CPUs with
+# the build host's features. The portable profile builds for a fixed floor:
+#   x86-64: the x86-64 baseline (SSE2); every optional ggml ISA switch is OFF.
+#   arm64 (not Apple): GGML_CPU_ARM_ARCH, default armv8.2-a+dotprod (no i8mm).
+#   Apple: the compiler default for arm64 macOS (Apple M1), and an explicit
+#          CMAKE_OSX_DEPLOYMENT_TARGET, which must be set on the command line.
+option(TENSORSHARP_GGML_NATIVE_PORTABLE "Build for the release CPU floor instead of the build host's CPU" OFF)
+set(TENSORSHARP_NATIVE_VARIANT "dev" CACHE STRING "Artifact variant recorded in the build identity (cpu, metal, vulkan, cuda13, dev)")
+set(TENSORSHARP_NATIVE_RID "" CACHE STRING "Runtime identifier recorded in the build identity")
+set(TENSORSHARP_SOURCE_COMMIT "" CACHE STRING "TensorSharp commit recorded in the build identity (default: git HEAD at configure time)")
+set(TENSORSHARP_BUILD_VERSION "" CACHE STRING "TensorSharp build recorded in the build identity (default: TensorSharpVersion in Directory.Build.props)")
+
+set(TSG_CPU_PROFILE "native")
+if (TENSORSHARP_GGML_NATIVE_PORTABLE)
+    set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" TSG_SYSTEM_PROCESSOR)
+    if (TSG_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|x64)$")
+        foreach(TSG_ISA_SWITCH GGML_SSE42 GGML_AVX GGML_AVX_VNNI GGML_AVX2 GGML_BMI2 GGML_FMA GGML_F16C
+                GGML_AVX512 GGML_AVX512_VBMI GGML_AVX512_VNNI GGML_AVX512_BF16 GGML_AMX_TILE GGML_AMX_INT8 GGML_AMX_BF16)
+            set(${TSG_ISA_SWITCH} OFF CACHE BOOL "" FORCE)
+        endforeach()
+        set(TSG_CPU_PROFILE "x86-64")
+    elseif (TSG_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        if (APPLE)
+            if (NOT TENSORSHARP_GGML_NATIVE_IOS AND "${CMAKE_OSX_DEPLOYMENT_TARGET}" STREQUAL "")
+                message(FATAL_ERROR "TENSORSHARP_GGML_NATIVE_PORTABLE requires -DCMAKE_OSX_DEPLOYMENT_TARGET=<version> on macOS.")
+            endif()
+            set(TSG_CPU_PROFILE "apple-m1")
+        else()
+            if ("${GGML_CPU_ARM_ARCH}" STREQUAL "")
+                set(GGML_CPU_ARM_ARCH "armv8.2-a+dotprod" CACHE STRING "" FORCE)
+            endif()
+            set(TSG_CPU_PROFILE "${GGML_CPU_ARM_ARCH}")
+        endif()
+    else()
+        message(FATAL_ERROR "TENSORSHARP_GGML_NATIVE_PORTABLE has no CPU floor for processor '${CMAKE_SYSTEM_PROCESSOR}'.")
+    endif()
+endif()
+
+if ("${TENSORSHARP_BUILD_VERSION}" STREQUAL "")
+    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/../Directory.Build.props" TSG_VERSION_LINE
+        REGEX "<TensorSharpVersion>[^<]+</TensorSharpVersion>" LIMIT_COUNT 1)
+    string(REGEX REPLACE ".*<TensorSharpVersion>([^<]+)</TensorSharpVersion>.*" "\\1" TSG_BUILD_VERSION "${TSG_VERSION_LINE}")
+else()
+    set(TSG_BUILD_VERSION "${TENSORSHARP_BUILD_VERSION}")
+endif()
+set(TSG_SOURCE_COMMIT "${TENSORSHARP_SOURCE_COMMIT}")
+set(TSG_GGML_COMMIT "")
+find_package(Git QUIET)
+if (GIT_FOUND)
+    if ("${TSG_SOURCE_COMMIT}" STREQUAL "")
+        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE TSG_SOURCE_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    endif()
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../ExternalProjects/ggml"
+        OUTPUT_VARIABLE TSG_GGML_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+if ("${TSG_SOURCE_COMMIT}" STREQUAL "")
+    set(TSG_SOURCE_COMMIT "unknown")
+endif()
+if ("${TSG_GGML_COMMIT}" STREQUAL "")
+    set(TSG_GGML_COMMIT "unknown")
+endif()
+message(STATUS "TensorSharp: build identity tensorsharp=${TSG_BUILD_VERSION} source=${TSG_SOURCE_COMMIT} "
+               "ggml=${TSG_GGML_COMMIT} variant=${TENSORSHARP_NATIVE_VARIANT} rid=${TENSORSHARP_NATIVE_RID} cpu=${TSG_CPU_PROFILE}")
+
 set(GGML_FATAL_WARNINGS OFF CACHE BOOL "" FORCE)
 
 # Turn on ggml's ccache integration only when ccache/sccache is actually on PATH.
@@ -260,6 +330,7 @@ endif()
 
 set(TSG_GGMLOPS_SOURCES
     bonsai_quant.cpp
+    ggml_ops_build_identity.cpp
     ggml_ops_core.cpp
     ggml_ops_graph_optimize.cpp
     ggml_ops_bonsai.cpp
@@ -399,6 +470,14 @@ if (WIN32)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ggml_api_exports.def)
     target_sources(GgmlOps PRIVATE "${TSG_DEF_FILE}")
 endif()
+
+set_property(SOURCE ggml_ops_build_identity.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+    "TSG_BUILD_TENSORSHARP_VERSION=\"${TSG_BUILD_VERSION}\""
+    "TSG_BUILD_SOURCE_COMMIT=\"${TSG_SOURCE_COMMIT}\""
+    "TSG_BUILD_GGML_COMMIT=\"${TSG_GGML_COMMIT}\""
+    "TSG_BUILD_VARIANT=\"${TENSORSHARP_NATIVE_VARIANT}\""
+    "TSG_BUILD_RID=\"${TENSORSHARP_NATIVE_RID}\""
+    "TSG_BUILD_CPU_PROFILE=\"${TSG_CPU_PROFILE}\"")
 
 if (TENSORSHARP_GGML_NATIVE_ENABLE_VULKAN)
     target_compile_definitions(GgmlOps PRIVATE TSG_GGML_USE_VULKAN=1)

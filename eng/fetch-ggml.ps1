@@ -4,11 +4,12 @@
 # (TensorSharp.GGML.Native/CMakeLists.txt) and the CUDA PTX kernels
 # (TensorSharp.Backends.Cuda/native/kernels/tensorsharp_kernels.cu) consume the
 # sources at ExternalProjects/ggml. The directory is not committed; it is fetched
-# here at build time so the repo tracks upstream ggml.
+# here at build time at the commit pinned in eng/ggml-revision. Release natives
+# must be built from that commit, and the artifact manifest records it.
 #
 # Environment overrides:
 #   TENSORSHARP_GGML_GIT_URL   git URL                (default: ggml-org/ggml)
-#   TENSORSHARP_GGML_GIT_REF   branch/tag/commit      (default: master, the ggml default branch)
+#   TENSORSHARP_GGML_GIT_REF   branch/tag/commit      (default: the commit in eng/ggml-revision)
 #   TENSORSHARP_GGML_NO_UPDATE if set to 1/ON/true and a checkout or complete
 #                              source copy exists, use what is on disk.
 # Fetching and building leave upstream sources unchanged. Model-specific
@@ -21,7 +22,8 @@ $ExternalProjectsDir = Join-Path $RepoRoot "ExternalProjects"
 $GgmlDir = Join-Path $ExternalProjectsDir "ggml"
 
 $GitUrl = if ([string]::IsNullOrWhiteSpace($env:TENSORSHARP_GGML_GIT_URL)) { "https://github.com/ggml-org/ggml.git" } else { $env:TENSORSHARP_GGML_GIT_URL }
-$GitRef = if ([string]::IsNullOrWhiteSpace($env:TENSORSHARP_GGML_GIT_REF)) { "master" } else { $env:TENSORSHARP_GGML_GIT_REF }
+$PinnedRef = (Get-Content -Raw (Join-Path $ScriptDir "ggml-revision")).Trim()
+$GitRef = if ([string]::IsNullOrWhiteSpace($env:TENSORSHARP_GGML_GIT_REF)) { $PinnedRef } else { $env:TENSORSHARP_GGML_GIT_REF }
 
 New-Item -ItemType Directory -Force -Path $ExternalProjectsDir | Out-Null
 $Sha256 = [System.Security.Cryptography.SHA256]::Create()
@@ -56,6 +58,12 @@ if ((Test-Truthy $env:TENSORSHARP_GGML_NO_UPDATE) -and
 }
 
 if (Test-Path (Join-Path $GgmlDir ".git")) {
+    # A checkout already at the requested commit needs no network access.
+    $CurrentHead = (git -C $GgmlDir rev-parse HEAD)
+    if ($LASTEXITCODE -eq 0 -and $CurrentHead -and $CurrentHead.Trim() -eq $GitRef) {
+        Write-Host "ggml: checkout at $GgmlDir is already at $GitRef"
+        exit 0
+    }
     if (Test-Truthy $env:TENSORSHARP_GGML_NO_UPDATE) {
         Write-Host "ggml: TENSORSHARP_GGML_NO_UPDATE set; using existing checkout at $GgmlDir"
         exit 0

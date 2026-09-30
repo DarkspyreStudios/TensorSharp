@@ -5,11 +5,12 @@
 # (TensorSharp.GGML.Native/CMakeLists.txt) and the CUDA PTX kernels
 # (TensorSharp.Backends.Cuda/native/kernels/tensorsharp_kernels.cu) consume the
 # sources at ExternalProjects/ggml. The directory is not committed; it is fetched
-# here at build time so the repo tracks upstream ggml.
+# here at build time at the commit pinned in eng/ggml-revision. Release natives
+# must be built from that commit, and the artifact manifest records it.
 #
 # Environment overrides:
 #   TENSORSHARP_GGML_GIT_URL   git URL                (default: ggml-org/ggml)
-#   TENSORSHARP_GGML_GIT_REF   branch/tag/commit      (default: master, the ggml default branch)
+#   TENSORSHARP_GGML_GIT_REF   branch/tag/commit      (default: the commit in eng/ggml-revision)
 #   TENSORSHARP_GGML_NO_UPDATE if set to 1/ON/true and a checkout or complete
 #                              source copy exists, use what is on disk.
 #
@@ -24,7 +25,8 @@ GGML_DIR="${REPO_ROOT}/ExternalProjects/ggml"
 LOCK_FILE="${EXTERNAL_PROJECTS_DIR}/.ggml-fetch.lock"
 
 GIT_URL="${TENSORSHARP_GGML_GIT_URL:-https://github.com/ggml-org/ggml.git}"
-GIT_REF="${TENSORSHARP_GGML_GIT_REF:-master}"
+PINNED_REF="$(tr -d '[:space:]' < "${SCRIPT_DIR}/ggml-revision")"
+GIT_REF="${TENSORSHARP_GGML_GIT_REF:-${PINNED_REF}}"
 NO_UPDATE_RAW="${TENSORSHARP_GGML_NO_UPDATE:-}"
 
 mkdir -p "${EXTERNAL_PROJECTS_DIR}"
@@ -60,6 +62,11 @@ if is_truthy "${NO_UPDATE_RAW}" &&
 fi
 
 if [[ -d "${GGML_DIR}/.git" ]]; then
+    # A checkout already at the requested commit needs no network access.
+    if [[ "$(git -C "${GGML_DIR}" rev-parse HEAD 2>/dev/null)" == "${GIT_REF}" ]]; then
+        echo "ggml: checkout at ${GGML_DIR} is already at ${GIT_REF}"
+        exit 0
+    fi
     if is_truthy "${NO_UPDATE_RAW}"; then
         echo "ggml: TENSORSHARP_GGML_NO_UPDATE set; using existing checkout at ${GGML_DIR}"
         exit 0

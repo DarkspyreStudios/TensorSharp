@@ -6,7 +6,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BuildDir = Join-Path $ScriptDir "build-windows"
+# TENSORSHARP_GGML_NATIVE_BUILD_DIR selects a separate build tree, so a release
+# build (eng/build-ggml-natives.ps1) never reuses a development CMake cache.
+$BuildDir = if ([string]::IsNullOrWhiteSpace($env:TENSORSHARP_GGML_NATIVE_BUILD_DIR)) { Join-Path $ScriptDir "build-windows" } else { $env:TENSORSHARP_GGML_NATIVE_BUILD_DIR }
 
 # Get-VisualStudioInstallation / Import-VcVarsEnvironment. See eng/vs-locate.ps1
 # for why a bare `vswhere -latest` cannot be trusted to find the local MSVC.
