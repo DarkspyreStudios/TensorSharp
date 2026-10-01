@@ -6,19 +6,20 @@ using System.Text.Json;
 using TensorSharp;
 using TensorSharp.GGML;
 
-if (args.Length != 3 || args[0] is not ("selected" or "default" or "ambiguous-default" or "reject-variant" or "reject-legacy"))
+if (args.Length != 3 || args[0] is not ("selected" or "selected-metal" or "default" or "ambiguous-default" or "reject-variant" or "reject-legacy"))
 {
-    Console.Error.WriteLine("Usage: ggml-native-runtime <selected|default|ambiguous-default|reject-variant|reject-legacy> <absolute-bridge-directory> <variant>");
+    Console.Error.WriteLine("Usage: ggml-native-runtime <selected|selected-metal|default|ambiguous-default|reject-variant|reject-legacy> <absolute-bridge-directory> <variant>");
     return 2;
 }
 
 try
 {
     string mode = args[0], directory = Path.GetFullPath(args[1]), variant = args[2];
+    GgmlBackendType backend = mode == "selected-metal" ? GgmlBackendType.Metal : GgmlBackendType.Cpu;
     string entry = Path.Combine(directory, GgmlNativeLoader.EntryLibraryName);
     byte[] bytes = File.ReadAllBytes(entry);
     var candidate = new GgmlNativeCandidate(directory, GgmlNativeLoader.TensorSharpBuild,
-        GgmlNativeLoader.RuntimeIdentifier, variant, GgmlBackendType.Cpu,
+        GgmlNativeLoader.RuntimeIdentifier, variant, backend,
         [new(GgmlNativeLoader.EntryLibraryName, bytes.LongLength, Convert.ToHexStringLower(SHA256.HashData(bytes)))]);
     Require(GgmlNativeLoader.Current == null, "The process starts without a selected bridge.");
     Require(GgmlNativeLoader.Check(candidate) == null, "The candidate passes filesystem validation before loading.");
@@ -48,7 +49,7 @@ try
     }
 
     GgmlNativeSelection selected;
-    GgmlRuntimePlan plan = new(GgmlNativeLoader.TensorSharpBuild, GgmlNativeLoader.NativeAbi, GgmlNativeLoader.RuntimeIdentifier, []);
+    GgmlRuntimePlan plan = new(GgmlNativeLoader.TensorSharpBuild, GgmlNativeLoader.NativeAbi, GgmlNativeLoader.RuntimeIdentifier, [], RequestedBackend: backend);
     if (mode is "default" or "ambiguous-default")
     {
         GgmlRuntimePlan defaultPlan = plan with { Candidates = null, DefaultNuGetProbing = true };
@@ -107,10 +108,15 @@ try
         selected = (await first).Selection;
         Require(selected.Refusals.Single().Code == GgmlNativeRefusalCodes.NotSelected, "A different ABI plan is refused before loading.");
     }
-    Require(selected.State == GgmlNativeSelectionState.Loaded, "The real CPU backend initializes after pre-load refusals.");
+    Require(selected.State == GgmlNativeSelectionState.Loaded, "The requested real backend initializes after pre-load refusals.");
     Require(selected.Identity?.NativeAbi == GgmlNativeLoader.NativeAbi && selected.Identity.GgmlCommit == GgmlNativeLoader.GgmlCommit,
         "The actual bridge reports the managed ABI and pinned upstream revision.");
     GgmlInitializationResult ready = await GgmlNativeLoader.InitializeAsync();
+    Require(ready.ActualBackend == backend, "The initialized backend matches the requested backend without fallback.");
+    int gpuDevices = backend == GgmlBackendType.Cpu ? 0 : GgmlBasicOps.GetGpuDeviceCount(backend);
+    string? gpuDescription = gpuDevices > 0 ? GgmlBasicOps.GetGpuDeviceDescription(backend, 0) : null;
+    if (backend != GgmlBackendType.Cpu)
+        Require(gpuDevices > 0 && !string.IsNullOrWhiteSpace(gpuDescription), "A GPU run requires a detected device and its actual description.");
     GgmlNativeLoader.Configure(ready.Plan);
     Require(ReferenceEquals(await GgmlNativeLoader.InitializeAsync(), ready), "Repeated identical configuration shares the existing owner result.");
     Require(GgmlDeepSeek4Native.NPast(IntPtr.Zero) == 0, "Other interop classes bind to the same selected bridge.");
@@ -120,7 +126,7 @@ try
     for (int i = 0; i < 10 && foreign.IsAlive; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }
     Require(!foreign.IsAlive, "The BCL process-owner token does not pin a foreign collectible assembly.");
 
-    var context = new GgmlContext([0], GgmlBackendType.Cpu);
+    var context = new GgmlContext([0], backend);
     MethodInfo enter = typeof(GgmlNativeLoader).GetMethod("EnterNativeCall", BindingFlags.NonPublic | BindingFlags.Static)!;
     using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero])!)
     {
@@ -139,11 +145,11 @@ try
         input.SetElementsAsFloat([1, 2, 3, 4]);
         GgmlBasicOps.Add(output, input, 5);
         values = output.GetElementsAsFloat(4);
-        Require(values.SequenceEqual(new float[] { 6, 7, 8, 9 }), "A real GGML CPU operation returns the expected tensor values.");
+        Require(values.SequenceEqual(new float[] { 6, 7, 8, 9 }), "A real GGML operation returns the expected tensor values on the requested backend.");
     }
     Require(!GgmlNativeLoader.Shutdown().Released, "An active context refuses shutdown even after its tensors are disposed.");
     context.Dispose();
-    using (var parallelContext = new GgmlContext([0], GgmlBackendType.Cpu))
+    using (var parallelContext = new GgmlContext([0], backend))
     using (var group = new GgmlTensorParallelGroup(parallelContext))
     using (var started = new ManualResetEventSlim())
     using (var finish = new ManualResetEventSlim())
@@ -174,7 +180,7 @@ try
     Require(GgmlNativeLoader.State == GgmlRuntimeState.Stopped, "Successful shutdown is terminal.");
     Refused(() => GgmlBasicOps.AlignedAlloc(128), "A cached native import cannot execute after shutdown.");
     Refused(() => GgmlNativeLoader.InitializeAsync(), "Initialization cannot follow terminal shutdown.");
-    Console.WriteLine(JsonSerializer.Serialize(new { mode, state = selected.State.ToString(), selected.Identity, values, shutdown.Released }));
+    Console.WriteLine(JsonSerializer.Serialize(new { mode, state = selected.State.ToString(), backend = ready.ActualBackend.ToString(), gpuDevices, gpuDescription, selected.Identity, values, shutdown.Released }));
     return 0;
 }
 catch (Exception error)

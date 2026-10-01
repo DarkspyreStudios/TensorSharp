@@ -135,14 +135,18 @@ cross-class import binding, shared initialization, cancellation, immutable plans
 arithmetic, active-resource/call shutdown refusal, double-free refusal, foreign-owner refusal,
 collectible-context release and terminal teardown. `default` verifies absolute package-path probing;
 `ambiguous-default` verifies no-load ambiguity refusal followed by a corrected default plan.
+`selected-metal` repeats the explicit selection and lifecycle checks on the Metal backend. It
+requires an actual detected GPU, reports its description, and checks tensor arithmetic after GPU
+dispatch and host synchronization. A CPU fallback fails this mode.
 `reject-variant` verifies that a loaded identity mismatch leaves later candidates untried and
 rejects a second selection. `reject-legacy` verifies the same refusal for a bridge without an
-exact ABI identity. The probes do not qualify model generation, real whole-model handles, GPU
-execution, Windows dependency loading or other RIDs, nor prove a published package's layout.
+exact ABI identity. The probes do not qualify model generation, real whole-model handles, CUDA or
+Vulkan execution, Windows dependency loading or other RIDs, nor prove a published package's layout.
 
 ```sh
 dotnet build eng/tests/ggml-native-runtime/ggml-native-runtime.csproj -c Release -p:TensorSharpSkipGgmlNative=true
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected-metal /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll default /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll ambiguous-default /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-variant /absolute/bridge/directory metal
