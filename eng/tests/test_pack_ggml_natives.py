@@ -206,6 +206,77 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertIsNone(pack.INVENTORY.run(["inspection-tool"]))
 
 
+class PackageCatalogPolicyTests(unittest.TestCase):
+    """Catalog/payload descriptions only; no package/archive or native build is produced."""
+
+    def artifact(self, rid="linux-x64", variant="vulkan"):
+        entry = pack.ENTRY[rid.split("-")[0]]
+        return {"driverId": pack.DRIVER_ID, "rid": rid, "variant": variant,
+                "version": "2.8.6.8", "tensorSharpBuild": "2.8.6.8", "nativeAbi": "a" * 64,
+                "tensorSharp": {"packageVersion": "2.8.6.8", "packageCommit": "b" * 40,
+                                "nativeSourceCommit": "c" * 40},
+                "ggml": {"version": "0.9.0", "commit": "d" * 40},
+                "backends": pack.BACKENDS[variant], "entryLibrary": entry,
+                "files": [{"path": entry, "size": 7, "sha256": pack.sha256_bytes(b"fixture")},
+                          {"path": "licenses/ggml-LICENSE.txt", "size": 7, "sha256": pack.sha256_bytes(b"license")}],
+                "components": [{"id": "example-evidence"}],
+                "archive": {"name": "not-created.zip"}, "build": {"sourceCommit": "c" * 40}}
+
+    def test_catalog_copies_complete_existing_identity_without_recomputing_evidence(self):
+        artifact = self.artifact()
+        catalog = json.loads(pack.package_catalog(artifact))
+        self.assertEqual(pack.SCHEMA, catalog.pop("schema"))
+        self.assertEqual({key: artifact[key] for key in (
+            "driverId", "rid", "variant", "version", "tensorSharpBuild", "nativeAbi",
+            "tensorSharp", "ggml", "backends", "entryLibrary", "files", "components")}, catalog)
+        self.assertNotIn("archive", catalog)
+        self.assertNotIn("build", catalog)
+        self.assertEqual(pack.package_catalog(artifact), pack.package_catalog(artifact))
+
+    def test_baseline_catalog_and_complete_closure_have_fixed_runtime_paths(self):
+        for rid, variant in pack.BASELINE.items():
+            with self.subTest(rid=rid):
+                artifact = self.artifact(rid, variant)
+                files = {item["path"]: b"fixture" for item in artifact["files"]}
+                with patch.object(Path, "read_bytes", lambda path: files[path.as_posix().removeprefix("/fixture/")]):
+                    contents = dict(pack.native_package_contents(artifact, Path("/fixture"), "package", True))
+                for item in artifact["files"]:
+                    self.assertIn(f"runtimes/{rid}/native/{item['path']}", contents)
+                self.assertIn("licenses/ggml-LICENSE.txt", contents)
+                self.assertEqual(json.loads(pack.package_catalog(artifact)),
+                                 json.loads(contents["ggml/baseline.artifact.json"]))
+                self.assertIn("buildTransitive/package.targets", contents)
+
+    def test_developer_catalog_and_native_closure_are_siblings(self):
+        artifact = self.artifact()
+        files = {item["path"]: b"fixture" for item in artifact["files"]}
+        with patch.object(Path, "read_bytes", lambda path: files[path.as_posix().removeprefix("/fixture/")]):
+            contents = dict(pack.native_package_contents(artifact, Path("/fixture"), "package", False))
+        self.assertIn("ggml/vulkan.artifact.json", contents)
+        self.assertIn("ggml/vulkan/licenses/ggml-LICENSE.txt", contents)
+        self.assertIn("ggml/vulkan/libGgmlOps.so", contents)
+
+    def test_copy_targets_include_catalog_for_output_and_publish(self):
+        document = ET.fromstring(pack.developer_targets("package", "vulkan"))
+        items = document.findall("ItemGroup/None")
+        catalog = next((item for item in items if item.get("Link") == "ggml/vulkan.artifact.json"), None)
+        self.assertIsNotNone(catalog)
+        self.assertEqual("$(MSBuildThisFileDirectory)../ggml/vulkan.artifact.json", catalog.get("Include"))
+        self.assertEqual("PreserveNewest", catalog.get("CopyToOutputDirectory"))
+        self.assertEqual("PreserveNewest", catalog.get("CopyToPublishDirectory"))
+
+    def test_baseline_targets_bind_only_selected_rid_without_architecture_mix(self):
+        document = ET.fromstring(pack.baseline_targets("package", "win-arm64"))
+        group = document.find("ItemGroup")
+        self.assertIn("win-arm64", group.get("Condition"))
+        self.assertIn("RuntimeIdentifier", group.get("Condition"))
+        items = group.findall("None")
+        self.assertEqual({"ggml/baseline.artifact.json", "runtimes/win-arm64/native/%(RecursiveDir)%(Filename)%(Extension)"},
+                         {item.get("Link") for item in items})
+        self.assertTrue(all(item.get("CopyToOutputDirectory") == "PreserveNewest" and
+                            item.get("CopyToPublishDirectory") == "PreserveNewest" for item in items))
+
+
 class StagingFilesystemTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
