@@ -15,7 +15,10 @@ using TensorSharp.Runtime;
 if (args.Length != 3 || args[0] is not ("normal" or "refusal" or "phase-order" or "borrowed-tp" or "constructor-matrix" or "partial-weight" or
     "derived-cleanup-failure" or "base-cleanup-failure" or "local-cleanup-failure" or "dispose-cleanup-failure" or "observe-dispose-refusal" or "observe-refusal" or
     "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" or "bonsai-unregister-refusal" or
-    "local-quantized-transfer" or "quantized-fusion-ownership" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "bonsai-registration-refusal") || args[1] is not ("cpu" or "metal"))
+    "local-quantized-transfer" or "quantized-fusion-ownership" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "bonsai-registration-refusal" or
+    "observe-tp-column-owner" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "observe-tp-concatenated" or "observe-tp-separate" or
+    "observe-tp-concatenated-bias" or "observe-tp-separate-bias" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or
+    "observe-tp-sync-retirement" or "tp-sync-preflight-refusal") || args[1] is not ("cpu" or "metal"))
     throw new ArgumentException("Expected a model-lifetime mode, cpu|metal and an absolute bridge directory.");
 
 Retirement.Run(args[0], args[1], Path.GetFullPath(args[2]));
@@ -35,7 +38,7 @@ internal static class Retirement
             Thread.Sleep(10);
         }
         string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
-        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal";
+        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy";
         if (!unsafeCleanup && retained.Length != 0)
             throw new InvalidOperationException("Disposed real model generation remains rooted: " + string.Join(",", retained));
         if (unsafeCleanup && retained.Length != evidence.Roots.Length)
@@ -46,7 +49,9 @@ internal static class Retirement
             backend,
             evidence.Report,
             retained,
-            actualModel = mode is "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or
+            actualModel = mode.StartsWith("observe-tp-", StringComparison.Ordinal) || mode is "tp-view-unregister-refusal" or "tp-sync-preflight-refusal"
+                ? "generated ownership-only sources, logical ranks on one real GGML context, no forward" :
+                mode is "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or
                 "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" or "quantized-fusion-ownership" or "quantized-fusion-source-refusal" ? "generated Q4_0 ownership-only GGUF, no forward" :
                 mode is "bonsai-unregister-refusal" or "bonsai-registration-refusal" or "local-quantized-transfer" or "local-bonsai-transfer-refusal" ?
                     "generated F32 metadata context and Q2_0 owner, no forward" : "generated tiny F32 HunyuanDense",
@@ -137,8 +142,9 @@ public static partial class ForeignModelLifetime
                 IncludeTokenizer = mode != "constructor-matrix"
             }.Write(modelPath);
             if (mode is "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or
-                "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" or "quantized-fusion-ownership" or "quantized-fusion-source-refusal")
-                WriteQuantizedOwnershipFixture(modelPath, mode is not ("raw-quantized-read-refusal" or "quantized-fusion-ownership" or "quantized-fusion-source-refusal"));
+                "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" or "quantized-fusion-ownership" or "quantized-fusion-source-refusal" or
+                "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order")
+                WriteQuantizedOwnershipFixture(modelPath, mode is not ("raw-quantized-read-refusal" or "quantized-fusion-ownership" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order"));
             string modelHash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(modelPath)));
             string work = mode switch
             {
@@ -160,10 +166,17 @@ public static partial class ForeignModelLifetime
                 "local-bonsai-transfer-refusal" => ExerciseLocalQuantizedTransfer(modelPath, backend, refuseCleanup: true),
                 "quantized-fusion-source-refusal" => ExerciseQuantizedFusion(modelPath, backend, refuseSource: true),
                 "bonsai-registration-refusal" => ExerciseBonsaiRegistration(modelPath, backend),
+                "observe-tp-column-owner" => ObserveTpColumnOwner(modelPath, backend),
+                "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "observe-tp-concatenated" or "observe-tp-separate" or
+                    "observe-tp-concatenated-bias" or "observe-tp-separate-bias" => ObserveTpPartialShard(mode, modelPath, backend),
+                "tp-view-unregister-refusal" => ExerciseTpViewRefusal(modelPath, backend, poisonLate: false),
+                "observe-tp-view-cleanup-order" => ExerciseTpViewRefusal(modelPath, backend, poisonLate: true),
+                "observe-tp-sync-retirement" => ExerciseTpSynchronization(modelPath, backend, preflight: false),
+                "tp-sync-preflight-refusal" => ExerciseTpSynchronization(modelPath, backend, preflight: true),
                 _ => RefuseModel(modelPath, backend)
             };
             // Finalization is diagnostic here. A failed construction must not require GC to retire its model lease.
-            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal";
+            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy";
             for (int attempt = 0; unsafeCleanup && attempt < 10; attempt++)
             {
                 GC.Collect();
@@ -173,8 +186,12 @@ public static partial class ForeignModelLifetime
             int modelLeases = ModelLeaseCount();
             if (mode.EndsWith("cleanup-failure", StringComparison.Ordinal)) VerifyRetainedOwner(mode);
             if (mode is "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal") VerifyQuantizedRetention(mode);
+            if (mode is "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy") VerifyTpRetention(mode);
             GgmlNativeShutdownResult shutdown = GgmlNativeLoader.Shutdown();
-            if (!unsafeCleanup) Require(shutdown.Released && modelLeases == 0, "Explicit real model cleanup drains guarded shutdown without GC: " + shutdown.Diagnostic);
+            if (!unsafeCleanup) Require(shutdown.Released && modelLeases == 0,
+                (mode.StartsWith("observe-tp-", StringComparison.Ordinal)
+                    ? "Diagnostic TP observation leaves no native leases at shutdown; GC is not explicit ownership cleanup: "
+                    : "Explicit real model cleanup drains guarded shutdown without GC: ") + shutdown.Diagnostic);
             else Require(!shutdown.Released && modelLeases == 1, "Terminal unsafe ownership refuses shutdown and retains its model lease: " + shutdown.Diagnostic);
             return $"bridgeSha256={hash};nativeAbi={GgmlNativeLoader.NativeAbi};modelSha256={modelHash};" +
                 $"work={work};modelLeases={modelLeases};shutdownReleased={shutdown.Released};diagnostic={shutdown.Diagnostic}";
