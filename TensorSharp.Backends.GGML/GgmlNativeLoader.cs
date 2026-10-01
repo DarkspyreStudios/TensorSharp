@@ -404,11 +404,7 @@ namespace TensorSharp.GGML
                         refusals.Add(Refuse(skipped, GgmlNativeRefusalCodes.NotSelected,
                             $"An earlier candidate ({candidate.Variant}) was loaded."));
 
-                    if (!s_processExitHooked)
-                    {
-                        s_processExitHooked = true;
-                        AppDomain.CurrentDomain.ProcessExit += (_, _) => Shutdown();
-                    }
+                    RegisterProcessExitHook();
 
                     return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Loaded,
                         candidate, libraryPath, backend, identity, refusals, Array.Empty<GgmlNativeCandidate>()));

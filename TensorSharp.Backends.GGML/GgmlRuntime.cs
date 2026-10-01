@@ -392,11 +392,7 @@ public static partial class GgmlNativeLoader
             s_defaultLibraryPath = paths.FirstOrDefault();
             s_defaultProbingBound = true;
             s_selectedHandle = handle;
-            if (!s_processExitHooked)
-            {
-                s_processExitHooked = true;
-                AppDomain.CurrentDomain.ProcessExit += (_, _) => Shutdown();
-            }
+            RegisterProcessExitHook();
             return handle;
         }
     }
@@ -466,6 +462,25 @@ public static partial class GgmlNativeLoader
                 AppDomain.CurrentDomain.SetData(ProcessOwnerKey, null);
     }
 
+    private static void RegisterProcessExitHook()
+    {
+        lock (s_gate)
+        {
+            if (s_processExitHooked) return;
+            AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
+            s_processExitHooked = true;
+        }
+    }
+
+    private static void OnProcessExit(object? sender, EventArgs args) => Shutdown();
+
+    private static void RemoveProcessExitHook()
+    {
+        if (!s_processExitHooked) return;
+        AppDomain.CurrentDomain.ProcessExit -= OnProcessExit;
+        s_processExitHooked = false;
+    }
+
     private static GgmlNativeShutdownResult ShutdownOwned()
     {
         lock (s_gate)
@@ -481,6 +496,7 @@ public static partial class GgmlNativeLoader
             try
             {
                 if (s_selectedHandle != IntPtr.Zero) GgmlNative.ShutdownCore();
+                RemoveProcessExitHook();
                 s_shutDown = true;
                 s_runtimeState = GgmlRuntimeState.Stopped;
                 return s_shutdownResult = new(true, null);

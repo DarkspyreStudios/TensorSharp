@@ -6,15 +6,18 @@ using System.Text.Json;
 using TensorSharp;
 using TensorSharp.GGML;
 
-if (args.Length != 3 || args[0] is not ("selected" or "selected-metal" or "default" or "ambiguous-default" or "reject-variant" or "reject-legacy"))
+if (args.Length != 3 || args[0] is not ("selected" or "selected-metal" or "default" or "ambiguous-default" or "reject-variant" or "reject-legacy" or
+    "retire-selected-cpu" or "retire-default-cpu" or "retire-selected-metal" or "retire-default-metal"))
 {
-    Console.Error.WriteLine("Usage: ggml-native-runtime <selected|selected-metal|default|ambiguous-default|reject-variant|reject-legacy> <absolute-bridge-directory> <variant>");
+    Console.Error.WriteLine("Usage: ggml-native-runtime <selected|selected-metal|default|ambiguous-default|reject-variant|reject-legacy|retire-selected-cpu|retire-default-cpu|retire-selected-metal|retire-default-metal> <absolute-bridge-directory> <variant>");
     return 2;
 }
 
 try
 {
     string mode = args[0], directory = Path.GetFullPath(args[1]), variant = args[2];
+    if (mode.StartsWith("retire-", StringComparison.Ordinal))
+        return LoadedGenerationRetirement.Run(mode, directory, variant);
     GgmlBackendType backend = mode == "selected-metal" ? GgmlBackendType.Metal : GgmlBackendType.Cpu;
     string entry = Path.Combine(directory, GgmlNativeLoader.EntryLibraryName);
     byte[] bytes = File.ReadAllBytes(entry);

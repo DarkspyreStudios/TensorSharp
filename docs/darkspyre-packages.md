@@ -183,6 +183,11 @@ native imports cannot execute afterwards. The loaded library is never unloaded. 
 BCL-only ownership token prevents another managed load context from loading a second GGML build
 without pinning a foreign collectible assembly. `AcquireLease(GgmlRuntimeResourceKind)` lets
 adapters retain additional resources; it does not replace the mandatory supplier leases.
+Both explicit selection and default probing register the same owned, idempotent `ProcessExit`
+handler. Successful guarded teardown removes that external delegate root before reporting
+`Stopped` and `Released`. Busy or poisoned teardown retains cleanup ownership and does not
+report release. Removing the handler does not reset terminal process ownership or unload the
+native library.
 
 The focused loader tests use ordinary files, symbolic links and isolated collectible managed load
 contexts. They do not load a bridge or qualify a CPU or accelerator backend:
@@ -205,6 +210,17 @@ rejects a second selection. `reject-legacy` verifies the same refusal for a brid
 exact ABI identity. The probes do not qualify model generation, real whole-model handles, CUDA or
 Vulkan execution, Windows dependency loading or other RIDs, nor prove a published package's layout.
 
+`retire-selected-cpu`, `retire-default-cpu`, `retire-selected-metal` and `retire-default-metal`
+load the real fixture, GGML backend and Core assemblies privately in a collectible generation.
+They assert the provenance of the fixture, loader, context, allocator, group, tensor and operation
+registry. They perform real tensor arithmetic, drain host reads, refuse shutdown while contexts,
+tensors, aligned allocations or resource/call leases remain, and drain a pending rank-one callback
+before disposal. A Model-kind lease does not establish actual model loading. Rank-one callbacks
+do not establish multi-device persistent worker shutdown. The foreign invocation frame returns
+only native identity strings and weak references. The outer frame requests GC and verifies
+collection of the generation and its three real assemblies before process exit. The tests do not
+serialize foreign objects through a permanently rooted reflection serializer.
+
 ```sh
 dotnet build eng/tests/ggml-native-runtime/ggml-native-runtime.csproj -c Release -p:TensorSharpSkipGgmlNative=true
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected /absolute/bridge/directory metal
@@ -213,6 +229,10 @@ dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll ambiguous-default /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-variant /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-legacy /absolute/legacy/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-selected-cpu /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-default-cpu /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-selected-metal /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-default-metal /absolute/bridge/directory metal
 ```
 
 `dotnet run --project eng/guard-ggml-interop/guard-ggml-interop.csproj -- --verify .` checks every

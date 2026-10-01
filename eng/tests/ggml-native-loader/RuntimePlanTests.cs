@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using TensorSharp.GGML;
 using Xunit;
@@ -62,6 +63,38 @@ public sealed class RuntimePlanTests
         Assert.Equal("Stopped", owner.State);
         Assert.IsType<InvalidOperationException>(Assert.Throws<TargetInvocationException>(() => owner.Configure(owner.Plan())).InnerException);
         Assert.IsType<InvalidOperationException>((await Assert.ThrowsAsync<TargetInvocationException>(async () => await owner.Initialize())).InnerException);
+    }
+
+    [Fact]
+    public void IdempotentOwnedHookRegistrationIsRemovedBySuccessfulNoLoadShutdown()
+    {
+        WeakReference[] roots = RegisterHookShutdownAndUnload();
+        for (int attempt = 0; attempt < 20 && roots.Any(root => root.IsAlive); attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+        Assert.All(roots, root => Assert.False(root.IsAlive));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] RegisterHookShutdownAndUnload()
+    {
+        var context = new AssemblyLoadContext("owned-hook-no-native-test", isCollectible: true);
+        Assembly assembly = context.LoadFromAssemblyPath(typeof(GgmlNativeLoader).Assembly.Location);
+        Type loader = assembly.GetType(typeof(GgmlNativeLoader).FullName!)!;
+        MethodInfo register = loader.GetMethod("RegisterProcessExitHook", BindingFlags.NonPublic | BindingFlags.Static)!;
+        register.Invoke(null, null);
+        register.Invoke(null, null);
+        FieldInfo hooked = loader.GetField("s_processExitHooked", BindingFlags.NonPublic | BindingFlags.Static)!;
+        Assert.True((bool)hooked.GetValue(null)!);
+        object result = loader.GetMethod("Shutdown")!.Invoke(null, null)!;
+        Assert.True((bool)result.GetType().GetProperty("Released")!.GetValue(result)!);
+        Assert.False((bool)hooked.GetValue(null)!);
+        WeakReference[] roots = [new(context), new(assembly)];
+        context.Unload();
+        return roots;
     }
 
     private sealed class IsolatedOwner : IDisposable
