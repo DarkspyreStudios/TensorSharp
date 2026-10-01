@@ -18,6 +18,38 @@ Model files load from file paths through the upstream path APIs.
 
 `Darkspyre.TensorSharp.Backends.GGML` contains managed code only. A consumer installs a separate
 `Darkspyre.TensorSharp.Backends.GGML.Native.<rid>` baseline package for default native probing.
+
+`GgmlNativeLoader.ResolvePackageCandidatesAsync` explicitly reads deployed package catalogs without
+loading native code. It inspects only `AppContext.BaseDirectory` and the managed supplier assembly's
+directory. Baselines use `ggml/baseline.artifact.json` with the fixed
+`runtimes/<rid>/native/` payload. Optional packages use `ggml/<variant>.artifact.json` with
+`ggml/<variant>/`. The resolver does not scan CWD, PATH, parent repositories or download locations.
+Missing catalogs return no candidates. Loose libraries without a catalog do not establish candidates.
+
+The packer derives each catalog from the validated artifact record. Catalogs retain package/native
+source identities, exact ABI and ggml revision, backend declarations, file sizes/hashes and component
+evidence. Baselines retain flat package notices and also carry the complete verified file closure,
+including licenses, inside the native directory. Their RID-conditional `buildTransitive` targets copy
+that directory and its catalog for output and publish. An explicit target RID takes precedence over
+the SDK host RID. Optional targets apply the same RID condition and copy their payload and sibling
+catalog for output and publish. Other RID packages remain inert and cannot overwrite these bindings.
+
+Resolution rejects malformed/duplicate JSON, unknown fields, conflicting bindings, wrong build/ABI/
+upstream/RID/variant, incomplete component mappings, unsafe or linked paths and missing/stale file
+bytes. It throws `InvalidDataException` with a fixed safe message and no raw filesystem diagnostic.
+Cancellation never returns a partial candidate list. Results and nested file lists are read-only.
+Catalog checks do not establish native initialization, device availability or redistribution permission.
+Package/native source commits pass exact hash syntax and core-component coherence checks. This resolver
+does not compare them to a managed assembly source commit or read a native bridge identity. Verified
+supplier release provenance and actual loaded bridge identity remain separate downstream gates.
+
+Candidates put accelerator primaries first (CUDA then Vulkan; Metal on macOS), followed by baseline
+CPU and CPU alternatives advertised by optional artifacts. Each artifact/backend pair uses the same
+verified files; it does not represent a second independent library. The configured runtime still
+refuses fallback after a potentially loaded failure. A consumer can derive a stable pair identity from
+the catalog RID/variant and candidate backend. Actual bridge identity and backend remain initialization
+observations, not catalog claims. Existing `Check` and initialization validate candidates again.
+
 The native packaging tool selects these baseline variants from its staged input:
 
 | Runtime | File | Backends | Toolchain |

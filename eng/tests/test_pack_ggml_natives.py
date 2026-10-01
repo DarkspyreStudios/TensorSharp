@@ -233,6 +233,11 @@ class PackageCatalogPolicyTests(unittest.TestCase):
         self.assertNotIn("build", catalog)
         self.assertEqual(pack.package_catalog(artifact), pack.package_catalog(artifact))
 
+    def test_catalog_file_portability_matches_runtime_validation(self):
+        for name in ("wild*card", "question?mark", 'quote"name', "pipe|name", "less<name", "greater>name"):
+            with self.subTest(name=name):
+                self.assertFalse(pack.portable_path(name))
+
     def test_baseline_catalog_and_complete_closure_have_fixed_runtime_paths(self):
         for rid, variant in pack.BASELINE.items():
             with self.subTest(rid=rid):
@@ -257,7 +262,7 @@ class PackageCatalogPolicyTests(unittest.TestCase):
         self.assertIn("ggml/vulkan/libGgmlOps.so", contents)
 
     def test_copy_targets_include_catalog_for_output_and_publish(self):
-        document = ET.fromstring(pack.developer_targets("package", "vulkan"))
+        document = ET.fromstring(pack.developer_targets("package", "vulkan", "linux-x64"))
         items = document.findall("ItemGroup/None")
         catalog = next((item for item in items if item.get("Link") == "ggml/vulkan.artifact.json"), None)
         self.assertIsNotNone(catalog)
@@ -275,6 +280,38 @@ class PackageCatalogPolicyTests(unittest.TestCase):
                          {item.get("Link") for item in items})
         self.assertTrue(all(item.get("CopyToOutputDirectory") == "PreserveNewest" and
                             item.get("CopyToPublishDirectory") == "PreserveNewest" for item in items))
+
+    def test_actual_msbuild_evaluation_preserves_catalog_payload_output_and_publish_links(self):
+        (pack.REPO_ROOT / "tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="catalog-copy-", dir=pack.REPO_ROOT / "tmp") as temporary:
+            root = Path(temporary)
+            (root / "buildTransitive").mkdir()
+            (root / "ggml/vulkan").mkdir(parents=True)
+            (root / "runtimes/win-arm64/native/licenses").mkdir(parents=True)
+            for path in ("ggml/vulkan/libGgmlOps.so", "ggml/vulkan.artifact.json",
+                         "ggml/baseline.artifact.json", "runtimes/win-arm64/native/GgmlOps.dll",
+                         "runtimes/win-arm64/native/licenses/ggml-LICENSE.txt"):
+                (root / path).write_text("controlled copy fixture; not native")
+            (root / "buildTransitive/optional.targets").write_bytes(pack.developer_targets("optional", "vulkan", "win-arm64"))
+            (root / "buildTransitive/baseline.targets").write_bytes(pack.baseline_targets("baseline", "win-arm64"))
+            project = root / "copy.proj"
+            project.write_text('<Project><Import Project="buildTransitive/optional.targets" />'
+                               '<Import Project="buildTransitive/baseline.targets" /></Project>')
+            for requested, host, include_baseline in (("win-arm64", "linux-x64", True),
+                                                     ("linux-x64", "win-arm64", False),
+                                                     ("", "win-arm64", True), ("", "linux-x64", False)):
+                result = subprocess.run(["dotnet", "msbuild", str(project), "-nologo", "-getItem:None",
+                                         "-p:RuntimeIdentifier=" + requested, "-p:NETCoreSdkRuntimeIdentifier=" + host],
+                                        capture_output=True, text=True, check=True, timeout=20)
+                items = json.loads(result.stdout)["Items"]["None"]
+                links = {item["Link"] for item in items}
+                self.assertEqual(include_baseline, "ggml/vulkan.artifact.json" in links)
+                self.assertEqual(include_baseline, "ggml/vulkan/libGgmlOps.so" in links)
+                self.assertEqual(include_baseline, "ggml/baseline.artifact.json" in links)
+                if include_baseline:
+                    self.assertIn("runtimes/win-arm64/native/licenses/ggml-LICENSE.txt", links)
+                self.assertTrue(all(item["CopyToOutputDirectory"] == "PreserveNewest" and
+                                    item["CopyToPublishDirectory"] == "PreserveNewest" for item in items))
 
 
 class StagingFilesystemTests(unittest.TestCase):

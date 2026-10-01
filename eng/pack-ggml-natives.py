@@ -13,11 +13,14 @@ Output, in --out (default: <stage>/dist):
   Darkspyre.TensorSharp.Backends.GGML.Native.<rid>.<version>.nupkg
       The RID's baseline build. Native files sit in runtimes/<rid>/native/, where
       the runtime's default probing finds them. License and notice files sit in
-      licenses/ and NOTICE.md at the package root.
+      licenses/ and NOTICE.md at the package root. The complete verified closure also
+      sits in the native directory. RID-conditional buildTransitive targets copy that
+      directory plus ggml/baseline.artifact.json for build output and publish.
   Darkspyre.TensorSharp.Backends.GGML.Native.<rid>.<variant>.<version>.nupkg
       Optional developer package for a non-baseline variant. Files sit in
       ggml/<variant>/; buildTransitive/<id>.targets copies them to
-      <output>/ggml/<variant>/, a directory a GgmlNativeLoader candidate can name.
+      <output>/ggml/<variant>/ plus ggml/<variant>.artifact.json for explicit
+      GgmlNativeLoader.ResolvePackageCandidatesAsync discovery.
       Packages above --developer-package-limit bytes are not written unless
       --allow-oversized is passed.
   ggml-<version>-<rid>-<variant>.zip
@@ -292,19 +295,69 @@ def check_components(directory, build, files, described, entry):
     return components
 
 
-def developer_targets(package_id, variant):
+def package_target_condition(rid):
+    return f"'$(RuntimeIdentifier)' == '{rid}' Or ('$(RuntimeIdentifier)' == '' And '$(NETCoreSdkRuntimeIdentifier)' == '{rid}')"
+
+
+def developer_targets(package_id, variant, rid):
     return f"""<Project>
   <!-- Copies the {variant} GgmlOps artifact to $(OutDir)ggml/{variant}/ and to the publish directory.
-       Pass that directory to GgmlNativeLoader.Select as a candidate. -->
-  <ItemGroup>
+       ResolvePackageCandidatesAsync validates its sibling catalog before selection. -->
+  <ItemGroup Condition="{package_target_condition(rid)}">
     <None Include="$(MSBuildThisFileDirectory)../ggml/{variant}/**"
           Link="ggml/{variant}/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../ggml/{variant}.artifact.json"
+          Link="ggml/{variant}.artifact.json"
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest"
           Visible="false" />
   </ItemGroup>
 </Project>
 """.encode()
+
+
+def baseline_targets(package_id, rid):
+    return f"""<Project>
+  <!-- An explicit target RID wins over the build SDK's host RID. Other RID packages stay inert. -->
+  <ItemGroup Condition="{package_target_condition(rid)}">
+    <None Include="$(MSBuildThisFileDirectory)../runtimes/{rid}/native/**"
+          Link="runtimes/{rid}/native/%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)../ggml/baseline.artifact.json"
+          Link="ggml/baseline.artifact.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Visible="false" />
+  </ItemGroup>
+</Project>
+""".encode()
+
+
+def package_catalog(artifact):
+    """Copy the validated record's identity and closure; never recompute or hand-author hashes."""
+    catalog = {"schema": SCHEMA}
+    catalog.update({key: artifact[key] for key in (
+        "driverId", "rid", "variant", "version", "tensorSharpBuild", "nativeAbi",
+        "tensorSharp", "ggml", "backends", "entryLibrary", "files", "components")})
+    return (json.dumps(catalog, indent=2) + "\n").encode()
+
+
+def native_package_contents(artifact, directory, package_id, baseline):
+    rid, variant, files = artifact["rid"], artifact["variant"], artifact["files"]
+    prefix = f"runtimes/{rid}/native" if baseline else f"ggml/{variant}"
+    contents = [(f"{prefix}/{file['path']}", (directory / file["path"]).read_bytes()) for file in files]
+    if baseline:
+        contents += [(file["path"], (directory / file["path"]).read_bytes())
+                     for file in files if file["path"].startswith("licenses/")]
+    contents += [(f"ggml/{'baseline' if baseline else variant}.artifact.json", package_catalog(artifact)),
+                 (f"buildTransitive/{package_id}.targets", baseline_targets(package_id, rid) if baseline
+                  else developer_targets(package_id, variant, rid))]
+    return contents
 
 
 def check_artifact(rid, variant, directory, record, described, required_exports=None):
@@ -424,6 +477,7 @@ def portable_path(name):
         return False
     parts = name.split("/")
     return (bool(name) and not PurePosixPath(name).is_absolute() and "\\" not in name and ":" not in name
+            and not any(char in '<>"|?*' for char in name)
             and not any(ord(char) < 32 or ord(char) == 127 for char in name)
             and all(part not in ("", ".", "..") and not part.endswith((".", " ")) for part in parts))
 
@@ -722,7 +776,6 @@ def main():
                 if dep["resolution"] not in ("bundled", "os"):
                     requires.setdefault(dep["resolution"], set()).add(Path(dep["name"]).name)
         baseline = BASELINE.get(rid) == variant
-        native_files = [f for f in files if not f["path"].startswith("licenses/")]
         artifact = {
             "driverId": DRIVER_ID,
             "rid": rid,
@@ -760,12 +813,11 @@ def main():
             "inventory": described,
         }
 
-        licenses = [(f["path"], (variant_dir / f["path"]).read_bytes()) for f in files if f["path"].startswith("licenses/")]
         if baseline:
             package_id = f"{PACKAGE_PREFIX}.{rid}"
             title = f"{package_id} {version}"
-            contents = [(f"runtimes/{rid}/native/{f['path']}", (variant_dir / f["path"]).read_bytes()) for f in native_files]
-            contents += licenses + [("NOTICE.md", notice_markdown(title, candidate["components"]))]
+            contents = native_package_contents(artifact, variant_dir, package_id, True)
+            contents += [("NOTICE.md", notice_markdown(title, candidate["components"]))]
             description = (f"GgmlOps baseline native library for {rid} ({', '.join(BACKENDS[variant])}), TensorSharp build {version}. "
                            "Use with Darkspyre.TensorSharp.Backends.GGML.")
             data = nupkg(package_id, version, description, f"darkspyre tensorsharp ggml native {rid}", build["sourceCommit"], contents)
@@ -775,16 +827,12 @@ def main():
             packages.append({"id": package_id, "version": version, "kind": "baseline", "rid": rid, "variant": variant,
                              "fileName": file_name, "size": len(data), "sha256": sha256_bytes(data), "entries": entries})
             artifact["baselinePackage"] = {"id": package_id, "version": version, "nativeDirectory": f"runtimes/{rid}/native",
-                                           "files": [f for f in native_files]}
+                                           "files": files}
         else:
             package_id = f"{PACKAGE_PREFIX}.{rid}.{variant}"
             title = f"{package_id} {version}"
-            contents = [(f"ggml/{variant}/{f['path']}", (variant_dir / f["path"]).read_bytes()) for f in files]
-            contents += [("NOTICE.md", notice_markdown(title, candidate["components"])),
-                         (f"buildTransitive/{package_id}.targets", developer_targets(package_id, variant)),
-                         (f"ggml/{variant}.artifact.json", json.dumps({k: artifact[k] for k in (
-                             "driverId", "rid", "variant", "version", "tensorSharpBuild", "backends", "entryLibrary", "files", "components")},
-                             indent=2).encode())]
+            contents = native_package_contents(artifact, variant_dir, package_id, False)
+            contents += [("NOTICE.md", notice_markdown(title, candidate["components"]))]
             file_name = f"{package_id}.{version}.nupkg"
             size_estimate = len(archive) + 65536
             if size_estimate > args.developer_package_limit and not args.allow_oversized:
