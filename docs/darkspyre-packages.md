@@ -190,8 +190,9 @@ and stops further dependent teardown. For GGML, a generation-local failed-owner 
 retains the actual unsafe model and unregistered storage, supported by the existing live runtime
 owner’s process-exit root and guarded shutdown refusal. It adds no global root or finalizer and
 does not establish equivalent terminal-failure retention for CUDA or MLX owners. This retention
-applies to construction rollback and normal `Dispose` failure. Normal disposal preserves the
-original cleanup exception and stack; repeated teardown after failure refuses before any phase
+applies to construction rollback and failure inside the shared normal `Dispose` pipeline. Cleanup
+outside that pipeline, including the V4.1 vision companion, does not enter this retention path.
+The shared pipeline preserves the original cleanup exception and stack; repeated teardown after failure refuses before any phase
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
 
