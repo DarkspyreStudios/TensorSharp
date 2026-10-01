@@ -1,5 +1,6 @@
 """Packaging validation only. The compiled fixture exports ABI stubs, not a GGML backend."""
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -159,7 +160,6 @@ class ArtifactPolicyTests(unittest.TestCase):
                        "dependencies": "not inspected"},
                       {"path": "dependency.dll", "format": "pe", "identity": {"arch": "arm64"},
                        "dependencies": [], "runpath": ["/build-machine/lib"]},
-                      {"path": "VCRUNTIME140.dll", "format": "other"},
                       {"path": "NVCUDA.DLL", "format": "other"}):
             with self.subTest(extra=extra):
                 self.assertTrue(self.check(self.facts(), [extra]))
@@ -258,11 +258,29 @@ class StagingFilesystemTests(unittest.TestCase):
         self.build_dir.mkdir(parents=True)
         self.build = {"tensorSharpBuild": self.version, "sourceCommit": self.source, "ggmlCommit": self.ggml,
                       "rid": self.rid, "variant": self.variant, "nativeAbi": self.abi}
+        self.build["components"] = []
+        for expected in pack.core_component_specs(self.build, self.entry):
+            self.build["components"].append({key: value for key, value in expected.items() if key not in ("binaryPaths", "evidencePaths")} | {
+                "binaryFiles": [self.reference(name) for name in expected["binaryPaths"]],
+                "evidenceFiles": [self.reference(name) for name in expected["evidencePaths"]]})
         self.write_build()
         self.out = self.root / "output"
 
     def write_build(self):
         (self.build_dir / "build-identity.json").write_text(json.dumps(self.build), encoding="utf-8")
+
+    def reference(self, name):
+        return {key: value for key, value in pack.file_record(self.artifact, self.artifact / name).items() if key != "executable"}
+
+    def add_runtime_component(self, name, identifier="runtime-one", evidence="licenses/provider-notice.txt"):
+        shutil.copyfile(self.library, self.artifact / name)
+        (self.artifact / evidence).write_text("Provider redistribution notice inspection fixture\n")
+        component = {"id": identifier, "name": "Fixture runtime", "kind": "redistributed", "supplier": "Fixture provider",
+                     "version": "1.2.3", "sourceId": "fixture:release-1.2.3", "binaryFiles": [self.reference(name)],
+                     "evidenceFiles": [self.reference(evidence)]}
+        self.build["components"].append(component)
+        self.write_build()
+        return component
 
     def run_cli(self, *extra):
         messages = io.StringIO()
@@ -276,6 +294,94 @@ class StagingFilesystemTests(unittest.TestCase):
         code, output = self.run_cli("--validate-only")
         self.assertEqual(0, code, output)
         self.assertIn("validated 1 staged artifacts; no output written", output)
+
+    def test_supplied_components_can_share_actual_evidence_without_a_filename_legal_claim(self):
+        suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
+        self.add_runtime_component("libfirst" + suffix)
+        self.add_runtime_component("libsecond" + suffix, "runtime-two")
+        code, output = self.run_cli("--validate-only")
+        self.assertEqual(0, code, output)
+        artifacts, errors = pack.collect_artifacts(self.stage, self.version, self.ggml)
+        self.assertEqual([], errors)
+        self.assertEqual(self.build["components"], artifacts[0]["components"])
+        notice = pack.notice_markdown("Fixture package", artifacts[0]["components"]).decode()
+        self.assertIn("Fixture provider / 1.2.3", notice)
+        self.assertIn("licenses/provider-notice.txt", notice)
+        self.assertIn("do not certify redistribution permission", notice)
+        self.assertNotIn("Distributable Code", notice)
+
+    def test_missing_or_forged_component_identity_refuses(self):
+        original = copy.deepcopy(self.build["components"])
+        for changed in (None, [], original[:1], original + original[:1],
+                        [original[0] | {"sourceId": "git:" + "9" * 40}, original[1]],
+                        [original[0] | {"supplier": "somebody else"}, original[1]]):
+            self.build["components"] = changed
+            self.write_build()
+            with self.subTest(changed=changed):
+                code, output = self.run_cli("--validate-only")
+                self.assertEqual(1, code, output)
+
+    def test_empty_stale_missing_non_text_or_unmapped_evidence_refuses(self):
+        source = self.artifact / pack.REQUIRED_LICENSES[0]
+        original = source.read_bytes()
+        for data in (b"", b" \n", b"altered license", b"binary\0notice", b"\xff\xfe"):
+            source.write_bytes(data)
+            self.build["components"][0]["evidenceFiles"] = [self.reference(pack.REQUIRED_LICENSES[0])]
+            if data == b"altered license":
+                self.build["components"][0]["evidenceFiles"][0]["sha256"] = "0" * 64
+            self.write_build()
+            with self.subTest(data=data):
+                code, output = self.run_cli("--validate-only")
+                self.assertEqual(1, code, output)
+        source.write_bytes(original)
+        self.build["components"][0]["evidenceFiles"] = [self.reference(pack.REQUIRED_LICENSES[0])]
+        self.write_build()
+        (self.artifact / "licenses/unclaimed.txt").write_text("unmapped notice")
+        code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("unmapped staged component", output)
+
+    def test_native_siblings_need_exhaustive_non_conflicting_mapping(self):
+        suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
+        name = "libruntime" + suffix
+        component = self.add_runtime_component(name)
+        original = copy.deepcopy(self.build["components"])
+        for changed in (original[:2], original + [component | {"id": "competing-runtime"}],
+                        original[:2] + [component | {"kind": "static"}],
+                        original[:2] + [component | {"binaryFiles": [self.reference(self.entry)]}]):
+            self.build["components"] = changed
+            self.write_build()
+            with self.subTest(changed=changed):
+                code, output = self.run_cli("--validate-only")
+                self.assertEqual(1, code, output)
+
+    def test_evidence_paths_cannot_collide_on_case_insensitive_targets(self):
+        suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
+        component = self.add_runtime_component("libruntime" + suffix)
+        duplicate = copy.deepcopy(component)
+        duplicate["id"] = "case-collision"
+        duplicate["binaryFiles"] = [self.reference("libruntime" + suffix) | {"path": "LIBRUNTIME" + suffix}]
+        self.build["components"].append(duplicate)
+        self.write_build()
+        code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("case-conflicting", output)
+
+    def test_component_paths_sizes_hashes_and_supplier_identity_refuse_malformed_input(self):
+        original = copy.deepcopy(self.build["components"])
+        for field, value in (("path", "../outside.txt"), ("path", "/absolute.txt"), ("path", "licenses\\notice.txt"),
+                             ("path", "licenses/../notice.txt"), ("size", True), ("size", -1), ("sha256", "BAD")):
+            self.build["components"] = copy.deepcopy(original)
+            self.build["components"][0]["evidenceFiles"][0][field] = value
+            self.write_build()
+            with self.subTest(field=field, value=value):
+                self.assertEqual(1, self.run_cli("--validate-only")[0])
+        for field in ("supplier", "version", "sourceId"):
+            self.build["components"] = copy.deepcopy(original)
+            self.build["components"][0][field] = " "
+            self.write_build()
+            with self.subTest(field=field):
+                self.assertEqual(1, self.run_cli("--validate-only")[0])
 
     def test_complete_validation_and_release_output_refuse_a_partial_stage(self):
         for arguments in (("--validate-only", "--complete-release"), ()):

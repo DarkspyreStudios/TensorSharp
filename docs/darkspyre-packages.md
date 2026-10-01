@@ -83,6 +83,51 @@ the bridge hash, CMake cache hash and settings, actual compiler output, exact CP
 deployment target. CUDA13 records include observed toolkit compiler output and every compiled
 SASS/PTX architecture. Target and GPU execution remain explicitly unrecorded by this inspection.
 
+### Component evidence
+
+The build record and schema-1 artifact manifest include `components`. Each component records an
+ID, name, kind, supplier, exact version and source ID. `binaryFiles` and `evidenceFiles` contain
+relative paths, positive byte sizes and lowercase SHA-256 hashes. The two core records associate
+the bridge with TensorSharp and statically linked ggml. The provenance helper copies their actual
+source `LICENSE` bytes after verifying clean TensorSharp and pinned ggml sources. The ggml record
+uses its exact pinned commit as its version identity.
+
+`--redist-dir` requires `--redist-manifest`. The UTF-8 mapping has this shape:
+
+```json
+{
+  "schema": "tensorsharp-native-redistribution/1",
+  "components": [
+    {
+      "id": "supplier-runtime",
+      "name": "Supplier runtime",
+      "kind": "redistributed",
+      "supplier": "Supplier name",
+      "version": "exact-supplier-version",
+      "sourceId": "exact-supplier-release-or-package-identity",
+      "binaryFiles": [{ "path": "runtime-library-name", "size": 123, "sha256": "actual-64-character-lowercase-digest" }],
+      "evidenceFiles": [{ "path": "licenses/supplier-notice.txt", "size": 456, "sha256": "actual-64-character-lowercase-digest" }]
+    }
+  ]
+}
+```
+
+The example describes fields, not usable redistribution inputs. The provenance helper copies only
+declared files. It rejects extra input files, stale hashes, absent or empty evidence, non-text notices,
+links, unsafe or case-conflicting paths, conflicting ownership and core-file overwrites. Binary files
+must sit at the redistribution directory's top level. Evidence must sit under `licenses/`. The
+mapping may sit outside that directory or inside it; the helper does not copy the mapping itself.
+Multiple components may reference the same supplied evidence. Each redistributed native sibling
+has one component owner. The packer independently verifies exhaustive staged-file coverage and
+actual inspected native formats. Partial validation applies the same evidence checks without
+requiring every RID/variant or a fetched ggml checkout.
+
+Flat manifest `notices` and staged package/archive license bytes remain unchanged. Generated
+package `NOTICE.md` identifies components, exact supplier identities and supplied evidence paths.
+A filename does not establish legal permission. Core license records do not certify complete
+inline/static third-party attribution coverage, optional compiled dependencies or toolkit
+redistribution permission. Actual source/toolkit notice review remains a separate release gate.
+
 ## Native candidate validation
 
 `GgmlNativeLoader.Check` inspects a candidate without loading native code. It checks the managed

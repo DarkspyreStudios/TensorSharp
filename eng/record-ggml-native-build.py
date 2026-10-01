@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -19,7 +20,7 @@ CUDA_ARCHITECTURES = "75-real;80-real;86-real;89-real;120-real;120-virtual"
 INPUTS = ["TensorSharp.GGML.Native", "TensorSharp.Backends.GGML", "eng/GgmlNativeIdentity.cmake",
           "eng/GgmlNativeIdentity.targets", "eng/build-ggml-natives.sh", "eng/record-ggml-native-build.py",
           "eng/pack-ggml-natives.py", "eng/native-artifact-manifest.py", "eng/guard-ggml-interop",
-          "eng/ggml-required-exports.json", "eng/ggml-revision", "Directory.Build.props"]
+          "eng/ggml-required-exports.json", "eng/ggml-revision", "Directory.Build.props", "LICENSE"]
 
 
 def command(arguments):
@@ -52,7 +53,70 @@ def verify_clean_source(root, source):
     return pinned
 
 
-def create_record(root, build_dir, binary, rid, variant, source):
+def stage_components(root, binary, build, redist_dir=None, redist_manifest=None):
+    directory = binary.parent
+    components, contents = [], {}
+    for expected in pack.core_component_specs(build, binary.name):
+        source = root / ("LICENSE" if expected["id"] == "tensorsharp" else "ExternalProjects/ggml/LICENSE")
+        text = pack.read_build_file(source)
+        if not text.strip():
+            raise ValueError("source license is empty: " + str(source))
+        data = source.read_bytes()
+        evidence = {"path": expected["evidencePaths"][0], "size": len(data), "sha256": pack.sha256_bytes(data)}
+        components.append({key: value for key, value in expected.items() if key not in ("binaryPaths", "evidencePaths")} | {
+            "binaryFiles": [{"path": binary.name, "size": binary.stat().st_size, "sha256": build["bridgeSha256"]}],
+            "evidenceFiles": [evidence]})
+        contents[evidence["path"]] = (source, evidence)
+    if (redist_dir is None) != (redist_manifest is None):
+        raise ValueError("--redist-dir requires an explicit --redist-manifest and vice versa")
+    if redist_dir is not None:
+        redist_dir, redist_manifest = redist_dir.absolute(), redist_manifest.absolute()
+        manifest = json.loads(pack.read_build_file(redist_manifest.absolute()))
+        if (not isinstance(manifest, dict) or set(manifest) != {"schema", "components"}
+                or manifest["schema"] != "tensorsharp-native-redistribution/1"):
+            raise ValueError("malformed redistribution mapping")
+        supplied = manifest["components"]
+        pack.validate_component_shape(supplied)
+        expected_files = set()
+        for component in supplied:
+            if component["id"] in ("tensorsharp", "ggml") or component["kind"] != "redistributed":
+                raise ValueError("redistribution mapping cannot override core components")
+            for reference in component["binaryFiles"] + component["evidenceFiles"]:
+                name = reference["path"]
+                if name in {binary.name, *pack.REQUIRED_LICENSES}:
+                    raise ValueError("redistribution mapping cannot overwrite bridge or core licenses")
+                pack.verify_component_file(redist_dir, reference)
+                if name in contents and contents[name][1] != reference:
+                    raise ValueError("conflicting supplied component evidence: " + name)
+                contents[name] = (redist_dir / name, reference)
+                expected_files.add(name)
+        actual_files = {path.relative_to(redist_dir).as_posix() for path in pack.regular_files(redist_dir.absolute())}
+        try:
+            actual_files.discard(redist_manifest.absolute().relative_to(redist_dir.absolute()).as_posix())
+        except ValueError:
+            pass
+        if actual_files != expected_files:
+            raise ValueError("unmapped redistribution files: " + ", ".join(sorted(actual_files - expected_files)))
+        components += supplied
+    pack.validate_component_shape(components)
+    for name, (source, reference) in contents.items():
+        destination = directory / name
+        pack.require_unlinked(destination.absolute())
+        if destination.exists():
+            raise ValueError("component staging refuses existing evidence or runtime file: " + name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        pack.verify_component_file(directory, reference)
+    files = [pack.file_record(directory, path) for path in pack.regular_files(directory.absolute())]
+    described = [pack.INVENTORY.describe(item["path"], build["rid"], build["variant"], directory / item["path"]) for item in files]
+    validated = pack.check_components(directory, build | {"components": components}, files, described, binary.name)
+    errors = pack.check_artifact(build["rid"], build["variant"], directory, {"files": files}, described)
+    if errors:
+        raise ValueError("; ".join(errors))
+    return validated
+
+
+def create_record(root, build_dir, binary, rid, variant, source, redist_dir=None, redist_manifest=None):
     if rid not in pack.VARIANTS or variant not in pack.VARIANTS[rid]:
         raise ValueError("unsupported release RID/variant")
     pack.require_unlinked(binary.absolute())
@@ -119,6 +183,7 @@ def create_record(root, build_dir, binary, rid, variant, source):
         record["cuda"] = {"compiler": compiler, "compilerVersion": compiler_version,
                           "toolkitVersion": match[1] + "." + match[2],
                           "architectures": CUDA_ARCHITECTURES.split(";")}
+    record["components"] = stage_components(root, binary, record, redist_dir, redist_manifest)
     verify_clean_source(root, source)
     return record
 
@@ -131,9 +196,13 @@ def main():
     parser.add_argument("--variant", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--redist-dir", type=Path)
+    parser.add_argument("--redist-manifest", type=Path,
+                        help="explicit component, binary and license/notice mapping with exact input hashes")
     args = parser.parse_args()
     try:
-        record = create_record(ROOT, args.build_dir, args.binary, args.rid, args.variant, args.source_commit)
+        record = create_record(ROOT, args.build_dir, args.binary, args.rid, args.variant, args.source_commit,
+                               args.redist_dir, args.redist_manifest)
         pack.require_unlinked(args.out.absolute())
         args.out.mkdir(parents=True, exist_ok=True)
         for name in ("build-identity.json", "cmake-settings.txt"):
@@ -143,7 +212,7 @@ def main():
         (args.out / "cmake-settings.txt").write_text("".join(f"{key}={settings[key]}\n" for key in sorted(settings)), encoding="utf-8")
         print("Recorded verified build identity; target/GPU execution is not asserted: " + str(args.out))
         return 0
-    except (OSError, ValueError, subprocess.SubprocessError, ET.ParseError) as error:
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError, ET.ParseError) as error:
         parser.exit(1, "error: " + str(error) + "\n")
 
 

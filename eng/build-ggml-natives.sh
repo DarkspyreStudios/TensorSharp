@@ -4,7 +4,7 @@
 #
 # Usage:
 #   eng/build-ggml-natives.sh --rid <rid> --variant <variant> [--out <dir>]
-#                             [--redist-dir <dir>] [-- <extra cmake args>]
+#                             [--redist-dir <dir> --redist-manifest <json>] [-- <extra cmake args>]
 #
 #   --rid         osx-arm64, linux-x64 or linux-arm64. The script refuses a RID
 #                 that is not the build machine's own OS and architecture.
@@ -14,7 +14,8 @@
 #   --redist-dir  a directory of third-party runtime libraries to ship beside the
 #                 bridge, for example the CUDA runtime and cuBLAS. It must hold
 #                 the libraries at its top level and their license and notice
-#                 files under licenses/. The script copies both.
+#                 files under licenses/. --redist-manifest supplies the explicit
+#                 component/file mapping and hashes. Only declared files copy.
 #
 # Release natives come from a clean tree: the ggml commit in eng/ggml-revision,
 # a separate build directory per RID and variant, and the TensorSharp version in
@@ -35,6 +36,7 @@ RID=""
 VARIANT=""
 OUT=""
 REDIST_DIR=""
+REDIST_MANIFEST=""
 EXTRA_ARGS=()
 while (($# > 0)); do
     case "$1" in
@@ -42,6 +44,7 @@ while (($# > 0)); do
         --variant) VARIANT="$2"; shift ;;
         --out) OUT="$2"; shift ;;
         --redist-dir) REDIST_DIR="$2"; shift ;;
+        --redist-manifest) REDIST_MANIFEST="$2"; shift ;;
         --) shift; EXTRA_ARGS+=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -49,10 +52,14 @@ while (($# > 0)); do
 done
 
 [[ -n "${RID}" && -n "${VARIANT}" ]] || { echo "--rid and --variant are required" >&2; exit 2; }
+if [[ ( -n "${REDIST_DIR}" && -z "${REDIST_MANIFEST}" ) || ( -z "${REDIST_DIR}" && -n "${REDIST_MANIFEST}" ) ]]; then
+    echo "error: --redist-dir and --redist-manifest must be supplied together." >&2
+    exit 2
+fi
 
 VERSION="$(sed -n 's:.*<TensorSharpVersion>\(.*\)</TensorSharpVersion>.*:\1:p' "${REPO_ROOT}/Directory.Build.props" | head -n 1)"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native TensorSharp.Backends.GGML eng/GgmlNativeIdentity.cmake eng/GgmlNativeIdentity.targets eng/build-ggml-natives.sh eng/record-ggml-native-build.py eng/pack-ggml-natives.py eng/native-artifact-manifest.py eng/guard-ggml-interop eng/ggml-required-exports.json eng/ggml-revision Directory.Build.props)" ]]; then
+if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native TensorSharp.Backends.GGML eng/GgmlNativeIdentity.cmake eng/GgmlNativeIdentity.targets eng/build-ggml-natives.sh eng/record-ggml-native-build.py eng/pack-ggml-natives.py eng/native-artifact-manifest.py eng/guard-ggml-interop eng/ggml-required-exports.json eng/ggml-revision Directory.Build.props LICENSE)" ]]; then
     echo "error: native source, managed ABI or build inputs have uncommitted changes; a release native must be built from a commit." >&2
     exit 1
 fi
@@ -135,28 +142,17 @@ STAGE="${OUT}/runtimes/${RID}/native/${VARIANT}"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/licenses"
 cp "${BUILD_DIR}/${ENTRY}" "${STAGE}/${ENTRY}"
-cp "${REPO_ROOT}/LICENSE" "${STAGE}/licenses/TensorSharp-LICENSE.txt"
-cp "${REPO_ROOT}/ExternalProjects/ggml/LICENSE" "${STAGE}/licenses/ggml-LICENSE.txt"
-
-if [[ -n "${REDIST_DIR}" ]]; then
-    compgen -G "${REDIST_DIR}/licenses/*" >/dev/null || {
-        echo "error: ${REDIST_DIR}/licenses holds no license or notice files." >&2
-        exit 1
-    }
-    find "${REDIST_DIR}" -maxdepth 1 -type f -exec cp {} "${STAGE}/" \;
-    cp "${REDIST_DIR}/licenses/"* "${STAGE}/licenses/"
-fi
-for forbidden in libcuda.so libcuda.so.1 nvcuda.dll; do
-    [[ ! -e "${STAGE}/${forbidden}" ]] || { echo "error: the NVIDIA driver library ${forbidden} must not ship." >&2; exit 1; }
-done
-
 # The build record sits outside the artifact directory; the packer copies it
 # into the artifact manifest.
 RECORD="${OUT}/build/${RID}-${VARIANT}"
 rm -rf "${RECORD}"
 mkdir -p "${RECORD}"
+REDIST_ARGS=()
+if [[ -n "${REDIST_DIR}" ]]; then
+    REDIST_ARGS+=(--redist-dir "${REDIST_DIR}" --redist-manifest "${REDIST_MANIFEST}")
+fi
 python3 "${SCRIPT_DIR}/record-ggml-native-build.py" --build-dir "${BUILD_DIR}" \
     --binary "${STAGE}/${ENTRY}" --rid "${RID}" --variant "${VARIANT}" \
-    --source-commit "${SOURCE_COMMIT}" --out "${RECORD}"
+    --source-commit "${SOURCE_COMMIT}" --out "${RECORD}" ${REDIST_ARGS[@]+"${REDIST_ARGS[@]}"}
 echo "Staged ${STAGE}"
 ls -l "${STAGE}"
