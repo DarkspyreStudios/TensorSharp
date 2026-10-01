@@ -52,7 +52,7 @@ done
 
 VERSION="$(sed -n 's:.*<TensorSharpVersion>\(.*\)</TensorSharpVersion>.*:\1:p' "${REPO_ROOT}/Directory.Build.props" | head -n 1)"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native TensorSharp.Backends.GGML eng/GgmlNativeIdentity.cmake eng/GgmlNativeIdentity.targets eng/build-ggml-natives.sh eng/record-ggml-native-build.py eng/pack-ggml-natives.py eng/native-artifact-manifest.py eng/ggml-revision Directory.Build.props)" ]]; then
+if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native TensorSharp.Backends.GGML eng/GgmlNativeIdentity.cmake eng/GgmlNativeIdentity.targets eng/build-ggml-natives.sh eng/record-ggml-native-build.py eng/pack-ggml-natives.py eng/native-artifact-manifest.py eng/guard-ggml-interop eng/ggml-required-exports.json eng/ggml-revision Directory.Build.props)" ]]; then
     echo "error: native source, managed ABI or build inputs have uncommitted changes; a release native must be built from a commit." >&2
     exit 1
 fi

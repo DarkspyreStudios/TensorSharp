@@ -194,7 +194,7 @@ def developer_targets(package_id, variant):
 """.encode()
 
 
-def check_artifact(rid, variant, directory, record, described):
+def check_artifact(rid, variant, directory, record, described, required_exports=None):
     errors = []
     if variant not in VARIANTS.get(rid, ()):
         return [f"{rid}/{variant}: unsupported RID/variant pair"]
@@ -210,6 +210,13 @@ def check_artifact(rid, variant, directory, record, described):
         errors.append(f"{rid}/{variant}: {entry} is not a native bridge for this RID")
     if primary.get("tsggmlBuildIdentityExport") is not True:
         errors.append(f"{rid}/{variant}: {entry} does not export TSGgml_GetBuildIdentity")
+    if required_exports is not None:
+        symbols = primary.get("functionExports")
+        if not isinstance(symbols, list) or any(not isinstance(name, str) for name in symbols):
+            errors.append(f"{rid}/{variant}: bridge exports were not inspected")
+        else:
+            for name in sorted(set(required_exports) - set(symbols)):
+                errors.append(f"{rid}/{variant}: missing required managed entrypoint {name}")
     os_part, _, arch_part = rid.partition("-")
     siblings = {}
     for item in described:
@@ -286,6 +293,21 @@ def native_abi(root):
     return sha256_bytes(manifest.encode("utf-8"))
 
 
+def read_required_exports(root):
+    inventory = json.loads(read_build_file(root / "eng/ggml-required-exports.json"))
+    if (not isinstance(inventory, dict) or set(inventory) != {"schema", "nativeAbi", "ggmlCommit", "exports"}
+            or inventory["schema"] != "tensorsharp-ggml-required-exports/1"
+            or inventory["nativeAbi"] != native_abi(root)
+            or inventory["ggmlCommit"] != (root / "eng/ggml-revision").read_text(encoding="utf-8").strip()):
+        raise ValueError("the required-export inventory does not match the exact managed/native ABI and upstream")
+    names = inventory["exports"]
+    if (not isinstance(names, list) or not names
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*", name, re.ASCII) for name in names)
+            or len(set(names)) != len(names) or names != sorted(names)):
+        raise ValueError("the required-export inventory must contain unique sorted literal entrypoint names")
+    return names
+
+
 def portable_path(name):
     if not isinstance(name, str):
         return False
@@ -342,6 +364,7 @@ def collect_artifacts(stage, version, ggml_commit):
     artifacts = []
     errors = []
     expected_abi = native_abi(REPO_ROOT)
+    required_exports = read_required_exports(REPO_ROOT)
     for rid_dir in directories(stage / "runtimes"):
         rid = rid_dir.name
         if rid not in VARIANTS:
@@ -369,7 +392,7 @@ def collect_artifacts(stage, version, ggml_commit):
                 build["cmakeSettings"] = read_build_file(settings_path).splitlines() if settings_path.exists() or settings_path.is_symlink() else []
                 files = [file_record(variant_dir, path) for path in paths]
                 described = [INVENTORY.describe(f["path"], rid, variant, variant_dir / f["path"]) for f in files]
-                errors += check_artifact(rid, variant, variant_dir, {"files": files}, described)
+                errors += check_artifact(rid, variant, variant_dir, {"files": files}, described, required_exports)
                 entry = ENTRY[rid.split("-")[0]]
                 identity = read_identity(variant_dir / entry) if entry in {f["path"] for f in files} else None
                 if identity is None:

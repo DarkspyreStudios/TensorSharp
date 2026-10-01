@@ -18,7 +18,8 @@ spec.loader.exec_module(pack)
 CUDA_ARCHITECTURES = "75-real;80-real;86-real;89-real;120-real;120-virtual"
 INPUTS = ["TensorSharp.GGML.Native", "TensorSharp.Backends.GGML", "eng/GgmlNativeIdentity.cmake",
           "eng/GgmlNativeIdentity.targets", "eng/build-ggml-natives.sh", "eng/record-ggml-native-build.py",
-          "eng/pack-ggml-natives.py", "eng/native-artifact-manifest.py", "eng/ggml-revision", "Directory.Build.props"]
+          "eng/pack-ggml-natives.py", "eng/native-artifact-manifest.py", "eng/guard-ggml-interop",
+          "eng/ggml-required-exports.json", "eng/ggml-revision", "Directory.Build.props"]
 
 
 def command(arguments):

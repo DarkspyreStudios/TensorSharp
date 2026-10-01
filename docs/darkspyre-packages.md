@@ -45,6 +45,12 @@ export. Binary identity must match the source, ggml, RID, variant and version in
 Inspection-tool failures do not count as empty dependency lists. A supplied managed package must
 have the release's exact identity/version and no native payload.
 
+`eng/ggml-required-exports.json` records the literal entrypoints used by the guarded managed
+interop declarations. The existing Roslyn guard tool generates it with `--inventory` without
+rewriting sources. The inventory binds to the exact native ABI and pinned ggml commit. Artifact
+validation requires every listed symbol and refuses missing or uninspected exports. Additional
+raw backend exports are permitted. CPU artifacts do not require CUDA/Vulkan-only upstream APIs.
+
 Release output requires all 12 RID/variant pairs: macOS ARM64 Metal; Linux x64 and ARM64 CPU,
 Vulkan and CUDA13; Windows x64 CPU, Vulkan and CUDA13; and Windows ARM64 CPU and Vulkan.
 Missing, unsupported or duplicate pairs fail before output is written. Bundled dependencies must
@@ -62,9 +68,10 @@ and must stay immutable through packaging. Existing output is not removed on val
 python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only
 python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only --complete-release
 python3 -B -m unittest discover -s eng/tests -p test_pack_ggml_natives.py
+dotnet run --project eng/guard-ggml-interop/guard-ggml-interop.csproj -- --inventory .
 ```
 
-The packaging tests inspect actual native headers and exports from a tiny compiled identity
+The packaging tests inspect actual native headers and exports from a tiny compiled ABI-stub
 fixture, ordinary files and symbolic links. The fixture contains no GGML backend. These tests do
 not qualify model loading, native lifecycle or accelerator execution.
 

@@ -1,4 +1,4 @@
-"""Packaging validation only. The compiled fixture exports an identity, not a GGML backend."""
+"""Packaging validation only. The compiled fixture exports ABI stubs, not a GGML backend."""
 import contextlib
 import importlib.util
 import io
@@ -228,7 +228,9 @@ class StagingFilesystemTests(unittest.TestCase):
         cls.abi = pack.native_abi(pack.REPO_ROOT)
         identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu=portable;abi={cls.abi}"
         source_path = Path(cls.fixture.name) / "identity.c"
-        source_path.write_text(f"const char *TSGgml_GetBuildIdentity(void) {{ return {json.dumps(identity)}; }}\n", encoding="utf-8")
+        stubs = "".join(f"void {name}(void) {{}}\n" for name in pack.read_required_exports(pack.REPO_ROOT)
+                        if name != "TSGgml_GetBuildIdentity")
+        source_path.write_text(f"const char *TSGgml_GetBuildIdentity(void) {{ return {json.dumps(identity)}; }}\n" + stubs, encoding="utf-8")
         flags = ["-dynamiclib"] if host[0] == "Darwin" else ["-shared", "-fPIC"]
         try:
             subprocess.run([compiler, *flags, str(source_path), "-o", str(cls.library)], check=True, capture_output=True)
@@ -306,6 +308,18 @@ class StagingFilesystemTests(unittest.TestCase):
             code, output = self.run_cli("--validate-only")
         self.assertEqual(1, code, output)
         self.assertIn("not an inspected native sibling", output)
+
+    def test_a_missing_required_symbol_fails_before_any_release_output(self):
+        describe = pack.INVENTORY.describe
+        def altered(*args):
+            result = describe(*args)
+            if result["path"] == self.entry:
+                result["functionExports"].remove("ggml_quantize_chunk")
+            return result
+        with patch.object(pack.INVENTORY, "describe", side_effect=altered):
+            code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("missing required managed entrypoint ggml_quantize_chunk", output)
 
     def test_invalid_build_records_fail_before_packaging(self):
         for key, value in (("tensorSharpBuild", "wrong"), ("sourceCommit", "2" * 40), ("sourceCommit", "not-a-commit"),
