@@ -58,6 +58,14 @@ The packaging tests inspect actual native headers and exports from a tiny compil
 fixture, ordinary files and symbolic links. The fixture contains no GGML backend. These tests do
 not qualify model loading, native lifecycle or accelerator execution.
 
+`eng/build-ggml-natives.sh` records provenance through `eng/record-ggml-native-build.py`. The record
+checks the built bridge's identity, native header, architecture and identity export against the
+committed source and actual CMake cache. It rejects modified source or ggml inputs, a host-specific
+CPU profile, a mismatched accelerator, and a Linux runpath other than `$ORIGIN`. The record includes
+the bridge hash, CMake cache hash and settings, actual compiler output, exact CPU floor and macOS
+deployment target. CUDA13 records include observed toolkit compiler output and every compiled
+SASS/PTX architecture. Target and GPU execution remain explicitly unrecorded by this inspection.
+
 ## Native candidate validation
 
 `GgmlNativeLoader.Check` inspects a candidate without loading native code. It checks the managed
