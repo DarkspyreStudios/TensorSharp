@@ -47,3 +47,37 @@ before checking collection.
 
 The fixture does not qualify pretrained or complete quantized models,
 whole-native executors, multiple devices, captured CUDA teardown or other operating systems.
+
+## DeepSeek41 Vision Lifetime
+
+`vision-normal`, `vision-mismatch` and `observe-vision-cleanup-refusal` generate a complete
+one-layer F32 DeepSeek41 text GGUF with 129265 tokenizer entries and the exact image token at
+129264. The text file is 36105440 bytes. Its 38 tensors include the real Engram, compressor,
+indexer, hyper-connection and expert weights required by the native loader. The matching real
+vision companion has one four-dimensional layer, 19 F32 tensors and 7840 bytes. The mismatch
+companion declares text dimension 64. Neither generator downloads a model or requires Python
+packages. Files exist only under the supplied repository `TMPDIR` and are deleted in `finally`.
+
+The three modes qualify lifetime behavior on the preserved bridge's CPU backend. `vision-normal`
+normally constructs the actual DeepSeek41Model, loads and attaches its real vision companion,
+then explicitly disposes all text/vision native handles before guarded shutdown and foreign
+generation collection. `vision-mismatch` receives a real native vision handle and its actual
+VisionInfo before validation refuses the dimension mismatch. Successful rollback preserves
+the original validation error, frees that handle and leaves native text reset and the original
+tokenizer usable. No text forward, image encode, mixed-logit or pretrained accuracy is tested.
+
+`observe-vision-cleanup-refusal` installs a test-only delegating ITokenizer wrapper through the
+existing protected setter. Only image-placeholder lookup poisons the existing GGML owner and
+throws an original validation error. Every other operation delegates unchanged. The original
+tokenizer restores in `finally`. The current catch's guarded Free throws a different error,
+masks the original and leaves the real returned vision handle in the native ownership table,
+but the model's `_vision` field is zero. The actual model weak reference collects after
+diagnostic finalizer drainage while both native text/vision handles remain tracked. This red
+distinguishes native-table accounting from actual instance ownership. Guarded shutdown refuses
+and the complete foreign generation stays rooted. The mode performs no native call or pointer
+read after poisoning and does not claim an actual GPU fault or successful cleanup.
+
+Metal class execution is unqualified. DeepSeek4Model normalizes its base constructor to
+GgmlCpu. A runtime already initialized as Metal refuses that CPU request before the text
+executor loads. The fixture does not bypass that owner policy. These modes do not qualify
+physical multi-device execution, CUDA/MLX, vision encode, production failure routing or release.
