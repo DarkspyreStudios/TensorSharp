@@ -29,6 +29,9 @@ namespace TensorSharp.Models
 
     public abstract partial class ModelBase : IModelArchitecture
     {
+        private static readonly List<ModelBase> FailedGgmlConstructionOwners = new();
+        private readonly List<IDisposable> _failedConstructionResources = new();
+        private bool _constructionCleanupFailed;
         public ModelConfig Config { get; protected set; }
         public ITokenizer Tokenizer { get; protected set; }
         public IMultimodalInjector MultimodalInjector { get; }
@@ -37,6 +40,8 @@ namespace TensorSharp.Models
         protected readonly GgufFile _gguf;
         private readonly GgmlContext _ggmlContext;
         private readonly bool _ownsGgmlContext;
+        private readonly ITensorParallelGroup _borrowedTensorParallelGroup;
+        private readonly bool _allocatorFromTensorParallelGroup;
         private readonly IDisposable _ggmlRuntimeLease;
         protected readonly IAllocator _allocator;
         protected readonly BackendType _backend;
@@ -257,6 +262,7 @@ namespace TensorSharp.Models
         {
             LayerSplitDegree = Math.Max(1, layerSplitDegree);
             _backend = backend;
+            _borrowedTensorParallelGroup = tpGroup;
             // The pure-C# CPU backend must never touch native (ggml P/Invoke) dequant — route
             // every dequant/row-size through the managed implementation (bit-exact vs native,
             // verified). Other backends keep native dequant (faster load; their runtime quant
@@ -265,66 +271,68 @@ namespace TensorSharp.Models
             ExecutionPlan = new BackendExecutionPlan(backend);
             MultimodalInjector = new ModelMultimodalInjector(this);
 
-            if (tpGroup != null)
-                _tpGroup = tpGroup;
-            else if (tpDegree > 1 && backend == BackendType.Cuda)
-                _tpGroup = new Cuda.TensorParallelGroup(tpDegree);
-
-            switch (backend)
+            try
             {
-                case BackendType.GgmlCpu:
-                    _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Cpu);
-                    _allocator = new GgmlAllocator(_ggmlContext, 0);
-                    break;
-                case BackendType.GgmlMetal:
-                    _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Metal);
-                    _allocator = new GgmlAllocator(_ggmlContext, 0);
-                    break;
-                case BackendType.GgmlCuda:
-                case BackendType.GgmlVulkan:
-                    {
-                        var ggmlType = backend == BackendType.GgmlCuda ? GgmlBackendType.Cuda : GgmlBackendType.Vulkan;
-                        // A caller-supplied group (multi-node) already owns the
-                        // multi-GPU context; reuse it rather than initializing the
-                        // devices a second time.
-                        if (LayerSplitDegree > 1)
+                if (tpGroup != null)
+                    _tpGroup = tpGroup;
+                else if (tpDegree > 1 && backend == BackendType.Cuda)
+                    _tpGroup = new Cuda.TensorParallelGroup(tpDegree);
+
+                switch (backend)
+                {
+                    case BackendType.GgmlCpu:
+                        _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Cpu);
+                        _allocator = new GgmlAllocator(_ggmlContext, 0);
+                        break;
+                    case BackendType.GgmlMetal:
+                        _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Metal);
+                        _allocator = new GgmlAllocator(_ggmlContext, 0);
+                        break;
+                    case BackendType.GgmlCuda:
+                    case BackendType.GgmlVulkan:
                         {
-                            // LAYER SPLIT: one backend per GPU, NO tensor-parallel group.
-                            // _tpGroup must stay null - IsTensorParallel gates the weight
-                            // sharding and AllReduce machinery, none of which applies here,
-                            // and leaving it set would also make the startup banner claim a
-                            // transport that is never used.
-                            _ggmlContext = CreateGgmlContext(ggmlType, LayerSplitDegree, enableCollectives: false);
-                            _allocator = new GgmlAllocator(_ggmlContext, 0);
-                        }
-                        else
-                        {
+                            var ggmlType = backend == BackendType.GgmlCuda ? GgmlBackendType.Cuda : GgmlBackendType.Vulkan;
                             // A caller-supplied group (multi-node) already owns the
                             // multi-GPU context; reuse it rather than initializing the
                             // devices a second time.
-                            _ggmlContext = FindGgmlContext(_tpGroup) ?? CreateGgmlContext(ggmlType, tpDegree);
-                            _tpGroup ??= CreateGgmlTpGroup(_ggmlContext);
-                            _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new GgmlAllocator(_ggmlContext, 0);
+                            if (LayerSplitDegree > 1)
+                            {
+                                // LAYER SPLIT: one backend per GPU, NO tensor-parallel group.
+                                // _tpGroup must stay null - IsTensorParallel gates the weight
+                                // sharding and AllReduce machinery, none of which applies here,
+                                // and leaving it set would also make the startup banner claim a
+                                // transport that is never used.
+                                _ggmlContext = CreateGgmlContext(ggmlType, LayerSplitDegree, enableCollectives: false);
+                                _allocator = new GgmlAllocator(_ggmlContext, 0);
+                            }
+                            else
+                            {
+                                // A caller-supplied group (multi-node) already owns the
+                                // multi-GPU context; reuse it rather than initializing the
+                                // devices a second time.
+                                _ggmlContext = FindGgmlContext(_tpGroup) ?? CreateGgmlContext(ggmlType, tpDegree);
+                                _tpGroup ??= CreateGgmlTpGroup(_ggmlContext);
+                                _allocatorFromTensorParallelGroup = _tpGroup != null;
+                                _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new GgmlAllocator(_ggmlContext, 0);
+                            }
+                            break;
                         }
+                    case BackendType.Cuda:
+                        _allocatorFromTensorParallelGroup = _tpGroup != null;
+                        _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new CudaAllocator(0);
                         break;
-                    }
-                case BackendType.Cuda:
-                    _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new CudaAllocator(0);
-                    break;
-                case BackendType.Mlx:
-                    MlxBackend.Register();
-                    _allocator = new MlxAllocator(0);
-                    break;
-                case BackendType.Cpu:
-                    _allocator = new CpuAllocator(BlasEnum.DotNet);
-                    break;
-                default:
-                    throw new ArgumentException($"Unsupported backend: {backend}");
-            }
-            _ownsGgmlContext = _ggmlContext != null && !ReferenceEquals(_ggmlContext, FindGgmlContext(tpGroup));
-            _ggmlRuntimeLease = _ggmlContext == null ? null : GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
-            try
-            {
+                    case BackendType.Mlx:
+                        MlxBackend.Register();
+                        _allocator = new MlxAllocator(0);
+                        break;
+                    case BackendType.Cpu:
+                        _allocator = new CpuAllocator(BlasEnum.DotNet);
+                        break;
+                    default:
+                        throw new ArgumentException($"Unsupported backend: {backend}");
+                }
+                _ownsGgmlContext = _ggmlContext != null && !ReferenceEquals(_ggmlContext, FindGgmlContext(tpGroup));
+                _ggmlRuntimeLease = _ggmlContext == null ? null : GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
                 Console.WriteLine($"Backend: {backend}");
 
                 // Tell the kernels about the whole cluster, not just this process.
@@ -346,11 +354,21 @@ namespace TensorSharp.Models
 
                 _gguf = new GgufFile(ggufPath);
             }
-            catch
+            catch (Exception loadError)
             {
-                if (!ReferenceEquals(_tpGroup, tpGroup)) _tpGroup?.Dispose();
-                if (_ownsGgmlContext) _ggmlContext.Dispose();
-                _ggmlRuntimeLease?.Dispose();
+                try
+                {
+                    if (!ReferenceEquals(_tpGroup, tpGroup)) _tpGroup?.Dispose();
+                    if (!_allocatorFromTensorParallelGroup && _allocator is IDisposable allocator) allocator.Dispose();
+                    if (_ggmlContext != null && !ReferenceEquals(_ggmlContext, FindGgmlContext(tpGroup)))
+                        _ggmlContext.Dispose();
+                    _ggmlRuntimeLease?.Dispose();
+                }
+                catch (Exception cleanupError)
+                {
+                    RetainFailedConstruction();
+                    throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
+                }
                 throw;
             }
         }
@@ -2615,20 +2633,64 @@ namespace TensorSharp.Models
 
         public virtual void Dispose()
         {
+            DisposeBaseResources(OwnsTensorParallelGroup);
+        }
+
+        protected void RollBackFailedConstruction(Exception loadError, Action releaseDerivedResources,
+            bool ownsTensorParallelGroup = true, Action releaseAfterModelCaches = null, Action releaseDerivedGraphs = null)
+        {
+            if (_constructionCleanupFailed) return;
+            try
+            {
+                // Stop at a failed dependency teardown. Its buffers and runtime lease remain owned.
+                DisposeBaseResources(ownsTensorParallelGroup && !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup),
+                    releaseDerivedResources, releaseAfterModelCaches, constructionRollback: true, releaseDerivedGraphs: releaseDerivedGraphs);
+            }
+            catch (Exception cleanupError)
+            {
+                RetainFailedConstruction();
+                throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
+            }
+        }
+
+        protected void DisposeBaseResources(Action releaseDerivedResources, bool ownsTensorParallelGroup = true,
+            Action releaseDerivedGraphs = null)
+        {
+            DisposeBaseResources(ownsTensorParallelGroup, releaseDerivedResources, releaseDerivedGraphs: releaseDerivedGraphs);
+        }
+
+        protected void DisposeBaseResourcesAfterModelWeights(Action releaseOwnedBuffers, bool ownsTensorParallelGroup = true)
+        {
+            DisposeBaseResources(ownsTensorParallelGroup, releaseAfterModelCaches: releaseOwnedBuffers);
+        }
+
+        private void RetainFailedConstruction(IDisposable resource = null)
+        {
+            _constructionCleanupFailed = true;
+            if (resource != null) _failedConstructionResources.Add(resource);
+            if (_ggmlContext == null) return;
+            // The live GGML owner's process-exit hook retains this generation until safe shutdown.
+            lock (FailedGgmlConstructionOwners)
+                if (!FailedGgmlConstructionOwners.Contains(this)) FailedGgmlConstructionOwners.Add(this);
+        }
+
+        private void DisposeBaseResources(bool ownsTensorParallelGroup, Action releaseDerivedResources = null,
+            Action releaseAfterModelCaches = null, bool constructionRollback = false, Action releaseDerivedGraphs = null)
+        {
             // Release any distributed worker nodes before tearing down the TP
             // group, so every driver exit path (normal or exception) lets the
             // workers leave their loops cleanly.
-            SignalDistributedWorkersShutdown();
+            if (!constructionRollback || !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup))
+                SignalDistributedWorkersShutdown();
 
-            if (MultimodalInjector is IDisposable multimodalInjector)
-                multimodalInjector.Dispose();
-
-            foreach (var w in _weights.Values)
-                w.Dispose();
-            _weights.Clear();
+            // Some family reset entrypoints free captured buffers without their own async barrier.
+            if (IsGgmlBackend) GgmlBasicOps.HostReadBarrier();
+            // Family-owned graphs may bind generic scratch/cache buffers as well as model tensors.
+            releaseDerivedGraphs?.Invoke();
 
             if (IsGgmlBackend)
             {
+                if (_hasDFlash) GgmlBasicOps.DFlashResetCaches();
                 // Clear offloadable registrations FIRST so they don't outlive
                 // the host pointers (which become invalid once the GgufFile
                 // mmap below is disposed). ClearHostBufferCache then frees the
@@ -2652,6 +2714,17 @@ namespace TensorSharp.Models
                 GgmlBasicOps.ReleaseReuseComputeBuffers();
                 GgmlBasicOps.ClearHostBufferCache();
             }
+
+            // Generic native graphs/caches can bind both derived and base-owned buffers.
+            // If their teardown fails, no referenced model buffer may be released.
+            releaseDerivedResources?.Invoke();
+
+            if (MultimodalInjector is IDisposable multimodalInjector)
+                multimodalInjector.Dispose();
+
+            foreach (var w in _weights.Values)
+                w.Dispose();
+            _weights.Clear();
 
             if (_backend == BackendType.Cuda && _allocator is CudaAllocator cudaAllocator)
             {
@@ -2695,10 +2768,12 @@ namespace TensorSharp.Models
                 foreach (var w in shards) w?.Dispose();
             _tpWeights.Clear();
 
-            if (OwnsTensorParallelGroup)
+            releaseAfterModelCaches?.Invoke();
+
+            if (ownsTensorParallelGroup)
                 _tpGroup?.Dispose();
 
-            if (_allocator is IDisposable allocatorDisposable)
+            if (!_allocatorFromTensorParallelGroup && _allocator is IDisposable allocatorDisposable)
                 allocatorDisposable.Dispose();
             if (_ownsGgmlContext) _ggmlContext.Dispose();
             _ggmlRuntimeLease?.Dispose();
@@ -2706,12 +2781,13 @@ namespace TensorSharp.Models
 
         /// <summary>
         /// The refusal a whole-model native executor's loader returned (a null handle),
-        /// after releasing what this partially constructed model already holds.
+        /// for the constructor's ownership rollback to release.
         /// </summary>
         /// <remarks>
         /// The loaders free their own half-built state; the managed side still holds the
         /// GGUF mapping and allocator the base constructor opened, and nothing else will
-        /// dispose an object whose constructor threw. The native loaders record their
+        /// dispose an object whose constructor threw. The constructor's catch path releases
+        /// those resources without virtual dispatch. The native loaders record their
         /// refusal (not enough VRAM, a <c>--tp</c> layout that cannot fit, a missing
         /// shard) as the thread's last error, so the exception carries the reason itself
         /// rather than pointing at stderr, which a host that exits no longer shows.
@@ -2724,16 +2800,6 @@ namespace TensorSharp.Models
             string hintWithoutReason = null)
         {
             string reason = GgmlBasicOps.LastNativeError(null);
-            try
-            {
-                Dispose();
-            }
-            catch (Exception disposeEx)
-            {
-                Console.Error.WriteLine(
-                    $"[{family}] releasing the refused load also failed: {disposeEx.GetType().Name}: {disposeEx.Message}");
-            }
-
             string file = System.IO.Path.GetFileName(ggufPath);
             return string.IsNullOrWhiteSpace(reason)
                 ? new ModelLoadRefusedException(

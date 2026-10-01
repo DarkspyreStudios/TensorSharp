@@ -109,89 +109,97 @@ namespace TensorSharp.Models.WanVideo
 
         public WanVideoModel(string ggufPath, BackendType backend) : base(ggufPath, backend)
         {
-            if (backend is not (BackendType.GgmlCuda or BackendType.GgmlCpu or BackendType.GgmlMetal
-                or BackendType.GgmlVulkan or BackendType.Cuda or BackendType.Cpu))
-                throw new NotSupportedException(
-                    "Wan video generation runs on the GGML backends (ggml_cuda, ggml_cpu, ggml_metal, " +
-                    $"ggml_vulkan) and the direct cuda / cpu backends; backend '{backend}' is not supported. " +
-                    "Pass e.g. --backend ggml_cuda.");
-
-            _ditPath = ggufPath;
-            Config = new ModelConfig
+            try
             {
-                Architecture = "wan",
-                VocabSize = 0,
-            };
-
-            // The 5D patch embedding [kw, kh, kd, ic, oc] tells the family apart:
-            // ic 16 = T2V latent, 36 = A14B I2V (16 latent + 4 mask + 16 image latent),
-            // 48 = TI2V-5B's high-compression latent.
-            if (!_gguf.Tensors.TryGetValue("patch_embedding.weight", out var patch) || patch.Shape.Length < 5)
-                throw new InvalidDataException("Wan DiT GGUF has no 5D patch_embedding.weight tensor.");
-            InputChannels = (int)patch.Shape[3];
-
-            string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath)) ?? ".";
-            switch (InputChannels)
-            {
-                case 48:
-                    Variant = WanVariant.TI2V;
-                    LatentChannels = 48;
-                    VaeSpatialScale = 16;
-                    break;
-                case 36:
-                case 16:
-                    LatentChannels = 16;
-                    VaeSpatialScale = 8;
-                    _dit2Path = ResolveSecondExpert(ggufPath, dir);
-                    Variant = _dit2Path != null || InputChannels == 36 ? WanVariant.A14B : WanVariant.T2V;
-                    break;
-                default:
+                if (backend is not (BackendType.GgmlCuda or BackendType.GgmlCpu or BackendType.GgmlMetal
+                    or BackendType.GgmlVulkan or BackendType.Cuda or BackendType.Cpu))
                     throw new NotSupportedException(
-                        $"Unsupported Wan DiT input width {InputChannels} (expected 16, 36 or 48 channels).");
+                        "Wan video generation runs on the GGML backends (ggml_cuda, ggml_cpu, ggml_metal, " +
+                        $"ggml_vulkan) and the direct cuda / cpu backends; backend '{backend}' is not supported. " +
+                        "Pass e.g. --backend ggml_cuda.");
+
+                _ditPath = ggufPath;
+                Config = new ModelConfig
+                {
+                    Architecture = "wan",
+                    VocabSize = 0,
+                };
+
+                // The 5D patch embedding [kw, kh, kd, ic, oc] tells the family apart:
+                // ic 16 = T2V latent, 36 = A14B I2V (16 latent + 4 mask + 16 image latent),
+                // 48 = TI2V-5B's high-compression latent.
+                if (!_gguf.Tensors.TryGetValue("patch_embedding.weight", out var patch) || patch.Shape.Length < 5)
+                    throw new InvalidDataException("Wan DiT GGUF has no 5D patch_embedding.weight tensor.");
+                InputChannels = (int)patch.Shape[3];
+
+                string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath)) ?? ".";
+                switch (InputChannels)
+                {
+                    case 48:
+                        Variant = WanVariant.TI2V;
+                        LatentChannels = 48;
+                        VaeSpatialScale = 16;
+                        break;
+                    case 36:
+                    case 16:
+                        LatentChannels = 16;
+                        VaeSpatialScale = 8;
+                        _dit2Path = ResolveSecondExpert(ggufPath, dir);
+                        Variant = _dit2Path != null || InputChannels == 36 ? WanVariant.A14B : WanVariant.T2V;
+                        break;
+                    default:
+                        throw new NotSupportedException(
+                            $"Unsupported Wan DiT input width {InputChannels} (expected 16, 36 or 48 channels).");
+                }
+
+                if (InputChannels == 36 && _dit2Path == null)
+                    throw new FileNotFoundException(
+                        "Wan2.2-I2V-A14B needs BOTH expert GGUFs (…HighNoise… and …LowNoise…). Put them in " +
+                        "the same directory (or HighNoise/ + LowNoise/ subdirectories, the QuantStack layout), " +
+                        "or point TS_WAN_DIT2 at the second expert.");
+
+                // A14B: assign the loaded + companion GGUFs to their denoising phases by name.
+                if (_dit2Path != null)
+                {
+                    _gguf2 = new GgufFile(_dit2Path);
+                    bool loadedIsHigh = IsHighNoiseName(Path.GetFileName(ggufPath));
+                    HighNoiseGguf = loadedIsHigh ? _gguf : _gguf2;
+                    LowNoiseGguf = loadedIsHigh ? _gguf2 : _gguf;
+                }
+
+                bool wan22Vae = Variant == WanVariant.TI2V;
+                _vaePath = ResolveCompanion("TS_WAN_VAE", dir,
+                    wan22Vae
+                        ? new[] { "Wan2.2_VAE.safetensors", "wan2.2_vae.safetensors", Path.Combine("VAE", "Wan2.2_VAE.safetensors") }
+                        : new[] { "wan_2.1_vae.safetensors", "wan2.1_vae.safetensors", Path.Combine("VAE", "wan_2.1_vae.safetensors") },
+                    n => n.Contains("vae") && n.EndsWith(".safetensors")
+                         && n.Contains("2.2") == wan22Vae);
+                _tePath = ResolveCompanion("TS_WAN_TE", dir,
+                    new[] { "umt5-xxl-encoder-Q8_0.gguf" },
+                    n => (n.Contains("umt5") || n.Contains("t5xxl") || n.Contains("t5-xxl")) && n.EndsWith(".gguf"));
+
+                DistilledSteps = ParseDistilledSteps(Path.GetFileName(ggufPath));
+
+                Console.WriteLine($"Wan video ({Variant}): DiT={Path.GetFileName(ggufPath)}");
+                if (DistilledSteps > 0)
+                    Console.WriteLine($"  step-distilled checkpoint detected -> {DistilledSteps} steps, guidance off " +
+                                      $"(--diffusion-steps / --cfg override)");
+                if (_dit2Path != null)
+                    Console.WriteLine($"  expert #2    = {_dit2Path}");
+                Console.WriteLine($"  VAE          = {_vaePath ?? "<missing>"}");
+                Console.WriteLine($"  text-encoder = {_tePath ?? "<missing>"}");
+
+                if (_vaePath == null || _tePath == null)
+                    throw new FileNotFoundException(
+                        "Wan video generation needs companion models next to the DiT GGUF (or via TS_WAN_VAE / TS_WAN_TE): " +
+                        (wan22Vae ? "Wan2.2_VAE.safetensors (Wan2.2 TI2V VAE)" : "wan_2.1_vae.safetensors (Comfy-Org/Wan_2.1_ComfyUI_repackaged)") +
+                        " and a umt5-xxl encoder GGUF (city96/umt5-xxl-encoder-gguf).");
             }
-
-            if (InputChannels == 36 && _dit2Path == null)
-                throw new FileNotFoundException(
-                    "Wan2.2-I2V-A14B needs BOTH expert GGUFs (…HighNoise… and …LowNoise…). Put them in " +
-                    "the same directory (or HighNoise/ + LowNoise/ subdirectories, the QuantStack layout), " +
-                    "or point TS_WAN_DIT2 at the second expert.");
-
-            // A14B: assign the loaded + companion GGUFs to their denoising phases by name.
-            if (_dit2Path != null)
+            catch (Exception loadError)
             {
-                _gguf2 = new GgufFile(_dit2Path);
-                bool loadedIsHigh = IsHighNoiseName(Path.GetFileName(ggufPath));
-                HighNoiseGguf = loadedIsHigh ? _gguf : _gguf2;
-                LowNoiseGguf = loadedIsHigh ? _gguf2 : _gguf;
+                RollBackFailedConstruction(loadError, DisposeWanResources);
+                throw;
             }
-
-            bool wan22Vae = Variant == WanVariant.TI2V;
-            _vaePath = ResolveCompanion("TS_WAN_VAE", dir,
-                wan22Vae
-                    ? new[] { "Wan2.2_VAE.safetensors", "wan2.2_vae.safetensors", Path.Combine("VAE", "Wan2.2_VAE.safetensors") }
-                    : new[] { "wan_2.1_vae.safetensors", "wan2.1_vae.safetensors", Path.Combine("VAE", "wan_2.1_vae.safetensors") },
-                n => n.Contains("vae") && n.EndsWith(".safetensors")
-                     && n.Contains("2.2") == wan22Vae);
-            _tePath = ResolveCompanion("TS_WAN_TE", dir,
-                new[] { "umt5-xxl-encoder-Q8_0.gguf" },
-                n => (n.Contains("umt5") || n.Contains("t5xxl") || n.Contains("t5-xxl")) && n.EndsWith(".gguf"));
-
-            DistilledSteps = ParseDistilledSteps(Path.GetFileName(ggufPath));
-
-            Console.WriteLine($"Wan video ({Variant}): DiT={Path.GetFileName(ggufPath)}");
-            if (DistilledSteps > 0)
-                Console.WriteLine($"  step-distilled checkpoint detected -> {DistilledSteps} steps, guidance off " +
-                                  $"(--diffusion-steps / --cfg override)");
-            if (_dit2Path != null)
-                Console.WriteLine($"  expert #2    = {_dit2Path}");
-            Console.WriteLine($"  VAE          = {_vaePath ?? "<missing>"}");
-            Console.WriteLine($"  text-encoder = {_tePath ?? "<missing>"}");
-
-            if (_vaePath == null || _tePath == null)
-                throw new FileNotFoundException(
-                    "Wan video generation needs companion models next to the DiT GGUF (or via TS_WAN_VAE / TS_WAN_TE): " +
-                    (wan22Vae ? "Wan2.2_VAE.safetensors (Wan2.2 TI2V VAE)" : "wan_2.1_vae.safetensors (Comfy-Org/Wan_2.1_ComfyUI_repackaged)") +
-                    " and a umt5-xxl encoder GGUF (city96/umt5-xxl-encoder-gguf).");
         }
 
         private static bool IsHighNoiseName(string name)
@@ -316,10 +324,14 @@ namespace TensorSharp.Models.WanVideo
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeWanResources);
+        }
+
+        private void DisposeWanResources()
+        {
             _pipeline?.Dispose();
             _gguf2?.Dispose();
             _gguf2 = null;
-            base.Dispose();
         }
     }
 }

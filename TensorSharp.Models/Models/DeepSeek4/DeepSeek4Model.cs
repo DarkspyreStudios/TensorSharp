@@ -43,131 +43,121 @@ namespace TensorSharp.Models
             string draftModelPath = null)
             : base(ggufPath, NormalizeBackend(backend), 1, null)
         {
-            string arch = _gguf.GetString("general.architecture") ?? "deepseek4";
-            bool isV41 = string.Equals(arch, "deepseek41", StringComparison.Ordinal);
-            if (isV41)
+            try
             {
-                // A refusal here would otherwise leak the GGUF mapping the base
-                // constructor opened: nobody disposes an object whose constructor threw.
-                try
+                string arch = _gguf.GetString("general.architecture") ?? "deepseek4";
+                bool isV41 = string.Equals(arch, "deepseek41", StringComparison.Ordinal);
+                if (isV41)
                 {
                     DeepSeek41Architecture.ValidateLoad(ggufPath, backend, ResolveDsparkPath(draftModelPath), tpDegree, tpGroup);
+                    // Once per load, and only here: ValidateLoad also runs as the
+                    // descriptor's ApplyNativeTunables, so warning from inside it
+                    // would print the same line twice.
+                    if (DeepSeek41Architecture.DescribeCpuBackendChoice(backend) is string cpuNote)
+                        Console.Error.WriteLine(cpuNote);
                 }
-                catch
+                else if (DescribeCpuBackendChoice(backend) is string v4CpuNote)
                 {
-                    base.Dispose();
-                    throw;
+                    Console.Error.WriteLine(v4CpuNote);
                 }
-                // Once per load, and only here: ValidateLoad also runs as the
-                // descriptor's ApplyNativeTunables, so warning from inside it
-                // would print the same line twice.
-                if (DeepSeek41Architecture.DescribeCpuBackendChoice(backend) is string cpuNote)
-                    Console.Error.WriteLine(cpuNote);
-            }
-            else if (DescribeCpuBackendChoice(backend) is string v4CpuNote)
-            {
-                Console.Error.WriteLine(v4CpuNote);
-            }
-            Config = new ModelConfig { Architecture = arch };
-            // V4.1 was refused in ValidateLoad above (and once more before the
-            // factory ran); plain V4 has no pre-load hook, so refuse here.
-            if (!isV41)
-            {
-                try
+                Config = new ModelConfig { Architecture = arch };
+                // V4.1 was refused in ValidateLoad above (and once more before the
+                // factory ran); plain V4 has no pre-load hook, so refuse here.
+                if (!isV41)
                 {
                     DeepSeek4Architecture.RefuseBlockQuantizedKvCache("DeepSeek V4 (Flash)", v41: false);
                 }
-                catch
+                // Every executor of this family keeps F16 caches and ignores the
+                // process-wide dtype, so report what is actually allocated rather
+                // than whatever KV_CACHE_DTYPE happened to say.
+                _kvCacheDtype = DeepSeek4Architecture.ExecutorKvCacheDtype;
+                if (KvCacheDtypeConfig.IsExplicitlySet && KvCacheDtypeConfig.Current == KvCacheDtype.F32)
+                    Console.Error.WriteLine(DeepSeek4Architecture.DescribeF32KvCacheRequest(
+                        isV41 ? "DeepSeek V4.1 Flash" : "DeepSeek V4 (Flash)"));
+                ParseBaseConfig();
+                if (isV41)
                 {
-                    base.Dispose();
-                    throw;
+                    Config.NumExperts = (int)_gguf.GetUint32($"{arch}.expert_count");
+                    Config.NumExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count");
+                    Config.IntermediateSize = (int)_gguf.GetUint32($"{arch}.expert_feed_forward_length");
+                    Config.SlidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window");
+                    Config.OriginalContextLength = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length");
+                }
+                ParseTokenizer();
+
+                int maxContext = ResolveConfiguredContextLength();
+                // The GGUF advertises 1M context; cache rows scale with n_ctx, so keep a
+                // practical default unless the operator asks for more via MAX_CONTEXT.
+                string ctxEnv = Environment.GetEnvironmentVariable("MAX_CONTEXT");
+                if (string.IsNullOrWhiteSpace(ctxEnv))
+                    maxContext = Math.Min(maxContext, 65536);
+                _maxContextLength = maxContext;
+
+                int nUbatch = ResolveNativeUbatch(isV41, backend, Environment.GetEnvironmentVariable("TS_DSV4_UBATCH"),
+                    out string ubatchWarning);
+                if (ubatchWarning != null)
+                    Console.Error.WriteLine(ubatchWarning);
+
+                if (backend == BackendType.Cuda)
+                {
+                    // Direct-CUDA whole-model executor: quantized weights resident in
+                    // device memory, layer-split across the visible GPUs, driver-API
+                    // kernels only (no ggml).
+                    int nGpu = ParseEnvInt("TS_DSV4_NGPU", tpDegree > 1 ? tpDegree : 0); // 0 = all visible GPUs
+                    string dspark = ResolveDsparkPath(draftModelPath);
+                    Console.WriteLine($"Model: {arch} (direct-CUDA whole-model executor), Layers={Config.NumLayers}, " +
+                        $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
+                        (dspark != null ? ", DSpark drafter" : string.Empty));
+                    _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark, ResolveCpuMoeLayers());
+                }
+                else if (_backend == BackendType.Cpu)
+                {
+                    // Pure C# whole-model executor: quantized weights served straight
+                    // from the memory-mapped GGUF shards, managed SIMD kernels only.
+                    WarnDsparkUnavailable(draftModelPath, backend);
+                    int nThreads = ParseEnvInt("TS_DSV4_THREADS", Environment.ProcessorCount);
+                    Console.WriteLine($"Model: {arch} (pure C# CPU executor), Layers={Config.NumLayers}, " +
+                        $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}");
+                    _cpuExec = new DeepSeek4CpuExecutor(ggufPath, maxContext, nUbatch, nThreads, _allocator);
+                }
+                else
+                {
+                    int nThreads = ParseEnvInt("TS_DSV4_THREADS", Math.Min(Environment.ProcessorCount, 32));
+                    int nGpu = ParseEnvInt("TS_DSV4_NGPU", tpDegree > 1 ? tpDegree : 0); // 0 = all visible GPUs
+                    string dspark = backend == BackendType.GgmlCuda || (isV41 && backend == BackendType.GgmlCpu)
+                        ? ResolveDsparkPath(draftModelPath) : null;
+                    if (dspark == null)
+                        WarnDsparkUnavailable(draftModelPath, backend);
+
+                    Console.WriteLine($"Model: {arch} (native whole-model executor), Layers={Config.NumLayers}, " +
+                        $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
+                        (dspark != null ? ", DSpark drafter" : string.Empty));
+
+                    int nCpuMoe = ResolveCpuMoeLayers();
+                    // `backend`, not `_backend`: the base ctor coerces everything to
+                    // GgmlCpu so no second GPU context is created, but the native
+                    // executor still has to pick its devices from the backend the
+                    // operator actually asked for.
+                    string backendName = BackendRegistryName(backend);
+                    _handle = dspark != null
+                        ? GgmlDeepSeek4Native.LoadModelWithDspark(ggufPath, nGpu, maxContext, nUbatch, nThreads, dspark, nCpuMoe, backendName)
+                        : GgmlDeepSeek4Native.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads, nCpuMoe, backendName);
+                    _nativeDsparkBlock = _handle != IntPtr.Zero && dspark != null
+                        ? GgmlDeepSeek4Native.DsparkBlockSize(_handle) : 0;
+                    if (_handle == IntPtr.Zero)
+                        throw NativeLoadRefused("dsv4", ggufPath);
+                    // The width the loader actually runs: the request, or its own
+                    // choice for UBatchAuto. Speculative prefill chunks to it.
+                    _nativeUBatch = GgmlDeepSeek4Native.UBatch(_handle);
+                    // Zero for plain V4: its compressor overlaps blocks, so a rewind reads state
+                    // rows an aligned target does not protect, and the native side declines.
+                    _truncateAlign = GgmlDeepSeek4Native.TruncateAlign(_handle);
                 }
             }
-            // Every executor of this family keeps F16 caches and ignores the
-            // process-wide dtype, so report what is actually allocated rather
-            // than whatever KV_CACHE_DTYPE happened to say.
-            _kvCacheDtype = DeepSeek4Architecture.ExecutorKvCacheDtype;
-            if (KvCacheDtypeConfig.IsExplicitlySet && KvCacheDtypeConfig.Current == KvCacheDtype.F32)
-                Console.Error.WriteLine(DeepSeek4Architecture.DescribeF32KvCacheRequest(
-                    isV41 ? "DeepSeek V4.1 Flash" : "DeepSeek V4 (Flash)"));
-            ParseBaseConfig();
-            if (isV41)
+            catch (Exception loadError)
             {
-                Config.NumExperts = (int)_gguf.GetUint32($"{arch}.expert_count");
-                Config.NumExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count");
-                Config.IntermediateSize = (int)_gguf.GetUint32($"{arch}.expert_feed_forward_length");
-                Config.SlidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window");
-                Config.OriginalContextLength = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length");
-            }
-            ParseTokenizer();
-
-            int maxContext = ResolveConfiguredContextLength();
-            // The GGUF advertises 1M context; cache rows scale with n_ctx, so keep a
-            // practical default unless the operator asks for more via MAX_CONTEXT.
-            string ctxEnv = Environment.GetEnvironmentVariable("MAX_CONTEXT");
-            if (string.IsNullOrWhiteSpace(ctxEnv))
-                maxContext = Math.Min(maxContext, 65536);
-            _maxContextLength = maxContext;
-
-            int nUbatch = ResolveNativeUbatch(isV41, backend, Environment.GetEnvironmentVariable("TS_DSV4_UBATCH"),
-                out string ubatchWarning);
-            if (ubatchWarning != null)
-                Console.Error.WriteLine(ubatchWarning);
-
-            if (backend == BackendType.Cuda)
-            {
-                // Direct-CUDA whole-model executor: quantized weights resident in
-                // device memory, layer-split across the visible GPUs, driver-API
-                // kernels only (no ggml).
-                int nGpu = ParseEnvInt("TS_DSV4_NGPU", tpDegree > 1 ? tpDegree : 0); // 0 = all visible GPUs
-                string dspark = ResolveDsparkPath(draftModelPath);
-                Console.WriteLine($"Model: {arch} (direct-CUDA whole-model executor), Layers={Config.NumLayers}, " +
-                    $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
-                    (dspark != null ? ", DSpark drafter" : string.Empty));
-                _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark, ResolveCpuMoeLayers());
-            }
-            else if (_backend == BackendType.Cpu)
-            {
-                // Pure C# whole-model executor: quantized weights served straight
-                // from the memory-mapped GGUF shards, managed SIMD kernels only.
-                WarnDsparkUnavailable(draftModelPath, backend);
-                int nThreads = ParseEnvInt("TS_DSV4_THREADS", Environment.ProcessorCount);
-                Console.WriteLine($"Model: {arch} (pure C# CPU executor), Layers={Config.NumLayers}, " +
-                    $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}");
-                _cpuExec = new DeepSeek4CpuExecutor(ggufPath, maxContext, nUbatch, nThreads, _allocator);
-            }
-            else
-            {
-                int nThreads = ParseEnvInt("TS_DSV4_THREADS", Math.Min(Environment.ProcessorCount, 32));
-                int nGpu = ParseEnvInt("TS_DSV4_NGPU", tpDegree > 1 ? tpDegree : 0); // 0 = all visible GPUs
-                string dspark = backend == BackendType.GgmlCuda || (isV41 && backend == BackendType.GgmlCpu)
-                    ? ResolveDsparkPath(draftModelPath) : null;
-                if (dspark == null)
-                    WarnDsparkUnavailable(draftModelPath, backend);
-
-                Console.WriteLine($"Model: {arch} (native whole-model executor), Layers={Config.NumLayers}, " +
-                    $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
-                    (dspark != null ? ", DSpark drafter" : string.Empty));
-
-                int nCpuMoe = ResolveCpuMoeLayers();
-                // `backend`, not `_backend`: the base ctor coerces everything to
-                // GgmlCpu so no second GPU context is created, but the native
-                // executor still has to pick its devices from the backend the
-                // operator actually asked for.
-                string backendName = BackendRegistryName(backend);
-                _handle = dspark != null
-                    ? GgmlDeepSeek4Native.LoadModelWithDspark(ggufPath, nGpu, maxContext, nUbatch, nThreads, dspark, nCpuMoe, backendName)
-                    : GgmlDeepSeek4Native.LoadModel(ggufPath, nGpu, maxContext, nUbatch, nThreads, nCpuMoe, backendName);
-                _nativeDsparkBlock = _handle != IntPtr.Zero && dspark != null
-                    ? GgmlDeepSeek4Native.DsparkBlockSize(_handle) : 0;
-                if (_handle == IntPtr.Zero)
-                    throw NativeLoadRefused("dsv4", ggufPath);
-                // The width the loader actually runs: the request, or its own
-                // choice for UBatchAuto. Speculative prefill chunks to it.
-                _nativeUBatch = GgmlDeepSeek4Native.UBatch(_handle);
-                // Zero for plain V4: its compressor overlaps blocks, so a rewind reads state
-                // rows an aligned target does not protect, and the native side declines.
-                _truncateAlign = GgmlDeepSeek4Native.TruncateAlign(_handle);
+                RollBackFailedConstruction(loadError, static () => { }, releaseDerivedGraphs: DisposeDeepSeek4Resources);
+                throw;
             }
         }
 
@@ -448,6 +438,11 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(static () => { }, releaseDerivedGraphs: DisposeDeepSeek4Resources);
+        }
+
+        private void DisposeDeepSeek4Resources()
+        {
             lock (_sync)
             {
                 if (_cudaExec != null)
@@ -466,7 +461,6 @@ namespace TensorSharp.Models
                     _handle = IntPtr.Zero;
                 }
             }
-            base.Dispose();
         }
     }
 }

@@ -47,19 +47,26 @@ namespace TensorSharp.Models.QwenImage
 
         public QwenImageTextEncoder(string ggufPath, BackendType backend) : base(ggufPath, backend)
         {
-            try { QwenImage21CompanionValidation.ValidateText(_gguf); }
-            catch { base.Dispose(); throw; }
-            Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") ?? "qwen3vl" };
-            ParseBaseConfig();
-            _numHeads = Config.NumHeads;
-            _numKVHeads = Config.NumKVHeads;
-            _headDim = Config.HeadDim;
-            _numLayers = Config.NumLayers;
-            _ropeBase = Config.RopeBase > 0 ? Config.RopeBase : 1000000f;
-            _eps = Config.Eps > 0 ? Config.Eps : 1e-6f;
-            ParseTokenizer();
-            EnsureQuantBackendAvailable();
-            LoadWeights();
+            try
+            {
+                QwenImage21CompanionValidation.ValidateText(_gguf);
+                Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") ?? "qwen3vl" };
+                ParseBaseConfig();
+                _numHeads = Config.NumHeads;
+                _numKVHeads = Config.NumKVHeads;
+                _headDim = Config.HeadDim;
+                _numLayers = Config.NumLayers;
+                _ropeBase = Config.RopeBase > 0 ? Config.RopeBase : 1000000f;
+                _eps = Config.Eps > 0 ? Config.Eps : 1e-6f;
+                ParseTokenizer();
+                EnsureQuantBackendAvailable();
+                LoadWeights();
+            }
+            catch (Exception loadError)
+            {
+                RollBackFailedConstruction(loadError, static () => { }, releaseAfterModelCaches: DisposeTextEncoderResources);
+                throw;
+            }
         }
 
         // M-RoPE 3D positions [3*seq] = (t[seq], h[seq], w[seq]); for text-only all three equal.
@@ -491,7 +498,11 @@ namespace TensorSharp.Models.QwenImage
 
         public override void Dispose()
         {
-            base.Dispose();
+            DisposeBaseResourcesAfterModelWeights(DisposeTextEncoderResources);
+        }
+
+        private void DisposeTextEncoderResources()
+        {
             foreach (var p in _fusedAllocs) System.Runtime.InteropServices.Marshal.FreeHGlobal(p);
             _fusedAllocs.Clear();
             _fusedLayers = null;

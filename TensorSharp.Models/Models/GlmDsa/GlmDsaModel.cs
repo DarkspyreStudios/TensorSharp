@@ -159,59 +159,67 @@ namespace TensorSharp.Models
         public GlmDsaModel(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
             : base(ggufPath, NormalizeBackend(backend), tpDegree, tpGroup)
         {
-            string arch = _gguf.GetString("general.architecture") ?? "glm-dsa";
-            Config = new ModelConfig { Architecture = arch };
-            ParseBaseConfig();
-            ParseGlmDsaConfig(arch);
-            ParseTokenizer();
-
-            Console.WriteLine($"Model: {arch}, Layers={_numTrunkLayers}" +
-                (_numNextnLayers > 0 ? $" (+{_numNextnLayers} NextN/MTP block in the file)" : "") +
-                $", Hidden={Config.HiddenSize}, " +
-                $"Heads={Config.NumHeads}, MLA(q_lora={_qLoraRank}, kv_lora={_kvLoraRank}, head_k={_headDimK}, head_v={_headDimV}, rope={_ropeDim}), " +
-                $"Vocab={Config.VocabSize}");
-            Console.WriteLine($"  MoE: {_numExperts} experts, top-{_numExpertsUsed}, ffn={_expertFfnLength}, shared={_numSharedExperts}, " +
-                $"scale={_expertWeightsScale}, norm={_expertWeightsNorm}, gating={(_expertGatingFunc == 2 ? "sigmoid" : "softmax")}, dense_lead={_numDenseLead}");
-            Console.WriteLine($"  DSA indexer: {_indexerHeads} heads x {_indexerHeadDim}, top-k={_indexerTopK}, " +
-                $"full layers={CountIndexerFull()}/{_numTrunkLayers}");
-            Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, eps={Config.Eps}");
-
-            int maxContextLength = ResolveConfiguredContextLength();
-
-            if (NativeRequested(backend))
+            try
             {
-                // The whole model lives in the native executor: no managed weight
-                // tensors, no managed caches.
-                InitNativeExecutor(ggufPath, backend, tpDegree, maxContextLength);
-                return;
+                string arch = _gguf.GetString("general.architecture") ?? "glm-dsa";
+                Config = new ModelConfig { Architecture = arch };
+                ParseBaseConfig();
+                ParseGlmDsaConfig(arch);
+                ParseTokenizer();
+
+                Console.WriteLine($"Model: {arch}, Layers={_numTrunkLayers}" +
+                    (_numNextnLayers > 0 ? $" (+{_numNextnLayers} NextN/MTP block in the file)" : "") +
+                    $", Hidden={Config.HiddenSize}, " +
+                    $"Heads={Config.NumHeads}, MLA(q_lora={_qLoraRank}, kv_lora={_kvLoraRank}, head_k={_headDimK}, head_v={_headDimV}, rope={_ropeDim}), " +
+                    $"Vocab={Config.VocabSize}");
+                Console.WriteLine($"  MoE: {_numExperts} experts, top-{_numExpertsUsed}, ffn={_expertFfnLength}, shared={_numSharedExperts}, " +
+                    $"scale={_expertWeightsScale}, norm={_expertWeightsNorm}, gating={(_expertGatingFunc == 2 ? "sigmoid" : "softmax")}, dense_lead={_numDenseLead}");
+                Console.WriteLine($"  DSA indexer: {_indexerHeads} heads x {_indexerHeadDim}, top-k={_indexerTopK}, " +
+                    $"full layers={CountIndexerFull()}/{_numTrunkLayers}");
+                Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, eps={Config.Eps}");
+
+                int maxContextLength = ResolveConfiguredContextLength();
+
+                if (NativeRequested(backend))
+                {
+                    // The whole model lives in the native executor: no managed weight
+                    // tensors, no managed caches.
+                    InitNativeExecutor(ggufPath, backend, tpDegree, maxContextLength);
+                    return;
+                }
+
+                // glm5next now has a managed per-op path (GlmDsaModel.Glm5Next.cs): KDA
+                // linear attention and Sinkhorn hyper-connections both run in C#, so the
+                // pure-C# `cpu` backend serves this family too.
+                ParseGlm5NextConfig(arch, _numTrunkLayers);
+
+                LoadWeights();
+                BuildLayerNames();
+                CacheMoeWeightHandles();
+                ResolveMtpLayer();
+
+                if (IsTensorParallel)
+                {
+                    ShardGlmDsaWeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
+                }
+                else
+                {
+                    PrepareCudaQuantizedWeightsForInference();
+                }
+
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+
+                InitCaches(initialCacheLength, maxContextLength);
+                AllocateScratch();
             }
-
-            // glm5next now has a managed per-op path (GlmDsaModel.Glm5Next.cs): KDA
-            // linear attention and Sinkhorn hyper-connections both run in C#, so the
-            // pure-C# `cpu` backend serves this family too.
-            ParseGlm5NextConfig(arch, _numTrunkLayers);
-
-            LoadWeights();
-            BuildLayerNames();
-            CacheMoeWeightHandles();
-            ResolveMtpLayer();
-
-            if (IsTensorParallel)
+            catch (Exception loadError)
             {
-                ShardGlmDsaWeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
+                RollBackFailedConstruction(loadError, DisposeGlmDsaResources, releaseDerivedGraphs: DisposeGlmDsaGraphs);
+                throw;
             }
-            else
-            {
-                PrepareCudaQuantizedWeightsForInference();
-            }
-
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-
-            InitCaches(initialCacheLength, maxContextLength);
-            AllocateScratch();
         }
 
         /// <summary>

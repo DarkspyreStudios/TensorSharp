@@ -34,6 +34,8 @@ public sealed class DenseDecoderSyntheticModelBuilder
     public bool IncludeMistralControlTokens { get; init; } = true;
     public bool IncludeRopeFreqs { get; init; }
     public bool IncludeQkNorms { get; init; }
+    public int ValueHeadDim { get; init; } = HeadDim;
+    public bool IncludeTokenizer { get; init; } = true;
     public uint ExpertCount { get; init; }
     public string RopeScalingType { get; init; }
     public float RopeBase { get; init; } = 1_000_000f;
@@ -116,7 +118,7 @@ public sealed class DenseDecoderSyntheticModelBuilder
             ($"{a}.attention.head_count", U32(NumHeads)),
             ($"{a}.attention.head_count_kv", U32(NumKvHeads)),
             ($"{a}.attention.key_length", U32(HeadDim)),
-            ($"{a}.attention.value_length", U32(HeadDim)),
+            ($"{a}.attention.value_length", U32(checked((uint)ValueHeadDim))),
             ($"{a}.rope.dimension_count", U32(HeadDim)),
             ($"{a}.rope.freq_base", F32(RopeBase)),
             ($"{a}.attention.layer_norm_rms_epsilon", F32(1e-5f)),
@@ -136,6 +138,7 @@ public sealed class DenseDecoderSyntheticModelBuilder
             foreach (string c in MistralControlTokens) { tokens.Add(c); types.Add(3); }
         }
 
+        if (!IncludeTokenizer) return kv;
         kv.Add(("tokenizer.ggml.model", Str("gpt2")));
         kv.Add(("tokenizer.ggml.pre", Str(PreTokenizer)));
         kv.Add(("tokenizer.ggml.tokens", StrArr(tokens)));

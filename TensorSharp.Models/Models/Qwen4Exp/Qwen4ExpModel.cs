@@ -98,12 +98,12 @@ namespace TensorSharp.Models
             ITensorParallelGroup tpGroup = null, int layerSplitDegree = 1, string draftGgufPath = null)
             : base(ggufPath, backend, tpDegree, tpGroup, layerSplitDegree)
         {
-            Config = new ModelConfig { Architecture = ArchitectureId };
-            ParseBaseConfig();
-            ParseQwen4ExpConfig();
-            ParseTokenizer();
             try
             {
+                Config = new ModelConfig { Architecture = ArchitectureId };
+                ParseBaseConfig();
+                ParseQwen4ExpConfig();
+                ParseTokenizer();
                 if (!string.IsNullOrWhiteSpace(draftGgufPath))
                     LoadMtpDraftWeights(draftGgufPath);
 
@@ -130,9 +130,9 @@ namespace TensorSharp.Models
                 InitCaches(initialCacheLength, maxContextLength);
                 FinalizeMtpHead();
             }
-            catch
+            catch (Exception loadError)
             {
-                DisposeMtpHead();
+                RollBackFailedConstruction(loadError, DisposeQwen4ExpResources, releaseDerivedGraphs: DisposeQwen4ExpGraphs);
                 throw;
             }
         }

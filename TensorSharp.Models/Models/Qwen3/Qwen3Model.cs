@@ -58,53 +58,61 @@ namespace TensorSharp.Models
         public Qwen3Model(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            string arch = _gguf.GetString("general.architecture") ?? "qwen3";
-            Config = new ModelConfig { Architecture = arch };
-            ParseBaseConfig();
-
-            Config.NumKVHeads = (int)_gguf.GetUint32($"{arch}.attention.head_count_kv");
-            ParseRopeScaling(arch);
-
-            ParseTokenizer();
-
-            Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
-                $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, HeadDim={Config.HeadDim}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, type={_ropeScalingType}, " +
-                $"origCtx={_ropeOriginalContext}, eps={Config.Eps}");
-
-            LoadWeights();
-            _hasQkNorm = _weights.ContainsKey("blk.0.attn_q_norm.weight");
-            _hasQkvBias = _weights.ContainsKey("blk.0.attn_q.bias");
-            if (_hasQkvBias)
-                FuseQKVBiases();
-            FuseQKVWeights();
-            FuseGateUpWeights();
-            if (!_hasQkNorm || _hasQkvBias)
-                Console.WriteLine($"  Attention variant: qkNorm={_hasQkNorm}, qkvBias={_hasQkvBias}");
-
-            if (IsTensorParallel)
+            try
             {
-                ShardQwen3WeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
+                string arch = _gguf.GetString("general.architecture") ?? "qwen3";
+                Config = new ModelConfig { Architecture = arch };
+                ParseBaseConfig();
+
+                Config.NumKVHeads = (int)_gguf.GetUint32($"{arch}.attention.head_count_kv");
+                ParseRopeScaling(arch);
+
+                ParseTokenizer();
+
+                Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
+                    $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, HeadDim={Config.HeadDim}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, type={_ropeScalingType}, " +
+                    $"origCtx={_ropeOriginalContext}, eps={Config.Eps}");
+
+                LoadWeights();
+                _hasQkNorm = _weights.ContainsKey("blk.0.attn_q_norm.weight");
+                _hasQkvBias = _weights.ContainsKey("blk.0.attn_q.bias");
+                if (_hasQkvBias)
+                    FuseQKVBiases();
+                FuseQKVWeights();
+                FuseGateUpWeights();
+                if (!_hasQkNorm || _hasQkvBias)
+                    Console.WriteLine($"  Attention variant: qkNorm={_hasQkNorm}, qkvBias={_hasQkvBias}");
+
+                if (IsTensorParallel)
+                {
+                    ShardQwen3WeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
+                }
+                else
+                {
+                    PrepareCudaQuantizedWeightsForInference();
+                }
+
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+
+                if (IsTensorParallel)
+                    InitTpKVCache(initialCacheLength, maxContextLength);
+                else
+                    InitKVCache(initialCacheLength, maxContextLength);
+
+                PrecomputeConstants();
+                BuildModelDecodeArrays();
+                DetermineNativeLayerDecodeAvailability();
             }
-            else
+            catch (Exception loadError)
             {
-                PrepareCudaQuantizedWeightsForInference();
+                RollBackFailedConstruction(loadError, DisposeQwen3Resources, releaseDerivedGraphs: DisposeQwen3Graphs);
+                throw;
             }
-
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-
-            if (IsTensorParallel)
-                InitTpKVCache(initialCacheLength, maxContextLength);
-            else
-                InitKVCache(initialCacheLength, maxContextLength);
-
-            PrecomputeConstants();
-            BuildModelDecodeArrays();
-            DetermineNativeLayerDecodeAvailability();
         }
 
         private void ParseRopeScaling(string arch)
@@ -1325,11 +1333,20 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeQwen3Resources, releaseDerivedGraphs: DisposeQwen3Graphs);
+        }
+
+        private void DisposeQwen3Graphs()
+        {
             if (_backend == BackendType.GgmlMetal)
             {
                 GgmlBasicOps.Qwen3ResetDecodeCache();
                 CountDecodeGraphReset();
             }
+        }
+
+        private void DisposeQwen3Resources()
+        {
             DisposeFusedSequenceCaches();
             if (_kvCacheK != null)
                 foreach (var t in _kvCacheK) t?.Dispose();
@@ -1338,12 +1355,11 @@ namespace TensorSharp.Models
 
             if (_tpKvCacheK != null)
                 foreach (var layer in _tpKvCacheK)
-                    foreach (var t in layer) t?.Dispose();
+                    if (layer != null) foreach (var t in layer) t?.Dispose();
             if (_tpKvCacheV != null)
                 foreach (var layer in _tpKvCacheV)
-                    foreach (var t in layer) t?.Dispose();
+                    if (layer != null) foreach (var t in layer) t?.Dispose();
 
-            base.Dispose();
         }
     }
 }

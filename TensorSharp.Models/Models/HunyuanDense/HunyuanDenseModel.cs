@@ -31,42 +31,50 @@ namespace TensorSharp.Models
         public HunyuanDenseModel(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            string arch = _gguf.GetString("general.architecture") ?? "hunyuan-dense";
-            Config = new ModelConfig { Architecture = arch };
-            ParseBaseConfig();
-
-            _attnKeyLen = Config.KeyLength > 0 ? Config.KeyLength : Config.HeadDim;
-            _attnValLen = Config.ValueLength > 0 ? Config.ValueLength : _attnKeyLen;
-            if (_attnKeyLen != _attnValLen)
+            try
             {
-                throw new NotSupportedException(
-                    $"hunyuan-dense expects equal key/value head dims, got key={_attnKeyLen} value={_attnValLen}.");
+                string arch = _gguf.GetString("general.architecture") ?? "hunyuan-dense";
+                Config = new ModelConfig { Architecture = arch };
+                ParseBaseConfig();
+
+                _attnKeyLen = Config.KeyLength > 0 ? Config.KeyLength : Config.HeadDim;
+                _attnValLen = Config.ValueLength > 0 ? Config.ValueLength : _attnKeyLen;
+                if (_attnKeyLen != _attnValLen)
+                {
+                    throw new NotSupportedException(
+                        $"hunyuan-dense expects equal key/value head dims, got key={_attnKeyLen} value={_attnValLen}.");
+                }
+
+                _ropeDim = (int)_gguf.GetUint32($"{arch}.rope.dimension_count", (uint)_attnKeyLen);
+                ApplyHunyuanRopeBase(arch);
+                ParseTokenizer();
+
+                Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
+                    $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, KeyLen={_attnKeyLen}, " +
+                    $"ValLen={_attnValLen}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, dim={_ropeDim} (NeoX, then QK-norm)");
+
+                LoadWeights();
+                FuseQKVWeights();
+                FuseGateUpWeights();
+                PrepareCudaQuantizedWeightsForInference();
+                PrecomputeLayerFlags();
+
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                {
+                    Console.WriteLine(
+                        $"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+                }
+
+                InitKVCache(initialCacheLength, maxContextLength);
             }
-
-            _ropeDim = (int)_gguf.GetUint32($"{arch}.rope.dimension_count", (uint)_attnKeyLen);
-            ApplyHunyuanRopeBase(arch);
-            ParseTokenizer();
-
-            Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
-                $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, KeyLen={_attnKeyLen}, " +
-                $"ValLen={_attnValLen}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, dim={_ropeDim} (NeoX, then QK-norm)");
-
-            LoadWeights();
-            FuseQKVWeights();
-            FuseGateUpWeights();
-            PrepareCudaQuantizedWeightsForInference();
-            PrecomputeLayerFlags();
-
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
+            catch (Exception loadError)
             {
-                Console.WriteLine(
-                    $"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+                RollBackFailedConstruction(loadError, DisposeHunyuanResources);
+                throw;
             }
-
-            InitKVCache(initialCacheLength, maxContextLength);
         }
 
         protected override bool SupportsSplitGateUpFfn => true;
@@ -536,6 +544,11 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeHunyuanResources);
+        }
+
+        private void DisposeHunyuanResources()
+        {
             if (_kvCacheK != null)
             {
                 foreach (Tensor t in _kvCacheK)
@@ -546,7 +559,6 @@ namespace TensorSharp.Models
                 foreach (Tensor t in _kvCacheV)
                     t?.Dispose();
             }
-            base.Dispose();
         }
     }
 }

@@ -33,7 +33,7 @@ public sealed class Bonsai2ConstructionFailureTests
     }
 
     [Fact]
-    public void ThrowingNativeCleanupStillReleasesOwnedWeightAndPreservesLoadException()
+    public void ThrowingNativeCleanupRetainsOwnedWeightAndReportsBothFailures()
     {
         using var file = new MalformedBonsai();
         Assert.Throws<InvalidDataException>(() => new CapturingModel(file.Path));
@@ -42,12 +42,16 @@ public sealed class Bonsai2ConstructionFailureTests
         QuantizedWeight? weight = null;
         IntPtr key = IntPtr.Zero;
         int cleanupAttempts = 0;
-        var actual = Assert.Throws<InvalidDataException>(() =>
+        var actual = Assert.Throws<AggregateException>(() =>
             model.FailWithUnavailableNativeCleanup(original, out weight, out key, out cleanupAttempts));
-        Assert.Same(original, actual);
-        Assert.Equal(2, cleanupAttempts);
-        AssertReleasedAndReusable(new[] { weight! }, new[] { key });
-        Assert.Equal(0, model.LoadedWeightCount);
+        Assert.Same(original, actual.InnerExceptions[0]);
+        Assert.IsType<EntryPointNotFoundException>(actual.InnerExceptions[1]);
+        Assert.Equal(1, cleanupAttempts);
+        Assert.True(weight!.HasHostData);
+        Assert.NotEqual(IntPtr.Zero, key);
+        Assert.Equal(1, model.LoadedWeightCount);
+        // This injected failure creates no graph. The test owns the extra weight.
+        weight.Dispose();
     }
 
     private static void AssertReleasedAndReusable(QuantizedWeight[] weights, IntPtr[] keys)
@@ -105,10 +109,12 @@ public sealed class Bonsai2ConstructionFailureTests
             try { throw original; }
             catch
             {
-                CleanUpFailedBonsaiConstruction(
-                    () => { attempts++; throw new EntryPointNotFoundException("missing graph reset export"); },
-                    () => { attempts++; throw new EntryPointNotFoundException("missing base reset export"); });
-                cleanupAttempts = attempts;
+                try
+                {
+                    RollBackFailedConstruction(original,
+                        () => { attempts++; throw new EntryPointNotFoundException("missing graph reset export"); });
+                }
+                finally { cleanupAttempts = attempts; }
                 throw;
             }
         }

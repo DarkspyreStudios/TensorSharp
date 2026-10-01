@@ -177,6 +177,21 @@ externally supplied contexts remain borrowed. `GgmlContext` is disposable and re
 while tensor storages remain; disposal drains pending compute and invalidates pooled host buffers
 before freeing memory. An abandoned context retains its lease if safe synchronization fails.
 
+Concrete model constructors roll back base and family-owned resources without virtual disposal
+of a partially constructed subclass. The guarded host-read barrier drains deferred work before
+any family graph reset (some native reset entrypoints have no barrier). Family graphs retire
+before generic GGML scratch/cache
+bindings, then derived buffers, base weights/mappings, late owned raw buffers and final context/
+model ownership retire. Failed construction does not dispose a caller-supplied tensor-parallel
+group, its allocator or its context. A tensor allocated during F32 weight reading transfers to
+the model only after a successful read; failure explicitly disposes the unregistered allocation.
+Clean rollback preserves the original exception and stack. Failed cleanup reports both errors
+and stops further dependent teardown. For GGML, a generation-local failed-owner collection
+retains the actual unsafe model and unregistered storage, supported by the existing live runtime
+owner’s process-exit root and guarded shutdown refusal. It adds no global root or finalizer and
+does not establish equivalent terminal-failure retention for CUDA or MLX owners. This retention
+applies to construction rollback; normal `Dispose` failures do not enter the failed-owner collection.
+
 `Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
 Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
 native imports cannot execute afterwards. The loaded library is never unloaded. A process-wide
@@ -233,6 +248,36 @@ dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-default-cpu /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-selected-metal /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-default-metal /absolute/bridge/directory metal
+```
+
+`eng/tests/ggml-model-lifetime` privately loads its fixture and all real TensorSharp dependencies
+in a collectible generation. `normal` generates a deterministic two-layer F32 HunyuanDense GGUF,
+loads it, refuses shutdown while the model is live, executes complete prefill and decode, and
+explicitly disposes it before guarded shutdown and outer-frame collection of all eight roots.
+`refusal` exercises the actual unequal-head-dimension constructor error. `constructor-matrix`
+checks malformed-input unwind of all 18 concrete model implementations, including internal image
+components, with zero resources immediately after each failure. `partial-weight` injects a real
+empty-file read after the first registered F32 weight and verifies local and registered tensor
+cleanup without virtual disposal or GC. `borrowed-tp` checks disposable allocator ownership and
+a real caller-owned nested GGML context after base and derived construction failures; using a
+CUDA constructor label with a supplied allocator/context does not qualify CUDA execution.
+`phase-order` queues real asynchronous native flash attention and verifies the pipeline barrier
+drains it before the first family graph callback, with real KV device-copy cache bindings retired
+before the first derived buffer free. It does not build a captured CUDA graph.
+
+`derived-cleanup-failure`, `base-cleanup-failure` and `local-cleanup-failure` use labeled managed
+fault injection with real native resources. They verify both errors, retained derived/base or
+unregistered native buffers through finalizer drainage, shutdown refusal and all foreign roots
+remaining alive. The base mode holds a controlled managed call lease, not a blocked native call.
+These tests do not qualify pretrained, quantized, whole-native-executor or multi-device models,
+every nested allocation helper, actual captured-graph teardown, other RIDs or CUDA/Vulkan devices.
+`observe-refusal` is a historical red-reproduction mode for the pre-fix checkpoint and is not a
+current success gate. Run each mode/backend in a separate process against a matching real bridge:
+
+```sh
+env TMPDIR="$PWD/tmp" dotnet build eng/tests/ggml-model-lifetime/ggml-model-lifetime.csproj -c Release -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+env TMPDIR="$PWD/tmp" dotnet eng/tests/ggml-model-lifetime/bin/Release/net10.0/ggml-model-lifetime.dll normal cpu /absolute/bridge/directory
+env TMPDIR="$PWD/tmp" dotnet eng/tests/ggml-model-lifetime/bin/Release/net10.0/ggml-model-lifetime.dll normal metal /absolute/bridge/directory
 ```
 
 `dotnet run --project eng/guard-ggml-interop/guard-ggml-interop.csproj -- --verify .` checks every

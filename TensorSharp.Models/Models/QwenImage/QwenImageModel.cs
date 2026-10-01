@@ -127,7 +127,11 @@ namespace TensorSharp.Models.QwenImage
                     QwenImage21CompanionValidation.ValidateVision(vision);
                 }
             }
-            catch { Dispose(); throw; }
+            catch (Exception loadError)
+            {
+                RollBackFailedConstruction(loadError, DisposeQwenImageResources);
+                throw;
+            }
         }
 
         private static string ResolveVersion21Companion(string envVar, string dir, Func<string, bool> match)
@@ -187,11 +191,15 @@ namespace TensorSharp.Models.QwenImage
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeQwenImageResources);
+        }
+
+        private void DisposeQwenImageResources()
+        {
             _pipeline21?.Dispose();
             _vaeSafetensors?.Dispose();
             _vaeGguf?.Dispose();
             _teGguf?.Dispose();
-            base.Dispose();
         }
     }
 }

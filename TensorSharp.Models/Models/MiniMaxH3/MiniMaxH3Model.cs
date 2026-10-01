@@ -47,39 +47,47 @@ namespace TensorSharp.Models.MiniMaxH3
         public MiniMaxH3Model(string ggufPath, BackendType backend)
             : base(ggufPath, backend)
         {
-            _ditPath = ggufPath;
-            string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath));
-
-            using (var probe = new GgufFile(ggufPath))
+            try
             {
-                DitConfig = MiniMaxH3Config.Detect(probe.Tensors);
+                _ditPath = ggufPath;
+                string dir = Path.GetDirectoryName(Path.GetFullPath(ggufPath));
+
+                using (var probe = new GgufFile(ggufPath))
+                {
+                    DitConfig = MiniMaxH3Config.Detect(probe.Tensors);
+                }
+                Partition = MiniMaxH3Config.PartitionFromFileName(ggufPath);
+                Config = new ModelConfig { Architecture = ArchitectureId, VocabSize = 0 };
+
+                _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE", dir,
+                    new[] { "qwen3vl_32b_minimax_h3-Q4_K_M.gguf" },
+                    n => n.Contains("qwen3vl") && n.EndsWith(".gguf"));
+                _vaePath = ResolveCompanion("TS_VIDEO_VAE", "TS_WAN_VAE", dir,
+                    new[] { "minimax_h3_video_vae_fp16.safetensors" },
+                    n => n.Contains("video_vae") && n.EndsWith(".safetensors"));
+                _audioVaePath = ResolveCompanion("TS_VIDEO_AUDIO_VAE", null, dir,
+                    new[] { "minimax_h3_audio_vae_fp32.safetensors" },
+                    n => n.Contains("audio_vae") && n.EndsWith(".safetensors"));
+
+                Console.WriteLine($"MiniMax-H3 ({Partition}): DiT={Path.GetFileName(ggufPath)}");
+                Console.WriteLine($"  {DitConfig}");
+                Console.WriteLine($"  text-encoder = {_tePath ?? "<missing>"}");
+                Console.WriteLine($"  video VAE    = {_vaePath ?? "<missing>"}");
+                Console.WriteLine($"  audio VAE    = {_audioVaePath ?? "<missing> (video only)"}");
+
+                if (_tePath == null || _vaePath == null)
+                    throw new FileNotFoundException(
+                        "MiniMax-H3 needs companion models beside the denoiser GGUF (or via " +
+                        "--video-text-encoder / --video-vae): the Qwen3-VL-32B text encoder GGUF " +
+                        "(unsloth/MiniMax-H3-GGUF) and minimax_h3_video_vae_fp16.safetensors " +
+                        "(Comfy-Org/MiniMax-H3). The text encoder also needs vocab.json and " +
+                        "merges.txt beside it, since its GGUF carries no tokenizer.");
             }
-            Partition = MiniMaxH3Config.PartitionFromFileName(ggufPath);
-            Config = new ModelConfig { Architecture = ArchitectureId, VocabSize = 0 };
-
-            _tePath = ResolveCompanion("TS_VIDEO_TEXT_ENCODER", "TS_WAN_TE", dir,
-                new[] { "qwen3vl_32b_minimax_h3-Q4_K_M.gguf" },
-                n => n.Contains("qwen3vl") && n.EndsWith(".gguf"));
-            _vaePath = ResolveCompanion("TS_VIDEO_VAE", "TS_WAN_VAE", dir,
-                new[] { "minimax_h3_video_vae_fp16.safetensors" },
-                n => n.Contains("video_vae") && n.EndsWith(".safetensors"));
-            _audioVaePath = ResolveCompanion("TS_VIDEO_AUDIO_VAE", null, dir,
-                new[] { "minimax_h3_audio_vae_fp32.safetensors" },
-                n => n.Contains("audio_vae") && n.EndsWith(".safetensors"));
-
-            Console.WriteLine($"MiniMax-H3 ({Partition}): DiT={Path.GetFileName(ggufPath)}");
-            Console.WriteLine($"  {DitConfig}");
-            Console.WriteLine($"  text-encoder = {_tePath ?? "<missing>"}");
-            Console.WriteLine($"  video VAE    = {_vaePath ?? "<missing>"}");
-            Console.WriteLine($"  audio VAE    = {_audioVaePath ?? "<missing> (video only)"}");
-
-            if (_tePath == null || _vaePath == null)
-                throw new FileNotFoundException(
-                    "MiniMax-H3 needs companion models beside the denoiser GGUF (or via " +
-                    "--video-text-encoder / --video-vae): the Qwen3-VL-32B text encoder GGUF " +
-                    "(unsloth/MiniMax-H3-GGUF) and minimax_h3_video_vae_fp16.safetensors " +
-                    "(Comfy-Org/MiniMax-H3). The text encoder also needs vocab.json and " +
-                    "merges.txt beside it, since its GGUF carries no tokenizer.");
+            catch (Exception loadError)
+            {
+                RollBackFailedConstruction(loadError, static () => { });
+                throw;
+            }
         }
 
         /// <summary>True when the tensor table looks like a MiniMax-H3 denoiser. Used

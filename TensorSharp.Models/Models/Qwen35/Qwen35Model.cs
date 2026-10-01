@@ -404,25 +404,17 @@ namespace TensorSharp.Models
             string draftModelPath = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            _useMetalGdnInplaceState = ShouldUseMetalGdnInplaceState(
-                backend,
-                IsTensorParallel,
-                Environment.GetEnvironmentVariable("TS_QWEN35_METAL_GDN_INPLACE_STATE"));
-
             try
             {
+                _useMetalGdnInplaceState = ShouldUseMetalGdnInplaceState(
+                    backend,
+                    IsTensorParallel,
+                    Environment.GetEnvironmentVariable("TS_QWEN35_METAL_GDN_INPLACE_STATE"));
                 InitializeQwen35Model(backend, draftModelPath);
             }
-            catch
+            catch (Exception loadError)
             {
-                if (HasBonsaiCheckpointMetadata)
-                {
-                    // Reuse the ordinary cleanup without virtual dispatch into
-                    // a subclass whose constructor has not completed. A missing
-                    // native entry point must not hide the original load error
-                    // or prevent rollback of owned transcoded weights.
-                    CleanUpFailedBonsaiConstruction(DisposeQwen35Resources, () => base.Dispose());
-                }
+                RollBackFailedConstruction(loadError, DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs);
                 throw;
             }
         }
@@ -6459,11 +6451,10 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
-            DisposeQwen35Resources();
-            base.Dispose();
+            DisposeBaseResources(DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs);
         }
 
-        private void DisposeQwen35Resources()
+        private void DisposeQwen35Graphs()
         {
             // Native whole-model graphs retain backend buffers and weight/cache
             // bindings. Release them while the model tensors and Metal backend are
@@ -6488,6 +6479,10 @@ namespace TensorSharp.Models
             // them before the tensors/caches they reference are torn down.
             _cudaPrefillGraphs?.Dispose();
             _cudaPrefillGraphs = null;
+        }
+
+        private void DisposeQwen35Resources()
+        {
             _cudaDecodeDynParams?.Dispose();
             _cudaDecodeDynParams = null;
 

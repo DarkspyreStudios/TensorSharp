@@ -223,7 +223,11 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
-            VisionEncoder?.Dispose();
+            DisposeBaseResources(DisposeGlmDsaResources, releaseDerivedGraphs: DisposeGlmDsaGraphs);
+        }
+
+        private void DisposeGlmDsaGraphs()
+        {
             lock (_nativeSync)
             {
                 if (_native != IntPtr.Zero)
@@ -232,13 +236,16 @@ namespace TensorSharp.Models
                     _native = IntPtr.Zero;
                 }
             }
+        }
 
+        private void DisposeGlmDsaResources()
+        {
+            VisionEncoder?.Dispose();
             // The per-op path's caches are this model's own tensors; the base
             // class only knows about weights, so they have to be released here
             // or they outlive the allocator that backs them.
             DisposeCaches();
 
-            base.Dispose();
         }
     }
 }
