@@ -6,6 +6,7 @@
     <Nullable>annotations</Nullable>
     <IsPackable>false</IsPackable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../../TensorSharp.Models/TensorSharp.Models.csproj" />
