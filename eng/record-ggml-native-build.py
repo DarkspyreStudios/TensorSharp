@@ -117,6 +117,7 @@ def stage_components(root, binary, build, redist_dir=None, redist_manifest=None)
 
 
 def create_record(root, build_dir, binary, rid, variant, source, redist_dir=None, redist_manifest=None):
+    binary = binary.absolute()
     if rid not in pack.VARIANTS or variant not in pack.VARIANTS[rid]:
         raise ValueError("unsupported release RID/variant")
     pack.require_unlinked(binary.absolute())

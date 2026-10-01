@@ -82,6 +82,13 @@ class BuildRecordTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), (self.binary.parent / evidence["path"]).read_bytes())
             self.assertEqual(record.pack.sha256_bytes(source.read_bytes()), evidence["sha256"])
 
+    def test_relative_bridge_path_uses_one_absolute_staging_root(self):
+        with patch("os.getcwd", return_value=str(self.root)):
+            result = record.create_record(self.root, self.root / "build", Path("stage/libGgmlOps.so"),
+                                          "linux-arm64", "cuda13", self.source)
+        self.assertEqual("libGgmlOps.so", result["components"][0]["binaryFiles"][0]["path"])
+        self.assertEqual(record.pack.sha256_bytes(self.binary.read_bytes()), result["bridgeSha256"])
+
     def test_wrong_binary_identity_and_cpu_floor_refuse(self):
         for key in ("source", "ggml", "abi", "rid", "variant", "cpu"):
             with self.subTest(key=key):
