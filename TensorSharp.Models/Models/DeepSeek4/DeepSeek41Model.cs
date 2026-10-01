@@ -58,6 +58,7 @@ namespace TensorSharp.Models
                     ResolveVisionBackendName(_requestedBackend), 0, Math.Min(Environment.ProcessorCount, 32));
                 if (vision == IntPtr.Zero)
                     throw new InvalidDataException($"Cannot load DeepSeek V4.1 vision companion {mmProjPath} (see stderr).");
+                _vision = vision;
                 try
                 {
                     int[] info = GgmlDeepSeek41VisionNative.Info(vision);
@@ -69,11 +70,15 @@ namespace TensorSharp.Models
                         throw new InvalidDataException("Cannot attach V4.1 vision companion to the text executor (see stderr).");
                     ImageTokenId = info[6];
                     ImageProcessor = processor;
-                    _vision = vision;
                 }
-                catch
+                catch (Exception loadError)
                 {
-                    GgmlDeepSeek41VisionNative.TSGgml_Dsv41VisionFree(vision);
+                    try { ReleaseVisionResources(); }
+                    catch (Exception cleanupError)
+                    {
+                        RetainFailedModelOwnership(cleanupFailure: cleanupError);
+                        throw new AggregateException("Vision loading and ownership rollback both failed.", loadError, cleanupError);
+                    }
                     throw;
                 }
             }
@@ -156,13 +161,19 @@ namespace TensorSharp.Models
             lock (NativeSync)
             {
                 _visionQueue.Clear();
-                if (_vision != IntPtr.Zero)
+                DisposeBaseResources(static () => { }, releaseDerivedGraphs: () =>
                 {
-                    GgmlDeepSeek41VisionNative.TSGgml_Dsv41VisionFree(_vision);
-                    _vision = IntPtr.Zero;
-                }
-                base.Dispose();
+                    ReleaseVisionResources();
+                    DisposeDeepSeek4Resources();
+                });
             }
+        }
+
+        private void ReleaseVisionResources()
+        {
+            if (_vision == IntPtr.Zero) return;
+            GgmlDeepSeek41VisionNative.TSGgml_Dsv41VisionFree(_vision);
+            _vision = IntPtr.Zero;
         }
     }
 

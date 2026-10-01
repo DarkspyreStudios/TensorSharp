@@ -191,10 +191,20 @@ retains the actual unsafe model and unregistered storage, supported by the exist
 owner’s process-exit root and guarded shutdown refusal. It adds no global root or finalizer and
 does not establish equivalent terminal-failure retention for CUDA or MLX owners. This retention
 applies to construction rollback and failure inside the shared normal `Dispose` pipeline. Cleanup
-outside that pipeline, including the V4.1 vision companion, does not enter this retention path.
+outside that pipeline does not automatically enter this retention path.
 The shared pipeline preserves the original cleanup exception and stack; repeated teardown after failure refuses before any phase
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
+
+The DeepSeek V4.1 vision loader reserves its returned native handle before validating companion
+metadata and attaching it to the text model. Successful rollback explicitly frees and clears
+the handle, then rethrows the original validation error unchanged. Refused rollback retains
+the actual model and reserved handle through the existing GGML failed-owner collection and
+reports the original validation and cleanup errors together. Normal V4.1 disposal releases its
+vision handle and text executor through one shared graph-release callback after the host-read
+barrier. A failure retains the still-owned fields and native identities; repeated teardown
+refuses at the shared terminal guard. These paths do not fence forward/reset operations or
+establish equivalent non-GGML retention, captured GPU teardown or image-encoding qualification.
 
 Weight loading keeps a local disposable owner until ordinary quantized, Bonsai or F32 storage
 transfers to a model dictionary. Owned stacked expert buffers transfer before reading or creating

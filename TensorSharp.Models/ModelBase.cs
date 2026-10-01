@@ -2665,7 +2665,7 @@ namespace TensorSharp.Models
             DisposeBaseResources(ownsTensorParallelGroup, releaseAfterModelCaches: releaseOwnedBuffers);
         }
 
-        private void RetainFailedModelOwnership(IDisposable resource = null, Exception cleanupFailure = null)
+        private protected void RetainFailedModelOwnership(IDisposable resource = null, Exception cleanupFailure = null)
         {
             _ownershipCleanupFailed = true;
             _ownershipCleanupFailure ??= cleanupFailure;
