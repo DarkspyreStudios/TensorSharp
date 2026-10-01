@@ -29,6 +29,7 @@ NATIVE_DIR="${REPO_ROOT}/TensorSharp.GGML.Native"
 # macOS 14.0 is the lowest macOS the consuming application supports. Every
 # Apple Silicon Mac, including M1, runs it.
 MACOS_DEPLOYMENT_TARGET="${TENSORSHARP_MACOS_DEPLOYMENT_TARGET:-14.0}"
+RELEASE_CUDA_ARCHITECTURES='75-real;80-real;86-real;89-real;120-real;120-virtual'
 
 RID=""
 VARIANT=""
@@ -51,8 +52,8 @@ done
 
 VERSION="$(sed -n 's:.*<TensorSharpVersion>\(.*\)</TensorSharpVersion>.*:\1:p' "${REPO_ROOT}/Directory.Build.props" | head -n 1)"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native eng/ggml-revision Directory.Build.props)" ]]; then
-    echo "error: native sources have uncommitted changes; a release native must be built from a commit." >&2
+if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native TensorSharp.Backends.GGML eng/GgmlNativeIdentity.cmake eng/GgmlNativeIdentity.targets eng/build-ggml-natives.sh eng/ggml-revision Directory.Build.props)" ]]; then
+    echo "error: native source, managed ABI or build inputs have uncommitted changes; a release native must be built from a commit." >&2
     exit 1
 fi
 OUT="${OUT:-${REPO_ROOT}/artifacts/ggml-natives/${VERSION}}"
@@ -90,7 +91,16 @@ case "${RID}/${VARIANT}" in
         case "${VARIANT}" in
             cpu) BUILD_ARGS+=(--no-cuda --no-vulkan) ;;
             vulkan) BUILD_ARGS+=(--no-cuda --vulkan) ;;
-            cuda13) BUILD_ARGS+=(--cuda --no-vulkan) ;;
+            cuda13)
+                BUILD_ARGS+=(--cuda --no-vulkan)
+                for argument in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
+                    if [[ "${argument}" == -DCMAKE_CUDA_ARCHITECTURES=* ]]; then
+                        echo "error: the release CUDA architecture profile cannot be overridden." >&2
+                        exit 2
+                    fi
+                done
+                CMAKE_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=${RELEASE_CUDA_ARCHITECTURES}")
+                ;;
         esac
         # Libraries shipped beside the bridge resolve from its own directory,
         # never from a path on the build machine.
@@ -112,6 +122,13 @@ GGML_HEAD="$(git -C "${REPO_ROOT}/ExternalProjects/ggml" rev-parse HEAD)"
 if [[ "${GGML_HEAD}" != "$(tr -d '[:space:]' < "${SCRIPT_DIR}/ggml-revision")" ]]; then
     echo "error: ExternalProjects/ggml is at ${GGML_HEAD}, not the pinned revision." >&2
     exit 1
+fi
+if [[ "${VARIANT}" == cuda13 ]]; then
+    actual_architectures="$(sed -n 's/^CMAKE_CUDA_ARCHITECTURES:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt")"
+    if [[ "${actual_architectures}" != "${RELEASE_CUDA_ARCHITECTURES}" ]]; then
+        echo "error: the build did not preserve the full release CUDA architecture profile." >&2
+        exit 1
+    fi
 fi
 
 STAGE="${OUT}/runtimes/${RID}/native/${VARIANT}"

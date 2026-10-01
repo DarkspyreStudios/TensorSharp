@@ -145,6 +145,13 @@ dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll
 interop declaration for private raw binding, mandatory call guards and owned handle-family
 acquisition/use/release coverage. New unclassified native handles fail verification.
 
+`eng/build-ggml-natives.sh` refuses uncommitted native, managed ABI and build inputs. Its Linux
+CUDA release profile includes SASS 75/80/86/89/120 and PTX 120 on both x64 and ARM64. Local GPU
+detection and extra CMake arguments cannot reduce that profile. The builder checks the actual
+CMake cache before staging. A toolkit that cannot compile the profile fails the build.
+`test_build_ggml_natives.py` verifies these command/provenance gates with mock build commands;
+it does not qualify CUDA binaries or devices.
+
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.
 
