@@ -13,7 +13,8 @@ using TensorSharp.Models;
 using TensorSharp.Runtime;
 
 if (args.Length != 3 || args[0] is not ("normal" or "refusal" or "phase-order" or "borrowed-tp" or "constructor-matrix" or "partial-weight" or
-    "derived-cleanup-failure" or "base-cleanup-failure" or "local-cleanup-failure" or "dispose-cleanup-failure" or "observe-dispose-refusal" or "observe-refusal") || args[1] is not ("cpu" or "metal"))
+    "derived-cleanup-failure" or "base-cleanup-failure" or "local-cleanup-failure" or "dispose-cleanup-failure" or "observe-dispose-refusal" or "observe-refusal" or
+    "observe-raw-quantized-read" or "observe-stacked-quantized-read" or "observe-stacked-owner-insertion" or "stacked-partial-view-refusal" or "observe-bonsai-unregister") || args[1] is not ("cpu" or "metal"))
     throw new ArgumentException("Expected a model-lifetime mode, cpu|metal and an absolute bridge directory.");
 
 Retirement.Run(args[0], args[1], Path.GetFullPath(args[2]));
@@ -33,7 +34,7 @@ internal static class Retirement
             Thread.Sleep(10);
         }
         string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
-        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal";
+        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "observe-bonsai-unregister";
         if (!unsafeCleanup && retained.Length != 0)
             throw new InvalidOperationException("Disposed real model generation remains rooted: " + string.Join(",", retained));
         if (unsafeCleanup && retained.Length != evidence.Roots.Length)
@@ -44,7 +45,9 @@ internal static class Retirement
             backend,
             evidence.Report,
             retained,
-            actualModel = "generated tiny F32 HunyuanDense",
+            actualModel = mode is "observe-raw-quantized-read" or "observe-stacked-quantized-read" or
+                "observe-stacked-owner-insertion" or "stacked-partial-view-refusal" ? "generated Q4_0 ownership-only GGUF, no forward" :
+                mode == "observe-bonsai-unregister" ? "generated F32 metadata context and registered Q2_0 weight, no forward" : "generated tiny F32 HunyuanDense",
             pretrainedModelQualification = "not-run",
             wholeNativeExecutor = "not-run",
             multiDeviceWorkers = "not-run"
@@ -91,7 +94,7 @@ internal static class Retirement
     }
 }
 
-public static class ForeignModelLifetime
+public static partial class ForeignModelLifetime
 {
     public static string Run(string mode, string backendName, string directory)
     {
@@ -131,6 +134,9 @@ public static class ForeignModelLifetime
                 ValueHeadDim = mode is "refusal" or "borrowed-tp" or "observe-refusal" ? 8 : DenseDecoderSyntheticModelBuilder.HeadDim,
                 IncludeTokenizer = mode != "constructor-matrix"
             }.Write(modelPath);
+            if (mode is "observe-raw-quantized-read" or "observe-stacked-quantized-read" or
+                "observe-stacked-owner-insertion" or "stacked-partial-view-refusal")
+                WriteQuantizedOwnershipFixture(modelPath, mode != "observe-raw-quantized-read");
             string modelHash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(modelPath)));
             string work = mode switch
             {
@@ -144,10 +150,13 @@ public static class ForeignModelLifetime
                 "base-cleanup-failure" => RefuseBaseCleanup(modelPath, backend),
                 "dispose-cleanup-failure" => RefuseNormalDispose(modelPath, backend),
                 "observe-dispose-refusal" => ObserveNormalDisposeRefusal(modelPath, backend),
+                "observe-raw-quantized-read" or "observe-stacked-quantized-read" or
+                    "observe-stacked-owner-insertion" or "stacked-partial-view-refusal" => ObserveQuantizedTransfer(mode, modelPath, backend),
+                "observe-bonsai-unregister" => ObserveBonsaiUnregister(modelPath, backend),
                 _ => RefuseModel(modelPath, backend)
             };
             // Finalization is diagnostic here. A failed construction must not require GC to retire its model lease.
-            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal";
+            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "observe-bonsai-unregister";
             for (int attempt = 0; unsafeCleanup && attempt < 10; attempt++)
             {
                 GC.Collect();
