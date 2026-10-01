@@ -34,6 +34,7 @@ public sealed class DenseDecoderSyntheticModelBuilder
     public bool IncludeMistralControlTokens { get; init; } = true;
     public bool IncludeRopeFreqs { get; init; }
     public bool IncludeQkNorms { get; init; }
+    public int ValueHeadDim { get; init; } = HeadDim;
     public uint ExpertCount { get; init; }
     public string RopeScalingType { get; init; }
     public float RopeBase { get; init; } = 1_000_000f;
@@ -116,7 +117,7 @@ public sealed class DenseDecoderSyntheticModelBuilder
             ($"{a}.attention.head_count", U32(NumHeads)),
             ($"{a}.attention.head_count_kv", U32(NumKvHeads)),
             ($"{a}.attention.key_length", U32(HeadDim)),
-            ($"{a}.attention.value_length", U32(HeadDim)),
+            ($"{a}.attention.value_length", U32(checked((uint)ValueHeadDim))),
             ($"{a}.rope.dimension_count", U32(HeadDim)),
             ($"{a}.rope.freq_base", F32(RopeBase)),
             ($"{a}.attention.layer_norm_rms_epsilon", F32(1e-5f)),
