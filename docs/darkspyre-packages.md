@@ -190,7 +190,11 @@ and stops further dependent teardown. For GGML, a generation-local failed-owner 
 retains the actual unsafe model and unregistered storage, supported by the existing live runtime
 owner’s process-exit root and guarded shutdown refusal. It adds no global root or finalizer and
 does not establish equivalent terminal-failure retention for CUDA or MLX owners. This retention
-applies to construction rollback; normal `Dispose` failures do not enter the failed-owner collection.
+applies to construction rollback and failure inside the shared normal `Dispose` pipeline. Cleanup
+outside that pipeline, including the V4.1 vision companion, does not enter this retention path.
+The shared pipeline preserves the original cleanup exception and stack; repeated teardown after failure refuses before any phase
+and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
+fencing or proof of failed-GPU synchronization safety.
 
 `Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
 Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
@@ -265,10 +269,14 @@ CUDA constructor label with a supplied allocator/context does not qualify CUDA e
 drains it before the first family graph callback, with real KV device-copy cache bindings retired
 before the first derived buffer free. It does not build a captured CUDA graph.
 
-`derived-cleanup-failure`, `base-cleanup-failure` and `local-cleanup-failure` use labeled managed
+`derived-cleanup-failure`, `base-cleanup-failure`, `local-cleanup-failure` and `dispose-cleanup-failure` use labeled managed
 fault injection with real native resources. They verify both errors, retained derived/base or
 unregistered native buffers through finalizer drainage, shutdown refusal and all foreign roots
 remaining alive. The base mode holds a controlled managed call lease, not a blocked native call.
+The disposal mode constructs the probe successfully, then refuses at its graph phase; repeated
+disposal preserves the first exception without rerunning teardown, and actual model/storage
+owners and all four leases survive finalizer drainage. `observe-dispose-refusal` is the historical
+red reproduction of actual model/storage collection despite an abandoned numeric Model lease.
 These tests do not qualify pretrained, quantized, whole-native-executor or multi-device models,
 every nested allocation helper, actual captured-graph teardown, other RIDs or CUDA/Vulkan devices.
 `observe-refusal` is a historical red-reproduction mode for the pre-fix checkpoint and is not a

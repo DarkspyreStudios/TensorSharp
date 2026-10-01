@@ -184,7 +184,7 @@ namespace TensorSharp.Models
                         try { tensor.Dispose(); }
                         catch (Exception cleanupError)
                         {
-                            RetainFailedConstruction(tensor);
+                            RetainFailedModelOwnership(tensor, cleanupError);
                             throw new AggregateException("Weight loading and allocation rollback both failed.", loadError, cleanupError);
                         }
                         throw;

@@ -29,9 +29,10 @@ namespace TensorSharp.Models
 
     public abstract partial class ModelBase : IModelArchitecture
     {
-        private static readonly List<ModelBase> FailedGgmlConstructionOwners = new();
-        private readonly List<IDisposable> _failedConstructionResources = new();
-        private bool _constructionCleanupFailed;
+        private static readonly List<ModelBase> FailedGgmlModelOwners = new();
+        private readonly List<IDisposable> _failedOwnershipResources = new();
+        private bool _ownershipCleanupFailed;
+        private Exception _ownershipCleanupFailure;
         public ModelConfig Config { get; protected set; }
         public ITokenizer Tokenizer { get; protected set; }
         public IMultimodalInjector MultimodalInjector { get; }
@@ -366,7 +367,7 @@ namespace TensorSharp.Models
                 }
                 catch (Exception cleanupError)
                 {
-                    RetainFailedConstruction();
+                    RetainFailedModelOwnership(cleanupFailure: cleanupError);
                     throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
                 }
                 throw;
@@ -2639,7 +2640,7 @@ namespace TensorSharp.Models
         protected void RollBackFailedConstruction(Exception loadError, Action releaseDerivedResources,
             bool ownsTensorParallelGroup = true, Action releaseAfterModelCaches = null, Action releaseDerivedGraphs = null)
         {
-            if (_constructionCleanupFailed) return;
+            if (_ownershipCleanupFailed) return;
             try
             {
                 // Stop at a failed dependency teardown. Its buffers and runtime lease remain owned.
@@ -2648,7 +2649,7 @@ namespace TensorSharp.Models
             }
             catch (Exception cleanupError)
             {
-                RetainFailedConstruction();
+                RetainFailedModelOwnership(cleanupFailure: cleanupError);
                 throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
             }
         }
@@ -2664,18 +2665,36 @@ namespace TensorSharp.Models
             DisposeBaseResources(ownsTensorParallelGroup, releaseAfterModelCaches: releaseOwnedBuffers);
         }
 
-        private void RetainFailedConstruction(IDisposable resource = null)
+        private void RetainFailedModelOwnership(IDisposable resource = null, Exception cleanupFailure = null)
         {
-            _constructionCleanupFailed = true;
-            if (resource != null) _failedConstructionResources.Add(resource);
+            _ownershipCleanupFailed = true;
+            _ownershipCleanupFailure ??= cleanupFailure;
+            if (resource != null) _failedOwnershipResources.Add(resource);
             if (_ggmlContext == null) return;
             // The live GGML owner's process-exit hook retains this generation until safe shutdown.
-            lock (FailedGgmlConstructionOwners)
-                if (!FailedGgmlConstructionOwners.Contains(this)) FailedGgmlConstructionOwners.Add(this);
+            lock (FailedGgmlModelOwners)
+                if (!FailedGgmlModelOwners.Contains(this)) FailedGgmlModelOwners.Add(this);
         }
 
         private void DisposeBaseResources(bool ownsTensorParallelGroup, Action releaseDerivedResources = null,
             Action releaseAfterModelCaches = null, bool constructionRollback = false, Action releaseDerivedGraphs = null)
+        {
+            if (_ownershipCleanupFailed)
+                throw new InvalidOperationException("Model ownership cleanup previously failed; repeated teardown is unsafe.", _ownershipCleanupFailure);
+            try
+            {
+                DisposeBaseResourcesCore(ownsTensorParallelGroup, releaseDerivedResources, releaseAfterModelCaches,
+                    constructionRollback, releaseDerivedGraphs);
+            }
+            catch (Exception cleanupError)
+            {
+                RetainFailedModelOwnership(cleanupFailure: cleanupError);
+                throw;
+            }
+        }
+
+        private void DisposeBaseResourcesCore(bool ownsTensorParallelGroup, Action releaseDerivedResources,
+            Action releaseAfterModelCaches, bool constructionRollback, Action releaseDerivedGraphs)
         {
             // Release any distributed worker nodes before tearing down the TP
             // group, so every driver exit path (normal or exception) lets the
