@@ -27,25 +27,24 @@ class ArtifactPolicyTests(unittest.TestCase):
                                 capture_output=True, text=True, check=True, timeout=30)
         self.assertEqual("-- GgmlNativeAbi=" + pack.native_abi(pack.REPO_ROOT), result.stdout.strip())
 
-    def test_abi_normalizes_line_endings_and_tracks_bridge_interop_and_upstream(self):
+    def test_abi_normalizes_line_endings_and_tracks_bridge_backend_and_upstream(self):
         (pack.REPO_ROOT / "tmp").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="abi-inputs-", dir=pack.REPO_ROOT / "tmp") as temporary:
             root = Path(temporary)
             native, managed, eng = root / "TensorSharp.GGML.Native", root / "TensorSharp.Backends.GGML", root / "eng"
             for directory in (native, managed, eng):
                 directory.mkdir()
-            inputs = [native / "bridge.cpp", native / "bridge.cuh", managed / "GgmlNative.cs", managed / "QwenImage21Native.cs", eng / "ggml-revision"]
+            inputs = [native / "bridge.cpp", native / "bridge.cuh", managed / "GgmlNative.cs",
+                      managed / "QwenImage21Native.cs", managed / "GgmlTensorParallel.cs",
+                      managed / "GgmlContext.cs", managed / "GgmlNativeLoader.cs", eng / "ggml-revision"]
             for path in inputs:
                 path.write_bytes(b"\xef\xbb\xbfinput\r\n")
-            loader = managed / "GgmlNativeLoader.cs"
-            loader.write_bytes(b"loader excluded")
             expected = pack.native_abi(root)
             result = subprocess.run(["cmake", "-DROOT=" + str(root), "-P", str(pack.REPO_ROOT / "eng" / "print-ggml-native-abi.cmake")],
                                     capture_output=True, text=True, check=True, timeout=30)
             self.assertEqual("-- GgmlNativeAbi=" + expected, result.stdout.strip())
             for path in inputs:
                 path.write_bytes(b"\xef\xbb\xbfinput\n")
-            loader.write_bytes(b"another loader version")
             self.assertEqual(expected, pack.native_abi(root))
             for path in inputs:
                 path.write_bytes(b"changed")

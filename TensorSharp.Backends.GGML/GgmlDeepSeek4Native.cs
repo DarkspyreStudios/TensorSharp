@@ -26,109 +26,249 @@ namespace TensorSharp.GGML
 
         // Paths must cross as UTF-8: ggml_fopen decodes them as UTF-8 on Windows,
         // while CharSet.Ansi would marshal the active code page.
-        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_Dsv4LoadModel(string ggufPath,
-            int nGpu, int nCtx, int nUbatch, int nThreads,
-            int nCpuMoe, string backendName);
+        private static IntPtr TSGgml_Dsv4LoadModel(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe, string backendName)
+        {
+            backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("deepseek-model", Native_TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName));
+        }
 
-        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
+        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_Dsv4LoadModel")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_Dsv4LoadModelDspark(string ggufPath,
-            int nGpu, int nCtx, int nUbatch,
-            int nThreads, string dsparkPath, int nCpuMoe,
-            string backendName);
+        private static partial IntPtr Native_TSGgml_Dsv4LoadModel(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe, string backendName);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4DsparkBlockSize(IntPtr handle);
+        private static IntPtr TSGgml_Dsv4LoadModelDspark(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, string dsparkPath, int nCpuMoe, string backendName)
+        {
+            backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("deepseek-model", Native_TSGgml_Dsv4LoadModelDspark(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath, nCpuMoe, backendName));
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_Dsv4LoadModelDspark")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4UBatch(IntPtr handle);
+        private static partial IntPtr Native_TSGgml_Dsv4LoadModelDspark(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, string dsparkPath, int nCpuMoe, string backendName);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv4ForwardSpec(IntPtr handle, int* tokens, int nTokens, float* logitsOut);
+        private static int TSGgml_Dsv4DsparkBlockSize(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4DsparkBlockSize(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4DsparkBlockSize")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv4DsparkDraft(IntPtr handle, int anchorToken, int* toksOut, float* confOut);
+        private static partial int Native_TSGgml_Dsv4DsparkBlockSize(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4Rewind(IntPtr handle, int nPast);
+        private static int TSGgml_Dsv4UBatch(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4UBatch(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4UBatch")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4Truncate(IntPtr handle, int nPast);
+        private static partial int Native_TSGgml_Dsv4UBatch(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4TruncateAlign(IntPtr handle);
+        private static unsafe int TSGgml_Dsv4ForwardSpec(IntPtr handle, int* tokens, int nTokens, float* logitsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4ForwardSpec(handle, tokens, nTokens, logitsOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4ForwardSpec")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4VocabSize(IntPtr handle);
+        private static unsafe partial int Native_TSGgml_Dsv4ForwardSpec(IntPtr handle, int* tokens, int nTokens, float* logitsOut);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4CtxSize(IntPtr handle);
+        private static unsafe int TSGgml_Dsv4DsparkDraft(IntPtr handle, int anchorToken, int* toksOut, float* confOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4DsparkDraft(handle, anchorToken, toksOut, confOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4DsparkDraft")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4NPast(IntPtr handle);
+        private static unsafe partial int Native_TSGgml_Dsv4DsparkDraft(IntPtr handle, int anchorToken, int* toksOut, float* confOut);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv4Forward(IntPtr handle, int* tokens, int nTokens, float* logitsOut);
+        private static int TSGgml_Dsv4Rewind(IntPtr handle, int nPast)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4Rewind(handle, nPast);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4Rewind")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Dsv4Reset(IntPtr handle);
+        private static partial int Native_TSGgml_Dsv4Rewind(IntPtr handle, int nPast);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4ResetChecked(IntPtr handle);
+        private static int TSGgml_Dsv4Truncate(IntPtr handle, int nPast)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4Truncate(handle, nPast);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4Truncate")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Dsv4Free(IntPtr handle);
+        private static partial int Native_TSGgml_Dsv4Truncate(IntPtr handle, int nPast);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SlotAlloc(IntPtr handle);
+        private static int TSGgml_Dsv4TruncateAlign(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4TruncateAlign(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4TruncateAlign")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SetActiveSlot(IntPtr handle, int slotId);
+        private static partial int Native_TSGgml_Dsv4TruncateAlign(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SlotFree(IntPtr handle, int slotId);
+        private static int TSGgml_Dsv4VocabSize(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4VocabSize(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4VocabSize")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SlotStatus(IntPtr handle, int slotId,
-            out int head, out int checkpoint, out int healthy);
+        private static partial int Native_TSGgml_Dsv4VocabSize(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SlotCanReuse(IntPtr handle, int slotId, int cachedHead, int target);
+        private static int TSGgml_Dsv4CtxSize(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4CtxSize(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4CtxSize")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SlotCanRetain(IntPtr handle, int slotId,
-            int retainedCount, ulong budgetPerDevice);
+        private static partial int Native_TSGgml_Dsv4CtxSize(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Dsv4SlotReleaseGraphs(IntPtr handle, int slotId);
+        private static int TSGgml_Dsv4NPast(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4NPast(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4NPast")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv4ForwardBatchedDecode(
-            IntPtr handle, int n, int* slotIds, int* tokens, int* positions, float* logitsOut);
+        private static partial int Native_TSGgml_Dsv4NPast(IntPtr handle);
+
+        private static unsafe int TSGgml_Dsv4Forward(IntPtr handle, int* tokens, int nTokens, float* logitsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4Forward(handle, tokens, nTokens, logitsOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4Forward")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int Native_TSGgml_Dsv4Forward(IntPtr handle, int* tokens, int nTokens, float* logitsOut);
+
+        private static void TSGgml_Dsv4Reset(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            Native_TSGgml_Dsv4Reset(handle);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4Reset")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Dsv4Reset(IntPtr handle);
+
+        private static int TSGgml_Dsv4ResetChecked(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4ResetChecked(handle);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4ResetChecked")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4ResetChecked(IntPtr handle);
+
+        private static void TSGgml_Dsv4Free(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("deepseek-model", handle);
+            Native_TSGgml_Dsv4Free(handle);
+            resource.Complete();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4Free")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Dsv4Free(IntPtr handle);
+
+        private static int TSGgml_Dsv4SlotAlloc(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SlotAlloc(handle);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SlotAlloc")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SlotAlloc(IntPtr handle);
+
+        private static int TSGgml_Dsv4SetActiveSlot(IntPtr handle, int slotId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SetActiveSlot(handle, slotId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SetActiveSlot")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SetActiveSlot(IntPtr handle, int slotId);
+
+        private static int TSGgml_Dsv4SlotFree(IntPtr handle, int slotId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SlotFree(handle, slotId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SlotFree")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SlotFree(IntPtr handle, int slotId);
+
+        private static int TSGgml_Dsv4SlotStatus(IntPtr handle, int slotId, out int head, out int checkpoint, out int healthy)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SlotStatus(handle, slotId, out head, out checkpoint, out healthy);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SlotStatus")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SlotStatus(IntPtr handle, int slotId, out int head, out int checkpoint, out int healthy);
+
+        private static int TSGgml_Dsv4SlotCanReuse(IntPtr handle, int slotId, int cachedHead, int target)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SlotCanReuse(handle, slotId, cachedHead, target);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SlotCanReuse")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SlotCanReuse(IntPtr handle, int slotId, int cachedHead, int target);
+
+        private static int TSGgml_Dsv4SlotCanRetain(IntPtr handle, int slotId, int retainedCount, ulong budgetPerDevice)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SlotCanRetain(handle, slotId, retainedCount, budgetPerDevice);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SlotCanRetain")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SlotCanRetain(IntPtr handle, int slotId, int retainedCount, ulong budgetPerDevice);
+
+        private static int TSGgml_Dsv4SlotReleaseGraphs(IntPtr handle, int slotId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4SlotReleaseGraphs(handle, slotId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4SlotReleaseGraphs")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Dsv4SlotReleaseGraphs(IntPtr handle, int slotId);
+
+        private static unsafe int TSGgml_Dsv4ForwardBatchedDecode(IntPtr handle, int n, int* slotIds, int* tokens, int* positions, float* logitsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-model", handle);
+            return Native_TSGgml_Dsv4ForwardBatchedDecode(handle, n, slotIds, tokens, positions, logitsOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4ForwardBatchedDecode")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int Native_TSGgml_Dsv4ForwardBatchedDecode(IntPtr handle, int n, int* slotIds, int* tokens, int* positions, float* logitsOut);
 
         /// <summary>
         /// Routed-expert CPU offload policy passed to the native loader:

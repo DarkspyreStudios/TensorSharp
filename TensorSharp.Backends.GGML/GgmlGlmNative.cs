@@ -32,84 +32,219 @@ namespace TensorSharp.GGML
 
         // Paths cross as UTF-8: ggml_fopen decodes them as UTF-8 on Windows,
         // while CharSet.Ansi would marshal the active code page.
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern IntPtr TSGgml_GlmLoadModel([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath,
-            int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe,
-            [MarshalAs(UnmanagedType.LPUTF8Str)] string backendName, int tp, int ctxIsHardLimit, int loadMtp);
+        private static IntPtr TSGgml_GlmLoadModel([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe, [MarshalAs(UnmanagedType.LPUTF8Str)] string backendName, int tp, int ctxIsHardLimit, int loadMtp)
+        {
+            backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("glm-model", Native_TSGgml_GlmLoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName, tp, ctxIsHardLimit, loadMtp));
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmVocabSize(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmLoadModel")]
+        private static extern IntPtr Native_TSGgml_GlmLoadModel([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe, [MarshalAs(UnmanagedType.LPUTF8Str)] string backendName, int tp, int ctxIsHardLimit, int loadMtp);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmCtxSize(IntPtr handle);
+        private static int TSGgml_GlmVocabSize(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmVocabSize(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmNPast(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmVocabSize")]
+        private static extern int Native_TSGgml_GlmVocabSize(IntPtr handle);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern unsafe int TSGgml_GlmForward(IntPtr handle, int* tokens, int nTokens, float* logitsOut);
+        private static int TSGgml_GlmCtxSize(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmCtxSize(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern void TSGgml_GlmReset(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmCtxSize")]
+        private static extern int Native_TSGgml_GlmCtxSize(IntPtr handle);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmRewind(IntPtr handle, int nPast);
+        private static int TSGgml_GlmNPast(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmNPast(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmForwardBatchedDecode(IntPtr handle, int n, int[] slotIds,
-            int[] tokens, int[] positions, float[] logitsOut);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmNPast")]
+        private static extern int Native_TSGgml_GlmNPast(IntPtr handle);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmSlotAlloc(IntPtr handle);
+        private static unsafe int TSGgml_GlmForward(IntPtr handle, int* tokens, int nTokens, float* logitsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmForward(handle, tokens, nTokens, logitsOut);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmSetActiveSlot(IntPtr handle, int slotId);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmForward")]
+        private static extern unsafe int Native_TSGgml_GlmForward(IntPtr handle, int* tokens, int nTokens, float* logitsOut);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmSlotFree(IntPtr handle, int slotId);
+        private static void TSGgml_GlmReset(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            Native_TSGgml_GlmReset(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern void TSGgml_GlmFree(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmReset")]
+        private static extern void Native_TSGgml_GlmReset(IntPtr handle);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern unsafe int TSGgml_GlmQueueVisionRows(IntPtr handle, float* rows, int nRows, int index);
+        private static int TSGgml_GlmRewind(IntPtr handle, int nPast)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmRewind(handle, nPast);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern void TSGgml_GlmClearVisionRows(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmRewind")]
+        private static extern int Native_TSGgml_GlmRewind(IntPtr handle, int nPast);
+
+        private static int TSGgml_GlmForwardBatchedDecode(IntPtr handle, int n, int[] slotIds, int[] tokens, int[] positions, float[] logitsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmForwardBatchedDecode(handle, n, slotIds, tokens, positions, logitsOut);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmForwardBatchedDecode")]
+        private static extern int Native_TSGgml_GlmForwardBatchedDecode(IntPtr handle, int n, int[] slotIds, int[] tokens, int[] positions, float[] logitsOut);
+
+        private static int TSGgml_GlmSlotAlloc(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmSlotAlloc(handle);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmSlotAlloc")]
+        private static extern int Native_TSGgml_GlmSlotAlloc(IntPtr handle);
+
+        private static int TSGgml_GlmSetActiveSlot(IntPtr handle, int slotId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmSetActiveSlot(handle, slotId);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmSetActiveSlot")]
+        private static extern int Native_TSGgml_GlmSetActiveSlot(IntPtr handle, int slotId);
+
+        private static int TSGgml_GlmSlotFree(IntPtr handle, int slotId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmSlotFree(handle, slotId);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmSlotFree")]
+        private static extern int Native_TSGgml_GlmSlotFree(IntPtr handle, int slotId);
+
+        private static void TSGgml_GlmFree(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("glm-model", handle);
+            Native_TSGgml_GlmFree(handle);
+            resource.Complete();
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmFree")]
+        private static extern void Native_TSGgml_GlmFree(IntPtr handle);
+
+        private static unsafe int TSGgml_GlmQueueVisionRows(IntPtr handle, float* rows, int nRows, int index)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmQueueVisionRows(handle, rows, nRows, index);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmQueueVisionRows")]
+        private static extern unsafe int Native_TSGgml_GlmQueueVisionRows(IntPtr handle, float* rows, int nRows, int index);
+
+        private static void TSGgml_GlmClearVisionRows(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            Native_TSGgml_GlmClearVisionRows(handle);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmClearVisionRows")]
+        private static extern void Native_TSGgml_GlmClearVisionRows(IntPtr handle);
 
         // ---- NextN/MTP speculative decoding -------------------------------
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmHasMtp(IntPtr handle);
+        private static int TSGgml_GlmHasMtp(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmHasMtp(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmHiddenSize(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmHasMtp")]
+        private static extern int Native_TSGgml_GlmHasMtp(IntPtr handle);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern unsafe int TSGgml_GlmSpecForward(IntPtr handle, int* tokens, int nTokens,
-            float* hOut, float* logitsOut, int allLogitsRows);
+        private static int TSGgml_GlmHiddenSize(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmHiddenSize(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern unsafe int TSGgml_GlmMtpDraftStep(IntPtr handle, int token, float* hPrev, int pos,
-            float* logitsOut, float* hOut);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmHiddenSize")]
+        private static extern int Native_TSGgml_GlmHiddenSize(IntPtr handle);
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern unsafe int TSGgml_GlmMtpCatchUp(IntPtr handle, int* tokens, int nTokens,
-            float* hRows, int startPos);
+        private static unsafe int TSGgml_GlmSpecForward(IntPtr handle, int* tokens, int nTokens, float* hOut, float* logitsOut, int allLogitsRows)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmSpecForward(handle, tokens, nTokens, hOut, logitsOut, allLogitsRows);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmSpecForward")]
+        private static extern unsafe int Native_TSGgml_GlmSpecForward(IntPtr handle, int* tokens, int nTokens, float* hOut, float* logitsOut, int allLogitsRows);
+
+        private static unsafe int TSGgml_GlmMtpDraftStep(IntPtr handle, int token, float* hPrev, int pos, float* logitsOut, float* hOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmMtpDraftStep(handle, token, hPrev, pos, logitsOut, hOut);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmMtpDraftStep")]
+        private static extern unsafe int Native_TSGgml_GlmMtpDraftStep(IntPtr handle, int token, float* hPrev, int pos, float* logitsOut, float* hOut);
+
+        private static unsafe int TSGgml_GlmMtpCatchUp(IntPtr handle, int* tokens, int nTokens, float* hRows, int startPos)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmMtpCatchUp(handle, tokens, nTokens, hRows, startPos);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmMtpCatchUp")]
+        private static extern unsafe int Native_TSGgml_GlmMtpCatchUp(IntPtr handle, int* tokens, int nTokens, float* hRows, int startPos);
 
         // ---- glm5next KDA recurrent-state snapshot (speculative rollback) ----
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmKdaStateApiVersion();
+        private static int TSGgml_GlmKdaStateApiVersion()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GlmKdaStateApiVersion();
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmKdaStateCapture(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmKdaStateApiVersion")]
+        private static extern int Native_TSGgml_GlmKdaStateApiVersion();
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmKdaStateRestore(IntPtr handle);
+        private static int TSGgml_GlmKdaStateCapture(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmKdaStateCapture(handle);
+        }
 
-        [DllImport(DllName, CallingConvention = Conv)]
-        private static extern int TSGgml_GlmResetChecked(IntPtr handle);
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmKdaStateCapture")]
+        private static extern int Native_TSGgml_GlmKdaStateCapture(IntPtr handle);
+
+        private static int TSGgml_GlmKdaStateRestore(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmKdaStateRestore(handle);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmKdaStateRestore")]
+        private static extern int Native_TSGgml_GlmKdaStateRestore(IntPtr handle);
+
+        private static int TSGgml_GlmResetChecked(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("glm-model", handle);
+            return Native_TSGgml_GlmResetChecked(handle);
+        }
+
+        [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmResetChecked")]
+        private static extern int Native_TSGgml_GlmResetChecked(IntPtr handle);
 
         /// <param name="nGpu">GPUs to spread the layers over; 0 = every visible device.</param>
         /// <param name="nCpuMoe">Leading layers whose routed experts stay in system RAM;

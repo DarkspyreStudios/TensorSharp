@@ -174,7 +174,7 @@ namespace TensorSharp.GGML
     /// and <see cref="Check"/> load no native code. Settings and discovery code can use them.
     /// </para>
     /// </remarks>
-    public static class GgmlNativeLoader
+    public static partial class GgmlNativeLoader
     {
         private static readonly object s_gate = new();
         private static int s_resolverRegistered;
@@ -346,12 +346,10 @@ namespace TensorSharp.GGML
         /// <exception cref="InvalidOperationException">
         /// A GgmlOps library is already in the process, through default probing or an earlier selection.
         /// </exception>
-        public static GgmlNativeSelection Select(IReadOnlyList<GgmlNativeCandidate> candidates)
+        private static GgmlNativeSelection SelectCore(IReadOnlyList<GgmlNativeCandidate> candidates)
         {
             ArgumentNullException.ThrowIfNull(candidates);
 
-            lock (s_gate)
-            {
                 if (s_shutDown)
                     throw new InvalidOperationException("GgmlOps was shut down in this process.");
                 if (s_candidateInProcess)
@@ -380,6 +378,7 @@ namespace TensorSharp.GGML
                     }
 
                     s_candidateInProcess = true;
+                    s_nativeUseStarted = true;
                     IReadOnlyList<GgmlNativeCandidate> untried = candidates.Skip(i + 1).ToArray();
 
                     GgmlNativeBuildIdentity? identity = ReadIdentity(handle);
@@ -392,7 +391,8 @@ namespace TensorSharp.GGML
                     }
 
                     s_selectedHandle = handle;
-                    string? backendProblem = InitializeBackend(candidate.Backend);
+                    GgmlBackendType backend = s_plan!.RequestedBackend;
+                    string? backendProblem = InitializeBackend(backend);
                     if (backendProblem != null)
                     {
                         refusals.Add(Refuse(candidate, GgmlNativeRefusalCodes.IncompatibleHardware, backendProblem));
@@ -411,12 +411,11 @@ namespace TensorSharp.GGML
                     }
 
                     return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Loaded,
-                        candidate, libraryPath, candidate.Backend, identity, refusals, Array.Empty<GgmlNativeCandidate>()));
+                        candidate, libraryPath, backend, identity, refusals, Array.Empty<GgmlNativeCandidate>()));
                 }
 
                 return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Unavailable,
                     null, null, null, null, refusals, Array.Empty<GgmlNativeCandidate>()));
-            }
         }
 
         /// <summary>
@@ -449,40 +448,7 @@ namespace TensorSharp.GGML
         /// graph the library holds. Idempotent. No GgmlOps call may follow it in this process.
         /// Only process exit releases the library itself.
         /// </summary>
-        public static GgmlNativeShutdownResult Shutdown()
-        {
-            lock (s_gate)
-            {
-                if (s_shutDown)
-                    return new GgmlNativeShutdownResult(true, null);
-
-                if (!s_defaultProbingBound && s_selectedHandle == IntPtr.Zero)
-                {
-                    if (s_candidateInProcess)
-                    {
-                        // A library that failed its identity check is not bound to the imports,
-                        // so its teardown cannot run. Process exit releases it.
-                        return new GgmlNativeShutdownResult(false,
-                            "The partially initialized library is not bound; only process exit releases it.");
-                    }
-
-                    s_shutDown = true;
-                    return new GgmlNativeShutdownResult(true, null);
-                }
-
-                s_shutDown = true;
-            }
-
-            try
-            {
-                GgmlNative.Shutdown();
-                return new GgmlNativeShutdownResult(true, null);
-            }
-            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
-            {
-                return new GgmlNativeShutdownResult(false, ex.Message);
-            }
-        }
+        public static GgmlNativeShutdownResult Shutdown() => ShutdownOwned();
 
         internal static void EnsureImportResolverRegistered()
         {
@@ -513,15 +479,17 @@ namespace TensorSharp.GGML
                 if (s_candidateInProcess)
                     throw new DllNotFoundException(
                         "The GgmlOps selection in this process is partially initialized; a fresh process must load the next candidate.");
-                s_defaultProbingBound = true;
                 return false;
             }
         }
 
         private static GgmlNativeSelection Finish(GgmlNativeSelection selection)
         {
-            s_current = selection;
-            return selection;
+            lock (s_gate)
+            {
+            s_current = selection with { Refusals = Array.AsReadOnly(selection.Refusals.ToArray()), Untried = Array.AsReadOnly(selection.Untried.ToArray()) };
+            return s_current;
+            }
         }
 
         private static GgmlNativeRefusal Refuse(GgmlNativeCandidate candidate, string code, string message) =>
@@ -545,10 +513,10 @@ namespace TensorSharp.GGML
         private static bool TryLoad(GgmlNativeCandidate candidate, string libraryPath, out IntPtr handle, out GgmlNativeRefusal? refusal)
         {
             refusal = null;
-            GgmlNative.EnsureWindowsNativeDependencySearchPaths();
             try
             {
-                handle = NativeLibrary.Load(libraryPath);
+                ClaimProcess();
+                handle = GgmlLibraryLoader.Load(libraryPath);
                 return true;
             }
             catch (BadImageFormatException ex)

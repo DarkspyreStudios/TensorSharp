@@ -156,7 +156,7 @@ namespace TensorSharp.GGML
         /// Outstanding blocks are untouched; the pool refills itself on demand, so the
         /// only cost of trimming is that the next few allocations map fresh memory.
         /// </summary>
-        public long Trim()
+        public long Trim(Action<IntPtr> beforeFree = null)
         {
             List<PoolBlock> release;
             lock (_lock)
@@ -169,6 +169,7 @@ namespace TensorSharp.GGML
             long bytes = 0;
             foreach (PoolBlock block in release)
             {
+                beforeFree?.Invoke(block.Ptr);
                 bytes += (long)block.Size;
                 FreeToSystem(block);
             }

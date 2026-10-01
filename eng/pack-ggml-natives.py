@@ -247,7 +247,7 @@ def native_abi(root):
     """Mirror the CMake/MSBuild bridge identity for artifact validation without a build tool."""
     extensions = {".cpp", ".h", ".hpp", ".inc", ".cu", ".cuh"}
     files = [p for p in (root / "TensorSharp.GGML.Native").iterdir() if p.is_file() and p.suffix in extensions]
-    files += [p for p in (root / "TensorSharp.Backends.GGML").glob("*Native*.cs") if p.name != "GgmlNativeLoader.cs"]
+    files += list((root / "TensorSharp.Backends.GGML").glob("*.cs"))
     files.append(root / "eng" / "ggml-revision")
     rows = []
     for path in sorted(files, key=lambda p: p.relative_to(root).as_posix()):

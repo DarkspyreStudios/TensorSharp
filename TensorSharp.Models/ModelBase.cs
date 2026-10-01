@@ -36,6 +36,8 @@ namespace TensorSharp.Models
 
         protected readonly GgufFile _gguf;
         private readonly GgmlContext _ggmlContext;
+        private readonly bool _ownsGgmlContext;
+        private readonly IDisposable _ggmlRuntimeLease;
         protected readonly IAllocator _allocator;
         protected readonly BackendType _backend;
 
@@ -280,32 +282,32 @@ namespace TensorSharp.Models
                     break;
                 case BackendType.GgmlCuda:
                 case BackendType.GgmlVulkan:
-                {
-                    var ggmlType = backend == BackendType.GgmlCuda ? GgmlBackendType.Cuda : GgmlBackendType.Vulkan;
-                    // A caller-supplied group (multi-node) already owns the
-                    // multi-GPU context; reuse it rather than initializing the
-                    // devices a second time.
-                    if (LayerSplitDegree > 1)
                     {
-                        // LAYER SPLIT: one backend per GPU, NO tensor-parallel group.
-                        // _tpGroup must stay null - IsTensorParallel gates the weight
-                        // sharding and AllReduce machinery, none of which applies here,
-                        // and leaving it set would also make the startup banner claim a
-                        // transport that is never used.
-                        _ggmlContext = CreateGgmlContext(ggmlType, LayerSplitDegree, enableCollectives: false);
-                        _allocator = new GgmlAllocator(_ggmlContext, 0);
-                    }
-                    else
-                    {
+                        var ggmlType = backend == BackendType.GgmlCuda ? GgmlBackendType.Cuda : GgmlBackendType.Vulkan;
                         // A caller-supplied group (multi-node) already owns the
                         // multi-GPU context; reuse it rather than initializing the
                         // devices a second time.
-                        _ggmlContext = FindGgmlContext(_tpGroup) ?? CreateGgmlContext(ggmlType, tpDegree);
-                        _tpGroup ??= CreateGgmlTpGroup(_ggmlContext);
-                        _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new GgmlAllocator(_ggmlContext, 0);
+                        if (LayerSplitDegree > 1)
+                        {
+                            // LAYER SPLIT: one backend per GPU, NO tensor-parallel group.
+                            // _tpGroup must stay null - IsTensorParallel gates the weight
+                            // sharding and AllReduce machinery, none of which applies here,
+                            // and leaving it set would also make the startup banner claim a
+                            // transport that is never used.
+                            _ggmlContext = CreateGgmlContext(ggmlType, LayerSplitDegree, enableCollectives: false);
+                            _allocator = new GgmlAllocator(_ggmlContext, 0);
+                        }
+                        else
+                        {
+                            // A caller-supplied group (multi-node) already owns the
+                            // multi-GPU context; reuse it rather than initializing the
+                            // devices a second time.
+                            _ggmlContext = FindGgmlContext(_tpGroup) ?? CreateGgmlContext(ggmlType, tpDegree);
+                            _tpGroup ??= CreateGgmlTpGroup(_ggmlContext);
+                            _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new GgmlAllocator(_ggmlContext, 0);
+                        }
+                        break;
                     }
-                    break;
-                }
                 case BackendType.Cuda:
                     _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new CudaAllocator(0);
                     break;
@@ -319,26 +321,38 @@ namespace TensorSharp.Models
                 default:
                     throw new ArgumentException($"Unsupported backend: {backend}");
             }
-            Console.WriteLine($"Backend: {backend}");
-
-            // Tell the kernels about the whole cluster, not just this process.
-            // Expert parallelism is sharded by the GLOBAL degree, so a kernel
-            // that sized its expert stack from the local one declared more
-            // experts than it had bytes bound for and let the router address the
-            // difference. Harmless to set on a single node: it publishes the
-            // local degree and offset 0, which is what the kernels assume anyway.
-            if (backend is BackendType.GgmlCuda or BackendType.GgmlVulkan
-                        or BackendType.GgmlCpu or BackendType.GgmlMetal)
+            _ownsGgmlContext = _ggmlContext != null && !ReferenceEquals(_ggmlContext, FindGgmlContext(tpGroup));
+            _ggmlRuntimeLease = _ggmlContext == null ? null : GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
+            try
             {
-                // Published unconditionally, including the (0, 0) reset for a
-                // non-TP model: the value is process-global and sticky, so a
-                // plain model loaded after a tensor-parallel one would inherit
-                // the old degree and take the plan-mode branch it must not.
-                GgmlBasicOps.TensorParallelSetGlobalGeometry(
-                    _tpGroup?.GlobalDegree ?? 0, _tpGroup?.GlobalRankOffset ?? 0);
-            }
+                Console.WriteLine($"Backend: {backend}");
 
-            _gguf = new GgufFile(ggufPath);
+                // Tell the kernels about the whole cluster, not just this process.
+                // Expert parallelism is sharded by the GLOBAL degree, so a kernel
+                // that sized its expert stack from the local one declared more
+                // experts than it had bytes bound for and let the router address the
+                // difference. Harmless to set on a single node: it publishes the
+                // local degree and offset 0, which is what the kernels assume anyway.
+                if (backend is BackendType.GgmlCuda or BackendType.GgmlVulkan
+                            or BackendType.GgmlCpu or BackendType.GgmlMetal)
+                {
+                    // Published unconditionally, including the (0, 0) reset for a
+                    // non-TP model: the value is process-global and sticky, so a
+                    // plain model loaded after a tensor-parallel one would inherit
+                    // the old degree and take the plan-mode branch it must not.
+                    GgmlBasicOps.TensorParallelSetGlobalGeometry(
+                        _tpGroup?.GlobalDegree ?? 0, _tpGroup?.GlobalRankOffset ?? 0);
+                }
+
+                _gguf = new GgufFile(ggufPath);
+            }
+            catch
+            {
+                if (!ReferenceEquals(_tpGroup, tpGroup)) _tpGroup?.Dispose();
+                if (_ownsGgmlContext) _ggmlContext.Dispose();
+                _ggmlRuntimeLease?.Dispose();
+                throw;
+            }
         }
 
         /// <summary>
@@ -389,7 +403,7 @@ namespace TensorSharp.Models
         }
 
         private static ITensorParallelGroup CreateGgmlTpGroup(GgmlContext context)
-            => context.Degree > 1 ? new GgmlTensorParallelGroup(context) : null;
+            => context.Degree > 1 ? new GgmlTensorParallelGroup(context, ownsContext: true) : null;
 
         private static GgmlContext FindGgmlContext(ITensorParallelGroup group)
         {
@@ -411,7 +425,7 @@ namespace TensorSharp.Models
                 BackendType.GgmlVulkan => GgmlBackendType.Vulkan,
                 _ => throw new ArgumentException($"{backend} is not a multi-device GGML backend.", nameof(backend)),
             };
-            return new GgmlTensorParallelGroup(CreateGgmlContext(ggmlType, Math.Max(1, localDegree)));
+            return new GgmlTensorParallelGroup(CreateGgmlContext(ggmlType, Math.Max(1, localDegree)), ownsContext: true);
         }
 
         /// <summary>
@@ -2143,11 +2157,11 @@ namespace TensorSharp.Models
         // lockstep (their per-layer AllReduces line up with the driver's).
         // On single-node and worker processes the hook is inert.
         // ====================================================================
-        private const int TpControlForward       = 1;
+        private const int TpControlForward = 1;
         private const int TpControlForwardRefill = 2;
-        private const int TpControlReset         = 3;
-        private const int TpControlShutdown      = 4;
-        private const int TpControlTruncate      = 5;
+        private const int TpControlReset = 3;
+        private const int TpControlShutdown = 4;
+        private const int TpControlTruncate = 5;
 
         private bool _distributedDriver;
 
@@ -2269,10 +2283,10 @@ namespace TensorSharp.Models
                     var (op, payload) = _tpGroup.ReceiveControl();
                     switch (op)
                     {
-                        case TpControlForward:       ForwardCore(payload); break;
+                        case TpControlForward: ForwardCore(payload); break;
                         case TpControlForwardRefill: ForwardRefillCore(payload); break;
-                        case TpControlReset:         ResetKVCacheCore(); break;
-                        case TpControlTruncate:      TruncateKVCacheCore(payload.Length > 0 ? payload[0] : 0); break;
+                        case TpControlReset: ResetKVCacheCore(); break;
+                        case TpControlTruncate: TruncateKVCacheCore(payload.Length > 0 ? payload[0] : 0); break;
                         case TpControlShutdown:
                             Console.WriteLine("[TP worker] shutdown received; exiting worker loop.");
                             return;
@@ -2686,6 +2700,8 @@ namespace TensorSharp.Models
 
             if (_allocator is IDisposable allocatorDisposable)
                 allocatorDisposable.Dispose();
+            if (_ownsGgmlContext) _ggmlContext.Dispose();
+            _ggmlRuntimeLease?.Dispose();
         }
 
         /// <summary>

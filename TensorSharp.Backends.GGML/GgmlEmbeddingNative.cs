@@ -13,18 +13,38 @@ public static partial class GgmlEmbeddingNative
 
     public static string LastError(string fallback) => GgmlNative.LastNativeError(fallback);
 
-    [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static partial IntPtr TSGgml_EmbeddingLoad(string path, string backend, int device, int threads);
+    public static IntPtr TSGgml_EmbeddingLoad(string path, string backend, int device, int threads)
+    {
+        backend = GgmlNativeLoader.PrepareModelBackend(backend);
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return GgmlNativeLoader.TrackNativeHandle("embedding-model", Native_TSGgml_EmbeddingLoad(path, backend, device, threads));
+    }
 
-    [LibraryImport(DllName)]
+    [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_EmbeddingLoad")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    public static partial void TSGgml_EmbeddingFree(IntPtr handle);
+    private static partial IntPtr Native_TSGgml_EmbeddingLoad(string path, string backend, int device, int threads);
 
-    [LibraryImport(DllName)]
+    public static void TSGgml_EmbeddingFree(IntPtr handle)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        using var resource = GgmlNativeLoader.BeginNativeHandleRelease("embedding-model", handle);
+        Native_TSGgml_EmbeddingFree(handle);
+        resource.Complete();
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_EmbeddingFree")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static unsafe partial int TSGgml_EmbeddingEncode(IntPtr handle, int* tokens, int* lengths,
-        int batch, float* output, int capacity);
+    private static partial void Native_TSGgml_EmbeddingFree(IntPtr handle);
+
+    private static unsafe int TSGgml_EmbeddingEncode(IntPtr handle, int* tokens, int* lengths, int batch, float* output, int capacity)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall("embedding-model", handle);
+        return Native_TSGgml_EmbeddingEncode(handle, tokens, lengths, batch, output, capacity);
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_EmbeddingEncode")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static unsafe partial int Native_TSGgml_EmbeddingEncode(IntPtr handle, int* tokens, int* lengths, int batch, float* output, int capacity);
 
     public static unsafe void Encode(IntPtr handle, int[] tokens, int[] lengths, float[] output)
     {

@@ -9,8 +9,7 @@ function(tensorsharp_native_abi ROOT OUTPUT)
         "${ROOT}/TensorSharp.GGML.Native/*.inc"
         "${ROOT}/TensorSharp.GGML.Native/*.cu"
         "${ROOT}/TensorSharp.GGML.Native/*.cuh"
-        "${ROOT}/TensorSharp.Backends.GGML/*Native*.cs")
-    list(REMOVE_ITEM INPUTS "TensorSharp.Backends.GGML/GgmlNativeLoader.cs")
+        "${ROOT}/TensorSharp.Backends.GGML/*.cs")
     list(APPEND INPUTS "eng/ggml-revision")
     list(SORT INPUTS)
     set(MANIFEST "")

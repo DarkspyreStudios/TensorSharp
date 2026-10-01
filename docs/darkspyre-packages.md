@@ -72,7 +72,9 @@ validation does not lock the filesystem against another writer.
 
 The managed assembly's `GgmlNativeAbi` metadata and the bridge's `TSGgml_GetBuildIdentity` export
 carry the same SHA-256 identity. CMake and MSBuild compute it from sorted bridge implementation
-files, managed native interop declarations and the pinned ggml revision. CRLF line endings normalize
+files, every top-level managed GGML backend source file and the pinned ggml revision. The broader
+managed input set includes interop declarations and their type/owner dependencies regardless of
+filename. CRLF line endings normalize
 to LF. The identity does not use the package display version or Git commit. Explicit selection
 rejects a missing or different ABI identity, malformed or repeated identity fields, and unknown
 native/upstream source commits. The reported ggml commit must match `GgmlUpstreamCommit` in the
@@ -80,8 +82,40 @@ managed assembly. A loaded refusal retains its library handle and requires a new
 process; it never falls through to another library. Resolver registration and static construction
 load no native code. First import binding applies the native environment tunables after selection.
 
-The focused loader tests use ordinary files and symbolic links. They do not load a bridge or qualify
-a CPU or accelerator backend:
+## Native runtime ownership
+
+The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
+`Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
+code. `InitializeAsync(CancellationToken)` shares one initialization task for the same plan;
+cancellation cancels that caller's wait, not the process initialization. Results distinguish
+`Ready`, `Unavailable`, `Unsupported` and `RequiresProcessRestart`, and retain actual selection,
+identity and refusal details. Repeating an identical configuration is allowed; changing a used
+runtime, or configuring after shutdown, is not. No-load unavailability permits a retry.
+
+Null candidates require `DefaultNuGetProbing: true`; an explicit empty list never probes ambient
+libraries. Default probing examines absolute application, assembly, package runtime and nearest
+repository build paths, refuses competing bridges, and checks the loaded exact identity. Windows
+uses `LoadLibraryExW` with the chosen library directory and System32 only. It does not mutate PATH,
+search CUDA toolkits, or use the working directory. Windows dependency closure still requires
+real target qualification; static loading flags do not prove a driver package works.
+
+Every bridge import acquires a mandatory native-call lease. Model/vision/embedding handles,
+paged-KV pools, MTP handles, state snapshots and aligned allocations are retained until their
+guarded release; owned handle calls cannot race their release. GGML contexts and tensor storages
+retain managed resource leases. Models retain their own lease and release contexts they create;
+externally supplied contexts remain borrowed. `GgmlContext` is disposable and refuses disposal
+while tensor storages remain; disposal drains pending compute and invalidates pooled host buffers
+before freeing memory. An abandoned context retains its lease if safe synchronization fails.
+
+`Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
+Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
+native imports cannot execute afterwards. The loaded library is never unloaded. A process-wide
+BCL-only ownership token prevents another managed load context from loading a second GGML build
+without pinning a foreign collectible assembly. `AcquireLease(GgmlRuntimeResourceKind)` lets
+adapters retain additional resources; it does not replace the mandatory supplier leases.
+
+The focused loader tests use ordinary files, symbolic links and isolated collectible managed load
+contexts. They do not load a bridge or qualify a CPU or accelerator backend:
 
 ```sh
 dotnet test eng/tests/ggml-native-loader/ggml-native-loader.csproj -p:TensorSharpSkipGgmlNative=true
@@ -89,18 +123,27 @@ dotnet test eng/tests/ggml-native-loader/ggml-native-loader.csproj -p:TensorShar
 
 `eng/tests/ggml-native-runtime` runs each selection scenario in a separate process against a real
 bridge directory. `selected` verifies pre-load hash/ABI refusals, retry, exact loaded identity,
-cross-class import binding, CPU tensor arithmetic and teardown after releasing its test tensors.
+cross-class import binding, shared initialization, cancellation, immutable plans, CPU tensor
+arithmetic, active-resource/call shutdown refusal, double-free refusal, foreign-owner refusal,
+collectible-context release and terminal teardown. `default` verifies absolute package-path probing;
+`ambiguous-default` verifies no-load ambiguity refusal followed by a corrected default plan.
 `reject-variant` verifies that a loaded identity mismatch leaves later candidates untried and
 rejects a second selection. `reject-legacy` verifies the same refusal for a bridge without an
-exact ABI identity. The probes do not qualify active-resource shutdown guarding, model generation,
-default NuGet probing, GPU execution or other RIDs.
+exact ABI identity. The probes do not qualify model generation, real whole-model handles, GPU
+execution, Windows dependency loading or other RIDs, nor prove a published package's layout.
 
 ```sh
 dotnet build eng/tests/ggml-native-runtime/ggml-native-runtime.csproj -c Release -p:TensorSharpSkipGgmlNative=true
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll default /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll ambiguous-default /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-variant /absolute/bridge/directory metal
 dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-legacy /absolute/legacy/bridge/directory metal
 ```
+
+`dotnet run --project eng/guard-ggml-interop/guard-ggml-interop.csproj -- --verify .` checks every
+interop declaration for private raw binding, mandatory call guards and owned handle-family
+acquisition/use/release coverage. New unclassified native handles fail verification.
 
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.

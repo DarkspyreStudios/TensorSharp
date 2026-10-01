@@ -8,9 +8,15 @@ namespace TensorSharp.GGML;
 
 internal static partial class GgmlNative
 {
-    [LibraryImport(DllName)]
+    internal static unsafe int TSGgml_QwenVaeAttention(float* qkv, float* output, int channels, int sequence)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return Native_TSGgml_QwenVaeAttention(qkv, output, channels, sequence);
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_QwenVaeAttention")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    internal static unsafe partial int TSGgml_QwenVaeAttention(float* qkv, float* output, int channels, int sequence);
+    private static unsafe partial int Native_TSGgml_QwenVaeAttention(float* qkv, float* output, int channels, int sequence);
 }
 
 public partial class GgmlBasicOps

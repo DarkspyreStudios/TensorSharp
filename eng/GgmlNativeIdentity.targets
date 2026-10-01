@@ -21,7 +21,7 @@
         if (Upstream.Length != 40 || Upstream.Any(c => !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')))
             throw new InvalidOperationException("The ggml revision must be an exact lowercase Git SHA-1.");
         var files = Directory.EnumerateFiles(native).Where(p => extensions.Contains(Path.GetExtension(p)))
-            .Concat(Directory.EnumerateFiles(managed, "*Native*.cs").Where(p => Path.GetFileName(p) != "GgmlNativeLoader.cs"))
+            .Concat(Directory.EnumerateFiles(managed, "*.cs"))
             .Concat(new[] { Path.Combine(Root, "eng", "ggml-revision") });
         using (var sha = SHA256.Create())
         {

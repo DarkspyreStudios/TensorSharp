@@ -11,26 +11,63 @@ namespace TensorSharp.GGML
         private const string DllName = "GgmlOps";
         static GgmlDeepSeek41VisionNative() => GgmlNative.EnsureImportResolverRegistered();
 
-        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
+        public static IntPtr TSGgml_Dsv41VisionLoad(string path, string backendName, int device, int nThreads)
+        {
+            backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("deepseek-vision", Native_TSGgml_Dsv41VisionLoad(path, backendName, device, nThreads));
+        }
+
+        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_Dsv41VisionLoad")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial IntPtr TSGgml_Dsv41VisionLoad(string path, string backendName, int device, int nThreads);
-        [LibraryImport(DllName)]
+        private static partial IntPtr Native_TSGgml_Dsv41VisionLoad(string path, string backendName, int device, int nThreads);
+        public static void TSGgml_Dsv41VisionFree(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("deepseek-vision", handle);
+            Native_TSGgml_Dsv41VisionFree(handle);
+            resource.Complete();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv41VisionFree")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial void TSGgml_Dsv41VisionFree(IntPtr handle);
-        [LibraryImport(DllName)]
+        private static partial void Native_TSGgml_Dsv41VisionFree(IntPtr handle);
+        private static unsafe int TSGgml_Dsv41VisionInfo(IntPtr handle, int* info, int count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-vision", handle);
+            return Native_TSGgml_Dsv41VisionInfo(handle, info, count);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv41VisionInfo")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv41VisionInfo(IntPtr handle, int* info, int count);
-        [LibraryImport(DllName)]
+        private static unsafe partial int Native_TSGgml_Dsv41VisionInfo(IntPtr handle, int* info, int count);
+        private static unsafe int TSGgml_Dsv41VisionEncode(IntPtr handle, float* patches, int nH, int nW, float* output, int capacity)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("deepseek-vision", handle);
+            return Native_TSGgml_Dsv41VisionEncode(handle, patches, nH, nW, output, capacity);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv41VisionEncode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv41VisionEncode(IntPtr handle, float* patches,
-            int nH, int nW, float* output, int capacity);
-        [LibraryImport(DllName)]
+        private static unsafe partial int Native_TSGgml_Dsv41VisionEncode(IntPtr handle, float* patches, int nH, int nW, float* output, int capacity);
+        public static int TSGgml_Dsv41AttachVision(IntPtr text, IntPtr vision)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Dsv41AttachVision(text, vision);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv41AttachVision")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        public static partial int TSGgml_Dsv41AttachVision(IntPtr text, IntPtr vision);
-        [LibraryImport(DllName)]
+        private static partial int Native_TSGgml_Dsv41AttachVision(IntPtr text, IntPtr vision);
+        private static unsafe int TSGgml_Dsv41ForwardVision(IntPtr text, int* tokens, byte* imageMask, float* imageEmbeddings, int nTokens, int nImageTokens, float* logits)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Dsv41ForwardVision(text, tokens, imageMask, imageEmbeddings, nTokens, nImageTokens, logits);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv41ForwardVision")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_Dsv41ForwardVision(IntPtr text, int* tokens,
-            byte* imageMask, float* imageEmbeddings, int nTokens, int nImageTokens, float* logits);
+        private static unsafe partial int Native_TSGgml_Dsv41ForwardVision(IntPtr text, int* tokens, byte* imageMask, float* imageEmbeddings, int nTokens, int nImageTokens, float* logits);
 
         public static unsafe int[] Info(IntPtr handle)
         {

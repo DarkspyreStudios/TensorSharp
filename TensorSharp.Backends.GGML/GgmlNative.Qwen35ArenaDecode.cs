@@ -13,9 +13,15 @@ namespace TensorSharp.GGML
 {
     internal static partial class GgmlNative
     {
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35ArenaHiddenDecodeAbi()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ArenaHiddenDecodeAbi();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ArenaHiddenDecodeAbi")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ArenaHiddenDecodeAbi();
+        private static partial int Native_TSGgml_Qwen35ArenaHiddenDecodeAbi();
 
         internal static bool SupportsQwen35ArenaHiddenDecode()
         {
@@ -23,26 +29,15 @@ namespace TensorSharp.GGML
             catch (EntryPointNotFoundException) { return false; }
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35ArenaDecodeBatchedHidden([In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs, [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions, [In] IntPtr[] kCaches, [In] IntPtr[] vCaches, [In] IntPtr[] convStates, [In] IntPtr[] deltaStates, [In] int[] gdnHostAuth, [In] int[] cacheSizes, int numHeads, int numKvHeads, int headDim, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr tokenEmbd, int tokenEmbdType, long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes, IntPtr sampled, int wantLogits, IntPtr embeddingRows)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ArenaDecodeBatchedHidden(layers, numLayers, nSeqs, tokenIds, positions, ropePositions, kCaches, vCaches, convStates, deltaStates, gdnHostAuth, cacheSizes, numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps, ropeBase, ropeFreqScale, numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, tokenEmbd, tokenEmbdType, tokenEmbdNe0, tokenEmbdNe1, tokenEmbdBytes, sampled, wantLogits, embeddingRows);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ArenaDecodeBatchedHidden")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ArenaDecodeBatchedHidden(
-            [In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
-            [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions,
-            [In] IntPtr[] kCaches, [In] IntPtr[] vCaches,
-            [In] IntPtr[] convStates, [In] IntPtr[] deltaStates,
-            [In] int[] gdnHostAuth, [In] int[] cacheSizes,
-            int numHeads, int numKvHeads, int headDim,
-            int ropeNDims, int ropeMode, int kvCacheType,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps, float ropeBase, float ropeFreqScale,
-            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
-            int normTopk, float expertWeightsScale,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm,
-            IntPtr tokenEmbd, int tokenEmbdType,
-            long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
-            IntPtr sampled, int wantLogits, IntPtr embeddingRows);
+        private static partial int Native_TSGgml_Qwen35ArenaDecodeBatchedHidden([In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs, [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions, [In] IntPtr[] kCaches, [In] IntPtr[] vCaches, [In] IntPtr[] convStates, [In] IntPtr[] deltaStates, [In] int[] gdnHostAuth, [In] int[] cacheSizes, int numHeads, int numKvHeads, int headDim, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr tokenEmbd, int tokenEmbdType, long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes, IntPtr sampled, int wantLogits, IntPtr embeddingRows);
 
         internal static int Qwen35ArenaDecodeBatchedHiddenStatus(
             Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,

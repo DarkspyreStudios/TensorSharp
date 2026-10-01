@@ -19,79 +19,165 @@ namespace TensorSharp.GGML
 {
     internal static partial class GgmlNative
     {
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetGpuDeviceCount(int backendType);
+        private static int TSGgml_GetGpuDeviceCount(int backendType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetGpuDeviceCount(backendType);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetGpuDeviceCount")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetGpuDeviceDescription(int backendType, int deviceIndex, byte[] description, int descriptionSize);
+        private static partial int Native_TSGgml_GetGpuDeviceCount(int backendType);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelInit(int backendType, int[] deviceIndices, int count, int concurrentRanks);
+        private static int TSGgml_GetGpuDeviceDescription(int backendType, int deviceIndex, byte[] description, int descriptionSize)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetGpuDeviceDescription(backendType, deviceIndex, description, descriptionSize);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetGpuDeviceDescription")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MultiDeviceInit(int backendType, int[] deviceIndices, int count);
+        private static partial int Native_TSGgml_GetGpuDeviceDescription(int backendType, int deviceIndex, byte[] description, int descriptionSize);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelInitLoopback(int backendType, int count);
+        private static int TSGgml_TensorParallelInit(int backendType, int[] deviceIndices, int count, int concurrentRanks)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelInit(backendType, deviceIndices, count, concurrentRanks);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelInit")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_SetActiveDevice(int rank);
+        private static partial int Native_TSGgml_TensorParallelInit(int backendType, int[] deviceIndices, int count, int concurrentRanks);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetActiveDevice();
+        private static int TSGgml_MultiDeviceInit(int backendType, int[] deviceIndices, int count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MultiDeviceInit(backendType, deviceIndices, count);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MultiDeviceInit")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetTensorParallelDegree();
+        private static partial int Native_TSGgml_MultiDeviceInit(int backendType, int[] deviceIndices, int count);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelHasDeviceAllReduce();
+        private static int TSGgml_TensorParallelInitLoopback(int backendType, int count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelInitLoopback(backendType, count);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelInitLoopback")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_TensorParallelAllReduceHost(float** buffers, int rankCount, long count);
+        private static partial int Native_TSGgml_TensorParallelInitLoopback(int backendType, int count);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_TensorParallelAllReduceDevice(float** buffers, int rankCount, long count);
+        private static int TSGgml_SetActiveDevice(int rank)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SetActiveDevice(rank);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SetActiveDevice")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelFusedAvailable(int rankCount);
+        private static partial int Native_TSGgml_SetActiveDevice(int rank);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelFusedAvailableDistributed(int rankCount);
+        private static int TSGgml_GetActiveDevice()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetActiveDevice();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetActiveDevice")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelExecutePlans(IntPtr[] plans, int rankCount);
+        private static partial int Native_TSGgml_GetActiveDevice();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TensorParallelExecutePlansDistributed(
-            IntPtr[] plans, int rankCount, IntPtr crossNodeCallback, IntPtr crossNodeUser);
+        private static int TSGgml_GetTensorParallelDegree()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetTensorParallelDegree();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetTensorParallelDegree")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_TensorParallelMatmul(
-            GgmlTensorView2D* results,
-            GgmlTensorView2D* inputs,
-            IntPtr* weightData,
-            int* weightTypes,
-            long* weightNe0,
-            long* weightNe1,
-            long* weightRawBytes,
-            int rankCount,
-            int allReduce);
+        private static partial int Native_TSGgml_GetTensorParallelDegree();
+
+        private static int TSGgml_TensorParallelHasDeviceAllReduce()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelHasDeviceAllReduce();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelHasDeviceAllReduce")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_TensorParallelHasDeviceAllReduce();
+
+        private static unsafe int TSGgml_TensorParallelAllReduceHost(float** buffers, int rankCount, long count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelAllReduceHost(buffers, rankCount, count);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelAllReduceHost")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int Native_TSGgml_TensorParallelAllReduceHost(float** buffers, int rankCount, long count);
+
+        private static unsafe int TSGgml_TensorParallelAllReduceDevice(float** buffers, int rankCount, long count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelAllReduceDevice(buffers, rankCount, count);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelAllReduceDevice")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int Native_TSGgml_TensorParallelAllReduceDevice(float** buffers, int rankCount, long count);
+
+        private static int TSGgml_TensorParallelFusedAvailable(int rankCount)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelFusedAvailable(rankCount);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelFusedAvailable")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_TensorParallelFusedAvailable(int rankCount);
+
+        private static int TSGgml_TensorParallelFusedAvailableDistributed(int rankCount)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelFusedAvailableDistributed(rankCount);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelFusedAvailableDistributed")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_TensorParallelFusedAvailableDistributed(int rankCount);
+
+        private static int TSGgml_TensorParallelExecutePlans(IntPtr[] plans, int rankCount)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelExecutePlans(plans, rankCount);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelExecutePlans")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_TensorParallelExecutePlans(IntPtr[] plans, int rankCount);
+
+        private static int TSGgml_TensorParallelExecutePlansDistributed(IntPtr[] plans, int rankCount, IntPtr crossNodeCallback, IntPtr crossNodeUser)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelExecutePlansDistributed(plans, rankCount, crossNodeCallback, crossNodeUser);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelExecutePlansDistributed")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_TensorParallelExecutePlansDistributed(IntPtr[] plans, int rankCount, IntPtr crossNodeCallback, IntPtr crossNodeUser);
+
+        private static unsafe int TSGgml_TensorParallelMatmul(GgmlTensorView2D* results, GgmlTensorView2D* inputs, IntPtr* weightData, int* weightTypes, long* weightNe0, long* weightNe1, long* weightRawBytes, int rankCount, int allReduce)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TensorParallelMatmul(results, inputs, weightData, weightTypes, weightNe0, weightNe1, weightRawBytes, rankCount, allReduce);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelMatmul")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int Native_TSGgml_TensorParallelMatmul(GgmlTensorView2D* results, GgmlTensorView2D* inputs, IntPtr* weightData, int* weightTypes, long* weightNe0, long* weightNe1, long* weightRawBytes, int rankCount, int allReduce);
 
         // The native active rank is thread-local, so mirror it here and skip the
         // interop call when it has not changed: the per-op dispatch hook runs on
@@ -147,13 +233,15 @@ namespace TensorSharp.GGML
         /// </summary>
         public static void TensorParallelInit(GgmlBackendType backendType, int[] deviceIndices, bool concurrentRanks)
         {
+            EnsureAvailable(backendType);
             if (deviceIndices == null || deviceIndices.Length == 0)
                 throw new ArgumentException("At least one device index is required.", nameof(deviceIndices));
 
             if (TSGgml_TensorParallelInit((int)backendType, deviceIndices, deviceIndices.Length, concurrentRanks ? 1 : 0) == 0)
             {
-                throw new InvalidOperationException(GetLastErrorMessage(
-                    $"Failed to initialize GGML tensor parallelism across {deviceIndices.Length} device(s)."));
+                string message = GetLastErrorMessage($"Failed to initialize GGML tensor parallelism across {deviceIndices.Length} device(s).");
+                GgmlNativeLoader.PoisonAfterBackendFailure();
+                throw new InvalidOperationException(message);
             }
             s_cachedRankValid = false;
         }
@@ -171,13 +259,15 @@ namespace TensorSharp.GGML
         /// </summary>
         public static void MultiDeviceInit(GgmlBackendType backendType, int[] deviceIndices)
         {
+            EnsureAvailable(backendType);
             if (deviceIndices == null || deviceIndices.Length == 0)
                 throw new ArgumentException("At least one device index is required.", nameof(deviceIndices));
 
             if (TSGgml_MultiDeviceInit((int)backendType, deviceIndices, deviceIndices.Length) == 0)
             {
-                throw new InvalidOperationException(GetLastErrorMessage(
-                    $"Failed to initialize {deviceIndices.Length} GGML device(s) for a layer split."));
+                string message = GetLastErrorMessage($"Failed to initialize {deviceIndices.Length} GGML device(s) for a layer split.");
+                GgmlNativeLoader.PoisonAfterBackendFailure();
+                throw new InvalidOperationException(message);
             }
             s_cachedRankValid = false;
         }
@@ -190,16 +280,26 @@ namespace TensorSharp.GGML
         /// </summary>
         public static void TensorParallelInitLoopback(GgmlBackendType backendType, int count)
         {
+            EnsureAvailable(backendType);
             if (TSGgml_TensorParallelInitLoopback((int)backendType, count) == 0)
-                throw new InvalidOperationException(GetLastErrorMessage(
-                    $"Failed to initialize a {count}-rank loopback tensor-parallel group."));
+            {
+                string message = GetLastErrorMessage($"Failed to initialize a {count}-rank loopback tensor-parallel group.");
+                GgmlNativeLoader.PoisonAfterBackendFailure();
+                throw new InvalidOperationException(message);
+            }
             s_cachedRankValid = false;
         }
 
         /// <summary>Number of ranks the native bridge currently has initialized.</summary>
-        [LibraryImport(DllName)]
+        private static void TSGgml_TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_TensorParallelSetGlobalGeometry(globalDegree, rankOffset);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelSetGlobalGeometry")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset);
+        private static partial void Native_TSGgml_TensorParallelSetGlobalGeometry(int globalDegree, int rankOffset);
 
         /// <summary>
         /// Describe the whole tensor-parallel group to the kernels: its total

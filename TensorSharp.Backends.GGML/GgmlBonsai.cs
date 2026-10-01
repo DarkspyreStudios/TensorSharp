@@ -36,13 +36,30 @@ public static class GgmlBonsai
 
 internal static partial class GgmlNative
 {
-    [LibraryImport(DllName)]
-    internal static partial int TSGgml_TranscodeBonsaiToQ2_0(int sourceType, IntPtr source, long elements, IntPtr destination);
+    internal static int TSGgml_TranscodeBonsaiToQ2_0(int sourceType, IntPtr source, long elements, IntPtr destination)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return Native_TSGgml_TranscodeBonsaiToQ2_0(sourceType, source, elements, destination);
+    }
 
-    [LibraryImport(DllName)]
-    internal static partial int TSGgml_BonsaiRegisterWeight(IntPtr key, int width, IntPtr signs,
-        int blockSize, int inverse, int permutationHeadDim, int permutationKeyHeads, int permutationRepeat);
+    [LibraryImport(DllName, EntryPoint = "TSGgml_TranscodeBonsaiToQ2_0")]
+    private static partial int Native_TSGgml_TranscodeBonsaiToQ2_0(int sourceType, IntPtr source, long elements, IntPtr destination);
 
-    [LibraryImport(DllName)]
-    internal static partial void TSGgml_BonsaiUnregisterWeight(IntPtr key);
+    internal static int TSGgml_BonsaiRegisterWeight(IntPtr key, int width, IntPtr signs, int blockSize, int inverse, int permutationHeadDim, int permutationKeyHeads, int permutationRepeat)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return Native_TSGgml_BonsaiRegisterWeight(key, width, signs, blockSize, inverse, permutationHeadDim, permutationKeyHeads, permutationRepeat);
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_BonsaiRegisterWeight")]
+    private static partial int Native_TSGgml_BonsaiRegisterWeight(IntPtr key, int width, IntPtr signs, int blockSize, int inverse, int permutationHeadDim, int permutationKeyHeads, int permutationRepeat);
+
+    internal static void TSGgml_BonsaiUnregisterWeight(IntPtr key)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        Native_TSGgml_BonsaiUnregisterWeight(key);
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_BonsaiUnregisterWeight")]
+    private static partial void Native_TSGgml_BonsaiUnregisterWeight(IntPtr key);
 }

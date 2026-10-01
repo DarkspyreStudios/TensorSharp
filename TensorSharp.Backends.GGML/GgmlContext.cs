@@ -12,8 +12,12 @@ using System.Reflection;
 
 namespace TensorSharp.GGML
 {
-    public sealed class GgmlContext
+    public sealed class GgmlContext : IDisposable
     {
+        private readonly object lifetimeGate = new();
+        private IDisposable runtimeLease;
+        private int activeStorages;
+        private bool disposed;
         internal GgmlMemoryPool MemoryPool { get; }
 
         /// <summary>
@@ -22,7 +26,89 @@ namespace TensorSharp.GGML
         /// is cheap; on a device that is about to be killed for memory, cheap is not
         /// the point.
         /// </summary>
-        public long ReleasePooledMemory() => MemoryPool.Trim();
+        public long ReleasePooledMemory()
+        {
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                return GgmlNativeLoader.WithResourceCleanup(() =>
+                {
+                    GgmlBasicOps.HostReadBarrier();
+                    return MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
+                });
+            }
+        }
+
+        internal IDisposable AcquireStorageLease()
+        {
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                IDisposable lease = GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Tensor);
+                activeStorages++;
+                return new StorageLease(this, lease);
+            }
+        }
+
+        private sealed class StorageLease(GgmlContext context, IDisposable lease) : IDisposable
+        {
+            private bool released;
+            public void Dispose()
+            {
+                lock (context.lifetimeGate)
+                {
+                    if (released) return;
+                    released = true;
+                    context.activeStorages--;
+                    lease.Dispose();
+                }
+            }
+        }
+
+        internal void ThrowIfDisposed()
+        {
+            if (disposed) throw new ObjectDisposedException(nameof(GgmlContext));
+        }
+
+        public void Dispose()
+        {
+            lock (lifetimeGate)
+            {
+                if (disposed) return;
+                if (activeStorages != 0) throw new InvalidOperationException("Dispose the context's tensor storages before disposing their context.");
+                GgmlNativeLoader.WithResourceCleanup(() =>
+                {
+                    GgmlBasicOps.HostReadBarrier();
+                    MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
+                    runtimeLease.Dispose();
+                    disposed = true;
+                    return true;
+                });
+                GC.SuppressFinalize(this);
+            }
+        }
+
+        ~GgmlContext()
+        {
+            // Storages retain their context. Only an unreachable, storage-free context can reach this path.
+            try
+            {
+                if (MemoryPool != null && runtimeLease != null)
+                {
+                    GgmlNativeLoader.WithResourceCleanup(() =>
+                    {
+                        GgmlBasicOps.HostReadBarrier();
+                        MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
+                        runtimeLease.Dispose();
+                        return true;
+                    });
+                }
+            }
+            catch
+            {
+                // Retain the lease and memory if synchronization cannot prove teardown safe.
+            }
+        }
 
         public GgmlContext(int[] deviceIds, GgmlBackendType backendType)
             : this(deviceIds, backendType, enableCollectives: true)
@@ -46,6 +132,9 @@ namespace TensorSharp.GGML
             DeviceId = deviceIds[0];
             BackendType = backendType;
             MemoryPool = new GgmlMemoryPool(backendType);
+            runtimeLease = GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Context);
+            try
+            {
             MemoryPool.EnsureInitialBlocks();
             GgmlNative.EnsureAvailable(backendType);
 
@@ -94,6 +183,15 @@ namespace TensorSharp.GGML
             bool enableAsync = backendType == GgmlBackendType.Metal &&
                                !string.Equals(disableAsync, "0", StringComparison.Ordinal);
             GgmlNative.SetAsyncCompute(enableAsync);
+            }
+            catch
+            {
+                MemoryPool.Trim();
+                runtimeLease.Dispose();
+                disposed = true;
+                GC.SuppressFinalize(this);
+                throw;
+            }
         }
 
         /// <summary>Physical device index backing rank 0.</summary>
