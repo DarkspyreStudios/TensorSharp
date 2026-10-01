@@ -196,6 +196,17 @@ The shared pipeline preserves the original cleanup exception and stack; repeated
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
 
+Weight loading keeps a local disposable owner until ordinary quantized, Bonsai or F32 storage
+transfers to a model dictionary. Owned stacked expert buffers transfer before reading or creating
+expert views. Failure before that transfer explicitly frees the raw allocation. Fusion transfers
+the fused owner before disposing source weights, and removes each source entry only after
+successful disposal. Contiguous mapped fusion views retain their common backing owner.
+Bonsai registration reserves an identity before native registration. Unregister removes only
+successfully retired identities. Failed unregister keeps host storage and GCHandle identity
+alive; the model cleanup boundary retains unsafe local owners and preserves both work and
+cleanup errors. These paths do not establish tensor-parallel backing-owner or CUDA/MLX shared
+allocator teardown safety.
+
 `Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
 Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
 native imports cannot execute afterwards. The loaded library is never unloaded. A process-wide

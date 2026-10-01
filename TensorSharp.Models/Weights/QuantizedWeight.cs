@@ -70,7 +70,12 @@ namespace TensorSharp.Models
             _data = AllocateBuffer(raw.Length);
             CacheKey = _data;
             _ownsBuffer = true;
-            Marshal.Copy(raw, 0, _data, raw.Length);
+            try { Marshal.Copy(raw, 0, _data, raw.Length); }
+            catch
+            {
+                FreeBuffer(_data);
+                throw;
+            }
         }
 
         public QuantizedWeight(IntPtr data, long rawBytes, int ggmlType, long ne0, long ne1)
@@ -116,28 +121,14 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
-            try
+            UnregisterBonsaiWeights();
+            ReleaseHostData();
+            if (_ownsCacheKeyHandle)
             {
-                UnregisterBonsaiWeights();
-            }
-            finally
-            {
-                // A failed native cleanup must never strand an owned buffer or
-                // the GCHandle that roots this weight during construction.
-                try { ReleaseHostData(); }
-                finally
-                {
-                    if (_ownsCacheKeyHandle)
-                    {
-                        try { UnregisterBonsaiCacheKey(CacheKey); }
-                        finally
-                        {
-                            _cacheKeyHandle.Free();
-                            _ownsCacheKeyHandle = false;
-                            CacheKey = IntPtr.Zero;
-                        }
-                    }
-                }
+                UnregisterBonsaiCacheKey(CacheKey);
+                _cacheKeyHandle.Free();
+                _ownsCacheKeyHandle = false;
+                CacheKey = IntPtr.Zero;
             }
         }
 
@@ -237,17 +228,26 @@ namespace TensorSharp.Models
                 totalNe1 += weight.Ne1;
             }
 
-            IntPtr fusedPtr = AllocateBuffer(totalBytes);
-            byte* fusedDst = (byte*)fusedPtr.ToPointer();
-            long offset = 0;
-            for (int i = 0; i < weights.Length; i++)
+            QuantizedWeight result = AllocateOwnedBuffer(totalBytes, first.GgmlType, first.Ne0, totalNe1);
+            IntPtr fusedPtr = result.Data;
+            try
             {
-                QuantizedWeight weight = weights[i];
-                Buffer.MemoryCopy(weight.Data.ToPointer(), fusedDst + offset, totalBytes - offset, weight.RawBytes);
-                offset += weight.RawBytes;
-            }
+                byte* fusedDst = (byte*)fusedPtr.ToPointer();
+                long offset = 0;
+                for (int i = 0; i < weights.Length; i++)
+                {
+                    QuantizedWeight weight = weights[i];
+                    Buffer.MemoryCopy(weight.Data.ToPointer(), fusedDst + offset, totalBytes - offset, weight.RawBytes);
+                    offset += weight.RawBytes;
+                }
 
-            return new QuantizedWeight(fusedPtr, totalBytes, first.GgmlType, first.Ne0, totalNe1);
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
         }
 
         public IntPtr EnsureDeviceCacheKey()
@@ -278,13 +278,13 @@ namespace TensorSharp.Models
         /// </summary>
         public void MarkDevicePreloadTooLarge()
         {
-            DevicePreloadTooLarge = true;
             if (_ownsCacheKeyHandle)
             {
                 UnregisterBonsaiCacheKey(CacheKey);
                 _cacheKeyHandle.Free();
                 _ownsCacheKeyHandle = false;
             }
+            DevicePreloadTooLarge = true;
             CacheKey = _data;
         }
 
@@ -294,20 +294,28 @@ namespace TensorSharp.Models
                 return;
 
             IntPtr currentData = _data;
-            try { UnregisterBonsaiCacheKey(currentData); }
-            finally
+            UnregisterBonsaiCacheKey(currentData);
+            if (_ownsBuffer)
+                FreeBuffer(currentData);
+            else if (ViewIsFileBacked)
+                AdviseExternalViewCanBePagedOut(currentData, RawBytes);
+
+            if (CacheKey == currentData)
+                CacheKey = IntPtr.Zero;
+
+            _data = IntPtr.Zero;
+            _ownsBuffer = false;
+            _ownerToken = null;
+        }
+
+        internal static QuantizedWeight AllocateOwnedBuffer(long bytes, int ggmlType, long ne0, long ne1)
+        {
+            IntPtr pointer = AllocateBuffer(bytes);
+            try { return new QuantizedWeight(pointer, bytes, ggmlType, ne0, ne1); }
+            catch
             {
-                if (_ownsBuffer)
-                    FreeBuffer(currentData);
-                else if (ViewIsFileBacked)
-                    AdviseExternalViewCanBePagedOut(currentData, RawBytes);
-
-                if (CacheKey == currentData)
-                    CacheKey = IntPtr.Zero;
-
-                _data = IntPtr.Zero;
-                _ownsBuffer = false;
-                _ownerToken = null;
+                FreeBuffer(pointer);
+                throw;
             }
         }
 

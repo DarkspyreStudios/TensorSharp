@@ -2669,7 +2669,7 @@ namespace TensorSharp.Models
         {
             _ownershipCleanupFailed = true;
             _ownershipCleanupFailure ??= cleanupFailure;
-            if (resource != null) _failedOwnershipResources.Add(resource);
+            if (resource != null && !_failedOwnershipResources.Contains(resource)) _failedOwnershipResources.Add(resource);
             if (_ggmlContext == null) return;
             // The live GGML owner's process-exit hook retains this generation until safe shutdown.
             lock (FailedGgmlModelOwners)

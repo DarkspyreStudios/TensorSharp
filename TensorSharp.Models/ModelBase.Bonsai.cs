@@ -54,16 +54,16 @@ public abstract partial class ModelBase
             throw new IOException($"Unable to map Bonsai2 tensor '{info.Name}'.");
         long elements = checked((long)info.Shape[0] * (long)info.Shape[1]);
         long bytes = checked(elements / 64 * 18);
-        IntPtr destination = QuantizedWeight.AllocateBuffer(bytes);
+        QuantizedWeight converted = QuantizedWeight.AllocateOwnedBuffer(bytes, (int)GgmlTensorType.Q2_0,
+            (long)info.Shape[0], (long)info.Shape[1]);
         try
         {
-            GgmlBonsai.TranscodeToQ2_0((int)info.Type, source, elements, destination);
-            return new QuantizedWeight(destination, bytes, (int)GgmlTensorType.Q2_0,
-                (long)info.Shape[0], (long)info.Shape[1]);
+            GgmlBonsai.TranscodeToQ2_0((int)info.Type, source, elements, converted.Data);
+            return converted;
         }
-        catch
+        catch (Exception original)
         {
-            QuantizedWeight.FreeBuffer(destination);
+            RollBackLocalResource(converted, original);
             throw;
         }
     }

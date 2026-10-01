@@ -55,7 +55,7 @@ namespace TensorSharp.Models
                 if (info.Type is GgmlTensorType.PQ2_0 or GgmlTensorType.PTQ1_0)
                 {
                     QuantizedWeight converted = LoadBonsaiQuantizedWeight(info);
-                    _quantWeights[info.Name] = converted;
+                    TransferOwnedResource(converted, weight => _quantWeights.Add(info.Name, weight));
                     countQuant++;
                     totalQuantBytes += converted.RawBytes;
                     continue;
@@ -86,16 +86,17 @@ namespace TensorSharp.Models
                             {
                                 IntPtr expertPtr = new IntPtr(mappedTensorPtr.ToInt64() + e * perExpertBytes);
                                 string expertName = $"{baseName}.{e}.weight";
-                                _quantWeights[expertName] = QuantizedWeight.CreateExternalView(
+                                QuantizedWeight view = QuantizedWeight.CreateExternalView(
                                     expertPtr, perExpertBytes, (int)info.Type, ne0, ne1, _gguf);
+                                TransferOwnedResource(view, weight => _quantWeights.Add(expertName, weight));
                                 _stackedExpertMemberNames.Add(expertName);
                             }
                             // Free zero-cost stacked view: same bytes the per-expert
                             // views point into, owner is the GgufFile mmap.
-                            _stackedExpertWeights[info.Name] = new StackedExpertWeights(
+                            _stackedExpertWeights.Add(info.Name, new StackedExpertWeights(
                                 mappedTensorPtr, (int)info.Type, ne0, ne1, numExperts,
                                 byteCount, isExternalView: true, ownerToken: _gguf,
-                                ownedBuffer: IntPtr.Zero);
+                                ownedBuffer: IntPtr.Zero));
                             mappedQuantBytes += byteCount;
                         }
                         else
@@ -107,20 +108,29 @@ namespace TensorSharp.Models
                             // the cost of an extra strong reference held by the
                             // stacked weight (no memory duplication).
                             IntPtr bulkPtr = QuantizedWeight.AllocateBuffer(byteCount);
+                            StackedExpertWeights stacked;
+                            try
+                            {
+                                stacked = new StackedExpertWeights(
+                                    bulkPtr, (int)info.Type, ne0, ne1, numExperts,
+                                    byteCount, isExternalView: false, ownerToken: null,
+                                    ownedBuffer: bulkPtr);
+                                _stackedExpertWeights.Add(info.Name, stacked);
+                            }
+                            catch
+                            {
+                                QuantizedWeight.FreeBuffer(bulkPtr);
+                                throw;
+                            }
                             _gguf.ReadTensorDataToNative(info, bulkPtr, byteCount);
-
-                            var stacked = new StackedExpertWeights(
-                                bulkPtr, (int)info.Type, ne0, ne1, numExperts,
-                                byteCount, isExternalView: false, ownerToken: null,
-                                ownedBuffer: bulkPtr);
-                            _stackedExpertWeights[info.Name] = stacked;
 
                             for (int e = 0; e < numExperts; e++)
                             {
                                 IntPtr expertPtr = new IntPtr(bulkPtr.ToInt64() + e * perExpertBytes);
                                 string expertName = $"{baseName}.{e}.weight";
-                                _quantWeights[expertName] = QuantizedWeight.CreateExternalView(
+                                QuantizedWeight view = QuantizedWeight.CreateExternalView(
                                     expertPtr, perExpertBytes, (int)info.Type, ne0, ne1, stacked);
+                                TransferOwnedResource(view, weight => _quantWeights.Add(expertName, weight));
                                 _stackedExpertMemberNames.Add(expertName);
                             }
                         }
@@ -131,15 +141,19 @@ namespace TensorSharp.Models
                     {
                         if (tryMmap && _gguf.TryGetTensorDataPointer(info, out IntPtr mappedTensorPtr))
                         {
-                            _quantWeights[info.Name] = QuantizedWeight.CreateExternalView(
+                            QuantizedWeight view = QuantizedWeight.CreateExternalView(
                                 mappedTensorPtr, byteCount, (int)info.Type, ne0, ne1, _gguf);
+                            TransferOwnedResource(view, weight => _quantWeights.Add(info.Name, weight));
                             mappedQuantBytes += byteCount;
                         }
                         else
                         {
-                            IntPtr ptr = QuantizedWeight.AllocateBuffer(byteCount);
-                            _gguf.ReadTensorDataToNative(info, ptr, byteCount);
-                            _quantWeights[info.Name] = new QuantizedWeight(ptr, byteCount, (int)info.Type, ne0, ne1);
+                            QuantizedWeight weight = QuantizedWeight.AllocateOwnedBuffer(byteCount, (int)info.Type, ne0, ne1);
+                            TransferOwnedResource(weight, owned =>
+                            {
+                                _gguf.ReadTensorDataToNative(info, owned.Data, byteCount);
+                                _quantWeights.Add(info.Name, owned);
+                            });
                         }
                         countQuant++;
                         totalQuantBytes += byteCount;
@@ -158,9 +172,9 @@ namespace TensorSharp.Models
                         tsShape[i] = ggufShape[ggufShape.Length - 1 - i];
 
                     var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                    try
+                    TransferOwnedResource(tensor, owned =>
                     {
-                        IntPtr destPtr = GetStoragePtr(tensor);
+                        IntPtr destPtr = GetStoragePtr(owned);
 
                         if (info.Type == GgmlTensorType.F32)
                         {
@@ -177,18 +191,8 @@ namespace TensorSharp.Models
                             finally { QuantizedWeight.FreeBuffer(tempPtr); }
                         }
 
-                        _weights[info.Name] = tensor;
-                    }
-                    catch (Exception loadError)
-                    {
-                        try { tensor.Dispose(); }
-                        catch (Exception cleanupError)
-                        {
-                            RetainFailedModelOwnership(tensor, cleanupError);
-                            throw new AggregateException("Weight loading and allocation rollback both failed.", loadError, cleanupError);
-                        }
-                        throw;
-                    }
+                        _weights.Add(info.Name, owned);
+                    });
 
                     countF32++;
                     totalF32Bytes += numElements * 4;
@@ -1041,58 +1045,75 @@ namespace TensorSharp.Models
                     }
 
                     QuantizedWeight gateSrc = gw, upSrc = uw, requant = null;
-                    if (gw.GgmlType != uw.GgmlType)
+                    try
                     {
-                        requant = TryRequantizeForFusion(gw, uw, out bool requantIsGate);
-                        if (requant == null)
+                        if (gw.GgmlType != uw.GgmlType)
                         {
-                            // ggml refuses to quantize INTO IQ2_XXS / IQ2_XS /
-                            // IQ1_S without an importance matrix
-                            // (ggml_quantize_requires_imatrix), so a layer whose gate
-                            // and up are both such types cannot be brought to a
-                            // common type at load time. Collect and report ONCE below
-                            // - ten per-layer WARNINGs read like ten problems - and
-                            // let the report say whether this family can actually run
-                            // the two projections separately (SupportsSplitGateUpFfn).
-                            splitLayers.Add(
+                            requant = TryRequantizeForFusion(gw, uw, out bool requantIsGate);
+                            if (requant == null)
+                            {
+                                // ggml refuses to quantize INTO IQ2_XXS / IQ2_XS /
+                                // IQ1_S without an importance matrix
+                                // (ggml_quantize_requires_imatrix), so a layer whose gate
+                                // and up are both such types cannot be brought to a
+                                // common type at load time. Collect and report ONCE below
+                                // - ten per-layer WARNINGs read like ten problems - and
+                                // let the report say whether this family can actually run
+                                // the two projections separately (SupportsSplitGateUpFfn).
+                                splitLayers.Add(
+                                    $"{l}:{(Runtime.GgmlTensorType)(uint)gw.GgmlType}+" +
+                                    $"{(Runtime.GgmlTensorType)(uint)uw.GgmlType}");
+                                continue;
+                            }
+                            if (requantIsGate) gateSrc = requant; else upSrc = requant;
+                            requantized++;
+                            requantLayers.Add(
                                 $"{l}:{(Runtime.GgmlTensorType)(uint)gw.GgmlType}+" +
-                                $"{(Runtime.GgmlTensorType)(uint)uw.GgmlType}");
+                                $"{(Runtime.GgmlTensorType)(uint)uw.GgmlType}->" +
+                                $"{(Runtime.GgmlTensorType)(uint)requant.GgmlType}");
+                        }
+
+                        // Where fusion IS possible it must produce a tensor at guName.
+                        // (It is not always possible - see the split path above - and the
+                        // FFN of every model that can load such a GGUF handles a missing
+                        // guName by running gate and up separately.) If MLX view-fusion fails
+                        // (gate/up not contiguous in the GGUF file), fall back to a
+                        // copy. Cost is bounded — 2 tensors × per-layer, host memory
+                        // released after the MLX device upload.
+                        if (!TryCreateFusedQuantizedWeight(
+                                SupportsSplitGateUpFfn, out QuantizedWeight fusedWeight, gateSrc, upSrc))
+                        {
+                            // Only reachable when the copy was declined for memory (see
+                            // AllowWeightFusionCopies). Every family that reaches here runs
+                            // gate and up as two matmuls when guName is absent, so drop the
+                            // requantized temporary and leave the mapped sources in place.
+                            if (requant != null)
+                                RetireOwnedResource(requant);
+                            requant = null;
                             continue;
                         }
-                        if (requantIsGate) gateSrc = requant; else upSrc = requant;
-                        requantized++;
-                        requantLayers.Add(
-                            $"{l}:{(Runtime.GgmlTensorType)(uint)gw.GgmlType}+" +
-                            $"{(Runtime.GgmlTensorType)(uint)uw.GgmlType}->" +
-                            $"{(Runtime.GgmlTensorType)(uint)requant.GgmlType}");
-                    }
 
-                    // Where fusion IS possible it must produce a tensor at guName.
-                    // (It is not always possible - see the split path above - and the
-                    // FFN of every model that can load such a GGUF handles a missing
-                    // guName by running gate and up separately.) If MLX view-fusion fails
-                    // (gate/up not contiguous in the GGUF file), fall back to a
-                    // copy. Cost is bounded — 2 tensors × per-layer, host memory
-                    // released after the MLX device upload.
-                    if (!TryCreateFusedQuantizedWeight(
-                            SupportsSplitGateUpFfn, out QuantizedWeight fusedWeight, gateSrc, upSrc))
+                        fusedWeight.Scale = gw.Scale;
+                        TransferOwnedResource(fusedWeight, owned => _quantWeights.Add(guName, owned));
+                        if (ReferenceEquals(requant, fusedWeight)) requant = null;
+                        RetireOwnedResource(gw);
+                        _quantWeights.Remove(gateName);
+                        RetireOwnedResource(uw);
+                        _quantWeights.Remove(upName);
+                        if (requant != null && !ReferenceEquals(requant, fusedWeight))
+                            RetireOwnedResource(requant);
+                        requant = null;
+                        fused++;
+                    }
+                    catch (Exception original)
                     {
-                        // Only reachable when the copy was declined for memory (see
-                        // AllowWeightFusionCopies). Every family that reaches here runs
-                        // gate and up as two matmuls when guName is absent, so drop the
-                        // requantized temporary and leave the mapped sources in place.
                         if (requant != null)
-                            requant.Dispose();
-                        continue;
+                        {
+                            if (_ownershipCleanupFailed) RetainFailedModelOwnership(requant);
+                            else RollBackLocalResource(requant, original);
+                        }
+                        throw;
                     }
-
-                    fusedWeight.Scale = gw.Scale;
-                    _quantWeights[guName] = fusedWeight;
-                    _quantWeights.Remove(gateName); gw.Dispose();
-                    _quantWeights.Remove(upName); uw.Dispose();
-                    if (requant != null && !ReferenceEquals(requant, fusedWeight))
-                        requant.Dispose();
-                    fused++;
                 }
                 else if (_weights.TryGetValue(gateName, out var gf) &&
                          _weights.TryGetValue(upName, out var uf))
@@ -1100,11 +1121,16 @@ namespace TensorSharp.Models
                     int gateDim = (int)gf.Sizes[0], upDim = (int)uf.Sizes[0];
                     int inDim = (int)gf.Sizes[1];
                     var fusedTensor = new Tensor(_allocator, DType.Float32, gateDim + upDim, inDim);
-                    using (var s0 = fusedTensor.Narrow(0, 0, gateDim)) Ops.Copy(s0, gf);
-                    using (var s1 = fusedTensor.Narrow(0, gateDim, upDim)) Ops.Copy(s1, uf);
-                    _weights[guName] = fusedTensor;
-                    _weights.Remove(gateName); gf.Dispose();
-                    _weights.Remove(upName); uf.Dispose();
+                    TransferOwnedResource(fusedTensor, owned =>
+                    {
+                        using (var s0 = owned.Narrow(0, 0, gateDim)) Ops.Copy(s0, gf);
+                        using (var s1 = owned.Narrow(0, gateDim, upDim)) Ops.Copy(s1, uf);
+                        _weights.Add(guName, owned);
+                    });
+                    RetireOwnedResource(gf);
+                    _weights.Remove(gateName);
+                    RetireOwnedResource(uf);
+                    _weights.Remove(upName);
                     fused++;
                 }
             }
