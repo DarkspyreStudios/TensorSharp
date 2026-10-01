@@ -27,18 +27,18 @@ public static partial class ForeignModelLifetime
             string textHash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(text)));
             string visionHash = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(vision)));
             string work;
-            if (mode == "observe-vision-cleanup-refusal")
+            if (mode is "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal")
             {
-                var failure = ObserveVisionCleanupRefusal(text, vision, backend);
+                VisionRefusalEvidence failure = mode == "vision-load-cleanup-refusal"
+                    ? RefuseVisionLoadCleanup(text, vision, backend) : RefuseLoadedVisionDispose(text, vision, backend);
                 for (int attempt = 0; attempt < 10; attempt++)
                 {
                     GC.Collect();
                     GC.WaitForPendingFinalizers();
                     GC.Collect();
                 }
-                Require(!failure.Model.IsAlive && NativeHandleCount("deepseek-vision") == 1 && NativeHandleCount("deepseek-model") == 1,
-                    "The actual model collects while both unsafe native handles stay tracked; numeric ownership does not retain the lost instance.");
-                work = failure.Report + ";actual-model-weak-reference-collected-after-finalizer-drain;native-ownership-still-tracked-not-model-owned";
+                VerifyRetainedVisionOwner(failure);
+                work = failure.Report + ";actual-model-and-exact-text-vision-handles-retained-after-finalizer-drain;terminal-repeat-guard-preserves-original-cleanup-diagnostic";
             }
             else work = UseVisionLifetime(text, vision, backend, mode == "vision-mismatch");
             return $"textBytes={new FileInfo(text).Length};visionBytes={new FileInfo(vision).Length};textSha256={textHash};visionSha256={visionHash};" +
@@ -81,7 +81,7 @@ public static partial class ForeignModelLifetime
         }
         Require(!GgmlNativeLoader.Shutdown().Released, "Actual live text/vision ownership refuses guarded shutdown.");
         model.Dispose();
-        Require(ModelLeaseCount() == 0 && RuntimeResourceCount() == 0 && NativeHandleCount(null) == 0,
+        Require(!model.IsVisionEncoderLoaded && ModelLeaseCount() == 0 && RuntimeResourceCount() == 0 && NativeHandleCount(null) == 0,
             "Successful explicit class disposal releases real text/vision handles and all managed native ownership before GC.");
         return mismatch
             ? "real-VisionInfo-mismatch-original-error-preserved;returned-handle-explicitly-freed;text-native-reset-usable;explicit-clean-disposal"
@@ -89,7 +89,7 @@ public static partial class ForeignModelLifetime
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static (WeakReference Model, string Report) ObserveVisionCleanupRefusal(string text, string vision, BackendType backend)
+    private static VisionRefusalEvidence RefuseVisionLoadCleanup(string text, string vision, BackendType backend)
     {
         var model = new DeepSeek41Model(text, backend);
         var original = new InvalidDataException("controlled original vision tokenizer validation error");
@@ -104,19 +104,94 @@ public static partial class ForeignModelLifetime
         }
         catch (Exception error) { failure = error; }
         finally { property.SetValue(model, tokenizer); }
-        Require(wrapper.Refused && failure is InvalidOperationException && !ReferenceEquals(failure, original) &&
-            model.Tokenizer == tokenizer && !model.IsVisionEncoderLoaded,
-            "Current failed Free masks the original error and never transfers its real returned vision handle into the model field.");
+        Require(wrapper.Refused && failure is AggregateException aggregate && aggregate.InnerExceptions.Count == 2 &&
+            ReferenceEquals(aggregate.InnerExceptions[0], original) && aggregate.InnerExceptions[1] is InvalidOperationException &&
+            original.StackTrace?.Contains(nameof(RefusingVisionTokenizer.LookupToken), StringComparison.Ordinal) == true &&
+            model.Tokenizer == tokenizer && VisionHandle(model) != IntPtr.Zero,
+            "Refused rollback preserves the original validation exception/stack and cleanup failure, plus the actual reserved vision field.");
         Require(NativeHandleCount("deepseek-vision") == 1 && NativeHandleCount("deepseek-model") == 1 && ModelLeaseCount() == 1,
             "The real returned vision/text handles remain tracked after guarded cleanup refuses; no post-poison native call is attempted.");
-        return (new WeakReference(model), "red-original-validation-error-masked-by-guarded-Free-refusal;real-vision-handle-still-native-tracked-but-instance-field-zero;" +
+        var cleanupError = ((AggregateException)failure!).InnerExceptions[1];
+        Require(ReferenceEquals(CleanupFailure(model), cleanupError), "Terminal ownership retains the exact first cleanup diagnostic.");
+        var identities = NativeHandleKeys();
+        RefuseRepeatedVisionDispose(model, cleanupError, identities);
+        return new(new WeakReference(model), identities,
+            "real-validation-original-and-cleanup-aggregate-preserved;actual-reserved-vision-handle-and-model-retained;" +
             "original-tokenizer-restored;no-native-call-or-pointer-read-after-poison;not-GPU-fault");
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static VisionRefusalEvidence RefuseLoadedVisionDispose(string text, string vision, BackendType backend)
+    {
+        var model = new DeepSeek41Model(text, backend);
+        model.LoadVisionEncoder(vision);
+        Require(model.IsVisionEncoderLoaded && NativeHandleCount("deepseek-model") == 1 && NativeHandleCount("deepseek-vision") == 1,
+            "The normally constructed model owns an actual loaded and attached vision companion before controlled refusal.");
+        var identities = NativeHandleKeys();
+        PoisonOwner();
+        InvalidOperationException? failure = null;
+        try { model.Dispose(); }
+        catch (InvalidOperationException error) { failure = error; }
+        Require(failure != null && ReferenceEquals(CleanupFailure(model), failure),
+            "Shared disposal preserves the exact ordinary failure type/stack and first terminal ownership diagnostic.");
+        RequireExactVisionHandles(model, identities);
+        RefuseRepeatedVisionDispose(model, failure!, identities);
+        return new(new WeakReference(model), identities,
+            "real-loaded-attached-vision-Dispose-managed-refusal;shared-terminal-boundary-retains-actual-model-and-handles;" +
+            "no-native-call-or-pointer-read-after-poison;not-captured-graph-or-GPU-fault-proof");
+    }
+
+    private sealed record VisionRefusalEvidence(WeakReference Model, (string Kind, IntPtr Handle)[] NativeKeys, string Report);
+
+    private static IntPtr VisionHandle(DeepSeek41Model model)
+        => (IntPtr)typeof(DeepSeek41Model).GetField("_vision", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
+
+    private static Exception? CleanupFailure(DeepSeek41Model model)
+        => (Exception?)typeof(ModelBase).GetField("_ownershipCleanupFailure", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model);
+
+    private static void RefuseRepeatedVisionDispose(DeepSeek41Model model, Exception failure, (string Kind, IntPtr Handle)[] identities)
+    {
+        string? originalStack = failure.StackTrace;
+        Require(!string.IsNullOrEmpty(originalStack), "The initial cleanup failure retains its actual thrown stack.");
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            InvalidOperationException? repeated = null;
+            try { model.Dispose(); }
+            catch (InvalidOperationException error) { repeated = error; }
+            Require(repeated?.Message.Contains("repeated teardown is unsafe", StringComparison.Ordinal) == true &&
+                ReferenceEquals(repeated.InnerException, failure) && ReferenceEquals(CleanupFailure(model), failure) &&
+                failure.StackTrace == originalStack,
+                "Repeated teardown refuses at the shared terminal guard and does not replace the exact first cleanup failure.");
+            RequireExactVisionHandles(model, identities);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void VerifyRetainedVisionOwner(VisionRefusalEvidence evidence)
+    {
+        var owners = (IList)typeof(ModelBase).GetField("FailedGgmlModelOwners", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        Require(evidence.Model.IsAlive && owners.Count == 1 && ReferenceEquals(owners[0], evidence.Model.Target) && owners[0] is DeepSeek41Model,
+            "Existing generation-local retention keeps the exact actual failed vision model strongly alive after finalizer drainage.");
+        RequireExactVisionHandles((DeepSeek41Model)owners[0]!, evidence.NativeKeys);
+    }
+
+    private static void RequireExactVisionHandles(DeepSeek41Model model, (string Kind, IntPtr Handle)[] identities)
+    {
+        IntPtr text = (IntPtr)typeof(DeepSeek4Model).GetField("_handle", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
+        IntPtr vision = VisionHandle(model);
+        Require(text != IntPtr.Zero && vision != IntPtr.Zero && identities.Length == 2 &&
+            identities.Contains(("deepseek-model", text)) && identities.Contains(("deepseek-vision", vision)) &&
+            identities.ToHashSet().SetEquals(NativeHandleKeys()) && ModelLeaseCount() == 1 && RuntimeResourceCount() == 2,
+            "The actual model retains exact unchanged text/vision identities and context/Model ownership, not numeric handles alone.");
+    }
+
+    private static (string Kind, IntPtr Handle)[] NativeHandleKeys()
+        => ((IDictionary)typeof(GgmlNativeLoader).GetField("s_nativeResources", BindingFlags.Static | BindingFlags.NonPublic)!
+            .GetValue(null)!).Keys.Cast<(string Kind, IntPtr Handle)>().ToArray();
+
     private static int NativeHandleCount(string? kind)
     {
-        var handles = (IDictionary)typeof(GgmlNativeLoader).GetField("s_nativeResources", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
-        return handles.Keys.Cast<(string Kind, IntPtr Handle)>().Count(key => kind == null || key.Kind == kind);
+        return NativeHandleKeys().Count(key => kind == null || key.Kind == kind);
     }
 
     private sealed class RefusingVisionTokenizer(ITokenizer original, Exception failure) : ITokenizer

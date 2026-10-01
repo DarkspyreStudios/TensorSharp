@@ -441,7 +441,7 @@ namespace TensorSharp.Models
             DisposeBaseResources(static () => { }, releaseDerivedGraphs: DisposeDeepSeek4Resources);
         }
 
-        private void DisposeDeepSeek4Resources()
+        private protected void DisposeDeepSeek4Resources()
         {
             lock (_sync)
             {

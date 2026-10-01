@@ -50,7 +50,8 @@ whole-native executors, multiple devices, captured CUDA teardown or other operat
 
 ## DeepSeek41 Vision Lifetime
 
-`vision-normal`, `vision-mismatch` and `observe-vision-cleanup-refusal` generate a complete
+`vision-normal`, `vision-mismatch`, `vision-load-cleanup-refusal` and
+`vision-dispose-cleanup-refusal` generate a complete
 one-layer F32 DeepSeek41 text GGUF with 129265 tokenizer entries and the exact image token at
 129264. The text file is 36105440 bytes. Its 38 tensors include the real Engram, compressor,
 indexer, hyper-connection and expert weights required by the native loader. The matching real
@@ -58,7 +59,7 @@ vision companion has one four-dimensional layer, 19 F32 tensors and 7840 bytes. 
 companion declares text dimension 64. Neither generator downloads a model or requires Python
 packages. Files exist only under the supplied repository `TMPDIR` and are deleted in `finally`.
 
-The three modes qualify lifetime behavior on the preserved bridge's CPU backend. `vision-normal`
+The four modes qualify lifetime behavior on the preserved bridge's CPU backend. `vision-normal`
 normally constructs the actual DeepSeek41Model, loads and attaches its real vision companion,
 then explicitly disposes all text/vision native handles before guarded shutdown and foreign
 generation collection. `vision-mismatch` receives a real native vision handle and its actual
@@ -66,18 +67,26 @@ VisionInfo before validation refuses the dimension mismatch. Successful rollback
 the original validation error, frees that handle and leaves native text reset and the original
 tokenizer usable. No text forward, image encode, mixed-logit or pretrained accuracy is tested.
 
-`observe-vision-cleanup-refusal` installs a test-only delegating ITokenizer wrapper through the
+`vision-load-cleanup-refusal` installs a test-only delegating ITokenizer wrapper through the
 existing protected setter. Only image-placeholder lookup poisons the existing GGML owner and
 throws an original validation error. Every other operation delegates unchanged. The original
-tokenizer restores in `finally`. The current catch's guarded Free throws a different error,
-masks the original and leaves the real returned vision handle in the native ownership table,
-but the model's `_vision` field is zero. The actual model weak reference collects after
-diagnostic finalizer drainage while both native text/vision handles remain tracked. This red
-distinguishes native-table accounting from actual instance ownership. Guarded shutdown refuses
-and the complete foreign generation stays rooted. The mode performs no native call or pointer
-read after poisoning and does not claim an actual GPU fault or successful cleanup.
+tokenizer restores in `finally`. Refused guarded Free preserves the original validation error
+and its stack together with the cleanup error in an aggregate. The model reserves the actual
+returned vision field before validation. Existing generation-local failed ownership retains
+the actual model and exact vision/text native identities after diagnostic finalizer drainage.
+Two managed context/Model leases and both native handles remain owned; guarded shutdown refuses
+and the complete foreign generation stays rooted. This mode distinguishes actual instance
+ownership from native-table accounting alone.
+
+`vision-dispose-cleanup-refusal` loads and attaches the actual companion before controlled
+owner poisoning. The shared disposal pipeline refuses and retains the loaded model and both
+exact native identities. Both refusal modes call Dispose twice more and verify the shared
+terminal guard preserves the first cleanup diagnostic and all still-owned fields/identities.
+No mode performs a native call or pointer read after poisoning. The disposal source routes
+vision/text release through one shared graph callback after HostReadBarrier. These controlled
+refusals do not prove actual captured graph teardown, failed GPU synchronization or image encode.
 
 Metal class execution is unqualified. DeepSeek4Model normalizes its base constructor to
 GgmlCpu. A runtime already initialized as Metal refuses that CPU request before the text
 executor loads. The fixture does not bypass that owner policy. These modes do not qualify
-physical multi-device execution, CUDA/MLX, vision encode, production failure routing or release.
+physical multi-device execution, CUDA/MLX, vision encode, execution fencing or release.
