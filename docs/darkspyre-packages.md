@@ -87,6 +87,21 @@ a CPU or accelerator backend:
 dotnet test eng/tests/ggml-native-loader/ggml-native-loader.csproj -p:TensorSharpSkipGgmlNative=true
 ```
 
+`eng/tests/ggml-native-runtime` runs each selection scenario in a separate process against a real
+bridge directory. `selected` verifies pre-load hash/ABI refusals, retry, exact loaded identity,
+cross-class import binding, CPU tensor arithmetic and teardown after releasing its test tensors.
+`reject-variant` verifies that a loaded identity mismatch leaves later candidates untried and
+rejects a second selection. `reject-legacy` verifies the same refusal for a bridge without an
+exact ABI identity. The probes do not qualify active-resource shutdown guarding, model generation,
+default NuGet probing, GPU execution or other RIDs.
+
+```sh
+dotnet build eng/tests/ggml-native-runtime/ggml-native-runtime.csproj -c Release -p:TensorSharpSkipGgmlNative=true
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-variant /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-legacy /absolute/legacy/bridge/directory metal
+```
+
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.
 
