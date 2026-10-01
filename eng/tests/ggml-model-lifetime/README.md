@@ -124,3 +124,12 @@ The terminal model check changes neither ordinary disposed-model policy nor back
 handling. Metadata, diagnostic getters and independent managed sampling remain available.
 Model-bound resource and media operations refuse before accepting new argument ownership.
 Associated encoders check their host model; standalone encoders retain their original behavior.
+
+CPU admission-refusal processes complete successfully. On the matching preserved Metal bridge,
+`execution-cleanup-failure metal` completes its admission and retention assertions, then exits
+with code 134. The unchanged upstream `ggml_metal_rsets_free` asserts that its resident-set
+collection is empty during native process-exit destruction. The intentionally retained failed
+model still has Metal resident resources after its real prefill/decode. This process is a failed
+terminal-exit qualification, not a passing Metal refusal case. Clean Metal normal, phase-order
+and fusion processes explicitly retire ownership and complete successfully. No fixture resets
+terminal ownership or frees its retained resources to hide the exit failure.
