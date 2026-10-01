@@ -1,0 +1,6 @@
+if(NOT DEFINED ROOT)
+    set(ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/GgmlNativeIdentity.cmake")
+tensorsharp_native_abi("${ROOT}" ABI)
+message(STATUS "GgmlNativeAbi=${ABI}")

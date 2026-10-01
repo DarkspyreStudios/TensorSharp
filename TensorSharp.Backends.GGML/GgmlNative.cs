@@ -1428,17 +1428,19 @@ internal enum GgmlIndexReductionOp
         private const string DllName = "GgmlOps";
         private static int s_windowsDependencySearchPathsInitialized;
 
+        private static readonly object s_tunablesGate = new();
+        private static bool s_earlyTunablesApplied;
+        private static bool s_applyingEarlyTunables;
+
         static GgmlNative()
         {
             GgmlNativeLoader.EnsureImportResolverRegistered();
-            ApplyEarlyNativeTunables();
         }
 
-        // Forces this type's static constructor so the assembly-wide DllImport
-        // resolver is registered before other classes (e.g. Interop.GgmlApi)
-        // issue their first P/Invoke into the GgmlOps module.
+        // Registration does not P/Invoke. The selected backend initializes separately.
         internal static void EnsureImportResolverRegistered()
         {
+            GgmlNativeLoader.EnsureImportResolverRegistered();
         }
 
         /// <summary>
@@ -1465,20 +1467,29 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         private static void ApplyEarlyNativeTunables()
         {
-            try
+            lock (s_tunablesGate)
             {
-                ApplySmallBarVulkanWorkaround();
-                ApplyTensorParallelCudaGraphTunable();
-            }
-            catch (DllNotFoundException)
-            {
-                // No native library on this host (e.g. a managed-only unit test):
-                // nothing to configure.
-            }
-            catch (EntryPointNotFoundException)
-            {
-                // Older GgmlOps without the setter; the native-side backstop in
-                // TSGgml_TensorParallelInit still applies where it can.
+                if (s_earlyTunablesApplied || s_applyingEarlyTunables)
+                    return;
+                s_applyingEarlyTunables = true;
+                try
+                {
+                    ApplySmallBarVulkanWorkaround();
+                    ApplyTensorParallelCudaGraphTunable();
+                    s_earlyTunablesApplied = true;
+                }
+                catch (DllNotFoundException)
+                {
+                    // A missing library can become available before explicit selection.
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    // The older bridge's native tensor-parallel backstop remains active.
+                }
+                finally
+                {
+                    s_applyingEarlyTunables = false;
+                }
             }
         }
 
@@ -4809,6 +4820,7 @@ internal enum GgmlIndexReductionOp
 
         public static void EnsureAvailable(GgmlBackendType backendType)
         {
+            EnsureImportResolverRegistered();
             if (backendType == GgmlBackendType.Metal && !IsApplePlatform())
             {
                 throw new PlatformNotSupportedException("The GGML Metal backend is available on Apple platforms (macOS, iOS/iPadOS, Mac Catalyst) only.");
@@ -4855,6 +4867,7 @@ internal enum GgmlIndexReductionOp
 
         public static bool CanInitialize(GgmlBackendType backendType)
         {
+            EnsureImportResolverRegistered();
             if (backendType == GgmlBackendType.Metal && !IsApplePlatform())
             {
                 return false;
@@ -6998,6 +7011,7 @@ internal enum GgmlIndexReductionOp
             // default probing (runtimes/<rid>/native from the NuGet package) apply.
             if (GgmlNativeLoader.TryGetSelectedHandle(out IntPtr selected))
             {
+                ApplyEarlyNativeTunables();
                 return selected;
             }
 
@@ -7016,11 +7030,16 @@ internal enum GgmlIndexReductionOp
             {
                 if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out IntPtr handle))
                 {
+                    ApplyEarlyNativeTunables();
                     return handle;
                 }
             }
 
-            return IntPtr.Zero;
+            // This overload performs the runtime's package/ALC probing without
+            // re-entering the registered DllImport resolver.
+            IntPtr defaultHandle = NativeLibrary.Load(libraryName, assembly, searchPath);
+            ApplyEarlyNativeTunables();
+            return defaultHandle;
         }
 
         private static IEnumerable<string> GetCandidatePaths(Assembly assembly)

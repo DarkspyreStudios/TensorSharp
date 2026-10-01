@@ -143,6 +143,7 @@ cat > "${RECORD}/build-identity.json" <<JSON
   "tensorSharpBuild": "${VERSION}",
   "sourceCommit": "${SOURCE_COMMIT}",
   "ggmlCommit": "${GGML_HEAD}",
+  "nativeAbi": "$(sed -n 's/^TENSORSHARP_NATIVE_ABI:INTERNAL=//p' "${BUILD_DIR}/CMakeCache.txt")",
   "rid": "${RID}",
   "variant": "${VARIANT}",
   "cpuProfile": "portable",

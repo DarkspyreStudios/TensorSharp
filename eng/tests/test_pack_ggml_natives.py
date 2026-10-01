@@ -22,6 +22,36 @@ spec.loader.exec_module(pack)
 
 
 class ArtifactPolicyTests(unittest.TestCase):
+    def test_packaging_and_native_build_compute_the_same_abi(self):
+        result = subprocess.run(["cmake", "-P", str(pack.REPO_ROOT / "eng" / "print-ggml-native-abi.cmake")],
+                                capture_output=True, text=True, check=True, timeout=30)
+        self.assertEqual("-- GgmlNativeAbi=" + pack.native_abi(pack.REPO_ROOT), result.stdout.strip())
+
+    def test_abi_normalizes_line_endings_and_tracks_bridge_interop_and_upstream(self):
+        (pack.REPO_ROOT / "tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="abi-inputs-", dir=pack.REPO_ROOT / "tmp") as temporary:
+            root = Path(temporary)
+            native, managed, eng = root / "TensorSharp.GGML.Native", root / "TensorSharp.Backends.GGML", root / "eng"
+            for directory in (native, managed, eng):
+                directory.mkdir()
+            inputs = [native / "bridge.cpp", native / "bridge.cuh", managed / "GgmlNative.cs", managed / "QwenImage21Native.cs", eng / "ggml-revision"]
+            for path in inputs:
+                path.write_bytes(b"\xef\xbb\xbfinput\r\n")
+            loader = managed / "GgmlNativeLoader.cs"
+            loader.write_bytes(b"loader excluded")
+            expected = pack.native_abi(root)
+            result = subprocess.run(["cmake", "-DROOT=" + str(root), "-P", str(pack.REPO_ROOT / "eng" / "print-ggml-native-abi.cmake")],
+                                    capture_output=True, text=True, check=True, timeout=30)
+            self.assertEqual("-- GgmlNativeAbi=" + expected, result.stdout.strip())
+            for path in inputs:
+                path.write_bytes(b"\xef\xbb\xbfinput\n")
+            loader.write_bytes(b"another loader version")
+            self.assertEqual(expected, pack.native_abi(root))
+            for path in inputs:
+                path.write_bytes(b"changed")
+                self.assertNotEqual(expected, pack.native_abi(root))
+                path.write_bytes(b"\xef\xbb\xbfinput\n")
+
     def test_all_five_baselines_and_required_optional_variants_are_explicit(self):
         self.assertEqual(pack.BASELINE, {"osx-arm64": "metal", "linux-x64": "cpu", "linux-arm64": "cpu",
                                          "win-x64": "cpu", "win-arm64": "cpu"})
@@ -120,7 +150,8 @@ class StagingFilesystemTests(unittest.TestCase):
         cls.variant = pack.BASELINE[cls.rid]
         cls.entry = pack.ENTRY[cls.rid.split("-")[0]]
         cls.library = Path(cls.fixture.name) / cls.entry
-        identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu=portable"
+        cls.abi = pack.native_abi(pack.REPO_ROOT)
+        identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu=portable;abi={cls.abi}"
         source_path = Path(cls.fixture.name) / "identity.c"
         source_path.write_text(f"const char *TSGgml_GetBuildIdentity(void) {{ return {json.dumps(identity)}; }}\n", encoding="utf-8")
         flags = ["-dynamiclib"] if host[0] == "Darwin" else ["-shared", "-fPIC"]
@@ -149,7 +180,7 @@ class StagingFilesystemTests(unittest.TestCase):
         self.build_dir = self.stage / "build" / f"{self.rid}-{self.variant}"
         self.build_dir.mkdir(parents=True)
         self.build = {"tensorSharpBuild": self.version, "sourceCommit": self.source, "ggmlCommit": self.ggml,
-                      "rid": self.rid, "variant": self.variant}
+                      "rid": self.rid, "variant": self.variant, "nativeAbi": self.abi}
         self.write_build()
         self.out = self.root / "output"
 
@@ -171,7 +202,7 @@ class StagingFilesystemTests(unittest.TestCase):
 
     def test_invalid_build_records_fail_before_packaging(self):
         for key, value in (("tensorSharpBuild", "wrong"), ("sourceCommit", "2" * 40), ("sourceCommit", "not-a-commit"),
-                           ("rid", "win-arm64"), ("variant", "vulkan"), ("ggmlCommit", "wrong")):
+                           ("rid", "win-arm64"), ("variant", "vulkan"), ("ggmlCommit", "wrong"), ("nativeAbi", "0" * 64)):
             with self.subTest(key=key, value=value):
                 original = self.build[key]
                 self.build[key] = value

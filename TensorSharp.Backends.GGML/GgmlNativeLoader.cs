@@ -17,7 +17,6 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
-using System.Threading;
 
 namespace TensorSharp.GGML
 {
@@ -46,7 +45,11 @@ namespace TensorSharp.GGML
         string Rid,
         string Variant,
         GgmlBackendType Backend,
-        IReadOnlyList<GgmlNativeFile> Files);
+        IReadOnlyList<GgmlNativeFile> Files)
+    {
+        /// <summary>The bridge source/interop identity. It must match this managed assembly.</summary>
+        public string NativeAbi { get; init; } = GgmlNativeLoader.NativeAbi;
+    }
 
     /// <summary>Refusal codes for candidate validation and loading.</summary>
     public static class GgmlNativeRefusalCodes
@@ -80,22 +83,34 @@ namespace TensorSharp.GGML
         string CpuProfile,
         string Raw)
     {
+        /// <summary>The SHA-256 identity of bridge source, managed interop and the pinned upstream revision.</summary>
+        public string NativeAbi { get; init; } = string.Empty;
+
         /// <summary>Parses the "key=value;..." string the native export returns.</summary>
         public static GgmlNativeBuildIdentity Parse(string raw)
         {
             ArgumentNullException.ThrowIfNull(raw);
             var values = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (string pair in raw.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            foreach (string pair in raw.Split(';'))
             {
                 int eq = pair.IndexOf('=');
-                if (eq > 0)
-                    values[pair[..eq]] = pair[(eq + 1)..];
+                if (eq <= 0 || eq == pair.Length - 1 || pair.Any(c => c < ' ' || c > '~') ||
+                    !values.TryAdd(pair[..eq], pair[(eq + 1)..]))
+                    throw new FormatException("The native build identity contains a malformed or repeated field.");
             }
 
             string Get(string key) => values.TryGetValue(key, out string? v) ? v : string.Empty;
+            if (Get("format") != "1" || Get("tensorsharp").Length == 0 || Get("rid").Length == 0 ||
+                Get("variant").Length == 0 || Get("cpu").Length == 0 ||
+                !IsHexIdentity(Get("source"), 40) || !IsHexIdentity(Get("ggml"), 40) ||
+                !IsHexIdentity(Get("abi"), 64))
+                throw new FormatException("The native build identity has an unsupported format or lacks exact source and ABI identities.");
             return new GgmlNativeBuildIdentity(Get("tensorsharp"), Get("source"), Get("ggml"), Get("variant"),
-                Get("rid"), Get("cpu"), raw);
+                Get("rid"), Get("cpu"), raw) { NativeAbi = Get("abi") };
         }
+
+        private static bool IsHexIdentity(string value, int length) =>
+            value.Length == length && value.All(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'));
     }
 
     /// <summary>The outcome of <see cref="GgmlNativeLoader.Select"/>.</summary>
@@ -175,6 +190,16 @@ namespace TensorSharp.GGML
             typeof(GgmlNativeLoader).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
                 .FirstOrDefault(a => a.Key == "TensorSharpBuild")?.Value ?? string.Empty;
 
+        /// <summary>The bridge source/interop identity of this managed assembly. Reading it loads no native code.</summary>
+        public static string NativeAbi { get; } =
+            typeof(GgmlNativeLoader).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                .FirstOrDefault(a => a.Key == "GgmlNativeAbi")?.Value ?? string.Empty;
+
+        /// <summary>The exact upstream revision required by this managed assembly. Reading it loads no native code.</summary>
+        public static string GgmlCommit { get; } =
+            typeof(GgmlNativeLoader).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>()
+                .FirstOrDefault(a => a.Key == "GgmlUpstreamCommit")?.Value ?? string.Empty;
+
         /// <summary>The runtime identifier of this process, for example osx-arm64. Candidates must match it exactly.</summary>
         public static string RuntimeIdentifier => RuntimeInformation.RuntimeIdentifier;
 
@@ -215,6 +240,8 @@ namespace TensorSharp.GGML
                 return Refuse(candidate, GgmlNativeRefusalCodes.IncompatibleHardware, "The candidate names an unknown backend.");
             if (string.IsNullOrWhiteSpace(candidate.Variant))
                 return Refuse(candidate, GgmlNativeRefusalCodes.NotSelected, "The candidate has no variant identity.");
+            if (NativeAbi.Length != 64 || !string.Equals(candidate.NativeAbi, NativeAbi, StringComparison.Ordinal))
+                return Refuse(candidate, GgmlNativeRefusalCodes.NotSelected, "The candidate does not match the managed bridge source/ABI identity.");
 
             if (!string.Equals(candidate.Rid, RuntimeIdentifier, StringComparison.Ordinal))
             {
@@ -411,6 +438,10 @@ namespace TensorSharp.GGML
             {
                 return null;
             }
+            catch (FormatException)
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -455,8 +486,13 @@ namespace TensorSharp.GGML
 
         internal static void EnsureImportResolverRegistered()
         {
-            if (Interlocked.Exchange(ref s_resolverRegistered, 1) == 0)
+            lock (s_gate)
+            {
+                if (s_resolverRegistered != 0)
+                    return;
                 NativeLibrary.SetDllImportResolver(typeof(GgmlNativeLoader).Assembly, GgmlNative.ImportResolver);
+                s_resolverRegistered = 1;
+            }
         }
 
         /// <summary>
@@ -554,13 +590,24 @@ namespace TensorSharp.GGML
                 return null;
             IntPtr text = ((delegate* unmanaged<IntPtr>)export)();
             string? raw = text == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(text);
-            return raw == null ? null : GgmlNativeBuildIdentity.Parse(raw);
+            try
+            {
+                return raw == null ? null : GgmlNativeBuildIdentity.Parse(raw);
+            }
+            catch (FormatException)
+            {
+                return null;
+            }
         }
 
         private static string? CompareIdentity(GgmlNativeCandidate candidate, GgmlNativeBuildIdentity? identity)
         {
             if (identity == null)
-                return "The library has no TSGgml_GetBuildIdentity export; it predates versioned selection.";
+                return "The library has no valid exact source/ABI identity; rebuild the native bridge.";
+            if (!string.Equals(identity.NativeAbi, NativeAbi, StringComparison.Ordinal))
+                return $"The library reports bridge ABI '{identity.NativeAbi}'; the managed assembly requires '{NativeAbi}'.";
+            if (!string.Equals(identity.GgmlCommit, GgmlCommit, StringComparison.Ordinal))
+                return $"The library reports ggml '{identity.GgmlCommit}'; the managed assembly requires '{GgmlCommit}'.";
             if (!string.Equals(identity.TensorSharpBuild, candidate.TensorSharpBuild, StringComparison.Ordinal))
                 return $"The library reports TensorSharp {identity.TensorSharpBuild}; the candidate says {candidate.TensorSharpBuild}.";
             if (!string.Equals(identity.Rid, candidate.Rid, StringComparison.Ordinal))
@@ -572,8 +619,8 @@ namespace TensorSharp.GGML
 
         private static string? InitializeBackend(GgmlBackendType backend)
         {
-            // The first call into GgmlNative runs its static constructor, which applies the
-            // tunables that must precede backend creation, through the selected library.
+            // Registration loads no native code. Import binding applies the tunables
+            // through the identity-checked selected library before backend creation.
             GgmlNative.EnsureImportResolverRegistered();
             try
             {

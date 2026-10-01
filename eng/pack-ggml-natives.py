@@ -243,6 +243,20 @@ def read_identity(path):
     return dict(pair.split("=", 1) for pair in match.group(0).decode().split(";") if "=" in pair)
 
 
+def native_abi(root):
+    """Mirror the CMake/MSBuild bridge identity for artifact validation without a build tool."""
+    extensions = {".cpp", ".h", ".hpp", ".inc", ".cu", ".cuh"}
+    files = [p for p in (root / "TensorSharp.GGML.Native").iterdir() if p.is_file() and p.suffix in extensions]
+    files += [p for p in (root / "TensorSharp.Backends.GGML").glob("*Native*.cs") if p.name != "GgmlNativeLoader.cs"]
+    files.append(root / "eng" / "ggml-revision")
+    rows = []
+    for path in sorted(files, key=lambda p: p.relative_to(root).as_posix()):
+        digest = sha256_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        rows.append(path.relative_to(root).as_posix() + "=" + digest + "\n")
+    manifest = "".join(rows)
+    return sha256_bytes(manifest.encode("utf-8"))
+
+
 def portable_path(name):
     if not isinstance(name, str):
         return False
@@ -298,6 +312,7 @@ def read_build_file(path):
 def collect_artifacts(stage, version, ggml_commit):
     artifacts = []
     errors = []
+    expected_abi = native_abi(REPO_ROOT)
     for rid_dir in directories(stage / "runtimes"):
         rid = rid_dir.name
         if rid not in VARIANTS:
@@ -314,7 +329,8 @@ def collect_artifacts(stage, version, ggml_commit):
                 build = json.loads(read_build_file(build_dir / "build-identity.json"))
                 if not isinstance(build, dict):
                     raise ValueError(f"{rid}/{variant}: build record is not an object")
-                for key, expected in (("tensorSharpBuild", version), ("rid", rid), ("variant", variant), ("ggmlCommit", ggml_commit)):
+                for key, expected in (("tensorSharpBuild", version), ("rid", rid), ("variant", variant), ("ggmlCommit", ggml_commit),
+                                      ("nativeAbi", expected_abi)):
                     if build.get(key) != expected:
                         errors.append(f"{rid}/{variant}: build record {key}={build.get(key)}, expected {expected}")
                 source = build.get("sourceCommit")
@@ -331,7 +347,7 @@ def collect_artifacts(stage, version, ggml_commit):
                     errors.append(f"{rid}/{variant}: {entry} has no build identity")
                 else:
                     for key, expected in (("tensorsharp", version), ("rid", rid), ("variant", variant),
-                                          ("ggml", ggml_commit), ("source", source)):
+                                          ("ggml", ggml_commit), ("source", source), ("abi", expected_abi)):
                         if identity.get(key) != expected:
                             errors.append(f"{rid}/{variant}: binary identity {key}={identity.get(key)}, expected {expected}")
                 artifacts.append({"rid": rid, "variant": variant, "directory": variant_dir, "build": build,
@@ -438,6 +454,7 @@ def main():
             "variant": variant,
             "version": version,
             "tensorSharpBuild": version,
+            "nativeAbi": identity["abi"],
             "tensorSharp": {"packageVersion": version, "packageCommit": package_commit,
                             "nativeSourceCommit": build["sourceCommit"]},
             "ggml": {"version": ggml_version, "commit": ggml_commit},

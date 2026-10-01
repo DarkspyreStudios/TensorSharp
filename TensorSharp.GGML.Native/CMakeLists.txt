@@ -115,6 +115,9 @@ set(TENSORSHARP_NATIVE_VARIANT "dev" CACHE STRING "Artifact variant recorded in 
 set(TENSORSHARP_NATIVE_RID "" CACHE STRING "Runtime identifier recorded in the build identity")
 set(TENSORSHARP_SOURCE_COMMIT "" CACHE STRING "TensorSharp commit recorded in the build identity (default: git HEAD at configure time)")
 set(TENSORSHARP_BUILD_VERSION "" CACHE STRING "TensorSharp build recorded in the build identity (default: TensorSharpVersion in Directory.Build.props)")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../eng/GgmlNativeIdentity.cmake")
+tensorsharp_native_abi("${CMAKE_CURRENT_SOURCE_DIR}/.." TSG_NATIVE_ABI)
+set(TENSORSHARP_NATIVE_ABI "${TSG_NATIVE_ABI}" CACHE INTERNAL "Exact bridge source/interop identity" FORCE)
 
 set(TSG_CPU_PROFILE "native")
 if (TENSORSHARP_GGML_NATIVE_PORTABLE)
@@ -475,6 +478,7 @@ set_property(SOURCE ggml_ops_build_identity.cpp APPEND PROPERTY COMPILE_DEFINITI
     "TSG_BUILD_TENSORSHARP_VERSION=\"${TSG_BUILD_VERSION}\""
     "TSG_BUILD_SOURCE_COMMIT=\"${TSG_SOURCE_COMMIT}\""
     "TSG_BUILD_GGML_COMMIT=\"${TSG_GGML_COMMIT}\""
+    "TSG_BUILD_NATIVE_ABI=\"${TSG_NATIVE_ABI}\""
     "TSG_BUILD_VARIANT=\"${TENSORSHARP_NATIVE_VARIANT}\""
     "TSG_BUILD_RID=\"${TENSORSHARP_NATIVE_RID}\""
     "TSG_BUILD_CPU_PROFILE=\"${TSG_CPU_PROFILE}\"")

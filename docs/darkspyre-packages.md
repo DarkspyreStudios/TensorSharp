@@ -61,13 +61,24 @@ not qualify model loading, native lifecycle or accelerator execution.
 ## Native candidate validation
 
 `GgmlNativeLoader.Check` inspects a candidate without loading native code. It checks the managed
-package build, current process RID, declared backend, variant, absolute directory and bridge file.
+package build, exact bridge source/interop identity, current process RID, declared backend, variant,
+absolute directory and bridge file.
 A supplied file list must name the bridge. Every entry has a unique relative path, a nonnegative
 size and a lowercase SHA-256 digest that matches the file. Paths cannot contain traversal segments,
 control characters or alternate separators. Candidate directories, their ancestors, listed files
 and intermediate directories cannot be symbolic links. Filesystem inspection failures return a
 structured refusal. The caller owns keeping the validated directory immutable through loading;
 validation does not lock the filesystem against another writer.
+
+The managed assembly's `GgmlNativeAbi` metadata and the bridge's `TSGgml_GetBuildIdentity` export
+carry the same SHA-256 identity. CMake and MSBuild compute it from sorted bridge implementation
+files, managed native interop declarations and the pinned ggml revision. CRLF line endings normalize
+to LF. The identity does not use the package display version or Git commit. Explicit selection
+rejects a missing or different ABI identity, malformed or repeated identity fields, and unknown
+native/upstream source commits. The reported ggml commit must match `GgmlUpstreamCommit` in the
+managed assembly. A loaded refusal retains its library handle and requires a new
+process; it never falls through to another library. Resolver registration and static construction
+load no native code. First import binding applies the native environment tunables after selection.
 
 The focused loader tests use ordinary files and symbolic links. They do not load a bridge or qualify
 a CPU or accelerator backend:
