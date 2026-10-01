@@ -111,76 +111,84 @@ namespace TensorSharp.Models
             ITensorParallelGroup tpGroup = null, string draftModelPath = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            string arch = _gguf.GetString("general.architecture") ?? "muse-glimmer";
-            Config = new ModelConfig { Architecture = arch };
-            ParseBaseConfig();
-
-            _headDim = Config.HeadDim;
-            _slidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window", DefaultSlidingWindow);
-            Config.SlidingWindow = _slidingWindow;
-            _finalLogitSoftcap = _gguf.GetFloat32($"{arch}.final_logit_softcapping", DefaultFinalLogitSoftcap);
-            _finalLogitScale = _gguf.GetFloat32($"{arch}.logit_scale", DefaultLogitScale);
-
-            ResolveSwaPattern(arch);
-
-            int swaCount = 0;
-            for (int l = 0; l < Config.NumLayers; l++)
-                if (_isSwaLayer[l]) swaCount++;
-
-            Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, " +
-                $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, " +
-                $"HeadDim={_headDim}, FFN={Config.IntermediateSize}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"RoPE base={Config.RopeBase} scale={Config.RopeScale} (sliding-window layers only; full layers are NoPE)");
-            Console.WriteLine($"Sliding window={_slidingWindow}, LogitScale={_finalLogitScale}, Softcap={_finalLogitSoftcap}");
-            Console.WriteLine($"Layer types: {swaCount} sliding-window, {Config.NumLayers - swaCount} full causal");
-
-            ParseTokenizer();
-            LoadWeights();
-
-            _hasTiedOutput = !_weights.ContainsKey("output.weight") && !_quantWeights.ContainsKey("output.weight");
-            if (_hasTiedOutput)
-                Console.WriteLine("  Output tied to token_embd.weight");
-
-            FuseGateUpWeights();
-
-            if (IsTensorParallel)
+            try
             {
-                ValidateMuseGlimmerTpConstraints();
-                ShardMuseGlimmerWeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
-            }
-            else
-            {
-                PrepareCudaQuantizedWeightsForInference();
-            }
+                string arch = _gguf.GetString("general.architecture") ?? "muse-glimmer";
+                Config = new ModelConfig { Architecture = arch };
+                ParseBaseConfig();
 
-            PrecomputeConstants();
+                _headDim = Config.HeadDim;
+                _slidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window", DefaultSlidingWindow);
+                Config.SlidingWindow = _slidingWindow;
+                _finalLogitSoftcap = _gguf.GetFloat32($"{arch}.final_logit_softcapping", DefaultFinalLogitSoftcap);
+                _finalLogitScale = _gguf.GetFloat32($"{arch}.logit_scale", DefaultLogitScale);
 
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-            if (IsTensorParallel)
-            {
-                InitTpKVCache(initialCacheLength, maxContextLength);
-                // Needs the per-rank KV caches and the per-rank device preload,
-                // so it goes last. No-op outside tensor parallelism.
-                BuildMuseGlimmerTpDecodeArrays();
-            }
-            else
-            {
-                InitKVCache(initialCacheLength, maxContextLength);
-            }
+                ResolveSwaPattern(arch);
 
-            // --draft-model, else TS_MUSE_GLIMMER_DFLASH. The drafter's speculative
-            // path runs the SINGLE-GPU fused kernel (for its residual capture) and
-            // grows the single-GPU KV cache through EnsureCacheCapacity; neither
-            // exists under tensor parallelism, so it is not offered there.
-            string dflashPath = ResolveDFlashPath(draftModelPath);
-            if (!string.IsNullOrWhiteSpace(dflashPath) && IsTensorParallel)
-                Console.WriteLine("  DFlash speculative decoding is not supported under tensor parallelism; ignoring the drafter.");
-            else if (!string.IsNullOrWhiteSpace(dflashPath))
-                LoadDFlashDraftWeights(dflashPath);
+                int swaCount = 0;
+                for (int l = 0; l < Config.NumLayers; l++)
+                    if (_isSwaLayer[l]) swaCount++;
+
+                Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, " +
+                    $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, " +
+                    $"HeadDim={_headDim}, FFN={Config.IntermediateSize}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"RoPE base={Config.RopeBase} scale={Config.RopeScale} (sliding-window layers only; full layers are NoPE)");
+                Console.WriteLine($"Sliding window={_slidingWindow}, LogitScale={_finalLogitScale}, Softcap={_finalLogitSoftcap}");
+                Console.WriteLine($"Layer types: {swaCount} sliding-window, {Config.NumLayers - swaCount} full causal");
+
+                ParseTokenizer();
+                LoadWeights();
+
+                _hasTiedOutput = !_weights.ContainsKey("output.weight") && !_quantWeights.ContainsKey("output.weight");
+                if (_hasTiedOutput)
+                    Console.WriteLine("  Output tied to token_embd.weight");
+
+                FuseGateUpWeights();
+
+                if (IsTensorParallel)
+                {
+                    ValidateMuseGlimmerTpConstraints();
+                    ShardMuseGlimmerWeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
+                }
+                else
+                {
+                    PrepareCudaQuantizedWeightsForInference();
+                }
+
+                PrecomputeConstants();
+
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+                if (IsTensorParallel)
+                {
+                    InitTpKVCache(initialCacheLength, maxContextLength);
+                    // Needs the per-rank KV caches and the per-rank device preload,
+                    // so it goes last. No-op outside tensor parallelism.
+                    BuildMuseGlimmerTpDecodeArrays();
+                }
+                else
+                {
+                    InitKVCache(initialCacheLength, maxContextLength);
+                }
+
+                // --draft-model, else TS_MUSE_GLIMMER_DFLASH. The drafter's speculative
+                // path runs the SINGLE-GPU fused kernel (for its residual capture) and
+                // grows the single-GPU KV cache through EnsureCacheCapacity; neither
+                // exists under tensor parallelism, so it is not offered there.
+                string dflashPath = ResolveDFlashPath(draftModelPath);
+                if (!string.IsNullOrWhiteSpace(dflashPath) && IsTensorParallel)
+                    Console.WriteLine("  DFlash speculative decoding is not supported under tensor parallelism; ignoring the drafter.");
+                else if (!string.IsNullOrWhiteSpace(dflashPath))
+                    LoadDFlashDraftWeights(dflashPath);
+            }
+            catch (Exception loadError)
+            {
+                RollBackFailedConstruction(loadError, DisposeMuseGlimmerResources, releaseDerivedGraphs: DisposeMuseGlimmerGraphs);
+                throw;
+            }
         }
 
         /// <summary>
@@ -1568,6 +1576,17 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeMuseGlimmerResources, releaseDerivedGraphs: DisposeMuseGlimmerGraphs);
+        }
+
+        private void DisposeMuseGlimmerGraphs()
+        {
+            ResetFusedDecodeCache();
+            ResetMuseGlimmerTpGraphs();
+        }
+
+        private void DisposeMuseGlimmerResources()
+        {
             _visionEncoder?.Dispose();
             foreach (var (embeddings, _) in _pendingVisionEmbeddingsList)
                 embeddings?.Dispose();
@@ -1579,7 +1598,6 @@ namespace TensorSharp.Models
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)
                 foreach (var t in _kvCacheV) t?.Dispose();
-            base.Dispose();
         }
     }
 }

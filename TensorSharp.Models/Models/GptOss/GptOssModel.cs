@@ -195,66 +195,74 @@ namespace TensorSharp.Models
         public GptOssModel(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            string arch = _gguf.GetString("general.architecture") ?? "gpt-oss";
-            Config = new ModelConfig { Architecture = arch };
-            ParseBaseConfig();
-
-            _numExperts = (int)_gguf.GetUint32($"{arch}.expert_count", 0);
-            _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
-            _slidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window", 128);
-            _expertFfnLength = (int)_gguf.GetUint32($"{arch}.expert_feed_forward_length", 0);
-
-            Config.NumExperts = _numExperts;
-            Config.NumExpertsUsed = _numExpertsUsed;
-            Config.SlidingWindow = _slidingWindow;
-            Config.OriginalContextLength = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length", 4096);
-
-            ParseTokenizer();
-
-            Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
-                $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, HeadDim={Config.HeadDim}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, eps={Config.Eps}");
-            Console.WriteLine($"MoE: {_numExperts} experts, {_numExpertsUsed} used, " +
-                $"SlidingWindow={_slidingWindow}, ExpertFFN={_expertFfnLength}");
-
-            LoadWeights();
-            SplitExpertBiases();
-            // Snapshot the gate/up biases per expert BEFORE FuseExpertGateUpWeights
-            // disposes them — we need them in their original split shape to build
-            // the stacked-by-expert bias tables for the fused MoE prefill kernel.
-            float[][] preFuseGateBias = SnapshotPerExpertBiases("ffn_gate_exps", _expertFfnLength);
-            float[][] preFuseUpBias = SnapshotPerExpertBiases("ffn_up_exps", _expertFfnLength);
-            FuseExpertGateUpWeights();
-            FuseQKVWeights();
-
-            // Before the TP sharding, not after: whole-expert partitioning is
-            // built from these stacked tensors, so the sharder has to be able to
-            // ask whether they exist (see BuildGptOssExpertParallelShards).
-            InitMoeStackedWeights(preFuseGateBias, preFuseUpBias);
-
-            if (IsTensorParallel)
+            try
             {
-                ValidateGptOssTpConstraints();
-                ShardGptOssWeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
+                string arch = _gguf.GetString("general.architecture") ?? "gpt-oss";
+                Config = new ModelConfig { Architecture = arch };
+                ParseBaseConfig();
+
+                _numExperts = (int)_gguf.GetUint32($"{arch}.expert_count", 0);
+                _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
+                _slidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window", 128);
+                _expertFfnLength = (int)_gguf.GetUint32($"{arch}.expert_feed_forward_length", 0);
+
+                Config.NumExperts = _numExperts;
+                Config.NumExpertsUsed = _numExpertsUsed;
+                Config.SlidingWindow = _slidingWindow;
+                Config.OriginalContextLength = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length", 4096);
+
+                ParseTokenizer();
+
+                Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
+                    $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, HeadDim={Config.HeadDim}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, eps={Config.Eps}");
+                Console.WriteLine($"MoE: {_numExperts} experts, {_numExpertsUsed} used, " +
+                    $"SlidingWindow={_slidingWindow}, ExpertFFN={_expertFfnLength}");
+
+                LoadWeights();
+                SplitExpertBiases();
+                // Snapshot the gate/up biases per expert BEFORE FuseExpertGateUpWeights
+                // disposes them — we need them in their original split shape to build
+                // the stacked-by-expert bias tables for the fused MoE prefill kernel.
+                float[][] preFuseGateBias = SnapshotPerExpertBiases("ffn_gate_exps", _expertFfnLength);
+                float[][] preFuseUpBias = SnapshotPerExpertBiases("ffn_up_exps", _expertFfnLength);
+                FuseExpertGateUpWeights();
+                FuseQKVWeights();
+
+                // Before the TP sharding, not after: whole-expert partitioning is
+                // built from these stacked tensors, so the sharder has to be able to
+                // ask whether they exist (see BuildGptOssExpertParallelShards).
+                InitMoeStackedWeights(preFuseGateBias, preFuseUpBias);
+
+                if (IsTensorParallel)
+                {
+                    ValidateGptOssTpConstraints();
+                    ShardGptOssWeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
+                }
+                else
+                {
+                    PrepareCudaQuantizedWeightsForInference();
+                    PrepareMlxStackedMoeWeights();
+                }
+
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+
+                if (IsTensorParallel)
+                    InitGptOssTpKVCache(initialCacheLength, maxContextLength);
+                else
+                    InitKVCache(initialCacheLength, maxContextLength);
+
+                PrecomputeConstants();
             }
-            else
+            catch (Exception loadError)
             {
-                PrepareCudaQuantizedWeightsForInference();
-                PrepareMlxStackedMoeWeights();
+                RollBackFailedConstruction(loadError, DisposeGptOssResources, releaseDerivedGraphs: DisposeGptOssGraphs);
+                throw;
             }
-
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-
-            if (IsTensorParallel)
-                InitGptOssTpKVCache(initialCacheLength, maxContextLength);
-            else
-                InitKVCache(initialCacheLength, maxContextLength);
-
-            PrecomputeConstants();
         }
 
         // Build a per-(layer,expert) snapshot of bias arrays before FuseExpertGateUpWeights
@@ -2828,6 +2836,17 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeGptOssResources, releaseDerivedGraphs: DisposeGptOssGraphs);
+        }
+
+        private void DisposeGptOssGraphs()
+        {
+            ResetFusedModelDecodeCache();
+            if (IsGgmlBackend) GgmlBasicOps.GptOssResetBatchedDecodeCache();
+        }
+
+        private void DisposeGptOssResources()
+        {
             if (_kvCacheK != null)
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)
@@ -2847,7 +2866,6 @@ namespace TensorSharp.Models
                         handle.Free();
             DisposeFusedSequenceCaches();
             DisposeFusedModelDecodeState();
-            base.Dispose();
         }
     }
 }

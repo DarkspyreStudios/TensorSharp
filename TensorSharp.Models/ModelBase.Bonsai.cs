@@ -10,41 +10,6 @@ public abstract partial class ModelBase
 {
     protected BonsaiHadamardMetadata BonsaiHadamard { get; private set; }
 
-    protected bool HasBonsaiCheckpointMetadata
-    {
-        get
-        {
-            foreach (string key in _gguf.Metadata.Keys)
-                if (key.StartsWith("prism.hadamard.", StringComparison.Ordinal))
-                    return true;
-            foreach (var tensor in _gguf.Tensors.Values)
-                if (tensor.Type is GgmlTensorType.PQ2_0 or GgmlTensorType.PTQ1_0)
-                    return true;
-            return false;
-        }
-    }
-
-    // The ordinary Dispose paths retire captured graphs first. If one of those
-    // paths throws (for example an older native library lacks a reset export),
-    // still release each load-owned object independently. This method runs only
-    // while unwinding a failed constructor and must preserve that exception.
-    protected void CleanUpFailedBonsaiConstruction(Action releaseDerivedResources, Action releaseBaseResources)
-    {
-        try { releaseDerivedResources(); } catch { }
-        bool baseReleased = false;
-        try { releaseBaseResources(); baseReleased = true; } catch { }
-        foreach (var weight in _quantWeights.Values)
-            try { weight.Dispose(); } catch { }
-        _quantWeights.Clear();
-        foreach (var weight in _weights.Values)
-            try { weight.Dispose(); } catch { }
-        _weights.Clear();
-        try { _gguf.Dispose(); } catch { }
-        if (!baseReleased && _allocator is IDisposable allocator)
-            try { allocator.Dispose(); } catch { }
-        try { _ggmlContext?.ReleasePooledMemory(); } catch { }
-    }
-
     private void ReadBonsaiMetadata()
     {
         BonsaiHadamard = BonsaiHadamardMetadata.Read(_gguf);

@@ -1769,18 +1769,28 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeQwen4ExpResources, releaseDerivedGraphs: DisposeQwen4ExpGraphs);
+        }
+
+        private void DisposeQwen4ExpGraphs()
+        {
+            if (IsGgmlBackend)
+            {
+                GgmlBasicOps.Qwen4ExpReleaseAllSeqState();
+            }
+        }
+
+        private void DisposeQwen4ExpResources()
+        {
             DisposeMtpHead();
             ReleaseSpecSnapshot();
             DisposeAllFusedHolders();
-            if (IsGgmlBackend)
-                GgmlBasicOps.Qwen4ExpReleaseAllSeqState();
             if (_kCache != null)
                 foreach (var t in _kCache) t?.Dispose();
             if (_vCache != null)
                 foreach (var t in _vCache) t?.Dispose();
             if (_idxKCache != null)
                 foreach (var t in _idxKCache) t?.Dispose();
-            base.Dispose();
         }
     }
 }

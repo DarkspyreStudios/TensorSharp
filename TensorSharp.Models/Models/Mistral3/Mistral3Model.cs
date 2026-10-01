@@ -64,73 +64,81 @@ namespace TensorSharp.Models
         public Mistral3Model(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            // Hyperparameters live under whatever prefix the converter wrote: "mistral3"
-            // for current conversions, "llama" for Mistral Small 3.x files converted before
-            // llama.cpp had a mistral3 architecture (the registry admits those only through
-            // Mistral3Architecture.IsLlamaLabelledMistral3). The protocol id is always
-            // mistral3, so rendering, parsing and capabilities select this family either way.
-            string arch = _gguf.GetString("general.architecture") ?? "mistral3";
-            Config = new ModelConfig { Architecture = "mistral3" };
-            if (!string.Equals(arch, Config.Architecture, StringComparison.Ordinal))
+            try
             {
-                MetadataArchitecture = arch;
-                Console.WriteLine($"  GGUF labelled '{arch}' is served as mistral3 (metadata read under '{arch}.*').");
+                // Hyperparameters live under whatever prefix the converter wrote: "mistral3"
+                // for current conversions, "llama" for Mistral Small 3.x files converted before
+                // llama.cpp had a mistral3 architecture (the registry admits those only through
+                // Mistral3Architecture.IsLlamaLabelledMistral3). The protocol id is always
+                // mistral3, so rendering, parsing and capabilities select this family either way.
+                string arch = _gguf.GetString("general.architecture") ?? "mistral3";
+                Config = new ModelConfig { Architecture = "mistral3" };
+                if (!string.Equals(arch, Config.Architecture, StringComparison.Ordinal))
+                {
+                    MetadataArchitecture = arch;
+                    Console.WriteLine($"  GGUF labelled '{arch}' is served as mistral3 (metadata read under '{arch}.*').");
+                }
+                ParseBaseConfig();
+
+                _attnKeyLen = Config.KeyLength > 0 ? Config.KeyLength : Config.HeadDim;
+                _attnValLen = Config.ValueLength > 0 ? Config.ValueLength : _attnKeyLen;
+                _ropeDim = (int)_gguf.GetUint32($"{arch}.rope.dimension_count", (uint)_attnKeyLen);
+
+                // YaRN parameters
+                _ropeType = _gguf.GetString($"{arch}.rope.scaling.type", "");
+                _ropeScalingBeta = _gguf.GetFloat32($"{arch}.attention.temperature_scale",
+                                   _gguf.GetFloat32($"{arch}.rope.scaling_beta", 0.1f));
+                _ropeOrigCtx = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length", 0);
+                Config.OriginalContextLength = _ropeOrigCtx;
+                _ropeExtFactor = _gguf.GetFloat32($"{arch}.rope.scaling.extrapolation_factor", 1.0f);
+                _ropeBetaFast = _gguf.GetFloat32($"{arch}.rope.scaling.yarn_beta_fast",
+                                _gguf.GetFloat32($"{arch}.rope.scaling.beta_fast", 32.0f));
+                _ropeBetaSlow = _gguf.GetFloat32($"{arch}.rope.scaling.yarn_beta_slow",
+                                _gguf.GetFloat32($"{arch}.rope.scaling.beta_slow", 1.0f));
+                _ropeMscale = _gguf.GetFloat32($"{arch}.rope.scaling.mscale", 0f);
+                _ropeMscaleAllDim = _gguf.GetFloat32($"{arch}.rope.scaling.mscale_all_dim", 0f);
+
+                Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
+                    $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, KeyLen={_attnKeyLen}, " +
+                    $"ValLen={_attnValLen}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, type={_ropeType}, " +
+                    $"dim={_ropeDim}, origCtx={_ropeOrigCtx}");
+                if (_ropeType == "yarn")
+                    Console.WriteLine($"YaRN beta={_ropeScalingBeta}, betaFast={_ropeBetaFast}, " +
+                        $"betaSlow={_ropeBetaSlow}, extFactor={_ropeExtFactor}");
+
+                ParseTokenizer();
+                LoadWeights();
+                FuseQKVWeights();
+                FuseGateUpWeights();
+
+                if (IsTensorParallel)
+                {
+                    ShardMistral3WeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
+                }
+                else
+                {
+                    PrepareCudaQuantizedWeightsForInference();
+                }
+
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
+
+                if (IsTensorParallel)
+                    InitTpKVCache(initialCacheLength, maxContextLength);
+                else
+                    InitKVCache(initialCacheLength, maxContextLength);
+
+                PrecomputeConstants();
             }
-            ParseBaseConfig();
-
-            _attnKeyLen = Config.KeyLength > 0 ? Config.KeyLength : Config.HeadDim;
-            _attnValLen = Config.ValueLength > 0 ? Config.ValueLength : _attnKeyLen;
-            _ropeDim = (int)_gguf.GetUint32($"{arch}.rope.dimension_count", (uint)_attnKeyLen);
-
-            // YaRN parameters
-            _ropeType = _gguf.GetString($"{arch}.rope.scaling.type", "");
-            _ropeScalingBeta = _gguf.GetFloat32($"{arch}.attention.temperature_scale",
-                               _gguf.GetFloat32($"{arch}.rope.scaling_beta", 0.1f));
-            _ropeOrigCtx = (int)_gguf.GetUint32($"{arch}.rope.scaling.original_context_length", 0);
-            Config.OriginalContextLength = _ropeOrigCtx;
-            _ropeExtFactor = _gguf.GetFloat32($"{arch}.rope.scaling.extrapolation_factor", 1.0f);
-            _ropeBetaFast = _gguf.GetFloat32($"{arch}.rope.scaling.yarn_beta_fast",
-                            _gguf.GetFloat32($"{arch}.rope.scaling.beta_fast", 32.0f));
-            _ropeBetaSlow = _gguf.GetFloat32($"{arch}.rope.scaling.yarn_beta_slow",
-                            _gguf.GetFloat32($"{arch}.rope.scaling.beta_slow", 1.0f));
-            _ropeMscale = _gguf.GetFloat32($"{arch}.rope.scaling.mscale", 0f);
-            _ropeMscaleAllDim = _gguf.GetFloat32($"{arch}.rope.scaling.mscale_all_dim", 0f);
-
-            Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, Hidden={Config.HiddenSize}, " +
-                $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, KeyLen={_attnKeyLen}, " +
-                $"ValLen={_attnValLen}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"RoPE base={Config.RopeBase}, scale={Config.RopeScale}, type={_ropeType}, " +
-                $"dim={_ropeDim}, origCtx={_ropeOrigCtx}");
-            if (_ropeType == "yarn")
-                Console.WriteLine($"YaRN beta={_ropeScalingBeta}, betaFast={_ropeBetaFast}, " +
-                    $"betaSlow={_ropeBetaSlow}, extFactor={_ropeExtFactor}");
-
-            ParseTokenizer();
-            LoadWeights();
-            FuseQKVWeights();
-            FuseGateUpWeights();
-
-            if (IsTensorParallel)
+            catch (Exception loadError)
             {
-                ShardMistral3WeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
+                RollBackFailedConstruction(loadError, DisposeMistral3Resources);
+                throw;
             }
-            else
-            {
-                PrepareCudaQuantizedWeightsForInference();
-            }
-
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-
-            if (IsTensorParallel)
-                InitTpKVCache(initialCacheLength, maxContextLength);
-            else
-                InitKVCache(initialCacheLength, maxContextLength);
-
-            PrecomputeConstants();
         }
 
         private unsafe void FuseQKVWeights()
@@ -897,6 +905,11 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeMistral3Resources);
+        }
+
+        private void DisposeMistral3Resources()
+        {
             _visionEncoder?.Dispose();
             foreach (var (embeddings, _) in _pendingVisionEmbeddingsList)
                 embeddings?.Dispose();
@@ -909,12 +922,11 @@ namespace TensorSharp.Models
 
             if (_tpKvCacheK != null)
                 foreach (var layer in _tpKvCacheK)
-                    foreach (var t in layer) t?.Dispose();
+                    if (layer != null) foreach (var t in layer) t?.Dispose();
             if (_tpKvCacheV != null)
                 foreach (var layer in _tpKvCacheV)
-                    foreach (var t in layer) t?.Dispose();
+                    if (layer != null) foreach (var t in layer) t?.Dispose();
 
-            base.Dispose();
         }
     }
 }

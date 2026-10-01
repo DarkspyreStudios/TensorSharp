@@ -344,125 +344,133 @@ namespace TensorSharp.Models
             string draftModelPath = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            _draftModelPath = draftModelPath;
-            string arch = _gguf.GetString("general.architecture") ?? "nemotron_h";
-            Config = new ModelConfig { Architecture = arch };
-            ParseBaseConfig();
-
-            // SSM config
-            _ssmDConv = (int)_gguf.GetUint32($"{arch}.ssm.conv_kernel");
-            _ssmDInner = (int)_gguf.GetUint32($"{arch}.ssm.inner_size");
-            _ssmDState = (int)_gguf.GetUint32($"{arch}.ssm.state_size");
-            _ssmNHead = (int)_gguf.GetUint32($"{arch}.ssm.time_step_rank");
-            _ssmNGroup = (int)_gguf.GetUint32($"{arch}.ssm.group_count");
-            _ssmHeadDim = _ssmNHead > 0 ? _ssmDInner / _ssmNHead : 0;
-
-            // Attention scale
-            _attentionScale = _gguf.GetFloat32($"{arch}.attention.scale", 0f);
-
-            // MoE config
-            _numExperts = (int)_gguf.GetUint32($"{arch}.expert_count", 0);
-            _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
-            Config.NumExperts = _numExperts;
-            Config.NumExpertsUsed = _numExpertsUsed;
-            _expertWeightsNorm = _gguf.GetBool($"{arch}.expert_weights_norm", false);
-            _expertWeightsScale = _gguf.GetFloat32($"{arch}.expert_weights_scale", 1.0f);
-
-            // Per-layer config from GGUF arrays
-            var headCountKV = _gguf.GetUint32Array($"{arch}.attention.head_count_kv");
-            var ffnLength = _gguf.GetUint32Array($"{arch}.feed_forward_length");
-            var headCount = _gguf.GetUint32Array($"{arch}.attention.head_count");
-
-            int numLayers = Config.NumLayers;
-            _layerTypes = new LayerType[numLayers];
-            _layerNFF = new int[numLayers];
-            _layerNumHeads = new int[numLayers];
-            _layerNumKVHeads = new int[numLayers];
-
-            int attnCount = 0, mamba2Count = 0, ffnCount = 0;
-            for (int i = 0; i < numLayers; i++)
+            try
             {
-                uint kvHeads = (headCountKV != null && i < headCountKV.Length) ? headCountKV[i] : 1;
-                uint ff = (ffnLength != null && i < ffnLength.Length) ? ffnLength[i] : 0;
-                _layerNFF[i] = (int)ff;
+                _draftModelPath = draftModelPath;
+                string arch = _gguf.GetString("general.architecture") ?? "nemotron_h";
+                Config = new ModelConfig { Architecture = arch };
+                ParseBaseConfig();
 
-                if (kvHeads == 0 && ff == 0)
+                // SSM config
+                _ssmDConv = (int)_gguf.GetUint32($"{arch}.ssm.conv_kernel");
+                _ssmDInner = (int)_gguf.GetUint32($"{arch}.ssm.inner_size");
+                _ssmDState = (int)_gguf.GetUint32($"{arch}.ssm.state_size");
+                _ssmNHead = (int)_gguf.GetUint32($"{arch}.ssm.time_step_rank");
+                _ssmNGroup = (int)_gguf.GetUint32($"{arch}.ssm.group_count");
+                _ssmHeadDim = _ssmNHead > 0 ? _ssmDInner / _ssmNHead : 0;
+
+                // Attention scale
+                _attentionScale = _gguf.GetFloat32($"{arch}.attention.scale", 0f);
+
+                // MoE config
+                _numExperts = (int)_gguf.GetUint32($"{arch}.expert_count", 0);
+                _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
+                Config.NumExperts = _numExperts;
+                Config.NumExpertsUsed = _numExpertsUsed;
+                _expertWeightsNorm = _gguf.GetBool($"{arch}.expert_weights_norm", false);
+                _expertWeightsScale = _gguf.GetFloat32($"{arch}.expert_weights_scale", 1.0f);
+
+                // Per-layer config from GGUF arrays
+                var headCountKV = _gguf.GetUint32Array($"{arch}.attention.head_count_kv");
+                var ffnLength = _gguf.GetUint32Array($"{arch}.feed_forward_length");
+                var headCount = _gguf.GetUint32Array($"{arch}.attention.head_count");
+
+                int numLayers = Config.NumLayers;
+                _layerTypes = new LayerType[numLayers];
+                _layerNFF = new int[numLayers];
+                _layerNumHeads = new int[numLayers];
+                _layerNumKVHeads = new int[numLayers];
+
+                int attnCount = 0, mamba2Count = 0, ffnCount = 0;
+                for (int i = 0; i < numLayers; i++)
                 {
-                    _layerTypes[i] = LayerType.Mamba2;
-                    mamba2Count++;
+                    uint kvHeads = (headCountKV != null && i < headCountKV.Length) ? headCountKV[i] : 1;
+                    uint ff = (ffnLength != null && i < ffnLength.Length) ? ffnLength[i] : 0;
+                    _layerNFF[i] = (int)ff;
+
+                    if (kvHeads == 0 && ff == 0)
+                    {
+                        _layerTypes[i] = LayerType.Mamba2;
+                        mamba2Count++;
+                    }
+                    else if (ff == 0)
+                    {
+                        _layerTypes[i] = LayerType.Attention;
+                        attnCount++;
+                    }
+                    else
+                    {
+                        _layerTypes[i] = LayerType.FFN;
+                        ffnCount++;
+                    }
+
+                    _layerNumKVHeads[i] = (int)kvHeads;
+                    uint hc = (headCount != null && i < headCount.Length) ? headCount[i] : (uint)Config.NumHeads;
+                    _layerNumHeads[i] = (int)hc;
                 }
-                else if (ff == 0)
+
+                if (Config.NumHeads <= 1 || Config.NumKVHeads <= 0)
                 {
-                    _layerTypes[i] = LayerType.Attention;
-                    attnCount++;
+                    for (int i = 0; i < numLayers; i++)
+                    {
+                        if (_layerTypes[i] == LayerType.Attention && _layerNumHeads[i] > 0 && _layerNumKVHeads[i] > 0)
+                        {
+                            if (Config.NumHeads <= 1) Config.NumHeads = _layerNumHeads[i];
+                            if (Config.NumKVHeads <= 0) Config.NumKVHeads = _layerNumKVHeads[i];
+                            break;
+                        }
+                    }
+                }
+
+                ParseTokenizer();
+
+                Console.WriteLine($"Model: {arch}, Layers={numLayers}, Hidden={Config.HiddenSize}, " +
+                    $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, HeadDim={Config.HeadDim}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"SSM: dConv={_ssmDConv}, dInner={_ssmDInner}, dState={_ssmDState}, " +
+                    $"nHead={_ssmNHead}, nGroup={_ssmNGroup}, headDim={_ssmHeadDim}");
+                Console.WriteLine($"Layer types: {attnCount} attention, {mamba2Count} Mamba2, {ffnCount} FFN" +
+                    (_numExperts > 0 ? $" (MoE: {_numExperts} experts, top-{_numExpertsUsed})" : " (dense)"));
+                if (_attentionScale != 0)
+                    Console.WriteLine($"Attention scale: {_attentionScale}");
+
+                LoadWeights();
+
+                if (_numExperts == 0)
+                    FuseFFNWeights();
+                FuseQKVWeights();
+
+                if (IsTensorParallel)
+                {
+                    ValidateNemotronTpConstraints();
+                    ShardNemotronWeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
                 }
                 else
                 {
-                    _layerTypes[i] = LayerType.FFN;
-                    ffnCount++;
+                    PrepareCudaQuantizedWeightsForInference();
                 }
 
-                _layerNumKVHeads[i] = (int)kvHeads;
-                uint hc = (headCount != null && i < headCount.Length) ? headCount[i] : (uint)Config.NumHeads;
-                _layerNumHeads[i] = (int)hc;
-            }
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
 
-            if (Config.NumHeads <= 1 || Config.NumKVHeads <= 0)
+                if (IsTensorParallel)
+                    InitNemotronTpCaches(initialCacheLength, maxContextLength);
+                else
+                    InitCaches(initialCacheLength, maxContextLength);
+
+                InitMamba2Buffers();
+                InitLayerInfo();
+                CacheMamba2ConvWeights();
+                InitMoEBuffers();
+                InitNemotronTpMoeBatchedDecode();
+            }
+            catch (Exception loadError)
             {
-                for (int i = 0; i < numLayers; i++)
-                {
-                    if (_layerTypes[i] == LayerType.Attention && _layerNumHeads[i] > 0 && _layerNumKVHeads[i] > 0)
-                    {
-                        if (Config.NumHeads <= 1) Config.NumHeads = _layerNumHeads[i];
-                        if (Config.NumKVHeads <= 0) Config.NumKVHeads = _layerNumKVHeads[i];
-                        break;
-                    }
-                }
+                RollBackFailedConstruction(loadError, DisposeNemotronResources, releaseDerivedGraphs: DisposeNemotronGraphs);
+                throw;
             }
-
-            ParseTokenizer();
-
-            Console.WriteLine($"Model: {arch}, Layers={numLayers}, Hidden={Config.HiddenSize}, " +
-                $"Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, HeadDim={Config.HeadDim}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"SSM: dConv={_ssmDConv}, dInner={_ssmDInner}, dState={_ssmDState}, " +
-                $"nHead={_ssmNHead}, nGroup={_ssmNGroup}, headDim={_ssmHeadDim}");
-            Console.WriteLine($"Layer types: {attnCount} attention, {mamba2Count} Mamba2, {ffnCount} FFN" +
-                (_numExperts > 0 ? $" (MoE: {_numExperts} experts, top-{_numExpertsUsed})" : " (dense)"));
-            if (_attentionScale != 0)
-                Console.WriteLine($"Attention scale: {_attentionScale}");
-
-            LoadWeights();
-
-            if (_numExperts == 0)
-                FuseFFNWeights();
-            FuseQKVWeights();
-
-            if (IsTensorParallel)
-            {
-                ValidateNemotronTpConstraints();
-                ShardNemotronWeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
-            }
-            else
-            {
-                PrepareCudaQuantizedWeightsForInference();
-            }
-
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens (grows on demand up to {maxContextLength}).");
-
-            if (IsTensorParallel)
-                InitNemotronTpCaches(initialCacheLength, maxContextLength);
-            else
-                InitCaches(initialCacheLength, maxContextLength);
-
-            InitMamba2Buffers();
-            InitLayerInfo();
-            CacheMamba2ConvWeights();
-            InitMoEBuffers();
-            InitNemotronTpMoeBatchedDecode();
         }
 
         #region Initialization
@@ -3602,6 +3610,17 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeNemotronResources, releaseDerivedGraphs: DisposeNemotronGraphs);
+        }
+
+        private void DisposeNemotronGraphs()
+        {
+            if (IsGgmlBackend)
+                GgmlBasicOps.NemotronMamba2DecodeClear(_nativeMamba2DecodeModelId);
+        }
+
+        private void DisposeNemotronResources()
+        {
             if (_kvCacheK != null)
                 foreach (var t in _kvCacheK) t?.Dispose();
             if (_kvCacheV != null)
@@ -3609,8 +3628,6 @@ namespace TensorSharp.Models
             DisposeNemotronTpState();
             DisposeTensorArray(_mamba2NativeDecodeProjected);
             DisposeTensorArray(_mamba2NativeDecodeHidden);
-            if (IsGgmlBackend)
-                GgmlBasicOps.NemotronMamba2DecodeClear(_nativeMamba2DecodeModelId);
             _expertUpResult?.Dispose();
             _expertDownResult?.Dispose();
             _latentAccumTensor?.Dispose();
@@ -3623,7 +3640,6 @@ namespace TensorSharp.Models
             _audioEncoder?.Dispose();
             _audioEncoder = null;
 
-            base.Dispose();
         }
     }
 }

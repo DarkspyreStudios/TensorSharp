@@ -403,136 +403,144 @@ namespace TensorSharp.Models
 
         public Gemma4Model(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null) : base(ggufPath, backend, tpDegree, tpGroup)
         {
-            Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") };
-            ParseBaseConfig();
-
-            string arch = Config.Architecture;
-
-            _slidingWindowPattern = _gguf.GetBoolArray($"{arch}.attention.sliding_window_pattern");
-            _slidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window", 512);
-            Config.SlidingWindow = _slidingWindow;
-            Config.UsesCircularKvCache = _slidingWindowPattern != null && Array.Exists(_slidingWindowPattern, isLocal => isLocal);
-
-            // Head dimensions: key_length is global head dim, key_length_swa is local head dim
-            // Ollama uses a single headDim for Q/K/V per layer type
-            _globalHeadDim = (int)_gguf.GetUint32($"{arch}.attention.key_length", 512);
-            _localHeadDim = (int)_gguf.GetUint32($"{arch}.attention.key_length_swa", 256);
-
-            // RoPE dimensions for global layers with proportional RoPE
-            _partialRotaryDims = (int)_gguf.GetUint32($"{arch}.rope.dimension_count", 0);
-            if (_partialRotaryDims == 0)
+            try
             {
-                float partialFactor = _gguf.GetFloat32($"{arch}.rope.partial_rotary_factor", 1.0f);
-                _partialRotaryDims = (int)(_globalHeadDim * partialFactor);
-            }
+                Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") };
+                ParseBaseConfig();
 
-            // KV heads: try per-layer array first, then fall back to scalar
-            _numGlobalKVHeads = (int)_gguf.GetUint32($"{arch}.attention.global_head_count_kv", 0);
-            var kvHeadsArray = _gguf.GetInt32Array($"{arch}.attention.head_count_kv");
-            if (kvHeadsArray != null && kvHeadsArray.Length > 0)
-            {
-                Config.NumKVHeads = kvHeadsArray[0];
-                if (_numGlobalKVHeads == 0 && _slidingWindowPattern != null)
+                string arch = Config.Architecture;
+
+                _slidingWindowPattern = _gguf.GetBoolArray($"{arch}.attention.sliding_window_pattern");
+                _slidingWindow = (int)_gguf.GetUint32($"{arch}.attention.sliding_window", 512);
+                Config.SlidingWindow = _slidingWindow;
+                Config.UsesCircularKvCache = _slidingWindowPattern != null && Array.Exists(_slidingWindowPattern, isLocal => isLocal);
+
+                // Head dimensions: key_length is global head dim, key_length_swa is local head dim
+                // Ollama uses a single headDim for Q/K/V per layer type
+                _globalHeadDim = (int)_gguf.GetUint32($"{arch}.attention.key_length", 512);
+                _localHeadDim = (int)_gguf.GetUint32($"{arch}.attention.key_length_swa", 256);
+
+                // RoPE dimensions for global layers with proportional RoPE
+                _partialRotaryDims = (int)_gguf.GetUint32($"{arch}.rope.dimension_count", 0);
+                if (_partialRotaryDims == 0)
                 {
-                    for (int i = 0; i < _slidingWindowPattern.Length && i < kvHeadsArray.Length; i++)
+                    float partialFactor = _gguf.GetFloat32($"{arch}.rope.partial_rotary_factor", 1.0f);
+                    _partialRotaryDims = (int)(_globalHeadDim * partialFactor);
+                }
+
+                // KV heads: try per-layer array first, then fall back to scalar
+                _numGlobalKVHeads = (int)_gguf.GetUint32($"{arch}.attention.global_head_count_kv", 0);
+                var kvHeadsArray = _gguf.GetInt32Array($"{arch}.attention.head_count_kv");
+                if (kvHeadsArray != null && kvHeadsArray.Length > 0)
+                {
+                    Config.NumKVHeads = kvHeadsArray[0];
+                    if (_numGlobalKVHeads == 0 && _slidingWindowPattern != null)
                     {
-                        if (!_slidingWindowPattern[i])
+                        for (int i = 0; i < _slidingWindowPattern.Length && i < kvHeadsArray.Length; i++)
                         {
-                            _numGlobalKVHeads = kvHeadsArray[i];
-                            break;
+                            if (!_slidingWindowPattern[i])
+                            {
+                                _numGlobalKVHeads = kvHeadsArray[i];
+                                break;
+                            }
                         }
                     }
                 }
+                if (_numGlobalKVHeads == 0) _numGlobalKVHeads = Config.NumKVHeads;
+
+                _ropeLocalBase = _gguf.GetFloat32($"{arch}.rope.freq_base_swa", 0);
+                if (_ropeLocalBase == 0) _ropeLocalBase = _gguf.GetFloat32($"{arch}.rope.local.freq_base", 10000f);
+                _ropeGlobalBase = Config.RopeBase;
+
+                _finalLogitSoftcap = _gguf.GetFloat32($"{arch}.final_logit_softcapping", 0f);
+                _pleDim = (int)_gguf.GetUint32($"{arch}.embedding_length_per_layer_input", 0);
+
+                _sharedKVLayers = (int)_gguf.GetUint32($"{arch}.attention.shared_kv_layers", 0);
+                BuildKVDonorMap();
+
+                _numExperts = (int)_gguf.GetUint32($"{arch}.expert_count", 0);
+                _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
+                if (_numExpertsUsed > 0)
+                    _moeTopKScratch = new int[_numExpertsUsed];
+
+                Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, " +
+                    $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, " +
+                    $"GlobalKVHeads={_numGlobalKVHeads}, Vocab={Config.VocabSize}");
+                Console.WriteLine($"Head dims: local={_localHeadDim}, global={_globalHeadDim}");
+                Console.WriteLine($"RoPE global={_ropeGlobalBase} local={_ropeLocalBase}");
+                Console.WriteLine($"Partial rotary dims={_partialRotaryDims}");
+                Console.WriteLine($"Sliding window={_slidingWindow}, Softcap={_finalLogitSoftcap}");
+                Console.WriteLine($"PLE dim={_pleDim}, SharedKVLayers={_sharedKVLayers}");
+                if (_numExperts > 0)
+                {
+                    Console.WriteLine($"MoE: {_numExperts} experts, {_numExpertsUsed} used per token");
+                    // The host-MoE seam hangs off the GGML MoE FFN kernel (see
+                    // TryMoEFusedGEGLU's IsGgmlBackend gate); the pure-C# CUDA path
+                    // serves experts from its own stacked-expert device buffer and
+                    // has no offload, so the flag would silently do nothing.
+                    if (!IsGgmlBackend)
+                        MoeCpuOffloadConfig.WarnUnsupportedBackend("gemma4", _backend.ToString());
+                }
+
+                int localCount = 0, globalCount = 0;
+                for (int i = 0; i < Config.NumLayers; i++)
+                {
+                    if (IsLocalLayer(i)) localCount++;
+                    else globalCount++;
+                }
+                Console.WriteLine($"Layer types: {globalCount} global (causal), {localCount} local (SWA)");
+                if (_kvDonorMap.Count > 0)
+                {
+                    int firstShared = Config.NumLayers - _sharedKVLayers;
+                    Console.WriteLine($"KV sharing: layers {firstShared}-{Config.NumLayers - 1} share with donors");
+                }
+
+                ParseTokenizer();
+                LoadWeights();
+
+                _hasTiedOutput = !_weights.ContainsKey("output.weight") && !_quantWeights.ContainsKey("output.weight");
+                if (_hasTiedOutput)
+                    Console.WriteLine("  Output tied to token_embd.weight");
+
+                DetectHeadDimsFromWeights();
+                LoadLayerScalars();
+                FuseQKVWeights();
+                FuseGateUpWeights();
+                FuseExpertGateUpWeights();
+                CacheMoEStackedWeights();
+
+                if (IsTensorParallel)
+                {
+                    ValidateGemma4TpConstraints();
+                    ShardGemma4WeightsForTP();
+                    PrepareCudaQuantizedWeightsForInferenceTP();
+                }
+                else
+                {
+                    PrepareCudaQuantizedWeightsForInference();
+                }
+
+                PrecomputeRoPE();
+                int maxContextLength = ResolveConfiguredContextLength();
+                int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
+                if (initialCacheLength < maxContextLength)
+                    Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens for global layers (grows on demand up to {maxContextLength}).");
+
+                if (IsTensorParallel)
+                    InitGemma4TpKVCache(initialCacheLength, maxContextLength);
+                else
+                    InitKVCache(initialCacheLength, maxContextLength);
+
+                BuildGemma4DecodeArrays();
+                // Needs the per-rank KV caches and the device preload, so it goes
+                // last. No-op outside tensor parallelism.
+                BuildGemma4TpDecodeArrays();
             }
-            if (_numGlobalKVHeads == 0) _numGlobalKVHeads = Config.NumKVHeads;
-
-            _ropeLocalBase = _gguf.GetFloat32($"{arch}.rope.freq_base_swa", 0);
-            if (_ropeLocalBase == 0) _ropeLocalBase = _gguf.GetFloat32($"{arch}.rope.local.freq_base", 10000f);
-            _ropeGlobalBase = Config.RopeBase;
-
-            _finalLogitSoftcap = _gguf.GetFloat32($"{arch}.final_logit_softcapping", 0f);
-            _pleDim = (int)_gguf.GetUint32($"{arch}.embedding_length_per_layer_input", 0);
-
-            _sharedKVLayers = (int)_gguf.GetUint32($"{arch}.attention.shared_kv_layers", 0);
-            BuildKVDonorMap();
-
-            _numExperts = (int)_gguf.GetUint32($"{arch}.expert_count", 0);
-            _numExpertsUsed = (int)_gguf.GetUint32($"{arch}.expert_used_count", 0);
-            if (_numExpertsUsed > 0)
-                _moeTopKScratch = new int[_numExpertsUsed];
-
-            Console.WriteLine($"Model: {arch}, Layers={Config.NumLayers}, " +
-                $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, KVHeads={Config.NumKVHeads}, " +
-                $"GlobalKVHeads={_numGlobalKVHeads}, Vocab={Config.VocabSize}");
-            Console.WriteLine($"Head dims: local={_localHeadDim}, global={_globalHeadDim}");
-            Console.WriteLine($"RoPE global={_ropeGlobalBase} local={_ropeLocalBase}");
-            Console.WriteLine($"Partial rotary dims={_partialRotaryDims}");
-            Console.WriteLine($"Sliding window={_slidingWindow}, Softcap={_finalLogitSoftcap}");
-            Console.WriteLine($"PLE dim={_pleDim}, SharedKVLayers={_sharedKVLayers}");
-            if (_numExperts > 0)
+            catch (Exception loadError)
             {
-                Console.WriteLine($"MoE: {_numExperts} experts, {_numExpertsUsed} used per token");
-                // The host-MoE seam hangs off the GGML MoE FFN kernel (see
-                // TryMoEFusedGEGLU's IsGgmlBackend gate); the pure-C# CUDA path
-                // serves experts from its own stacked-expert device buffer and
-                // has no offload, so the flag would silently do nothing.
-                if (!IsGgmlBackend)
-                    MoeCpuOffloadConfig.WarnUnsupportedBackend("gemma4", _backend.ToString());
+                RollBackFailedConstruction(loadError, DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs);
+                throw;
             }
-
-            int localCount = 0, globalCount = 0;
-            for (int i = 0; i < Config.NumLayers; i++)
-            {
-                if (IsLocalLayer(i)) localCount++;
-                else globalCount++;
-            }
-            Console.WriteLine($"Layer types: {globalCount} global (causal), {localCount} local (SWA)");
-            if (_kvDonorMap.Count > 0)
-            {
-                int firstShared = Config.NumLayers - _sharedKVLayers;
-                Console.WriteLine($"KV sharing: layers {firstShared}-{Config.NumLayers - 1} share with donors");
-            }
-
-            ParseTokenizer();
-            LoadWeights();
-
-            _hasTiedOutput = !_weights.ContainsKey("output.weight") && !_quantWeights.ContainsKey("output.weight");
-            if (_hasTiedOutput)
-                Console.WriteLine("  Output tied to token_embd.weight");
-
-            DetectHeadDimsFromWeights();
-            LoadLayerScalars();
-            FuseQKVWeights();
-            FuseGateUpWeights();
-            FuseExpertGateUpWeights();
-            CacheMoEStackedWeights();
-
-            if (IsTensorParallel)
-            {
-                ValidateGemma4TpConstraints();
-                ShardGemma4WeightsForTP();
-                PrepareCudaQuantizedWeightsForInferenceTP();
-            }
-            else
-            {
-                PrepareCudaQuantizedWeightsForInference();
-            }
-
-            PrecomputeRoPE();
-            int maxContextLength = ResolveConfiguredContextLength();
-            int initialCacheLength = ResolveInitialCacheAllocationLength(maxContextLength);
-            if (initialCacheLength < maxContextLength)
-                Console.WriteLine($"Initial {_backend} KV cache allocation: {initialCacheLength} tokens for global layers (grows on demand up to {maxContextLength}).");
-
-            if (IsTensorParallel)
-                InitGemma4TpKVCache(initialCacheLength, maxContextLength);
-            else
-                InitKVCache(initialCacheLength, maxContextLength);
-
-            BuildGemma4DecodeArrays();
-            // Needs the per-rank KV caches and the device preload, so it goes
-            // last. No-op outside tensor parallelism.
-            BuildGemma4TpDecodeArrays();
         }
 
         // The E4B cache is compact (about 148 MiB at 8K) and its direct-CUDA
@@ -8265,10 +8273,25 @@ namespace TensorSharp.Models
 
         public override void Dispose()
         {
+            DisposeBaseResources(DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs);
+        }
+
+        private void DisposeGemma4Graphs()
+        {
             // Graph entries own captured scratch blocks and refs to KV/PLE/RoPE
             // inputs; release them before tearing down those model tensors.
             InvalidateCudaDecodeGraphs();
+            if (IsGgmlBackend)
+            {
+                GgmlBasicOps.Gemma4ResetDecodeCache();
+                GgmlBasicOps.Gemma4ResetBatchedDecodeCache();
+                GgmlBasicOps.Gemma4MoEResetDecodeCache();
+                GgmlBasicOps.Gemma4ResetMoEBatchedDecodeCache();
+            }
+        }
 
+        private void DisposeGemma4Resources()
+        {
             // Free the on-device MoE per-expert pointer tables (raw device buffers)
             // while the allocator is still alive (base.Dispose frees the arena).
             if (_allocator is CudaAllocator moeCudaAllocator)
@@ -8330,7 +8353,6 @@ namespace TensorSharp.Models
                     disposed.Add(l);
                 }
             }
-            base.Dispose();
         }
     }
 }

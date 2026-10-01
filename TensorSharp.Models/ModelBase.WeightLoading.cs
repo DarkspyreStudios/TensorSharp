@@ -158,24 +158,37 @@ namespace TensorSharp.Models
                         tsShape[i] = ggufShape[ggufShape.Length - 1 - i];
 
                     var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                    IntPtr destPtr = GetStoragePtr(tensor);
+                    try
+                    {
+                        IntPtr destPtr = GetStoragePtr(tensor);
 
-                    if (info.Type == GgmlTensorType.F32)
-                    {
-                        _gguf.ReadTensorDataToFloat32Native(info, destPtr, numElements);
-                    }
-                    else
-                    {
-                        IntPtr tempPtr = QuantizedWeight.AllocateBuffer(byteCount);
-                        try
+                        if (info.Type == GgmlTensorType.F32)
                         {
-                            _gguf.ReadTensorDataToNative(info, tempPtr, byteCount);
-                            NativeDequant.DequantizeToFloat32Native((int)info.Type, tempPtr, destPtr, numElements);
+                            _gguf.ReadTensorDataToFloat32Native(info, destPtr, numElements);
                         }
-                        finally { QuantizedWeight.FreeBuffer(tempPtr); }
-                    }
+                        else
+                        {
+                            IntPtr tempPtr = QuantizedWeight.AllocateBuffer(byteCount);
+                            try
+                            {
+                                _gguf.ReadTensorDataToNative(info, tempPtr, byteCount);
+                                NativeDequant.DequantizeToFloat32Native((int)info.Type, tempPtr, destPtr, numElements);
+                            }
+                            finally { QuantizedWeight.FreeBuffer(tempPtr); }
+                        }
 
-                    _weights[info.Name] = tensor;
+                        _weights[info.Name] = tensor;
+                    }
+                    catch (Exception loadError)
+                    {
+                        try { tensor.Dispose(); }
+                        catch (Exception cleanupError)
+                        {
+                            RetainFailedConstruction(tensor);
+                            throw new AggregateException("Weight loading and allocation rollback both failed.", loadError, cleanupError);
+                        }
+                        throw;
+                    }
 
                     countF32++;
                     totalF32Bytes += numElements * 4;

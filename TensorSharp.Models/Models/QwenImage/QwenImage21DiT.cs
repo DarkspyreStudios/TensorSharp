@@ -80,7 +80,12 @@ internal sealed class QwenImage21DiT : ModelBase
             else
                 Console.WriteLine($"Qwen-Image-2.1 DiT: {Layers} layers, {HiddenSize} hidden, {Heads} heads, quantized resident GGML graph.");
         }
-        catch { Dispose(); throw; }
+        catch (Exception loadError)
+        {
+            RollBackFailedConstruction(loadError, static () => { }, ownsTensorParallelGroup: false,
+                releaseAfterModelCaches: DisposeDiTResources);
+            throw;
+        }
     }
 
     /// <summary>Megatron sharding of the blocks. Q/K/V, gate and up keep rows (outputs) per
@@ -428,8 +433,12 @@ internal sealed class QwenImage21DiT : ModelBase
     protected override void ResetKVCacheCore() { }
     public override void Dispose()
     {
+        DisposeBaseResourcesAfterModelWeights(DisposeDiTResources, ownsTensorParallelGroup: false);
+    }
+
+    private void DisposeDiTResources()
+    {
         _layouts.Clear();
-        base.Dispose();
         foreach (var ptr in _owned) QuantizedWeight.FreeBuffer(ptr);
         _owned.Clear(); _pointers.Clear();
     }
