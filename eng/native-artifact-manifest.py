@@ -182,13 +182,17 @@ def elf_dynamic(path):
         key = tuple(int(p) for p in ver.split("."))
         if ns not in versions or key > versions[ns][0]:
             versions[ns] = (key, f"{ns}_{ver}")
-    exports = run(["objdump", "-T", str(path)]) or ""
+    exports = run(["objdump", "-T", str(path)])
+    symbols = None if exports is None else sorted({parts[-1] for line in exports.splitlines()
+        if (parts := line.split()) and ("DF" in parts[:-1] or "F" in parts[:-1])
+        and not any("UND" in part for part in parts[:-1])})
     return {
         "needed": needed,
         "runpath": runpath,
         "maxSymbolVersions": sorted(v[1] for v in versions.values()),
-        "tsggmlExports": len(re.findall(r"\.text\s+\S+\s+(?:Base\s+)?TSGgml_", exports)),
-        "tsggmlBuildIdentityExport": bool(re.search(r"\.text\s+\S+\s+(?:Base\s+)?TSGgml_GetBuildIdentity\s*$", exports, re.M)),
+        "functionExports": symbols,
+        "tsggmlExports": sum(name.startswith("TSGgml_") for name in symbols or []),
+        "tsggmlBuildIdentityExport": symbols is not None and "TSGgml_GetBuildIdentity" in symbols,
     }
 
 
@@ -197,10 +201,12 @@ def pe_dynamic(path):
     if text is None:
         return None
     exports = text.split("Export Table:", 1)[1] if "Export Table:" in text else ""
+    symbols = sorted(set(re.findall(r"^\s*(?:\[\s*\d+\]|\d+(?:\s+0x[0-9a-fA-F]+)?)\s+([A-Za-z_]\w*)\s*$", exports, re.M)))
     return {
         "needed": re.findall(r"DLL Name:\s+(\S+)", text),
-        "tsggmlExports": len(re.findall(r"\sTSGgml_\w+", exports)),
-        "tsggmlBuildIdentityExport": bool(re.search(r"\sTSGgml_GetBuildIdentity(?:\s|$)", exports)),
+        "functionExports": symbols,
+        "tsggmlExports": sum(name.startswith("TSGgml_") for name in symbols),
+        "tsggmlBuildIdentityExport": "TSGgml_GetBuildIdentity" in symbols,
     }
 
 
@@ -210,17 +216,39 @@ def macho_dynamic(path):
         return None
     own = (run(["otool", "-D", str(path)]) or "").strip().splitlines()[1:]
     deps = [line.strip().split(" (")[0] for line in text.splitlines()[1:] if line.strip()]
-    exports = run(["nm", "-gU", str(path)]) or ""
+    exports = run(["nm", "-gU", str(path)])
+    symbols = None if exports is None else sorted(set(re.findall(r"^\S+\s+[TW]\s+_([A-Za-z_]\w*)\s*$", exports, re.M)))
     return {
         "installName": own[0] if own else None,
         "needed": [d for d in deps if d not in own],
-        "tsggmlExports": len(re.findall(r"\s_TSGgml_\w+$", exports, re.M)),
-        "tsggmlBuildIdentityExport": bool(re.search(r"\s_TSGgml_GetBuildIdentity$", exports, re.M)),
+        "functionExports": symbols,
+        "tsggmlExports": sum(name.startswith("TSGgml_") for name in symbols or []),
+        "tsggmlBuildIdentityExport": symbols is not None and "TSGgml_GetBuildIdentity" in symbols,
     }
 
 
+def dependency_basename(fmt, dep):
+    if (not isinstance(dep, str) or not dep or "\\" in dep or ":" in dep
+            or any(ord(char) < 32 or ord(char) == 127 for char in dep)
+            or any(part in ("", ".", "..") for part in dep.lstrip("/").split("/"))):
+        return None
+    if fmt == "macho":
+        if dep.startswith(("/System/Library/", "/usr/lib/")) and not dep.startswith("//"):
+            return PurePosixPath(dep).name
+        if dep.startswith("@loader_path/") and dep.count("/") == 1:
+            return dep.split("/", 1)[1]
+        # @rpath and bare names need an additional search scope that this
+        # inventory does not establish. Only the selected directory is trusted.
+        return None
+    return dep if "/" not in dep and not dep.startswith("@") else None
+
+
 def classify(fmt, dep, siblings):
-    base = PurePosixPath(dep).name
+    base = dependency_basename(fmt, dep)
+    if base is None:
+        return "unresolved-loader-path"
+    if fmt == "macho" and dep.startswith(("/System/Library/", "/usr/lib/")):
+        return "os"
     lower = {s.lower() for s in siblings}
     if fmt == "pe" and base.lower() in lower or fmt != "pe" and base in siblings:
         return "bundled"

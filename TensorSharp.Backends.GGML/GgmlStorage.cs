@@ -16,12 +16,15 @@ namespace TensorSharp.GGML
     public class GgmlStorage : Storage
     {
         private IntPtr buffer;
+        private IDisposable runtimeLease;
 
         public GgmlStorage(GgmlAllocator allocator, GgmlContext context, DType elementType, long elementCount)
             : base(allocator, elementType, elementCount)
         {
             Context = context ?? throw new ArgumentNullException(nameof(context));
-            buffer = context.MemoryPool.Allocate(ByteLength);
+            runtimeLease = context.AcquireStorageLease();
+            try { buffer = context.MemoryPool.Allocate(ByteLength); }
+            catch { runtimeLease.Dispose(); throw; }
         }
 
         public GgmlContext Context { get; }
@@ -44,6 +47,7 @@ namespace TensorSharp.GGML
                 Context.MemoryPool.Free(buffer, ByteLength);
                 buffer = IntPtr.Zero;
             }
+            runtimeLease.Dispose();
         }
 
         public override string LocationDescription()
@@ -67,11 +71,15 @@ namespace TensorSharp.GGML
         /// </summary>
         public override void EnsureHostReadable()
         {
+            Context.ThrowIfDisposed();
+            if (buffer == IntPtr.Zero && ByteLength != 0) throw new ObjectDisposedException(nameof(GgmlStorage));
             GgmlBasicOps.HostReadBarrier();
         }
 
         public override IntPtr PtrAtElement(long index)
         {
+            Context.ThrowIfDisposed();
+            if (buffer == IntPtr.Zero && ByteLength != 0) throw new ObjectDisposedException(nameof(GgmlStorage));
             // Block-quantized types (Q8_0 / Q4_0) cannot be addressed at element
             // granularity. Native kernels always pass index = 0 (the buffer base)
             // so we honour that; anything else is a bug in the caller.

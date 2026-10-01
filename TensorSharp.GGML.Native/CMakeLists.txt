@@ -113,8 +113,32 @@ set(GGML_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 option(TENSORSHARP_GGML_NATIVE_PORTABLE "Build for the release CPU floor instead of the build host's CPU" OFF)
 set(TENSORSHARP_NATIVE_VARIANT "dev" CACHE STRING "Artifact variant recorded in the build identity (cpu, metal, vulkan, cuda13, dev)")
 set(TENSORSHARP_NATIVE_RID "" CACHE STRING "Runtime identifier recorded in the build identity")
+if ("${TENSORSHARP_NATIVE_RID}" STREQUAL "")
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" TSG_RID_PROCESSOR)
+    if (TSG_RID_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        set(TSG_RID_ARCH "arm64")
+    elseif (TSG_RID_PROCESSOR MATCHES "^(x86_64|amd64|x64)$")
+        set(TSG_RID_ARCH "x64")
+    else()
+        message(FATAL_ERROR "Specify TENSORSHARP_NATIVE_RID for target processor '${CMAKE_SYSTEM_PROCESSOR}'.")
+    endif()
+    if (TENSORSHARP_GGML_NATIVE_IOS)
+        set(TENSORSHARP_NATIVE_RID "ios-${TSG_RID_ARCH}")
+    elseif (APPLE)
+        set(TENSORSHARP_NATIVE_RID "osx-${TSG_RID_ARCH}")
+    elseif (WIN32)
+        set(TENSORSHARP_NATIVE_RID "win-${TSG_RID_ARCH}")
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(TENSORSHARP_NATIVE_RID "linux-${TSG_RID_ARCH}")
+    else()
+        message(FATAL_ERROR "Specify TENSORSHARP_NATIVE_RID for target system '${CMAKE_SYSTEM_NAME}'.")
+    endif()
+endif()
 set(TENSORSHARP_SOURCE_COMMIT "" CACHE STRING "TensorSharp commit recorded in the build identity (default: git HEAD at configure time)")
 set(TENSORSHARP_BUILD_VERSION "" CACHE STRING "TensorSharp build recorded in the build identity (default: TensorSharpVersion in Directory.Build.props)")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../eng/GgmlNativeIdentity.cmake")
+tensorsharp_native_abi("${CMAKE_CURRENT_SOURCE_DIR}/.." TSG_NATIVE_ABI)
+set(TENSORSHARP_NATIVE_ABI "${TSG_NATIVE_ABI}" CACHE INTERNAL "Exact bridge source/interop identity" FORCE)
 
 set(TSG_CPU_PROFILE "native")
 if (TENSORSHARP_GGML_NATIVE_PORTABLE)
@@ -475,6 +499,7 @@ set_property(SOURCE ggml_ops_build_identity.cpp APPEND PROPERTY COMPILE_DEFINITI
     "TSG_BUILD_TENSORSHARP_VERSION=\"${TSG_BUILD_VERSION}\""
     "TSG_BUILD_SOURCE_COMMIT=\"${TSG_SOURCE_COMMIT}\""
     "TSG_BUILD_GGML_COMMIT=\"${TSG_GGML_COMMIT}\""
+    "TSG_BUILD_NATIVE_ABI=\"${TSG_NATIVE_ABI}\""
     "TSG_BUILD_VARIANT=\"${TENSORSHARP_NATIVE_VARIANT}\""
     "TSG_BUILD_RID=\"${TENSORSHARP_NATIVE_RID}\""
     "TSG_BUILD_CPU_PROFILE=\"${TSG_CPU_PROFILE}\"")

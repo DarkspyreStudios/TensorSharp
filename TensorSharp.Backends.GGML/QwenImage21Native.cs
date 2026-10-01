@@ -79,21 +79,45 @@ public struct QwenImage21PrefixCacheInfo
 
 internal static partial class GgmlNative
 {
-    [LibraryImport(DllName)]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static partial int TSGgml_QwenImage21Forward(in QwenImage21ForwardArgs desc);
+    private static int TSGgml_QwenImage21Forward(in QwenImage21ForwardArgs desc)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return Native_TSGgml_QwenImage21Forward(in desc);
+    }
 
-    [LibraryImport(DllName)]
+    [LibraryImport(DllName, EntryPoint = "TSGgml_QwenImage21Forward")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static unsafe partial int TSGgml_QwenImage21ForwardTp(QwenImage21ForwardArgs** descs, int ranks);
+    private static partial int Native_TSGgml_QwenImage21Forward(in QwenImage21ForwardArgs desc);
 
-    [LibraryImport(DllName)]
-    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static partial void TSGgml_QwenImage21ReleasePrefixCache(ulong key);
+    private static unsafe int TSGgml_QwenImage21ForwardTp(QwenImage21ForwardArgs** descs, int ranks)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return Native_TSGgml_QwenImage21ForwardTp(descs, ranks);
+    }
 
-    [LibraryImport(DllName)]
+    [LibraryImport(DllName, EntryPoint = "TSGgml_QwenImage21ForwardTp")]
     [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-    private static partial int TSGgml_QwenImage21GetPrefixCacheInfo(ulong key, out QwenImage21PrefixCacheInfo info);
+    private static unsafe partial int Native_TSGgml_QwenImage21ForwardTp(QwenImage21ForwardArgs** descs, int ranks);
+
+    private static void TSGgml_QwenImage21ReleasePrefixCache(ulong key)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        Native_TSGgml_QwenImage21ReleasePrefixCache(key);
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_QwenImage21ReleasePrefixCache")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static partial void Native_TSGgml_QwenImage21ReleasePrefixCache(ulong key);
+
+    private static int TSGgml_QwenImage21GetPrefixCacheInfo(ulong key, out QwenImage21PrefixCacheInfo info)
+    {
+        using var call = GgmlNativeLoader.EnterNativeCall();
+        return Native_TSGgml_QwenImage21GetPrefixCacheInfo(key, out info);
+    }
+
+    [LibraryImport(DllName, EntryPoint = "TSGgml_QwenImage21GetPrefixCacheInfo")]
+    [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static partial int Native_TSGgml_QwenImage21GetPrefixCacheInfo(ulong key, out QwenImage21PrefixCacheInfo info);
 
     public static QwenImage21ForwardPath QwenImage21Forward(in QwenImage21ForwardArgs desc)
     {

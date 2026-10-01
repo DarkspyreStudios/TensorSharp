@@ -4,7 +4,7 @@
 #
 # Usage:
 #   eng/build-ggml-natives.sh --rid <rid> --variant <variant> [--out <dir>]
-#                             [--redist-dir <dir>] [-- <extra cmake args>]
+#                             [--redist-dir <dir> --redist-manifest <json>] [-- <extra cmake args>]
 #
 #   --rid         osx-arm64, linux-x64 or linux-arm64. The script refuses a RID
 #                 that is not the build machine's own OS and architecture.
@@ -14,7 +14,8 @@
 #   --redist-dir  a directory of third-party runtime libraries to ship beside the
 #                 bridge, for example the CUDA runtime and cuBLAS. It must hold
 #                 the libraries at its top level and their license and notice
-#                 files under licenses/. The script copies both.
+#                 files under licenses/. --redist-manifest supplies the explicit
+#                 component/file mapping and hashes. Only declared files copy.
 #
 # Release natives come from a clean tree: the ggml commit in eng/ggml-revision,
 # a separate build directory per RID and variant, and the TensorSharp version in
@@ -29,11 +30,13 @@ NATIVE_DIR="${REPO_ROOT}/TensorSharp.GGML.Native"
 # macOS 14.0 is the lowest macOS the consuming application supports. Every
 # Apple Silicon Mac, including M1, runs it.
 MACOS_DEPLOYMENT_TARGET="${TENSORSHARP_MACOS_DEPLOYMENT_TARGET:-14.0}"
+RELEASE_CUDA_ARCHITECTURES='75-real;80-real;86-real;89-real;120-real;120-virtual'
 
 RID=""
 VARIANT=""
 OUT=""
 REDIST_DIR=""
+REDIST_MANIFEST=""
 EXTRA_ARGS=()
 while (($# > 0)); do
     case "$1" in
@@ -41,6 +44,7 @@ while (($# > 0)); do
         --variant) VARIANT="$2"; shift ;;
         --out) OUT="$2"; shift ;;
         --redist-dir) REDIST_DIR="$2"; shift ;;
+        --redist-manifest) REDIST_MANIFEST="$2"; shift ;;
         --) shift; EXTRA_ARGS+=("$@"); break ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -48,11 +52,15 @@ while (($# > 0)); do
 done
 
 [[ -n "${RID}" && -n "${VARIANT}" ]] || { echo "--rid and --variant are required" >&2; exit 2; }
+if [[ ( -n "${REDIST_DIR}" && -z "${REDIST_MANIFEST}" ) || ( -z "${REDIST_DIR}" && -n "${REDIST_MANIFEST}" ) ]]; then
+    echo "error: --redist-dir and --redist-manifest must be supplied together." >&2
+    exit 2
+fi
 
 VERSION="$(sed -n 's:.*<TensorSharpVersion>\(.*\)</TensorSharpVersion>.*:\1:p' "${REPO_ROOT}/Directory.Build.props" | head -n 1)"
 SOURCE_COMMIT="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
-if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native eng/ggml-revision Directory.Build.props)" ]]; then
-    echo "error: native sources have uncommitted changes; a release native must be built from a commit." >&2
+if [[ -n "$(git -C "${REPO_ROOT}" status --porcelain -- TensorSharp.GGML.Native TensorSharp.Backends.GGML eng/GgmlNativeIdentity.cmake eng/GgmlNativeIdentity.targets eng/build-ggml-natives.sh eng/record-ggml-native-build.py eng/pack-ggml-natives.py eng/native-artifact-manifest.py eng/guard-ggml-interop eng/ggml-required-exports.json eng/ggml-revision Directory.Build.props LICENSE)" ]]; then
+    echo "error: native source, managed ABI or build inputs have uncommitted changes; a release native must be built from a commit." >&2
     exit 1
 fi
 OUT="${OUT:-${REPO_ROOT}/artifacts/ggml-natives/${VERSION}}"
@@ -90,7 +98,16 @@ case "${RID}/${VARIANT}" in
         case "${VARIANT}" in
             cpu) BUILD_ARGS+=(--no-cuda --no-vulkan) ;;
             vulkan) BUILD_ARGS+=(--no-cuda --vulkan) ;;
-            cuda13) BUILD_ARGS+=(--cuda --no-vulkan) ;;
+            cuda13)
+                BUILD_ARGS+=(--cuda --no-vulkan)
+                for argument in ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; do
+                    if [[ "${argument}" == -DCMAKE_CUDA_ARCHITECTURES=* ]]; then
+                        echo "error: the release CUDA architecture profile cannot be overridden." >&2
+                        exit 2
+                    fi
+                done
+                CMAKE_ARGS+=("-DCMAKE_CUDA_ARCHITECTURES=${RELEASE_CUDA_ARCHITECTURES}")
+                ;;
         esac
         # Libraries shipped beside the bridge resolve from its own directory,
         # never from a path on the build machine.
@@ -113,46 +130,29 @@ if [[ "${GGML_HEAD}" != "$(tr -d '[:space:]' < "${SCRIPT_DIR}/ggml-revision")" ]
     echo "error: ExternalProjects/ggml is at ${GGML_HEAD}, not the pinned revision." >&2
     exit 1
 fi
+if [[ "${VARIANT}" == cuda13 ]]; then
+    actual_architectures="$(sed -n 's/^CMAKE_CUDA_ARCHITECTURES:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt")"
+    if [[ "${actual_architectures}" != "${RELEASE_CUDA_ARCHITECTURES}" ]]; then
+        echo "error: the build did not preserve the full release CUDA architecture profile." >&2
+        exit 1
+    fi
+fi
 
 STAGE="${OUT}/runtimes/${RID}/native/${VARIANT}"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/licenses"
 cp "${BUILD_DIR}/${ENTRY}" "${STAGE}/${ENTRY}"
-cp "${REPO_ROOT}/LICENSE" "${STAGE}/licenses/TensorSharp-LICENSE.txt"
-cp "${REPO_ROOT}/ExternalProjects/ggml/LICENSE" "${STAGE}/licenses/ggml-LICENSE.txt"
-
-if [[ -n "${REDIST_DIR}" ]]; then
-    compgen -G "${REDIST_DIR}/licenses/*" >/dev/null || {
-        echo "error: ${REDIST_DIR}/licenses holds no license or notice files." >&2
-        exit 1
-    }
-    find "${REDIST_DIR}" -maxdepth 1 -type f -exec cp {} "${STAGE}/" \;
-    cp "${REDIST_DIR}/licenses/"* "${STAGE}/licenses/"
-fi
-for forbidden in libcuda.so libcuda.so.1 nvcuda.dll; do
-    [[ ! -e "${STAGE}/${forbidden}" ]] || { echo "error: the NVIDIA driver library ${forbidden} must not ship." >&2; exit 1; }
-done
-
 # The build record sits outside the artifact directory; the packer copies it
 # into the artifact manifest.
 RECORD="${OUT}/build/${RID}-${VARIANT}"
 rm -rf "${RECORD}"
 mkdir -p "${RECORD}"
-cat > "${RECORD}/build-identity.json" <<JSON
-{
-  "tensorSharpBuild": "${VERSION}",
-  "sourceCommit": "${SOURCE_COMMIT}",
-  "ggmlCommit": "${GGML_HEAD}",
-  "rid": "${RID}",
-  "variant": "${VARIANT}",
-  "cpuProfile": "portable",
-  "macosDeploymentTarget": $([[ "${RID}" == osx-* ]] && echo "\"${MACOS_DEPLOYMENT_TARGET}\"" || echo null),
-  "host": "$(uname -srm)",
-  "compiler": "$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt" | head -n 1)",
-  "builtAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-JSON
-grep -E '^(GGML_NATIVE|GGML_CPU_ARM_ARCH|GGML_SSE42|GGML_AVX|GGML_AVX2|GGML_FMA|GGML_F16C|GGML_BMI2|GGML_OPENMP|GGML_METAL|GGML_METAL_EMBED_LIBRARY|GGML_CUDA|GGML_VULKAN|CMAKE_OSX_DEPLOYMENT_TARGET|CMAKE_CUDA_ARCHITECTURES|CMAKE_CXX_COMPILER|CMAKE_INSTALL_RPATH|CMAKE_BUILD_WITH_INSTALL_RPATH)(:[A-Z]+)?=' \
-    "${BUILD_DIR}/CMakeCache.txt" > "${RECORD}/cmake-settings.txt" || true
+REDIST_ARGS=()
+if [[ -n "${REDIST_DIR}" ]]; then
+    REDIST_ARGS+=(--redist-dir "${REDIST_DIR}" --redist-manifest "${REDIST_MANIFEST}")
+fi
+python3 "${SCRIPT_DIR}/record-ggml-native-build.py" --build-dir "${BUILD_DIR}" \
+    --binary "${STAGE}/${ENTRY}" --rid "${RID}" --variant "${VARIANT}" \
+    --source-commit "${SOURCE_COMMIT}" --out "${RECORD}" ${REDIST_ARGS[@]+"${REDIST_ARGS[@]}"}
 echo "Staged ${STAGE}"
 ls -l "${STAGE}"

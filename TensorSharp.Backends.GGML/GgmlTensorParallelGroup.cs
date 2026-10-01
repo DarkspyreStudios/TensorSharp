@@ -39,6 +39,11 @@ namespace TensorSharp.GGML
         private readonly GgmlAllocator[] _allocators;
         private readonly GgmlContext _context;
         private readonly RankWorkerPool _workers;
+        private readonly bool _ownsContext;
+        private readonly IDisposable _runtimeLease;
+        private readonly object _lifetimeGate = new();
+        private int _activeRuns;
+        private bool _stopping;
         private bool _disposed;
 
         /// <summary>
@@ -50,8 +55,18 @@ namespace TensorSharp.GGML
             !string.Equals(Environment.GetEnvironmentVariable("TS_GGML_TP_PARALLEL"), "0", StringComparison.Ordinal);
 
         public GgmlTensorParallelGroup(GgmlContext context)
+            : this(context, ownsContext: false)
+        {
+        }
+
+        public GgmlTensorParallelGroup(GgmlContext context, bool ownsContext)
         {
             _context = context ?? throw new ArgumentNullException(nameof(context));
+            _ownsContext = ownsContext;
+            context.ThrowIfDisposed();
+            _runtimeLease = GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
+            try
+            {
 
             Degree = context.Degree;
             _allocators = new GgmlAllocator[Degree];
@@ -72,6 +87,14 @@ namespace TensorSharp.GGML
                 Console.WriteLine($"Tensor parallelism (GGML {context.BackendType}): {Degree} GPUs ({string.Join(", ", names)})");
                 Console.WriteLine($"  AllReduce: {DescribeAllReduce(context.HasDeviceAllReduce)}" +
                                   $"; rank dispatch: {(_workers != null ? "parallel" : "sequential")}");
+            }
+            }
+            catch
+            {
+                _workers?.Dispose();
+                _runtimeLease.Dispose();
+                if (_ownsContext) context.Dispose();
+                throw;
             }
         }
 
@@ -124,6 +147,14 @@ namespace TensorSharp.GGML
         /// </summary>
         public void RunPerRank(Action<int> body)
         {
+            lock (_lifetimeGate)
+            {
+                if (_disposed || _stopping) throw new ObjectDisposedException(nameof(GgmlTensorParallelGroup));
+                _context.ThrowIfDisposed();
+                _activeRuns++;
+            }
+            try
+            {
             if (Degree == 1)
             {
                 body(0);
@@ -138,6 +169,8 @@ namespace TensorSharp.GGML
             }
 
             _workers.Run(body);
+            }
+            finally { lock (_lifetimeGate) _activeRuns--; }
         }
 
         /// <summary>
@@ -231,11 +264,21 @@ namespace TensorSharp.GGML
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
-            _workers?.Dispose();
-            if (Degree > 1)
-                OpRegistry.PreInvokeHook = null;
+            lock (_lifetimeGate)
+            {
+                if (_disposed) return;
+                if (_stopping || _activeRuns != 0) throw new InvalidOperationException("A tensor-parallel group cannot be disposed while rank work is active or another teardown is running.");
+                _stopping = true;
+            }
+            try
+            {
+                _workers?.Dispose();
+                if (Degree > 1) OpRegistry.PreInvokeHook = null;
+                if (_ownsContext) _context.Dispose();
+                _runtimeLease.Dispose();
+                lock (_lifetimeGate) _disposed = true;
+            }
+            finally { lock (_lifetimeGate) _stopping = false; }
         }
 
         // --- Per-op device routing -----------------------------------------

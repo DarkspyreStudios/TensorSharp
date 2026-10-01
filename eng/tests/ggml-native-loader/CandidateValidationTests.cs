@@ -30,6 +30,8 @@ public sealed class CandidateValidationTests : IDisposable
     {
         Refused(candidate with { Rid = "another-rid" }, GgmlNativeRefusalCodes.IncompatibleHardware);
         Refused(candidate with { TensorSharpBuild = "another-build" }, GgmlNativeRefusalCodes.NotSelected);
+        Refused(candidate with { NativeAbi = new string('0', 64) }, GgmlNativeRefusalCodes.NotSelected);
+        Refused(candidate with { NativeAbi = string.Empty }, GgmlNativeRefusalCodes.NotSelected);
     }
 
     [Fact]

@@ -78,7 +78,6 @@ VARIANTS = {
 ENTRY = {"osx": "libGgmlOps.dylib", "linux": "libGgmlOps.so", "win": "GgmlOps.dll"}
 BACKENDS = {"cpu": ["cpu"], "metal": ["metal", "cpu"], "vulkan": ["vulkan", "cpu"], "cuda13": ["cuda", "cpu"]}
 REQUIRED_LICENSES = ("licenses/TensorSharp-LICENSE.txt", "licenses/ggml-LICENSE.txt")
-MSVC_NOTICE = "licenses/MSVC-runtime-NOTICE.txt"
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 DEFAULT_DEVELOPER_LIMIT = 250 * 1024 * 1024
 REPOSITORY_URL = "https://github.com/DarkspyreStudios/TensorSharp"
@@ -167,16 +166,126 @@ def nupkg(package_id, version, description, tags, commit, files):
     return zip_bytes(entries + list(files))
 
 
-def notice_markdown(title, artifact_files, has_msvc):
+def notice_markdown(title, components):
+    escape = lambda value: value.replace("|", "\\|")
     lines = [f"# {title}", "", "This package contains GgmlOps, the TensorSharp native bridge, which statically links ggml.", "",
-             "| Component | License | File |", "|---|---|---|",
-             "| TensorSharp (GgmlOps) | BSD-3-Clause | licenses/TensorSharp-LICENSE.txt |",
-             "| ggml | MIT | licenses/ggml-LICENSE.txt |"]
-    if has_msvc:
-        lines.append("| Microsoft Visual C++ runtime | Microsoft Visual Studio license terms, Distributable Code | licenses/MSVC-runtime-NOTICE.txt |")
-    for extra in sorted(p for p in artifact_files if p.startswith("licenses/") and p not in REQUIRED_LICENSES and p != MSVC_NOTICE):
-        lines.append(f"| third-party runtime library | see file | {extra} |")
+             "The following records identify supplied component evidence. They do not certify redistribution permission",
+             "or complete inline/static third-party notice coverage.", "",
+             "| Component | Supplier / Version | Source ID | Binary Files | Evidence Files |", "|---|---|---|---|---|"]
+    for component in components:
+        binaries = ", ".join(item["path"] for item in component["binaryFiles"])
+        evidence = ", ".join(item["path"] for item in component["evidenceFiles"])
+        lines.append("| " + " | ".join(escape(value) for value in (component["name"],
+                     component["supplier"] + " / " + component["version"], component["sourceId"], binaries, evidence)) + " |")
     return ("\n".join(lines) + "\n").encode()
+
+
+def core_component_specs(build, entry):
+    if (not isinstance(build.get("tensorSharpBuild"), str) or not build["tensorSharpBuild"]
+            or any(not isinstance(build.get(key), str) or not re.fullmatch(r"[a-f0-9]{40}", build[key])
+                   for key in ("sourceCommit", "ggmlCommit"))):
+        raise ValueError("core component evidence requires exact source identities")
+    return [{"id": "tensorsharp", "name": "TensorSharp (GgmlOps)", "kind": "bridge", "supplier": "TensorSharp",
+             "version": build["tensorSharpBuild"], "sourceId": "git:" + build["sourceCommit"],
+             "binaryPaths": [entry], "evidencePaths": [REQUIRED_LICENSES[0]]},
+            {"id": "ggml", "name": "ggml", "kind": "static", "supplier": "ggml",
+             "version": build["ggmlCommit"], "sourceId": "git:" + build["ggmlCommit"],
+             "binaryPaths": [entry], "evidencePaths": [REQUIRED_LICENSES[1]]}]
+
+
+def validate_component_shape(components):
+    if not isinstance(components, list) or not components:
+        raise ValueError("component evidence must be a nonempty list")
+    ids, ownership, portable_names = set(), {}, {}
+    for component in components:
+        fields = {"id", "name", "kind", "supplier", "version", "sourceId", "binaryFiles", "evidenceFiles"}
+        if not isinstance(component, dict) or set(component) != fields:
+            raise ValueError("malformed component evidence record")
+        identifier = component["id"]
+        if (not isinstance(identifier, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", identifier)
+                or identifier in ids):
+            raise ValueError("duplicate or invalid component ID")
+        ids.add(identifier)
+        for key in ("name", "supplier", "version", "sourceId"):
+            value = component[key]
+            if (not isinstance(value, str) or not value or value.strip() != value
+                    or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+                raise ValueError("component has no exact " + key)
+        if component["kind"] not in ("bridge", "static", "redistributed"):
+            raise ValueError("invalid component kind")
+        for key in ("binaryFiles", "evidenceFiles"):
+            references = component[key]
+            if not isinstance(references, list) or not references:
+                raise ValueError("component has no " + key)
+            paths = set()
+            for reference in references:
+                if not isinstance(reference, dict) or set(reference) != {"path", "size", "sha256"}:
+                    raise ValueError("malformed component file reference")
+                name, size, digest = reference["path"], reference["size"], reference["sha256"]
+                if (not portable_path(name) or name in paths or type(size) is not int or size <= 0
+                        or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest)):
+                    raise ValueError("unsafe, empty or invalid component file reference")
+                if (key == "binaryFiles" and "/" in name) or (key == "evidenceFiles" and not name.startswith("licenses/")):
+                    raise ValueError("component file is outside its binary/evidence scope")
+                paths.add(name)
+                previous_name = portable_names.setdefault(name.casefold(), name)
+                if previous_name != name:
+                    raise ValueError("case-conflicting component file paths: " + name)
+                if key == "binaryFiles":
+                    previous = ownership.setdefault(name, identifier)
+                    if previous != identifier and {previous, identifier} != {"tensorsharp", "ggml"}:
+                        raise ValueError("conflicting native component ownership: " + name)
+
+
+def verify_component_file(directory, reference):
+    path = directory / reference["path"]
+    require_unlinked(path.absolute())
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("component evidence requires ordinary files: " + reference["path"])
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if path.stat().st_size != reference["size"] or digest.hexdigest() != reference["sha256"]:
+        raise ValueError("stale component file evidence: " + reference["path"])
+    if reference["path"].startswith("licenses/"):
+        text = path.read_text(encoding="utf-8-sig")
+        if not text.strip() or any(ord(char) < 32 and char not in "\t\r\n" for char in text):
+            raise ValueError("component license/notice text is empty or non-text: " + reference["path"])
+
+
+def check_components(directory, build, files, described, entry):
+    components = build.get("components")
+    validate_component_shape(components)
+    by_id = {component["id"]: component for component in components}
+    for expected in core_component_specs(build, entry):
+        component = by_id.get(expected["id"])
+        if (not component or any(component[key] != value for key, value in expected.items()
+                                 if key not in ("binaryPaths", "evidencePaths"))
+                or [item["path"] for item in component["binaryFiles"]] != expected["binaryPaths"]
+                or [item["path"] for item in component["evidenceFiles"]] != expected["evidencePaths"]):
+            raise ValueError("missing or conflicting core component evidence: " + expected["id"])
+    available = {item["path"]: item for item in files}
+    native = {item["path"] for item in described if item["format"] != "other"}
+    covered = set()
+    for component in components:
+        if component["id"] not in ("tensorsharp", "ggml") and component["kind"] != "redistributed":
+            raise ValueError("non-core component must be explicitly redistributed")
+        for key in ("binaryFiles", "evidenceFiles"):
+            for reference in component[key]:
+                actual = available.get(reference["path"])
+                if not actual or any(actual.get(key) != value for key, value in reference.items()):
+                    raise ValueError("missing or stale staged component evidence: " + reference["path"])
+                verify_component_file(directory, reference)
+                covered.add(reference["path"])
+                if key == "binaryFiles" and reference["path"] not in native:
+                    raise ValueError("component binary is not an inspected native file: " + reference["path"])
+                if (component["id"] not in ("tensorsharp", "ggml")
+                        and reference["path"] in {entry, *REQUIRED_LICENSES}):
+                    raise ValueError("redistribution overrides core component evidence")
+    if covered != set(available):
+        raise ValueError("unmapped staged component files: " + ", ".join(sorted(set(available) - covered)))
+    return components
 
 
 def developer_targets(package_id, variant):
@@ -194,7 +303,7 @@ def developer_targets(package_id, variant):
 """.encode()
 
 
-def check_artifact(rid, variant, directory, record, described):
+def check_artifact(rid, variant, directory, record, described, required_exports=None):
     errors = []
     if variant not in VARIANTS.get(rid, ()):
         return [f"{rid}/{variant}: unsupported RID/variant pair"]
@@ -210,7 +319,23 @@ def check_artifact(rid, variant, directory, record, described):
         errors.append(f"{rid}/{variant}: {entry} is not a native bridge for this RID")
     if primary.get("tsggmlBuildIdentityExport") is not True:
         errors.append(f"{rid}/{variant}: {entry} does not export TSGgml_GetBuildIdentity")
+    if required_exports is not None:
+        symbols = primary.get("functionExports")
+        if not isinstance(symbols, list) or any(not isinstance(name, str) for name in symbols):
+            errors.append(f"{rid}/{variant}: bridge exports were not inspected")
+        else:
+            for name in sorted(set(required_exports) - set(symbols)):
+                errors.append(f"{rid}/{variant}: missing required managed entrypoint {name}")
     os_part, _, arch_part = rid.partition("-")
+    siblings = {}
+    for item in described:
+        path = item["path"]
+        if "/" in path:
+            continue
+        key = path.lower() if os_part == "win" else path
+        if key in siblings:
+            errors.append(f"{rid}/{variant}: competing native sibling name {path}")
+        siblings[key] = item
     for f in described:
         if f["format"] == "other":
             continue
@@ -222,16 +347,34 @@ def check_artifact(rid, variant, directory, record, described):
         if not isinstance(f.get("dependencies"), list):
             errors.append(f"{f['path']}: native dependencies were not inspected")
         for dep in f.get("dependencies", []) if isinstance(f.get("dependencies"), list) else []:
-            if dep["resolution"].startswith("unresolved"):
-                errors.append(f"{f['path']}: dependency {dep['name']} is {dep['resolution']}")
+            resolution = INVENTORY.classify(f["format"], dep["name"], set(siblings))
+            if resolution.startswith("unresolved"):
+                errors.append(f"{f['path']}: dependency {dep['name']} is {resolution}")
+            elif resolution == "bundled":
+                name = INVENTORY.dependency_basename(f["format"], dep["name"])
+                sibling = siblings[name.lower() if os_part == "win" else name]
+                if (sibling.get("format") != INVENTORY.RID_FORMAT[os_part]
+                        or sibling.get("identity", {}).get("arch") != INVENTORY.RID_ARCH[arch_part]
+                        or not isinstance(sibling.get("dependencies"), list)):
+                    errors.append(f"{f['path']}: dependency {dep['name']} is not an inspected native sibling for {rid}")
+                if f["format"] == "elf" and "$ORIGIN" not in f.get("runpath", []):
+                    errors.append(f"{f['path']}: bundled dependency {dep['name']} has no selected-directory $ORIGIN runpath")
         for rp in f.get("runpath", []):
             if rp != "$ORIGIN":
                 errors.append(f"{f['path']}: build-machine search path {rp}")
-    if any(INVENTORY.MSVC_REDIST.match(Path(n).name) for n in names) and MSVC_NOTICE not in names:
-        errors.append(f"{rid}/{variant}: bundled MSVC runtime without {MSVC_NOTICE}")
     for forbidden in ("libcuda.so", "libcuda.so.1", "nvcuda.dll"):
         if forbidden in {Path(n).name.lower() for n in names}:
             errors.append(f"{rid}/{variant}: the NVIDIA driver library {forbidden} must not ship")
+    return errors
+
+
+def check_release_matrix(artifacts):
+    required = {(rid, variant) for rid, variants in VARIANTS.items() for variant in variants}
+    present = [(artifact["rid"], artifact["variant"]) for artifact in artifacts]
+    errors = [f"complete release: missing {rid}/{variant}" for rid, variant in sorted(required - set(present))]
+    errors += [f"complete release: unsupported {rid}/{variant}" for rid, variant in sorted(set(present) - required)]
+    if len(present) != len(set(present)):
+        errors.append("complete release: duplicate RID/variant artifacts")
     return errors
 
 
@@ -241,6 +384,35 @@ def read_identity(path):
     if not match:
         return None
     return dict(pair.split("=", 1) for pair in match.group(0).decode().split(";") if "=" in pair)
+
+
+def native_abi(root):
+    """Mirror the CMake/MSBuild bridge identity for artifact validation without a build tool."""
+    extensions = {".cpp", ".h", ".hpp", ".inc", ".cu", ".cuh"}
+    files = [p for p in (root / "TensorSharp.GGML.Native").iterdir() if p.is_file() and p.suffix in extensions]
+    files += list((root / "TensorSharp.Backends.GGML").glob("*.cs"))
+    files.append(root / "eng" / "ggml-revision")
+    rows = []
+    for path in sorted(files, key=lambda p: p.relative_to(root).as_posix()):
+        digest = sha256_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+        rows.append(path.relative_to(root).as_posix() + "=" + digest + "\n")
+    manifest = "".join(rows)
+    return sha256_bytes(manifest.encode("utf-8"))
+
+
+def read_required_exports(root):
+    inventory = json.loads(read_build_file(root / "eng/ggml-required-exports.json"))
+    if (not isinstance(inventory, dict) or set(inventory) != {"schema", "nativeAbi", "ggmlCommit", "exports"}
+            or inventory["schema"] != "tensorsharp-ggml-required-exports/1"
+            or inventory["nativeAbi"] != native_abi(root)
+            or inventory["ggmlCommit"] != (root / "eng/ggml-revision").read_text(encoding="utf-8").strip()):
+        raise ValueError("the required-export inventory does not match the exact managed/native ABI and upstream")
+    names = inventory["exports"]
+    if (not isinstance(names, list) or not names
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z_]\w*", name, re.ASCII) for name in names)
+            or len(set(names)) != len(names) or names != sorted(names)):
+        raise ValueError("the required-export inventory must contain unique sorted literal entrypoint names")
+    return names
 
 
 def portable_path(name):
@@ -298,6 +470,8 @@ def read_build_file(path):
 def collect_artifacts(stage, version, ggml_commit):
     artifacts = []
     errors = []
+    expected_abi = native_abi(REPO_ROOT)
+    required_exports = read_required_exports(REPO_ROOT)
     for rid_dir in directories(stage / "runtimes"):
         rid = rid_dir.name
         if rid not in VARIANTS:
@@ -314,7 +488,8 @@ def collect_artifacts(stage, version, ggml_commit):
                 build = json.loads(read_build_file(build_dir / "build-identity.json"))
                 if not isinstance(build, dict):
                     raise ValueError(f"{rid}/{variant}: build record is not an object")
-                for key, expected in (("tensorSharpBuild", version), ("rid", rid), ("variant", variant), ("ggmlCommit", ggml_commit)):
+                for key, expected in (("tensorSharpBuild", version), ("rid", rid), ("variant", variant), ("ggmlCommit", ggml_commit),
+                                      ("nativeAbi", expected_abi)):
                     if build.get(key) != expected:
                         errors.append(f"{rid}/{variant}: build record {key}={build.get(key)}, expected {expected}")
                 source = build.get("sourceCommit")
@@ -324,19 +499,20 @@ def collect_artifacts(stage, version, ggml_commit):
                 build["cmakeSettings"] = read_build_file(settings_path).splitlines() if settings_path.exists() or settings_path.is_symlink() else []
                 files = [file_record(variant_dir, path) for path in paths]
                 described = [INVENTORY.describe(f["path"], rid, variant, variant_dir / f["path"]) for f in files]
-                errors += check_artifact(rid, variant, variant_dir, {"files": files}, described)
+                errors += check_artifact(rid, variant, variant_dir, {"files": files}, described, required_exports)
                 entry = ENTRY[rid.split("-")[0]]
+                components = check_components(variant_dir, build, files, described, entry)
                 identity = read_identity(variant_dir / entry) if entry in {f["path"] for f in files} else None
                 if identity is None:
                     errors.append(f"{rid}/{variant}: {entry} has no build identity")
                 else:
                     for key, expected in (("tensorsharp", version), ("rid", rid), ("variant", variant),
-                                          ("ggml", ggml_commit), ("source", source)):
+                                          ("ggml", ggml_commit), ("source", source), ("abi", expected_abi)):
                         if identity.get(key) != expected:
                             errors.append(f"{rid}/{variant}: binary identity {key}={identity.get(key)}, expected {expected}")
                 artifacts.append({"rid": rid, "variant": variant, "directory": variant_dir, "build": build,
-                                  "files": files, "inventory": described, "identity": identity})
-            except (OSError, ValueError, KeyError, IndexError, struct.error) as error:
+                                  "files": files, "inventory": described, "identity": identity, "components": components})
+            except (OSError, ValueError, KeyError, IndexError, UnicodeError, struct.error) as error:
                 errors.append(f"{rid}/{variant}: artifact inspection failed: {error}")
     if not artifacts and not errors:
         errors.append("no native artifacts staged")
@@ -379,6 +555,8 @@ def main():
     parser.add_argument("--allow-oversized", action="store_true")
     parser.add_argument("--developer-package-limit", type=int, default=DEFAULT_DEVELOPER_LIMIT)
     parser.add_argument("--validate-only", action="store_true", help="validate staged inputs without writing release artifacts")
+    parser.add_argument("--complete-release", action="store_true",
+                        help="require the entire canonical release matrix during validation-only checks; output generation always requires it")
     args = parser.parse_args()
 
     version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
@@ -394,6 +572,8 @@ def main():
         if any(root == out or root in out.parents for root in (stage / "runtimes", stage / "build")):
             raise ValueError("output directory overlaps staged artifacts or build records")
         staged, errors = collect_artifacts(stage, version, ggml_commit)
+        if args.complete_release or not args.validate_only:
+            errors += check_release_matrix(staged)
         managed = managed_package_record(args.managed_package, version) if args.managed_package else None
     except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:
         print(f"error: staging validation failed: {error}", file=sys.stderr)
@@ -438,6 +618,7 @@ def main():
             "variant": variant,
             "version": version,
             "tensorSharpBuild": version,
+            "nativeAbi": identity["abi"],
             "tensorSharp": {"packageVersion": version, "packageCommit": package_commit,
                             "nativeSourceCommit": build["sourceCommit"]},
             "ggml": {"version": ggml_version, "commit": ggml_commit},
@@ -462,18 +643,18 @@ def main():
                 "runpath": entry_info.get("runpath"),
             },
             "build": build,
+            "components": candidate["components"],
             "requires": {k: sorted(v) for k, v in sorted(requires.items())},
             "notices": [{k: f[k] for k in ("path", "size", "sha256")} for f in files if f["path"].startswith("licenses/")],
             "inventory": described,
         }
 
-        has_msvc = any(INVENTORY.MSVC_REDIST.match(Path(f["path"]).name) for f in files)
         licenses = [(f["path"], (variant_dir / f["path"]).read_bytes()) for f in files if f["path"].startswith("licenses/")]
         if baseline:
             package_id = f"{PACKAGE_PREFIX}.{rid}"
             title = f"{package_id} {version}"
             contents = [(f"runtimes/{rid}/native/{f['path']}", (variant_dir / f["path"]).read_bytes()) for f in native_files]
-            contents += licenses + [("NOTICE.md", notice_markdown(title, [f["path"] for f in files], has_msvc))]
+            contents += licenses + [("NOTICE.md", notice_markdown(title, candidate["components"]))]
             description = (f"GgmlOps baseline native library for {rid} ({', '.join(BACKENDS[variant])}), TensorSharp build {version}. "
                            "Use with Darkspyre.TensorSharp.Backends.GGML.")
             data = nupkg(package_id, version, description, f"darkspyre tensorsharp ggml native {rid}", build["sourceCommit"], contents)
@@ -488,10 +669,10 @@ def main():
             package_id = f"{PACKAGE_PREFIX}.{rid}.{variant}"
             title = f"{package_id} {version}"
             contents = [(f"ggml/{variant}/{f['path']}", (variant_dir / f["path"]).read_bytes()) for f in files]
-            contents += [("NOTICE.md", notice_markdown(title, [f["path"] for f in files], has_msvc)),
+            contents += [("NOTICE.md", notice_markdown(title, candidate["components"])),
                          (f"buildTransitive/{package_id}.targets", developer_targets(package_id, variant)),
                          (f"ggml/{variant}.artifact.json", json.dumps({k: artifact[k] for k in (
-                             "driverId", "rid", "variant", "version", "tensorSharpBuild", "backends", "entryLibrary", "files")},
+                             "driverId", "rid", "variant", "version", "tensorSharpBuild", "backends", "entryLibrary", "files", "components")},
                              indent=2).encode())]
             file_name = f"{package_id}.{version}.nupkg"
             size_estimate = len(archive) + 65536

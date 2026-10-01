@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../eng/GgmlNativeIdentity.targets" />
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Library</OutputType>
@@ -142,7 +143,7 @@
       <_GgmlBuildIdentityFile>$(IntermediateOutputPath)GgmlBuildIdentity.g.cs</_GgmlBuildIdentityFile>
     </PropertyGroup>
     <WriteLinesToFile File="$(_GgmlBuildIdentityFile)"
-                      Lines="[assembly: System.Reflection.AssemblyMetadata(&quot;TensorSharpBuild&quot;, &quot;$(TensorSharpVersion)&quot;)]"
+                      Lines="[assembly: System.Reflection.AssemblyMetadata(&quot;TensorSharpBuild&quot;, &quot;$(TensorSharpVersion)&quot;)]%0A[assembly: System.Reflection.AssemblyMetadata(&quot;GgmlNativeAbi&quot;, &quot;$(GgmlNativeAbi)&quot;)]%0A[assembly: System.Reflection.AssemblyMetadata(&quot;GgmlUpstreamCommit&quot;, &quot;$(GgmlUpstreamCommit)&quot;)]"
                       Overwrite="true" WriteOnlyWhenDifferent="true" />
     <ItemGroup>
       <Compile Include="$(_GgmlBuildIdentityFile)" />

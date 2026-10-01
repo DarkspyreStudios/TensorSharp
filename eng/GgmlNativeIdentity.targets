@@ -1,0 +1,46 @@
+<Project>
+  <UsingTask TaskName="ComputeGgmlNativeIdentity" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)/Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Root ParameterType="System.String" Required="true" />
+      <Identity ParameterType="System.String" Output="true" />
+      <Upstream ParameterType="System.String" Output="true" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System" />
+      <Using Namespace="System.IO" />
+      <Using Namespace="System.Linq" />
+      <Using Namespace="System.Text" />
+      <Using Namespace="System.Security.Cryptography" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        Root = Path.GetFullPath(Root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        Func<string, string> relative = path => Path.GetFullPath(path).Substring(Root.Length + 1).Replace('\\', '/');
+        var native = Path.Combine(Root, "TensorSharp.GGML.Native");
+        var managed = Path.Combine(Root, "TensorSharp.Backends.GGML");
+        var extensions = new[] { ".cpp", ".h", ".hpp", ".inc", ".cu", ".cuh" };
+        Upstream = File.ReadAllText(Path.Combine(Root, "eng", "ggml-revision")).Trim();
+        if (Upstream.Length != 40 || Upstream.Any(c => !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')))
+            throw new InvalidOperationException("The ggml revision must be an exact lowercase Git SHA-1.");
+        var files = Directory.EnumerateFiles(native).Where(p => extensions.Contains(Path.GetExtension(p)))
+            .Concat(Directory.EnumerateFiles(managed, "*.cs"))
+            .Concat(new[] { Path.Combine(Root, "eng", "ggml-revision") });
+        using (var sha = SHA256.Create())
+        {
+            Func<byte[], string> hash = bytes => BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant();
+            var manifest = new StringBuilder();
+            foreach (var file in files.OrderBy(relative, StringComparer.Ordinal))
+            {
+                var text = Encoding.UTF8.GetString(File.ReadAllBytes(file)).Replace("\r\n", "\n");
+                manifest.Append(relative(file)).Append('=').Append(hash(Encoding.UTF8.GetBytes(text))).Append('\n');
+            }
+            Identity = hash(Encoding.UTF8.GetBytes(manifest.ToString()));
+        }
+      ]]></Code>
+    </Task>
+  </UsingTask>
+  <Target Name="_GenerateGgmlNativeAbi" BeforeTargets="_GenerateGgmlBuildIdentity">
+    <ComputeGgmlNativeIdentity Root="$(MSBuildThisFileDirectory)..">
+      <Output TaskParameter="Identity" PropertyName="GgmlNativeAbi" />
+      <Output TaskParameter="Upstream" PropertyName="GgmlUpstreamCommit" />
+    </ComputeGgmlNativeIdentity>
+  </Target>
+</Project>

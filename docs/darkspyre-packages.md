@@ -45,23 +45,94 @@ export. Binary identity must match the source, ggml, RID, variant and version in
 Inspection-tool failures do not count as empty dependency lists. A supplied managed package must
 have the release's exact identity/version and no native payload.
 
+`eng/ggml-required-exports.json` records the literal entrypoints used by the guarded managed
+interop declarations. The existing Roslyn guard tool generates it with `--inventory` without
+rewriting sources. The inventory binds to the exact native ABI and pinned ggml commit. Artifact
+validation requires every listed symbol and refuses missing or uninspected exports. Additional
+raw backend exports are permitted. CPU artifacts do not require CUDA/Vulkan-only upstream APIs.
+
+Release output requires all 12 RID/variant pairs: macOS ARM64 Metal; Linux x64 and ARM64 CPU,
+Vulkan and CUDA13; Windows x64 CPU, Vulkan and CUDA13; and Windows ARM64 CPU and Vulkan.
+Missing, unsupported or duplicate pairs fail before output is written. Bundled dependencies must
+be inspected native siblings with the matching target format and architecture. A text file with a
+library name does not satisfy closure. Linux bundled dependencies require `$ORIGIN` linkage.
+Dependency names cannot refer to absolute build-machine paths or escape the selected directory.
+macOS accepts system libraries and direct `@loader_path` siblings; unverified `@rpath` scopes fail.
+
 `--validate-only` runs those checks without creating an output directory, package, archive or
-manifest. Validation does not require a fetched ggml checkout. Staged inputs remain caller-owned
+manifest. This mode permits a partial stage; add `--complete-release` to require the entire matrix.
+Validation does not require a fetched ggml checkout. Staged inputs remain caller-owned
 and must stay immutable through packaging. Existing output is not removed on validation failure.
 
 ```sh
 python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only
+python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only --complete-release
 python3 -B -m unittest discover -s eng/tests -p test_pack_ggml_natives.py
+dotnet run --project eng/guard-ggml-interop/guard-ggml-interop.csproj -- --inventory .
 ```
 
-The packaging tests inspect actual native headers and exports from a tiny compiled identity
+The packaging tests inspect actual native headers and exports from a tiny compiled ABI-stub
 fixture, ordinary files and symbolic links. The fixture contains no GGML backend. These tests do
 not qualify model loading, native lifecycle or accelerator execution.
+
+`eng/build-ggml-natives.sh` records provenance through `eng/record-ggml-native-build.py`. The record
+checks the built bridge's identity, native header, architecture and identity export against the
+committed source and actual CMake cache. It rejects modified source or ggml inputs, a host-specific
+CPU profile, a mismatched accelerator, and a Linux runpath other than `$ORIGIN`. The record includes
+the bridge hash, CMake cache hash and settings, actual compiler output, exact CPU floor and macOS
+deployment target. CUDA13 records include observed toolkit compiler output and every compiled
+SASS/PTX architecture. Target and GPU execution remain explicitly unrecorded by this inspection.
+
+### Component evidence
+
+The build record and schema-1 artifact manifest include `components`. Each component records an
+ID, name, kind, supplier, exact version and source ID. `binaryFiles` and `evidenceFiles` contain
+relative paths, positive byte sizes and lowercase SHA-256 hashes. The two core records associate
+the bridge with TensorSharp and statically linked ggml. The provenance helper copies their actual
+source `LICENSE` bytes after verifying clean TensorSharp and pinned ggml sources. The ggml record
+uses its exact pinned commit as its version identity.
+
+`--redist-dir` requires `--redist-manifest`. The UTF-8 mapping has this shape:
+
+```json
+{
+  "schema": "tensorsharp-native-redistribution/1",
+  "components": [
+    {
+      "id": "supplier-runtime",
+      "name": "Supplier runtime",
+      "kind": "redistributed",
+      "supplier": "Supplier name",
+      "version": "exact-supplier-version",
+      "sourceId": "exact-supplier-release-or-package-identity",
+      "binaryFiles": [{ "path": "runtime-library-name", "size": 123, "sha256": "actual-64-character-lowercase-digest" }],
+      "evidenceFiles": [{ "path": "licenses/supplier-notice.txt", "size": 456, "sha256": "actual-64-character-lowercase-digest" }]
+    }
+  ]
+}
+```
+
+The example describes fields, not usable redistribution inputs. The provenance helper copies only
+declared files. It rejects extra input files, stale hashes, absent or empty evidence, non-text notices,
+links, unsafe or case-conflicting paths, conflicting ownership and core-file overwrites. Binary files
+must sit at the redistribution directory's top level. Evidence must sit under `licenses/`. The
+mapping may sit outside that directory or inside it; the helper does not copy the mapping itself.
+Multiple components may reference the same supplied evidence. Each redistributed native sibling
+has one component owner. The packer independently verifies exhaustive staged-file coverage and
+actual inspected native formats. Partial validation applies the same evidence checks without
+requiring every RID/variant or a fetched ggml checkout.
+
+Flat manifest `notices` and staged package/archive license bytes remain unchanged. Generated
+package `NOTICE.md` identifies components, exact supplier identities and supplied evidence paths.
+A filename does not establish legal permission. Core license records do not certify complete
+inline/static third-party attribution coverage, optional compiled dependencies or toolkit
+redistribution permission. Actual source/toolkit notice review remains a separate release gate.
 
 ## Native candidate validation
 
 `GgmlNativeLoader.Check` inspects a candidate without loading native code. It checks the managed
-package build, current process RID, declared backend, variant, absolute directory and bridge file.
+package build, exact bridge source/interop identity, current process RID, declared backend, variant,
+absolute directory and bridge file.
 A supplied file list must name the bridge. Every entry has a unique relative path, a nonnegative
 size and a lowercase SHA-256 digest that matches the file. Paths cannot contain traversal segments,
 control characters or alternate separators. Candidate directories, their ancestors, listed files
@@ -69,12 +140,111 @@ and intermediate directories cannot be symbolic links. Filesystem inspection fai
 structured refusal. The caller owns keeping the validated directory immutable through loading;
 validation does not lock the filesystem against another writer.
 
-The focused loader tests use ordinary files and symbolic links. They do not load a bridge or qualify
-a CPU or accelerator backend:
+The managed assembly's `GgmlNativeAbi` metadata and the bridge's `TSGgml_GetBuildIdentity` export
+carry the same SHA-256 identity. CMake and MSBuild compute it from sorted bridge implementation
+files, every top-level managed GGML backend source file and the pinned ggml revision. The broader
+managed input set includes interop declarations and their type/owner dependencies regardless of
+filename. CRLF line endings normalize
+to LF. The identity does not use the package display version or Git commit. Explicit selection
+rejects a missing or different ABI identity, malformed or repeated identity fields, and unknown
+native/upstream source commits. The reported ggml commit must match `GgmlUpstreamCommit` in the
+managed assembly. A loaded refusal retains its library handle and requires a new
+process; it never falls through to another library. Resolver registration and static construction
+load no native code. First import binding applies the native environment tunables after selection.
+
+## Native runtime ownership
+
+The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
+`Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
+code. `InitializeAsync(CancellationToken)` shares one initialization task for the same plan;
+cancellation cancels that caller's wait, not the process initialization. Results distinguish
+`Ready`, `Unavailable`, `Unsupported` and `RequiresProcessRestart`, and retain actual selection,
+identity and refusal details. Repeating an identical configuration is allowed; changing a used
+runtime, or configuring after shutdown, is not. No-load unavailability permits a retry.
+
+Null candidates require `DefaultNuGetProbing: true`; an explicit empty list never probes ambient
+libraries. Default probing examines absolute application, assembly, package runtime and nearest
+repository build paths, refuses competing bridges, and checks the loaded exact identity. Windows
+uses `LoadLibraryExW` with the chosen library directory and System32 only. It does not mutate PATH,
+search CUDA toolkits, or use the working directory. Windows dependency closure still requires
+real target qualification; static loading flags do not prove a driver package works.
+
+Every bridge import acquires a mandatory native-call lease. Model/vision/embedding handles,
+paged-KV pools, MTP handles, state snapshots and aligned allocations are retained until their
+guarded release; owned handle calls cannot race their release. GGML contexts and tensor storages
+retain managed resource leases. Models retain their own lease and release contexts they create;
+externally supplied contexts remain borrowed. `GgmlContext` is disposable and refuses disposal
+while tensor storages remain; disposal drains pending compute and invalidates pooled host buffers
+before freeing memory. An abandoned context retains its lease if safe synchronization fails.
+
+`Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
+Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
+native imports cannot execute afterwards. The loaded library is never unloaded. A process-wide
+BCL-only ownership token prevents another managed load context from loading a second GGML build
+without pinning a foreign collectible assembly. `AcquireLease(GgmlRuntimeResourceKind)` lets
+adapters retain additional resources; it does not replace the mandatory supplier leases.
+Both explicit selection and default probing register the same owned, idempotent `ProcessExit`
+handler. Successful guarded teardown removes that external delegate root before reporting
+`Stopped` and `Released`. Busy or poisoned teardown retains cleanup ownership and does not
+report release. Removing the handler does not reset terminal process ownership or unload the
+native library.
+
+The focused loader tests use ordinary files, symbolic links and isolated collectible managed load
+contexts. They do not load a bridge or qualify a CPU or accelerator backend:
 
 ```sh
 dotnet test eng/tests/ggml-native-loader/ggml-native-loader.csproj -p:TensorSharpSkipGgmlNative=true
 ```
+
+`eng/tests/ggml-native-runtime` runs each selection scenario in a separate process against a real
+bridge directory. `selected` verifies pre-load hash/ABI refusals, retry, exact loaded identity,
+cross-class import binding, shared initialization, cancellation, immutable plans, CPU tensor
+arithmetic, active-resource/call shutdown refusal, double-free refusal, foreign-owner refusal,
+collectible-context release and terminal teardown. `default` verifies absolute package-path probing;
+`ambiguous-default` verifies no-load ambiguity refusal followed by a corrected default plan.
+`selected-metal` repeats the explicit selection and lifecycle checks on the Metal backend. It
+requires an actual detected GPU, reports its description, and checks tensor arithmetic after GPU
+dispatch and host synchronization. A CPU fallback fails this mode.
+`reject-variant` verifies that a loaded identity mismatch leaves later candidates untried and
+rejects a second selection. `reject-legacy` verifies the same refusal for a bridge without an
+exact ABI identity. The probes do not qualify model generation, real whole-model handles, CUDA or
+Vulkan execution, Windows dependency loading or other RIDs, nor prove a published package's layout.
+
+`retire-selected-cpu`, `retire-default-cpu`, `retire-selected-metal` and `retire-default-metal`
+load the real fixture, GGML backend and Core assemblies privately in a collectible generation.
+They assert the provenance of the fixture, loader, context, allocator, group, tensor and operation
+registry. They perform real tensor arithmetic, drain host reads, refuse shutdown while contexts,
+tensors, aligned allocations or resource/call leases remain, and drain a pending rank-one callback
+before disposal. A Model-kind lease does not establish actual model loading. Rank-one callbacks
+do not establish multi-device persistent worker shutdown. The foreign invocation frame returns
+only native identity strings and weak references. The outer frame requests GC and verifies
+collection of the generation and its three real assemblies before process exit. The tests do not
+serialize foreign objects through a permanently rooted reflection serializer.
+
+```sh
+dotnet build eng/tests/ggml-native-runtime/ggml-native-runtime.csproj -c Release -p:TensorSharpSkipGgmlNative=true
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll selected-metal /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll default /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll ambiguous-default /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-variant /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll reject-legacy /absolute/legacy/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-selected-cpu /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-default-cpu /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-selected-metal /absolute/bridge/directory metal
+dotnet eng/tests/ggml-native-runtime/bin/Release/net10.0/ggml-native-runtime.dll retire-default-metal /absolute/bridge/directory metal
+```
+
+`dotnet run --project eng/guard-ggml-interop/guard-ggml-interop.csproj -- --verify .` checks every
+interop declaration for private raw binding, mandatory call guards and owned handle-family
+acquisition/use/release coverage. New unclassified native handles fail verification.
+
+`eng/build-ggml-natives.sh` refuses uncommitted native, managed ABI and build inputs. Its Linux
+CUDA release profile includes SASS 75/80/86/89/120 and PTX 120 on both x64 and ARM64. Local GPU
+detection and extra CMake arguments cannot reduce that profile. The builder checks the actual
+CMake cache before staging. A toolkit that cannot compile the profile fails the build.
+`test_build_ggml_natives.py` verifies these command/provenance gates with mock build commands;
+it does not qualify CUDA binaries or devices.
 
 Stable fork releases use a fourth numeric version component. Each published package version is
 immutable; a later compatible fork release increments the fourth component.

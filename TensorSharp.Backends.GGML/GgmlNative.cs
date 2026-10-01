@@ -1426,19 +1426,20 @@ internal enum GgmlIndexReductionOp
     internal static partial class GgmlNative
     {
         private const string DllName = "GgmlOps";
-        private static int s_windowsDependencySearchPathsInitialized;
+
+        private static readonly object s_tunablesGate = new();
+        private static bool s_earlyTunablesApplied;
+        private static bool s_applyingEarlyTunables;
 
         static GgmlNative()
         {
             GgmlNativeLoader.EnsureImportResolverRegistered();
-            ApplyEarlyNativeTunables();
         }
 
-        // Forces this type's static constructor so the assembly-wide DllImport
-        // resolver is registered before other classes (e.g. Interop.GgmlApi)
-        // issue their first P/Invoke into the GgmlOps module.
+        // Registration does not P/Invoke. The selected backend initializes separately.
         internal static void EnsureImportResolverRegistered()
         {
+            GgmlNativeLoader.EnsureImportResolverRegistered();
         }
 
         /// <summary>
@@ -1465,20 +1466,29 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         private static void ApplyEarlyNativeTunables()
         {
-            try
+            lock (s_tunablesGate)
             {
-                ApplySmallBarVulkanWorkaround();
-                ApplyTensorParallelCudaGraphTunable();
-            }
-            catch (DllNotFoundException)
-            {
-                // No native library on this host (e.g. a managed-only unit test):
-                // nothing to configure.
-            }
-            catch (EntryPointNotFoundException)
-            {
-                // Older GgmlOps without the setter; the native-side backstop in
-                // TSGgml_TensorParallelInit still applies where it can.
+                if (s_earlyTunablesApplied || s_applyingEarlyTunables)
+                    return;
+                s_applyingEarlyTunables = true;
+                try
+                {
+                    ApplySmallBarVulkanWorkaround();
+                    ApplyTensorParallelCudaGraphTunable();
+                    s_earlyTunablesApplied = true;
+                }
+                catch (DllNotFoundException)
+                {
+                    // A missing library can become available before explicit selection.
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    // The older bridge's native tensor-parallel backstop remains active.
+                }
+                finally
+                {
+                    s_applyingEarlyTunables = false;
+                }
             }
         }
 
@@ -1565,135 +1575,165 @@ internal enum GgmlIndexReductionOp
             return TSGgml_SetNativeEnvironmentVariable(name, value, overwrite ? 1 : 0) != 0;
         }
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TransformerModelDecode(
-            IntPtr hiddenData, int hiddenSize, int numLayers,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            IntPtr[] qkvBiasArr,
-            IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr,
-            int[] splitTypeArr, long[] splitBytesArr,
-            int[] qkvTypeArr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oBytesArr,
-            int[] guTypeArr, long[] guBytesArr,
-            int[] downTypeArr, long[] downBytesArr,
-            int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            int oType, long oNe0, long oNe1, long oBytes,
-            int guType, long guNe0, long guNe1, long guBytes,
-            int downType, long downNe0, long downNe1, long downBytes,
-            int headDim, int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int intermediateSize, int ropeMode,
-            int kvCacheType,
-            int ropeOriginalContext,
-            float ropeExtFactor, float ropeAttnFactor,
-            float ropeBetaFast, float ropeBetaSlow);
+        private static int TSGgml_TransformerModelDecode(IntPtr hiddenData, int hiddenSize, int numLayers, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, IntPtr[] qkvBiasArr, IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr, int[] splitTypeArr, long[] splitBytesArr, int[] qkvTypeArr, long[] qkvBytesArr, int[] oTypeArr, long[] oBytesArr, int[] guTypeArr, long[] guBytesArr, int[] downTypeArr, long[] downBytesArr, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, int oType, long oNe0, long oNe1, long oBytes, int guType, long guNe0, long guNe1, long guBytes, int downType, long downNe0, long downNe1, long downBytes, int headDim, int numHeads, int numKvHeads, int maxSeqLen, int position, float eps, float ropeBase, float ropeFreqScale, int intermediateSize, int ropeMode, int kvCacheType, int ropeOriginalContext, float ropeExtFactor, float ropeAttnFactor, float ropeBetaFast, float ropeBetaSlow)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TransformerModelDecode(hiddenData, hiddenSize, numLayers, attnNormArr, qkvArr, qNormArr, kNormArr, oArr, ffnNormArr, guArr, downArr, kCacheArr, vCacheArr, qkvBiasArr, qArr, kArr, vArr, splitTypeArr, splitBytesArr, qkvTypeArr, qkvBytesArr, oTypeArr, oBytesArr, guTypeArr, guBytesArr, downTypeArr, downBytesArr, qkvType, qkvNe0, qkvNe1, qkvBytes, oType, oNe0, oNe1, oBytes, guType, guNe0, guNe1, guBytes, downType, downNe0, downNe1, downBytes, headDim, numHeads, numKvHeads, maxSeqLen, position, eps, ropeBase, ropeFreqScale, intermediateSize, ropeMode, kvCacheType, ropeOriginalContext, ropeExtFactor, ropeAttnFactor, ropeBetaFast, ropeBetaSlow);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TransformerModelDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_TransformerLayerDecode(
-            IntPtr hiddenData, int hiddenSize,
-            IntPtr attnNormData,
-            IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qkvBiasData,
-            IntPtr qNormData, IntPtr kNormData, int headDim,
-            IntPtr oData, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr ffnNormData,
-            IntPtr guData, int guType, long guNe0, long guNe1, long guBytes,
-            IntPtr downData, int downType, long downNe0, long downNe1, long downBytes,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int intermediateSize, int ropeMode,
-            int kvCacheType,
-            int ropeOriginalContext,
-            float ropeExtFactor, float ropeAttnFactor,
-            float ropeBetaFast, float ropeBetaSlow);
+        private static partial int Native_TSGgml_TransformerModelDecode(IntPtr hiddenData, int hiddenSize, int numLayers, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, IntPtr[] qkvBiasArr, IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr, int[] splitTypeArr, long[] splitBytesArr, int[] qkvTypeArr, long[] qkvBytesArr, int[] oTypeArr, long[] oBytesArr, int[] guTypeArr, long[] guBytesArr, int[] downTypeArr, long[] downBytesArr, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, int oType, long oNe0, long oNe1, long oBytes, int guType, long guNe0, long guNe1, long guBytes, int downType, long downNe0, long downNe1, long downBytes, int headDim, int numHeads, int numKvHeads, int maxSeqLen, int position, float eps, float ropeBase, float ropeFreqScale, int intermediateSize, int ropeMode, int kvCacheType, int ropeOriginalContext, float ropeExtFactor, float ropeAttnFactor, float ropeBetaFast, float ropeBetaSlow);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_GetLastError();
+        private static int TSGgml_TransformerLayerDecode(IntPtr hiddenData, int hiddenSize, IntPtr attnNormData, IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qkvBiasData, IntPtr qNormData, IntPtr kNormData, int headDim, IntPtr oData, int oType, long oNe0, long oNe1, long oBytes, IntPtr ffnNormData, IntPtr guData, int guType, long guNe0, long guNe1, long guBytes, IntPtr downData, int downType, long downNe0, long downNe1, long downBytes, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int numKvHeads, int maxSeqLen, int position, float eps, float ropeBase, float ropeFreqScale, int intermediateSize, int ropeMode, int kvCacheType, int ropeOriginalContext, float ropeExtFactor, float ropeAttnFactor, float ropeBetaFast, float ropeBetaSlow)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_TransformerLayerDecode(hiddenData, hiddenSize, attnNormData, qkvData, qkvType, qkvNe0, qkvNe1, qkvBytes, qkvBiasData, qNormData, kNormData, headDim, oData, oType, oNe0, oNe1, oBytes, ffnNormData, guData, guType, guNe0, guNe1, guBytes, downData, downType, downNe0, downNe1, downBytes, kCacheData, vCacheData, numHeads, numKvHeads, maxSeqLen, position, eps, ropeBase, ropeFreqScale, intermediateSize, ropeMode, kvCacheType, ropeOriginalContext, ropeExtFactor, ropeAttnFactor, ropeBetaFast, ropeBetaSlow);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_TransformerLayerDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_HasBackendFailure();
+        private static partial int Native_TSGgml_TransformerLayerDecode(IntPtr hiddenData, int hiddenSize, IntPtr attnNormData, IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qkvBiasData, IntPtr qNormData, IntPtr kNormData, int headDim, IntPtr oData, int oType, long oNe0, long oNe1, long oBytes, IntPtr ffnNormData, IntPtr guData, int guType, long guNe0, long guNe1, long guBytes, IntPtr downData, int downType, long downNe0, long downNe1, long downBytes, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int numKvHeads, int maxSeqLen, int position, float eps, float ropeBase, float ropeFreqScale, int intermediateSize, int ropeMode, int kvCacheType, int ropeOriginalContext, float ropeExtFactor, float ropeAttnFactor, float ropeBetaFast, float ropeBetaSlow);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_GetBackendFailureText();
+        private static IntPtr TSGgml_GetLastError()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetLastError();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetLastError")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial long TSGgml_FlashAttnFallbackCount();
+        private static partial IntPtr Native_TSGgml_GetLastError();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_RecreateBackend();
+        private static int TSGgml_HasBackendFailure()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_HasBackendFailure();
+        }
 
-        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_HasBackendFailure")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_SetNativeEnvironmentVariable(
-            string name,
-            string value, int overwrite);
+        private static partial int Native_TSGgml_HasBackendFailure();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_CanInitializeBackend(int backendType);
+        private static IntPtr TSGgml_GetBackendFailureText()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetBackendFailureText();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetBackendFailureText")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_IsBackendAvailable(int backendType);
+        private static partial IntPtr Native_TSGgml_GetBackendFailureText();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_SetVulkanDeviceIndex(int deviceIndex);
+        private static long TSGgml_FlashAttnFallbackCount()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FlashAttnFallbackCount();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FlashAttnFallbackCount")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetVulkanDeviceCount();
+        private static partial long Native_TSGgml_FlashAttnFallbackCount();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetVulkanDeviceDescription(int deviceIndex, byte[] description, int descriptionSize);
+        private static int TSGgml_RecreateBackend()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RecreateBackend();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RecreateBackend")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_AddmmF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D src,
-            GgmlTensorView2D m1,
-            GgmlTensorView2D m2,
-            float beta,
-            float alpha);
+        private static partial int Native_TSGgml_RecreateBackend();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_AddmmQuantF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D m1,
-            IntPtr m2Data,
-            int m2GgmlType,
-            long m2Ne0,
-            long m2Ne1,
-            long m2RawBytes);
+        private static int TSGgml_SetNativeEnvironmentVariable(string name, string value, int overwrite)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SetNativeEnvironmentVariable(name, value, overwrite);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_SetNativeEnvironmentVariable")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedRmsNormMatMulQuantF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D input,
-            IntPtr normWeightData,
-            int normWeightCount,
-            float eps,
-            IntPtr m2Data,
-            int m2GgmlType,
-            long m2Ne0,
-            long m2Ne1,
-            long m2RawBytes);
+        private static partial int Native_TSGgml_SetNativeEnvironmentVariable(string name, string value, int overwrite);
+
+        private static int TSGgml_CanInitializeBackend(int backendType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_CanInitializeBackend(backendType);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_CanInitializeBackend")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_CanInitializeBackend(int backendType);
+
+        private static int TSGgml_IsBackendAvailable(int backendType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_IsBackendAvailable(backendType);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_IsBackendAvailable")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_IsBackendAvailable(int backendType);
+
+        private static int TSGgml_SetVulkanDeviceIndex(int deviceIndex)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SetVulkanDeviceIndex(deviceIndex);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SetVulkanDeviceIndex")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_SetVulkanDeviceIndex(int deviceIndex);
+
+        private static int TSGgml_GetVulkanDeviceCount()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetVulkanDeviceCount();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetVulkanDeviceCount")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_GetVulkanDeviceCount();
+
+        private static int TSGgml_GetVulkanDeviceDescription(int deviceIndex, byte[] description, int descriptionSize)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetVulkanDeviceDescription(deviceIndex, description, descriptionSize);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetVulkanDeviceDescription")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_GetVulkanDeviceDescription(int deviceIndex, byte[] description, int descriptionSize);
+
+        private static int TSGgml_AddmmF32(GgmlTensorView2D result, GgmlTensorView2D src, GgmlTensorView2D m1, GgmlTensorView2D m2, float beta, float alpha)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_AddmmF32(result, src, m1, m2, beta, alpha);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AddmmF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_AddmmF32(GgmlTensorView2D result, GgmlTensorView2D src, GgmlTensorView2D m1, GgmlTensorView2D m2, float beta, float alpha);
+
+        private static int TSGgml_AddmmQuantF32(GgmlTensorView2D result, GgmlTensorView2D m1, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_AddmmQuantF32(result, m1, m2Data, m2GgmlType, m2Ne0, m2Ne1, m2RawBytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AddmmQuantF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_AddmmQuantF32(GgmlTensorView2D result, GgmlTensorView2D m1, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes);
+
+        private static int TSGgml_FusedRmsNormMatMulQuantF32(GgmlTensorView2D result, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedRmsNormMatMulQuantF32(result, input, normWeightData, normWeightCount, eps, m2Data, m2GgmlType, m2Ne0, m2Ne1, m2RawBytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedRmsNormMatMulQuantF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_FusedRmsNormMatMulQuantF32(GgmlTensorView2D result, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes);
 
         // ------------------------------------------------------------------
         // The tensor-parallel PLAN SLOT contract (applies to every entry point
@@ -1720,46 +1760,45 @@ internal enum GgmlIndexReductionOp
         //
         // GgmlTensorParallelPlanSlotContractTests guards this.
         // ------------------------------------------------------------------
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedMatMulQuantAddF32(
-            GgmlTensorView2D residual,
-            GgmlTensorView2D input,
-            IntPtr m2Data,
-            int m2GgmlType,
-            long m2Ne0,
-            long m2Ne1,
-            long m2RawBytes,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static int TSGgml_FusedMatMulQuantAddF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedMatMulQuantAddF32(residual, input, m2Data, m2GgmlType, m2Ne0, m2Ne1, m2RawBytes, tpDegree, tpPlanOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedMatMulQuantAddF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_ReleaseFusedMatmulAddTpGraphs();
+        private static partial int Native_TSGgml_FusedMatMulQuantAddF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2Ne1, long m2RawBytes, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedFFNSwiGLUQuantF32(
-            GgmlTensorView2D residual,
-            GgmlTensorView2D input,
-            IntPtr normWeightData,
-            int normWeightCount,
-            float eps,
-            IntPtr gateUpData,
-            int gateUpGgmlType,
-            long gateUpNe0,
-            long gateUpNe1,
-            long gateUpRawBytes,
-            IntPtr downData,
-            int downGgmlType,
-            long downNe0,
-            long downNe1,
-            long downRawBytes,
-            int halfDim,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static void TSGgml_ReleaseFusedMatmulAddTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_ReleaseFusedMatmulAddTpGraphs();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ReleaseFusedMatmulAddTpGraphs")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_ReleaseFusedFfnTpGraphs();
+        private static partial void Native_TSGgml_ReleaseFusedMatmulAddTpGraphs();
+
+        private static int TSGgml_FusedFFNSwiGLUQuantF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps, IntPtr gateUpData, int gateUpGgmlType, long gateUpNe0, long gateUpNe1, long gateUpRawBytes, IntPtr downData, int downGgmlType, long downNe0, long downNe1, long downRawBytes, int halfDim, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedFFNSwiGLUQuantF32(residual, input, normWeightData, normWeightCount, eps, gateUpData, gateUpGgmlType, gateUpNe0, gateUpNe1, gateUpRawBytes, downData, downGgmlType, downNe0, downNe1, downRawBytes, halfDim, tpDegree, tpPlanOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedFFNSwiGLUQuantF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_FusedFFNSwiGLUQuantF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps, IntPtr gateUpData, int gateUpGgmlType, long gateUpNe0, long gateUpNe1, long gateUpRawBytes, IntPtr downData, int downGgmlType, long downNe0, long downNe1, long downRawBytes, int halfDim, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+
+        private static void TSGgml_ReleaseFusedFfnTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_ReleaseFusedFfnTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ReleaseFusedFfnTpGraphs")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_ReleaseFusedFfnTpGraphs();
 
         public static void ReleaseFusedFfnTpGraphs()
         {
@@ -1767,347 +1806,257 @@ internal enum GgmlIndexReductionOp
             catch (EntryPointNotFoundException) { }
         }
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedFFNActProjectQuantF32(
-            GgmlTensorView2D output,
-            GgmlTensorView2D input,
-            IntPtr normWeightData,
-            int normWeightCount,
-            float eps,
-            IntPtr gateUpData,
-            int gateUpGgmlType,
-            long gateUpNe0,
-            long gateUpNe1,
-            long gateUpRawBytes,
-            IntPtr downData,
-            int downGgmlType,
-            long downNe0,
-            long downNe1,
-            long downRawBytes,
-            int halfDim,
-            int actType);
+        private static int TSGgml_FusedFFNActProjectQuantF32(GgmlTensorView2D output, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps, IntPtr gateUpData, int gateUpGgmlType, long gateUpNe0, long gateUpNe1, long gateUpRawBytes, IntPtr downData, int downGgmlType, long downNe0, long downNe1, long downRawBytes, int halfDim, int actType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedFFNActProjectQuantF32(output, input, normWeightData, normWeightCount, eps, gateUpData, gateUpGgmlType, gateUpNe0, gateUpNe1, gateUpRawBytes, downData, downGgmlType, downNe0, downNe1, downRawBytes, halfDim, actType);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedFFNActProjectQuantF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedRmsNormResidualAddF32(
-            GgmlTensorView2D residual,
-            GgmlTensorView2D input,
-            IntPtr normWeightData,
-            int normWeightCount,
-            float eps);
+        private static partial int Native_TSGgml_FusedFFNActProjectQuantF32(GgmlTensorView2D output, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps, IntPtr gateUpData, int gateUpGgmlType, long gateUpNe0, long gateUpNe1, long gateUpRawBytes, IntPtr downData, int downGgmlType, long downNe0, long downNe1, long downRawBytes, int halfDim, int actType);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedPleBlockQuantF32(
-            GgmlTensorView2D residual,
-            GgmlTensorView2D perLayerInput,
-            IntPtr inpGateData, int inpGateGgmlType, long inpGateNe0, long inpGateNe1, long inpGateRawBytes,
-            IntPtr projData, int projGgmlType, long projNe0, long projNe1, long projRawBytes,
-            IntPtr postNormData, int postNormCount, float eps);
+        private static int TSGgml_FusedRmsNormResidualAddF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedRmsNormResidualAddF32(residual, input, normWeightData, normWeightCount, eps);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedRmsNormResidualAddF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedOutProjNormRouterQuantF32(
-            GgmlTensorView2D residual, GgmlTensorView2D input,
-            IntPtr outProjData, int outProjType, long outNe0, long outNe1, long outBytes,
-            IntPtr normData, int normCount, float eps,
-            GgmlTensorView2D normedOut,
-            IntPtr routerData, int routerType, long routerNe0, long routerNe1, long routerBytes,
-            GgmlTensorView2D routerOut);
+        private static partial int Native_TSGgml_FusedRmsNormResidualAddF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr normWeightData, int normWeightCount, float eps);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedVisionMLPF32(
-            GgmlTensorView2D hidden,
-            IntPtr lnW, IntPtr lnB, int lnDim, float eps,
-            IntPtr upW, int upNe0, int upNe1, long upBytes,
-            IntPtr upB, int upBDim,
-            IntPtr downW, int downNe0, int downNe1, long downBytes,
-            IntPtr downB, int downBDim);
+        private static int TSGgml_FusedPleBlockQuantF32(GgmlTensorView2D residual, GgmlTensorView2D perLayerInput, IntPtr inpGateData, int inpGateGgmlType, long inpGateNe0, long inpGateNe1, long inpGateRawBytes, IntPtr projData, int projGgmlType, long projNe0, long projNe1, long projRawBytes, IntPtr postNormData, int postNormCount, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedPleBlockQuantF32(residual, perLayerInput, inpGateData, inpGateGgmlType, inpGateNe0, inpGateNe1, inpGateRawBytes, projData, projGgmlType, projNe0, projNe1, projRawBytes, postNormData, postNormCount, eps);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedPleBlockQuantF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MuseGlimmerVisionBlockQuantF32(
-            in GgmlMuseGlimmerVisionBlockArgs args);
+        private static partial int Native_TSGgml_FusedPleBlockQuantF32(GgmlTensorView2D residual, GgmlTensorView2D perLayerInput, IntPtr inpGateData, int inpGateGgmlType, long inpGateNe0, long inpGateNe1, long inpGateRawBytes, IntPtr projData, int projGgmlType, long projNe0, long projNe1, long projRawBytes, IntPtr postNormData, int postNormCount, float eps);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedOutProjFFNQuantF32(
-            GgmlTensorView2D residual, GgmlTensorView2D input,
-            IntPtr outProjData, int outProjType, long outNe0, long outNe1, long outRawBytes,
-            IntPtr ffnNormData, int ffnNormCount, float eps,
-            IntPtr guData, int guType, long guNe0, long guNe1, long guRawBytes,
-            IntPtr dnData, int dnType, long dnNe0, long dnNe1, long dnRawBytes,
-            int halfDim);
+        private static int TSGgml_FusedOutProjNormRouterQuantF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr outProjData, int outProjType, long outNe0, long outNe1, long outBytes, IntPtr normData, int normCount, float eps, GgmlTensorView2D normedOut, IntPtr routerData, int routerType, long routerNe0, long routerNe1, long routerBytes, GgmlTensorView2D routerOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedOutProjNormRouterQuantF32(residual, input, outProjData, outProjType, outNe0, outNe1, outBytes, normData, normCount, eps, normedOut, routerData, routerType, routerNe0, routerNe1, routerBytes, routerOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedOutProjNormRouterQuantF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedVisionAttentionF32(
-            GgmlTensorView2D hidden,
-            IntPtr lnW, IntPtr lnB, int lnDim, float eps,
-            IntPtr qkvW, int qkvNe0, int qkvNe1, long qkvBytes,
-            IntPtr qkvB, int qkvBDim,
-            IntPtr outW, int outNe0, int outNe1, long outBytes,
-            IntPtr outB, int outBDim,
-            IntPtr cosTable, IntPtr sinTable,
-            int numPatches, int numHeads, int headDim, int halfDim,
-            float attnScale);
+        private static partial int Native_TSGgml_FusedOutProjNormRouterQuantF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr outProjData, int outProjType, long outNe0, long outNe1, long outBytes, IntPtr normData, int normCount, float eps, GgmlTensorView2D normedOut, IntPtr routerData, int routerType, long routerNe0, long routerNe1, long routerBytes, GgmlTensorView2D routerOut);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35VisionEncoderF32(
-            GgmlTensorView2D hidden,
-            int blockCount, float eps, float attnScale,
-            int numPatches, int numHeads, int headDim, int halfDim,
-            IntPtr cosTable, IntPtr sinTable,
-            IntPtr[] ln1W, IntPtr[] ln1B,
-            IntPtr[] qkvW, IntPtr[] qkvB,
-            IntPtr[] outW, IntPtr[] outB,
-            IntPtr[] ln2W, IntPtr[] ln2B,
-            IntPtr[] upW, IntPtr[] upB,
-            IntPtr[] downW, IntPtr[] downB,
-            int lnDim,
-            int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim,
-            int outNe0, int outNe1, long outBytes, int outBDim,
-            int upNe0, int upNe1, long upBytes, int upBDim,
-            int downNe0, int downNe1, long downBytes, int downBDim);
+        private static int TSGgml_FusedVisionMLPF32(GgmlTensorView2D hidden, IntPtr lnW, IntPtr lnB, int lnDim, float eps, IntPtr upW, int upNe0, int upNe1, long upBytes, IntPtr upB, int upBDim, IntPtr downW, int downNe0, int downNe1, long downBytes, IntPtr downB, int downBDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedVisionMLPF32(hidden, lnW, lnB, lnDim, eps, upW, upNe0, upNe1, upBytes, upB, upBDim, downW, downNe0, downNe1, downBytes, downB, downBDim);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedVisionMLPF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen21VisionEncoderF32(
-            GgmlTensorView2D hidden,
-            int blockCount, float eps, float attnScale,
-            int numPatches, int numHeads, int headDim, int halfDim,
-            IntPtr cosTable, IntPtr sinTable,
-            IntPtr[] ln1W, IntPtr[] ln1B,
-            IntPtr[] qkvW, IntPtr[] qkvB,
-            IntPtr[] outW, IntPtr[] outB,
-            IntPtr[] ln2W, IntPtr[] ln2B,
-            IntPtr[] upW, IntPtr[] upB,
-            IntPtr[] downW, IntPtr[] downB,
-            int lnDim,
-            int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim,
-            int outNe0, int outNe1, long outBytes, int outBDim,
-            int upNe0, int upNe1, long upBytes, int upBDim,
-            int downNe0, int downNe1, long downBytes, int downBDim);
+        private static partial int Native_TSGgml_FusedVisionMLPF32(GgmlTensorView2D hidden, IntPtr lnW, IntPtr lnB, int lnDim, float eps, IntPtr upW, int upNe0, int upNe1, long upBytes, IntPtr upB, int upBDim, IntPtr downW, int downNe0, int downNe1, long downBytes, IntPtr downB, int downBDim);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GlmVisionEncoderF32(
-            GgmlTensorView2D hidden,
-            int blockCount, float eps, float attnScale, float swigluLimit,
-            int numPatches, int numHeads, int headDim, int halfDim,
-            IntPtr cosTable, IntPtr sinTable,
-            IntPtr[] ln1W,
-            IntPtr[] qkvW, IntPtr[] qkvB,
-            IntPtr[] qnW, IntPtr[] knW,
-            IntPtr[] outW, IntPtr[] outB,
-            IntPtr[] ln2W,
-            IntPtr[] gateW, IntPtr[] gateB,
-            IntPtr[] upW, IntPtr[] upB,
-            IntPtr[] downW, IntPtr[] downB,
-            int lnDim,
-            int qkvNe0, int qkvNe1, long qkvBytes,
-            int outNe0, int outNe1, long outBytes,
-            int ffnNe0, int ffnNe1, long ffnUpBytes, long ffnDownBytes);
+        private static int TSGgml_MuseGlimmerVisionBlockQuantF32(in GgmlMuseGlimmerVisionBlockArgs args)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MuseGlimmerVisionBlockQuantF32(in args);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MuseGlimmerVisionBlockQuantF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedGemma4VisionBlockF32(
-            GgmlTensorView2D hidden, float eps,
-            IntPtr ln1W,
-            IntPtr qW, int qNe0, int qNe1, long qBytes,
-            IntPtr kW, int kNe0, int kNe1, long kBytes,
-            IntPtr vW, int vNe0, int vNe1, long vBytes,
-            IntPtr qNormW, IntPtr kNormW,
-            IntPtr attnPostNormW,
-            IntPtr outW, int outNe0, int outNe1, long outBytes,
-            IntPtr posX, IntPtr posY, float ropeTheta,
-            IntPtr ln2W,
-            IntPtr gateW, int gateNe0, int gateNe1, long gateBytes,
-            IntPtr upW, int upNe0, int upNe1, long upBytes,
-            IntPtr downW, int downNe0, int downNe1, long downBytes,
-            IntPtr ffnPostNormW,
-            IntPtr clamps,
-            int numPatches, int numHeads, int headDim);
+        private static partial int Native_TSGgml_MuseGlimmerVisionBlockQuantF32(in GgmlMuseGlimmerVisionBlockArgs args);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetRowsQuantF32(
-            GgmlTensorView2D result,
-            IntPtr srcData,
-            int srcGgmlType,
-            long srcNe0,
-            long srcNe1,
-            long srcRawBytes,
-            GgmlContiguousTensor indices);
+        private static int TSGgml_FusedOutProjFFNQuantF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr outProjData, int outProjType, long outNe0, long outNe1, long outRawBytes, IntPtr ffnNormData, int ffnNormCount, float eps, IntPtr guData, int guType, long guNe0, long guNe1, long guRawBytes, IntPtr dnData, int dnType, long dnNe0, long dnNe1, long dnRawBytes, int halfDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedOutProjFFNQuantF32(residual, input, outProjData, outProjType, outNe0, outNe1, outRawBytes, ffnNormData, ffnNormCount, eps, guData, guType, guNe0, guNe1, guRawBytes, dnData, dnType, dnNe0, dnNe1, dnRawBytes, halfDim);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedOutProjFFNQuantF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MoEExpertsForwardF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D input,
-            int numExperts,
-            IntPtr[] upDataPtrs,
-            IntPtr[] downDataPtrs,
-            int upGgmlType,
-            long upNe0,
-            long upNe1,
-            long upRawBytesEach,
-            int downGgmlType,
-            long downNe0,
-            long downNe1,
-            long downRawBytesEach,
-            float[] routeWeights);
+        private static partial int Native_TSGgml_FusedOutProjFFNQuantF32(GgmlTensorView2D residual, GgmlTensorView2D input, IntPtr outProjData, int outProjType, long outNe0, long outNe1, long outRawBytes, IntPtr ffnNormData, int ffnNormCount, float eps, IntPtr guData, int guType, long guNe0, long guNe1, long guRawBytes, IntPtr dnData, int dnType, long dnNe0, long dnNe1, long dnRawBytes, int halfDim);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MoEExpertsSwiGLUForwardF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D input,
-            int numExperts,
-            IntPtr[] gateDataPtrs,
-            IntPtr[] upDataPtrs,
-            IntPtr[] downDataPtrs,
-            int gateGgmlType,
-            long gateNe0,
-            long gateNe1,
-            long gateRawBytesEach,
-            int upGgmlType,
-            long upNe0,
-            long upNe1,
-            long upRawBytesEach,
-            int downGgmlType,
-            long downNe0,
-            long downNe1,
-            long downRawBytesEach,
-            float[] routeWeights);
+        private static int TSGgml_FusedVisionAttentionF32(GgmlTensorView2D hidden, IntPtr lnW, IntPtr lnB, int lnDim, float eps, IntPtr qkvW, int qkvNe0, int qkvNe1, long qkvBytes, IntPtr qkvB, int qkvBDim, IntPtr outW, int outNe0, int outNe1, long outBytes, IntPtr outB, int outBDim, IntPtr cosTable, IntPtr sinTable, int numPatches, int numHeads, int headDim, int halfDim, float attnScale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedVisionAttentionF32(hidden, lnW, lnB, lnDim, eps, qkvW, qkvNe0, qkvNe1, qkvBytes, qkvB, qkvBDim, outW, outNe0, outNe1, outBytes, outB, outBDim, cosTable, sinTable, numPatches, numHeads, headDim, halfDim, attnScale);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedVisionAttentionF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MoEExpertsSwiGLUResidualF32(
-            GgmlTensorView2D residual,
-            GgmlTensorView2D input,
-            int numExperts,
-            IntPtr[] gateDataPtrs,
-            IntPtr[] upDataPtrs,
-            IntPtr[] downDataPtrs,
-            int gateGgmlType,
-            long gateNe0,
-            long gateNe1,
-            long gateRawBytesEach,
-            int upGgmlType,
-            long upNe0,
-            long upNe1,
-            long upRawBytesEach,
-            int downGgmlType,
-            long downNe0,
-            long downNe1,
-            long downRawBytesEach,
-            float[] routeWeights,
-            int useShared,
-            IntPtr sharedGateData,
-            IntPtr sharedUpData,
-            IntPtr sharedDownData,
-            int sharedGateGgmlType,
-            long sharedGateNe0,
-            long sharedGateNe1,
-            long sharedGateRawBytes,
-            int sharedUpGgmlType,
-            long sharedUpNe0,
-            long sharedUpNe1,
-            long sharedUpRawBytes,
-            int sharedDownGgmlType,
-            long sharedDownNe0,
-            long sharedDownNe1,
-            long sharedDownRawBytes,
-            float sharedScalar);
+        private static partial int Native_TSGgml_FusedVisionAttentionF32(GgmlTensorView2D hidden, IntPtr lnW, IntPtr lnB, int lnDim, float eps, IntPtr qkvW, int qkvNe0, int qkvNe1, long qkvBytes, IntPtr qkvB, int qkvBDim, IntPtr outW, int outNe0, int outNe1, long outBytes, IntPtr outB, int outBDim, IntPtr cosTable, IntPtr sinTable, int numPatches, int numHeads, int headDim, int halfDim, float attnScale);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_AddmmQuantBatchF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D m1,
-            IntPtr m2Data,
-            int m2GgmlType,
-            long m2Ne0,
-            long m2RawBytes,
-            int batchCount,
-            long[] weightOffsets,
-            long[] weightNe1Arr);
+        private static int TSGgml_Qwen35VisionEncoderF32(GgmlTensorView2D hidden, int blockCount, float eps, float attnScale, int numPatches, int numHeads, int headDim, int halfDim, IntPtr cosTable, IntPtr sinTable, IntPtr[] ln1W, IntPtr[] ln1B, IntPtr[] qkvW, IntPtr[] qkvB, IntPtr[] outW, IntPtr[] outB, IntPtr[] ln2W, IntPtr[] ln2B, IntPtr[] upW, IntPtr[] upB, IntPtr[] downW, IntPtr[] downB, int lnDim, int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim, int outNe0, int outNe1, long outBytes, int outBDim, int upNe0, int upNe1, long upBytes, int upBDim, int downNe0, int downNe1, long downBytes, int downBDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35VisionEncoderF32(hidden, blockCount, eps, attnScale, numPatches, numHeads, headDim, halfDim, cosTable, sinTable, ln1W, ln1B, qkvW, qkvB, outW, outB, ln2W, ln2B, upW, upB, downW, downB, lnDim, qkvNe0, qkvNe1, qkvBytes, qkvBDim, outNe0, outNe1, outBytes, outBDim, upNe0, upNe1, upBytes, upBDim, downNe0, downNe1, downBytes, downBDim);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35VisionEncoderF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_AddmmBatchF32(
-            GgmlTensorView3D result,
-            GgmlTensorView3D src,
-            GgmlTensorView3D m1,
-            GgmlTensorView3D m2,
-            float beta,
-            float alpha);
+        private static partial int Native_TSGgml_Qwen35VisionEncoderF32(GgmlTensorView2D hidden, int blockCount, float eps, float attnScale, int numPatches, int numHeads, int headDim, int halfDim, IntPtr cosTable, IntPtr sinTable, IntPtr[] ln1W, IntPtr[] ln1B, IntPtr[] qkvW, IntPtr[] qkvB, IntPtr[] outW, IntPtr[] outB, IntPtr[] ln2W, IntPtr[] ln2B, IntPtr[] upW, IntPtr[] upB, IntPtr[] downW, IntPtr[] downB, int lnDim, int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim, int outNe0, int outNe1, long outBytes, int outBDim, int upNe0, int upNe1, long upBytes, int upBDim, int downNe0, int downNe1, long downBytes, int downBDim);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_ReduceLastDimF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D src);
+        private static int TSGgml_Qwen21VisionEncoderF32(GgmlTensorView2D hidden, int blockCount, float eps, float attnScale, int numPatches, int numHeads, int headDim, int halfDim, IntPtr cosTable, IntPtr sinTable, IntPtr[] ln1W, IntPtr[] ln1B, IntPtr[] qkvW, IntPtr[] qkvB, IntPtr[] outW, IntPtr[] outB, IntPtr[] ln2W, IntPtr[] ln2B, IntPtr[] upW, IntPtr[] upB, IntPtr[] downW, IntPtr[] downB, int lnDim, int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim, int outNe0, int outNe1, long outBytes, int outBDim, int upNe0, int upNe1, long upBytes, int upBDim, int downNe0, int downNe1, long downBytes, int downBDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen21VisionEncoderF32(hidden, blockCount, eps, attnScale, numPatches, numHeads, headDim, halfDim, cosTable, sinTable, ln1W, ln1B, qkvW, qkvB, outW, outB, ln2W, ln2B, upW, upB, downW, downB, lnDim, qkvNe0, qkvNe1, qkvBytes, qkvBDim, outNe0, outNe1, outBytes, outBDim, upNe0, upNe1, upBytes, upBDim, downNe0, downNe1, downBytes, downBDim);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen21VisionEncoderF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_IndexReductionF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D src);
+        private static partial int Native_TSGgml_Qwen21VisionEncoderF32(GgmlTensorView2D hidden, int blockCount, float eps, float attnScale, int numPatches, int numHeads, int headDim, int halfDim, IntPtr cosTable, IntPtr sinTable, IntPtr[] ln1W, IntPtr[] ln1B, IntPtr[] qkvW, IntPtr[] qkvB, IntPtr[] outW, IntPtr[] outB, IntPtr[] ln2W, IntPtr[] ln2B, IntPtr[] upW, IntPtr[] upB, IntPtr[] downW, IntPtr[] downB, int lnDim, int qkvNe0, int qkvNe1, long qkvBytes, int qkvBDim, int outNe0, int outNe1, long outBytes, int outBDim, int upNe0, int upNe1, long upBytes, int upBDim, int downNe0, int downNe1, long downBytes, int downBDim);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_GlmVisionEncoderF32(GgmlTensorView2D hidden, int blockCount, float eps, float attnScale, float swigluLimit, int numPatches, int numHeads, int headDim, int halfDim, IntPtr cosTable, IntPtr sinTable, IntPtr[] ln1W, IntPtr[] qkvW, IntPtr[] qkvB, IntPtr[] qnW, IntPtr[] knW, IntPtr[] outW, IntPtr[] outB, IntPtr[] ln2W, IntPtr[] gateW, IntPtr[] gateB, IntPtr[] upW, IntPtr[] upB, IntPtr[] downW, IntPtr[] downB, int lnDim, int qkvNe0, int qkvNe1, long qkvBytes, int outNe0, int outNe1, long outBytes, int ffnNe0, int ffnNe1, long ffnUpBytes, long ffnDownBytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GlmVisionEncoderF32(hidden, blockCount, eps, attnScale, swigluLimit, numPatches, numHeads, headDim, halfDim, cosTable, sinTable, ln1W, qkvW, qkvB, qnW, knW, outW, outB, ln2W, gateW, gateB, upW, upB, downW, downB, lnDim, qkvNe0, qkvNe1, qkvBytes, outNe0, outNe1, outBytes, ffnNe0, ffnNe1, ffnUpBytes, ffnDownBytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GlmVisionEncoderF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_SoftmaxF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D src);
+        private static partial int Native_TSGgml_GlmVisionEncoderF32(GgmlTensorView2D hidden, int blockCount, float eps, float attnScale, float swigluLimit, int numPatches, int numHeads, int headDim, int halfDim, IntPtr cosTable, IntPtr sinTable, IntPtr[] ln1W, IntPtr[] qkvW, IntPtr[] qkvB, IntPtr[] qnW, IntPtr[] knW, IntPtr[] outW, IntPtr[] outB, IntPtr[] ln2W, IntPtr[] gateW, IntPtr[] gateB, IntPtr[] upW, IntPtr[] upB, IntPtr[] downW, IntPtr[] downB, int lnDim, int qkvNe0, int qkvNe1, long qkvBytes, int outNe0, int outNe1, long outBytes, int ffnNe0, int ffnNe1, long ffnUpBytes, long ffnDownBytes);
+
+        private static int TSGgml_FusedGemma4VisionBlockF32(GgmlTensorView2D hidden, float eps, IntPtr ln1W, IntPtr qW, int qNe0, int qNe1, long qBytes, IntPtr kW, int kNe0, int kNe1, long kBytes, IntPtr vW, int vNe0, int vNe1, long vBytes, IntPtr qNormW, IntPtr kNormW, IntPtr attnPostNormW, IntPtr outW, int outNe0, int outNe1, long outBytes, IntPtr posX, IntPtr posY, float ropeTheta, IntPtr ln2W, IntPtr gateW, int gateNe0, int gateNe1, long gateBytes, IntPtr upW, int upNe0, int upNe1, long upBytes, IntPtr downW, int downNe0, int downNe1, long downBytes, IntPtr ffnPostNormW, IntPtr clamps, int numPatches, int numHeads, int headDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedGemma4VisionBlockF32(hidden, eps, ln1W, qW, qNe0, qNe1, qBytes, kW, kNe0, kNe1, kBytes, vW, vNe0, vNe1, vBytes, qNormW, kNormW, attnPostNormW, outW, outNe0, outNe1, outBytes, posX, posY, ropeTheta, ln2W, gateW, gateNe0, gateNe1, gateBytes, upW, upNe0, upNe1, upBytes, downW, downNe0, downNe1, downBytes, ffnPostNormW, clamps, numPatches, numHeads, headDim);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedGemma4VisionBlockF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_FusedGemma4VisionBlockF32(GgmlTensorView2D hidden, float eps, IntPtr ln1W, IntPtr qW, int qNe0, int qNe1, long qBytes, IntPtr kW, int kNe0, int kNe1, long kBytes, IntPtr vW, int vNe0, int vNe1, long vBytes, IntPtr qNormW, IntPtr kNormW, IntPtr attnPostNormW, IntPtr outW, int outNe0, int outNe1, long outBytes, IntPtr posX, IntPtr posY, float ropeTheta, IntPtr ln2W, IntPtr gateW, int gateNe0, int gateNe1, long gateBytes, IntPtr upW, int upNe0, int upNe1, long upBytes, IntPtr downW, int downNe0, int downNe1, long downBytes, IntPtr ffnPostNormW, IntPtr clamps, int numPatches, int numHeads, int headDim);
+
+        private static int TSGgml_GetRowsQuantF32(GgmlTensorView2D result, IntPtr srcData, int srcGgmlType, long srcNe0, long srcNe1, long srcRawBytes, GgmlContiguousTensor indices)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetRowsQuantF32(result, srcData, srcGgmlType, srcNe0, srcNe1, srcRawBytes, indices);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetRowsQuantF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_GetRowsQuantF32(GgmlTensorView2D result, IntPtr srcData, int srcGgmlType, long srcNe0, long srcNe1, long srcRawBytes, GgmlContiguousTensor indices);
+
+        private static int TSGgml_MoEExpertsForwardF32(GgmlTensorView2D result, GgmlTensorView2D input, int numExperts, IntPtr[] upDataPtrs, IntPtr[] downDataPtrs, int upGgmlType, long upNe0, long upNe1, long upRawBytesEach, int downGgmlType, long downNe0, long downNe1, long downRawBytesEach, float[] routeWeights)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MoEExpertsForwardF32(result, input, numExperts, upDataPtrs, downDataPtrs, upGgmlType, upNe0, upNe1, upRawBytesEach, downGgmlType, downNe0, downNe1, downRawBytesEach, routeWeights);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MoEExpertsForwardF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_MoEExpertsForwardF32(GgmlTensorView2D result, GgmlTensorView2D input, int numExperts, IntPtr[] upDataPtrs, IntPtr[] downDataPtrs, int upGgmlType, long upNe0, long upNe1, long upRawBytesEach, int downGgmlType, long downNe0, long downNe1, long downRawBytesEach, float[] routeWeights);
+
+        private static int TSGgml_MoEExpertsSwiGLUForwardF32(GgmlTensorView2D result, GgmlTensorView2D input, int numExperts, IntPtr[] gateDataPtrs, IntPtr[] upDataPtrs, IntPtr[] downDataPtrs, int gateGgmlType, long gateNe0, long gateNe1, long gateRawBytesEach, int upGgmlType, long upNe0, long upNe1, long upRawBytesEach, int downGgmlType, long downNe0, long downNe1, long downRawBytesEach, float[] routeWeights)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MoEExpertsSwiGLUForwardF32(result, input, numExperts, gateDataPtrs, upDataPtrs, downDataPtrs, gateGgmlType, gateNe0, gateNe1, gateRawBytesEach, upGgmlType, upNe0, upNe1, upRawBytesEach, downGgmlType, downNe0, downNe1, downRawBytesEach, routeWeights);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MoEExpertsSwiGLUForwardF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_MoEExpertsSwiGLUForwardF32(GgmlTensorView2D result, GgmlTensorView2D input, int numExperts, IntPtr[] gateDataPtrs, IntPtr[] upDataPtrs, IntPtr[] downDataPtrs, int gateGgmlType, long gateNe0, long gateNe1, long gateRawBytesEach, int upGgmlType, long upNe0, long upNe1, long upRawBytesEach, int downGgmlType, long downNe0, long downNe1, long downRawBytesEach, float[] routeWeights);
+
+        private static int TSGgml_MoEExpertsSwiGLUResidualF32(GgmlTensorView2D residual, GgmlTensorView2D input, int numExperts, IntPtr[] gateDataPtrs, IntPtr[] upDataPtrs, IntPtr[] downDataPtrs, int gateGgmlType, long gateNe0, long gateNe1, long gateRawBytesEach, int upGgmlType, long upNe0, long upNe1, long upRawBytesEach, int downGgmlType, long downNe0, long downNe1, long downRawBytesEach, float[] routeWeights, int useShared, IntPtr sharedGateData, IntPtr sharedUpData, IntPtr sharedDownData, int sharedGateGgmlType, long sharedGateNe0, long sharedGateNe1, long sharedGateRawBytes, int sharedUpGgmlType, long sharedUpNe0, long sharedUpNe1, long sharedUpRawBytes, int sharedDownGgmlType, long sharedDownNe0, long sharedDownNe1, long sharedDownRawBytes, float sharedScalar)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MoEExpertsSwiGLUResidualF32(residual, input, numExperts, gateDataPtrs, upDataPtrs, downDataPtrs, gateGgmlType, gateNe0, gateNe1, gateRawBytesEach, upGgmlType, upNe0, upNe1, upRawBytesEach, downGgmlType, downNe0, downNe1, downRawBytesEach, routeWeights, useShared, sharedGateData, sharedUpData, sharedDownData, sharedGateGgmlType, sharedGateNe0, sharedGateNe1, sharedGateRawBytes, sharedUpGgmlType, sharedUpNe0, sharedUpNe1, sharedUpRawBytes, sharedDownGgmlType, sharedDownNe0, sharedDownNe1, sharedDownRawBytes, sharedScalar);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MoEExpertsSwiGLUResidualF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_MoEExpertsSwiGLUResidualF32(GgmlTensorView2D residual, GgmlTensorView2D input, int numExperts, IntPtr[] gateDataPtrs, IntPtr[] upDataPtrs, IntPtr[] downDataPtrs, int gateGgmlType, long gateNe0, long gateNe1, long gateRawBytesEach, int upGgmlType, long upNe0, long upNe1, long upRawBytesEach, int downGgmlType, long downNe0, long downNe1, long downRawBytesEach, float[] routeWeights, int useShared, IntPtr sharedGateData, IntPtr sharedUpData, IntPtr sharedDownData, int sharedGateGgmlType, long sharedGateNe0, long sharedGateNe1, long sharedGateRawBytes, int sharedUpGgmlType, long sharedUpNe0, long sharedUpNe1, long sharedUpRawBytes, int sharedDownGgmlType, long sharedDownNe0, long sharedDownNe1, long sharedDownRawBytes, float sharedScalar);
+
+        private static int TSGgml_AddmmQuantBatchF32(GgmlTensorView2D result, GgmlTensorView2D m1, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2RawBytes, int batchCount, long[] weightOffsets, long[] weightNe1Arr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_AddmmQuantBatchF32(result, m1, m2Data, m2GgmlType, m2Ne0, m2RawBytes, batchCount, weightOffsets, weightNe1Arr);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AddmmQuantBatchF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_AddmmQuantBatchF32(GgmlTensorView2D result, GgmlTensorView2D m1, IntPtr m2Data, int m2GgmlType, long m2Ne0, long m2RawBytes, int batchCount, long[] weightOffsets, long[] weightNe1Arr);
+
+        private static int TSGgml_AddmmBatchF32(GgmlTensorView3D result, GgmlTensorView3D src, GgmlTensorView3D m1, GgmlTensorView3D m2, float beta, float alpha)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_AddmmBatchF32(result, src, m1, m2, beta, alpha);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AddmmBatchF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_AddmmBatchF32(GgmlTensorView3D result, GgmlTensorView3D src, GgmlTensorView3D m1, GgmlTensorView3D m2, float beta, float alpha);
+
+        private static int TSGgml_ReduceLastDimF32(int op, GgmlTensorView4D result, GgmlTensorView4D src)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_ReduceLastDimF32(op, result, src);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ReduceLastDimF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_ReduceLastDimF32(int op, GgmlTensorView4D result, GgmlTensorView4D src);
+
+        private static int TSGgml_IndexReductionF32(int op, GgmlTensorView4D result, GgmlTensorView4D src)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_IndexReductionF32(op, result, src);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_IndexReductionF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_IndexReductionF32(int op, GgmlTensorView4D result, GgmlTensorView4D src);
+
+        private static int TSGgml_SoftmaxF32(GgmlTensorView4D result, GgmlTensorView4D src)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SoftmaxF32(result, src);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SoftmaxF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_SoftmaxF32(GgmlTensorView4D result, GgmlTensorView4D src);
 
         // In-place softmax with causal+SWA mask and optional attention sinks.
         // Replaces the GptOss CPU softmax-with-sinks loop. See native side:
         // attention_softmax_with_sinks_f32_impl in ggml_ops_norm_attn.cpp.
-        [LibraryImport(DllName)]
+        private static int TSGgml_AttentionSoftmaxWithSinksF32(GgmlTensorView3D scores, IntPtr sinksData, // float* [num_heads], or IntPtr.Zero for no sinks
+         int numHeads, int seqLen, int kvLen, int maskStartPos, int slidingWindow, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_AttentionSoftmaxWithSinksF32(scores, sinksData, numHeads, seqLen, kvLen, maskStartPos, slidingWindow, scale);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AttentionSoftmaxWithSinksF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_AttentionSoftmaxWithSinksF32(
-            GgmlTensorView3D scores,
-            IntPtr sinksData,         // float* [num_heads], or IntPtr.Zero for no sinks
-            int numHeads,
-            int seqLen,
-            int kvLen,
-            int maskStartPos,
-            int slidingWindow,
-            float scale);
+        private static partial int Native_TSGgml_AttentionSoftmaxWithSinksF32(GgmlTensorView3D scores, IntPtr sinksData, // float* [num_heads], or IntPtr.Zero for no sinks
+         int numHeads, int seqLen, int kvLen, int maskStartPos, int slidingWindow, float scale);
 
         // Fused MoE FFN prefill (mul_mat_id-based).
         // Collapses an entire layer's MoE forward (gate + up + SwiGLU + down +
         // expert weighting + aggregation) into one GGML graph dispatch.
         // See native side: TSGgml_MoEFFNPrefillSwiGLUQuantF32 in ggml_ops_moe.cpp.
-        [LibraryImport(DllName)]
+        private static int TSGgml_MoEFFNPrefillSwiGLUQuantF32(IntPtr hiddenIn, IntPtr hiddenOut, int seqLen, int hiddenDim, int nFf, int numExperts, int nUsed, IntPtr selectedExperts, // int32* [seqLen, nUsed]
+         IntPtr routingWeights, // float* [seqLen, nUsed]
+         IntPtr gateData, int gateType, long gateNe0, long gateNe1, long gateTotalBytes, IntPtr upData, int upType, long upNe0, long upNe1, long upTotalBytes, IntPtr downData, int downType, long downNe0, long downNe1, long downTotalBytes, IntPtr gateBias, // optional float* [biasDim, numExperts] (biasDim = nFf or 2*nFf for fused gate_up); IntPtr.Zero to skip
+         IntPtr upBias, // optional, only valid when up_data != null
+         IntPtr downBias, // optional float* [hiddenDim, numExperts]
+         int activationType, // 0 = SwiGLU split, 1 = SwiGLU OAI, 2 = GEGLU split, 3 = ReLU-squared
+         float oaiAlpha, float oaiLimit, int runOnCpu)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MoEFFNPrefillSwiGLUQuantF32(hiddenIn, hiddenOut, seqLen, hiddenDim, nFf, numExperts, nUsed, selectedExperts, routingWeights, gateData, gateType, gateNe0, gateNe1, gateTotalBytes, upData, upType, upNe0, upNe1, upTotalBytes, downData, downType, downNe0, downNe1, downTotalBytes, gateBias, upBias, downBias, activationType, oaiAlpha, oaiLimit, runOnCpu);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MoEFFNPrefillSwiGLUQuantF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MoEFFNPrefillSwiGLUQuantF32(
-            IntPtr hiddenIn,
-            IntPtr hiddenOut,
-            int seqLen,
-            int hiddenDim,
-            int nFf,
-            int numExperts,
-            int nUsed,
-            IntPtr selectedExperts,    // int32* [seqLen, nUsed]
-            IntPtr routingWeights,     // float* [seqLen, nUsed]
-            IntPtr gateData, int gateType, long gateNe0, long gateNe1, long gateTotalBytes,
-            IntPtr upData,   int upType,   long upNe0,   long upNe1,   long upTotalBytes,
-            IntPtr downData, int downType, long downNe0, long downNe1, long downTotalBytes,
-            IntPtr gateBias,           // optional float* [biasDim, numExperts] (biasDim = nFf or 2*nFf for fused gate_up); IntPtr.Zero to skip
-            IntPtr upBias,             // optional, only valid when up_data != null
-            IntPtr downBias,           // optional float* [hiddenDim, numExperts]
-            int activationType,        // 0 = SwiGLU split, 1 = SwiGLU OAI, 2 = GEGLU split, 3 = ReLU-squared
-            float oaiAlpha,
-            float oaiLimit,
-            int runOnCpu);            // non-zero: run this layer on the host ggml CPU backend (MoE CPU offload)
+        private static partial int Native_TSGgml_MoEFFNPrefillSwiGLUQuantF32(IntPtr hiddenIn, IntPtr hiddenOut, int seqLen, int hiddenDim, int nFf, int numExperts, int nUsed, IntPtr selectedExperts, // int32* [seqLen, nUsed]
+         IntPtr routingWeights, // float* [seqLen, nUsed]
+         IntPtr gateData, int gateType, long gateNe0, long gateNe1, long gateTotalBytes, IntPtr upData, int upType, long upNe0, long upNe1, long upTotalBytes, IntPtr downData, int downType, long downNe0, long downNe1, long downTotalBytes, IntPtr gateBias, // optional float* [biasDim, numExperts] (biasDim = nFf or 2*nFf for fused gate_up); IntPtr.Zero to skip
+         IntPtr upBias, // optional, only valid when up_data != null
+         IntPtr downBias, // optional float* [hiddenDim, numExperts]
+         int activationType, // 0 = SwiGLU split, 1 = SwiGLU OAI, 2 = GEGLU split, 3 = ReLU-squared
+         float oaiAlpha, float oaiLimit, int runOnCpu); // non-zero: run this layer on the host ggml CPU backend (MoE CPU offload)
+                    // non-zero: run this layer on the host ggml CPU backend (MoE CPU offload)
 
         // Gemma 4 MoE GEGLU + post_norm + residual add fused kernel.
         // Computes residual_in_out += rms_norm(moe_ffn(hidden_in), eps) * post_norm_w
@@ -2115,95 +2064,59 @@ internal enum GgmlIndexReductionOp
         // TSGgml_MoEFFNPrefillSwiGLUQuantF32 ABI but adds the residual buffer,
         // the post_ffw_norm_2 weight, and an RMSNorm epsilon.
         // See native side: TSGgml_Gemma4MoEGEGLUResidualF32 in ggml_ops_moe.cpp.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4MoEGEGLUResidualF32(
-            IntPtr hiddenIn,
-            IntPtr residualInOut,      // float* [seqLen, hiddenDim] - dense FFN result; kernel adds normed MoE output to it in place
-            IntPtr postNormW,          // float* [hiddenDim] - post_ffw_norm_2.weight
-            float postNormEps,
-            int seqLen,
-            int hiddenDim,
-            int nFf,
-            int numExperts,
-            int nUsed,
-            IntPtr selectedExperts,
-            IntPtr routingWeights,
-            IntPtr gateData, int gateType, long gateNe0, long gateNe1, long gateTotalBytes,
-            IntPtr upData,   int upType,   long upNe0,   long upNe1,   long upTotalBytes,
-            IntPtr downData, int downType, long downNe0, long downNe1, long downTotalBytes,
-            IntPtr gateBias,
-            IntPtr upBias,
-            IntPtr downBias,
-            int activationType,
-            float oaiAlpha,
-            float oaiLimit,
-            int runOnCpu);
+        private static int TSGgml_Gemma4MoEGEGLUResidualF32(IntPtr hiddenIn, IntPtr residualInOut, // float* [seqLen, hiddenDim] - dense FFN result; kernel adds normed MoE output to it in place
+         IntPtr postNormW, // float* [hiddenDim] - post_ffw_norm_2.weight
+         float postNormEps, int seqLen, int hiddenDim, int nFf, int numExperts, int nUsed, IntPtr selectedExperts, IntPtr routingWeights, IntPtr gateData, int gateType, long gateNe0, long gateNe1, long gateTotalBytes, IntPtr upData, int upType, long upNe0, long upNe1, long upTotalBytes, IntPtr downData, int downType, long downNe0, long downNe1, long downTotalBytes, IntPtr gateBias, IntPtr upBias, IntPtr downBias, int activationType, float oaiAlpha, float oaiLimit, int runOnCpu)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4MoEGEGLUResidualF32(hiddenIn, residualInOut, postNormW, postNormEps, seqLen, hiddenDim, nFf, numExperts, nUsed, selectedExperts, routingWeights, gateData, gateType, gateNe0, gateNe1, gateTotalBytes, upData, upType, upNe0, upNe1, upTotalBytes, downData, downType, downNe0, downNe1, downTotalBytes, gateBias, upBias, downBias, activationType, oaiAlpha, oaiLimit, runOnCpu);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoEGEGLUResidualF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_ScaledDotProductAttentionF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D query,
-            GgmlTensorView4D key,
-            GgmlTensorView4D value,
-            GgmlTensorView4D mask,
-            int hasMask,
-            float scale);
+        private static partial int Native_TSGgml_Gemma4MoEGEGLUResidualF32(IntPtr hiddenIn, IntPtr residualInOut, // float* [seqLen, hiddenDim] - dense FFN result; kernel adds normed MoE output to it in place
+         IntPtr postNormW, // float* [hiddenDim] - post_ffw_norm_2.weight
+         float postNormEps, int seqLen, int hiddenDim, int nFf, int numExperts, int nUsed, IntPtr selectedExperts, IntPtr routingWeights, IntPtr gateData, int gateType, long gateNe0, long gateNe1, long gateTotalBytes, IntPtr upData, int upType, long upNe0, long upNe1, long upTotalBytes, IntPtr downData, int downType, long downNe0, long downNe1, long downTotalBytes, IntPtr gateBias, IntPtr upBias, IntPtr downBias, int activationType, float oaiAlpha, float oaiLimit, int runOnCpu);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_SoftmaxGradF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D adj,
-            GgmlTensorView4D val,
-            int addGrad);
+        private static int TSGgml_ScaledDotProductAttentionF32(GgmlTensorView4D result, GgmlTensorView4D query, GgmlTensorView4D key, GgmlTensorView4D value, GgmlTensorView4D mask, int hasMask, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_ScaledDotProductAttentionF32(result, query, key, value, mask, hasMask, scale);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ScaledDotProductAttentionF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_AdamF32(
-            GgmlContiguousTensor weight,
-            GgmlContiguousTensor gradient,
-            GgmlContiguousTensor v,
-            GgmlContiguousTensor m,
-            float gradNormFactor,
-            float stepSize,
-            float clipValue,
-            float regc,
-            float decayRateV,
-            float decayRateM,
-            int iter,
-            float eps);
+        private static partial int Native_TSGgml_ScaledDotProductAttentionF32(GgmlTensorView4D result, GgmlTensorView4D query, GgmlTensorView4D key, GgmlTensorView4D value, GgmlTensorView4D mask, int hasMask, float scale);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_SoftmaxGradF32(GgmlTensorView4D result, GgmlTensorView4D adj, GgmlTensorView4D val, int addGrad)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SoftmaxGradF32(result, adj, val, addGrad);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SoftmaxGradF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4LayerPrefill(
-            IntPtr hiddenData, int hiddenSize, int seqLen,
-            IntPtr attnNormW,
-            IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qNormW, IntPtr kNormW,
-            IntPtr oW, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr postAttnNormW,
-            IntPtr ffnNormW,
-            IntPtr guW, int guType, long guNe0, long guNe1, long guBytes,
-            IntPtr downW, int downType, long downNe0, long downNe1, long downBytes,
-            IntPtr postFfnNormW,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int kvHeads, int headDim,
-            int cacheSize, int startPos,
-            int isLocal, int slidingWindow,
-            float ropeBase, int ropeDims,
-            IntPtr ropeFreqFactors, int freqFactorsLen,
-            float layerScalar, float eps,
-            IntPtr swaPrevK, IntPtr swaPrevV, int prevWindowLen,
-            IntPtr pleInputData, int pleDim,
-            IntPtr pleGateW, int pleGateType, long pleGateNe0, long pleGateNe1, long pleGateBytes,
-            IntPtr pleProjW, int pleProjType, long pleProjNe0, long pleProjNe1, long pleProjBytes,
-            IntPtr plePostNormW,
-            IntPtr freshKOut, IntPtr freshVOut,
-            int isShared,
-            IntPtr donorK, IntPtr donorV, int donorKvLen,
-            int kvCacheType);
+        private static partial int Native_TSGgml_SoftmaxGradF32(GgmlTensorView4D result, GgmlTensorView4D adj, GgmlTensorView4D val, int addGrad);
+
+        private static int TSGgml_AdamF32(GgmlContiguousTensor weight, GgmlContiguousTensor gradient, GgmlContiguousTensor v, GgmlContiguousTensor m, float gradNormFactor, float stepSize, float clipValue, float regc, float decayRateV, float decayRateM, int iter, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_AdamF32(weight, gradient, v, m, gradNormFactor, stepSize, clipValue, regc, decayRateV, decayRateM, iter, eps);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AdamF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_AdamF32(GgmlContiguousTensor weight, GgmlContiguousTensor gradient, GgmlContiguousTensor v, GgmlContiguousTensor m, float gradNormFactor, float stepSize, float clipValue, float regc, float decayRateV, float decayRateM, int iter, float eps);
+
+        private static int TSGgml_Gemma4LayerPrefill(IntPtr hiddenData, int hiddenSize, int seqLen, IntPtr attnNormW, IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qNormW, IntPtr kNormW, IntPtr oW, int oType, long oNe0, long oNe1, long oBytes, IntPtr postAttnNormW, IntPtr ffnNormW, IntPtr guW, int guType, long guNe0, long guNe1, long guBytes, IntPtr downW, int downType, long downNe0, long downNe1, long downBytes, IntPtr postFfnNormW, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int kvHeads, int headDim, int cacheSize, int startPos, int isLocal, int slidingWindow, float ropeBase, int ropeDims, IntPtr ropeFreqFactors, int freqFactorsLen, float layerScalar, float eps, IntPtr swaPrevK, IntPtr swaPrevV, int prevWindowLen, IntPtr pleInputData, int pleDim, IntPtr pleGateW, int pleGateType, long pleGateNe0, long pleGateNe1, long pleGateBytes, IntPtr pleProjW, int pleProjType, long pleProjNe0, long pleProjNe1, long pleProjBytes, IntPtr plePostNormW, IntPtr freshKOut, IntPtr freshVOut, int isShared, IntPtr donorK, IntPtr donorV, int donorKvLen, int kvCacheType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4LayerPrefill(hiddenData, hiddenSize, seqLen, attnNormW, qkvW, qkvType, qkvNe0, qkvNe1, qkvBytes, qNormW, kNormW, oW, oType, oNe0, oNe1, oBytes, postAttnNormW, ffnNormW, guW, guType, guNe0, guNe1, guBytes, downW, downType, downNe0, downNe1, downBytes, postFfnNormW, kCacheData, vCacheData, numHeads, kvHeads, headDim, cacheSize, startPos, isLocal, slidingWindow, ropeBase, ropeDims, ropeFreqFactors, freqFactorsLen, layerScalar, eps, swaPrevK, swaPrevV, prevWindowLen, pleInputData, pleDim, pleGateW, pleGateType, pleGateNe0, pleGateNe1, pleGateBytes, pleProjW, pleProjType, pleProjNe0, pleProjNe1, pleProjBytes, plePostNormW, freshKOut, freshVOut, isShared, donorK, donorV, donorKvLen, kvCacheType);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4LayerPrefill")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Gemma4LayerPrefill(IntPtr hiddenData, int hiddenSize, int seqLen, IntPtr attnNormW, IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qNormW, IntPtr kNormW, IntPtr oW, int oType, long oNe0, long oNe1, long oBytes, IntPtr postAttnNormW, IntPtr ffnNormW, IntPtr guW, int guType, long guNe0, long guNe1, long guBytes, IntPtr downW, int downType, long downNe0, long downNe1, long downBytes, IntPtr postFfnNormW, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int kvHeads, int headDim, int cacheSize, int startPos, int isLocal, int slidingWindow, float ropeBase, int ropeDims, IntPtr ropeFreqFactors, int freqFactorsLen, float layerScalar, float eps, IntPtr swaPrevK, IntPtr swaPrevV, int prevWindowLen, IntPtr pleInputData, int pleDim, IntPtr pleGateW, int pleGateType, long pleGateNe0, long pleGateNe1, long pleGateBytes, IntPtr pleProjW, int pleProjType, long pleProjNe0, long pleProjNe1, long pleProjBytes, IntPtr plePostNormW, IntPtr freshKOut, IntPtr freshVOut, int isShared, IntPtr donorK, IntPtr donorV, int donorKvLen, int kvCacheType);
 
         public static void Gemma4LayerPrefill(
             IntPtr hiddenData, int hiddenSize, int seqLen,
@@ -2262,224 +2175,196 @@ internal enum GgmlIndexReductionOp
                 kvCacheType), "gemma4_layer_prefill");
         }
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedPrefillAttentionF32(
-            IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData,
-            int numHeads, int numKvHeads, int headDim,
-            int seqLen, int kvLen,
-            int maskStartPos, int slidingWindow,
-            float scale, int inputFormat);
+        private static int TSGgml_FusedPrefillAttentionF32(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen, int maskStartPos, int slidingWindow, float scale, int inputFormat)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedPrefillAttentionF32(qData, kData, vData, outData, numHeads, numKvHeads, headDim, seqLen, kvLen, maskStartPos, slidingWindow, scale, inputFormat);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedPrefillAttentionF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DiffusionPrefillAttentionF32(
-            IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData,
-            int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen,
-            int maskStartPos, int slidingWindow, float scale);
+        private static partial int Native_TSGgml_FusedPrefillAttentionF32(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen, int maskStartPos, int slidingWindow, float scale, int inputFormat);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedPrefillAttentionF16KV(
-            IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData,
-            int numHeads, int numKvHeads, int headDim,
-            int seqLen, int kvLen, int kvCacheLen,
-            int maskStartPos, int slidingWindow,
-            float scale);
+        private static int TSGgml_DiffusionPrefillAttentionF32(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen, int maskStartPos, int slidingWindow, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DiffusionPrefillAttentionF32(qData, kData, vData, outData, numHeads, numKvHeads, headDim, seqLen, kvLen, maskStartPos, slidingWindow, scale);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DiffusionPrefillAttentionF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FlashAttnDecodeF32(
-            IntPtr qData, IntPtr kData, IntPtr vData,
-            IntPtr kCacheData, IntPtr vCacheData,
-            IntPtr outData,
-            int numHeads, int numKvHeads, int headDim,
-            int maxSeqLen, int position,
-            float scale, int kvCacheType);
+        private static partial int Native_TSGgml_DiffusionPrefillAttentionF32(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen, int maskStartPos, int slidingWindow, float scale);
+
+        private static int TSGgml_FusedPrefillAttentionF16KV(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen, int kvCacheLen, int maskStartPos, int slidingWindow, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedPrefillAttentionF16KV(qData, kData, vData, outData, numHeads, numKvHeads, headDim, seqLen, kvLen, kvCacheLen, maskStartPos, slidingWindow, scale);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedPrefillAttentionF16KV")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_FusedPrefillAttentionF16KV(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int seqLen, int kvLen, int kvCacheLen, int maskStartPos, int slidingWindow, float scale);
+
+        private static int TSGgml_FlashAttnDecodeF32(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr kCacheData, IntPtr vCacheData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int maxSeqLen, int position, float scale, int kvCacheType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FlashAttnDecodeF32(qData, kData, vData, kCacheData, vCacheData, outData, numHeads, numKvHeads, headDim, maxSeqLen, position, scale, kvCacheType);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FlashAttnDecodeF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_FlashAttnDecodeF32(IntPtr qData, IntPtr kData, IntPtr vData, IntPtr kCacheData, IntPtr vCacheData, IntPtr outData, int numHeads, int numKvHeads, int headDim, int maxSeqLen, int position, float scale, int kvCacheType);
 
         // Device-resident paged K/V pool. The pool tensors live on the backend
         // for the model's lifetime; only this step's new rows (scatter) and the
         // per-sequence row-index vectors (attention) cross the bus.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_PagedKvPoolCreate(
-            int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim);
+        private static IntPtr TSGgml_PagedKvPoolCreate(int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("paged-kv-pool", Native_TSGgml_PagedKvPoolCreate(numLayers, numBlocks, blockSize, numKvHeads, headDim));
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolCreate")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_PagedKvPoolFree(IntPtr handle);
+        private static partial IntPtr Native_TSGgml_PagedKvPoolCreate(int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial long TSGgml_PagedKvPoolBytes(IntPtr handle);
+        private static void TSGgml_PagedKvPoolFree(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("paged-kv-pool", handle);
+            Native_TSGgml_PagedKvPoolFree(handle);
+            resource.Complete();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolFree")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedKvPoolGrow(IntPtr handle, int newNumBlocks);
+        private static partial void Native_TSGgml_PagedKvPoolFree(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedKvPoolScatter(
-            IntPtr handle, int layer, IntPtr kData, IntPtr vData,
-            IntPtr slotMapping, int numTokens);
+        private static long TSGgml_PagedKvPoolBytes(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("paged-kv-pool", handle);
+            return Native_TSGgml_PagedKvPoolBytes(handle);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolBytes")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedKvPoolAttention(
-            IntPtr handle, int layer, IntPtr qData, IntPtr outData,
-            IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions,
-            IntPtr blockTableFlat, IntPtr blockTableOffsets,
-            int numSeqs, int numTokens, int numHeads, int slidingWindow, float scale);
+        private static partial long Native_TSGgml_PagedKvPoolBytes(IntPtr handle);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedAttentionForward(
-            IntPtr qData,
-            IntPtr pagedKData,
-            IntPtr pagedVData,
-            IntPtr outData,
-            IntPtr queryStartLoc,
-            IntPtr seqLens,
-            IntPtr positions,
-            IntPtr blockTableFlat,
-            IntPtr blockTableOffsets,
-            int numSeqs,
-            int numTokens,
-            int numHeads,
-            int numKvHeads,
-            int headDim,
-            int blockSize,
-            int slidingWindow,
-            float scale);
+        private static int TSGgml_PagedKvPoolGrow(IntPtr handle, int newNumBlocks)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("paged-kv-pool", handle);
+            return Native_TSGgml_PagedKvPoolGrow(handle, newNumBlocks);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolGrow")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedAttentionForwardWithSinks(
-            IntPtr qData,
-            IntPtr pagedKData,
-            IntPtr pagedVData,
-            IntPtr outData,
-            IntPtr queryStartLoc,
-            IntPtr seqLens,
-            IntPtr positions,
-            IntPtr blockTableFlat,
-            IntPtr blockTableOffsets,
-            int numSeqs,
-            int numTokens,
-            int numHeads,
-            int numKvHeads,
-            int headDim,
-            int blockSize,
-            int slidingWindow,
-            float scale,
-            IntPtr sinksData);          // [numHeads] F32 or IntPtr.Zero
+        private static partial int Native_TSGgml_PagedKvPoolGrow(IntPtr handle, int newNumBlocks);
+
+        private static int TSGgml_PagedKvPoolScatter(IntPtr handle, int layer, IntPtr kData, IntPtr vData, IntPtr slotMapping, int numTokens)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("paged-kv-pool", handle);
+            return Native_TSGgml_PagedKvPoolScatter(handle, layer, kData, vData, slotMapping, numTokens);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolScatter")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_PagedKvPoolScatter(IntPtr handle, int layer, IntPtr kData, IntPtr vData, IntPtr slotMapping, int numTokens);
+
+        private static int TSGgml_PagedKvPoolAttention(IntPtr handle, int layer, IntPtr qData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int slidingWindow, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("paged-kv-pool", handle);
+            return Native_TSGgml_PagedKvPoolAttention(handle, layer, qData, outData, queryStartLoc, seqLens, positions, blockTableFlat, blockTableOffsets, numSeqs, numTokens, numHeads, slidingWindow, scale);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolAttention")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_PagedKvPoolAttention(IntPtr handle, int layer, IntPtr qData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int slidingWindow, float scale);
+
+        private static int TSGgml_PagedAttentionForward(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_PagedAttentionForward(qData, pagedKData, pagedVData, outData, queryStartLoc, seqLens, positions, blockTableFlat, blockTableOffsets, numSeqs, numTokens, numHeads, numKvHeads, headDim, blockSize, slidingWindow, scale);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedAttentionForward")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_PagedAttentionForward(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale);
+
+        private static int TSGgml_PagedAttentionForwardWithSinks(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale, IntPtr sinksData)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_PagedAttentionForwardWithSinks(qData, pagedKData, pagedVData, outData, queryStartLoc, seqLens, positions, blockTableFlat, blockTableOffsets, numSeqs, numTokens, numHeads, numKvHeads, headDim, blockSize, slidingWindow, scale, sinksData);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedAttentionForwardWithSinks")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_PagedAttentionForwardWithSinks(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale, IntPtr sinksData); // [numHeads] F32 or IntPtr.Zero
+                  // [numHeads] F32 or IntPtr.Zero
 
         // GPU-resident variant: qData and outData point to existing backend
         // (Tensor storage) buffers, so the kernel can zero-copy bind them
         // instead of round-tripping through host arrays + ggml_backend_synchronize.
         // Eliminates the per-layer queue drain that GetElementsAsFloat would
         // otherwise force.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedAttentionForwardDevice(
-            IntPtr qData,
-            IntPtr pagedKData,
-            IntPtr pagedVData,
-            IntPtr outData,
-            IntPtr queryStartLoc,
-            IntPtr seqLens,
-            IntPtr positions,
-            IntPtr blockTableFlat,
-            IntPtr blockTableOffsets,
-            int numSeqs,
-            int numTokens,
-            int numHeads,
-            int numKvHeads,
-            int headDim,
-            int blockSize,
-            int slidingWindow,
-            float scale);
+        private static int TSGgml_PagedAttentionForwardDevice(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_PagedAttentionForwardDevice(qData, pagedKData, pagedVData, outData, queryStartLoc, seqLens, positions, blockTableFlat, blockTableOffsets, numSeqs, numTokens, numHeads, numKvHeads, headDim, blockSize, slidingWindow, scale);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedAttentionForwardDevice")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PagedAttentionForwardDeviceWithSinks(
-            IntPtr qData,
-            IntPtr pagedKData,
-            IntPtr pagedVData,
-            IntPtr outData,
-            IntPtr queryStartLoc,
-            IntPtr seqLens,
-            IntPtr positions,
-            IntPtr blockTableFlat,
-            IntPtr blockTableOffsets,
-            int numSeqs,
-            int numTokens,
-            int numHeads,
-            int numKvHeads,
-            int headDim,
-            int blockSize,
-            int slidingWindow,
-            float scale,
-            IntPtr sinksData);
+        private static partial int Native_TSGgml_PagedAttentionForwardDevice(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35AttentionLayerDecode(
-            IntPtr residualData, int hiddenSize,
-            IntPtr attnNormData,
-            IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qNormData, IntPtr kNormData, int headDim,
-            IntPtr oData, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int numKvHeads,
-            int maxSeqLen, int position,
-            float eps, float ropeBase, float ropeFreqScale,
-            int ropeNDims, int ropeMode, int kvCacheType);
+        private static int TSGgml_PagedAttentionForwardDeviceWithSinks(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale, IntPtr sinksData)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_PagedAttentionForwardDeviceWithSinks(qData, pagedKData, pagedVData, outData, queryStartLoc, seqLens, positions, blockTableFlat, blockTableOffsets, numSeqs, numTokens, numHeads, numKvHeads, headDim, blockSize, slidingWindow, scale, sinksData);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PagedAttentionForwardDeviceWithSinks")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssAttentionLayerPrefill(
-            IntPtr hiddenData, int hiddenSize, int seqLen,
-            IntPtr attnNormW,
-            IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qkvB,
-            int isQkvFused,
-            IntPtr kW, int kType, long kNe0, long kNe1, long kBytes,
-            IntPtr kB,
-            IntPtr vW, int vType, long vNe0, long vNe1, long vBytes,
-            IntPtr vB,
-            IntPtr oW, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr oB,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int kvHeads, int headDim,
-            int cacheSize, int startPos,
-            int isSwa, int slidingWindow,
-            IntPtr sinksData,
-            float ropeBase, float ropeFreqScale, int ropeDims,
-            int originalContextLength,
-            int kvCacheType,
-            float eps);
+        private static partial int Native_TSGgml_PagedAttentionForwardDeviceWithSinks(IntPtr qData, IntPtr pagedKData, IntPtr pagedVData, IntPtr outData, IntPtr queryStartLoc, IntPtr seqLens, IntPtr positions, IntPtr blockTableFlat, IntPtr blockTableOffsets, int numSeqs, int numTokens, int numHeads, int numKvHeads, int headDim, int blockSize, int slidingWindow, float scale, IntPtr sinksData);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35AttentionLayerPrefill(
-            IntPtr hiddenData, int hiddenSize, int seqLen,
-            IntPtr attnNormW,
-            IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes,
-            IntPtr qNormW, IntPtr kNormW,
-            IntPtr oW, int oType, long oNe0, long oNe1, long oBytes,
-            IntPtr kCacheData, IntPtr vCacheData,
-            int numHeads, int kvHeads, int headDim,
-            int cacheSize, int startPos,
-            float ropeBase, float ropeFreqScale, int ropeDims,
-            int ropeMode,
-            int kvCacheType,
-            float eps,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static int TSGgml_Qwen35AttentionLayerDecode(IntPtr residualData, int hiddenSize, IntPtr attnNormData, IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qNormData, IntPtr kNormData, int headDim, IntPtr oData, int oType, long oNe0, long oNe1, long oBytes, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int numKvHeads, int maxSeqLen, int position, float eps, float ropeBase, float ropeFreqScale, int ropeNDims, int ropeMode, int kvCacheType)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35AttentionLayerDecode(residualData, hiddenSize, attnNormData, qkvData, qkvType, qkvNe0, qkvNe1, qkvBytes, qNormData, kNormData, headDim, oData, oType, oNe0, oNe1, oBytes, kCacheData, vCacheData, numHeads, numKvHeads, maxSeqLen, position, eps, ropeBase, ropeFreqScale, ropeNDims, ropeMode, kvCacheType);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35AttentionLayerDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ReleaseAttentionTpGraphs();
+        private static partial int Native_TSGgml_Qwen35AttentionLayerDecode(IntPtr residualData, int hiddenSize, IntPtr attnNormData, IntPtr qkvData, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qNormData, IntPtr kNormData, int headDim, IntPtr oData, int oType, long oNe0, long oNe1, long oBytes, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int numKvHeads, int maxSeqLen, int position, float eps, float ropeBase, float ropeFreqScale, int ropeNDims, int ropeMode, int kvCacheType);
+
+        private static int TSGgml_GptOssAttentionLayerPrefill(IntPtr hiddenData, int hiddenSize, int seqLen, IntPtr attnNormW, IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qkvB, int isQkvFused, IntPtr kW, int kType, long kNe0, long kNe1, long kBytes, IntPtr kB, IntPtr vW, int vType, long vNe0, long vNe1, long vBytes, IntPtr vB, IntPtr oW, int oType, long oNe0, long oNe1, long oBytes, IntPtr oB, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int kvHeads, int headDim, int cacheSize, int startPos, int isSwa, int slidingWindow, IntPtr sinksData, float ropeBase, float ropeFreqScale, int ropeDims, int originalContextLength, int kvCacheType, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssAttentionLayerPrefill(hiddenData, hiddenSize, seqLen, attnNormW, qkvW, qkvType, qkvNe0, qkvNe1, qkvBytes, qkvB, isQkvFused, kW, kType, kNe0, kNe1, kBytes, kB, vW, vType, vNe0, vNe1, vBytes, vB, oW, oType, oNe0, oNe1, oBytes, oB, kCacheData, vCacheData, numHeads, kvHeads, headDim, cacheSize, startPos, isSwa, slidingWindow, sinksData, ropeBase, ropeFreqScale, ropeDims, originalContextLength, kvCacheType, eps);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssAttentionLayerPrefill")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_GptOssAttentionLayerPrefill(IntPtr hiddenData, int hiddenSize, int seqLen, IntPtr attnNormW, IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qkvB, int isQkvFused, IntPtr kW, int kType, long kNe0, long kNe1, long kBytes, IntPtr kB, IntPtr vW, int vType, long vNe0, long vNe1, long vBytes, IntPtr vB, IntPtr oW, int oType, long oNe0, long oNe1, long oBytes, IntPtr oB, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int kvHeads, int headDim, int cacheSize, int startPos, int isSwa, int slidingWindow, IntPtr sinksData, float ropeBase, float ropeFreqScale, int ropeDims, int originalContextLength, int kvCacheType, float eps);
+
+        private static int TSGgml_Qwen35AttentionLayerPrefill(IntPtr hiddenData, int hiddenSize, int seqLen, IntPtr attnNormW, IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qNormW, IntPtr kNormW, IntPtr oW, int oType, long oNe0, long oNe1, long oBytes, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int kvHeads, int headDim, int cacheSize, int startPos, float ropeBase, float ropeFreqScale, int ropeDims, int ropeMode, int kvCacheType, float eps, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35AttentionLayerPrefill(hiddenData, hiddenSize, seqLen, attnNormW, qkvW, qkvType, qkvNe0, qkvNe1, qkvBytes, qNormW, kNormW, oW, oType, oNe0, oNe1, oBytes, kCacheData, vCacheData, numHeads, kvHeads, headDim, cacheSize, startPos, ropeBase, ropeFreqScale, ropeDims, ropeMode, kvCacheType, eps, tpDegree, tpPlanOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35AttentionLayerPrefill")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Qwen35AttentionLayerPrefill(IntPtr hiddenData, int hiddenSize, int seqLen, IntPtr attnNormW, IntPtr qkvW, int qkvType, long qkvNe0, long qkvNe1, long qkvBytes, IntPtr qNormW, IntPtr kNormW, IntPtr oW, int oType, long oNe0, long oNe1, long oBytes, IntPtr kCacheData, IntPtr vCacheData, int numHeads, int kvHeads, int headDim, int cacheSize, int startPos, float ropeBase, float ropeFreqScale, int ropeDims, int ropeMode, int kvCacheType, float eps, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+
+        private static void TSGgml_Qwen35ReleaseAttentionTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ReleaseAttentionTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ReleaseAttentionTpGraphs")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Qwen35ReleaseAttentionTpGraphs();
 
         public static void Qwen35ReleaseAttentionTpGraphs()
         {
@@ -2562,103 +2447,54 @@ internal enum GgmlIndexReductionOp
                 eps), "gpt_oss_attention_layer_prefill");
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Gemma4ModelDecode(IntPtr hiddenData, int hiddenSize, int numLayers, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, int[] kvSourceArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int position, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int pleTokenId, IntPtr pleModelProjData, int pleModelProjType, long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes, IntPtr pleModelProjNormData, int tpDegree, [In, Out] IntPtr[] tpPlanOut, IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4ModelDecode(hiddenData, hiddenSize, numLayers, attnNormArr, qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr, ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr, vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr, kvSourceArr, ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, numHeads, position, eps, slidingWindow, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr, pleData, pleDim, pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr, pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr, plePostNormArr, kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap, pleTokenEmbdData, pleTokenEmbdType, pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes, pleTokenId, pleModelProjData, pleModelProjType, pleModelProjNe0, pleModelProjNe1, pleModelProjBytes, pleModelProjNormData, tpDegree, tpPlanOut, gateArr, gateTypeArr, gateNe0Arr, gateNe1Arr, gateBytesArr, upArr, upTypeArr, upNe0Arr, upNe1Arr, upBytesArr);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ModelDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelDecode(
-            IntPtr hiddenData, int hiddenSize, int numLayers,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            int[] kvSourceArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int position,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap,
-            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
-            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
-            int pleTokenId,
-            IntPtr pleModelProjData, int pleModelProjType,
-            long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
-            IntPtr pleModelProjNormData,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut,
-            IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr,
-            IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr);
+        private static partial int Native_TSGgml_Gemma4ModelDecode(IntPtr hiddenData, int hiddenSize, int numLayers, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, int[] kvSourceArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int position, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int pleTokenId, IntPtr pleModelProjData, int pleModelProjType, long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes, IntPtr pleModelProjNormData, int tpDegree, [In, Out] IntPtr[] tpPlanOut, IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr);
 
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DFlashInject(
-            float[] featRows, int featureSize, int nRows,
-            long[] ringRowsIdx, int[] positions,
-            int numLayers, int hiddenSize, int headDim, int numKvHeads, int ringRows,
-            float eps, float ropeBase, float ropeFreqScale,
-            IntPtr fcData, int fcType, long fcNe0, long fcNe1, long fcBytes,
-            IntPtr encNormData,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr[] kNormArr,
-            IntPtr[] ringKArr, IntPtr[] ringVArr,
-            int ringDtype);
+        private static int TSGgml_DFlashInject(float[] featRows, int featureSize, int nRows, long[] ringRowsIdx, int[] positions, int numLayers, int hiddenSize, int headDim, int numKvHeads, int ringRows, float eps, float ropeBase, float ropeFreqScale, IntPtr fcData, int fcType, long fcNe0, long fcNe1, long fcBytes, IntPtr encNormData, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr[] kNormArr, IntPtr[] ringKArr, IntPtr[] ringVArr, int ringDtype)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DFlashInject(featRows, featureSize, nRows, ringRowsIdx, positions, numLayers, hiddenSize, headDim, numKvHeads, ringRows, eps, ropeBase, ropeFreqScale, fcData, fcType, fcNe0, fcNe1, fcBytes, encNormData, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, kNormArr, ringKArr, ringVArr, ringDtype);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DFlashInject")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DFlashDraftBlock(
-            int[] blockIds, int blockLen, int[] positions,
-            int numLayers, int hiddenSize, int headDim, int numHeads, int numKvHeads, int ringRows,
-            float eps, float ropeBase, float ropeFreqScale, float kqScale,
-            int[] ringSlotPos, int slidingWindow,
-            IntPtr[] attnNormArr,
-            IntPtr[] qArr, int[] qTypeArr, long[] qNe0Arr, long[] qNe1Arr, long[] qBytesArr,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            IntPtr[] ffnNormArr,
-            IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr,
-            IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr,
-            IntPtr[] downArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            IntPtr[] ringKArr, IntPtr[] ringVArr, int ringDtype,
-            IntPtr outNormData,
-            IntPtr tokEmbdData, int tokEmbdType, long tokEmbdNe0, long tokEmbdNe1, long tokEmbdBytes,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            int vocabSize, int[] idsOut, float[] confOut,
-            // DFlash2 grouped dynamic convolution. convTaps == 0 disables it and
-            // every array below may be null (a first-generation drafter).
-            int convTaps, int convGroupSize, int convNumGroups,
-            IntPtr[] attnConvBaseArr,
-            IntPtr[] attnConvProjArr, int[] attnConvProjTypeArr,
-            long[] attnConvProjNe0Arr, long[] attnConvProjNe1Arr, long[] attnConvProjBytesArr,
-            IntPtr[] ffnConvBaseArr,
-            IntPtr[] ffnConvProjArr, int[] ffnConvProjTypeArr,
-            long[] ffnConvProjNe0Arr, long[] ffnConvProjNe1Arr, long[] ffnConvProjBytesArr,
-            // DFlash2 candidate selector. selRank == 0 disables it; when it is on,
-            // idsOut/confOut are left untouched and the lattice comes back instead.
-            int selRank, int selTopK, float selLogitScale, float selLogitSoftcap,
-            IntPtr selHiddenData, int selHiddenType, long selHiddenNe0, long selHiddenNe1, long selHiddenBytes,
-            IntPtr selPredData, int selPredType, long selPredNe0, long selPredNe1, long selPredBytes,
-            IntPtr selSuccData, int selSuccType, long selSuccNe0, long selSuccNe1, long selSuccBytes,
-            float[] selScoresOut, int[] selCandOut);
+        private static partial int Native_TSGgml_DFlashInject(float[] featRows, int featureSize, int nRows, long[] ringRowsIdx, int[] positions, int numLayers, int hiddenSize, int headDim, int numKvHeads, int ringRows, float eps, float ropeBase, float ropeFreqScale, IntPtr fcData, int fcType, long fcNe0, long fcNe1, long fcBytes, IntPtr encNormData, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr[] kNormArr, IntPtr[] ringKArr, IntPtr[] ringVArr, int ringDtype);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_DFlashDraftBlock(int[] blockIds, int blockLen, int[] positions, int numLayers, int hiddenSize, int headDim, int numHeads, int numKvHeads, int ringRows, float eps, float ropeBase, float ropeFreqScale, float kqScale, int[] ringSlotPos, int slidingWindow, IntPtr[] attnNormArr, IntPtr[] qArr, int[] qTypeArr, long[] qNe0Arr, long[] qNe1Arr, long[] qBytesArr, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, IntPtr[] ffnNormArr, IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr, IntPtr[] downArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, IntPtr[] ringKArr, IntPtr[] ringVArr, int ringDtype, IntPtr outNormData, IntPtr tokEmbdData, int tokEmbdType, long tokEmbdNe0, long tokEmbdNe1, long tokEmbdBytes, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, int vocabSize, int[] idsOut, float[] confOut, // DFlash2 grouped dynamic convolution. convTaps == 0 disables it and
+        // every array below may be null (a first-generation drafter).
+        int convTaps, int convGroupSize, int convNumGroups, IntPtr[] attnConvBaseArr, IntPtr[] attnConvProjArr, int[] attnConvProjTypeArr, long[] attnConvProjNe0Arr, long[] attnConvProjNe1Arr, long[] attnConvProjBytesArr, IntPtr[] ffnConvBaseArr, IntPtr[] ffnConvProjArr, int[] ffnConvProjTypeArr, long[] ffnConvProjNe0Arr, long[] ffnConvProjNe1Arr, long[] ffnConvProjBytesArr, // DFlash2 candidate selector. selRank == 0 disables it; when it is on,
+        // idsOut/confOut are left untouched and the lattice comes back instead.
+        int selRank, int selTopK, float selLogitScale, float selLogitSoftcap, IntPtr selHiddenData, int selHiddenType, long selHiddenNe0, long selHiddenNe1, long selHiddenBytes, IntPtr selPredData, int selPredType, long selPredNe0, long selPredNe1, long selPredBytes, IntPtr selSuccData, int selSuccType, long selSuccNe0, long selSuccNe1, long selSuccBytes, float[] selScoresOut, int[] selCandOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DFlashDraftBlock(blockIds, blockLen, positions, numLayers, hiddenSize, headDim, numHeads, numKvHeads, ringRows, eps, ropeBase, ropeFreqScale, kqScale, ringSlotPos, slidingWindow, attnNormArr, qArr, qTypeArr, qNe0Arr, qNe1Arr, qBytesArr, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, qNormArr, kNormArr, oArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, ffnNormArr, gateArr, gateTypeArr, gateNe0Arr, gateNe1Arr, gateBytesArr, upArr, upTypeArr, upNe0Arr, upNe1Arr, upBytesArr, downArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, ringKArr, ringVArr, ringDtype, outNormData, tokEmbdData, tokEmbdType, tokEmbdNe0, tokEmbdNe1, tokEmbdBytes, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, vocabSize, idsOut, confOut, convTaps, convGroupSize, convNumGroups, attnConvBaseArr, attnConvProjArr, attnConvProjTypeArr, attnConvProjNe0Arr, attnConvProjNe1Arr, attnConvProjBytesArr, ffnConvBaseArr, ffnConvProjArr, ffnConvProjTypeArr, ffnConvProjNe0Arr, ffnConvProjNe1Arr, ffnConvProjBytesArr, selRank, selTopK, selLogitScale, selLogitSoftcap, selHiddenData, selHiddenType, selHiddenNe0, selHiddenNe1, selHiddenBytes, selPredData, selPredType, selPredNe0, selPredNe1, selPredBytes, selSuccData, selSuccType, selSuccNe0, selSuccNe1, selSuccBytes, selScoresOut, selCandOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DFlashDraftBlock")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_DFlashResetCaches();
+        private static partial int Native_TSGgml_DFlashDraftBlock(int[] blockIds, int blockLen, int[] positions, int numLayers, int hiddenSize, int headDim, int numHeads, int numKvHeads, int ringRows, float eps, float ropeBase, float ropeFreqScale, float kqScale, int[] ringSlotPos, int slidingWindow, IntPtr[] attnNormArr, IntPtr[] qArr, int[] qTypeArr, long[] qNe0Arr, long[] qNe1Arr, long[] qBytesArr, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, IntPtr[] ffnNormArr, IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr, IntPtr[] downArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, IntPtr[] ringKArr, IntPtr[] ringVArr, int ringDtype, IntPtr outNormData, IntPtr tokEmbdData, int tokEmbdType, long tokEmbdNe0, long tokEmbdNe1, long tokEmbdBytes, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, int vocabSize, int[] idsOut, float[] confOut, // DFlash2 grouped dynamic convolution. convTaps == 0 disables it and
+        // every array below may be null (a first-generation drafter).
+        int convTaps, int convGroupSize, int convNumGroups, IntPtr[] attnConvBaseArr, IntPtr[] attnConvProjArr, int[] attnConvProjTypeArr, long[] attnConvProjNe0Arr, long[] attnConvProjNe1Arr, long[] attnConvProjBytesArr, IntPtr[] ffnConvBaseArr, IntPtr[] ffnConvProjArr, int[] ffnConvProjTypeArr, long[] ffnConvProjNe0Arr, long[] ffnConvProjNe1Arr, long[] ffnConvProjBytesArr, // DFlash2 candidate selector. selRank == 0 disables it; when it is on,
+        // idsOut/confOut are left untouched and the lattice comes back instead.
+        int selRank, int selTopK, float selLogitScale, float selLogitSoftcap, IntPtr selHiddenData, int selHiddenType, long selHiddenNe0, long selHiddenNe1, long selHiddenBytes, IntPtr selPredData, int selPredType, long selPredNe0, long selPredNe1, long selPredBytes, IntPtr selSuccData, int selSuccType, long selSuccNe0, long selSuccNe1, long selSuccBytes, float[] selScoresOut, int[] selCandOut);
+
+        private static void TSGgml_DFlashResetCaches()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_DFlashResetCaches();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DFlashResetCaches")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_DFlashResetCaches();
 
         /// <summary>DFlash PASS A+B in one graph. False = declined, caller falls back.</summary>
         public static bool DFlashInject(
@@ -2758,46 +2594,35 @@ internal enum GgmlIndexReductionOp
         /// <summary>Drop the persistent DFlash graphs (ring reallocation / KV reset).</summary>
         public static void DFlashResetCaches() => TSGgml_DFlashResetCaches();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MuseGlimmerModelForward(
-            IntPtr hiddenData, int hiddenSize, int nTokens, int numLayers,
-            IntPtr[] attnNormArr,
-            IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr, IntPtr[] gateArr,
-            IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr,
-            IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr,
-            IntPtr[] guArr, IntPtr[] downArr,
-            IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] isSwaArr,
-            int[] qTypeArr, long[] qNe0Arr, long[] qNe1Arr, long[] qBytesArr,
-            int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int numKvHeads, int headDim, int cacheSize, int swaCacheSize,
-            int startPos, int slidingWindow,
-            float eps, float postNormEps, float ropeBase, float ropeFreqScale,
-            float kqScale, int kvCacheType,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitScale, float logitSoftcap,
-            IntPtr captureData, int[] captureLayers, int captureCount,
-            IntPtr tokEmbdData, int tokEmbdType, long tokEmbdNe0, long tokEmbdNe1, long tokEmbdBytes,
-            int[] tokenIds, int allLogitsRows,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static int TSGgml_MuseGlimmerModelForward(IntPtr hiddenData, int hiddenSize, int nTokens, int numLayers, IntPtr[] attnNormArr, IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr, IntPtr[] gateArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] isSwaArr, int[] qTypeArr, long[] qNe0Arr, long[] qNe1Arr, long[] qBytesArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int numKvHeads, int headDim, int cacheSize, int swaCacheSize, int startPos, int slidingWindow, float eps, float postNormEps, float ropeBase, float ropeFreqScale, float kqScale, int kvCacheType, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitScale, float logitSoftcap, IntPtr captureData, int[] captureLayers, int captureCount, IntPtr tokEmbdData, int tokEmbdType, long tokEmbdNe0, long tokEmbdNe1, long tokEmbdBytes, int[] tokenIds, int allLogitsRows, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MuseGlimmerModelForward(hiddenData, hiddenSize, nTokens, numLayers, attnNormArr, qArr, kArr, vArr, gateArr, qNormArr, kNormArr, oArr, postAttnNormArr, ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr, vCacheArr, isSwaArr, qTypeArr, qNe0Arr, qNe1Arr, qBytesArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, gateTypeArr, gateNe0Arr, gateNe1Arr, gateBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, numHeads, numKvHeads, headDim, cacheSize, swaCacheSize, startPos, slidingWindow, eps, postNormEps, ropeBase, ropeFreqScale, kqScale, kvCacheType, logitsData, vocabSize, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitScale, logitSoftcap, captureData, captureLayers, captureCount, tokEmbdData, tokEmbdType, tokEmbdNe0, tokEmbdNe1, tokEmbdBytes, tokenIds, allLogitsRows, tpDegree, tpPlanOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MuseGlimmerModelForward")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_MuseGlimmerResetDecodeCache();
+        private static partial int Native_TSGgml_MuseGlimmerModelForward(IntPtr hiddenData, int hiddenSize, int nTokens, int numLayers, IntPtr[] attnNormArr, IntPtr[] qArr, IntPtr[] kArr, IntPtr[] vArr, IntPtr[] gateArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] isSwaArr, int[] qTypeArr, long[] qNe0Arr, long[] qNe1Arr, long[] qBytesArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int numKvHeads, int headDim, int cacheSize, int swaCacheSize, int startPos, int slidingWindow, float eps, float postNormEps, float ropeBase, float ropeFreqScale, float kqScale, int kvCacheType, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitScale, float logitSoftcap, IntPtr captureData, int[] captureLayers, int captureCount, IntPtr tokEmbdData, int tokEmbdType, long tokEmbdNe0, long tokEmbdNe1, long tokEmbdBytes, int[] tokenIds, int allLogitsRows, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_MuseGlimmerResetDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_MuseGlimmerResetDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MuseGlimmerResetDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_MuseGlimmerReleaseTpGraphs();
+        private static partial void Native_TSGgml_MuseGlimmerResetDecodeCache();
+
+        private static void TSGgml_MuseGlimmerReleaseTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_MuseGlimmerReleaseTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MuseGlimmerReleaseTpGraphs")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_MuseGlimmerReleaseTpGraphs();
 
         /// <summary>
         /// Whole-model Muse-Glimmer forward in a single GGML graph. nTokens == 1 uses
@@ -2885,173 +2710,69 @@ internal enum GgmlIndexReductionOp
             catch (EntryPointNotFoundException) { }
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Gemma4ModelDecodeBatched(IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int[] positions, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4ModelDecodeBatched(hiddenData, hiddenSize, numLayers, nSeqs, attnNormArr, qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr, ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr, vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr, ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, numHeads, positions, eps, slidingWindow, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr, kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ModelDecodeBatched")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelDecodeBatched(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap);
+        private static partial int Native_TSGgml_Gemma4ModelDecodeBatched(IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int[] positions, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap);
 
         // Extended token-batched dense decode: the v1 signature plus the KV-donor
         // map, uploaded / in-kernel-gathered PLE (per-row token ids). Probe
         // TSGgml_Gemma4BatchedDecodeCapabilities before using it.
-        [LibraryImport(DllName)]
+        private static int TSGgml_Gemma4ModelDecodeBatchedEx(IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int[] positions, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap, int[] kvSourceArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int[] pleTokenIds, IntPtr pleModelProjData, int pleModelProjType, long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes, IntPtr pleModelProjNormData)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4ModelDecodeBatchedEx(hiddenData, hiddenSize, numLayers, nSeqs, attnNormArr, qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr, ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr, vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr, ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, numHeads, positions, eps, slidingWindow, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr, kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap, kvSourceArr, pleData, pleDim, pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr, pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr, plePostNormArr, pleTokenEmbdData, pleTokenEmbdType, pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes, pleTokenIds, pleModelProjData, pleModelProjType, pleModelProjNe0, pleModelProjNe1, pleModelProjBytes, pleModelProjNormData);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ModelDecodeBatchedEx")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelDecodeBatchedEx(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap,
-            int[] kvSourceArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
-            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
-            int[] pleTokenIds,
-            IntPtr pleModelProjData, int pleModelProjType,
-            long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
-            IntPtr pleModelProjNormData);
+        private static partial int Native_TSGgml_Gemma4ModelDecodeBatchedEx(IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int[] positions, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap, int[] kvSourceArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int[] pleTokenIds, IntPtr pleModelProjData, int pleModelProjType, long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes, IntPtr pleModelProjNormData);
 
         // Same ABI as Ex; cacheSizeArr is [numLayers*nSeqs] in layer-major order.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelDecodeBatchedEx2(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int[] positions,
-            float eps, int slidingWindow,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap,
-            int[] kvSourceArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
-            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
-            int[] pleTokenIds,
-            IntPtr pleModelProjData, int pleModelProjType,
-            long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes,
-            IntPtr pleModelProjNormData);
+        private static int TSGgml_Gemma4ModelDecodeBatchedEx2(IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int[] positions, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap, int[] kvSourceArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int[] pleTokenIds, IntPtr pleModelProjData, int pleModelProjType, long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes, IntPtr pleModelProjNormData)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4ModelDecodeBatchedEx2(hiddenData, hiddenSize, numLayers, nSeqs, attnNormArr, qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr, ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr, vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr, ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, numHeads, positions, eps, slidingWindow, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr, kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap, kvSourceArr, pleData, pleDim, pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr, pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr, plePostNormArr, pleTokenEmbdData, pleTokenEmbdType, pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes, pleTokenIds, pleModelProjData, pleModelProjType, pleModelProjNe0, pleModelProjNe1, pleModelProjBytes, pleModelProjNormData);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ModelDecodeBatchedEx2")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4BatchedDecodeCapabilities();
+        private static partial int Native_TSGgml_Gemma4ModelDecodeBatchedEx2(IntPtr hiddenData, int hiddenSize, int numLayers, int nSeqs, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int[] positions, float eps, int slidingWindow, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap, int[] kvSourceArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int[] pleTokenIds, IntPtr pleModelProjData, int pleModelProjType, long pleModelProjNe0, long pleModelProjNe1, long pleModelProjBytes, IntPtr pleModelProjNormData);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4ModelVerify(
-            IntPtr hiddenData, int hiddenSize, int numLayers, int numTokens,
-            IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr,
-            IntPtr[] oArr, IntPtr[] postAttnNormArr,
-            IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr,
-            float[] ropeBaseArr, float[] layerScalarArr,
-            int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr,
-            int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr,
-            int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr,
-            int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr,
-            int numHeads, int startPos,
-            float eps,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            int[] ropeNDimsArr,
-            int kvCacheType,
-            IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr,
-            IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr,
-            int[] kvSourceArr,
-            IntPtr pleData, int pleDim,
-            IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr,
-            IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr,
-            IntPtr[] plePostNormArr,
-            byte[] isExceptArr,
-            IntPtr pleTokenEmbdData, int pleTokenEmbdType,
-            long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes,
-            int[] pleTokenIds,
-            IntPtr pleProjWData, int pleProjWType,
-            long pleProjWNe0, long pleProjWNe1, long pleProjWBytes,
-            IntPtr pleProjNormData,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut,
-            IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr,
-            IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr,
-            IntPtr logitsData, int vocabSize,
-            IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNormData, float logitSoftcap);
+        private static int TSGgml_Gemma4BatchedDecodeCapabilities()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4BatchedDecodeCapabilities();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4BatchedDecodeCapabilities")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4DraftStep(
-            int token, IntPtr hPrev, int fixedPos,
-            int backbone, int draftHidden, int numDLayers, int numHeads, int vocab,
-            float eps, int kvCacheType,
-            IntPtr ropeFreqFactors, int ropeFreqFactorsLen,
-            IntPtr tgtTokEmbd, int tteType, long tteNe0, long tteNe1, long tteBytes,
-            IntPtr nextnPre, int npreType, long npreNe0, long npreNe1, long npreBytes,
-            IntPtr nextnPost, int npostType, long npostNe0, long npostNe1, long npostBytes,
-            IntPtr draftTokEmbd, int dteType, long dteNe0, long dteNe1, long dteBytes,
-            IntPtr outputNormW,
-            IntPtr[] attnNormArr, IntPtr[] wqArr, int[] wqType, long[] wqNe0, long[] wqNe1, long[] wqBytes,
-            IntPtr[] qNormArr, IntPtr[] woArr, int[] woType, long[] woNe0, long[] woNe1, long[] woBytes,
-            IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr,
-            IntPtr[] gateArr, int[] gateType, long[] gateNe0, long[] gateNe1, long[] gateBytes,
-            IntPtr[] upArr, int[] upType, long[] upNe0, long[] upNe1, long[] upBytes,
-            IntPtr[] downArr, int[] downType, long[] downNe0, long[] downNe1, long[] downBytes,
-            IntPtr[] postFfwNormArr, float[] outScaleArr,
-            int[] hdArr, int[] kvHeadsArr, int[] isLocalArr, float[] ropeBaseArr, int[] ropeDimsArr,
-            IntPtr[] donorKArr, IntPtr[] donorVArr, int[] donorCacheSizeArr,
-            IntPtr logitsOut, IntPtr hOut);
+        private static partial int Native_TSGgml_Gemma4BatchedDecodeCapabilities();
+
+        private static int TSGgml_Gemma4ModelVerify(IntPtr hiddenData, int hiddenSize, int numLayers, int numTokens, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int startPos, float eps, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, int[] kvSourceArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, byte[] isExceptArr, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int[] pleTokenIds, IntPtr pleProjWData, int pleProjWType, long pleProjWNe0, long pleProjWNe1, long pleProjWBytes, IntPtr pleProjNormData, int tpDegree, [In, Out] IntPtr[] tpPlanOut, IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4ModelVerify(hiddenData, hiddenSize, numLayers, numTokens, attnNormArr, qkvArr, qNormArr, kNormArr, oArr, postAttnNormArr, ffnNormArr, guArr, downArr, postFfnNormArr, kCacheArr, vCacheArr, headDimArr, kvHeadsArr, cacheSizeArr, isLocalArr, ropeBaseArr, layerScalarArr, qkvTypeArr, qkvNe0Arr, qkvNe1Arr, qkvBytesArr, oTypeArr, oNe0Arr, oNe1Arr, oBytesArr, guTypeArr, guNe0Arr, guNe1Arr, guBytesArr, downTypeArr, downNe0Arr, downNe1Arr, downBytesArr, numHeads, startPos, eps, ropeFreqFactors, ropeFreqFactorsLen, ropeNDimsArr, kvCacheType, kArr, kTypeArr, kNe0Arr, kNe1Arr, kBytesArr, vArr, vTypeArr, vNe0Arr, vNe1Arr, vBytesArr, kvSourceArr, pleData, pleDim, pleGateArr, pleGateTypeArr, pleGateNe0Arr, pleGateNe1Arr, pleGateBytesArr, pleProjArr, pleProjTypeArr, pleProjNe0Arr, pleProjNe1Arr, pleProjBytesArr, plePostNormArr, isExceptArr, pleTokenEmbdData, pleTokenEmbdType, pleTokenEmbdNe0, pleTokenEmbdNe1, pleTokenEmbdBytes, pleTokenIds, pleProjWData, pleProjWType, pleProjWNe0, pleProjWNe1, pleProjWBytes, pleProjNormData, tpDegree, tpPlanOut, gateArr, gateTypeArr, gateNe0Arr, gateNe1Arr, gateBytesArr, upArr, upTypeArr, upNe0Arr, upNe1Arr, upBytesArr, logitsData, vocabSize, lmHeadData, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNormData, logitSoftcap);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ModelVerify")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Gemma4ModelVerify(IntPtr hiddenData, int hiddenSize, int numLayers, int numTokens, IntPtr[] attnNormArr, IntPtr[] qkvArr, IntPtr[] qNormArr, IntPtr[] kNormArr, IntPtr[] oArr, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] guArr, IntPtr[] downArr, IntPtr[] postFfnNormArr, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] headDimArr, int[] kvHeadsArr, int[] cacheSizeArr, int[] isLocalArr, float[] ropeBaseArr, float[] layerScalarArr, int[] qkvTypeArr, long[] qkvNe0Arr, long[] qkvNe1Arr, long[] qkvBytesArr, int[] oTypeArr, long[] oNe0Arr, long[] oNe1Arr, long[] oBytesArr, int[] guTypeArr, long[] guNe0Arr, long[] guNe1Arr, long[] guBytesArr, int[] downTypeArr, long[] downNe0Arr, long[] downNe1Arr, long[] downBytesArr, int numHeads, int startPos, float eps, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, int[] ropeNDimsArr, int kvCacheType, IntPtr[] kArr, int[] kTypeArr, long[] kNe0Arr, long[] kNe1Arr, long[] kBytesArr, IntPtr[] vArr, int[] vTypeArr, long[] vNe0Arr, long[] vNe1Arr, long[] vBytesArr, int[] kvSourceArr, IntPtr pleData, int pleDim, IntPtr[] pleGateArr, int[] pleGateTypeArr, long[] pleGateNe0Arr, long[] pleGateNe1Arr, long[] pleGateBytesArr, IntPtr[] pleProjArr, int[] pleProjTypeArr, long[] pleProjNe0Arr, long[] pleProjNe1Arr, long[] pleProjBytesArr, IntPtr[] plePostNormArr, byte[] isExceptArr, IntPtr pleTokenEmbdData, int pleTokenEmbdType, long pleTokenEmbdNe0, long pleTokenEmbdNe1, long pleTokenEmbdBytes, int[] pleTokenIds, IntPtr pleProjWData, int pleProjWType, long pleProjWNe0, long pleProjWNe1, long pleProjWBytes, IntPtr pleProjNormData, int tpDegree, [In, Out] IntPtr[] tpPlanOut, IntPtr[] gateArr, int[] gateTypeArr, long[] gateNe0Arr, long[] gateNe1Arr, long[] gateBytesArr, IntPtr[] upArr, int[] upTypeArr, long[] upNe0Arr, long[] upNe1Arr, long[] upBytesArr, IntPtr logitsData, int vocabSize, IntPtr lmHeadData, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNormData, float logitSoftcap);
+
+        private static int TSGgml_Gemma4DraftStep(int token, IntPtr hPrev, int fixedPos, int backbone, int draftHidden, int numDLayers, int numHeads, int vocab, float eps, int kvCacheType, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, IntPtr tgtTokEmbd, int tteType, long tteNe0, long tteNe1, long tteBytes, IntPtr nextnPre, int npreType, long npreNe0, long npreNe1, long npreBytes, IntPtr nextnPost, int npostType, long npostNe0, long npostNe1, long npostBytes, IntPtr draftTokEmbd, int dteType, long dteNe0, long dteNe1, long dteBytes, IntPtr outputNormW, IntPtr[] attnNormArr, IntPtr[] wqArr, int[] wqType, long[] wqNe0, long[] wqNe1, long[] wqBytes, IntPtr[] qNormArr, IntPtr[] woArr, int[] woType, long[] woNe0, long[] woNe1, long[] woBytes, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] gateArr, int[] gateType, long[] gateNe0, long[] gateNe1, long[] gateBytes, IntPtr[] upArr, int[] upType, long[] upNe0, long[] upNe1, long[] upBytes, IntPtr[] downArr, int[] downType, long[] downNe0, long[] downNe1, long[] downBytes, IntPtr[] postFfwNormArr, float[] outScaleArr, int[] hdArr, int[] kvHeadsArr, int[] isLocalArr, float[] ropeBaseArr, int[] ropeDimsArr, IntPtr[] donorKArr, IntPtr[] donorVArr, int[] donorCacheSizeArr, IntPtr logitsOut, IntPtr hOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4DraftStep(token, hPrev, fixedPos, backbone, draftHidden, numDLayers, numHeads, vocab, eps, kvCacheType, ropeFreqFactors, ropeFreqFactorsLen, tgtTokEmbd, tteType, tteNe0, tteNe1, tteBytes, nextnPre, npreType, npreNe0, npreNe1, npreBytes, nextnPost, npostType, npostNe0, npostNe1, npostBytes, draftTokEmbd, dteType, dteNe0, dteNe1, dteBytes, outputNormW, attnNormArr, wqArr, wqType, wqNe0, wqNe1, wqBytes, qNormArr, woArr, woType, woNe0, woNe1, woBytes, postAttnNormArr, ffnNormArr, gateArr, gateType, gateNe0, gateNe1, gateBytes, upArr, upType, upNe0, upNe1, upBytes, downArr, downType, downNe0, downNe1, downBytes, postFfwNormArr, outScaleArr, hdArr, kvHeadsArr, isLocalArr, ropeBaseArr, ropeDimsArr, donorKArr, donorVArr, donorCacheSizeArr, logitsOut, hOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4DraftStep")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Gemma4DraftStep(int token, IntPtr hPrev, int fixedPos, int backbone, int draftHidden, int numDLayers, int numHeads, int vocab, float eps, int kvCacheType, IntPtr ropeFreqFactors, int ropeFreqFactorsLen, IntPtr tgtTokEmbd, int tteType, long tteNe0, long tteNe1, long tteBytes, IntPtr nextnPre, int npreType, long npreNe0, long npreNe1, long npreBytes, IntPtr nextnPost, int npostType, long npostNe0, long npostNe1, long npostBytes, IntPtr draftTokEmbd, int dteType, long dteNe0, long dteNe1, long dteBytes, IntPtr outputNormW, IntPtr[] attnNormArr, IntPtr[] wqArr, int[] wqType, long[] wqNe0, long[] wqNe1, long[] wqBytes, IntPtr[] qNormArr, IntPtr[] woArr, int[] woType, long[] woNe0, long[] woNe1, long[] woBytes, IntPtr[] postAttnNormArr, IntPtr[] ffnNormArr, IntPtr[] gateArr, int[] gateType, long[] gateNe0, long[] gateNe1, long[] gateBytes, IntPtr[] upArr, int[] upType, long[] upNe0, long[] upNe1, long[] upBytes, IntPtr[] downArr, int[] downType, long[] downNe0, long[] downNe1, long[] downBytes, IntPtr[] postFfwNormArr, float[] outScaleArr, int[] hdArr, int[] kvHeadsArr, int[] isLocalArr, float[] ropeBaseArr, int[] ropeDimsArr, IntPtr[] donorKArr, IntPtr[] donorVArr, int[] donorCacheSizeArr, IntPtr logitsOut, IntPtr hOut);
 
         /// <summary>Fused Gemma 4 MTP draft step. Returns false (no throw) when the
         /// native kernel declines (e.g. fixed_pos past the donor SWA window) so the
@@ -3100,22 +2821,40 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Gemma4MoELayerDecode(in Gemma4MoELayerDecodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4MoELayerDecode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoELayerDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4MoELayerDecode(in Gemma4MoELayerDecodeArgs desc);
+        private static partial int Native_TSGgml_Gemma4MoELayerDecode(in Gemma4MoELayerDecodeArgs desc);
 
         public static void Gemma4MoELayerDecode(in Gemma4MoELayerDecodeArgs desc)
         {
             CheckResult(TSGgml_Gemma4MoELayerDecode(in desc), nameof(TSGgml_Gemma4MoELayerDecode));
         }
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DiffusionDecodeLayer(in DiffusionDecodeLayerArgs desc);
+        private static int TSGgml_DiffusionDecodeLayer(in DiffusionDecodeLayerArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DiffusionDecodeLayer(in desc);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DiffusionDecodeLayer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_WanT5Encode(in WanT5EncodeArgs desc);
+        private static partial int Native_TSGgml_DiffusionDecodeLayer(in DiffusionDecodeLayerArgs desc);
+
+        private static int TSGgml_WanT5Encode(in WanT5EncodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_WanT5Encode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_WanT5Encode")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_WanT5Encode(in WanT5EncodeArgs desc);
 
         // Whole UMT5-XXL encoder forward in one resident-weight graph.
         public static bool TryWanT5Encode(in WanT5EncodeArgs desc)
@@ -3126,9 +2865,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_WanDitForward(in WanDitForwardArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_WanDitForward(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_WanDitForward")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_WanDitForward(in WanDitForwardArgs desc);
+        private static partial int Native_TSGgml_WanDitForward(in WanDitForwardArgs desc);
 
         // Whole Wan DiT forward (one denoising-step velocity prediction) in one
         // resident-weight graph; persistent + CUDA-graph-captured per shape on CUDA.
@@ -3140,9 +2885,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_WanVaeDecode(in WanVaeDecodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_WanVaeDecode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_WanVaeDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_WanVaeDecode(in WanVaeDecodeArgs desc);
+        private static partial int Native_TSGgml_WanVaeDecode(in WanVaeDecodeArgs desc);
 
         // Whole Wan 2.1 video VAE decode (chunked causal 3D decoder) in one graph.
         public static bool TryWanVaeDecode(in WanVaeDecodeArgs desc)
@@ -3153,9 +2904,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3VideoVaeDecode(in H3VideoVaeDecodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3VideoVaeDecode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3VideoVaeDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3VideoVaeDecode(in H3VideoVaeDecodeArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3VideoVaeDecode(in H3VideoVaeDecodeArgs desc);
 
         /// <summary>MiniMax-H3 video VAE ViT decode: one graph for the whole
         /// 36-block transformer, latent tokens in and pixel patches out.</summary>
@@ -3167,9 +2924,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3TextEncode(in H3TextEncodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3TextEncode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3TextEncode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3TextEncode(in H3TextEncodeArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3TextEncode(in H3TextEncodeArgs desc);
 
         /// <summary>Qwen3-VL text-encoder prefill for MiniMax-H3: the whole
         /// 50-layer trunk in one graph, returning raw hidden states.</summary>
@@ -3181,9 +2944,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3DitForward(in H3DitForwardArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3DitForward(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3DitForward")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3DitForward(in H3DitForwardArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3DitForward(in H3DitForwardArgs desc);
 
         /// <summary>One MiniMax-H3 diffusion step: the whole 50-block packed
         /// audio-video transformer in one graph.</summary>
@@ -3195,9 +2964,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3VideoVaeEncode(in H3VideoVaeEncodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3VideoVaeEncode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3VideoVaeEncode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3VideoVaeEncode(in H3VideoVaeEncodeArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3VideoVaeEncode(in H3VideoVaeEncodeArgs desc);
 
         /// <summary>Single-frame MiniMax-H3 video VAE encode, for image conditioning.</summary>
         public static bool TryMiniMaxH3VideoVaeEncode(in H3VideoVaeEncodeArgs desc)
@@ -3208,9 +2983,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3AudioVaeDecode(in H3AudioVaeDecodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3AudioVaeDecode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3AudioVaeDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3AudioVaeDecode(in H3AudioVaeDecodeArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3AudioVaeDecode(in H3AudioVaeDecodeArgs desc);
 
         /// <summary>Mono MiniMax-H3 audio VAE (BigVGAN) decode in one graph.</summary>
         public static bool TryMiniMaxH3AudioVaeDecode(in H3AudioVaeDecodeArgs desc)
@@ -3221,9 +3002,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3VideoVaeEncode3D(in H3VideoVaeEncode3DArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3VideoVaeEncode3D(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3VideoVaeEncode3D")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3VideoVaeEncode3D(in H3VideoVaeEncode3DArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3VideoVaeEncode3D(in H3VideoVaeEncode3DArgs desc);
 
         /// <summary>Causal 3-D video encode: a clip of frames to its latent.</summary>
         public static bool TryMiniMaxH3VideoVaeEncode3D(in H3VideoVaeEncode3DArgs desc)
@@ -3234,9 +3021,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3AudioVaeEncode(in H3AudioVaeEncodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3AudioVaeEncode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3AudioVaeEncode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3AudioVaeEncode(in H3AudioVaeEncodeArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3AudioVaeEncode(in H3AudioVaeEncodeArgs desc);
 
         /// <summary>DAC audio encoder: one mono plane of PCM to its latent.</summary>
         public static bool TryMiniMaxH3AudioVaeEncode(in H3AudioVaeEncodeArgs desc)
@@ -3247,9 +3040,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_MiniMaxH3VisionEncode(in H3VisionEncodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_MiniMaxH3VisionEncode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_MiniMaxH3VisionEncode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_MiniMaxH3VisionEncode(in H3VisionEncodeArgs desc);
+        private static partial int Native_TSGgml_MiniMaxH3VisionEncode(in H3VisionEncodeArgs desc);
 
         /// <summary>Qwen3-VL vision tower: one graph producing the final merger output
         /// plus the three DeepStack outputs.</summary>
@@ -3261,9 +3060,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_WanVaeEncode(in WanVaeEncodeArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_WanVaeEncode(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_WanVaeEncode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_WanVaeEncode(in WanVaeEncodeArgs desc);
+        private static partial int Native_TSGgml_WanVaeEncode(in WanVaeEncodeArgs desc);
 
         // Whole Wan video VAE encode (chunked causal 3D encoder) in one graph.
         public static bool TryWanVaeEncode(in WanVaeEncodeArgs desc)
@@ -3274,9 +3079,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Conv2dF32(in Conv2dArgs desc)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Conv2dF32(in desc);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Conv2dF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Conv2dF32(in Conv2dArgs desc);
+        private static partial int Native_TSGgml_Conv2dF32(in Conv2dArgs desc);
 
         public static bool TryConv2dF32(in Conv2dArgs desc)
         {
@@ -3294,13 +3105,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_DiffusionLmHead(IntPtr hidden, int hiddenSize, int canvasLen, IntPtr outputNormW, IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr logitsOut, int vocab, float eps, float finalLogitSoftcap)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DiffusionLmHead(hidden, hiddenSize, canvasLen, outputNormW, lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, logitsOut, vocab, eps, finalLogitSoftcap);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DiffusionLmHead")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DiffusionLmHead(
-            IntPtr hidden, int hiddenSize, int canvasLen,
-            IntPtr outputNormW,
-            IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr logitsOut, int vocab, float eps, float finalLogitSoftcap);
+        private static partial int Native_TSGgml_DiffusionLmHead(IntPtr hidden, int hiddenSize, int canvasLen, IntPtr outputNormW, IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr logitsOut, int vocab, float eps, float finalLogitSoftcap);
 
         /// <summary>Fused DiffusionGemma lm_head tail (output_norm + lm_head + softcap) in one GGML graph.
         /// Reads canvas hidden [H*C], writes canvas logits [C*vocab]. Returns false on failure.</summary>
@@ -3314,16 +3127,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_DiffusionLmHeadSample(IntPtr hidden, int hiddenSize, int canvasLen, IntPtr outputNormW, IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, int vocab, float eps, float finalLogitSoftcap, float invTemp, IntPtr uHost, int topK, IntPtr argmaxOut, IntPtr entropyOut, IntPtr sampledOut, IntPtr topTokensOut, IntPtr topProbsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DiffusionLmHeadSample(hidden, hiddenSize, canvasLen, outputNormW, lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, vocab, eps, finalLogitSoftcap, invTemp, uHost, topK, argmaxOut, entropyOut, sampledOut, topTokensOut, topProbsOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DiffusionLmHeadSample")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DiffusionLmHeadSample(
-            IntPtr hidden, int hiddenSize, int canvasLen,
-            IntPtr outputNormW,
-            IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            int vocab, float eps, float finalLogitSoftcap,
-            float invTemp, IntPtr uHost, int topK,
-            IntPtr argmaxOut, IntPtr entropyOut, IntPtr sampledOut,
-            IntPtr topTokensOut, IntPtr topProbsOut);
+        private static partial int Native_TSGgml_DiffusionLmHeadSample(IntPtr hidden, int hiddenSize, int canvasLen, IntPtr outputNormW, IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, int vocab, float eps, float finalLogitSoftcap, float invTemp, IntPtr uHost, int topK, IntPtr argmaxOut, IntPtr entropyOut, IntPtr sampledOut, IntPtr topTokensOut, IntPtr topProbsOut);
 
         /// <summary>Fused DiffusionGemma lm_head + on-device sample (CUDA only): runs output_norm + lm_head
         /// as one graph producing device logits, then a CUDA kernel computes per canvas position the argmax,
@@ -3343,14 +3155,15 @@ internal enum GgmlIndexReductionOp
             return r != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_DiffusionModelDecode([In] DiffusionDecodeLayerArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int canvasLen, int promptLen, IntPtr outputNormW, IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr logitsOut, int vocab, float finalLogitSoftcap)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DiffusionModelDecode(layers, numLayers, hidden, hiddenSize, canvasLen, promptLen, outputNormW, lmHeadW, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, logitsOut, vocab, finalLogitSoftcap);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DiffusionModelDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DiffusionModelDecode(
-            [In] DiffusionDecodeLayerArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int canvasLen, int promptLen,
-            IntPtr outputNormW,
-            IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr logitsOut, int vocab, float finalLogitSoftcap);
+        private static partial int Native_TSGgml_DiffusionModelDecode([In] DiffusionDecodeLayerArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int canvasLen, int promptLen, IntPtr outputNormW, IntPtr lmHeadW, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr logitsOut, int vocab, float finalLogitSoftcap);
 
         /// <summary>Fused DiffusionGemma whole-model decode: all layers + output_norm + lm_head + softcap
         /// in one GGML graph (canvas hidden stays on-device). Writes canvas logits [C*vocab] to logitsOut.
@@ -3369,14 +3182,15 @@ internal enum GgmlIndexReductionOp
         // Model-wide MoE decode: the whole transformer as one graph/token.
         // GPT-OSS whole-model decode: all layers + MoE + folded final norm/LM head
         // in ONE graph dispatch per token (see ggml_ops_gptoss_decode.cpp).
-        [LibraryImport(DllName)]
+        private static int TSGgml_GptOssModelDecode([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssModelDecode(layers, numLayers, hidden, hiddenSize, position, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssModelDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssModelDecode(
-            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int position,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm);
+        private static partial int Native_TSGgml_GptOssModelDecode([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm);
 
         /// <summary>
         /// Runs the whole GPT-OSS transformer for one token as a single graph.
@@ -3393,15 +3207,15 @@ internal enum GgmlIndexReductionOp
         // Same graph, tensor-parallel plan mode: builds this rank's graph and
         // hands it back UNEXECUTED for tp_execute_plans to drive segment by
         // segment (see ggml_ops_gptoss_decode.cpp).
-        [LibraryImport(DllName)]
+        private static int TSGgml_GptOssModelDecodeTP([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssModelDecodeTP(layers, numLayers, hidden, hiddenSize, position, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, tpDegree, tpPlanOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssModelDecodeTP")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssModelDecodeTP(
-            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int position,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static partial int Native_TSGgml_GptOssModelDecodeTP([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
 
         /// <summary>
         /// Builds one rank's whole-model decode graph and returns a plan pointer
@@ -3422,15 +3236,15 @@ internal enum GgmlIndexReductionOp
         }
 
         // Same graph, tensor-parallel plan mode.
-        [LibraryImport(DllName)]
+        private static int TSGgml_GptOssModelPrefillTP([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssModelPrefillTP(layers, numLayers, hidden, hiddenSize, numTokens, startPos, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, tpDegree, tpPlanOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssModelPrefillTP")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssModelPrefillTP(
-            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int numTokens, int startPos,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static partial int Native_TSGgml_GptOssModelPrefillTP([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
 
         /// <summary>
         /// Builds one rank's whole-model prefill graph and returns a plan pointer
@@ -3452,16 +3266,15 @@ internal enum GgmlIndexReductionOp
         // GPT-OSS TRUE token-batched decode: N concurrent sequences, one token
         // each, in ONE graph (see ggml_ops_gptoss_batched.cpp). kCaches/vCaches
         // are [layer * nSeqs + seq] HOST cache pointers (the device-window keys).
-        [LibraryImport(DllName)]
+        private static int TSGgml_GptOssModelDecodeBatched([In] GptOssLayerDecodeArgs[] layers, int numLayers, int nSeqs, IntPtr hidden, [In] IntPtr[] kCaches, [In] IntPtr[] vCaches, [In] int[] cacheSizes, [In] int[] positions, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr sampled, int wantLogits)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssModelDecodeBatched(layers, numLayers, nSeqs, hidden, kCaches, vCaches, cacheSizes, positions, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, sampled, wantLogits);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssModelDecodeBatched")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssModelDecodeBatched(
-            [In] GptOssLayerDecodeArgs[] layers, int numLayers, int nSeqs,
-            IntPtr hidden,
-            [In] IntPtr[] kCaches, [In] IntPtr[] vCaches,
-            [In] int[] cacheSizes, [In] int[] positions,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm, IntPtr sampled, int wantLogits);
+        private static partial int Native_TSGgml_GptOssModelDecodeBatched([In] GptOssLayerDecodeArgs[] layers, int numLayers, int nSeqs, IntPtr hidden, [In] IntPtr[] kCaches, [In] IntPtr[] vCaches, [In] int[] cacheSizes, [In] int[] positions, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr sampled, int wantLogits);
 
         /// <summary>
         /// Decode one token for each of N concurrent GPT-OSS sequences in a single
@@ -3483,14 +3296,15 @@ internal enum GgmlIndexReductionOp
 
         // GPT-OSS whole-model prefill: N tokens through every layer + MoE +
         // folded final norm/LM head in ONE graph (see ggml_ops_gptoss_prefill.cpp).
-        [LibraryImport(DllName)]
+        private static int TSGgml_GptOssModelPrefill([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssModelPrefill(layers, numLayers, hidden, hiddenSize, numTokens, startPos, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssModelPrefill")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssModelPrefill(
-            [In] GptOssLayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int numTokens, int startPos,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm);
+        private static partial int Native_TSGgml_GptOssModelPrefill([In] GptOssLayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int numTokens, int startPos, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm);
 
         /// <summary>
         /// Runs the whole GPT-OSS transformer over a prompt chunk as a single
@@ -3506,9 +3320,15 @@ internal enum GgmlIndexReductionOp
             => TSGgml_GptOssModelPrefill(layers, numLayers, hidden, hiddenSize, numTokens, startPos,
                 logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm) != 0;
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_GptOssResetDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_GptOssResetDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssResetDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_GptOssResetDecodeCache();
+        private static partial void Native_TSGgml_GptOssResetDecodeCache();
 
         /// <summary>
         /// Drops every cached GPT-OSS whole-model decode graph. Call before a
@@ -3517,9 +3337,15 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         public static void GptOssResetDecodeCache() => TSGgml_GptOssResetDecodeCache();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_GptOssResetBatchedDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_GptOssResetBatchedDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssResetBatchedDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_GptOssResetBatchedDecodeCache();
+        private static partial void Native_TSGgml_GptOssResetBatchedDecodeCache();
 
         /// <summary>
         /// Drops the token-batched GPT-OSS decode state (slot-stable arena
@@ -3529,10 +3355,15 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         public static void GptOssResetBatchedDecodeCache() => TSGgml_GptOssResetBatchedDecodeCache();
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_GptOssSyncKvCacheToHost(IntPtr kCache, IntPtr vCache, int cacheSize, int rows)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GptOssSyncKvCacheToHost(kCache, vCache, cacheSize, rows);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GptOssSyncKvCacheToHost")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GptOssSyncKvCacheToHost(
-            IntPtr kCache, IntPtr vCache, int cacheSize, int rows);
+        private static partial int Native_TSGgml_GptOssSyncKvCacheToHost(IntPtr kCache, IntPtr vCache, int cacheSize, int rows);
 
         /// <summary>
         /// Copies the device-resident GPT-OSS KV rows back into their host mirror.
@@ -3545,15 +3376,15 @@ internal enum GgmlIndexReductionOp
         // `layers` is one Gemma4MoELayerDecodeArgs per layer (blittable, marshalled
         // as a contiguous TSGgmlGemma4MoELayerDesc array). hidden/position come from
         // the explicit params; the per-element Hidden/Position fields are ignored.
-        [LibraryImport(DllName)]
+        private static int TSGgml_Gemma4MoEModelDecode([In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, float logitSoftcap, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4MoEModelDecode(layers, numLayers, hidden, hiddenSize, position, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, logitSoftcap, tpDegree, tpPlanOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoEModelDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4MoEModelDecode(
-            [In] Gemma4MoELayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int position,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm, float logitSoftcap,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static partial int Native_TSGgml_Gemma4MoEModelDecode([In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, float logitSoftcap, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
 
         public static void Gemma4MoEModelDecode(Gemma4MoELayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int position)
         {
@@ -3579,16 +3410,15 @@ internal enum GgmlIndexReductionOp
         // TRUE token-batched MoE decode: N concurrent sequences, one token each, in
         // one captured graph. Reuses the per-layer descriptor array for weights;
         // KV caches are per-(layer,seq) [layer*nSeqs+seq]; positions per seq.
-        [LibraryImport(DllName)]
+        private static int TSGgml_Gemma4MoEModelDecodeBatched([In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, int nSeqs, IntPtr hidden, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] positions, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, float logitSoftcap)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4MoEModelDecodeBatched(layers, numLayers, nSeqs, hidden, kCacheArr, vCacheArr, positions, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, logitSoftcap);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoEModelDecodeBatched")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4MoEModelDecodeBatched(
-            [In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, int nSeqs,
-            IntPtr hidden,
-            IntPtr[] kCacheArr, IntPtr[] vCacheArr,
-            int[] positions,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm, float logitSoftcap);
+        private static partial int Native_TSGgml_Gemma4MoEModelDecodeBatched([In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, int nSeqs, IntPtr hidden, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] positions, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, float logitSoftcap);
 
         public static bool Gemma4MoEModelDecodeBatched(Gemma4MoELayerDecodeArgs[] layers, int numLayers, int nSeqs,
             IntPtr hidden, IntPtr[] kCacheArr, IntPtr[] vCacheArr, int[] positions,
@@ -3601,26 +3431,40 @@ internal enum GgmlIndexReductionOp
             return rc != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Gemma4ResetMoEBatchedDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Gemma4ResetMoEBatchedDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ResetMoEBatchedDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Gemma4ResetMoEBatchedDecodeCache();
+        private static partial void Native_TSGgml_Gemma4ResetMoEBatchedDecodeCache();
         public static void Gemma4ResetMoEBatchedDecodeCache() => TSGgml_Gemma4ResetMoEBatchedDecodeCache();
 
         // Model-wide MoE multi-token verify: the whole MoE transformer over N tokens
         // as one graph. Reuses the same descriptor array as the decode; start_pos +
         // num_tokens are explicit. Returns 0 (false) when the kernel cannot handle
         // the shape so the caller falls back to the per-op verify.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Gemma4MoEModelVerify(
-            [In] Gemma4MoELayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int startPos, int numTokens,
-            byte[] mmIsExcept,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static int TSGgml_Gemma4MoEModelVerify([In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int startPos, int numTokens, byte[] mmIsExcept, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Gemma4MoEModelVerify(layers, numLayers, hidden, hiddenSize, startPos, numTokens, mmIsExcept, tpDegree, tpPlanOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoEModelVerify")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Gemma4MoEReleaseVerifyTpGraphs();
+        private static partial int Native_TSGgml_Gemma4MoEModelVerify([In] Gemma4MoELayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int startPos, int numTokens, byte[] mmIsExcept, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+
+        private static void TSGgml_Gemma4MoEReleaseVerifyTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Gemma4MoEReleaseVerifyTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoEReleaseVerifyTpGraphs")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Gemma4MoEReleaseVerifyTpGraphs();
 
         public static void Gemma4MoEReleaseVerifyTpGraphs()
         {
@@ -3640,49 +3484,45 @@ internal enum GgmlIndexReductionOp
         // Qwen3.5/3.6 full-model decode: the whole hybrid transformer (full-attention
         // + GatedDeltaNet recurrent layers + per-layer FFN) as one graph/token.
         // Returns 0 when it cannot handle the shape so the caller falls back to per-op.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ModelDecode(
-            [In] Qwen35LayerDecodeArgs[] layers, int numLayers,
-            [MarshalAs(UnmanagedType.Bool)] bool reseedState,
-            IntPtr hidden, int hiddenSize, int position, int ropePositionDelta,
-            int numHeads, int numKvHeads, int headDim, int cacheSize,
-            int ropeNDims, int ropeMode, int kvCacheType,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps, float ropeBase, float ropeFreqScale,
-            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
-            int normTopk, float expertWeightsScale,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm,
-            int tpDegree, [In, Out] IntPtr[] tpPlanOut);
+        private static int TSGgml_Qwen35ModelDecode([In] Qwen35LayerDecodeArgs[] layers, int numLayers, [MarshalAs(UnmanagedType.Bool)] bool reseedState, IntPtr hidden, int hiddenSize, int position, int ropePositionDelta, int numHeads, int numKvHeads, int headDim, int cacheSize, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, int tpDegree, [In, Out] IntPtr[] tpPlanOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ModelDecode(layers, numLayers, reseedState, hidden, hiddenSize, position, ropePositionDelta, numHeads, numKvHeads, headDim, cacheSize, ropeNDims, ropeMode, kvCacheType, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps, ropeBase, ropeFreqScale, numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, tpDegree, tpPlanOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ModelDecode")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ModelDecodeToken(
-            [In] Qwen35LayerDecodeArgs[] layers, int numLayers,
-            [MarshalAs(UnmanagedType.Bool)] bool reseedState,
-            int tokenId,
-            IntPtr tokenEmbedding, int tokenEmbeddingType,
-            long tokenEmbeddingNe0, long tokenEmbeddingNe1, long tokenEmbeddingBytes,
-            int hiddenSize, int position, int ropePositionDelta,
-            int numHeads, int numKvHeads, int headDim, int cacheSize,
-            int ropeNDims, int ropeMode, int kvCacheType,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps, float ropeBase, float ropeFreqScale,
-            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
-            int normTopk, float expertWeightsScale,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm);
+        private static partial int Native_TSGgml_Qwen35ModelDecode([In] Qwen35LayerDecodeArgs[] layers, int numLayers, [MarshalAs(UnmanagedType.Bool)] bool reseedState, IntPtr hidden, int hiddenSize, int position, int ropePositionDelta, int numHeads, int numKvHeads, int headDim, int cacheSize, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, int tpDegree, [In, Out] IntPtr[] tpPlanOut);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ResetDecodeCache();
+        private static int TSGgml_Qwen35ModelDecodeToken([In] Qwen35LayerDecodeArgs[] layers, int numLayers, [MarshalAs(UnmanagedType.Bool)] bool reseedState, int tokenId, IntPtr tokenEmbedding, int tokenEmbeddingType, long tokenEmbeddingNe0, long tokenEmbeddingNe1, long tokenEmbeddingBytes, int hiddenSize, int position, int ropePositionDelta, int numHeads, int numKvHeads, int headDim, int cacheSize, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ModelDecodeToken(layers, numLayers, reseedState, tokenId, tokenEmbedding, tokenEmbeddingType, tokenEmbeddingNe0, tokenEmbeddingNe1, tokenEmbeddingBytes, hiddenSize, position, ropePositionDelta, numHeads, numKvHeads, headDim, cacheSize, ropeNDims, ropeMode, kvCacheType, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps, ropeBase, ropeFreqScale, numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ModelDecodeToken")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35RopePositionAbi();
+        private static partial int Native_TSGgml_Qwen35ModelDecodeToken([In] Qwen35LayerDecodeArgs[] layers, int numLayers, [MarshalAs(UnmanagedType.Bool)] bool reseedState, int tokenId, IntPtr tokenEmbedding, int tokenEmbeddingType, long tokenEmbeddingNe0, long tokenEmbeddingNe1, long tokenEmbeddingBytes, int hiddenSize, int position, int ropePositionDelta, int numHeads, int numKvHeads, int headDim, int cacheSize, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm);
+
+        private static void TSGgml_Qwen35ResetDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ResetDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ResetDecodeCache")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Qwen35ResetDecodeCache();
+
+        private static int TSGgml_Qwen35RopePositionAbi()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35RopePositionAbi();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35RopePositionAbi")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_Qwen35RopePositionAbi();
 
         /// <summary>The Qwen3.5 fused-graph position contract the loaded library
         /// implements (see TSGgml_Qwen35RopePositionAbi), or 0 for a library built
@@ -3698,26 +3538,15 @@ internal enum GgmlIndexReductionOp
         // design ported to the hybrid GDN + attention family; see
         // ggml_ops_qwen35_batched_arena.cpp). kCaches/vCaches are
         // [attn_layer * n + s]; convStates/deltaStates are [gdn_layer * n + s].
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35ArenaDecodeBatched([In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs, [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions, [In] IntPtr[] kCaches, [In] IntPtr[] vCaches, [In] IntPtr[] convStates, [In] IntPtr[] deltaStates, [In] int[] gdnHostAuth, [In] int[] cacheSizes, int numHeads, int numKvHeads, int headDim, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr tokenEmbd, int tokenEmbdType, long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes, IntPtr sampled, int wantLogits)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ArenaDecodeBatched(layers, numLayers, nSeqs, tokenIds, positions, ropePositions, kCaches, vCaches, convStates, deltaStates, gdnHostAuth, cacheSizes, numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps, ropeBase, ropeFreqScale, numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, tokenEmbd, tokenEmbdType, tokenEmbdNe0, tokenEmbdNe1, tokenEmbdBytes, sampled, wantLogits);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ArenaDecodeBatched")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ArenaDecodeBatched(
-            [In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs,
-            [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions,
-            [In] IntPtr[] kCaches, [In] IntPtr[] vCaches,
-            [In] IntPtr[] convStates, [In] IntPtr[] deltaStates,
-            [In] int[] gdnHostAuth, [In] int[] cacheSizes,
-            int numHeads, int numKvHeads, int headDim,
-            int ropeNDims, int ropeMode, int kvCacheType,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps, float ropeBase, float ropeFreqScale,
-            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
-            int normTopk, float expertWeightsScale,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm,
-            IntPtr tokenEmbd, int tokenEmbdType,
-            long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
-            IntPtr sampled, int wantLogits);
+        private static partial int Native_TSGgml_Qwen35ArenaDecodeBatched([In] Qwen35LayerDecodeArgs[] layers, int numLayers, int nSeqs, [In] int[] tokenIds, [In] int[] positions, [In] int[] ropePositions, [In] IntPtr[] kCaches, [In] IntPtr[] vCaches, [In] IntPtr[] convStates, [In] IntPtr[] deltaStates, [In] int[] gdnHostAuth, [In] int[] cacheSizes, int numHeads, int numKvHeads, int headDim, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr tokenEmbd, int tokenEmbdType, long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes, IntPtr sampled, int wantLogits);
 
         /// <summary>Returns 1 on success, 0 on a safe pre-compute decline, and
         /// -1 when graph execution may have partially mutated recurrent state.
@@ -3750,18 +3579,30 @@ internal enum GgmlIndexReductionOp
                 finalNorm, tokenEmbd, tokenEmbdType, tokenEmbdNe0, tokenEmbdNe1, tokenEmbdBytes,
                 sampled, wantLogits ? 1 : 0);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ArenaResetBatchedDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ArenaResetBatchedDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ArenaResetBatchedDecodeCache();
+        private static partial void Native_TSGgml_Qwen35ArenaResetBatchedDecodeCache();
 
         /// <summary>Drops the qwen35 slot-stable arena batched-decode state
         /// (flushing dirty slots to their host bytes first). Survives prefills
         /// and holder churn by design; call on model teardown.</summary>
         public static void Qwen35ArenaResetBatchedDecodeCache() => TSGgml_Qwen35ArenaResetBatchedDecodeCache();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ArenaFlushHostPointer(IntPtr hostPtr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ArenaFlushHostPointer(hostPtr);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ArenaFlushHostPointer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ArenaFlushHostPointer(IntPtr hostPtr);
+        private static partial void Native_TSGgml_Qwen35ArenaFlushHostPointer(IntPtr hostPtr);
 
         /// <summary>Flush-and-retire the qwen35 arena slot registered for this
         /// host cache/state pointer (no-op when none) — call before any managed
@@ -3769,9 +3610,15 @@ internal enum GgmlIndexReductionOp
         /// kernels (growth, host sync, snapshot extraction).</summary>
         public static void Qwen35ArenaFlushHostPointer(IntPtr hostPtr) => TSGgml_Qwen35ArenaFlushHostPointer(hostPtr);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ArenaDiscardHostPointer(IntPtr hostPtr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ArenaDiscardHostPointer(hostPtr);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ArenaDiscardHostPointer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ArenaDiscardHostPointer(IntPtr hostPtr);
+        private static partial void Native_TSGgml_Qwen35ArenaDiscardHostPointer(IntPtr hostPtr);
 
         /// <summary>Retires the qwen35 arena slot registered for this host
         /// pointer without flushing it (no-op when none). Use only when the
@@ -3780,13 +3627,25 @@ internal enum GgmlIndexReductionOp
 
         public static void Qwen35ResetDecodeCache() => TSGgml_Qwen35ResetDecodeCache();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Gemma4ResetDecodeCache();
+        private static void TSGgml_Gemma4ResetDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Gemma4ResetDecodeCache();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ResetDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Gemma4ReleaseVerifyTpGraphs();
+        private static partial void Native_TSGgml_Gemma4ResetDecodeCache();
+
+        private static void TSGgml_Gemma4ReleaseVerifyTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Gemma4ReleaseVerifyTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ReleaseVerifyTpGraphs")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Gemma4ReleaseVerifyTpGraphs();
 
         public static void Gemma4ReleaseVerifyTpGraphs()
         {
@@ -3796,27 +3655,51 @@ internal enum GgmlIndexReductionOp
 
         public static void Gemma4ResetDecodeCache() => TSGgml_Gemma4ResetDecodeCache();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Gemma4ResetBatchedDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Gemma4ResetBatchedDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4ResetBatchedDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Gemma4ResetBatchedDecodeCache();
+        private static partial void Native_TSGgml_Gemma4ResetBatchedDecodeCache();
 
         public static void Gemma4ResetBatchedDecodeCache() => TSGgml_Gemma4ResetBatchedDecodeCache();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Gemma4MoEResetDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Gemma4MoEResetDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Gemma4MoEResetDecodeCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Gemma4MoEResetDecodeCache();
+        private static partial void Native_TSGgml_Gemma4MoEResetDecodeCache();
 
         public static void Gemma4MoEResetDecodeCache() => TSGgml_Gemma4MoEResetDecodeCache();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ResetVerifyCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ResetVerifyCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ResetVerifyCache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ResetVerifyCache();
+        private static partial void Native_TSGgml_Qwen35ResetVerifyCache();
 
         public static void Qwen35ResetVerifyCache() => TSGgml_Qwen35ResetVerifyCache();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ResetVerifyCacheOwner(long ownerId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ResetVerifyCacheOwner(ownerId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ResetVerifyCacheOwner")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ResetVerifyCacheOwner(long ownerId);
+        private static partial void Native_TSGgml_Qwen35ResetVerifyCacheOwner(long ownerId);
 
         public static void Qwen35ResetVerifyCache(long ownerId)
             => TSGgml_Qwen35ResetVerifyCacheOwner(ownerId);
@@ -3827,23 +3710,25 @@ internal enum GgmlIndexReductionOp
         // when it cannot handle the shape so the caller falls back to op-by-op.
         // padKv = fixed per-seq gather length (round_up(maxSeqLen, stride)); gatherIdx is
         // [nSeqs*padKv] (real slots then pad), seqLens [nSeqs] drives the per-seq attn mask.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ModelDecodeBatched(
-            [In] Qwen35LayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int nTokens, int nSeqs,
-            IntPtr positions, IntPtr slotMapping,
-            IntPtr gatherIdx, IntPtr seqLens, int padKv, int totalSlots,
-            int numHeads, int numKvHeads, int headDim,
-            int ropeNDims, int ropeMode, int kvCacheType,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps, float ropeBase, float ropeFreqScale,
-            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
-            int normTopk, float expertWeightsScale);
+        private static int TSGgml_Qwen35ModelDecodeBatched([In] Qwen35LayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int nTokens, int nSeqs, IntPtr positions, IntPtr slotMapping, IntPtr gatherIdx, IntPtr seqLens, int padKv, int totalSlots, int numHeads, int numKvHeads, int headDim, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ModelDecodeBatched(layers, numLayers, hidden, hiddenSize, nTokens, nSeqs, positions, slotMapping, gatherIdx, seqLens, padKv, totalSlots, numHeads, numKvHeads, headDim, ropeNDims, ropeMode, kvCacheType, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps, ropeBase, ropeFreqScale, numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ModelDecodeBatched")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ResetBatchedDecodeCache();
+        private static partial int Native_TSGgml_Qwen35ModelDecodeBatched([In] Qwen35LayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int nTokens, int nSeqs, IntPtr positions, IntPtr slotMapping, IntPtr gatherIdx, IntPtr seqLens, int padKv, int totalSlots, int numHeads, int numKvHeads, int headDim, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale);
+
+        private static void TSGgml_Qwen35ResetBatchedDecodeCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ResetBatchedDecodeCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ResetBatchedDecodeCache")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Qwen35ResetBatchedDecodeCache();
 
         public static void Qwen35ResetBatchedDecodeCache() => TSGgml_Qwen35ResetBatchedDecodeCache();
 
@@ -3939,25 +3824,15 @@ internal enum GgmlIndexReductionOp
         // [hidden, N] (normedOut, for the MTP draft head). GDN state advances from
         // each layer's ConvStateIn/DeltaStateIn to ConvStateOut/DeltaStateOut.
         // Returns 0 when it cannot handle the shape so the caller falls back to per-op.
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35ModelVerifyOwned([In] Qwen35LayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int startPos, int numTokens, int ropePositionDelta, int numHeads, int numKvHeads, int headDim, int cacheSize, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr normedOut, int nLogitRows, int[] mropePos, int[] mropeSections, int tpDegree, IntPtr[] tpPlanOut, IntPtr captureData, int[] captureLayers, int captureCount, int stateSnapshots, IntPtr stateSnapshotsUsed, int deviceStateCurrent, int deferStateDownload, long ownerId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35ModelVerifyOwned(layers, numLayers, hidden, hiddenSize, startPos, numTokens, ropePositionDelta, numHeads, numKvHeads, headDim, cacheSize, ropeNDims, ropeMode, kvCacheType, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps, ropeBase, ropeFreqScale, numExperts, numExpertsUsed, expertFf, sharedFf, normTopk, expertWeightsScale, logits, vocabSize, lmHead, lmHeadType, lmHeadNe0, lmHeadNe1, lmHeadBytes, finalNorm, normedOut, nLogitRows, mropePos, mropeSections, tpDegree, tpPlanOut, captureData, captureLayers, captureCount, stateSnapshots, stateSnapshotsUsed, deviceStateCurrent, deferStateDownload, ownerId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ModelVerifyOwned")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35ModelVerifyOwned(
-            [In] Qwen35LayerDecodeArgs[] layers, int numLayers,
-            IntPtr hidden, int hiddenSize, int startPos, int numTokens, int ropePositionDelta,
-            int numHeads, int numKvHeads, int headDim, int cacheSize,
-            int ropeNDims, int ropeMode, int kvCacheType,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps, float ropeBase, float ropeFreqScale,
-            int numExperts, int numExpertsUsed, int expertFf, int sharedFf,
-            int normTopk, float expertWeightsScale,
-            IntPtr logits, int vocabSize,
-            IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes,
-            IntPtr finalNorm, IntPtr normedOut, int nLogitRows,
-            int[] mropePos, int[] mropeSections,
-            int tpDegree, IntPtr[] tpPlanOut,
-            IntPtr captureData, int[] captureLayers, int captureCount,
-            int stateSnapshots, IntPtr stateSnapshotsUsed, int deviceStateCurrent,
-            int deferStateDownload, long ownerId);
+        private static partial int Native_TSGgml_Qwen35ModelVerifyOwned([In] Qwen35LayerDecodeArgs[] layers, int numLayers, IntPtr hidden, int hiddenSize, int startPos, int numTokens, int ropePositionDelta, int numHeads, int numKvHeads, int headDim, int cacheSize, int ropeNDims, int ropeMode, int kvCacheType, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps, float ropeBase, float ropeFreqScale, int numExperts, int numExpertsUsed, int expertFf, int sharedFf, int normTopk, float expertWeightsScale, IntPtr logits, int vocabSize, IntPtr lmHead, int lmHeadType, long lmHeadNe0, long lmHeadNe1, long lmHeadBytes, IntPtr finalNorm, IntPtr normedOut, int nLogitRows, int[] mropePos, int[] mropeSections, int tpDegree, IntPtr[] tpPlanOut, IntPtr captureData, int[] captureLayers, int captureCount, int stateSnapshots, IntPtr stateSnapshotsUsed, int deviceStateCurrent, int deferStateDownload, long ownerId);
 
         public static bool Qwen35ModelVerify(
             Qwen35LayerDecodeArgs[] layers, int numLayers,
@@ -3994,10 +3869,15 @@ internal enum GgmlIndexReductionOp
                 deferStateDownload ? 1 : 0, ownerId) != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35CommitStateSnapshotOwned(int slot, int numRecurrentLayers, long ownerId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35CommitStateSnapshotOwned(slot, numRecurrentLayers, ownerId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35CommitStateSnapshotOwned")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35CommitStateSnapshotOwned(
-            int slot, int numRecurrentLayers, long ownerId);
+        private static partial int Native_TSGgml_Qwen35CommitStateSnapshotOwned(int slot, int numRecurrentLayers, long ownerId);
 
         /// <summary>
         /// Commit one recurrent-state snapshot into the live device state, without a
@@ -4012,10 +3892,15 @@ internal enum GgmlIndexReductionOp
             int slot, int numRecurrentLayers, long ownerId = 0)
             => TSGgml_Qwen35CommitStateSnapshotOwned(slot, numRecurrentLayers, ownerId) != 0;
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35DrainDeviceStateOwned(IntPtr[] convOut, IntPtr[] deltaOut, int numRecurrentLayers, long ownerId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35DrainDeviceStateOwned(convOut, deltaOut, numRecurrentLayers, ownerId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35DrainDeviceStateOwned")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35DrainDeviceStateOwned(
-            IntPtr[] convOut, IntPtr[] deltaOut, int numRecurrentLayers, long ownerId);
+        private static partial int Native_TSGgml_Qwen35DrainDeviceStateOwned(IntPtr[] convOut, IntPtr[] deltaOut, int numRecurrentLayers, long ownerId);
 
         /// <summary>Read the live device recurrent state back into the host mirrors,
         /// for anything that has to run the op-by-op recurrent path.</summary>
@@ -4024,11 +3909,15 @@ internal enum GgmlIndexReductionOp
             => TSGgml_Qwen35DrainDeviceStateOwned(
                 convOut, deltaOut, numRecurrentLayers, ownerId) != 0;
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35FetchStateSnapshotOwned(int slot, IntPtr[] convOut, IntPtr[] deltaOut, int numRecurrentLayers, long ownerId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35FetchStateSnapshotOwned(slot, convOut, deltaOut, numRecurrentLayers, ownerId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35FetchStateSnapshotOwned")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35FetchStateSnapshotOwned(
-            int slot, IntPtr[] convOut, IntPtr[] deltaOut, int numRecurrentLayers,
-            long ownerId);
+        private static partial int Native_TSGgml_Qwen35FetchStateSnapshotOwned(int slot, IntPtr[] convOut, IntPtr[] deltaOut, int numRecurrentLayers, long ownerId);
 
         /// <summary>
         /// Pull ONE per-token recurrent-state snapshot out of the verify that just
@@ -4042,9 +3931,15 @@ internal enum GgmlIndexReductionOp
             => TSGgml_Qwen35FetchStateSnapshotOwned(
                 slot, convOut, deltaOut, numRecurrentLayers, ownerId) != 0;
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ReleaseVerifyTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ReleaseVerifyTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ReleaseVerifyTpGraphs")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ReleaseVerifyTpGraphs();
+        private static partial void Native_TSGgml_Qwen35ReleaseVerifyTpGraphs();
 
         public static void Qwen35ReleaseVerifyTpGraphs()
         {
@@ -4052,9 +3947,15 @@ internal enum GgmlIndexReductionOp
             catch (EntryPointNotFoundException) { }
         }
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35ReleaseVerifyOwner(long ownerId)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35ReleaseVerifyOwner(ownerId);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35ReleaseVerifyOwner")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35ReleaseVerifyOwner(long ownerId);
+        private static partial void Native_TSGgml_Qwen35ReleaseVerifyOwner(long ownerId);
 
         public static void Qwen35ReleaseVerifyOwner(long ownerId)
         {
@@ -4062,21 +3963,15 @@ internal enum GgmlIndexReductionOp
             catch (EntryPointNotFoundException) { }
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35RecurrentLayerPrefill(IntPtr hiddenData, int hiddenSize, int n, IntPtr attnNormW, IntPtr gdnQkvW, int gdnQkvType, long gdnQkvNe0, long gdnQkvNe1, long gdnQkvBytes, IntPtr gdnGateW, int gdnGateType, long gdnGateNe0, long gdnGateNe1, long gdnGateBytes, IntPtr ssmBetaW, int ssmBetaType, long ssmBetaNe0, long ssmBetaNe1, long ssmBetaBytes, IntPtr ssmAlphaW, int ssmAlphaType, long ssmAlphaNe0, long ssmAlphaNe1, long ssmAlphaBytes, IntPtr ssmOutW, int ssmOutType, long ssmOutNe0, long ssmOutNe1, long ssmOutBytes, IntPtr conv1dW, IntPtr ssmDtW, IntPtr ssmAW, IntPtr ssmNormW, IntPtr convStateIn, IntPtr deltaStateIn, IntPtr convStateOut, IntPtr deltaStateOut, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35RecurrentLayerPrefill(hiddenData, hiddenSize, n, attnNormW, gdnQkvW, gdnQkvType, gdnQkvNe0, gdnQkvNe1, gdnQkvBytes, gdnGateW, gdnGateType, gdnGateNe0, gdnGateNe1, gdnGateBytes, ssmBetaW, ssmBetaType, ssmBetaNe0, ssmBetaNe1, ssmBetaBytes, ssmAlphaW, ssmAlphaType, ssmAlphaNe0, ssmAlphaNe1, ssmAlphaBytes, ssmOutW, ssmOutType, ssmOutNe0, ssmOutNe1, ssmOutBytes, conv1dW, ssmDtW, ssmAW, ssmNormW, convStateIn, deltaStateIn, convStateOut, deltaStateOut, convKernel, headKDim, headVDim, numKHeads, numVHeads, eps);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35RecurrentLayerPrefill")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35RecurrentLayerPrefill(
-            IntPtr hiddenData, int hiddenSize, int n,
-            IntPtr attnNormW,
-            IntPtr gdnQkvW, int gdnQkvType, long gdnQkvNe0, long gdnQkvNe1, long gdnQkvBytes,
-            IntPtr gdnGateW, int gdnGateType, long gdnGateNe0, long gdnGateNe1, long gdnGateBytes,
-            IntPtr ssmBetaW, int ssmBetaType, long ssmBetaNe0, long ssmBetaNe1, long ssmBetaBytes,
-            IntPtr ssmAlphaW, int ssmAlphaType, long ssmAlphaNe0, long ssmAlphaNe1, long ssmAlphaBytes,
-            IntPtr ssmOutW, int ssmOutType, long ssmOutNe0, long ssmOutNe1, long ssmOutBytes,
-            IntPtr conv1dW, IntPtr ssmDtW, IntPtr ssmAW, IntPtr ssmNormW,
-            IntPtr convStateIn, IntPtr deltaStateIn,
-            IntPtr convStateOut, IntPtr deltaStateOut,
-            int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads,
-            float eps);
+        private static partial int Native_TSGgml_Qwen35RecurrentLayerPrefill(IntPtr hiddenData, int hiddenSize, int n, IntPtr attnNormW, IntPtr gdnQkvW, int gdnQkvType, long gdnQkvNe0, long gdnQkvNe1, long gdnQkvBytes, IntPtr gdnGateW, int gdnGateType, long gdnGateNe0, long gdnGateNe1, long gdnGateBytes, IntPtr ssmBetaW, int ssmBetaType, long ssmBetaNe0, long ssmBetaNe1, long ssmBetaBytes, IntPtr ssmAlphaW, int ssmAlphaType, long ssmAlphaNe0, long ssmAlphaNe1, long ssmAlphaBytes, IntPtr ssmOutW, int ssmOutType, long ssmOutNe0, long ssmOutNe1, long ssmOutBytes, IntPtr conv1dW, IntPtr ssmDtW, IntPtr ssmAW, IntPtr ssmNormW, IntPtr convStateIn, IntPtr deltaStateIn, IntPtr convStateOut, IntPtr deltaStateOut, int convKernel, int headKDim, int headVDim, int numKHeads, int numVHeads, float eps);
 
         public static bool Qwen35RecurrentLayerPrefill(
             IntPtr hiddenData, int hiddenSize, int n,
@@ -4104,18 +3999,15 @@ internal enum GgmlIndexReductionOp
                 convKernel, headKDim, headVDim, numKHeads, numVHeads, eps) != 0;
         }
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_Qwen35GdnLayerTP(IntPtr hiddenData, int hiddenSize, int n, IntPtr attnNormW, IntPtr inprojW, int inprojType, long inprojNe0, long inprojNe1, long inprojBytes, IntPtr conv1dW, IntPtr dtBias, IntPtr aLog, IntPtr ssmNormW, IntPtr convState, IntPtr deltaState, IntPtr gatedOut, int packedDim, int qkvDim, int qkDim, int vDim, int numKHeads, int numVHeads, int headKDim, int headVDim, int convKernel, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen35GdnLayerTP(hiddenData, hiddenSize, n, attnNormW, inprojW, inprojType, inprojNe0, inprojNe1, inprojBytes, conv1dW, dtBias, aLog, ssmNormW, convState, deltaState, gatedOut, packedDim, qkvDim, qkDim, vDim, numKHeads, numVHeads, headKDim, headVDim, convKernel, eps);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35GdnLayerTP")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_Qwen35GdnLayerTP(
-            IntPtr hiddenData, int hiddenSize, int n,
-            IntPtr attnNormW,
-            IntPtr inprojW, int inprojType, long inprojNe0, long inprojNe1, long inprojBytes,
-            IntPtr conv1dW, IntPtr dtBias, IntPtr aLog, IntPtr ssmNormW,
-            IntPtr convState, IntPtr deltaState,
-            IntPtr gatedOut,
-            int packedDim, int qkvDim, int qkDim, int vDim,
-            int numKHeads, int numVHeads, int headKDim, int headVDim,
-            int convKernel, float eps);
+        private static partial int Native_TSGgml_Qwen35GdnLayerTP(IntPtr hiddenData, int hiddenSize, int n, IntPtr attnNormW, IntPtr inprojW, int inprojType, long inprojNe0, long inprojNe1, long inprojBytes, IntPtr conv1dW, IntPtr dtBias, IntPtr aLog, IntPtr ssmNormW, IntPtr convState, IntPtr deltaState, IntPtr gatedOut, int packedDim, int qkvDim, int qkDim, int vDim, int numKHeads, int numVHeads, int headKDim, int headVDim, int convKernel, float eps);
 
         /// <summary>
         /// One rank's GatedDeltaNet block (norm + packed in-projection + conv +
@@ -4144,83 +4036,161 @@ internal enum GgmlIndexReductionOp
                 convKernel, eps), "qwen35_gdn_layer_tp");
         }
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_Qwen35GdnDropTpGraphs()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen35GdnDropTpGraphs();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen35GdnDropTpGraphs")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Qwen35GdnDropTpGraphs();
+        private static partial void Native_TSGgml_Qwen35GdnDropTpGraphs();
 
         /// <summary>Free every cached per-rank TP GatedDeltaNet graph.</summary>
         public static void Qwen35GdnDropTpGraphs() => TSGgml_Qwen35GdnDropTpGraphs();
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_GatedDeltaNetChunkedF32(GgmlTensorView3D q, GgmlTensorView3D k, GgmlTensorView3D v, GgmlTensorView3D z, GgmlTensorView2D alpha, GgmlTensorView2D beta, GgmlTensorView3D state, GgmlTensorView3D gatedOut, IntPtr dtBiasData, IntPtr aLogData, IntPtr ssmNormWData, int chunkSize, float eps, int gateMode)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GatedDeltaNetChunkedF32(q, k, v, z, alpha, beta, state, gatedOut, dtBiasData, aLogData, ssmNormWData, chunkSize, eps, gateMode);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GatedDeltaNetChunkedF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GatedDeltaNetChunkedF32(
-            GgmlTensorView3D q,
-            GgmlTensorView3D k,
-            GgmlTensorView3D v,
-            GgmlTensorView3D z,
-            GgmlTensorView2D alpha,
-            GgmlTensorView2D beta,
-            GgmlTensorView3D state,
-            GgmlTensorView3D gatedOut,
-            IntPtr dtBiasData,
-            IntPtr aLogData,
-            IntPtr ssmNormWData,
-            int chunkSize,
-            float eps,
-            int gateMode);
+        private static partial int Native_TSGgml_GatedDeltaNetChunkedF32(GgmlTensorView3D q, GgmlTensorView3D k, GgmlTensorView3D v, GgmlTensorView3D z, GgmlTensorView2D alpha, GgmlTensorView2D beta, GgmlTensorView3D state, GgmlTensorView3D gatedOut, IntPtr dtBiasData, IntPtr aLogData, IntPtr ssmNormWData, int chunkSize, float eps, int gateMode);
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpFfnBlock(
-            ref Qwen4ExpFfnArgs args,
-            IntPtr resData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int nExpert, int nExpertUsed, int nFf, int nFfShared,
-            float eps, int cacheSlot, int resResident);
+        private static int TSGgml_Qwen4ExpFfnBlock(ref Qwen4ExpFfnArgs args, IntPtr resData, int nEmbd, int hc, int hcLowRank, int nTokens, int nExpert, int nExpertUsed, int nFf, int nFfShared, float eps, int cacheSlot, int resResident)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpFfnBlock(ref args, resData, nEmbd, hc, hcLowRank, nTokens, nExpert, nExpertUsed, nFf, nFfShared, eps, cacheSlot, resResident);
+        }
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpGdnBlock(
-            ref Qwen4ExpGdnArgs args,
-            IntPtr resData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            float eps, int cacheSlot, int resResident);
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpFfnBlock")]
+        private static partial int Native_TSGgml_Qwen4ExpFfnBlock(ref Qwen4ExpFfnArgs args, IntPtr resData, int nEmbd, int hc, int hcLowRank, int nTokens, int nExpert, int nExpertUsed, int nFf, int nFfShared, float eps, int cacheSlot, int resResident);
 
-        [LibraryImport(DllName)]
-        internal static partial void TSGgml_Qwen4ExpResetFfnCache();
+        private static int TSGgml_Qwen4ExpGdnBlock(ref Qwen4ExpGdnArgs args, IntPtr resData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, float eps, int cacheSlot, int resResident)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpGdnBlock(ref args, resData, nEmbd, hc, hcLowRank, nTokens, headKDim, headVDim, nKHeads, nVHeads, dConv, eps, cacheSlot, resResident);
+        }
 
-        [LibraryImport(DllName)]
-        internal static partial void TSGgml_Qwen4ExpInvalidateSeqState(IntPtr key);
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpGdnBlock")]
+        private static partial int Native_TSGgml_Qwen4ExpGdnBlock(ref Qwen4ExpGdnArgs args, IntPtr resData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, float eps, int cacheSlot, int resResident);
 
-        [LibraryImport(DllName)]
-        internal static partial void TSGgml_Qwen4ExpReleaseAllSeqState();
+        internal static void TSGgml_Qwen4ExpResetFfnCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen4ExpResetFfnCache();
+        }
 
-        [LibraryImport(DllName)]
-        internal static unsafe partial void TSGgml_Qwen4ExpReleaseSeqState(IntPtr* keys, int n);
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpResetFfnCache")]
+        private static partial void Native_TSGgml_Qwen4ExpResetFfnCache();
 
-        [LibraryImport(DllName)]
-        internal static partial int TSGgml_Qwen4ExpSpecApiVersion();
+        internal static void TSGgml_Qwen4ExpInvalidateSeqState(IntPtr key)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen4ExpInvalidateSeqState(key);
+        }
 
-        [LibraryImport(DllName)]
-        internal static partial IntPtr TSGgml_Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config,
-            ref Qwen4ExpAttnArgs attn, ref Qwen4ExpFfnArgs ffn, ref Qwen4ExpHeadArgs head);
-        [LibraryImport(DllName)]
-        internal static partial int TSGgml_Qwen4ExpMtpForward(IntPtr handle,
-            IntPtr embedding, IntPtr previous, int count, int position, int ropePosition,
-            IntPtr mrope3, IntPtr hiddenOut, IntPtr logitsOut);
-        [LibraryImport(DllName)]
-        internal static partial void TSGgml_Qwen4ExpMtpFree(IntPtr handle);
-        [LibraryImport(DllName)]
-        internal static partial int TSGgml_Qwen4ExpMtpCopyKv(IntPtr handle, IntPtr k, IntPtr v, long bytes);
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpInvalidateSeqState")]
+        private static partial void Native_TSGgml_Qwen4ExpInvalidateSeqState(IntPtr key);
 
-        [LibraryImport(DllName)]
-        private static unsafe partial IntPtr TSGgml_Qwen4ExpStateSnapshotCreate(
-            IntPtr* keys, int* devices, int count, IntPtr attn, IntPtr gdn, IntPtr ple);
-        [LibraryImport(DllName)]
-        internal static partial int TSGgml_Qwen4ExpStateSnapshotCapture(IntPtr handle);
-        [LibraryImport(DllName)]
-        internal static partial int TSGgml_Qwen4ExpStateSnapshotRestore(IntPtr handle);
-        [LibraryImport(DllName)]
-        internal static partial void TSGgml_Qwen4ExpStateSnapshotFree(IntPtr handle);
+        internal static void TSGgml_Qwen4ExpReleaseAllSeqState()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen4ExpReleaseAllSeqState();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpReleaseAllSeqState")]
+        private static partial void Native_TSGgml_Qwen4ExpReleaseAllSeqState();
+
+        internal static unsafe void TSGgml_Qwen4ExpReleaseSeqState(IntPtr* keys, int n)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Qwen4ExpReleaseSeqState(keys, n);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpReleaseSeqState")]
+        private static unsafe partial void Native_TSGgml_Qwen4ExpReleaseSeqState(IntPtr* keys, int n);
+
+        internal static int TSGgml_Qwen4ExpSpecApiVersion()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpSpecApiVersion();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpSpecApiVersion")]
+        private static partial int Native_TSGgml_Qwen4ExpSpecApiVersion();
+
+        internal static IntPtr TSGgml_Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config, ref Qwen4ExpAttnArgs attn, ref Qwen4ExpFfnArgs ffn, ref Qwen4ExpHeadArgs head)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("qwen4-mtp", Native_TSGgml_Qwen4ExpMtpCreate(ref config, ref attn, ref ffn, ref head));
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpMtpCreate")]
+        private static partial IntPtr Native_TSGgml_Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config, ref Qwen4ExpAttnArgs attn, ref Qwen4ExpFfnArgs ffn, ref Qwen4ExpHeadArgs head);
+        internal static int TSGgml_Qwen4ExpMtpForward(IntPtr handle, IntPtr embedding, IntPtr previous, int count, int position, int ropePosition, IntPtr mrope3, IntPtr hiddenOut, IntPtr logitsOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("qwen4-mtp", handle);
+            return Native_TSGgml_Qwen4ExpMtpForward(handle, embedding, previous, count, position, ropePosition, mrope3, hiddenOut, logitsOut);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpMtpForward")]
+        private static partial int Native_TSGgml_Qwen4ExpMtpForward(IntPtr handle, IntPtr embedding, IntPtr previous, int count, int position, int ropePosition, IntPtr mrope3, IntPtr hiddenOut, IntPtr logitsOut);
+        internal static void TSGgml_Qwen4ExpMtpFree(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("qwen4-mtp", handle);
+            Native_TSGgml_Qwen4ExpMtpFree(handle);
+            resource.Complete();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpMtpFree")]
+        private static partial void Native_TSGgml_Qwen4ExpMtpFree(IntPtr handle);
+        internal static int TSGgml_Qwen4ExpMtpCopyKv(IntPtr handle, IntPtr k, IntPtr v, long bytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("qwen4-mtp", handle);
+            return Native_TSGgml_Qwen4ExpMtpCopyKv(handle, k, v, bytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpMtpCopyKv")]
+        private static partial int Native_TSGgml_Qwen4ExpMtpCopyKv(IntPtr handle, IntPtr k, IntPtr v, long bytes);
+
+        private static unsafe IntPtr TSGgml_Qwen4ExpStateSnapshotCreate(IntPtr* keys, int* devices, int count, IntPtr attn, IntPtr gdn, IntPtr ple)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("qwen4-snapshot", Native_TSGgml_Qwen4ExpStateSnapshotCreate(keys, devices, count, attn, gdn, ple));
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpStateSnapshotCreate")]
+        private static unsafe partial IntPtr Native_TSGgml_Qwen4ExpStateSnapshotCreate(IntPtr* keys, int* devices, int count, IntPtr attn, IntPtr gdn, IntPtr ple);
+        internal static int TSGgml_Qwen4ExpStateSnapshotCapture(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("qwen4-snapshot", handle);
+            return Native_TSGgml_Qwen4ExpStateSnapshotCapture(handle);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpStateSnapshotCapture")]
+        private static partial int Native_TSGgml_Qwen4ExpStateSnapshotCapture(IntPtr handle);
+        internal static int TSGgml_Qwen4ExpStateSnapshotRestore(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall("qwen4-snapshot", handle);
+            return Native_TSGgml_Qwen4ExpStateSnapshotRestore(handle);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpStateSnapshotRestore")]
+        private static partial int Native_TSGgml_Qwen4ExpStateSnapshotRestore(IntPtr handle);
+        internal static void TSGgml_Qwen4ExpStateSnapshotFree(IntPtr handle)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("qwen4-snapshot", handle);
+            Native_TSGgml_Qwen4ExpStateSnapshotFree(handle);
+            resource.Complete();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpStateSnapshotFree")]
+        private static partial void Native_TSGgml_Qwen4ExpStateSnapshotFree(IntPtr handle);
 
         internal static unsafe IntPtr Qwen4ExpStateSnapshotCreate(
             IntPtr[] keys, int[] devices, IntPtr attn, IntPtr gdn, IntPtr ple)
@@ -4279,15 +4249,14 @@ internal enum GgmlIndexReductionOp
                 resResident ? 1 : 0) != 0;
         }
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpAttnBlock(
-            ref Qwen4ExpAttnArgs args,
-            IntPtr resData,
-            IntPtr maskData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
-            int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            float eps, int cacheSlot, int resResident);
+        private static int TSGgml_Qwen4ExpAttnBlock(ref Qwen4ExpAttnArgs args, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, float eps, int cacheSlot, int resResident)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpAttnBlock(ref args, resData, maskData, nEmbd, hc, hcLowRank, nTokens, headDim, nHead, nHeadKv, kvCapacity, nKv, position, nRot, ropeBase, ropeFreqScale, attnScale, eps, cacheSlot, resResident);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpAttnBlock")]
+        private static partial int Native_TSGgml_Qwen4ExpAttnBlock(ref Qwen4ExpAttnArgs args, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, float eps, int cacheSlot, int resResident);
 
         public static bool Qwen4ExpAttnBlock(ref Qwen4ExpAttnArgs args, IntPtr resData, IntPtr maskData,
             int nEmbd, int hc, int hcLowRank, int nTokens,
@@ -4301,49 +4270,32 @@ internal enum GgmlIndexReductionOp
                 resResident ? 1 : 0) != 0;
         }
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpTokenSpan(
-            IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
-            int layerBegin, int layerEnd,
-            IntPtr resData, IntPtr maskData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
-            int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly,
-            IntPtr head, IntPtr logitsOut,
-            IntPtr ple, int pleLayer, IntPtr pleEmb,
-            IntPtr mropePos, IntPtr mropeSections, int ropePosition,
-            int device);
+        private static int TSGgml_Qwen4ExpTokenSpan(IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds, int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, int nExpert, int nExpertUsed, int nFf, int nFfSh, float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut, IntPtr ple, int pleLayer, IntPtr pleEmb, IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpTokenSpan(ffn, gdn, attn, kinds, layerBegin, layerEnd, resData, maskData, nEmbd, hc, hcLowRank, nTokens, headKDim, headVDim, nKHeads, nVHeads, dConv, headDim, nHead, nHeadKv, kvCapacity, nKv, position, nRot, ropeBase, ropeFreqScale, attnScale, nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly, head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition, device);
+        }
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpTokenSpanEx(
-            IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
-            int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
-            int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut,
-            IntPtr ple, int pleLayer, IntPtr pleEmb,
-            IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device,
-            IntPtr hiddenOut, int logitsRows);
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpTokenSpan")]
+        private static partial int Native_TSGgml_Qwen4ExpTokenSpan(IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds, int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, int nExpert, int nExpertUsed, int nFf, int nFfSh, float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut, IntPtr ple, int pleLayer, IntPtr pleEmb, IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device);
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpTokenSpanQsa(
-            IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
-            int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData,
-            int nEmbd, int hc, int hcLowRank, int nTokens,
-            int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv,
-            int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position,
-            int nRot, float ropeBase, float ropeFreqScale, float attnScale,
-            int nExpert, int nExpertUsed, int nFf, int nFfSh,
-            float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut,
-            IntPtr ple, int pleLayer, IntPtr pleEmb,
-            IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device,
-            IntPtr hiddenOut, int logitsRows, IntPtr qsa, IntPtr qsaPositions, int qsaPositionCount);
+        private static int TSGgml_Qwen4ExpTokenSpanEx(IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds, int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, int nExpert, int nExpertUsed, int nFf, int nFfSh, float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut, IntPtr ple, int pleLayer, IntPtr pleEmb, IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device, IntPtr hiddenOut, int logitsRows)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpTokenSpanEx(ffn, gdn, attn, kinds, layerBegin, layerEnd, resData, maskData, nEmbd, hc, hcLowRank, nTokens, headKDim, headVDim, nKHeads, nVHeads, dConv, headDim, nHead, nHeadKv, kvCapacity, nKv, position, nRot, ropeBase, ropeFreqScale, attnScale, nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly, head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition, device, hiddenOut, logitsRows);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpTokenSpanEx")]
+        private static partial int Native_TSGgml_Qwen4ExpTokenSpanEx(IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds, int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, int nExpert, int nExpertUsed, int nFf, int nFfSh, float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut, IntPtr ple, int pleLayer, IntPtr pleEmb, IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device, IntPtr hiddenOut, int logitsRows);
+
+        private static int TSGgml_Qwen4ExpTokenSpanQsa(IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds, int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, int nExpert, int nExpertUsed, int nFf, int nFfSh, float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut, IntPtr ple, int pleLayer, IntPtr pleEmb, IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device, IntPtr hiddenOut, int logitsRows, IntPtr qsa, IntPtr qsaPositions, int qsaPositionCount)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpTokenSpanQsa(ffn, gdn, attn, kinds, layerBegin, layerEnd, resData, maskData, nEmbd, hc, hcLowRank, nTokens, headKDim, headVDim, nKHeads, nVHeads, dConv, headDim, nHead, nHeadKv, kvCapacity, nKv, position, nRot, ropeBase, ropeFreqScale, attnScale, nExpert, nExpertUsed, nFf, nFfSh, eps, cacheSlot, firstFfnOnly, head, logitsOut, ple, pleLayer, pleEmb, mropePos, mropeSections, ropePosition, device, hiddenOut, logitsRows, qsa, qsaPositions, qsaPositionCount);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpTokenSpanQsa")]
+        private static partial int Native_TSGgml_Qwen4ExpTokenSpanQsa(IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds, int layerBegin, int layerEnd, IntPtr resData, IntPtr maskData, int nEmbd, int hc, int hcLowRank, int nTokens, int headKDim, int headVDim, int nKHeads, int nVHeads, int dConv, int headDim, int nHead, int nHeadKv, int kvCapacity, int nKv, int position, int nRot, float ropeBase, float ropeFreqScale, float attnScale, int nExpert, int nExpertUsed, int nFf, int nFfSh, float eps, int cacheSlot, int firstFfnOnly, IntPtr head, IntPtr logitsOut, IntPtr ple, int pleLayer, IntPtr pleEmb, IntPtr mropePos, IntPtr mropeSections, int ropePosition, int device, IntPtr hiddenOut, int logitsRows, IntPtr qsa, IntPtr qsaPositions, int qsaPositionCount);
 
         public static bool Qwen4ExpTokenSpan(
             IntPtr ffn, IntPtr gdn, IntPtr attn, IntPtr kinds,
@@ -4389,16 +4341,34 @@ internal enum GgmlIndexReductionOp
                 mropePos, mropeSections, ropePosition, device) != 0;
         }
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device);
+        private static int TSGgml_Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpCopyQsaCache(key, destination, bytes, device);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpCopyQsaCache")]
+        private static partial int Native_TSGgml_Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device);
         public static bool Qwen4ExpCopyQsaCache(IntPtr key, IntPtr destination, long bytes, int device)
             => TSGgml_Qwen4ExpCopyQsaCache(key, destination, bytes, device) != 0;
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpResUpload(IntPtr data, long bytes);
+        private static int TSGgml_Qwen4ExpResUpload(IntPtr data, long bytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpResUpload(data, bytes);
+        }
 
-        [LibraryImport(DllName)]
-        private static partial int TSGgml_Qwen4ExpResDownload(IntPtr data, long bytes);
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpResUpload")]
+        private static partial int Native_TSGgml_Qwen4ExpResUpload(IntPtr data, long bytes);
+
+        private static int TSGgml_Qwen4ExpResDownload(IntPtr data, long bytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_Qwen4ExpResDownload(data, bytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpResDownload")]
+        private static partial int Native_TSGgml_Qwen4ExpResDownload(IntPtr data, long bytes);
 
         public static bool Qwen4ExpResUpload(IntPtr data, long bytes)
             => TSGgml_Qwen4ExpResUpload(data, bytes) != 0;
@@ -4410,135 +4380,117 @@ internal enum GgmlIndexReductionOp
 
         // Mirrors NemoMamba2BatchedSeqDesc in ggml_ops_mamba2.cpp; same 32-byte
         // POD layout on 64-bit (two ints, two padding ints, two pointers).
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_NemotronMamba2BatchedStepF32(
-            int numSeqs,
-            [In, Out] NemoMamba2BatchedSeqDesc[] seqs,
-            int numTokens,
-            IntPtr packedBatched,
-            int dInProjTotal,
-            int dInner,
-            int dState,
-            int nHead,
-            int headDim,
-            int nGroup,
-            int dConv,
-            IntPtr convWt,
-            IntPtr convBias,
-            IntPtr dtBias,
-            IntPtr aLog,
-            IntPtr dData,
-            IntPtr ssmNormW,
-            float eps,
-            IntPtr outBatched);
+        private static int TSGgml_NemotronMamba2BatchedStepF32(int numSeqs, [In, Out] NemoMamba2BatchedSeqDesc[] seqs, int numTokens, IntPtr packedBatched, int dInProjTotal, int dInner, int dState, int nHead, int headDim, int nGroup, int dConv, IntPtr convWt, IntPtr convBias, IntPtr dtBias, IntPtr aLog, IntPtr dData, IntPtr ssmNormW, float eps, IntPtr outBatched)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_NemotronMamba2BatchedStepF32(numSeqs, seqs, numTokens, packedBatched, dInProjTotal, dInner, dState, nHead, headDim, nGroup, dConv, convWt, convBias, dtBias, aLog, dData, ssmNormW, eps, outBatched);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_NemotronMamba2BatchedStepF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GatedDeltaNetBatchedStepF32(
-            int numSeqs,
-            [In, Out] GdnBatchedSeqDesc[] seqs,
-            int numTokens,
-            IntPtr packedBatched,
-            int packedDim,
-            int qkvDim,
-            int qkDim,
-            int vDim,
-            int zDim,
-            int numKHeads,
-            int numVHeads,
-            int headKDim,
-            int headVDim,
-            int convKernel,
-            int ssmDInner,
-            IntPtr convWt,
-            IntPtr dtBias,
-            IntPtr aLog,
-            IntPtr ssmNormW,
-            float eps,
-            IntPtr gatedOut);
+        private static partial int Native_TSGgml_NemotronMamba2BatchedStepF32(int numSeqs, [In, Out] NemoMamba2BatchedSeqDesc[] seqs, int numTokens, IntPtr packedBatched, int dInProjTotal, int dInner, int dState, int nHead, int headDim, int nGroup, int dConv, IntPtr convWt, IntPtr convBias, IntPtr dtBias, IntPtr aLog, IntPtr dData, IntPtr ssmNormW, float eps, IntPtr outBatched);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_NemotronMamba2PrefillF32(
-            GgmlTensorView2D projected,
-            GgmlTensorView2D hiddenOut,
-            IntPtr convStateData,
-            int convStateElements,
-            IntPtr ssmStateData,
-            int ssmStateElements,
-            IntPtr convWeightData,
-            IntPtr convBiasData,
-            IntPtr dtBiasData,
-            IntPtr aData,
-            IntPtr dData,
-            IntPtr ssmNormData,
-            int dInner,
-            int dState,
-            int nHead,
-            int headDim,
-            int nGroup,
-            int dConv,
-            float eps);
+        private static int TSGgml_GatedDeltaNetBatchedStepF32(int numSeqs, [In, Out] GdnBatchedSeqDesc[] seqs, int numTokens, IntPtr packedBatched, int packedDim, int qkvDim, int qkDim, int vDim, int zDim, int numKHeads, int numVHeads, int headKDim, int headVDim, int convKernel, int ssmDInner, IntPtr convWt, IntPtr dtBias, IntPtr aLog, IntPtr ssmNormW, float eps, IntPtr gatedOut)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GatedDeltaNetBatchedStepF32(numSeqs, seqs, numTokens, packedBatched, packedDim, qkvDim, qkDim, vDim, zDim, numKHeads, numVHeads, headKDim, headVDim, convKernel, ssmDInner, convWt, dtBias, aLog, ssmNormW, eps, gatedOut);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GatedDeltaNetBatchedStepF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_NemotronMamba2DecodeF32(
-            ulong stateKey,
-            GgmlTensorView2D projected,
-            GgmlTensorView2D hiddenOut,
-            IntPtr convStateData,
-            int convStateElements,
-            IntPtr ssmStateData,
-            int ssmStateElements,
-            int initializeState,
-            int downloadState,
-            IntPtr convWeightData,
-            IntPtr convBiasData,
-            IntPtr dtBiasData,
-            IntPtr aData,
-            IntPtr dData,
-            IntPtr ssmNormData,
-            int dInner,
-            int dState,
-            int nHead,
-            int headDim,
-            int nGroup,
-            int dConv,
-            float eps);
+        private static partial int Native_TSGgml_GatedDeltaNetBatchedStepF32(int numSeqs, [In, Out] GdnBatchedSeqDesc[] seqs, int numTokens, IntPtr packedBatched, int packedDim, int qkvDim, int qkDim, int vDim, int zDim, int numKHeads, int numVHeads, int headKDim, int headVDim, int convKernel, int ssmDInner, IntPtr convWt, IntPtr dtBias, IntPtr aLog, IntPtr ssmNormW, float eps, IntPtr gatedOut);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_NemotronMamba2DecodeClear(ulong modelKey);
+        private static int TSGgml_NemotronMamba2PrefillF32(GgmlTensorView2D projected, GgmlTensorView2D hiddenOut, IntPtr convStateData, int convStateElements, IntPtr ssmStateData, int ssmStateElements, IntPtr convWeightData, IntPtr convBiasData, IntPtr dtBiasData, IntPtr aData, IntPtr dData, IntPtr ssmNormData, int dInner, int dState, int nHead, int headDim, int nGroup, int dConv, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_NemotronMamba2PrefillF32(projected, hiddenOut, convStateData, convStateElements, ssmStateData, ssmStateElements, convWeightData, convBiasData, dtBiasData, aData, dData, ssmNormData, dInner, dState, nHead, headDim, nGroup, dConv, eps);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_NemotronMamba2PrefillF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_NemotronMamba2DecodeReadState(
-            ulong stateKey,
-            IntPtr convStateData,
-            int convStateElements,
-            IntPtr ssmStateData,
-            int ssmStateElements);
+        private static partial int Native_TSGgml_NemotronMamba2PrefillF32(GgmlTensorView2D projected, GgmlTensorView2D hiddenOut, IntPtr convStateData, int convStateElements, IntPtr ssmStateData, int ssmStateElements, IntPtr convWeightData, IntPtr convBiasData, IntPtr dtBiasData, IntPtr aData, IntPtr dData, IntPtr ssmNormData, int dInner, int dState, int nHead, int headDim, int nGroup, int dConv, float eps);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_AlignedAlloc(UIntPtr size);
+        private static int TSGgml_NemotronMamba2DecodeF32(ulong stateKey, GgmlTensorView2D projected, GgmlTensorView2D hiddenOut, IntPtr convStateData, int convStateElements, IntPtr ssmStateData, int ssmStateElements, int initializeState, int downloadState, IntPtr convWeightData, IntPtr convBiasData, IntPtr dtBiasData, IntPtr aData, IntPtr dData, IntPtr ssmNormData, int dInner, int dState, int nHead, int headDim, int nGroup, int dConv, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_NemotronMamba2DecodeF32(stateKey, projected, hiddenOut, convStateData, convStateElements, ssmStateData, ssmStateElements, initializeState, downloadState, convWeightData, convBiasData, dtBiasData, aData, dData, ssmNormData, dInner, dState, nHead, headDim, nGroup, dConv, eps);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_NemotronMamba2DecodeF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_AlignedFree(IntPtr ptr);
+        private static partial int Native_TSGgml_NemotronMamba2DecodeF32(ulong stateKey, GgmlTensorView2D projected, GgmlTensorView2D hiddenOut, IntPtr convStateData, int convStateElements, IntPtr ssmStateData, int ssmStateElements, int initializeState, int downloadState, IntPtr convWeightData, IntPtr convBiasData, IntPtr dtBiasData, IntPtr aData, IntPtr dData, IntPtr ssmNormData, int dInner, int dState, int nHead, int headDim, int nGroup, int dConv, float eps);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_ClearHostBufferCache();
+        private static void TSGgml_NemotronMamba2DecodeClear(ulong modelKey)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_NemotronMamba2DecodeClear(modelKey);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_NemotronMamba2DecodeClear")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_Shutdown();
+        private static partial void Native_TSGgml_NemotronMamba2DecodeClear(ulong modelKey);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_NemotronMamba2DecodeReadState(ulong stateKey, IntPtr convStateData, int convStateElements, IntPtr ssmStateData, int ssmStateElements)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_NemotronMamba2DecodeReadState(stateKey, convStateData, convStateElements, ssmStateData, ssmStateElements);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_NemotronMamba2DecodeReadState")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial IntPtr TSGgml_GetBuildIdentity();
+        private static partial int Native_TSGgml_NemotronMamba2DecodeReadState(ulong stateKey, IntPtr convStateData, int convStateElements, IntPtr ssmStateData, int ssmStateElements);
+
+        private static IntPtr TSGgml_AlignedAlloc(UIntPtr size)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return GgmlNativeLoader.TrackNativeHandle("aligned-allocation", Native_TSGgml_AlignedAlloc(size));
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AlignedAlloc")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial IntPtr Native_TSGgml_AlignedAlloc(UIntPtr size);
+
+        private static void TSGgml_AlignedFree(IntPtr ptr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("aligned-allocation", ptr);
+            Native_TSGgml_AlignedFree(ptr);
+            resource.Complete();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_AlignedFree")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_AlignedFree(IntPtr ptr);
+
+        private static void TSGgml_ClearHostBufferCache()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_ClearHostBufferCache();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ClearHostBufferCache")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_ClearHostBufferCache();
+
+        private static void TSGgml_Shutdown()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_Shutdown();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_Shutdown")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_TSGgml_Shutdown();
+
+        private static IntPtr TSGgml_GetBuildIdentity()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetBuildIdentity();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetBuildIdentity")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial IntPtr Native_TSGgml_GetBuildIdentity();
 
         /// <summary>The build identity string of the bound GgmlOps library, or null when it returns none.</summary>
         internal static string ReadBuildIdentity()
@@ -4547,268 +4499,425 @@ internal enum GgmlIndexReductionOp
             return text == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(text);
         }
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_ReleaseReuseComputeBuffers();
+        private static void TSGgml_ReleaseReuseComputeBuffers()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_ReleaseReuseComputeBuffers();
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ReleaseReuseComputeBuffers")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_InvalidateHostBuffer(IntPtr ptr);
+        private static partial void Native_TSGgml_ReleaseReuseComputeBuffers();
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_SyncHostBuffer(IntPtr ptr, long byteCount);
+        private static void TSGgml_InvalidateHostBuffer(IntPtr ptr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_InvalidateHostBuffer(ptr);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_InvalidateHostBuffer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_SyncHostBufferRanges(IntPtr ptr, long* offsets, long* lengths, int count);
+        private static partial void Native_TSGgml_InvalidateHostBuffer(IntPtr ptr);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static unsafe partial int TSGgml_UploadHostBufferRanges(IntPtr ptr, long* offsets, long* lengths, int count);
+        private static int TSGgml_SyncHostBuffer(IntPtr ptr, long byteCount)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SyncHostBuffer(ptr, byteCount);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SyncHostBuffer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial long TSGgml_DeviceCopyCacheResidentBytes();
+        private static partial int Native_TSGgml_SyncHostBuffer(IntPtr ptr, long byteCount);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetBackendMemory(out long freeBytes, out long totalBytes);
+        private static unsafe int TSGgml_SyncHostBufferRanges(IntPtr ptr, long* offsets, long* lengths, int count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_SyncHostBufferRanges(ptr, offsets, lengths, count);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SyncHostBufferRanges")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_IsActiveDeviceIntegrated();
+        private static unsafe partial int Native_TSGgml_SyncHostBufferRanges(IntPtr ptr, long* offsets, long* lengths, int count);
+
+        private static unsafe int TSGgml_UploadHostBufferRanges(IntPtr ptr, long* offsets, long* lengths, int count)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_UploadHostBufferRanges(ptr, offsets, lengths, count);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_UploadHostBufferRanges")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static unsafe partial int Native_TSGgml_UploadHostBufferRanges(IntPtr ptr, long* offsets, long* lengths, int count);
+
+        private static long TSGgml_DeviceCopyCacheResidentBytes()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DeviceCopyCacheResidentBytes();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DeviceCopyCacheResidentBytes")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial long Native_TSGgml_DeviceCopyCacheResidentBytes();
+
+        private static int TSGgml_GetBackendMemory(out long freeBytes, out long totalBytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetBackendMemory(out freeBytes, out totalBytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetBackendMemory")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_GetBackendMemory(out long freeBytes, out long totalBytes);
+
+        private static int TSGgml_IsActiveDeviceIntegrated()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_IsActiveDeviceIntegrated();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_IsActiveDeviceIntegrated")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_IsActiveDeviceIntegrated();
 
         // Async dispatch (deferred ggml_backend_synchronize). When enabled, per-op
         // kernels return without waiting on the Metal command buffer; subsequent ops
         // chain through the Metal command queue, and host-side reads must call
         // TSGgml_HostReadBarrier first to drain pending GPU work. See
         // GgmlStorage.EnsureHostReadable for the C# entry point that triggers this.
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_SetAsyncCompute(int enabled);
+        private static void TSGgml_SetAsyncCompute(int enabled)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_SetAsyncCompute(enabled);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SetAsyncCompute")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_SetHostMoeThreads(int threads);
+        private static partial void Native_TSGgml_SetAsyncCompute(int enabled);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_SetHostMoeThreads(int threads)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_SetHostMoeThreads(threads);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SetHostMoeThreads")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_GetAsyncCompute();
+        private static partial void Native_TSGgml_SetHostMoeThreads(int threads);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_GetAsyncCompute()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_GetAsyncCompute();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_GetAsyncCompute")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_HostReadBarrier();
+        private static partial int Native_TSGgml_GetAsyncCompute();
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_HostReadBarrier()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_HostReadBarrier();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_HostReadBarrier")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes);
+        private static partial int Native_TSGgml_HostReadBarrier();
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_PreloadQuantizedWeight(cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_PreloadQuantizedWeight")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_RegisterOffloadable(IntPtr key);
+        private static partial int Native_TSGgml_PreloadQuantizedWeight(IntPtr cacheKey, IntPtr hostData, int ggmlType, long ne0, long ne1, long rawBytes);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_RegisterOffloadable(IntPtr key)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_RegisterOffloadable(key);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RegisterOffloadable")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_SetOffloadableBudget(long bytes);
+        private static partial void Native_TSGgml_RegisterOffloadable(IntPtr key);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_SetOffloadableBudget(long bytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_SetOffloadableBudget(bytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SetOffloadableBudget")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_ClearOffloadableState();
+        private static partial void Native_TSGgml_SetOffloadableBudget(long bytes);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_ClearOffloadableState()
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_ClearOffloadableState();
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_ClearOffloadableState")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_SetDeviceCopyBudget(long bytes);
+        private static partial void Native_TSGgml_ClearOffloadableState();
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_SetDeviceCopyBudget(long bytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_SetDeviceCopyBudget(bytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_SetDeviceCopyBudget")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DeviceMemoryInfo(out long freeBytes, out long totalBytes);
+        private static partial void Native_TSGgml_SetDeviceCopyBudget(long bytes);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_DeviceMemoryInfo(out long freeBytes, out long totalBytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DeviceMemoryInfo(out freeBytes, out totalBytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DeviceMemoryInfo")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_RegisterPinnedHostBuffer(IntPtr ptr, long bytes);
+        private static partial int Native_TSGgml_DeviceMemoryInfo(out long freeBytes, out long totalBytes);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_RegisterPinnedHostBuffer(IntPtr ptr, long bytes)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RegisterPinnedHostBuffer(ptr, bytes);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RegisterPinnedHostBuffer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void TSGgml_UnregisterPinnedHostBuffer(IntPtr ptr);
+        private static partial int Native_TSGgml_RegisterPinnedHostBuffer(IntPtr ptr, long bytes);
 
-        [LibraryImport(DllName)]
+        private static void TSGgml_UnregisterPinnedHostBuffer(IntPtr ptr)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_TSGgml_UnregisterPinnedHostBuffer(ptr);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_UnregisterPinnedHostBuffer")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial UIntPtr TSGgml_RowSize(int ggmlType, long ne);
+        private static partial void Native_TSGgml_UnregisterPinnedHostBuffer(IntPtr ptr);
 
-        [LibraryImport(DllName)]
+        private static UIntPtr TSGgml_RowSize(int ggmlType, long ne)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RowSize(ggmlType, ne);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RowSize")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_DequantizeToF32(int ggmlType, IntPtr src, long numElements, IntPtr dst);
+        private static partial UIntPtr Native_TSGgml_RowSize(int ggmlType, long ne);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_DequantizeToF32(int ggmlType, IntPtr src, long numElements, IntPtr dst)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_DequantizeToF32(ggmlType, src, numElements, dst);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_DequantizeToF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial void ggml_quantize_init(int type);
+        private static partial int Native_TSGgml_DequantizeToF32(int ggmlType, IntPtr src, long numElements, IntPtr dst);
 
-        [LibraryImport(DllName)]
+        private static void ggml_quantize_init(int type)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            Native_ggml_quantize_init(type);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "ggml_quantize_init")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void Native_ggml_quantize_init(int type);
+
+        private static bool ggml_quantize_requires_imatrix(int type)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_ggml_quantize_requires_imatrix(type);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "ggml_quantize_requires_imatrix")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         [return: MarshalAs(UnmanagedType.I1)]
-        private static partial bool ggml_quantize_requires_imatrix(int type);
+        private static partial bool Native_ggml_quantize_requires_imatrix(int type);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial UIntPtr ggml_quantize_chunk(int type, IntPtr src, IntPtr dst,
-            long start, long nrows, long nPerRow, IntPtr imatrix);
+        private static UIntPtr ggml_quantize_chunk(int type, IntPtr src, IntPtr dst, long start, long nrows, long nPerRow, IntPtr imatrix)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_ggml_quantize_chunk(type, src, dst, start, nrows, nPerRow, imatrix);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "ggml_quantize_chunk")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenVaeRun(in QwenVaeArgs args);
+        private static partial UIntPtr Native_ggml_quantize_chunk(int type, IntPtr src, IntPtr dst, long start, long nrows, long nPerRow, IntPtr imatrix);
+
+        private static int TSGgml_QwenVaeRun(in QwenVaeArgs args)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_QwenVaeRun(in args);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_QwenVaeRun")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_QwenVaeRun(in QwenVaeArgs args);
 
         /// <summary>Run a whole VAE encode/decode op-list as ONE device graph (see QwenVaeArgs).
         /// Returns false when the backend can't run it (caller falls back to the per-conv path).</summary>
         internal static bool TryQwenVaeRun(in QwenVaeArgs args) => TSGgml_QwenVaeRun(in args) != 0;
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_QwenTeTrunk(in QwenTeTrunkArgs args)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_QwenTeTrunk(in args);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_QwenTeTrunk")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_QwenTeTrunk(in QwenTeTrunkArgs args);
+        private static partial int Native_TSGgml_QwenTeTrunk(in QwenTeTrunkArgs args);
 
         /// <summary>Run the whole Qwen-Image-2.1 text-encoder trunk as ONE device graph
         /// (see QwenTeTrunkArgs). Returns false when the backend can't run it (caller falls
         /// back to the per-op path).</summary>
         internal static bool TryQwenTeTrunk(in QwenTeTrunkArgs args) => TSGgml_QwenTeTrunk(in args) != 0;
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_CopyF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D src);
+        private static int TSGgml_CopyF32(GgmlTensorView4D result, GgmlTensorView4D src)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_CopyF32(result, src);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_CopyF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_UnaryF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D src);
+        private static partial int Native_TSGgml_CopyF32(GgmlTensorView4D result, GgmlTensorView4D src);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_BinaryTensorF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D lhs,
-            GgmlTensorView4D rhs);
+        private static int TSGgml_UnaryF32(int op, GgmlTensorView4D result, GgmlTensorView4D src)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_UnaryF32(op, result, src);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_UnaryF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedActMulF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D a,
-            GgmlTensorView4D b);
+        private static partial int Native_TSGgml_UnaryF32(int op, GgmlTensorView4D result, GgmlTensorView4D src);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_FusedActMulSplitF32(
-            int op,
-            GgmlTensorView2D result,
-            GgmlTensorView2D gateUp,
-            int halfDim);
+        private static int TSGgml_BinaryTensorF32(int op, GgmlTensorView4D result, GgmlTensorView4D lhs, GgmlTensorView4D rhs)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_BinaryTensorF32(op, result, lhs, rhs);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_BinaryTensorF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_BinaryScalarF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D src,
-            float scalar);
+        private static partial int Native_TSGgml_BinaryTensorF32(int op, GgmlTensorView4D result, GgmlTensorView4D lhs, GgmlTensorView4D rhs);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_NormF32(
-            int op,
-            GgmlTensorView4D result,
-            GgmlTensorView4D src,
-            GgmlTensorView4D gamma,
-            GgmlTensorView4D beta,
-            int hasBeta,
-            float eps);
+        private static int TSGgml_FusedActMulF32(int op, GgmlTensorView4D result, GgmlTensorView4D a, GgmlTensorView4D b)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedActMulF32(op, result, a, b);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedActMulF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_IndexSelectF32(
-            GgmlTensorView2D result,
-            GgmlTensorView2D src,
-            GgmlContiguousTensor indices,
-            int addToResult);
+        private static partial int Native_TSGgml_FusedActMulF32(int op, GgmlTensorView4D result, GgmlTensorView4D a, GgmlTensorView4D b);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_IndexSelectGradF32(
-            GgmlTensorView2D grad,
-            GgmlTensorView2D adj,
-            GgmlContiguousTensor indices);
+        private static int TSGgml_FusedActMulSplitF32(int op, GgmlTensorView2D result, GgmlTensorView2D gateUp, int halfDim)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_FusedActMulSplitF32(op, result, gateUp, halfDim);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_FusedActMulSplitF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_RoPEF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D src,
-            int seqLen,
-            int rowOffset,
-            int addToResult,
-            int invertPositions);
+        private static partial int Native_TSGgml_FusedActMulSplitF32(int op, GgmlTensorView2D result, GgmlTensorView2D gateUp, int halfDim);
 
-        [LibraryImport(DllName)]
-        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_RoPEExF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D src,
-            GgmlContiguousTensor positions,
-            int ropeDim,
-            int mode,
-            int originalContextLength,
-            float freqBase,
-            float freqScale,
-            float extFactor,
-            float attnFactor,
-            float betaFast,
-            float betaSlow,
-            int addToResult,
-            int invertPositions);
+        private static int TSGgml_BinaryScalarF32(int op, GgmlTensorView4D result, GgmlTensorView4D src, float scalar)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_BinaryScalarF32(op, result, src, scalar);
+        }
 
-        [LibraryImport(DllName)]
+        [LibraryImport(DllName, EntryPoint = "TSGgml_BinaryScalarF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_RoPEMRoPEF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D src,
-            GgmlContiguousTensor positions,
-            int ropeDim,
-            int mode,
-            int sect0, int sect1, int sect2, int sect3,
-            int originalContextLength,
-            float freqBase,
-            float freqScale,
-            float extFactor,
-            float attnFactor,
-            float betaFast,
-            float betaSlow);
+        private static partial int Native_TSGgml_BinaryScalarF32(int op, GgmlTensorView4D result, GgmlTensorView4D src, float scalar);
 
-        [LibraryImport(DllName)]
+        private static int TSGgml_NormF32(int op, GgmlTensorView4D result, GgmlTensorView4D src, GgmlTensorView4D gamma, GgmlTensorView4D beta, int hasBeta, float eps)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_NormF32(op, result, src, gamma, beta, hasBeta, eps);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_NormF32")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
-        private static partial int TSGgml_RoPEExFreqFactorsF32(
-            GgmlTensorView4D result,
-            GgmlTensorView4D src,
-            GgmlContiguousTensor positions,
-            int ropeDim,
-            int mode,
-            int originalContextLength,
-            float freqBase,
-            float freqScale,
-            float extFactor,
-            float attnFactor,
-            float betaFast,
-            float betaSlow,
-            int addToResult,
-            int invertPositions,
-            IntPtr freqFactors,
-            int freqFactorsLen);
+        private static partial int Native_TSGgml_NormF32(int op, GgmlTensorView4D result, GgmlTensorView4D src, GgmlTensorView4D gamma, GgmlTensorView4D beta, int hasBeta, float eps);
+
+        private static int TSGgml_IndexSelectF32(GgmlTensorView2D result, GgmlTensorView2D src, GgmlContiguousTensor indices, int addToResult)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_IndexSelectF32(result, src, indices, addToResult);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_IndexSelectF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_IndexSelectF32(GgmlTensorView2D result, GgmlTensorView2D src, GgmlContiguousTensor indices, int addToResult);
+
+        private static int TSGgml_IndexSelectGradF32(GgmlTensorView2D grad, GgmlTensorView2D adj, GgmlContiguousTensor indices)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_IndexSelectGradF32(grad, adj, indices);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_IndexSelectGradF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_IndexSelectGradF32(GgmlTensorView2D grad, GgmlTensorView2D adj, GgmlContiguousTensor indices);
+
+        private static int TSGgml_RoPEF32(GgmlTensorView4D result, GgmlTensorView4D src, int seqLen, int rowOffset, int addToResult, int invertPositions)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RoPEF32(result, src, seqLen, rowOffset, addToResult, invertPositions);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RoPEF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_RoPEF32(GgmlTensorView4D result, GgmlTensorView4D src, int seqLen, int rowOffset, int addToResult, int invertPositions);
+
+        private static int TSGgml_RoPEExF32(GgmlTensorView4D result, GgmlTensorView4D src, GgmlContiguousTensor positions, int ropeDim, int mode, int originalContextLength, float freqBase, float freqScale, float extFactor, float attnFactor, float betaFast, float betaSlow, int addToResult, int invertPositions)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RoPEExF32(result, src, positions, ropeDim, mode, originalContextLength, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow, addToResult, invertPositions);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RoPEExF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_RoPEExF32(GgmlTensorView4D result, GgmlTensorView4D src, GgmlContiguousTensor positions, int ropeDim, int mode, int originalContextLength, float freqBase, float freqScale, float extFactor, float attnFactor, float betaFast, float betaSlow, int addToResult, int invertPositions);
+
+        private static int TSGgml_RoPEMRoPEF32(GgmlTensorView4D result, GgmlTensorView4D src, GgmlContiguousTensor positions, int ropeDim, int mode, int sect0, int sect1, int sect2, int sect3, int originalContextLength, float freqBase, float freqScale, float extFactor, float attnFactor, float betaFast, float betaSlow)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RoPEMRoPEF32(result, src, positions, ropeDim, mode, sect0, sect1, sect2, sect3, originalContextLength, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RoPEMRoPEF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_RoPEMRoPEF32(GgmlTensorView4D result, GgmlTensorView4D src, GgmlContiguousTensor positions, int ropeDim, int mode, int sect0, int sect1, int sect2, int sect3, int originalContextLength, float freqBase, float freqScale, float extFactor, float attnFactor, float betaFast, float betaSlow);
+
+        private static int TSGgml_RoPEExFreqFactorsF32(GgmlTensorView4D result, GgmlTensorView4D src, GgmlContiguousTensor positions, int ropeDim, int mode, int originalContextLength, float freqBase, float freqScale, float extFactor, float attnFactor, float betaFast, float betaSlow, int addToResult, int invertPositions, IntPtr freqFactors, int freqFactorsLen)
+        {
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            return Native_TSGgml_RoPEExFreqFactorsF32(result, src, positions, ropeDim, mode, originalContextLength, freqBase, freqScale, extFactor, attnFactor, betaFast, betaSlow, addToResult, invertPositions, freqFactors, freqFactorsLen);
+        }
+
+        [LibraryImport(DllName, EntryPoint = "TSGgml_RoPEExFreqFactorsF32")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int Native_TSGgml_RoPEExFreqFactorsF32(GgmlTensorView4D result, GgmlTensorView4D src, GgmlContiguousTensor positions, int ropeDim, int mode, int originalContextLength, float freqBase, float freqScale, float extFactor, float attnFactor, float betaFast, float betaSlow, int addToResult, int invertPositions, IntPtr freqFactors, int freqFactorsLen);
 
         public static void EnsureAvailable(GgmlBackendType backendType)
         {
+            EnsureImportResolverRegistered();
+            GgmlNativeLoader.ValidateRequestedBackend(backendType);
             if (backendType == GgmlBackendType.Metal && !IsApplePlatform())
             {
                 throw new PlatformNotSupportedException("The GGML Metal backend is available on Apple platforms (macOS, iOS/iPadOS, Mac Catalyst) only.");
@@ -4842,19 +4951,28 @@ internal enum GgmlIndexReductionOp
                     };
                     throw new InvalidOperationException($"Failed to initialize {backendName}. {GetBackendAvailabilityHint(backendType)}");
                 }
+                GgmlNativeLoader.RecordBackendInitialized(backendType);
             }
             catch (DllNotFoundException ex)
             {
+                GgmlNativeLoader.PoisonAfterBackendFailure();
                 throw new InvalidOperationException("Failed to load the native GGML bridge. Build `TensorSharp.GGML.Native` first.", ex);
             }
             catch (EntryPointNotFoundException ex)
             {
+                GgmlNativeLoader.PoisonAfterBackendFailure();
                 throw new InvalidOperationException("The native GGML bridge is out of date. Rebuild `TensorSharp.GGML.Native`.", ex);
+            }
+            catch (InvalidOperationException)
+            {
+                GgmlNativeLoader.PoisonAfterBackendFailure();
+                throw;
             }
         }
 
         public static bool CanInitialize(GgmlBackendType backendType)
         {
+            EnsureImportResolverRegistered();
             if (backendType == GgmlBackendType.Metal && !IsApplePlatform())
             {
                 return false;
@@ -6660,8 +6778,11 @@ internal enum GgmlIndexReductionOp
         /// </summary>
         public static void Shutdown()
         {
-            TSGgml_Shutdown();
+            GgmlNativeShutdownResult result = GgmlNativeLoader.Shutdown();
+            if (!result.Released) throw new InvalidOperationException(result.Diagnostic);
         }
+
+        internal static void ShutdownCore() => TSGgml_Shutdown();
 
         /// <summary>
         /// Free the reusable per-graph compute buffer + gallocr without tearing down the
@@ -6996,34 +7117,12 @@ internal enum GgmlIndexReductionOp
             // A library chosen by GgmlNativeLoader.Select binds every GgmlOps
             // import. Without a selection the probing below and the runtime's
             // default probing (runtimes/<rid>/native from the NuGet package) apply.
-            if (GgmlNativeLoader.TryGetSelectedHandle(out IntPtr selected))
-            {
-                return selected;
-            }
-
-            if (OperatingSystem.IsIOS() || OperatingSystem.IsTvOS())
-            {
-                // On iOS/iPadOS GgmlOps is a static archive linked into the app
-                // executable (GgmlOps.xcframework via NativeReference with
-                // ForceLoad), so every TSGgml_*/ggml_* symbol lives in the main
-                // program image - there is no separate library to probe for.
-                return NativeLibrary.GetMainProgramHandle();
-            }
-
-            EnsureWindowsNativeDependencySearchPaths();
-
-            foreach (string candidate in GetCandidatePaths(assembly))
-            {
-                if (File.Exists(candidate) && NativeLibrary.TryLoad(candidate, out IntPtr handle))
-                {
-                    return handle;
-                }
-            }
-
-            return IntPtr.Zero;
+            IntPtr defaultHandle = GgmlNativeLoader.ResolveDefault(assembly);
+            ApplyEarlyNativeTunables();
+            return defaultHandle;
         }
 
-        private static IEnumerable<string> GetCandidatePaths(Assembly assembly)
+        internal static IEnumerable<string> GetCandidatePaths(Assembly assembly)
         {
             string baseDirectory = AppContext.BaseDirectory;
             string assemblyDirectory = Path.GetDirectoryName(assembly.Location) ?? baseDirectory;
@@ -7032,6 +7131,16 @@ internal enum GgmlIndexReductionOp
             {
                 yield return Path.Combine(baseDirectory, fileName);
                 yield return Path.Combine(assemblyDirectory, fileName);
+                foreach (string directory in new[] { baseDirectory, assemblyDirectory })
+                {
+                    string native = Path.Combine(directory, "runtimes", GgmlNativeLoader.RuntimeIdentifier, "native");
+                    yield return Path.Combine(native, fileName);
+                    foreach (string variant in new[] { "cpu", "metal", "vulkan", "cuda13" })
+                        yield return Path.Combine(native, variant, fileName);
+                }
+                foreach (string directory in ((AppContext.GetData("NATIVE_DLL_SEARCH_DIRECTORIES") as string) ?? string.Empty)
+                    .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+                    if (Path.IsPathFullyQualified(directory)) yield return Path.Combine(directory, fileName);
             }
 
             foreach (string root in EnumerateRepoRoots(baseDirectory))
@@ -7054,6 +7163,7 @@ internal enum GgmlIndexReductionOp
                 if (IsRepoRoot(current.FullName))
                 {
                     yield return current.FullName;
+                    yield break;
                 }
 
                 current = current.Parent;
@@ -7083,50 +7193,6 @@ internal enum GgmlIndexReductionOp
             // Metal is the GPU backend on macOS; ggml-vulkan is built for
             // Windows and Linux only (see TensorSharp.GGML.Native/CMakeLists.txt).
             return OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
-        }
-
-        internal static void EnsureWindowsNativeDependencySearchPaths()
-        {
-            if (!OperatingSystem.IsWindows())
-                return;
-
-            if (Interlocked.Exchange(ref s_windowsDependencySearchPathsInitialized, 1) != 0)
-                return;
-
-            string currentPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-            var existingEntries = new HashSet<string>(
-                currentPath.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries),
-                StringComparer.OrdinalIgnoreCase);
-
-            var additions = EnumerateWindowsNativeDependencyDirectories()
-                .Where(path => Directory.Exists(path) && !existingEntries.Contains(path))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-
-            if (additions.Length == 0)
-                return;
-
-            Environment.SetEnvironmentVariable(
-                "PATH",
-                string.Join(Path.PathSeparator, additions.Concat(new[] { currentPath })));
-        }
-
-        private static IEnumerable<string> EnumerateWindowsNativeDependencyDirectories()
-        {
-            foreach (string variableName in new[] { "CUDA_PATH", "CUDA_HOME" })
-            {
-                string root = Environment.GetEnvironmentVariable(variableName);
-                if (!string.IsNullOrWhiteSpace(root))
-                    yield return Path.Combine(root, "bin");
-            }
-
-            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            string cudaRoot = Path.Combine(programFiles, "NVIDIA GPU Computing Toolkit", "CUDA");
-            if (!Directory.Exists(cudaRoot))
-                yield break;
-
-            foreach (string versionDir in Directory.EnumerateDirectories(cudaRoot, "v*").OrderByDescending(path => path))
-                yield return Path.Combine(versionDir, "bin");
         }
 
         private static bool IsRepoRoot(string path)
@@ -7191,7 +7257,7 @@ internal enum GgmlIndexReductionOp
         /// </para>
         /// </summary>
         /// <returns>Whether a working backend is standing afterwards.</returns>
-        public static bool RecreateBackend() => TSGgml_RecreateBackend() != 0;
+        public static bool RecreateBackend() => GgmlNativeLoader.RecreateOwnedBackend(() => TSGgml_RecreateBackend() != 0);
 
         /// <summary>What ggml logged about the failure, or an empty string.</summary>
         public static string BackendFailureText()
