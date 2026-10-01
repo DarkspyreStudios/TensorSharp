@@ -83,6 +83,20 @@ the bridge hash, CMake cache hash and settings, actual compiler output, exact CP
 deployment target. CUDA13 records include observed toolkit compiler output and every compiled
 SASS/PTX architecture. Target and GPU execution remain explicitly unrecorded by this inspection.
 
+The recorder and packer use one release-profile policy. Collection requires the recorded portable
+CPU floor, target/backend settings, Linux `$ORIGIN` configuration and an explicit macOS deployment
+target. CUDA13 requires the full recorded SASS/PTX profile and consistent observed CUDA13 compiler
+and toolkit evidence. The recorded bridge SHA-256 must match the actual staged bridge.
+
+Each build record includes `cmake-settings.txt` and `cmake-cache.snapshot.txt`. Both are ordinary
+files. The snapshot preserves the original observed cache bytes, including line endings and
+comments. Its SHA-256 must match `cmakeCacheSha256`. A strict parser rejects empty, malformed or
+duplicate cache entries. Parsed snapshot settings, normalized settings and `cmakeConfiguration`
+must agree exactly. Records without the snapshot fail validation, including partial-matrix stages.
+The snapshot is evidence only. Build scripts do not use it as a CMake input. These checks validate
+recorded observations; they do not authenticate the recorder, reproduce the build or qualify
+target/compiler/GPU execution. Native source commit evidence remains a separate release check.
+
 ### Component evidence
 
 The build record and schema-1 artifact manifest include `components`. Each component records an

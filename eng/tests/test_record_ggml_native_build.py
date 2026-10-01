@@ -48,7 +48,8 @@ class BuildRecordTests(unittest.TestCase):
         if name.startswith("licenses/"):
             return {"path": name, "format": "other"}
         return {"path": name, "format": "elf", "identity": {"arch": "arm64"},
-                "tsggmlBuildIdentityExport": True, "dependencies": [], "runpath": ["$ORIGIN"]}
+                "tsggmlBuildIdentityExport": True, "functionExports": ["TSGgml_GetBuildIdentity"],
+                "dependencies": [], "runpath": ["$ORIGIN"]}
 
     def output(self, args):
         if args[0] == "git":
@@ -238,6 +239,55 @@ class BuildRecordTests(unittest.TestCase):
             self.cache.write_text(text)
             with self.subTest(text=text), self.assertRaises(ValueError):
                 record.read_cache(self.cache)
+
+    def test_recorder_snapshot_preserves_exact_crlf_bytes_and_collector_accepts_same_observed_configuration(self):
+        stage = self.root / "stage"
+        artifact = stage / "runtimes/linux-arm64/native/cuda13"
+        artifact.mkdir(parents=True)
+        moved = artifact / self.binary.name
+        self.binary.rename(moved)
+        self.binary = moved
+        observed = self.cache.read_bytes().replace(b"\n", b"\r\n")
+        self.cache.write_bytes(observed)
+        result = self.create()
+        out = stage / "build/linux-arm64-cuda13"
+        record.write_build_record(out, result, self.cache)
+        self.assertEqual(observed, (out / record.pack.CMAKE_CACHE_SNAPSHOT).read_bytes())
+        self.assertEqual(record.pack.sha256_bytes(observed), result["cmakeCacheSha256"])
+        self.assertNotEqual(record.pack.sha256_bytes((out / "cmake-settings.txt").read_bytes()), result["cmakeCacheSha256"])
+        with patch.object(record.pack, "REPO_ROOT", self.root), \
+             patch.object(record.pack, "read_required_exports", return_value=["TSGgml_GetBuildIdentity"]):
+            artifacts, errors = record.pack.collect_artifacts(stage, "test", self.ggml)
+        self.assertEqual([], errors)
+        self.assertEqual(1, len(artifacts))
+
+    def test_snapshot_writer_refuses_changed_raw_bytes_or_recorded_configuration_before_output(self):
+        result = self.create()
+        observed = self.cache.read_bytes()
+        out = self.root / "snapshot-output"
+        self.cache.write_bytes(observed + b"//Changed raw evidence\n")
+        with self.assertRaisesRegex(ValueError, "original bytes"):
+            record.write_build_record(out, result, self.cache)
+        self.assertFalse(out.exists())
+        self.cache.write_bytes(observed)
+        result["cmakeConfiguration"] = result["cmakeConfiguration"] | {"GGML_NATIVE": "ON"}
+        with self.assertRaisesRegex(ValueError, "recorded configuration"):
+            record.write_build_record(out, result, self.cache)
+        self.assertFalse(out.exists())
+
+    def test_snapshot_writer_refuses_linked_input_and_output(self):
+        result = self.create()
+        actual = self.root / "actual-cache.txt"
+        self.cache.rename(actual)
+        self.cache.symlink_to(actual)
+        with self.assertRaisesRegex(ValueError, "linked staging"):
+            record.write_build_record(self.root / "snapshot-output", result, self.cache)
+        out = self.root / "snapshot-output"
+        out.mkdir()
+        (out / record.pack.CMAKE_CACHE_SNAPSHOT).symlink_to(actual)
+        with self.assertRaisesRegex(ValueError, "linked staging"):
+            record.write_build_record(out, result, actual)
+        self.assertFalse((out / "build-identity.json").exists())
 
 
 if __name__ == "__main__":

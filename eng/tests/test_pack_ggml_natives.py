@@ -226,7 +226,7 @@ class StagingFilesystemTests(unittest.TestCase):
         cls.entry = pack.ENTRY[cls.rid.split("-")[0]]
         cls.library = Path(cls.fixture.name) / cls.entry
         cls.abi = pack.native_abi(pack.REPO_ROOT)
-        identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu=portable;abi={cls.abi}"
+        identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu={pack.CPU_PROFILES[cls.rid]};abi={cls.abi}"
         source_path = Path(cls.fixture.name) / "identity.c"
         stubs = "".join(f"void {name}(void) {{}}\n" for name in pack.read_required_exports(pack.REPO_ROOT)
                         if name != "TSGgml_GetBuildIdentity")
@@ -258,6 +258,18 @@ class StagingFilesystemTests(unittest.TestCase):
         self.build_dir.mkdir(parents=True)
         self.build = {"tensorSharpBuild": self.version, "sourceCommit": self.source, "ggmlCommit": self.ggml,
                       "rid": self.rid, "variant": self.variant, "nativeAbi": self.abi}
+        settings = {"TENSORSHARP_NATIVE_ABI": self.abi, "TENSORSHARP_NATIVE_RID": self.rid,
+                    "TENSORSHARP_NATIVE_VARIANT": self.variant, "TENSORSHARP_GGML_NATIVE_PORTABLE": "ON",
+                    "GGML_NATIVE": "OFF", "GGML_METAL": "ON" if self.variant == "metal" else "OFF",
+                    "GGML_CUDA": "OFF", "GGML_VULKAN": "OFF", "CMAKE_CXX_COMPILER": "inspection-fixture-compiler"}
+        if self.rid.startswith("linux-"):
+            settings.update(CMAKE_INSTALL_RPATH="$ORIGIN", CMAKE_BUILD_WITH_INSTALL_RPATH="ON")
+        if self.rid.startswith("osx-"):
+            settings["CMAKE_OSX_DEPLOYMENT_TARGET"] = "14.0"
+        self.build.update(cpuProfile=pack.CPU_PROFILES[self.rid], cmakeConfiguration=settings,
+                          compiler=settings["CMAKE_CXX_COMPILER"], compilerVersion="inspection fixture, not release execution",
+                          macosDeploymentTarget=settings.get("CMAKE_OSX_DEPLOYMENT_TARGET"),
+                          bridgeSha256=pack.sha256_bytes((self.artifact / self.entry).read_bytes()))
         self.build["components"] = []
         for expected in pack.core_component_specs(self.build, self.entry):
             self.build["components"].append({key: value for key, value in expected.items() if key not in ("binaryPaths", "evidencePaths")} | {
@@ -267,7 +279,13 @@ class StagingFilesystemTests(unittest.TestCase):
         self.out = self.root / "output"
 
     def write_build(self):
+        settings = self.build["cmakeConfiguration"]
+        snapshot = "//Synthetic inspection fixture cache\n" + "".join(f"{key}:STRING={value}\n" for key, value in sorted(settings.items()))
+        (self.build_dir / pack.CMAKE_CACHE_SNAPSHOT).write_bytes(snapshot.encode())
+        self.build["cmakeCacheSha256"] = pack.sha256_bytes(snapshot.encode())
         (self.build_dir / "build-identity.json").write_text(json.dumps(self.build), encoding="utf-8")
+        (self.build_dir / "cmake-settings.txt").write_text("".join(f"{key}={value}\n" for key, value in
+                                                                 sorted(self.build["cmakeConfiguration"].items())), encoding="utf-8")
 
     def reference(self, name):
         return {key: value for key, value in pack.file_record(self.artifact, self.artifact / name).items() if key != "executable"}
@@ -477,9 +495,11 @@ class StagingFilesystemTests(unittest.TestCase):
 
     def test_dangling_settings_links_and_special_files_are_not_silently_ignored(self):
         settings = self.build_dir / "cmake-settings.txt"
+        settings.unlink()
         settings.symlink_to(self.root / "absent")
         self.assertEqual(1, self.run_cli()[0])
         settings.unlink()
+        self.write_build()
         os.mkfifo(self.artifact / "fifo")
         self.assertEqual(1, self.run_cli()[0])
 

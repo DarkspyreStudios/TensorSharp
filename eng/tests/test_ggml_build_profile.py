@@ -74,6 +74,11 @@ class RecordedProfileCollectionTests(unittest.TestCase):
         self.write_record()
 
     def write_record(self):
+        cache = "//Mocked observed cache with original CRLF bytes\r\n" + "".join(
+            f"{key}:STRING={value}\r\n" for key, value in sorted(self.settings.items()))
+        self.snapshot_path = self.record_dir / "cmake-cache.snapshot.txt"
+        self.snapshot_path.write_bytes(cache.encode())
+        self.build["cmakeCacheSha256"] = pack.sha256_bytes(self.snapshot_path.read_bytes())
         (self.record_dir / "build-identity.json").write_text(json.dumps(self.build))
         self.settings_path = self.record_dir / "cmake-settings.txt"
         self.settings_path.write_text("".join(f"{key}={value}\n" for key, value in sorted(self.settings.items())))
@@ -90,12 +95,78 @@ class RecordedProfileCollectionTests(unittest.TestCase):
         return pack.collect_artifacts(self.stage, "fixture", self.ggml)
 
     def test_five_settled_cpu_profiles_accept_without_execution_claim(self):
-        for rid in PROFILES:
-            with self.subTest(rid=rid):
-                self.rid, self.variant = rid, pack.BASELINE[rid]
-                self.configure()
-                _, errors = self.collect()
-                self.assertEqual([], errors)
+        for rid, variants in pack.VARIANTS.items():
+            for variant in variants:
+                with self.subTest(rid=rid, variant=variant):
+                    self.rid, self.variant = rid, variant
+                    self.configure()
+                    _, errors = self.collect()
+                    self.assertEqual([], errors)
+
+    def test_macos_missing_malformed_or_inconsistent_deployment_refuses(self):
+        self.rid, self.variant = "osx-arm64", "metal"
+        self.configure()
+        for deployment in ("", "latest", "14.0.0.0"):
+            with self.subTest(deployment=deployment):
+                self.settings["CMAKE_OSX_DEPLOYMENT_TARGET"] = deployment
+                self.build["macosDeploymentTarget"] = deployment
+                self.write_record()
+                self.assertTrue(self.collect()[1])
+        self.settings["CMAKE_OSX_DEPLOYMENT_TARGET"] = "14.0"
+        self.build["macosDeploymentTarget"] = "15.0"
+        self.write_record()
+        self.assertTrue(self.collect()[1])
+
+    def test_linked_or_nonordinary_settings_refuse(self):
+        self.settings_path.rename(self.record_dir / "actual-settings.txt")
+        self.settings_path.symlink_to(self.record_dir / "actual-settings.txt")
+        self.assertTrue(self.collect()[1])
+        self.settings_path.unlink()
+        self.settings_path.mkdir()
+        self.assertTrue(self.collect()[1])
+
+    def test_missing_or_inconsistent_cpp_compiler_evidence_refuses(self):
+        for key, value in (("compiler", "/other/compiler"), ("compilerVersion", ""), ("compilerVersion", None)):
+            with self.subTest(key=key, value=value):
+                original = self.build[key]
+                self.build[key] = value
+                self.write_record()
+                self.assertTrue(self.collect()[1])
+                self.build[key] = original
+        self.settings["CMAKE_CXX_COMPILER"] = ""
+        self.build["compiler"] = ""
+        self.write_record()
+        self.assertTrue(self.collect()[1])
+
+    def test_actual_raw_cache_hash_differs_from_record_refuses(self):
+        self.write_record()
+        self.build["cmakeCacheSha256"] = "3" * 64
+        (self.record_dir / "build-identity.json").write_text(json.dumps(self.build))
+        self.assertTrue(self.collect()[1])
+
+    def test_missing_linked_or_nonordinary_cache_snapshot_refuses(self):
+        self.snapshot_path.rename(self.record_dir / "actual-cache.txt")
+        self.assertTrue(self.collect()[1])
+        self.snapshot_path.symlink_to(self.record_dir / "actual-cache.txt")
+        self.assertTrue(self.collect()[1])
+        self.snapshot_path.unlink()
+        self.snapshot_path.mkdir()
+        self.assertTrue(self.collect()[1])
+
+    def test_cache_bytes_are_not_a_normalized_settings_hash(self):
+        self.snapshot_path.write_bytes(self.snapshot_path.read_bytes().replace(b"\r\n", b"\n"))
+        self.assertTrue(self.collect()[1])
+
+    def test_cache_malformed_duplicate_empty_or_configuration_mismatch_refuses_even_with_matching_hash(self):
+        valid = self.snapshot_path.read_bytes()
+        for contents in (b"", b"not-a-cache-entry\n", valid + b"GGML_NATIVE:BOOL=OFF\n",
+                         valid.replace(b"GGML_NATIVE:STRING=OFF", b"GGML_NATIVE:STRING=ON")):
+            with self.subTest(contents=contents):
+                self.snapshot_path.write_bytes(contents)
+                self.build["cmakeCacheSha256"] = pack.sha256_bytes(contents)
+                (self.record_dir / "build-identity.json").write_text(json.dumps(self.build))
+                self.assertTrue(self.collect()[1])
+        self.write_record()
 
     def test_missing_empty_duplicate_malformed_or_mismatching_settings_refuse(self):
         valid = self.settings_path.read_text()

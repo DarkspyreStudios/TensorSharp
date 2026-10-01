@@ -77,6 +77,10 @@ VARIANTS = {
 }
 ENTRY = {"osx": "libGgmlOps.dylib", "linux": "libGgmlOps.so", "win": "GgmlOps.dll"}
 BACKENDS = {"cpu": ["cpu"], "metal": ["metal", "cpu"], "vulkan": ["vulkan", "cpu"], "cuda13": ["cuda", "cpu"]}
+CPU_PROFILES = {"osx-arm64": "apple-m1", "linux-x64": "x86-64", "win-x64": "x86-64",
+                "linux-arm64": "armv8.2-a+dotprod", "win-arm64": "armv8.2-a+dotprod"}
+CUDA_ARCHITECTURES = "75-real;80-real;86-real;89-real;120-real;120-virtual"
+CMAKE_CACHE_SNAPSHOT = "cmake-cache.snapshot.txt"
 REQUIRED_LICENSES = ("licenses/TensorSharp-LICENSE.txt", "licenses/ggml-LICENSE.txt")
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
 DEFAULT_DEVELOPER_LIMIT = 250 * 1024 * 1024
@@ -467,6 +471,108 @@ def read_build_file(path):
     return path.read_text(encoding="utf-8")
 
 
+def read_cmake_cache(text):
+    settings = {}
+    for line in text.splitlines():
+        if not line or line.startswith(("#", "//")):
+            continue
+        match = re.fullmatch(r"([^:=\s\x00-\x1f\x7f]+):([A-Z]+)=([^\x00]*)", line)
+        if not match or match[1] in settings:
+            raise ValueError("malformed or duplicate CMake cache entry: " + line)
+        settings[match[1]] = match[3]
+    if not settings:
+        raise ValueError("CMake cache settings are empty")
+    return settings
+
+
+def read_cmake_settings(text):
+    settings = {}
+    for line in text.splitlines():
+        match = re.fullmatch(r"([^:=\s\x00-\x1f\x7f]+)=([^\x00]*)", line)
+        if not match or match[1] in settings:
+            raise ValueError("malformed or duplicate normalized CMake setting: " + line)
+        settings[match[1]] = match[2]
+    if not settings:
+        raise ValueError("normalized CMake settings are empty")
+    return settings
+
+
+def validate_release_profile(settings, identity):
+    if (not isinstance(settings, dict) or not settings
+            or any(not isinstance(key, str) or not re.fullmatch(r"[^:=\s\x00-\x1f\x7f]+", key)
+                   or not isinstance(value, str) for key, value in settings.items())):
+        raise ValueError("the recorded CMake configuration is malformed")
+    rid, variant = identity.get("rid"), identity.get("variant")
+    if rid not in VARIANTS or variant not in VARIANTS[rid]:
+        raise ValueError("unsupported release RID/variant")
+    for key, value in (("TENSORSHARP_NATIVE_ABI", identity.get("abi")), ("TENSORSHARP_NATIVE_RID", rid),
+                       ("TENSORSHARP_NATIVE_VARIANT", variant), ("TENSORSHARP_GGML_NATIVE_PORTABLE", "ON"),
+                       ("GGML_NATIVE", "OFF")):
+        if settings.get(key) != value:
+            raise ValueError("the CMake configuration differs from the release profile: " + key)
+    if identity.get("cpu") != CPU_PROFILES[rid]:
+        raise ValueError("the binary CPU profile differs from the portable release floor")
+    for backend in ("metal", "cuda13", "vulkan"):
+        flag = "GGML_" + ("CUDA" if backend == "cuda13" else backend.upper())
+        if settings.get(flag) != ("ON" if variant == backend else "OFF"):
+            raise ValueError("the CMake backend differs from the declared variant: " + flag)
+    if rid.startswith("linux-"):
+        if settings.get("CMAKE_INSTALL_RPATH") != "$ORIGIN" or settings.get("CMAKE_BUILD_WITH_INSTALL_RPATH") != "ON":
+            raise ValueError("Linux release libraries require the selected directory's $ORIGIN runpath")
+    deployment = settings.get("CMAKE_OSX_DEPLOYMENT_TARGET") if rid.startswith("osx-") else None
+    if rid.startswith("osx-") and (not deployment or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", deployment)):
+        raise ValueError("macOS release libraries require an explicit deployment target")
+    if not settings.get("CMAKE_CXX_COMPILER", "").strip():
+        raise ValueError("the CMake configuration has no C++ compiler")
+    if variant == "cuda13":
+        if settings.get("CMAKE_CUDA_ARCHITECTURES") != CUDA_ARCHITECTURES:
+            raise ValueError("the full release CUDA SASS/PTX profile is required")
+        if not settings.get("CMAKE_CUDA_COMPILER", "").strip():
+            raise ValueError("the CMake configuration has no CUDA compiler")
+    return deployment
+
+
+def cuda_profile_evidence(settings, compiler_version):
+    if not isinstance(compiler_version, str):
+        raise ValueError("the cuda13 variant has no observed CUDA compiler output")
+    match = re.search(r"\brelease ([0-9]+)\.([0-9]+)\b", compiler_version)
+    if not match or match[1] != "13":
+        raise ValueError("the cuda13 variant requires an observed CUDA 13 compiler")
+    return {"compiler": settings["CMAKE_CUDA_COMPILER"], "compilerVersion": compiler_version,
+            "toolkitVersion": match[1] + "." + match[2], "architectures": CUDA_ARCHITECTURES.split(";")}
+
+
+def validate_recorded_profile(build, identity, settings, bridge_sha256):
+    if build.get("cmakeConfiguration") != settings:
+        raise ValueError("normalized CMake settings differ from the recorded configuration")
+    deployment = validate_release_profile(settings, identity)
+    if build.get("cpuProfile") != identity["cpu"]:
+        raise ValueError("the recorded CPU profile differs from the binary release floor")
+    if build.get("macosDeploymentTarget") != deployment:
+        raise ValueError("the recorded macOS deployment target differs from the CMake configuration")
+    if (build.get("compiler") != settings["CMAKE_CXX_COMPILER"]
+            or not isinstance(build.get("compilerVersion"), str) or not build["compilerVersion"].strip()):
+        raise ValueError("the recorded C++ compiler evidence is missing or inconsistent")
+    if build.get("bridgeSha256") != bridge_sha256:
+        raise ValueError("the recorded bridge SHA-256 differs from the actual staged bridge")
+    if identity["variant"] == "cuda13":
+        cuda = build.get("cuda")
+        if not isinstance(cuda, dict) or cuda != cuda_profile_evidence(settings, cuda.get("compilerVersion")):
+            raise ValueError("the recorded CUDA compiler, toolkit or architecture evidence is inconsistent")
+
+
+def observed_cache_bytes(path, build):
+    require_unlinked(path.absolute())
+    if not stat.S_ISREG(path.stat().st_mode):
+        raise ValueError("the observed CMake cache snapshot must be an ordinary file")
+    data = path.read_bytes()
+    if sha256_bytes(data) != build.get("cmakeCacheSha256"):
+        raise ValueError("the observed CMake cache SHA-256 differs from the recorded original bytes")
+    if read_cmake_cache(data.decode("utf-8")) != build.get("cmakeConfiguration"):
+        raise ValueError("the observed CMake cache differs from the recorded configuration")
+    return data
+
+
 def collect_artifacts(stage, version, ggml_commit):
     artifacts = []
     errors = []
@@ -496,7 +602,10 @@ def collect_artifacts(stage, version, ggml_commit):
                 if not isinstance(source, str) or not re.fullmatch(r"[a-f0-9]{40}", source):
                     errors.append(f"{rid}/{variant}: build record has no exact source commit")
                 settings_path = build_dir / "cmake-settings.txt"
-                build["cmakeSettings"] = read_build_file(settings_path).splitlines() if settings_path.exists() or settings_path.is_symlink() else []
+                settings_text = read_build_file(settings_path)
+                settings = read_cmake_settings(settings_text)
+                observed_cache_bytes(build_dir / CMAKE_CACHE_SNAPSHOT, build)
+                build["cmakeSettings"] = settings_text.splitlines()
                 files = [file_record(variant_dir, path) for path in paths]
                 described = [INVENTORY.describe(f["path"], rid, variant, variant_dir / f["path"]) for f in files]
                 errors += check_artifact(rid, variant, variant_dir, {"files": files}, described, required_exports)
@@ -510,6 +619,8 @@ def collect_artifacts(stage, version, ggml_commit):
                                           ("ggml", ggml_commit), ("source", source), ("abi", expected_abi)):
                         if identity.get(key) != expected:
                             errors.append(f"{rid}/{variant}: binary identity {key}={identity.get(key)}, expected {expected}")
+                    bridge_digest = next(item["sha256"] for item in files if item["path"] == entry)
+                    validate_recorded_profile(build, identity, settings, bridge_digest)
                 artifacts.append({"rid": rid, "variant": variant, "directory": variant_dir, "build": build,
                                   "files": files, "inventory": described, "identity": identity, "components": components})
             except (OSError, ValueError, KeyError, IndexError, UnicodeError, struct.error) as error:
