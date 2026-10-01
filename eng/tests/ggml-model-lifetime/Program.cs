@@ -54,8 +54,14 @@ internal static class Retirement
                 mode is "bonsai-unregister-refusal" or "bonsai-registration-refusal" or "local-quantized-transfer" or "local-bonsai-transfer-refusal" ?
                     "generated F32 metadata context and Q2_0 owner, no forward" : "generated tiny F32 HunyuanDense",
             pretrainedModelQualification = "not-run",
-            wholeNativeExecutor = mode is "vision-normal" or "vision-mismatch" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal"
-                ? "real-text-load/reset/dispose-lifetime-only;forward-not-run" : "not-run",
+            wholeNativeExecutor = mode switch
+            {
+                "vision-normal" => "real-text-load/vision-attach/dispose-lifetime-only;forward-not-run",
+                "vision-mismatch" => "real-text-load/reset/dispose-lifetime-only;forward-not-run",
+                "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal"
+                    => "real-text-load/managed-cleanup-refusal/retention-lifetime-only;forward-not-run",
+                _ => "not-run"
+            },
             multiDeviceWorkers = "not-run"
         }));
     }
