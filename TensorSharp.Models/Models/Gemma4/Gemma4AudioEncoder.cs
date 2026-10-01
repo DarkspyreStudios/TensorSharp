@@ -169,6 +169,7 @@ namespace TensorSharp.Models
 
         public unsafe Tensor Encode(float[] melData, int numFrames)
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             Console.Write("Audio encoder SSCP...");
 
             // melData is [numFrames, melBins] row-major. We need [numFrames, melBins] as TensorSharp tensor.
@@ -949,6 +950,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             _onesForNorm?.Dispose();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
@@ -960,4 +962,3 @@ namespace TensorSharp.Models
         }
     }
 }
-

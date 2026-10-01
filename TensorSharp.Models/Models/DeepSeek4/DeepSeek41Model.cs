@@ -48,6 +48,7 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (NativeSync)
             {
                 if (_vision != IntPtr.Zero)
@@ -86,6 +87,7 @@ namespace TensorSharp.Models
 
         internal Tensor EncodeImage(string path)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (NativeSync)
             {
                 if (_vision == IntPtr.Zero)
@@ -103,6 +105,7 @@ namespace TensorSharp.Models
 
         public void SetVisionEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(embeddings);
             try
             {
@@ -154,7 +157,10 @@ namespace TensorSharp.Models
 
         List<int> IMultimodalPromptExpander.ExpandMultimodalPrompt(ModelMultimodalInjector injector,
             List<ChatMessage> history, List<int> inputTokens)
-            => injector.ProcessDeepSeek41History(this, history, inputTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return injector.ProcessDeepSeek41History(this, history, inputTokens);
+        }
 
         public override void Dispose()
         {

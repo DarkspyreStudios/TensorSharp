@@ -26,12 +26,14 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (Config.Architecture != "glm5next")
             {
                 Console.WriteLine($"Warning: {Config.Architecture} has no vision tower; ignoring mmproj {mmProjPath}.");
                 return;
             }
             VisionEncoder = new GlmNextVisionEncoder(mmProjPath, _allocator);
+            VisionEncoder.SetHostModel(this);
         }
 
         /// <summary>
@@ -42,6 +44,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SetVisionEmbeddings(Tensor visionEmbeddings, int startPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (visionEmbeddings == null)
                 return;
             try

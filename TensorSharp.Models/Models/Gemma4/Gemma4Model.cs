@@ -377,6 +377,7 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             // The direct CUDA backend currently diverges numerically in the Gemma4
             // vision stack; keep projector embeddings on the stable CPU path and
             // copy the final embeddings into the CUDA language model.
@@ -392,12 +393,14 @@ namespace TensorSharp.Models
 
         public void LoadAudioEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             _audioEncoder = new Gemma4AudioEncoder(mmProjPath, _allocator);
             _audioEncoder.SetHostModel(this);
         }
 
         public void SetAudioEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingAudioEmbeddingsList.Add((embeddings, insertPosition));
         }
 
@@ -1164,6 +1167,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_kvCacheK == null || _kvCacheV == null) return false;
             if (startToken < 0 || tokenCount <= 0) return false;
             if (startToken + tokenCount > _cacheSeqLen) return false;
@@ -1186,6 +1190,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_kvCacheK == null || _kvCacheV == null) return false;
             if (destToken < 0 || tokenCount <= 0) return false;
             // Inject is called by BatchExecutor.InjectAllBlocks block-by-block in
@@ -1313,6 +1318,7 @@ namespace TensorSharp.Models
 
         public void SetVisionEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingVisionEmbeddingsList.Add((embeddings, insertPosition));
         }
 
@@ -1709,6 +1715,7 @@ namespace TensorSharp.Models
 
         public override Tensor SubmitGreedyDecodeStep(int? firstTokenForBegin)
         {
+            ThrowIfOwnershipCleanupFailed();
             // Same wrapping rationale as Forward(): collapse all nested MLX
             // worker round-trips into one big inline run on the worker thread.
             if (_backend == BackendType.Mlx && !MlxWorker.Shared.IsOnWorkerThread)
@@ -1953,6 +1960,7 @@ namespace TensorSharp.Models
 
         public override void ResetPipelinedGreedyState()
         {
+            ThrowIfOwnershipCleanupFailed();
             _pipelineNextInputHidden?.Dispose();
             _pipelineNextInputHidden = null;
             _pipelineNextPLE?.Dispose();
@@ -3266,6 +3274,7 @@ namespace TensorSharp.Models
         public unsafe bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
         {
+            ThrowIfOwnershipCleanupFailed();
             BatchedFusedDecodeDeclineReason = null;
             // ---- gates (any failure => round-robin fallback) ----
             if (!IsGgmlBackend) return DeclineBatchedFusedDecode("requires a GGML backend");

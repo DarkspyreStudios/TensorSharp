@@ -113,8 +113,11 @@ namespace TensorSharp.Models
         public bool BatchedForwardAvailable => false;
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
-            => throw new NotSupportedException(
+        {
+            ThrowIfOwnershipCleanupFailed();
+            throw new NotSupportedException(
                 "DeepSeek V4 serves concurrency through per-sequence slots, not ForwardBatch.");
+        }
 
         /// <summary>Concurrent requests are served by the native executor's
         /// sequence slots (per-request caches + active-slot switching). Only
@@ -138,6 +141,7 @@ namespace TensorSharp.Models
         /// position 0).</summary>
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             lock (_sync)
@@ -182,6 +186,7 @@ namespace TensorSharp.Models
         /// allocate a fresh primary for later N==1 use.</summary>
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             lock (_sync)
             {
@@ -201,6 +206,7 @@ namespace TensorSharp.Models
         /// before an N==1 step that follows a concurrent episode.</summary>
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (_handle == IntPtr.Zero || (_activeSlotKey == null && _selectedRetainedKey == null)) return;
@@ -230,6 +236,7 @@ namespace TensorSharp.Models
         public bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (_handle == IntPtr.Zero || _slotByRequest == null || HasDraftHead) return false;
@@ -321,6 +328,7 @@ namespace TensorSharp.Models
         /// caches and captured graphs.</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (_handle == IntPtr.Zero) return;

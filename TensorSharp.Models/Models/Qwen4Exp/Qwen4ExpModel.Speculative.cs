@@ -94,6 +94,7 @@ namespace TensorSharp.Models
 
         public unsafe void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(tokens);
             ArgumentNullException.ThrowIfNull(logitsOut);
             if (tokens.Length == 0 || logitsOut.Length < checked(Config.VocabSize * (allLogitsRows ? tokens.Length : 1))
@@ -137,6 +138,7 @@ namespace TensorSharp.Models
 
         public void SpecEnsureCapacity(int requiredSeqLen)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (requiredSeqLen < _cacheSeqLen || requiredSeqLen > MaxContextLength)
                 throw new ArgumentOutOfRangeException(nameof(requiredSeqLen));
             EnsureCacheCapacity(requiredSeqLen);
@@ -145,6 +147,7 @@ namespace TensorSharp.Models
 
         public unsafe void SpecSnapshotRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             _specMetadata = null; // a partial capture must never restore an older window
             _specRecurrentRestored = false;
             if (!SpeculationProfitable || !EnsureGdnArgs() || !EnsureAttnArgs() || !EnsurePleArgs())
@@ -191,6 +194,7 @@ namespace TensorSharp.Models
 
         public void SpecRestoreRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             ValidateSpecMetadata(_specMetadata);
             // Reserve before native ownership changes; metadata publication after
             // a successful restore cannot fail from growing the history list.
@@ -208,6 +212,7 @@ namespace TensorSharp.Models
 
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             ValidateSpecMetadata(_specMetadata);
             if (!_specRecurrentRestored || length != _specMetadata.Position || length > _cacheSeqLen)
                 throw new InvalidOperationException("qwen4exp: recurrent rewind must return to the captured position, then replay accepted tokens.");

@@ -89,4 +89,38 @@ refusals do not prove actual captured graph teardown, failed GPU synchronization
 Metal class execution is unqualified. DeepSeek4Model normalizes its base constructor to
 GgmlCpu. A runtime already initialized as Metal refuses that CPU request before the text
 executor loads. The fixture does not bypass that owner policy. These modes do not qualify
-physical multi-device execution, CUDA/MLX, vision encode, execution fencing or release.
+physical multi-device execution, CUDA/MLX, vision encode or release.
+
+## Terminal Execution Admission
+
+`execution-cleanup-failure`, `execution-worker-cleanup-failure` and
+`execution-dispatch-cleanup-failure` normally construct the complete synthetic HunyuanDense
+model and run real prefill/decode before the failure. A real GGML tensor uses a test storage
+whose managed Destroy refuses before native freeing. The existing model ownership helper
+receives that actual refusal. The fixture does not seed the model flag or poison the runtime.
+The failed model and exact tensor/storage owners survive diagnostic finalizer drainage.
+Guarded shutdown refuses and the complete foreign generation remains rooted.
+
+Shared and family entrypoints reject operations with the exact first cleanup failure as
+InnerException. The shared case observes no control broadcast or accepted guarded native call.
+It preserves the live KV cache references, sequence length and caller snapshot bytes.
+The null batched context is only an admission-order observation, not paged execution.
+Worker cases use a logical recording group on one actual context. They check refusal before
+receive and after a controlled failure during receive, before direct Core dispatch.
+These cases do not qualify network collectives or physical multi-device execution.
+
+`vision-execution-cleanup-failure` normally constructs DeepSeek41 and loads its actual
+vision companion before the same real-storage refusal. Media operations reject admission
+before native handles or prepared prompt state change. Rejected input embeddings remain
+caller-owned. The runtime remains Ready in every admission mode. These controlled managed
+cleanup failures do not qualify GPU faults, forward cancellation or concurrent disposal.
+
+The source verifier in `eng/guard-model-execution` inventories all mapped admission methods,
+including direct family, speculative, prefix-cache, media, encoder and image/video child paths.
+It verifies unconditional first-statement checks and worker checks outside provider catches.
+Source coverage is not execution qualification for families without an actual model fixture.
+
+The terminal model check changes neither ordinary disposed-model policy nor backend failure
+handling. Metadata, diagnostic getters and independent managed sampling remain available.
+Model-bound resource and media operations refuse before accepting new argument ownership.
+Associated encoders check their host model; standalone encoders retain their original behavior.

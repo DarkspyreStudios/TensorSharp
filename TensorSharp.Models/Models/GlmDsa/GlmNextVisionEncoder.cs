@@ -36,6 +36,9 @@ namespace TensorSharp.Models
 {
     public class GlmNextVisionEncoder : IDisposable
     {
+        private ModelBase _hostModel;
+        internal void SetHostModel(ModelBase model) => _hostModel = model;
+
         private readonly Dictionary<string, Tensor> _weights = new();
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
@@ -184,6 +187,7 @@ namespace TensorSharp.Models
         /// </summary>
         public unsafe Tensor Encode(float[] pixelValues, int resizedH, int resizedW)
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             long encodeStart = Stopwatch.GetTimestamp();
             int gridH = resizedH / _patchSize;
             int gridW = resizedW / _patchSize;
@@ -722,6 +726,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
             _transposedWeights.Clear();

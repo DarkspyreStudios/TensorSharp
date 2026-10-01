@@ -264,6 +264,7 @@ namespace TensorSharp.Models
         /// </summary>
         public unsafe Tensor Encode(float[] pixelValues, int imageWidth, int imageHeight)
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             int numPatchesW = imageWidth / _patchSize;
             int numPatchesH = imageHeight / _patchSize;
             int numPatches = numPatchesW * numPatchesH;
@@ -649,6 +650,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
             _transposedWeights.Clear();

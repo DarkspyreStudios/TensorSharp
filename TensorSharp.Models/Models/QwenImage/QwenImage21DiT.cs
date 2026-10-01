@@ -258,6 +258,7 @@ internal sealed class QwenImage21DiT : ModelBase
         float timestep01, int[] imageSlots = null, float[][] referenceTokens = null,
         int[] referenceHeights = null, int[] referenceWidths = null, PrefixCache prefixCache = null)
     {
+        ThrowIfOwnershipCleanupFailed();
         if (latentH <= 0 || latentW <= 0 || targetTokens == null || targetTokens.Length != checked(latentH * latentW * Channels))
             throw new ArgumentException("Target must contain latentH*latentW*64 token-major floats.");
         if (textSeq <= 0 || textCond == null || textCond.Length != checked(textSeq * TextDim))

@@ -89,6 +89,7 @@ namespace TensorSharp.Models
         /// </summary>
         internal void RefreshActiveFusedHolderAfterCacheGrowth()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_activeFusedKey == null || _fusedHolders == null)
                 return;
             _fusedHolders[_activeFusedKey] = SnapshotActiveCache();
@@ -153,6 +154,7 @@ namespace TensorSharp.Models
         /// an empty one the first time. Returns true when freshly created.</summary>
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             _fusedHolders ??= new Dictionary<string, Qwen3KvCacheHolder>(StringComparer.Ordinal);
@@ -186,6 +188,7 @@ namespace TensorSharp.Models
         /// (zero copy) and give the primary a fresh empty allocation.</summary>
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             if (!SupportsPerSequenceFusedForward) return;
             _fusedHolders ??= new Dictionary<string, Qwen3KvCacheHolder>(StringComparer.Ordinal);
@@ -214,6 +217,7 @@ namespace TensorSharp.Models
         /// a fused episode.</summary>
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_activeFusedKey == null) return;
             _fusedHolders[_activeFusedKey] = SnapshotActiveCache();
             _activeFusedKey = null;
@@ -227,6 +231,7 @@ namespace TensorSharp.Models
         /// <summary>Free a finished/aborted request's per-request cache.</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))

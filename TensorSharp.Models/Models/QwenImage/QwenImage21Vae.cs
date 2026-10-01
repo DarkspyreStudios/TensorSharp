@@ -12,6 +12,7 @@ namespace TensorSharp.Models.QwenImage
         private VaeWeights _weights;
         public QwenImage21Vae(QwenImageModel model)
         {
+            model.ThrowIfOwnershipCleanupFailed();
             QwenImage21CompanionValidation.ValidateVae(model.VaeWeightSource);
             _weights = VaeWeights.Load(model.VaeWeightSource);
             // Vulkan convolutions run on the device too: the native F32 convolution

@@ -51,9 +51,16 @@ namespace TensorSharp.Models
         }
 
         public void AttachPrefixCache(IPrefixPayloadSink sink)
-            => _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
+        }
 
-        public void DetachPrefixCache() => _prefixCacheSink = null;
+        public void DetachPrefixCache()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _prefixCacheSink = null;
+        }
 
         public long QuerySpareBytes(ResourceClass cls) => QueryPrefixCacheSpareBytes(cls);
 
@@ -61,6 +68,7 @@ namespace TensorSharp.Models
 
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return SupportsPerSequenceFusedForward
                 && HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
@@ -81,6 +89,7 @@ namespace TensorSharp.Models
         /// </summary>
         public bool SettleForCopy(string payloadKey)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!TryGetRetained(payloadKey, out var holder)) return false;
             if (!(holder.KvHostDirty || holder.GdnHostDirty || holder.ArenaStateResident || holder.FdStateResident))
                 return true;
@@ -146,6 +155,7 @@ namespace TensorSharp.Models
         /// before its first disposal. Invalidation, pressure and reset dispose.</summary>
         public void DiscardRetainedCaches(ReadOnlySpan<string> payloadKeys, ReleaseReason reason)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || payloadKeys.IsEmpty) return;
             List<Qwen35KvCacheHolder> released = null;
             foreach (string key in payloadKeys)

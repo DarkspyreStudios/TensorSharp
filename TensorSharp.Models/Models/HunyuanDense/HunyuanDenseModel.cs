@@ -86,7 +86,10 @@ namespace TensorSharp.Models
             $"|kL={_attnKeyLen}|vL={_attnValLen}|rope={_ropeDim}|dtype={_kvCacheDtype.ToShortString()}";
 
         public override void PrepareForPrefill(int requiredContextTokens)
-            => EnsureCacheCapacity(requiredContextTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            EnsureCacheCapacity(requiredContextTokens);
+        }
 
         /// <summary>
         /// llama.cpp hunyuan-vl: <c>base = rope_theta * alpha^(dim / (dim - 2))</c>
@@ -282,6 +285,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             return KvBlockTransfer.Extract(
@@ -291,6 +295,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             EnsureCacheCapacity(destToken + tokenCount);

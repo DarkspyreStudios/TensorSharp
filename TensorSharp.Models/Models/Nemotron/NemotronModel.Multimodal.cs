@@ -46,6 +46,9 @@ namespace TensorSharp.Models
 
         List<int> IMultimodalPromptExpander.ExpandMultimodalPrompt(
             ModelMultimodalInjector injector, List<ChatMessage> history, List<int> inputTokens)
-            => injector.ProcessNemotronHistory(this, history, inputTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return injector.ProcessNemotronHistory(this, history, inputTokens);
+        }
     }
 }

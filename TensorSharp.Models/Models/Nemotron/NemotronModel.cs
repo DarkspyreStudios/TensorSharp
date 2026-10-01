@@ -235,6 +235,7 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             using (var metadata = new GgufFile(mmProjPath))
                 if (!metadata.Tensors.Keys.Any(name => name.StartsWith("v.", StringComparison.Ordinal)))
                     return;
@@ -249,6 +250,7 @@ namespace TensorSharp.Models
 
         public void LoadAudioEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             string path = Environment.GetEnvironmentVariable("TS_NEMOTRON_AUDIO_MMPROJ");
             if (string.IsNullOrWhiteSpace(path)) path = mmProjPath;
             using (var metadata = new GgufFile(path))
@@ -272,16 +274,19 @@ namespace TensorSharp.Models
 
         public void SetVisionEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingVisionEmbeddings.Add((embeddings, insertPosition));
         }
 
         public void SetAudioEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingAudioEmbeddings.Add((embeddings, insertPosition));
         }
 
         public override void WarmUpMultimodalKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_visionEncoder == null || DisableMultimodalWarmup)
                 return;
 
@@ -1185,6 +1190,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot) return false;
             long expected = ComputeKVBlockByteSize(tokenCount);
             if (destination.Length != expected) return false;
@@ -1216,6 +1222,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot) return false;
             if (destToken != _cacheSeqLen) return false;
             long expected = ComputeKVBlockByteSize(tokenCount);

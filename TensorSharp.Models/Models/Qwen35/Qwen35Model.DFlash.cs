@@ -106,6 +106,7 @@ namespace TensorSharp.Models
         /// <summary>One whole-block draft. See <c>ModelBase.DFlashPropose</c>.</summary>
         public int DraftBlock(int lastToken, float[] hPrev, int position, int[] draftOut, float[] confOut)
         {
+            ThrowIfOwnershipCleanupFailed();
             EnterSpecSession();
             return DFlashPropose(lastToken, hPrev, position, draftOut, confOut);
         }

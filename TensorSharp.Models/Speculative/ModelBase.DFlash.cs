@@ -234,6 +234,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void LoadDFlashDraftWeights(string ggufPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             // A trunk that cannot verify a draft window bit-exactly refuses every
             // drafter up front: attaching one would only produce a stream that
             // differs from plain greedy decoding.

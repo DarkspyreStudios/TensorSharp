@@ -124,9 +124,21 @@ namespace TensorSharp.Models.MiniMaxH3
             return null;
         }
 
-        internal MiniMaxH3TextEncoder CreateTextEncoder() => new(_tePath, null, Backend, _allocator);
-        internal MiniMaxH3DiT CreateDiT() => new(_ditPath, Backend, _allocator);
-        internal MiniMaxH3VideoVae CreateVideoVae() => new(_vaePath, Backend, _allocator);
+        internal MiniMaxH3TextEncoder CreateTextEncoder()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return new(_tePath, null, Backend, _allocator);
+        }
+        internal MiniMaxH3DiT CreateDiT()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return new(_ditPath, Backend, _allocator);
+        }
+        internal MiniMaxH3VideoVae CreateVideoVae()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return new(_vaePath, Backend, _allocator);
+        }
 
         /// <summary>Pull a weight file through the OS file cache in one sequential pass.
         ///
@@ -217,10 +229,13 @@ namespace TensorSharp.Models.MiniMaxH3
             catch (IOException) { return 0; }
             catch (UnauthorizedAccessException) { return 0; }
         }
-        internal MiniMaxH3AudioVae CreateAudioVae() =>
-            _audioVaePath != null
+        internal MiniMaxH3AudioVae CreateAudioVae()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return _audioVaePath != null
                 ? new MiniMaxH3AudioVae(_audioVaePath, Backend, UsesDirectBackend)
                 : null;
+        }
         /// <summary>True on the backends with no ggml graph to call, which run the
         /// generator through the managed direct implementations instead.</summary>
         internal bool UsesDirectBackend =>
@@ -233,6 +248,7 @@ namespace TensorSharp.Models.MiniMaxH3
         /// 1.0 and 4-8 steps is the operating point.</summary>
         public GeneratedVideo GenerateVideo(string prompt, VideoGenerationParams p = null)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pipeline ??= new MiniMaxH3Pipeline(this);
             return _pipeline.Generate(prompt, p ?? new VideoGenerationParams());
         }
@@ -256,6 +272,9 @@ namespace TensorSharp.Models.MiniMaxH3
 
         protected override void ResetKVCacheCore() { }
 
-        public override void WarmUpKernels() { }
+        public override void WarmUpKernels()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
     }
 }

@@ -139,11 +139,16 @@ namespace TensorSharp.Models
             retained.Remove(key);
         }
 
-        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+        public bool RetainSequenceCache(string requestId)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return RetainSequenceCacheAs(requestId, requestId);
+        }
 
         /// <summary>The key-parameterised form of <see cref="RetainSequenceCache"/> (DESIGN §4.8).</summary>
         public bool RetainSequenceCacheAs(string requestId, string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (!SupportsRetainedFusedCache) return false;
@@ -158,6 +163,7 @@ namespace TensorSharp.Models
 
         public bool TryRebindRetainedCache(string oldRequestId, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (!SupportsRetainedFusedCache) return false;
@@ -172,6 +178,7 @@ namespace TensorSharp.Models
 
         public void DiscardRetainedCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (_handle == IntPtr.Zero) return;
@@ -184,6 +191,7 @@ namespace TensorSharp.Models
 
         public bool CanReuseLivePrefix(int cachedTokenCount, int targetTokenCount)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 // Live-primary metadata must never refer to an idle retained
@@ -195,6 +203,7 @@ namespace TensorSharp.Models
 
         public bool CanReuseRetainedPrefix(string retainedKey, int cachedTokenCount, int targetTokenCount)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 return SupportsExactFusedCacheReuse && retainedKey != null && _retainedSlotByRequest != null

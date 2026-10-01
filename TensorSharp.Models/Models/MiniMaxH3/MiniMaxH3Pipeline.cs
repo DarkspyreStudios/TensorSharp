@@ -94,6 +94,7 @@ namespace TensorSharp.Models.MiniMaxH3
 
         public GeneratedVideo Generate(string prompt, VideoGenerationParams p)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             p ??= new VideoGenerationParams();
             var total = Stopwatch.StartNew();
 
@@ -1174,6 +1175,7 @@ namespace TensorSharp.Models.MiniMaxH3
 
         public void Dispose()
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             if (_disposed) return;
             _disposed = true;
             _dit?.Dispose();

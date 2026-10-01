@@ -124,6 +124,7 @@ public sealed class NemotronAudioEncoder : IDisposable
 
     public Tensor Encode(float[] mel, int frames, int validFrames)
     {
+        _host?.ThrowIfOwnershipCleanupFailed();
         ArgumentNullException.ThrowIfNull(mel);
         if (frames <= 0 || validFrames <= 0 || validFrames > frames || mel.Length != checked(frames * MelBins))
             throw new ArgumentException("Audio mel dimensions and valid frame count are inconsistent.");
@@ -322,5 +323,8 @@ public sealed class NemotronAudioEncoder : IDisposable
         return BitConverter.UInt32BitsToSingle((bits + 0x7fffu + ((bits >> 16) & 1u)) & 0xffff0000u);
     }
     public void Dispose()
-    { foreach (var value in _matrices.Values) value.Dispose(); _matrices.Clear(); _vectors.Clear(); _shapes.Clear(); }
+    {
+        _host?.ThrowIfOwnershipCleanupFailed();
+        foreach (var value in _matrices.Values) value.Dispose(); _matrices.Clear(); _vectors.Clear(); _shapes.Clear();
+    }
 }

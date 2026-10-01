@@ -419,6 +419,7 @@ namespace TensorSharp.Models
 
         public override void WarmUpKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
             // One tiny forward allocates the scheduler's compute buffers so the
             // first user request does not pay the allocation cost.
             try

@@ -297,6 +297,7 @@ namespace TensorSharp.Models.WanVideo
         /// via <see cref="VideoGenerationParams.Image"/> on the Wan 2.2 models).</summary>
         public GeneratedVideo GenerateVideo(string prompt, VideoGenerationParams p = null)
         {
+            ThrowIfOwnershipCleanupFailed();
             var pipeline = GetPipeline();
             return pipeline.Generate(prompt, p ?? new VideoGenerationParams());
         }
@@ -320,7 +321,10 @@ namespace TensorSharp.Models.WanVideo
         protected override void ResetKVCacheCore() { }
 
         // The diffusion networks load lazily on the first GenerateVideo call.
-        public override void WarmUpKernels() { }
+        public override void WarmUpKernels()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         public override void Dispose()
         {

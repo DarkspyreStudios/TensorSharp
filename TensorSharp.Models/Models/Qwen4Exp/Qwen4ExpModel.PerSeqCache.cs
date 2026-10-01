@@ -118,8 +118,11 @@ namespace TensorSharp.Models
         public bool BatchedForwardAvailable => false;
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
-            => throw new NotSupportedException(
+        {
+            ThrowIfOwnershipCleanupFailed();
+            throw new NotSupportedException(
                 "qwen4exp serves concurrency through per-sequence state holders, not ForwardBatch.");
+        }
 
         /// <summary>Per-sequence holders need the GGML fused span path: it is
         /// where the per-holder graph/state keying lives. The managed op-by-op
@@ -274,6 +277,7 @@ namespace TensorSharp.Models
 
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             _fusedHolders ??= new Dictionary<string, Qwen4ExpKvCacheHolder>(StringComparer.Ordinal);
@@ -304,6 +308,7 @@ namespace TensorSharp.Models
 
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             _fusedHolders ??= new Dictionary<string, Qwen4ExpKvCacheHolder>(StringComparer.Ordinal);
             if (_activeFusedKey != null) return;
@@ -320,6 +325,7 @@ namespace TensorSharp.Models
 
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_activeFusedKey == null)
                 return;
             _fusedHolders[_activeFusedKey] = SnapshotActiveCache();
@@ -333,6 +339,7 @@ namespace TensorSharp.Models
 
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))

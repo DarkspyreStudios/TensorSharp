@@ -166,6 +166,7 @@ namespace TensorSharp.Models
         /// (NumComputedTokens &gt; 0 at admission) before the first Forward.</summary>
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             _fusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
@@ -206,6 +207,7 @@ namespace TensorSharp.Models
         /// so that owner's history is preserved as its own per-request cache.</summary>
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             _fusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
 
@@ -250,6 +252,7 @@ namespace TensorSharp.Models
         /// No-op when the primary cache is already active.</summary>
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             CbTrace("RestorePrimaryCache ENTER");
             if (_activeFusedKey == null)
                 return;
@@ -270,6 +273,7 @@ namespace TensorSharp.Models
         /// the released holder happened to be the active one).</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
@@ -319,13 +323,18 @@ namespace TensorSharp.Models
         /// executor before <see cref="OnSequenceReleased"/>, which then no-ops for the
         /// (already-moved) holder so its buffers are NOT freed. Returns true when a
         /// holder was retained.</summary>
-        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+        public bool RetainSequenceCache(string requestId)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return RetainSequenceCacheAs(requestId, requestId);
+        }
 
         /// <summary>The key-parameterised form of <see cref="RetainSequenceCache"/>: the finished
         /// holder of <paramref name="requestId"/> is retained under <paramref name="key"/>
         /// (the prefix cache's tree-minted payload key, or the request id itself).</summary>
         public bool RetainSequenceCacheAs(string requestId, string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(key))
                 return false;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
@@ -361,6 +370,7 @@ namespace TensorSharp.Models
         /// Returns false when no retained holder exists for the id.</summary>
         public bool TryRebindRetainedCache(string retainedRequestId, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null
                 || string.IsNullOrEmpty(retainedRequestId)
                 || string.IsNullOrEmpty(newRequestId))
@@ -380,6 +390,7 @@ namespace TensorSharp.Models
         /// KV buffers. Mirrors the free path in <see cref="OnSequenceReleased"/>.</summary>
         public void DiscardRetainedCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_retainedFusedHolders.TryGetValue(requestId, out var holder))
@@ -400,6 +411,7 @@ namespace TensorSharp.Models
         /// <see cref="IBatchedPagedModel.TryCheckpointActiveCache"/>.</summary>
         public bool TryCheckpointActiveCache(string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || string.IsNullOrEmpty(key))
                 return false;
             _retainedFusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);
@@ -432,6 +444,7 @@ namespace TensorSharp.Models
         /// is untouched. See <see cref="IBatchedPagedModel.TryCloneRetainedCache"/>.</summary>
         public bool TryCloneRetainedCache(string retainedKey, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null
                 || string.IsNullOrEmpty(retainedKey)
                 || string.IsNullOrEmpty(newRequestId))
@@ -482,6 +495,7 @@ namespace TensorSharp.Models
 
         public unsafe bool TryExportRetainedCache(string key, System.IO.Stream destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || destination == null || string.IsNullOrEmpty(key)
                 || _retainedFusedHolders == null)
                 return false;
@@ -516,6 +530,7 @@ namespace TensorSharp.Models
 
         public unsafe bool TryImportRetainedCache(string key, System.IO.Stream source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || source == null || string.IsNullOrEmpty(key))
                 return false;
             _retainedFusedHolders ??= new Dictionary<string, Gemma4KvCacheHolder>(StringComparer.Ordinal);

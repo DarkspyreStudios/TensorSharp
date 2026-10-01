@@ -222,7 +222,10 @@ namespace TensorSharp.Models
 
         /// <summary>Prefill-length hint (see <see cref="IModelArchitecture.PrepareForPrefill"/>).
         /// Default no-op; models with a grow-on-demand KV cache override to pre-size it.</summary>
-        public virtual void PrepareForPrefill(int requiredContextTokens) { }
+        public virtual void PrepareForPrefill(int requiredContextTokens)
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>
         /// Release what only makes the NEXT request faster: the host memory pool's
@@ -232,6 +235,7 @@ namespace TensorSharp.Models
         /// </summary>
         public virtual void TrimIdleMemory()
         {
+            ThrowIfOwnershipCleanupFailed();
             long released = _ggmlContext?.ReleasePooledMemory() ?? 0;
             if (released > 0)
                 Console.WriteLine($"[memory] released {released / (1024 * 1024)} MB of pooled host buffers to the system");
@@ -2133,6 +2137,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void ReleaseGgmlDeviceResidency()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!IsGgmlBackend)
                 return;
 
@@ -2197,12 +2202,14 @@ namespace TensorSharp.Models
         /// </summary>
         public void BeginDistributedDriver()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_tpGroup != null && _tpGroup.NodeCount > 1 && _tpGroup.GlobalRankOffset == 0)
                 _distributedDriver = true;
         }
 
         public float[] Forward(int[] tokens)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForward, tokens);
             float[] logits = ForwardCore(tokens);
             ThrowIfBackendFailed();
@@ -2264,6 +2271,7 @@ namespace TensorSharp.Models
 
         public float[] ForwardRefill(int[] tokens)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlForwardRefill, tokens);
             float[] logits = ForwardRefillCore(tokens);
             ThrowIfBackendFailed();
@@ -2272,6 +2280,7 @@ namespace TensorSharp.Models
 
         public void ResetKVCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlReset, Array.Empty<int>());
             ResetKVCacheCore();
         }
@@ -2289,17 +2298,31 @@ namespace TensorSharp.Models
         /// </summary>
         public void RunDistributedWorkerLoop()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_tpGroup == null || _tpGroup.NodeCount <= 1)
                 return;
 
             Console.WriteLine(
                 $"[TP worker] ready — mirroring driver forward passes (global rank offset {_tpGroup.GlobalRankOffset}).");
 
-            try
+            while (true)
             {
-                while (true)
+                ThrowIfOwnershipCleanupFailed();
+                int op;
+                int[] payload;
+                try
                 {
-                    var (op, payload) = _tpGroup.ReceiveControl();
+                    (op, payload) = _tpGroup.ReceiveControl();
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[TP worker] loop ended: {ex.Message}");
+                    return;
+                }
+
+                ThrowIfOwnershipCleanupFailed();
+                try
+                {
                     switch (op)
                     {
                         case TpControlForward: ForwardCore(payload); break;
@@ -2313,10 +2336,11 @@ namespace TensorSharp.Models
                             throw new InvalidOperationException($"Unknown TP control op {op}.");
                     }
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[TP worker] loop ended: {ex.Message}");
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[TP worker] loop ended: {ex.Message}");
+                    return;
+                }
             }
         }
 
@@ -2344,10 +2368,14 @@ namespace TensorSharp.Models
         public virtual bool SupportsPipelinedGreedy => false;
         public virtual Tensor SubmitGreedyDecodeStep(int? firstTokenForBegin)
         {
+            ThrowIfOwnershipCleanupFailed();
             throw new NotSupportedException(
                 $"{GetType().Name} does not implement SubmitGreedyDecodeStep.");
         }
-        public virtual void ResetPipelinedGreedyState() { }
+        public virtual void ResetPipelinedGreedyState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
 
         /// <summary>
@@ -2383,6 +2411,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void TruncateKVCache(int tokenCount)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlTruncate, new[] { tokenCount });
             TruncateKVCacheCore(tokenCount);
         }
@@ -2398,6 +2427,7 @@ namespace TensorSharp.Models
         /// </summary>
         public bool TryTruncateKVCache(int tokenCount)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!TryTruncateKVCacheCore(tokenCount)) return false;
             if (_distributedDriver) _tpGroup.BroadcastControl(TpControlTruncate, new[] { tokenCount });
             return true;
@@ -2543,7 +2573,11 @@ namespace TensorSharp.Models
         /// into <paramref name="destination"/>. Returns false if the range is not
         /// valid or the model does not support snapshots. See <see cref="IModelArchitecture"/>.
         /// </summary>
-        public virtual bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination) => false;
+        public virtual bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return false;
+        }
 
         /// <summary>
         /// Write a block of K/V bytes at token position <paramref name="destToken"/>.
@@ -2551,7 +2585,11 @@ namespace TensorSharp.Models
         /// tokens had been forwarded into the cache at that position. See
         /// <see cref="IModelArchitecture"/>.
         /// </summary>
-        public virtual bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source) => false;
+        public virtual bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return false;
+        }
 
         /// <summary>
         /// Check if this model has vision encoder weights (v.* prefix tensors).
@@ -2674,6 +2712,12 @@ namespace TensorSharp.Models
             // The live GGML owner's process-exit hook retains this generation until safe shutdown.
             lock (FailedGgmlModelOwners)
                 if (!FailedGgmlModelOwners.Contains(this)) FailedGgmlModelOwners.Add(this);
+        }
+
+        internal void ThrowIfOwnershipCleanupFailed()
+        {
+            if (_ownershipCleanupFailed)
+                throw new InvalidOperationException("Model ownership cleanup previously failed; execution and resource mutation are unsafe.", _ownershipCleanupFailure);
         }
 
         private void DisposeBaseResources(bool ownsTensorParallelGroup, Action releaseDerivedResources = null,

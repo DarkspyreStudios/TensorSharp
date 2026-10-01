@@ -220,6 +220,7 @@ namespace TensorSharp.Models
 
         public void SpecEnsureCapacity(int requiredSeqLen)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (UsesNativeExecutor)
                 return;                       // native caches are sized to n_ctx at load
             EnsureCacheCapacity(Math.Min(requiredSeqLen, _maxContextLength));
@@ -230,6 +231,7 @@ namespace TensorSharp.Models
         /// (see GlmDsaModel.Glm5NextSpeculative.cs).</summary>
         public void SpecSnapshotRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (IsGlm5NextArch)
                 Glm5NextSnapshotRecurrentState();
         }
@@ -237,12 +239,14 @@ namespace TensorSharp.Models
         /// <summary>See <see cref="SpecSnapshotRecurrentState"/>.</summary>
         public void SpecRestoreRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (IsGlm5NextArch)
                 Glm5NextRestoreRecurrentState();
         }
 
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (length < 0)
                 throw new ArgumentOutOfRangeException(nameof(length));
             if (IsGlm5NextArch)
@@ -266,6 +270,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(tokens);
             if (tokens.Length == 0)
                 throw new ArgumentException("At least one token is required.", nameof(tokens));
@@ -336,6 +341,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
         {
+            ThrowIfOwnershipCleanupFailed();
             RequireMtp();
             ArgumentNullException.ThrowIfNull(hPrev);
             if (UsesNativeExecutor)
@@ -353,6 +359,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
         {
+            ThrowIfOwnershipCleanupFailed();
             RequireMtp();
             ArgumentNullException.ThrowIfNull(tokens);
             ArgumentNullException.ThrowIfNull(hRows);

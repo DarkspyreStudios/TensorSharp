@@ -48,9 +48,16 @@ namespace TensorSharp.Models
         /// <summary>Tree mode: <see cref="EnsureRetentionBudget"/> refuses instead of evicting and
         /// <see cref="TrimIdleMemory"/> reports every holder it frees through <paramref name="sink"/>.</summary>
         public void AttachPrefixCache(IPrefixPayloadSink sink)
-            => _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
+        }
 
-        public void DetachPrefixCache() => _prefixCacheSink = null;
+        public void DetachPrefixCache()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _prefixCacheSink = null;
+        }
 
         public long QuerySpareBytes(ResourceClass cls) => QueryPrefixCacheSpareBytes(cls);
 
@@ -58,6 +65,7 @@ namespace TensorSharp.Models
 
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return SupportsRetainedFusedCache && SupportsPerSequenceFusedForward
                 && HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
@@ -68,7 +76,11 @@ namespace TensorSharp.Models
 
         /// <summary>A no-op: <see cref="DeepCopyHolder"/> downloads a retained holder's device state itself
         /// (<see cref="SyncHolderKvToHost"/> and the native state export) before it copies.</summary>
-        public bool SettleForCopy(string payloadKey) => TryGetRetained(payloadKey, out _);
+        public bool SettleForCopy(string payloadKey)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return TryGetRetained(payloadKey, out _);
+        }
 
         public PayloadFootprint MeasureEndState(string payloadKey)
         {
@@ -102,6 +114,7 @@ namespace TensorSharp.Models
         /// holder's state entries (it drops every cached graph once), then each holder's tensors.</summary>
         public void DiscardRetainedCaches(ReadOnlySpan<string> payloadKeys, ReleaseReason reason)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || payloadKeys.IsEmpty) return;
             List<Qwen4ExpKvCacheHolder> released = null;
             foreach (string key in payloadKeys)

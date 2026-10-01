@@ -153,6 +153,7 @@ namespace TensorSharp.Models.QwenImage
         /// </summary>
         public RgbImage EditImage(string prompt, RgbImage input, QwenImageParams p)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (input == null) throw new ArgumentNullException(nameof(input));
             return GetPipeline21().Run(prompt, new[] { input }, p ?? new QwenImageParams());
         }
@@ -165,6 +166,7 @@ namespace TensorSharp.Models.QwenImage
         /// </summary>
         public RgbImage EditImage(string prompt, System.Collections.Generic.IReadOnlyList<RgbImage> inputs, QwenImageParams p)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (inputs == null || inputs.Count == 0)
                 throw new ArgumentException("At least one input image is required.", nameof(inputs));
             return GetPipeline21().Run(prompt, inputs.ToArray(), p ?? new QwenImageParams());
@@ -176,6 +178,7 @@ namespace TensorSharp.Models.QwenImage
         /// <summary>Generate an image from text using Qwen-Image-2.1.</summary>
         public RgbImage GenerateImage(string prompt, QwenImageParams p = null)
         {
+            ThrowIfOwnershipCleanupFailed();
             return GetPipeline21().Run(prompt, Array.Empty<RgbImage>(), p ?? new QwenImageParams());
         }
 
@@ -187,7 +190,10 @@ namespace TensorSharp.Models.QwenImage
 
         // The base warmup runs a dummy autoregressive Forward(); skip it for the image model
         // (the diffusion nets are loaded lazily on the first EditImage call).
-        public override void WarmUpKernels() { }
+        public override void WarmUpKernels()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         public override void Dispose()
         {

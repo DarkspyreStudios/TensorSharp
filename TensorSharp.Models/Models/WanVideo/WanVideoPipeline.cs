@@ -77,6 +77,7 @@ namespace TensorSharp.Models.WanVideo
 
         public GeneratedVideo Generate(string prompt, VideoGenerationParams p)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             try
             {
                 return GenerateCore(prompt, p ?? new VideoGenerationParams());
@@ -623,6 +624,7 @@ namespace TensorSharp.Models.WanVideo
 
         public void Dispose()
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             _te?.Dispose();
             _dit?.Dispose();
             _ditLow?.Dispose();

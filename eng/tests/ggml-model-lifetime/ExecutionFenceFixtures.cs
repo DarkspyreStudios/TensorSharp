@@ -99,6 +99,9 @@ public static partial class ForeignModelLifetime
             byte[] cache = new byte[checked((int)model.ComputeKVBlockByteSize(1))];
             Array.Fill(cache, (byte)0xa5);
             string fingerprint = model.KVStateFingerprint;
+            object? sequenceLength = typeof(ModelBase).GetField("_cacheSeqLen", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model);
+            object? cacheK = typeof(HunyuanDenseModel).GetField("_kvCacheK", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model);
+            object? cacheV = typeof(HunyuanDenseModel).GetField("_kvCacheV", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model);
             ExpectTerminal(() => model.Forward([69]), original);
             ExpectTerminal(() => model.ForwardRefill([69]), original);
             ExpectTerminal(model.ResetKVCache, original);
@@ -112,7 +115,10 @@ public static partial class ForeignModelLifetime
             ExpectTerminal(model.TrimIdleMemory, original);
             ExpectTerminal(model.WarmUpKernels, original);
             ExpectTerminal(model.BeginDistributedDriver, original);
-            Require(group.Broadcasts == 0 && NativeLeaseSequence() == before && model.KVStateFingerprint == fingerprint && cache.All(value => value == 0xa5),
+            Require(group.Broadcasts == 0 && NativeLeaseSequence() == before && model.KVStateFingerprint == fingerprint && cache.All(value => value == 0xa5) &&
+                Equals(sequenceLength, typeof(ModelBase).GetField("_cacheSeqLen", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)) &&
+                ReferenceEquals(cacheK, typeof(HunyuanDenseModel).GetField("_kvCacheK", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)) &&
+                ReferenceEquals(cacheV, typeof(HunyuanDenseModel).GetField("_kvCacheV", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)),
                 "Failed real-model APIs accept no native call/control broadcast and preserve KV metadata and caller snapshot storage.");
             model.ResetForwardTiming();
             Require(model.Config.HiddenSize > 0 && model.SampleGreedy([0, 1]) == 1,
@@ -137,12 +143,23 @@ public static partial class ForeignModelLifetime
             MethodInfo expand = typeof(DeepSeek41Model).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
                 .Single(method => method.Name.EndsWith(".ExpandMultimodalPrompt", StringComparison.Ordinal));
             ExpectTerminal(() => InvokeExecutionBoundary(expand, model, [injector, new List<ChatMessage>(), new List<int>()]), original);
+            string[] directNames = ["BindSequenceCache", "AdoptPrimaryCacheToFused", "RestorePrimaryCache", "OnSequenceReleased", "RetainSequenceCache",
+                "RetainSequenceCacheAs", "TryRebindRetainedCache", "DiscardRetainedCache", "SpecEnsureCapacity", "SpecSnapshotRecurrentState", "SpecRestoreRecurrentState",
+                "SpecRewindCache", "DraftStep", "DraftBlock", "DraftCatchUp", "SpecForward"];
+            foreach (string name in directNames)
+            {
+                MethodInfo method = model.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.Public)!;
+                object?[] parameters = method.GetParameters().Select(parameter =>
+                    parameter.ParameterType == typeof(string) ? (object)"failed-owner" : parameter.ParameterType == typeof(int[]) ? Array.Empty<int>() :
+                    parameter.ParameterType == typeof(float[]) ? Array.Empty<float>() : parameter.ParameterType.IsValueType ? Activator.CreateInstance(parameter.ParameterType) : null).ToArray();
+                ExpectTerminal(() => InvokeExecutionBoundary(method, model, parameters), original);
+            }
             Require(NativeLeaseSequence() == mediaBefore && handles.ToHashSet().SetEquals(NativeHandleKeys()) &&
                 !injector.HasPendingEmbeddings("failed-owner") && injector.GetPreparedMediaSpans("failed-owner").Count == 0,
                 "Real loaded vision refuses media operations before native handles or prepared prompt state change.");
             Require(incoming.GetElementsAsFloat(32).All(value => value == 2f),
                 "Rejected embeddings remain caller-owned and readable; healthy model ownership transfer is unchanged.");
-            report = "real-DeepSeek41-load-attach;8-media-admission-checks;caller-embedding-owned;no-forward-or-encode";
+            report = "real-DeepSeek41-load-attach;8-media-admission-checks;16-sequence-draft-method-boundary-only-checks;caller-embedding-owned;no-draft-forward-or-encode";
         }
         Require(ReferenceEquals(ExecutionCleanupFailure(model), original), "Admission refusal preserves the exact first ownership cleanup diagnostic.");
         ExpectTerminal(model.Dispose, original);

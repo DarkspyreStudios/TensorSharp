@@ -386,6 +386,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             return KvBlockTransfer.Extract(
@@ -395,6 +396,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             EnsureCacheCapacity(destToken + tokenCount);
@@ -416,16 +418,22 @@ namespace TensorSharp.Models
         // Vision support
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             _visionEncoder = new Mistral3VisionEncoder(mmProjPath, _allocator);
             _visionEncoder.SetHostModel(this);
         }
 
         /// <summary>Text-embedding rows for <paramref name="tokens"/>, for multimodal
         /// layouts that interleave marker tokens with encoder output.</summary>
-        internal Tensor EmbedTokensForMultimodal(int[] tokens) => Embedding(tokens);
+        internal Tensor EmbedTokensForMultimodal(int[] tokens)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return Embedding(tokens);
+        }
 
         public void SetVisionEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingVisionEmbeddingsList.Add((embeddings, insertPosition));
         }
 

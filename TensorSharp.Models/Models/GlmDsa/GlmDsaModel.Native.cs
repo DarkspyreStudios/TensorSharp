@@ -199,6 +199,7 @@ namespace TensorSharp.Models
 
         public override void WarmUpKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!UsesNativeExecutor)
             {
                 base.WarmUpKernels();

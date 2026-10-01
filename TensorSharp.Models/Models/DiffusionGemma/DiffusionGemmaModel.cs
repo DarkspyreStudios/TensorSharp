@@ -656,6 +656,7 @@ namespace TensorSharp.Models
         public unsafe float[] ForwardCanvas(int[] tokens, int promptLen,
             float[] scPrevLogits = null, float scUse = 0f, float prevTempInv = 1f)
         {
+            ThrowIfOwnershipCleanupFailed();
             _swForward.Start();
             int C = tokens.Length - promptLen;
             using Tensor hidden = ForwardCanvasHidden(tokens, promptLen, scPrevLogits, scUse, prevTempInv);
@@ -1125,6 +1126,7 @@ namespace TensorSharp.Models
         /// The prompt uses scaled-embedding input, causal attention, and the encoder per-layer scalar.</summary>
         public void PrefillPrompt(int[] promptTokens)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!_pkvEnabled)
                 throw new InvalidOperationException("Prompt-KV caching is not enabled for this backend.");
 
@@ -1220,7 +1222,10 @@ namespace TensorSharp.Models
         /// cached prompt K/V, and return the canvas logits [C, vocab]. Uses the canvas embedding
         /// (rms-norm + self-conditioning) and the decoder per-layer scalar.</summary>
         public unsafe float[] DecodeCanvas(int[] canvasTokens, float[] scPrevLogits, float scUse, float prevTempInv)
-            => DecodeCanvasCore(_promptK, _promptV, _promptLen, canvasTokens, scPrevLogits, scUse, prevTempInv);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return DecodeCanvasCore(_promptK, _promptV, _promptLen, canvasTokens, scPrevLogits, scUse, prevTempInv);
+        }
 
         /// <summary>Core single-canvas decode shared by the instance-cached single-request path
         /// (<see cref="DecodeCanvas"/>) and the batched scheduler's B==1 fast path: the prompt K/V are
@@ -1365,15 +1370,21 @@ namespace TensorSharp.Models
         public unsafe bool DecodeCanvasSampled(int[] canvasTokens,
             int[] scPrevTopTokens, float[] scPrevTopProbs, float scUse, float tempInv, float[] u, int K,
             int[] argmaxOut, float[] entropyOut, int[] sampledOut, int[] topTokensOut, float[] topProbsOut)
-            => DecodeCanvasSampledCore(_promptK, _promptV, _promptLen, canvasTokens, scPrevTopTokens, scPrevTopProbs,
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return DecodeCanvasSampledCore(_promptK, _promptV, _promptLen, canvasTokens, scPrevTopTokens, scPrevTopProbs,
                 scUse, tempInv, u, K, argmaxOut, entropyOut, sampledOut, topTokensOut, topProbsOut);
+        }
 
         /// <summary>Per-sequence single-canvas decode + on-device sample (batched scheduler B==1 fast path).</summary>
         public unsafe bool DecodeCanvasSampledSeq(DiffusionSeqState seq, int[] canvasTokens,
             int[] scPrevTopTokens, float[] scPrevTopProbs, float scUse, float tempInv, float[] u, int K,
             int[] argmaxOut, float[] entropyOut, int[] sampledOut, int[] topTokensOut, float[] topProbsOut)
-            => DecodeCanvasSampledCore(seq.PromptK, seq.PromptV, seq.PromptLen, canvasTokens, scPrevTopTokens, scPrevTopProbs,
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return DecodeCanvasSampledCore(seq.PromptK, seq.PromptV, seq.PromptLen, canvasTokens, scPrevTopTokens, scPrevTopProbs,
                 scUse, tempInv, u, K, argmaxOut, entropyOut, sampledOut, topTokensOut, topProbsOut);
+        }
 
         private unsafe bool DecodeCanvasSampledCore(Tensor[] pk, Tensor[] pv, int P,
             int[] canvasTokens, int[] scPrevTopTokens, float[] scPrevTopProbs, float scUse, float tempInv,
@@ -1465,6 +1476,7 @@ namespace TensorSharp.Models
         /// <see cref="DisposeSeqState"/> it when the request finishes.</summary>
         public DiffusionSeqState CreateSeqState()
         {
+            ThrowIfOwnershipCleanupFailed();
             return new DiffusionSeqState(Config.NumLayers);
         }
 
@@ -1472,6 +1484,7 @@ namespace TensorSharp.Models
         /// matching <see cref="ReleasePromptKvTensor"/>) and reset its length.</summary>
         public void DisposeSeqState(DiffusionSeqState seq)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (seq == null) return;
             if (seq.PromptK != null)
                 for (int l = 0; l < seq.PromptK.Length; l++) ReleasePromptKvTensor(ref seq.PromptK[l]);
@@ -1487,6 +1500,7 @@ namespace TensorSharp.Models
         /// previous block's K/V first, like <see cref="AllocPromptStore"/>).</summary>
         public void PrefillSeq(DiffusionSeqState seq, int[] promptTokens)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!_pkvEnabled)
                 throw new InvalidOperationException("Prompt-KV caching is not enabled for this backend.");
             for (int l = 0; l < Config.NumLayers; l++)
@@ -1505,7 +1519,10 @@ namespace TensorSharp.Models
         /// scheduler's B==1 fast path — keeps the fused decode kernel for solo requests).</summary>
         public float[] DecodeCanvasSeq(DiffusionSeqState seq, int[] canvasTokens,
             float[] scPrevLogits, float scUse, float prevTempInv)
-            => DecodeCanvasCore(seq.PromptK, seq.PromptV, seq.PromptLen, canvasTokens, scPrevLogits, scUse, prevTempInv);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return DecodeCanvasCore(seq.PromptK, seq.PromptV, seq.PromptLen, canvasTokens, scPrevLogits, scUse, prevTempInv);
+        }
 
         /// <summary>Decode B canvases in one batched forward, returning each sequence's canvas logits
         /// [C, vocab]. <paramref name="canvases"/>/<paramref name="scPrev"/>/<paramref name="scUse"/>/
@@ -1514,6 +1531,7 @@ namespace TensorSharp.Models
         public unsafe float[][] DecodeCanvasBatched(DiffusionSeqState[] seqs, int[][] canvases,
             float[][] scPrev, float[] scUse, float[] prevTempInv)
         {
+            ThrowIfOwnershipCleanupFailed();
             int B = seqs.Length;
             int C = _canvasLength;
             int D = Config.HiddenSize;
@@ -2742,6 +2760,7 @@ namespace TensorSharp.Models
 
         public override void WarmUpKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
             // Warm the native quantized matmul / norm / MoE kernels with a tiny [prompt|canvas]
             // forward (1 prompt token + 4 canvas positions). Autoregressive Forward() is unsupported.
             try

@@ -77,6 +77,7 @@ namespace TensorSharp.Models
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
             int numSeqs = ctx.Sequences.Count;
             if (numSeqs == 0) return Array.Empty<float[]>();
@@ -362,6 +363,7 @@ namespace TensorSharp.Models
         /// so every position from 0..<c>_cacheSeqLen</c> is recoverable.</summary>
         public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (owner == null) return false;
             if (!SupportsLinearKVMigration) return false;
             int ownerTokens = _cacheSeqLen;

@@ -55,7 +55,10 @@ namespace TensorSharp.Models
         /// </summary>
         List<int> IMultimodalPromptExpander.ExpandMultimodalPrompt(
             ModelMultimodalInjector injector, List<ChatMessage> history, List<int> inputTokens)
-            => injector.ProcessGemma4VisionHistory(_visionEncoder, history, inputTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return injector.ProcessGemma4VisionHistory(_visionEncoder, history, inputTokens);
+        }
 
         private Gemma4VisionEncoder _visionEncoder;
 
@@ -103,6 +106,7 @@ namespace TensorSharp.Models
 
             public void Dispose()
             {
+                _model?.ThrowIfOwnershipCleanupFailed();
                 if (_model == null) return;
                 _model._pendingVisionEmbeddingsList = _prevList;
                 _model._visionSpans = _prevSpans;
@@ -113,7 +117,11 @@ namespace TensorSharp.Models
         private static readonly List<(Tensor Embeddings, int Position)> EmptyVisionList = new();
 
         /// <summary>Run one prefill against <paramref name="seq"/>'s own image spans.</summary>
-        internal VisionScope UseSequenceVision(DiffusionSeqState seq) => new(this, seq);
+        internal VisionScope UseSequenceVision(DiffusionSeqState seq)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return new(this, seq);
+        }
 
         /// <summary>
         /// Attach already-encoded image spans to ONE sequence. This is the concurrency-safe entry
@@ -126,6 +134,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SetSequenceVisionEmbeddings(DiffusionSeqState seq, Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(seq);
             ArgumentNullException.ThrowIfNull(embeddings);
             ArgumentOutOfRangeException.ThrowIfNegative(insertPosition);
@@ -174,6 +183,7 @@ namespace TensorSharp.Models
         /// </summary>
         public bool QueueSequenceVisionEmbeddings(DiffusionSeqState seq, string mediaRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(seq);
             if (MultimodalInjector is not ModelMultimodalInjector injector)
                 return false;
@@ -250,6 +260,7 @@ namespace TensorSharp.Models
         /// </param>
         public void LoadVisionEncoder(string projectorPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentException.ThrowIfNullOrWhiteSpace(projectorPath);
 
             // Mirrors Gemma4Model.LoadVisionEncoder: the direct (non-GGML) CUDA backend diverges
@@ -289,6 +300,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SetVisionEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(embeddings);
             ArgumentOutOfRangeException.ThrowIfNegative(insertPosition);
             if (embeddings.Sizes.Length != 2 || embeddings.Sizes[1] != Config.HiddenSize)
@@ -342,6 +354,7 @@ namespace TensorSharp.Models
         /// would otherwise be spliced into the next request's prompt.</summary>
         public void ClearVisionEmbeddings()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_ownedVisionEmbeddingsList.Count == 0) return;
             foreach (var (embeddings, _) in _ownedVisionEmbeddingsList)
                 embeddings?.Dispose();
