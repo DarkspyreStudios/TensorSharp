@@ -45,12 +45,22 @@ export. Binary identity must match the source, ggml, RID, variant and version in
 Inspection-tool failures do not count as empty dependency lists. A supplied managed package must
 have the release's exact identity/version and no native payload.
 
+Release output requires all 12 RID/variant pairs: macOS ARM64 Metal; Linux x64 and ARM64 CPU,
+Vulkan and CUDA13; Windows x64 CPU, Vulkan and CUDA13; and Windows ARM64 CPU and Vulkan.
+Missing, unsupported or duplicate pairs fail before output is written. Bundled dependencies must
+be inspected native siblings with the matching target format and architecture. A text file with a
+library name does not satisfy closure. Linux bundled dependencies require `$ORIGIN` linkage.
+Dependency names cannot refer to absolute build-machine paths or escape the selected directory.
+macOS accepts system libraries and direct `@loader_path` siblings; unverified `@rpath` scopes fail.
+
 `--validate-only` runs those checks without creating an output directory, package, archive or
-manifest. Validation does not require a fetched ggml checkout. Staged inputs remain caller-owned
+manifest. This mode permits a partial stage; add `--complete-release` to require the entire matrix.
+Validation does not require a fetched ggml checkout. Staged inputs remain caller-owned
 and must stay immutable through packaging. Existing output is not removed on validation failure.
 
 ```sh
 python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only
+python3 -B eng/pack-ggml-natives.py --stage artifacts/ggml-natives/2.8.6.8 --validate-only --complete-release
 python3 -B -m unittest discover -s eng/tests -p test_pack_ggml_natives.py
 ```
 

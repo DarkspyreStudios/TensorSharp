@@ -58,6 +58,25 @@ class ArtifactPolicyTests(unittest.TestCase):
                                         "linux-arm64": {"cpu", "vulkan", "cuda13"},
                                         "win-x64": {"cpu", "vulkan", "cuda13"}, "win-arm64": {"cpu", "vulkan"}})
 
+    def complete_matrix(self):
+        return [{"rid": rid, "variant": variant} for rid, variants in pack.VARIANTS.items() for variant in variants]
+
+    def test_complete_release_requires_every_one_of_the_twelve_canonical_pairs(self):
+        complete = self.complete_matrix()
+        self.assertEqual(12, len(complete))
+        self.assertEqual([], pack.check_release_matrix(complete))
+        for missing in complete:
+            with self.subTest(missing=missing):
+                errors = pack.check_release_matrix([item for item in complete if item != missing])
+                self.assertEqual([f"complete release: missing {missing['rid']}/{missing['variant']}"], errors)
+
+    def test_complete_release_rejects_unknown_and_duplicate_pairs(self):
+        complete = self.complete_matrix()
+        self.assertIn("complete release: unsupported win-arm64/cuda13",
+                      pack.check_release_matrix(complete + [{"rid": "win-arm64", "variant": "cuda13"}]))
+        self.assertEqual(["complete release: duplicate RID/variant artifacts"],
+                         pack.check_release_matrix(complete + complete[:1]))
+
     def facts(self):
         return {"path": "GgmlOps.dll", "format": "pe", "identity": {"arch": "arm64"},
                 "dependencies": [], "tsggmlBuildIdentityExport": True}
@@ -68,6 +87,63 @@ class ArtifactPolicyTests(unittest.TestCase):
 
     def test_valid_inspection_facts_pass_policy_without_claiming_backend_execution(self):
         self.assertEqual([], self.check(self.facts()))
+
+    def test_bundled_dependency_requires_a_matching_inspected_native_sibling(self):
+        primary = self.facts() | {"dependencies": [{"name": "dependency.dll", "resolution": "bundled"}]}
+        valid = {"path": "dependency.dll", "format": "pe", "identity": {"arch": "arm64"}, "dependencies": []}
+        self.assertEqual([], self.check(primary, [valid]))
+        for sibling in (valid | {"format": "other"}, valid | {"format": "elf"},
+                        valid | {"identity": {"arch": "x86_64"}}, valid | {"identity": {}},
+                        valid | {"dependencies": "not inspected"}):
+            with self.subTest(sibling=sibling):
+                errors = self.check(primary, [sibling])
+                self.assertTrue(any("not an inspected native sibling" in error for error in errors), errors)
+
+    def test_bundled_dependency_validation_uses_actual_facts_not_claimed_resolution(self):
+        primary = self.facts() | {"dependencies": [{"name": "dependency.dll", "resolution": "os"}]}
+        text = {"path": "dependency.dll", "format": "other"}
+        self.assertTrue(any("not an inspected native sibling" in error for error in self.check(primary, [text])))
+        primary["dependencies"][0]["name"] = "missing.dll"
+        self.assertTrue(any("is unresolved" in error for error in self.check(primary)))
+
+    def test_windows_sibling_matching_is_case_insensitive_but_duplicate_names_refuse(self):
+        primary = self.facts() | {"dependencies": [{"name": "DEPENDENCY.DLL", "resolution": "bundled"}]}
+        valid = {"path": "dependency.dll", "format": "pe", "identity": {"arch": "arm64"}, "dependencies": []}
+        self.assertEqual([], self.check(primary, [valid]))
+        self.assertTrue(any("competing native sibling" in error for error in
+                            self.check(primary, [valid, valid | {"path": "Dependency.dll"}])))
+
+    def test_absolute_or_traversing_dependency_names_cannot_match_a_sibling(self):
+        sibling = {"path": "dependency.dll", "format": "pe", "identity": {"arch": "arm64"}, "dependencies": []}
+        for name in ("/build/dependency.dll", "C:\\build\\dependency.dll", "C:/build/dependency.dll",
+                     "../dependency.dll", "folder/dependency.dll", "dependency.dll\x00"):
+            primary = self.facts() | {"dependencies": [{"name": name, "resolution": "bundled"}]}
+            with self.subTest(name=name):
+                self.assertTrue(any("unresolved-loader-path" in error for error in self.check(primary, [sibling])))
+
+    def test_platform_dependency_paths_only_allow_verified_loader_scopes(self):
+        classify = pack.INVENTORY.classify
+        self.assertEqual("bundled", classify("elf", "libdependency.so", {"libdependency.so"}))
+        self.assertEqual("os", classify("elf", "libc.so.6", set()))
+        self.assertEqual("bundled", classify("macho", "@loader_path/libdependency.dylib", {"libdependency.dylib"}))
+        self.assertEqual("os", classify("macho", "/System/Library/Frameworks/Metal.framework/Versions/A/Metal", set()))
+        self.assertEqual("os", classify("macho", "/usr/lib/libSystem.B.dylib", {"libSystem.B.dylib"}))
+        for fmt, name in (("elf", "/build/libdependency.so"), ("elf", "/usr/lib/libc.so.6"),
+                          ("macho", "/build/libdependency.dylib"), ("macho", "@rpath/libdependency.dylib"),
+                          ("macho", "libdependency.dylib"), ("macho", "@loader_path/../libdependency.dylib"),
+                          ("macho", "/usr/lib/../build/libdependency.dylib")):
+            with self.subTest(fmt=fmt, name=name):
+                self.assertEqual("unresolved-loader-path", classify(fmt, name, {"libdependency.so", "libdependency.dylib"}))
+
+    def test_linux_bundled_dependency_requires_an_origin_relative_search_scope(self):
+        primary = {"path": "libGgmlOps.so", "format": "elf", "identity": {"arch": "arm64"},
+                   "tsggmlBuildIdentityExport": True, "dependencies": [{"name": "libdependency.so", "resolution": "bundled"}]}
+        sibling = {"path": "libdependency.so", "format": "elf", "identity": {"arch": "arm64"}, "dependencies": []}
+        files = [{"path": name} for name in ("libGgmlOps.so", "libdependency.so", *pack.REQUIRED_LICENSES)]
+        check = lambda bridge: pack.check_artifact("linux-arm64", "cpu", None, {"files": files}, [bridge, sibling])
+        self.assertTrue(any("no selected-directory $ORIGIN" in error for error in check(primary)))
+        self.assertEqual([], check(primary | {"runpath": ["$ORIGIN"]}))
+        self.assertTrue(check(primary | {"runpath": ["/build"]}))
 
     def test_missing_export_unknown_arch_wrong_format_and_uninspected_dependencies_fail(self):
         for changes in ({"tsggmlBuildIdentityExport": False}, {"tsggmlBuildIdentityExport": None},
@@ -198,6 +274,38 @@ class StagingFilesystemTests(unittest.TestCase):
         code, output = self.run_cli("--validate-only")
         self.assertEqual(0, code, output)
         self.assertIn("validated 1 staged artifacts; no output written", output)
+
+    def test_complete_validation_and_release_output_refuse_a_partial_stage(self):
+        for arguments in (("--validate-only", "--complete-release"), ()):
+            with self.subTest(arguments=arguments):
+                code, output = self.run_cli(*arguments)
+                self.assertEqual(1, code, output)
+                self.assertIn("complete release: missing linux-arm64/cuda13", output)
+                self.assertIn("complete release: missing win-arm64/cpu", output)
+                self.assertIn("complete release: missing win-arm64/vulkan", output)
+
+    def test_complete_validation_accepts_the_full_metadata_matrix_without_output(self):
+        complete = [{"rid": rid, "variant": variant} for rid, variants in pack.VARIANTS.items() for variant in variants]
+        with patch.object(pack, "collect_artifacts", return_value=(complete, [])):
+            code, output = self.run_cli("--validate-only", "--complete-release")
+        self.assertEqual(0, code, output)
+        self.assertIn("validated 12 staged artifacts; no output written", output)
+
+    def test_real_text_sibling_cannot_satisfy_a_claimed_bundled_dependency(self):
+        suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
+        name = "libdependency" + suffix
+        (self.artifact / name).write_text("not a native library", encoding="utf-8")
+        describe = pack.INVENTORY.describe
+        def altered(*args):
+            result = describe(*args)
+            if result["path"] == self.entry:
+                dependency = "@loader_path/" + name if self.rid.startswith("osx-") else name
+                result["dependencies"].append({"name": dependency, "resolution": "bundled"})
+            return result
+        with patch.object(pack.INVENTORY, "describe", side_effect=altered):
+            code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("not an inspected native sibling", output)
 
     def test_invalid_build_records_fail_before_packaging(self):
         for key, value in (("tensorSharpBuild", "wrong"), ("sourceCommit", "2" * 40), ("sourceCommit", "not-a-commit"),

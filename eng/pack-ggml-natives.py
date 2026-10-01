@@ -211,6 +211,15 @@ def check_artifact(rid, variant, directory, record, described):
     if primary.get("tsggmlBuildIdentityExport") is not True:
         errors.append(f"{rid}/{variant}: {entry} does not export TSGgml_GetBuildIdentity")
     os_part, _, arch_part = rid.partition("-")
+    siblings = {}
+    for item in described:
+        path = item["path"]
+        if "/" in path:
+            continue
+        key = path.lower() if os_part == "win" else path
+        if key in siblings:
+            errors.append(f"{rid}/{variant}: competing native sibling name {path}")
+        siblings[key] = item
     for f in described:
         if f["format"] == "other":
             continue
@@ -222,8 +231,18 @@ def check_artifact(rid, variant, directory, record, described):
         if not isinstance(f.get("dependencies"), list):
             errors.append(f"{f['path']}: native dependencies were not inspected")
         for dep in f.get("dependencies", []) if isinstance(f.get("dependencies"), list) else []:
-            if dep["resolution"].startswith("unresolved"):
-                errors.append(f"{f['path']}: dependency {dep['name']} is {dep['resolution']}")
+            resolution = INVENTORY.classify(f["format"], dep["name"], set(siblings))
+            if resolution.startswith("unresolved"):
+                errors.append(f"{f['path']}: dependency {dep['name']} is {resolution}")
+            elif resolution == "bundled":
+                name = INVENTORY.dependency_basename(f["format"], dep["name"])
+                sibling = siblings[name.lower() if os_part == "win" else name]
+                if (sibling.get("format") != INVENTORY.RID_FORMAT[os_part]
+                        or sibling.get("identity", {}).get("arch") != INVENTORY.RID_ARCH[arch_part]
+                        or not isinstance(sibling.get("dependencies"), list)):
+                    errors.append(f"{f['path']}: dependency {dep['name']} is not an inspected native sibling for {rid}")
+                if f["format"] == "elf" and "$ORIGIN" not in f.get("runpath", []):
+                    errors.append(f"{f['path']}: bundled dependency {dep['name']} has no selected-directory $ORIGIN runpath")
         for rp in f.get("runpath", []):
             if rp != "$ORIGIN":
                 errors.append(f"{f['path']}: build-machine search path {rp}")
@@ -232,6 +251,16 @@ def check_artifact(rid, variant, directory, record, described):
     for forbidden in ("libcuda.so", "libcuda.so.1", "nvcuda.dll"):
         if forbidden in {Path(n).name.lower() for n in names}:
             errors.append(f"{rid}/{variant}: the NVIDIA driver library {forbidden} must not ship")
+    return errors
+
+
+def check_release_matrix(artifacts):
+    required = {(rid, variant) for rid, variants in VARIANTS.items() for variant in variants}
+    present = [(artifact["rid"], artifact["variant"]) for artifact in artifacts]
+    errors = [f"complete release: missing {rid}/{variant}" for rid, variant in sorted(required - set(present))]
+    errors += [f"complete release: unsupported {rid}/{variant}" for rid, variant in sorted(set(present) - required)]
+    if len(present) != len(set(present)):
+        errors.append("complete release: duplicate RID/variant artifacts")
     return errors
 
 
@@ -395,6 +424,8 @@ def main():
     parser.add_argument("--allow-oversized", action="store_true")
     parser.add_argument("--developer-package-limit", type=int, default=DEFAULT_DEVELOPER_LIMIT)
     parser.add_argument("--validate-only", action="store_true", help="validate staged inputs without writing release artifacts")
+    parser.add_argument("--complete-release", action="store_true",
+                        help="require the entire canonical release matrix during validation-only checks; output generation always requires it")
     args = parser.parse_args()
 
     version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
@@ -410,6 +441,8 @@ def main():
         if any(root == out or root in out.parents for root in (stage / "runtimes", stage / "build")):
             raise ValueError("output directory overlaps staged artifacts or build records")
         staged, errors = collect_artifacts(stage, version, ggml_commit)
+        if args.complete_release or not args.validate_only:
+            errors += check_release_matrix(staged)
         managed = managed_package_record(args.managed_package, version) if args.managed_package else None
     except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:
         print(f"error: staging validation failed: {error}", file=sys.stderr)

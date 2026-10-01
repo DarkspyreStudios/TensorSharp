@@ -219,8 +219,28 @@ def macho_dynamic(path):
     }
 
 
+def dependency_basename(fmt, dep):
+    if (not isinstance(dep, str) or not dep or "\\" in dep or ":" in dep
+            or any(ord(char) < 32 or ord(char) == 127 for char in dep)
+            or any(part in ("", ".", "..") for part in dep.lstrip("/").split("/"))):
+        return None
+    if fmt == "macho":
+        if dep.startswith(("/System/Library/", "/usr/lib/")) and not dep.startswith("//"):
+            return PurePosixPath(dep).name
+        if dep.startswith("@loader_path/") and dep.count("/") == 1:
+            return dep.split("/", 1)[1]
+        # @rpath and bare names need an additional search scope that this
+        # inventory does not establish. Only the selected directory is trusted.
+        return None
+    return dep if "/" not in dep and not dep.startswith("@") else None
+
+
 def classify(fmt, dep, siblings):
-    base = PurePosixPath(dep).name
+    base = dependency_basename(fmt, dep)
+    if base is None:
+        return "unresolved-loader-path"
+    if fmt == "macho" and dep.startswith(("/System/Library/", "/usr/lib/")):
+        return "os"
     lower = {s.lower() for s in siblings}
     if fmt == "pe" and base.lower() in lower or fmt != "pe" and base in siblings:
         return "bundled"
