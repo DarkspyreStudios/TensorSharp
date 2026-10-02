@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TensorSharp.Chat" HintPath="$(ApplicationDirectory)/TensorSharp.Chat.dll" />
+    <Reference Include="TensorSharp.Runtime" HintPath="$(ApplicationDirectory)/TensorSharp.Runtime.dll" />
+    <Reference Include="TensorSharp.Models" HintPath="$(ApplicationDirectory)/TensorSharp.Models.dll" />
+    <Reference Include="TensorSharp.Core" HintPath="$(ApplicationDirectory)/TensorSharp.Core.dll" />
+    <Reference Include="TensorSharp.Backends.Cuda" HintPath="$(CudaBuildDirectory)/TensorSharp.Backends.Cuda.dll" />
+    <Content Include="$(CudaBuildDirectory)/cuda_kernels/*.ptx" Link="cuda_kernels/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -19,6 +19,23 @@ namespace TensorSharp.Cuda
 
         private static readonly ConcurrentDictionary<string, Stat> Fallbacks = new();
         private static readonly ConcurrentDictionary<string, Stat> Syncs = new();
+        private static readonly ConcurrentDictionary<IntPtr, string> KernelNames = new();
+        private static readonly ConcurrentDictionary<string, long> KernelLaunches = new();
+
+        internal static void RegisterKernel(IntPtr function, string name)
+        {
+            if (Enabled)
+                KernelNames[function] = name;
+        }
+
+        internal static void RecordKernelLaunch(IntPtr function)
+        {
+            if (Enabled)
+            {
+                string name = KernelNames.TryGetValue(function, out string? registered) ? registered : "unknown";
+                KernelLaunches.AddOrUpdate(name, 1, (_, count) => count + 1);
+            }
+        }
 
         static CudaProfileCounters()
         {
@@ -58,6 +75,9 @@ namespace TensorSharp.Cuda
 
         internal static void Dump()
         {
+            Console.WriteLine("[cuda-profile] successful CUDA kernel launches:");
+            foreach (var kv in KernelLaunches.OrderByDescending(kv => kv.Value))
+                Console.WriteLine($"  {kv.Key,-48} {kv.Value,8} calls");
             Console.WriteLine("[cuda-profile] CPU fallback ops:");
             foreach (var kv in Fallbacks.OrderByDescending(kv => kv.Value.Ticks))
                 Console.WriteLine($"  {kv.Key,-32} {kv.Value.Count,8} calls  {kv.Value.Ticks * 1000.0 / Stopwatch.Frequency,10:F1} ms");

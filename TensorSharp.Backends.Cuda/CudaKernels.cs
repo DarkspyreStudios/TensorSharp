@@ -3397,6 +3397,7 @@ namespace TensorSharp.Cuda
                 stream,
                 (IntPtr)args,
                 IntPtr.Zero).ThrowOnError();
+            CudaProfileCounters.RecordKernelLaunch(function);
         }
 
         private static uint Grid(int count)

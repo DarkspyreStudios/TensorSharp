@@ -49,6 +49,7 @@ namespace TensorSharp.Cuda
             {
                 CudaDriverApi.cuModuleGetFunction(out function, module, name).ThrowOnError();
                 functions.Add(name, function);
+                CudaProfileCounters.RegisterKernel(function, name);
             }
 
             return function;
