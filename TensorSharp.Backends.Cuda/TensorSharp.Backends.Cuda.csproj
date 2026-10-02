@@ -50,7 +50,8 @@
     </Content>
   </ItemGroup>
 
-  <Target Name="ResolveCudaPtxBuildSettings">
+  <!-- Explicit managed-source verification retains committed PTX without compiler discovery. -->
+  <Target Name="ResolveCudaPtxBuildSettings" Condition="'$(TensorSharpSkipCudaNative)' != 'true'">
     <Exec Command="nvcc --version" IgnoreExitCode="true" StandardOutputImportance="low" StandardErrorImportance="low">
       <Output TaskParameter="ExitCode" PropertyName="_NvccExitCode" />
     </Exec>
@@ -89,7 +90,7 @@
   <Target Name="SelectCudaPtxContent"
           BeforeTargets="AssignTargetPaths"
           DependsOnTargets="ResolveCudaPtxBuildSettings"
-          Condition="'$(DesignTimeBuild)' != 'true'">
+          Condition="'$(DesignTimeBuild)' != 'true' And '$(TensorSharpSkipCudaNative)' != 'true'">
     <ItemGroup Condition="'$(_NvccExitCode)' == '0'">
       <Content Remove="$(CudaCommittedPtxDir)/*.ptx" />
       <Content Include="@(CudaKernel->'$(PtxOutputDir)/%(Filename).ptx')">
@@ -106,6 +107,7 @@
   <Target Name="CompileCudaPtx"
           BeforeTargets="BeforeBuild"
           DependsOnTargets="ResolveCudaPtxBuildSettings"
+          Condition="'$(TensorSharpSkipCudaNative)' != 'true'"
           Inputs="@(CudaKernel);@(CudaKernelHeader);$(MSBuildProjectFullPath);$(CudaArchResolverPs1);$(CudaArchResolverSh)"
           Outputs="@(CudaKernel->'$(PtxOutputDir)/%(Filename).ptx');$(CudaPtxStampDir)/tensorsharp_cuda_$(_CudaBuildSettingsKey).stamp">
     <Message Condition="'$(_NvccExitCode)' != '0'" Importance="high"
@@ -152,7 +154,7 @@
                       Overwrite="true" />
   </Target>
 
-  <Target Name="CopyCudaPtxToOutput" AfterTargets="CompileCudaPtx">
+  <Target Name="CopyCudaPtxToOutput" AfterTargets="CompileCudaPtx" Condition="'$(TensorSharpSkipCudaNative)' != 'true'">
     <ItemGroup>
       <_CompiledPtx Include="$(PtxOutputDir)/*.ptx" />
     </ItemGroup>
@@ -173,7 +175,7 @@
        reflect real kernel changes. -->
   <Target Name="UpdateCommittedCudaPtx"
           AfterTargets="CompileCudaPtx"
-          Condition="'$(TensorSharpUpdateCommittedPtx)' == 'true' And '$(_NvccExitCode)' == '0'">
+          Condition="'$(TensorSharpUpdateCommittedPtx)' == 'true' And '$(_NvccExitCode)' == '0' And '$(TensorSharpSkipCudaNative)' != 'true'">
     <Copy SourceFiles="@(CudaKernel->'$(PtxOutputDir)/%(Filename).ptx')"
           DestinationFolder="$(CudaCommittedPtxDir)"
           SkipUnchangedFiles="true" />
