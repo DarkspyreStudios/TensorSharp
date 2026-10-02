@@ -11,7 +11,7 @@ import subprocess
 MODES = (
     "healthy", "promotion", "wildcard", "mlx", "lease-negatives", "race",
     "causes", "constructor", "initialize", "concurrent-faults", "queued",
-    "protocol", "malformed-cells",
+    "protocol", "malformed-cells", "roles", "cross-nesting", "lock-order",
 )
 
 

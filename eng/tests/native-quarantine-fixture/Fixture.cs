@@ -34,6 +34,16 @@ public sealed class Fixture
         catch (NativeRuntimeQuarantinedException ex) { return ex.Failure.FailureId.ToString(); }
     }
 
+    public bool RefusalMatches(Exception error, Guid id)
+    {
+        try { _registration.ThrowIfQuarantined(); return false; }
+        catch (NativeRuntimeQuarantinedException ex)
+        {
+            return ReferenceEquals(ex.InnerException, error) && ex.Failure.FailureId == id
+                && NativeRuntimeQuarantine.TryGetFailure(ex, out var failure) && failure!.FailureId == id;
+        }
+    }
+
     public void Start() => _lease = _registration.EnterEffect();
     public void Stop() { _lease!.Dispose(); _lease = null; }
     public void Complete()

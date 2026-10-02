@@ -51,6 +51,17 @@ switch (mode)
     case "queued":
         Queued(fixturePath);
         break;
+    case "roles":
+        var roles = Roles(fixturePath);
+        Collect();
+        Require(roles.All(w => w.IsAlive), "An actual dependent owner role was not retained.");
+        break;
+    case "cross-nesting":
+        CrossNesting(fixturePath);
+        break;
+    case "lock-order":
+        LockOrder(fixturePath);
+        break;
     case "protocol":
         AppDomain.CurrentDomain.SetData(slot, new object[] { 999 });
         try { NativeRuntimeQuarantine.Observe(); throw new Exception("Invalid protocol was accepted."); }
@@ -96,14 +107,71 @@ static (WeakReference[] Failed, WeakReference[] Independent) Promotion(string pa
     var failed = new[] { new WeakReference(a.Alc), new WeakReference(a.Assembly), (WeakReference)a.Get("OwnerReference"),
         (WeakReference)a.Get("StorageReference"), (WeakReference)a.Get("CoreReference"), new WeakReference(b.Alc),
         (WeakReference)b.Get("OwnerReference"), (WeakReference)b.Get("StorageReference"), (WeakReference)b.Get("CoreReference") };
-    var safe = new[] { new WeakReference(independent.Alc), (WeakReference)independent.Get("OwnerReference") };
+    var safe = new[] { new WeakReference(independent.Alc), new WeakReference(independent.Assembly),
+        (WeakReference)independent.Get("OwnerReference"), (WeakReference)independent.Get("StorageReference"),
+        (WeakReference)independent.Get("CoreReference") };
     var error = new HostileError();
     Guid id = (Guid)a.Call("Fail", error)!;
     Require((string)b.Call("Check")! == id.ToString(), "Foreign dependent owner was not fenced.");
+    Require((bool)b.Call("RefusalMatches", error, id)!, "Refusal lost the original failure inner or identity.");
     Require(NativeRuntimeQuarantine.TryGetFailure(new AggregateException(new Exception("original"), error), out var failure)
         && failure!.FailureId == id, "Constructor-shaped aggregate lost exact cause.");
     independent.Call("Complete");
     return (failed, safe);
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static WeakReference[] Roles(string path)
+{
+    var fixtures = new List<Foreign>();
+    var references = new List<WeakReference>();
+    try
+    {
+        for (int role = 0; role < 6; role++)
+        {
+            var f = new Foreign(path);
+            fixtures.Add(f);
+            f.Create(0, "cuda", role);
+            references.Add(new WeakReference(f.Alc));
+            references.Add((WeakReference)f.Get("OwnerReference"));
+            references.Add((WeakReference)f.Get("StorageReference"));
+            references.Add((WeakReference)f.Get("CoreReference"));
+        }
+        var error = new HostileError();
+        Guid id = (Guid)fixtures[0].Call("Fail", error)!;
+        Require(fixtures.All(f => (bool)f.Call("RefusalMatches", error, id)!), "A dependent role admitted terminal work.");
+        return references.ToArray();
+    }
+    finally { foreach (var f in fixtures) f.Dispose(); }
+}
+
+static void CrossNesting(string path)
+{
+    using var a = new Foreign(path); using var b = new Foreign(path); using var c = new Foreign(path); using var wildcard = new Foreign(path);
+    a.Create(0, "cuda"); b.Create(0, "cuda"); c.Create(1, "cuda"); wildcard.Create(0, "wildcard");
+    a.Call("Start");
+    try
+    {
+        b.Call("Start");
+        try
+        {
+            Refuses(() => c.Call("Start"));
+            Refuses(() => wildcard.Call("Start"));
+            Refuses(() => a.Call("Stop"));
+            Refuses(() => b.Call("AttachCuda", 1));
+        }
+        finally { b.Call("Stop"); }
+    }
+    finally { a.Call("Stop"); }
+    a.Call("Complete"); b.Call("Complete"); c.Call("Complete"); wildcard.Call("Complete");
+    Require(ActiveThreads() == 0 && NativeRuntimeQuarantine.Observe().Revision == 0, "Rejected nesting left state or locks.");
+}
+
+static void Refuses(Action action)
+{
+    try { action(); }
+    catch (InvalidOperationException) { return; }
+    throw new Exception("Expected admission refusal.");
 }
 
 [MethodImpl(MethodImplOptions.NoInlining)]
@@ -204,6 +272,37 @@ static int ActiveThreads()
 {
     var state = (object[])AppDomain.CurrentDomain.GetData("Darkspyre.TensorSharp.NativeQuarantine")!;
     lock (state[1]) return ((Dictionary<int, List<object[]>>)state[9]).Count;
+}
+
+static void LockOrder(string path)
+{
+    using var a = new Foreign(path); using var b = new Foreign(path);
+    a.Create(0, "cuda"); b.Create(1, "cuda");
+    var state = (object[])AppDomain.CurrentDomain.GetData("Darkspyre.TensorSharp.NativeQuarantine")!;
+    using var metadataHeld = new ManualResetEventSlim();
+    using var domainHeld = new ManualResetEventSlim();
+    Task metadata = Task.Run(() =>
+    {
+        lock (state[1])
+        {
+            metadataHeld.Set();
+            Require(domainHeld.Wait(TimeSpan.FromSeconds(2)), "Domain holder did not start.");
+            a.Call("Start");
+            a.Call("Stop");
+        }
+    });
+    Task domain = Task.Run(() =>
+    {
+        lock (AppDomain.CurrentDomain)
+        {
+            domainHeld.Set();
+            Require(metadataHeld.Wait(TimeSpan.FromSeconds(2)), "Metadata holder did not start.");
+            _ = b.Get("Revision");
+        }
+    });
+    Require(Task.WaitAll(new[] { metadata, domain }, TimeSpan.FromSeconds(3)),
+        "AppDomain/metadata lock inversion; background managed tasks remain blocked until this failing test process exits.");
+    a.Call("Complete"); b.Call("Complete");
 }
 
 static void Causes(string path)
