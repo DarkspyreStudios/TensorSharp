@@ -59,6 +59,34 @@ switch (mode)
         Collect();
         Require(construction.All(w => w.IsAlive), "Constructor rollback did not retain actual ownership.");
         break;
+    case "finalizer-origin":
+    case "finalizer-healthy":
+        var finalizing = FinalizerOrigin(fixturePath, mode == "finalizer-origin");
+        Collect();
+        bool unsafeFinalization = mode == "finalizer-origin";
+        Require((bool)finalizing.Observation[0] == unsafeFinalization,
+            "The failed owner did not genuinely finalize or the safely released owner finalized.");
+        if (unsafeFinalization)
+        {
+            Require((bool)finalizing.Observation[1], "The short owner weak reference was not cleared before finalization.");
+            Require(NativeRuntimeQuarantine.TryGetFailure((Exception)finalizing.Observation[3], out var finalizerFailure)
+                && finalizerFailure!.FailureId == (Guid)finalizing.Observation[2],
+                "The actual finalizer cause is not recorded in the process graph.");
+        }
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            actualFinalizerExecuted = finalizing.Observation[0],
+            shortOwnerWeakCleared = finalizing.Observation[1],
+            authenticatedOriginPromoted = finalizing.Observation[4],
+            foreignCoreMvid = finalizing.Observation[5],
+            foreignFixtureMvid = finalizing.Observation[6],
+            rootsAlive = finalizing.Roots.Select(w => w.IsAlive).ToArray()
+        }));
+        Require(finalizing.Roots.All(w => w.IsAlive == unsafeFinalization),
+            "Actual finalizer-origin owner/resource/private generation retention is incorrect.");
+        Require((bool)finalizing.Observation[4] == unsafeFinalization,
+            "The process graph did not retain the authenticated finalizer origin.");
+        break;
     case "initialize":
         Initialize(fixturePath);
         break;
@@ -103,6 +131,15 @@ Console.WriteLine(JsonSerializer.Serialize(new
     state = mode is "protocol" or "malformed-cells" ? "incompatible-refused" : NativeRuntimeQuarantine.Observe().State.ToString(),
     qualification = "managed-authority-only; backend integrations inert; no native/model/GPU qualification"
 }));
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static (WeakReference[] Roots, object[] Observation) FinalizerOrigin(string path, bool fail)
+{
+    using var f = new Foreign(path);
+    object[] result = (object[])f.Static("FinalizerOrigin", fail)!;
+    return (new[] { (WeakReference)result[0], (WeakReference)result[1], (WeakReference)result[3],
+        new WeakReference(f.Alc), new WeakReference(f.Assembly) }, (object[])result[2]);
+}
 
 [MethodImpl(MethodImplOptions.NoInlining)]
 static WeakReference[] ForeignQueuedSafeRelease(string path)

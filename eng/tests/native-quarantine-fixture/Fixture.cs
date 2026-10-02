@@ -1,9 +1,57 @@
+using System.Runtime.CompilerServices;
 using TensorSharp;
 
 namespace TensorSharp.QuarantineFixture;
 
 public sealed class Fixture
 {
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static object[] FinalizerOrigin(bool fail)
+    {
+        object[] observation = { false, false, Guid.Empty, null!, false,
+            typeof(NativeRuntimeQuarantine).Assembly.ManifestModule.ModuleVersionId,
+            typeof(Fixture).Assembly.ManifestModule.ModuleVersionId };
+        var owner = new FinalizingOwner(observation);
+        object[] result = { new WeakReference(owner, true), new WeakReference(owner.Resource, true),
+            observation, new WeakReference(typeof(NativeRuntimeQuarantine).Assembly) };
+        if (!fail) owner.ReleaseSafely();
+        return result;
+    }
+
+    private sealed class FinalizingOwner
+    {
+        internal readonly byte[] Resource = new byte[128];
+        private readonly NativeOwnerRegistration _registration;
+        private readonly object[] _observation;
+
+        internal FinalizingOwner(object[] observation)
+        {
+            _observation = observation;
+            _registration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Storage);
+            _registration.AttachCudaPrimaryDevice(11);
+        }
+
+        internal void ReleaseSafely()
+        {
+            using var lease = _registration.EnterEffect();
+            lease.ValidateSafeRelease(this);
+            lease.CompleteSafeRelease(this);
+            GC.SuppressFinalize(this);
+        }
+
+        ~FinalizingOwner()
+        {
+            _observation[1] = !((WeakReference<object>)_registration.Cell[2]).TryGetTarget(out _);
+            var original = new InvalidOperationException("Controlled finalizer cleanup refusal.");
+            using var lease = _registration.EnterEffect();
+            Guid id = lease.PublishFailure(this, original, NativeRuntimeFailureStage.StorageRelease).FailureId;
+            _observation[3] = original;
+            _observation[2] = id;
+            _observation[4] = ReferenceEquals(_registration.Cell[6], this);
+            _observation[0] = true;
+        }
+    }
+
     private sealed class Owner
     {
         internal readonly byte[] ActualResource = new byte[128];
