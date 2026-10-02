@@ -16,6 +16,7 @@ namespace TensorSharp.Cuda
 
         private readonly CudaModule module;
         private readonly CudaNativeCalls nativeCalls;
+        internal bool MatchesContext(CudaContext context) => module.Context.MatchesOwner(context);
         private bool disposed;
         private readonly IntPtr copy2DBytes;
         private readonly IntPtr fillF32;

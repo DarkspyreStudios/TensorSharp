@@ -94,7 +94,11 @@ The `dyn-*` modes normally construct actual `CudaDecodeDynParams` with a known c
 and a matching owned or verified ambient stream. Device handles remain opaque. The
 fixture allocates ordinary managed-test host memory through Marshal for the four integer
 slots; only those real host bytes are read or written. No pinned CUDA allocation executes.
-Write, active-pointer projections, activation and upload use the owner's device admission.
+Write, activation and upload use the owner's device admission. Consuming kernel routes
+select the actual owner and keep its synchronous borrow alive through enqueue. They
+validate actual allocator/context/stream/module association before preparatory effects.
+Partitioned attention prepares scratch outside that borrow and releases the borrow before
+scratch cleanup. The public raw-pointer kernel overload keeps its caller lifetime contract.
 Clean disposal checks context completion before device and host frees and leaves borrowed
 context/stream owners untouched. Nonzero allocation results preserve the invalid-block
 fallback only after returned OUT pointers are released. Constructor cleanup refusal keeps
@@ -105,6 +109,13 @@ quarantine. An ordinary upload error remains ordinary and supports later safe op
 Foreign modes execute actual private fixture/CUDA/Core assemblies and check collection
 or retained ownership outside the execution frame. Caller graph teardown must precede
 parameter disposal; these tests do not prove captured-graph ownership or replay scheduling.
+The consumer-disposal mode normally constructs the parameter and kernel owners, admits
+concurrent disposal and proves buffers remain owned through the actual managed enqueue.
+It records the dynamic argument from the launcher's real host stack arguments and compares
+opaque addresses; it never dereferences the device buffer. The mismatch mode rejects
+different context, stream and module associations before driver effects. This proves the
+shared managed borrow protocol. Source inspection covers the five Tensor-facing routes;
+these fixture cases do not execute their Tensor storage/model pipelines or real GPU work.
 
 After a focused build, `python3 eng/tests/run-cuda-quarantine.py --configuration Debug
 --output tmp/cuda-quarantine/debug` runs the finite controlled modes without building.

@@ -36,6 +36,7 @@ MODES = (
     "dyn-construction-rollback", "dyn-construction-rollback-refusal",
     "dyn-device-allocation-fallback", "dyn-host-allocation-fallback", "dyn-context-mismatch",
     "dyn-allocation-fallback-refusal", "dyn-retired-stream",
+    "dyn-consumer-disposal", "dyn-consumer-mismatch",
     "dyn-ordinary-upload-fault", "dyn-nested-release-refusal", "foreign-dyn-clean", "foreign-dyn-drain-refusal",
 )
 

@@ -65,6 +65,7 @@ internal static class Program
             case "dyn-context-mismatch": DynContextMismatch(); break;
             case "dyn-retired-stream": DynRetiredStream(); break;
             case "dyn-consumer-disposal": DynConsumerDisposal(); break;
+            case "dyn-consumer-mismatch": DynConsumerMismatch(); break;
             case "dyn-ordinary-upload-fault": DynOrdinaryUploadFault(); break;
             case "dyn-nested-release-refusal": DynNestedReleaseRefusal(); break;
             case "foreign-dyn-clean": ForeignDyn(false); break;
@@ -165,8 +166,8 @@ internal static class Program
         if (phase == 2) Assert(DynDevicePointer(owner) == IntPtr.Zero, "Completed device free remains falsely owned.");
         int effects = api.TotalCalls;
         foreach (Action operation in new Action[] { () => owner.Write(9, 9, 9, 9), owner.EnqueueUpload,
-                     owner.Activate, owner.Dispose, () => _ = owner.DevicePtr,
-                     () => _ = CudaDecodeDynParams.GetActiveDevicePtr(null) })
+                     owner.Activate, owner.Dispose, () => InvokeDynAdmission(owner),
+                     () => CudaDecodeDynParams.LimitCaptureAttendLen(1) })
         {
             try { operation(); throw new Exception("Quarantined dynamic parameter operation succeeded."); }
             catch (NativeRuntimeQuarantinedException error) { Assert(error.InnerException == observed, "Refusal changes first cause."); }
@@ -199,7 +200,7 @@ internal static class Program
         Assert(owner.IsValid, "Actual parameter allocation did not succeed.");
         owner.Write(1, 2, 3, 4);
         owner.Activate();
-        Assert(CudaDecodeDynParams.GetActiveDevicePtr(null) == DynDevicePointer(owner), "Active pointer lost actual owner association.");
+        Assert(ReferenceEquals(CudaDecodeDynParams.GetActiveOwner(null), owner), "Ambient selection loses its actual owner.");
         owner.EnqueueUpload();
         Assert(api.UploadedValues!.SequenceEqual(new[] { 1, 2, 3, 4 }), "Actual Write/upload changes pinned parameter bytes.");
         owner.Dispose();
@@ -207,7 +208,7 @@ internal static class Program
         Assert(!owner.IsValid && api.MemoryFreeCount == 1 && api.HostFreeCount == 1 && api.ContextSyncCount == 1
             && context.Handle != IntPtr.Zero && stream.Handle != IntPtr.Zero, "Parameter release does not drain once or disposes borrowed owners.");
         int effects = api.TotalCalls;
-        foreach (Action operation in new Action[] { () => owner.Write(0, 0, 0, 0), owner.EnqueueUpload, owner.Activate, () => _ = owner.DevicePtr })
+        foreach (Action operation in new Action[] { () => owner.Write(0, 0, 0, 0), owner.EnqueueUpload, owner.Activate, () => InvokeDynAdmission(owner) })
         {
             try { operation(); throw new Exception("Retired parameters admitted work."); }
             catch (ObjectDisposedException) { }
@@ -304,17 +305,83 @@ internal static class Program
         var stream = CudaStream.Create(context);
         var kernels = CudaKernels.CreateOwned(CudaModule.LoadFromBytes(new byte[] { 1 }, context));
         var owner = new CudaDecodeDynParams(context, stream);
-        IntPtr pointer = owner.DevicePtr;
+        using var started = new ManualResetEventSlim();
+        using var finished = new ManualResetEventSlim();
         Exception? failure = null;
-        var disposer = new Thread(() => { try { owner.Dispose(); } catch (Exception error) { failure = error; } });
-        disposer.Start();
-        Assert(disposer.Join(TimeSpan.FromSeconds(5)), "Controlled concurrent disposal did not finish.");
-        Assert(failure == null, "Controlled disposal failed before consumption.");
-        kernels.LaunchFillRopePositionsI32(IntPtr.Zero, 1, IntPtr.Zero, 1, pointer, stream.Handle);
-        Assert(!api.LaunchedFreedDynamicPointer, "Actual kernel enqueue consumes the freed dynamic pointer after its getter lease exits.");
-        kernels.Dispose();
+        var disposer = new Thread(() =>
+        {
+            started.Set();
+            try { owner.Dispose(); }
+            catch (Exception error) { failure = error; }
+            finally { finished.Set(); }
+        });
+        CudaDecodeDynParams.DeviceBorrow borrow = default;
+        bool threadStarted = false;
+        try
+        {
+            borrow = owner.BorrowFor(context, stream, kernels);
+            disposer.Start();
+            threadStarted = true;
+            Assert(started.Wait(TimeSpan.FromSeconds(5)), "Controlled disposer did not enter.");
+            Assert(!finished.Wait(TimeSpan.FromMilliseconds(100)) && api.MemoryFreeCount == 0,
+                "Concurrent disposal frees dynamic storage before consumer enqueue completes.");
+            kernels.LaunchFillRopePositionsI32(IntPtr.Zero, 1, IntPtr.Zero, 1, borrow.Pointer, stream.Handle);
+            Assert(!api.LaunchedFreedDynamicPointer && api.KernelLaunchCount == 1, "Consumer enqueues a freed pointer.");
+            borrow.Dispose();
+            borrow = default;
+            Assert(disposer.Join(TimeSpan.FromSeconds(5)) && failure == null && api.MemoryFreeCount == 1,
+                "Disposal does not finish once consumer scope drains.");
+            try { using var late = owner.BorrowFor(context, stream, kernels); throw new Exception("Late consumer succeeded."); }
+            catch (ObjectDisposedException) { }
+        }
+        finally
+        {
+            borrow.Dispose();
+            if (threadStarted) Assert(disposer.Join(TimeSpan.FromSeconds(5)), "Controlled disposer is stranded.");
+            owner.Dispose();
+            kernels.Dispose();
+            stream.Dispose();
+            context.Dispose();
+        }
+    }
+
+    private static void InvokeDynAdmission(CudaDecodeDynParams owner)
+    {
+        try
+        {
+            using var lease = (NativeEffectLease)typeof(CudaDecodeDynParams)
+                .GetMethod("EnterValidEffect", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(owner, null)!;
+        }
+        catch (TargetInvocationException error) { ExceptionDispatchInfo.Capture(error.InnerException!).Throw(); }
+    }
+
+    private static void DynConsumerMismatch()
+    {
+        var api = new RecordingCudaApi();
+        var first = CudaContext.Create(0, api);
+        var second = CudaContext.Create(1, api);
+        var stream = CudaStream.Create(first);
+        var otherStream = CudaStream.Create(first);
+        var otherDeviceStream = CudaStream.Create(second);
+        var firstKernels = CudaKernels.CreateOwned(CudaModule.LoadFromBytes(new byte[] { 1 }, first));
+        var secondKernels = CudaKernels.CreateOwned(CudaModule.LoadFromBytes(new byte[] { 1 }, second));
+        var owner = new CudaDecodeDynParams(first, stream);
+        int effects = api.TotalCalls;
+        using (var wrongContext = owner.BorrowFor(second, otherDeviceStream, secondKernels))
+            Assert(wrongContext.Pointer == IntPtr.Zero, "Different device consumes parameter pointer.");
+        using (var wrongStream = owner.BorrowFor(first, otherStream, firstKernels))
+            Assert(wrongStream.Pointer == IntPtr.Zero, "Different stream consumes parameter pointer.");
+        using (var wrongKernel = owner.BorrowFor(first, stream, secondKernels))
+            Assert(wrongKernel.Pointer == IntPtr.Zero, "Different module context consumes parameter pointer.");
+        Assert(api.TotalCalls == effects, "Consumer mismatch invokes native effects.");
+        owner.Dispose();
+        firstKernels.Dispose();
+        secondKernels.Dispose();
         stream.Dispose();
-        context.Dispose();
+        otherStream.Dispose();
+        otherDeviceStream.Dispose();
+        first.Dispose();
+        second.Dispose();
     }
 
     private static void DynContextMismatch()

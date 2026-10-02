@@ -1663,11 +1663,13 @@ namespace TensorSharp.Cuda
             if (!TryGetKernels(allocator, out CudaKernels kernels))
                 return false;
 
+            CudaDecodeDynParams dynOwner = CudaDecodeDynParams.GetActiveOwner(allocator);
+            if (dynOwner != null && !dynOwner.MatchesConsumer(allocator, kernels))
+                return false;
             queryStorage.EnsureDeviceCurrent();
             keyStorage.EnsureDeviceCurrent();
             valueStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
-            IntPtr dyn = CudaDecodeDynParams.GetActiveDevicePtr(allocator);
             bool useGroup4D512 =
                 keyIsHalf &&
                 CudaKernels.GqaDecodeGroup4Enabled &&
@@ -1692,7 +1694,7 @@ namespace TensorSharp.Cuda
                     scale,
                     hasSinks: 0,
                     keyIsHalf,
-                    dyn))
+                    dynOwner: dynOwner))
             {
                 resultStorage.MarkDeviceModified();
                 return true;
@@ -1700,6 +1702,9 @@ namespace TensorSharp.Cuda
 
             if (attendLen > DecodeAttentionSingleBlockMaxTokens)
                 return false;
+
+            using var dynBorrow = dynOwner?.BorrowFor(allocator, kernels) ?? default;
+            IntPtr dyn = dynBorrow.Pointer;
 
             // Decode-graph capture: the single-block kernel reads attend_len from
             // the dyn block on replay, so the scores[] shared buffer must be sized
@@ -1821,8 +1826,12 @@ namespace TensorSharp.Cuda
             float scale,
             int hasSinks,
             bool keyIsHalf,
-            IntPtr dyn = default)
+            IntPtr dyn = default,
+            CudaDecodeDynParams dynOwner = null)
         {
+            if (dynOwner != null && !dynOwner.MatchesConsumer(allocator, kernels))
+                return false;
+            bool hasDynamicParameters = dynOwner != null || dyn != IntPtr.Zero;
             // A circular SWA cache never attends more than its physical
             // capacity. Do not route it through the partition+reduce path just
             // because the model's logical sequence length has grown large.
@@ -1855,18 +1864,20 @@ namespace TensorSharp.Cuda
             if (useGroup4D256Ring)
             {
                 int ringLen = Math.Min(attendLen, cacheSize);
-                if (dyn == IntPtr.Zero && ringLen <= Group4RingPartitionMinTokens)
+                if (!hasDynamicParameters && ringLen <= Group4RingPartitionMinTokens)
                     return false;
                 int ringPartSize = Math.Max(
                     Group4RingPartitionSize,
                     (cacheSize + Group4RingMaxPartitions - 1) / Group4RingMaxPartitions);
                 ringPartSize = (ringPartSize + 31) & ~31;
-                int coveredLen = dyn != IntPtr.Zero ? cacheSize : ringLen;
+                int coveredLen = hasDynamicParameters ? cacheSize : ringLen;
                 int ringParts = (coveredLen + ringPartSize - 1) / ringPartSize;
                 using var ringPartial = new Tensor(
                     allocator, DType.Float32, numQHeads, ringParts, headDim + 2);
                 if (!TryGetContiguousFloat(ringPartial, out _, out IntPtr ringPartialPtr, out _))
                     return false;
+                using var ringBorrow = dynOwner?.BorrowFor(allocator, kernels) ?? default;
+                IntPtr ringDyn = dynOwner != null ? ringBorrow.Pointer : dyn;
                 kernels.LaunchGqaDecodeAttentionPartitionGroup4D256F16(
                     queryPtr,
                     keyPtr,
@@ -1881,7 +1892,7 @@ namespace TensorSharp.Cuda
                     ringParts,
                     ringPartSize,
                     allocator.Stream.Handle,
-                    dyn);
+                    ringDyn);
                 kernels.LaunchGqaDecodeAttentionPartitionReduceF32(
                     ringPartialPtr,
                     resultPtr,
@@ -1905,7 +1916,7 @@ namespace TensorSharp.Cuda
             int partitionSize = useGroup4D512
                 ? Group4DecodeAttentionPartitionSize
                 : DecodeAttentionPartitionSize;
-            if (useGroup4D512 && dyn != IntPtr.Zero)
+            if (useGroup4D512 && hasDynamicParameters)
             {
                 // Keep the capacity-sized capture grid bounded: empty partitions
                 // still write their partial rows and the reduce still reads them,
@@ -1919,12 +1930,15 @@ namespace TensorSharp.Cuda
             // read the live attend_len from the dyn block. Partitions past the
             // live length write (max=-inf, sum=0) rows the reduce kernel skips,
             // which keeps the result bit-identical to the exact-partition launch.
-            int numPartitions = dyn != IntPtr.Zero
+            int numPartitions = hasDynamicParameters
                 ? (cacheSize + partitionSize - 1) / partitionSize
                 : (attendLen + partitionSize - 1) / partitionSize;
             using var partial = new Tensor(allocator, DType.Float32, numQHeads, numPartitions, headDim + 2);
             if (!TryGetContiguousFloat(partial, out _, out IntPtr partialPtr, out _))
                 return false;
+
+            using var partitionBorrow = dynOwner?.BorrowFor(allocator, kernels) ?? default;
+            if (dynOwner != null) dyn = partitionBorrow.Pointer;
 
             if (useGroup4D512)
             {
@@ -2125,13 +2139,14 @@ namespace TensorSharp.Cuda
             if (!TryGetKernels(allocator, out CudaKernels kernels))
                 return false;
 
+            CudaDecodeDynParams dynOwner = seqLen == 1 ? CudaDecodeDynParams.GetActiveOwner(allocator) : null;
+            if (dynOwner != null && !dynOwner.MatchesConsumer(allocator, kernels))
+                return false;
             srcStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
-            // Decode-graph capture: the single-token append re-reads its write
-            // position from the dyn block on every replay.
-            IntPtr dyn = seqLen == 1
-                ? CudaDecodeDynParams.GetActiveDevicePtr(allocator)
-                : IntPtr.Zero;
+            // Hold the actual parameter owner through the consuming enqueue.
+            using var dynBorrow = dynOwner?.BorrowFor(allocator, kernels) ?? default;
+            IntPtr dyn = dynBorrow.Pointer;
             if (cacheIsHalf)
             {
                 kernels.LaunchCopyHeadFirstToCacheF16(
@@ -2503,10 +2518,12 @@ namespace TensorSharp.Cuda
             {
                 return false;
             }
-            IntPtr dyn = CudaDecodeDynParams.GetActiveDevicePtr(allocator);
-            if (dyn == IntPtr.Zero)
+            CudaDecodeDynParams dynOwner = CudaDecodeDynParams.GetActiveOwner(allocator);
+            if (dynOwner == null)
                 return false;
             if (!TryGetKernels(allocator, out CudaKernels kernels))
+                return false;
+            if (!dynOwner.MatchesConsumer(allocator, kernels))
                 return false;
 
             localCosStorage.EnsureDeviceCurrent();
@@ -2516,6 +2533,7 @@ namespace TensorSharp.Cuda
             globalSinStorage.EnsureDeviceCurrent();
             globalFreqStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
+            using var dynBorrow = dynOwner.BorrowFor(allocator, kernels);
             kernels.LaunchFillNeoXRopeTablesDynamicF32(
                 localCosPtr,
                 localSinPtr,
@@ -2525,7 +2543,7 @@ namespace TensorSharp.Cuda
                 globalSinPtr,
                 globalFreqPtr,
                 globalCosCount,
-                dyn,
+                dynBorrow.Pointer,
                 allocator.Stream.Handle);
             localCosStorage.MarkDeviceModified();
             localSinStorage.MarkDeviceModified();
@@ -2589,8 +2607,11 @@ namespace TensorSharp.Cuda
         /// so every replay RoPEs with the current token's position.
         /// </summary>
         public static bool TryFillRopePositions(Tensor posQ, Tensor posK, IntPtr dynParams)
+            => TryFillRopePositionsCore(posQ, posK, dynParams, null);
+
+        private static bool TryFillRopePositionsCore(Tensor posQ, Tensor posK, IntPtr dynParams, CudaDecodeDynParams dynOwner)
         {
-            if (dynParams == IntPtr.Zero ||
+            if ((dynParams == IntPtr.Zero && dynOwner == null) ||
                 !TryGetContiguous(posQ, out CudaStorage qStorage, out IntPtr qPtr, out long qCount) ||
                 !TryGetContiguous(posK, out CudaStorage kStorage, out IntPtr kPtr, out long kCount) ||
                 posQ.ElementType != DType.Int32 ||
@@ -2603,15 +2624,28 @@ namespace TensorSharp.Cuda
             CudaAllocator allocator = qStorage.AllocatorImpl;
             if (!TryGetKernels(allocator, out CudaKernels kernels))
                 return false;
+            if (dynOwner != null && !dynOwner.MatchesConsumer(allocator, kernels))
+                return false;
 
             qStorage.EnsureDeviceCurrent();
             kStorage.EnsureDeviceCurrent();
             allocator.Context.MakeCurrent();
+            using var dynBorrow = dynOwner?.BorrowFor(allocator, kernels) ?? default;
+            if (dynOwner != null) dynParams = dynBorrow.Pointer;
             kernels.LaunchFillRopePositionsI32(
                 qPtr, checked((int)qCount), kPtr, checked((int)kCount), dynParams, allocator.Stream.Handle);
             qStorage.MarkDeviceModified();
             kStorage.MarkDeviceModified();
             return true;
+        }
+
+        internal static bool TryFillRopePositions(Tensor posQ, Tensor posK, CudaDecodeDynParams dynParams)
+        {
+            CudaAllocator allocator = (posQ?.Storage as CudaStorage)?.AllocatorImpl;
+            if (allocator == null || !ReferenceEquals((posK?.Storage as CudaStorage)?.AllocatorImpl, allocator)
+                || !TryGetKernels(allocator, out CudaKernels kernels) || !dynParams.MatchesConsumer(allocator, kernels))
+                return false;
+            return TryFillRopePositionsCore(posQ, posK, IntPtr.Zero, dynParams);
         }
 
         public static bool TryIndexSelect(Tensor result, Tensor src, Tensor indices, bool isAdd)
@@ -2831,6 +2865,9 @@ namespace TensorSharp.Cuda
             if (!TryGetKernels(allocator, out CudaKernels kernels))
                 return false;
 
+            CudaDecodeDynParams dynOwner = seqLen == 1 ? CudaDecodeDynParams.GetActiveOwner(allocator) : null;
+            if (dynOwner != null && !dynOwner.MatchesConsumer(allocator, kernels))
+                return false;
             packedStorage.EnsureDeviceCurrent();
             convStateStorage.EnsureDeviceCurrent();
             ssmStateStorage.EnsureDeviceCurrent();
@@ -2840,12 +2877,7 @@ namespace TensorSharp.Cuda
             ssmNormStorage.EnsureDeviceCurrent();
 
             allocator.Context.MakeCurrent();
-            // Decode-graph capture: the single-token step re-reads the conv ring
-            // write index from the dyn block on every replay (it advances mod
-            // convDim each token).
-            IntPtr dyn = seqLen == 1
-                ? CudaDecodeDynParams.GetActiveDevicePtr(allocator)
-                : IntPtr.Zero;
+            using var dynBorrow = dynOwner?.BorrowFor(allocator, kernels) ?? default;
             kernels.LaunchQwen35GatedDeltaNetPackedF32(
                 packedPtr,
                 convStatePtr,
@@ -2868,7 +2900,7 @@ namespace TensorSharp.Cuda
                 convWriteIdx,
                 eps,
                 allocator.Stream.Handle,
-                dyn);
+                dynBorrow.Pointer);
             resultStorage.MarkDeviceModified();
             convStateStorage.MarkDeviceModified();
             ssmStateStorage.MarkDeviceModified();

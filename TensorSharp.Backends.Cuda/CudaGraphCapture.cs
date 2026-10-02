@@ -188,12 +188,12 @@ namespace TensorSharp.Cuda
         /// <summary>Returns the ambient dynamic-parameter pointer only when it
         /// belongs to the allocator issuing this launch. Otherwise the caller
         /// must use its ordinary scalar kernel arguments.</summary>
-        internal static IntPtr GetActiveDevicePtr(CudaAllocator launchAllocator)
+        internal static CudaDecodeDynParams GetActiveOwner(CudaAllocator launchAllocator)
         {
             CudaDecodeDynParams active = activeInstance;
             if (active == null || !ReferenceEquals(active.allocator, launchAllocator))
-                return IntPtr.Zero;
-            return active.DevicePtr;
+                return null;
+            return active;
         }
 
         public CudaDecodeDynParams(IAllocator allocator)
@@ -251,12 +251,40 @@ namespace TensorSharp.Cuda
             }
         }
 
-        internal IntPtr DevicePtr
+        internal bool MatchesConsumer(CudaAllocator launchAllocator, CudaKernels kernels)
+            => ReferenceEquals(allocator, launchAllocator) && launchAllocator != null
+                && MatchesConsumer(launchAllocator.Context, launchAllocator.Stream, kernels);
+
+        internal bool MatchesConsumer(CudaContext launchContext, CudaStream launchStream, CudaKernels kernels)
+            => ReferenceEquals(context, launchContext) && ReferenceEquals(stream, launchStream)
+                && context != null && stream.MatchesContext(context) && kernels != null && kernels.MatchesContext(context);
+
+        internal DeviceBorrow BorrowFor(CudaAllocator launchAllocator, CudaKernels kernels)
+            => MatchesConsumer(launchAllocator, kernels)
+                ? BorrowFor(launchAllocator.Context, launchAllocator.Stream, kernels) : default;
+
+        internal DeviceBorrow BorrowFor(CudaContext launchContext, CudaStream launchStream, CudaKernels kernels)
         {
-            get
+            if (!MatchesConsumer(launchContext, launchStream, kernels)) return default;
+            var lease = EnterValidEffect();
+            return new DeviceBorrow(this, lease, devicePtr);
+        }
+
+        internal readonly struct DeviceBorrow : IDisposable
+        {
+            private readonly CudaDecodeDynParams owner;
+            private readonly NativeEffectLease lease;
+            internal IntPtr Pointer { get; }
+            internal DeviceBorrow(CudaDecodeDynParams owner, NativeEffectLease lease, IntPtr pointer)
             {
-                using var lease = EnterValidEffect();
-                return devicePtr;
+                this.owner = owner;
+                this.lease = lease;
+                Pointer = pointer;
+            }
+            public void Dispose()
+            {
+                lease?.Dispose();
+                GC.KeepAlive(owner);
             }
         }
 
