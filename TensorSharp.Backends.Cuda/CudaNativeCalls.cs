@@ -7,6 +7,7 @@ namespace TensorSharp.Cuda;
 internal sealed class CudaNativeCalls
 {
     private readonly NativeOwnerRegistration _registration;
+    private readonly int[] _deviceOrdinals;
     internal ICudaNativeApi Api { get; }
 
     internal CudaNativeCalls(object actualOwner, NativeOwnerRole role, ICudaNativeApi api, params int[] deviceOrdinals)
@@ -15,6 +16,7 @@ internal sealed class CudaNativeCalls
         ArgumentNullException.ThrowIfNull(deviceOrdinals);
         deviceOrdinals = (int[])deviceOrdinals.Clone();
         foreach (int ordinal in deviceOrdinals) ArgumentOutOfRangeException.ThrowIfNegative(ordinal);
+        _deviceOrdinals = deviceOrdinals;
         Api = api;
         _registration = NativeQuarantineAuthority.Register(actualOwner, role);
         if (deviceOrdinals.Length == 0) _registration.AttachCudaUnresolvedRuntime();
@@ -22,6 +24,8 @@ internal sealed class CudaNativeCalls
     }
 
     internal NativeEffectLease EnterEffect() => _registration.EnterEffect();
+    internal bool CoversDevice(int deviceOrdinal) => _deviceOrdinals.Length == 0
+        || Array.IndexOf(_deviceOrdinals, deviceOrdinal) >= 0;
     internal void ThrowIfQuarantined() => _registration.ThrowIfQuarantined();
     internal void ValidateSafeRelease(NativeEffectLease lease) => lease.ValidateSafeRelease(_registration.Owner);
     internal void CompleteSafeRelease(NativeEffectLease lease) => lease.CompleteSafeRelease(_registration.Owner);

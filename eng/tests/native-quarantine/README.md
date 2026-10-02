@@ -3,8 +3,9 @@
 This harness loads actual compiled Core and fixture assemblies in distinct collectible
 ALCs. It proves managed admission, exact-cause identity, failed owner/storage retention,
 healthy retirement, and process-shared lock/schema behavior. It does not load native
-libraries or instantiate actual backend models. CUDA/MLX/GGML caller integrations are
-INERT/unimplemented; these tests do not qualify native release or hardware safety.
+libraries or instantiate actual backend models. The CUDA context uses the authority.
+The other CUDA/MLX/GGML callers do not yet use it. These Core tests do not qualify
+backend caller coverage, native release or hardware safety.
 
 Build `native-quarantine.csproj` with all three native hooks disabled, then run:
 
