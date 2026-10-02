@@ -39,9 +39,18 @@ public sealed class Fixture
             GC.SuppressFinalize(this);
         }
 
+        public object[] ExecutingProvenance() => new object[]
+        {
+            GetType().Assembly.ManifestModule.ModuleVersionId,
+            typeof(NativeRuntimeQuarantine).Assembly.ManifestModule.ModuleVersionId,
+            GetType().Assembly.IsCollectible,
+            typeof(NativeRuntimeQuarantine).Assembly.IsCollectible
+        };
+
         ~FinalizingOwner()
         {
-            _observation[1] = !((WeakReference<object>)_registration.Cell[2]).TryGetTarget(out _);
+            _observation[1] = ((WeakReference<object>)_registration.Cell[2]).TryGetTarget(out object? actual)
+                && ReferenceEquals(actual, this);
             var original = new InvalidOperationException("Controlled finalizer cleanup refusal.");
             using var lease = _registration.EnterEffect();
             Guid id = lease.PublishFailure(this, original, NativeRuntimeFailureStage.StorageRelease).FailureId;

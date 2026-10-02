@@ -68,7 +68,7 @@ switch (mode)
             "The failed owner did not genuinely finalize or the safely released owner finalized.");
         if (unsafeFinalization)
         {
-            Require((bool)finalizing.Observation[1], "The short owner weak reference was not cleared before finalization.");
+            Require((bool)finalizing.Observation[1], "The long owner weak reference lost the actual finalizing owner.");
             Require(NativeRuntimeQuarantine.TryGetFailure((Exception)finalizing.Observation[3], out var finalizerFailure)
                 && finalizerFailure!.FailureId == (Guid)finalizing.Observation[2],
                 "The actual finalizer cause is not recorded in the process graph.");
@@ -76,16 +76,19 @@ switch (mode)
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             actualFinalizerExecuted = finalizing.Observation[0],
-            shortOwnerWeakCleared = finalizing.Observation[1],
+            longOwnerWeakMatches = finalizing.Observation[1],
             authenticatedOriginPromoted = finalizing.Observation[4],
             foreignCoreMvid = finalizing.Observation[5],
             foreignFixtureMvid = finalizing.Observation[6],
             rootsAlive = finalizing.Roots.Select(w => w.IsAlive).ToArray()
         }));
-        Require(finalizing.Roots.All(w => w.IsAlive == unsafeFinalization),
+        Require(unsafeFinalization
+                ? finalizing.Roots[0].IsAlive && finalizing.Roots[1].IsAlive && finalizing.Roots[3].IsAlive
+                : finalizing.Roots.All(w => !w.IsAlive),
             "Actual finalizer-origin owner/resource/private generation retention is incorrect.");
         Require((bool)finalizing.Observation[4] == unsafeFinalization,
             "The process graph did not retain the authenticated finalizer origin.");
+        if (unsafeFinalization) VerifyFinalizerProvenance(finalizing.Roots[0], finalizing.Observation);
         break;
     case "initialize":
         Initialize(fixturePath);
@@ -139,6 +142,15 @@ static (WeakReference[] Roots, object[] Observation) FinalizerOrigin(string path
     object[] result = (object[])f.Static("FinalizerOrigin", fail)!;
     return (new[] { (WeakReference)result[0], (WeakReference)result[1], (WeakReference)result[3],
         new WeakReference(f.Alc), new WeakReference(f.Assembly) }, (object[])result[2]);
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static void VerifyFinalizerProvenance(WeakReference owner, object[] observation)
+{
+    object actual = owner.Target ?? throw new Exception("The actual finalizer owner was lost.");
+    object[] provenance = (object[])actual.GetType().GetMethod("ExecutingProvenance")!.Invoke(actual, null)!;
+    Require(provenance[0].Equals(observation[6]) && provenance[1].Equals(observation[5])
+        && (bool)provenance[2] && (bool)provenance[3], "Retained finalizer owner has different executing provenance.");
 }
 
 [MethodImpl(MethodImplOptions.NoInlining)]

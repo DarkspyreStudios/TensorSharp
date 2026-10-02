@@ -14,6 +14,7 @@ MODES = (
     "protocol", "malformed-cells", "roles", "cross-nesting", "lock-order", "mismatched-lease",
     "resolved-cuda-nesting",
     "queued-safe-release", "safe-release-negatives", "foreign-queued-safe-release",
+    "finalizer-origin", "finalizer-healthy",
 )
 
 

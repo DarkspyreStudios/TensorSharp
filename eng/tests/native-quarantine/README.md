@@ -44,6 +44,15 @@ before its controlled free callback and rejects wrong-owner, forged-gate, wrong-
 and disposed leases. Safe release validates every frozen held gate before teardown;
 blocked reservations do not imply that native work has executed.
 
+`finalizer-origin` runs a genuine foreign fixture finalizer without a static fixture
+root. The actual registration uses a resurrection-tracking long weak reference.
+Publication retains the authenticated finalizing owner and its actual managed resource.
+After finalizer drainage, a fixture-only accessor proves executing fixture/Core MVIDs
+and collectible provenance. Short weak `RuntimeAssembly` wrapper collection does not
+prove owner or loader retirement. `finalizer-healthy` explicitly completes safe release,
+suppresses finalization, and collects actual owner/resource/ALC references. These cases
+exercise managed authority behavior, not a device allocation or native free failure.
+
 Per-mode reports record actual fixture/Core hashes and MVID. Test public-method
 reflection is used solely to execute the compiled foreign fixture; there is no
 private-field reflection into shipping code or reflective Inference observation seam.
