@@ -131,6 +131,7 @@ namespace TensorSharp.Models
 
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
@@ -218,9 +219,7 @@ namespace TensorSharp.Models
             // 4. Residual add (replicated after AllReduce).
             Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
             TpResidualAdd(hidden, attnReplicated);
-            for (int r = 1; r < tp; r++)
-                attnReplicated[r].Dispose();
-            reducedAttn.Dispose();
+            DisposeTensorParallelBroadcast(attnReplicated, reducedAttn);
 
             // 5. FFN norm (replicated).
             Tensor[] normed2 = TpRMSNorm(hidden, wn[ffnNormIdx]);
@@ -264,9 +263,7 @@ namespace TensorSharp.Models
             // 9. Residual add.
             Tensor[] ffnReplicated = BroadcastTensorToAllRanks(ffnOut);
             TpResidualAdd(hidden, ffnReplicated);
-            for (int r = 1; r < tp; r++)
-                ffnReplicated[r].Dispose();
-            ffnOut.Dispose();
+            DisposeTensorParallelBroadcast(ffnReplicated, ffnOut);
 
             return hidden;
         }

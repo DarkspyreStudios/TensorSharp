@@ -117,6 +117,7 @@ namespace TensorSharp.Models
 
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {

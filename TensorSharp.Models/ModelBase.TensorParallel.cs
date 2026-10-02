@@ -995,13 +995,32 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
-        /// Broadcast a rank-0 tensor to all other GPUs. Returns an array where
-        /// element 0 is the original tensor and elements 1..tp-1 are copies.
+        /// Broadcast a borrowed rank-0 tensor. Every returned rank owns a copy;
+        /// the caller keeps ownership of the input.
         /// </summary>
         protected Tensor[] BroadcastTensorToAllRanks(Tensor tensor)
         {
             int tp = TpDegree;
             var result = new Tensor[tp];
+
+            if (IsGgmlBackend)
+            {
+                var owner = new TensorParallelBroadcastOwner(result, borrowedSource: tensor);
+                try
+                {
+                    for (int r = 0; r < tp; r++)
+                    {
+                        result[r] = new Tensor(_tpGroup.GetAllocator(r), tensor.ElementType, tensor.Sizes);
+                        Ops.Copy(result[r], tensor);
+                    }
+                }
+                catch (Exception original)
+                {
+                    RollBackLocalResource(owner, original);
+                    throw;
+                }
+                return result;
+            }
 
             // Note: do NOT collapse the GGML case to one shared buffer, even
             // though every rank's backend can read the same host memory. Callers
@@ -1019,6 +1038,43 @@ namespace TensorSharp.Models
             for (int r = 1; r < tp; r++)
                 result[r] = ReplicateTensorToRank(tensor, r);
             return result;
+        }
+
+        private protected void RetireTensorParallelBroadcastSource(Tensor source, Tensor[] copies)
+        {
+            if (!IsGgmlBackend) return;
+            var owner = new TensorParallelBroadcastOwner(copies);
+            try { RetireOwnedResource(source); }
+            catch (Exception cleanupError)
+            {
+                RetainFailedModelOwnership(owner, cleanupError);
+                throw;
+            }
+        }
+
+        private protected void DisposeTensorParallelBroadcast(Tensor[] copies, Tensor source)
+        {
+            if (IsGgmlBackend) RetireOwnedResource(new TensorParallelBroadcastOwner(copies, source));
+            else
+            {
+                for (int r = 1; r < copies.Length; r++) copies[r].Dispose();
+                source.Dispose();
+            }
+        }
+
+        private sealed class TensorParallelBroadcastOwner(Tensor[] copies, Tensor source = null, Tensor borrowedSource = null) : IDisposable
+        {
+            private readonly Tensor _borrowedSource = borrowedSource;
+
+            public void Dispose()
+            {
+                try
+                {
+                    foreach (var copy in copies) copy?.Dispose();
+                    source?.Dispose();
+                }
+                finally { GC.KeepAlive(_borrowedSource); }
+            }
         }
 
         // Per-rank copies of REPLICATED weights (norm alphas, gate vectors) that a
