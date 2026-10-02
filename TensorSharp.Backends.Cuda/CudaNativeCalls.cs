@@ -26,6 +26,20 @@ internal sealed class CudaNativeCalls
     internal NativeEffectLease EnterEffect() => _registration.EnterEffect();
     internal bool CoversDevice(int deviceOrdinal) => _deviceOrdinals.Length == 0
         || Array.IndexOf(_deviceOrdinals, deviceOrdinal) >= 0;
+
+    internal int cuCtxSynchronize()
+    {
+        using var lease = EnterEffect();
+        int result;
+        try { result = Api.cuCtxSynchronize(); }
+        catch (Exception failure)
+        {
+            PublishFailure(lease, failure, NativeRuntimeFailureStage.Synchronization);
+            throw;
+        }
+        RejectUnsafeResult(lease, result, NativeRuntimeFailureStage.Synchronization, false);
+        return result;
+    }
     internal void ThrowIfQuarantined() => _registration.ThrowIfQuarantined();
     internal void ValidateSafeRelease(NativeEffectLease lease) => lease.ValidateSafeRelease(_registration.Owner);
     internal void CompleteSafeRelease(NativeEffectLease lease) => lease.CompleteSafeRelease(_registration.Owner);

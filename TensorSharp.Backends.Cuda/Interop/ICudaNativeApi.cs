@@ -61,5 +61,5 @@ internal interface ICudaNativeApi
     int cublasSgemmStridedBatched(IntPtr handle, int transa, int transb, int m, int n, int k, ref float alpha, IntPtr a, int lda, long strideA, IntPtr b, int ldb, long strideB, ref float beta, IntPtr c, int ldc, long strideC, int batchCount);
     int cublasGemmEx(IntPtr handle, int transa, int transb, int m, int n, int k, ref float alpha, IntPtr a, int aType, int lda, IntPtr b, int bType, int ldb, ref float beta, IntPtr c, int cType, int ldc, int computeType, int algo);
     int cuCtxGetDevice(out int device);
+    int cuCtxSynchronize();
 }
-

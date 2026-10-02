@@ -16,6 +16,7 @@ internal static class Program
         {
             case "context-clean": ContextClean(); break;
             case "context-release-refusal": ContextReleaseRefusal(); break;
+            case "context-drain-refusal": ContextDrainRefusal(); break;
             case "context-construction-rollback": ConstructionRollback(false); break;
             case "context-construction-rollback-refusal": ConstructionRollback(true); break;
             case "foreign-context-clean": ForeignContext(false); break;
@@ -69,6 +70,21 @@ internal static class Program
         WeakReference[] roots = FailContextRelease();
         Collect();
         Assert(roots.All(r => r.IsAlive), "Unsafe cleanup loses the actual context/API owner graph.");
+    }
+
+    private static void ContextDrainRefusal()
+    {
+        var original = new InvalidOperationException("Controlled current-context drain refusal.");
+        var api = new RecordingCudaApi { DrainFailure = original };
+        CudaContext context = CudaContext.Create(5, api);
+        IntPtr handle = context.Handle;
+        try { context.Dispose(); throw new InvalidOperationException("Context release omitted its checked drain."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(api.ReleaseCount == 0 && context.Handle == handle && !context.IsDisposed,
+            "Drain refusal releases the primary context or clears actual ownership.");
+        Assert(NativeRuntimeQuarantine.TryGetFailure(original, out var failure)
+            && failure?.Stage == NativeRuntimeFailureStage.Synchronization,
+            "Context drain refusal does not retain its exact synchronization cause.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -174,6 +190,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal IntPtr Current;
     internal Exception? ReleaseFailure;
     internal Exception? BindFailure;
+    internal Exception? DrainFailure;
     internal int ReleaseCount;
     internal int TotalCalls;
 
@@ -189,6 +206,12 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         return 0;
     }
     public override int cuCtxGetCurrent(out IntPtr ctx) { TotalCalls++; ctx = Current; return 0; }
+    public override int cuCtxSynchronize()
+    {
+        TotalCalls++;
+        if (DrainFailure != null) throw DrainFailure;
+        return 0;
+    }
     public override int cuDevicePrimaryCtxRelease(int device)
     {
         TotalCalls++;

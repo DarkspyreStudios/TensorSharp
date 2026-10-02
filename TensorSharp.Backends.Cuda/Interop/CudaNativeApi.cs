@@ -175,4 +175,6 @@ internal sealed class CudaNativeApi : ICudaNativeApi
 
     public int cuCtxGetDevice(out int device)
         => CudaDriverApi.cuCtxGetDevice(out device);
+
+    public int cuCtxSynchronize() => CudaDriverApi.cuCtxSynchronize();
 }

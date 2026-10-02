@@ -5,6 +5,7 @@ namespace TensorSharp.CudaQuarantineFixture;
 // Unused calls refuse; no controlled API call reaches a CUDA library.
 internal abstract class RefusingCudaApi : ICudaNativeApi
 {
+    public virtual int cuCtxSynchronize() => throw new NotSupportedException("Unconfigured controlled CUDA call.");
     public virtual int cuInit(uint flags) => throw new NotSupportedException("Unconfigured controlled CUDA call.");
     public virtual int cuDeviceGet(out int device, int ordinal) => throw new NotSupportedException("Unconfigured controlled CUDA call.");
     public virtual int cuDeviceGetCount(out int count) => throw new NotSupportedException("Unconfigured controlled CUDA call.");

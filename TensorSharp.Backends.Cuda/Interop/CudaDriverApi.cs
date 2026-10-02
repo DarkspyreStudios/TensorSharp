@@ -44,6 +44,9 @@ namespace TensorSharp.Cuda.Interop
         public static partial int cuCtxGetDevice(out int device);
 
         [LibraryImport(LibName)]
+        public static partial int cuCtxSynchronize();
+
+        [LibraryImport(LibName)]
         public static partial int cuDevicePrimaryCtxRetain(out IntPtr ctx, int device);
 
         [LibraryImport(LibName)]
