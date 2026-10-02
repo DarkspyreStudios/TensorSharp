@@ -149,8 +149,18 @@ The additive `identityRelink` record contains both original observations and act
 and linker arguments. The packer verifies ordinary evidence files, hashes, source-tree equality,
 the original bridge/profile/cache, exact reused input membership, replacement identity source and
 compiler/linker arguments. The ordinary current-ABI, bridge-hash, profile and raw-cache gates also
-remain required. This operation does not compile upstream ggml or accelerator kernels. It does
+remain required. Every execution invariant is checked before invoking the compiler or linker.
+Recorded absolute command paths bind to explicit immutable execution roots. The evidence files
+use portable relative paths. Copying a stage or pruning its producer worktree does not change the
+recorded arguments or prevent validation in another checkout. This operation does not compile
+upstream ggml or accelerator kernels. It does
 not qualify native lifecycle, target execution or GPU safety.
+
+The packer's explicit `--mac-prerelease` mode requires exactly one osx-arm64 Metal/CPU baseline.
+All artifact, ABI, profile, cache, dependency, component and relink checks remain required. The
+default output mode requires the complete twelve-artifact release matrix. `--complete-release`
+and `--mac-prerelease` cannot be combined. Partial staging validation alone does not authorize
+package output.
 
 ### Component evidence
 

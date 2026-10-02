@@ -23,6 +23,14 @@ spec.loader.exec_module(pack)
 
 
 class ArtifactPolicyTests(unittest.TestCase):
+    def test_mac_prerelease_is_exact_and_does_not_replace_the_default_complete_matrix(self):
+        mac = [{"rid": "osx-arm64", "variant": "metal"}]
+        self.assertEqual([], pack.check_mac_prerelease_matrix(mac))
+        self.assertTrue(pack.check_release_matrix(mac))
+        for items in ([], mac * 2, mac + [{"rid": "win-arm64", "variant": "cpu"}],
+                      [{"rid": "osx-arm64", "variant": "cpu"}]):
+            with self.subTest(items=items):
+                self.assertTrue(pack.check_mac_prerelease_matrix(items))
     def test_packaging_and_native_build_compute_the_same_abi(self):
         result = subprocess.run(["cmake", "-P", str(pack.REPO_ROOT / "eng" / "print-ggml-native-abi.cmake")],
                                 capture_output=True, text=True, check=True, timeout=30)
@@ -538,6 +546,21 @@ class StagingFilesystemTests(unittest.TestCase):
             code, output = self.run_cli("--validate-only", "--complete-release")
         self.assertEqual(0, code, output)
         self.assertIn("validated 12 staged artifacts; no output written", output)
+
+    def test_mac_prerelease_validates_only_exact_mac_metadata_without_output(self):
+        with patch.object(pack, "collect_artifacts", return_value=([{"rid": "osx-arm64", "variant": "metal"}], [])):
+            code, output = self.run_cli("--validate-only", "--mac-prerelease")
+        self.assertEqual(0, code, output)
+        for items in ([], [{"rid": "win-arm64", "variant": "cpu"}]):
+            with patch.object(pack, "collect_artifacts", return_value=(items, [])):
+                code, output = self.run_cli("--validate-only", "--mac-prerelease")
+            self.assertEqual(1, code, output)
+            self.assertIn("requires exactly", output)
+
+    def test_mac_prerelease_cannot_be_combined_with_the_complete_release_gate(self):
+        with self.assertRaises(SystemExit) as refused:
+            self.run_cli("--validate-only", "--mac-prerelease", "--complete-release")
+        self.assertEqual(2, refused.exception.code)
 
     def test_real_text_sibling_cannot_satisfy_a_claimed_bundled_dependency(self):
         suffix = ".dylib" if self.rid.startswith("osx-") else ".so"

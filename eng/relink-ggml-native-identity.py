@@ -79,7 +79,8 @@ def relink(fixture, original_record_path, build_dir, stage):
     directory.mkdir(parents=True)
     binary.parent.mkdir(parents=True)
     proof = {"schema": "tensorsharp-identity-relink/1", "originalIdentity": original_identity, "nativeSourceTree": native_tree,
-             "compileIncludes": pack.identity_include_paths()}
+             "compileIncludes": pack.identity_include_paths(),
+             "executionRoots": {"sourceRoot": str(ROOT), "buildRecordRoot": str(directory), "binaryPath": str(binary)}}
     evidence = {"originalBuildRecord": (original_record_path, "original-build.json"),
                 "originalCache": (original_cache, "original-cache.txt"),
                 "originalBridge": (old_bridge, "original-bridge.dylib"),
@@ -102,6 +103,8 @@ def relink(fixture, original_record_path, build_dir, stage):
     resolved = {token: str(directory / reference["path"]) for token, reference in zip(tokens, proof["inputs"])}
     proof["linkArgv"] = [resolved.get(token, str(replacement) if token == replacement_token else token) for token in link]
     proof["linkArgv"][proof["linkArgv"].index("-o") + 1] = str(binary)
+    proof["replacementObject"] = {"path": "identity-relink/replacement/identity.o"}
+    pack.validate_identity_relink({"identityRelink": proof}, identity, directory, binary, before_execution=True)
     (directory / "identity-relink/commands.json").write_text(json.dumps({"compileArgv": proof["compileArgv"], "linkArgv": proof["linkArgv"]}, indent=2) + "\n")
     for name in ("compileArgv", "linkArgv"):
         completed = subprocess.run(proof[name], capture_output=True, text=True, timeout=60, check=True)

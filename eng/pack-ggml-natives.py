@@ -436,6 +436,13 @@ def check_release_matrix(artifacts):
     return errors
 
 
+def check_mac_prerelease_matrix(artifacts):
+    present = [(artifact["rid"], artifact["variant"]) for artifact in artifacts]
+    if present != [("osx-arm64", "metal")]:
+        return ["Mac prerelease requires exactly the osx-arm64/metal baseline; no other or duplicate artifacts"]
+    return []
+
+
 def read_identity(path):
     text = path.read_bytes()
     match = re.search(rb"format=1;tensorsharp=[\x20-\x7e]*", text)
@@ -663,9 +670,19 @@ def relink_file(directory, reference):
     return directory / reference["path"]
 
 
-def identity_include_paths():
-    return [str(REPO_ROOT / "TensorSharp.GGML.Native"), str(REPO_ROOT / "ExternalProjects/ggml/include"),
-            str(REPO_ROOT / "ExternalProjects/ggml/src")]
+def identity_include_paths(source_root=None):
+    source_root = REPO_ROOT if source_root is None else source_root
+    return [str(source_root / "TensorSharp.GGML.Native"), str(source_root / "ExternalProjects/ggml/include"),
+            str(source_root / "ExternalProjects/ggml/src")]
+
+
+MAC_IDENTITY_LINK_PREFIX = ["/usr/bin/c++", "-O3", "-DNDEBUG", "-arch", "arm64", "-mmacosx-version-min=14.0",
+                            "-dynamiclib", "-Wl,-headerpad_max_install_names", "-o", "libGgmlOps.dylib",
+                            "-install_name", "@rpath/libGgmlOps.dylib"]
+MAC_IDENTITY_LINK_SUFFIX = ["libggml.a", "-framework", "Foundation", "-framework", "Metal", "-framework",
+                            "MetalPerformanceShadersGraph", "-framework", "MetalPerformanceShaders", "libggml-cpu.a",
+                            "-framework", "Accelerate", "libggml-metal.a", "-framework", "Foundation", "-framework",
+                            "Metal", "libggml-base.a", "-lm", "-framework", "MetalKit"]
 
 
 def relink_compile_flags(text):
@@ -678,20 +695,45 @@ def relink_compile_flags(text):
     return result
 
 
-def validate_identity_relink(build, identity, directory, binary):
+def validate_identity_relink(build, identity, directory, binary, before_execution=False):
     if "identityRelink" not in build:
         return
     proof = build["identityRelink"]
     keys = {"schema", "originalIdentity", "originalBuildRecord", "originalCache", "originalBridge", "originalLink",
             "inputs", "replacementObject", "identitySource", "nativeSourceTree", "compileIncludes", "compileArgv", "linkArgv",
-            "originalFlags", "freshFlags", "freshLink"}
+            "originalFlags", "freshFlags", "freshLink", "executionRoots"}
     if not isinstance(proof, dict) or set(proof) != keys or proof["schema"] != "tensorsharp-identity-relink/1":
         raise ValueError("malformed identity-only relink evidence")
+    roots = proof["executionRoots"]
+    if not isinstance(roots, dict) or set(roots) != {"sourceRoot", "buildRecordRoot", "binaryPath"}:
+        raise ValueError("identity relink execution roots are malformed")
+    for value in roots.values():
+        if (not isinstance(value, str) or not value.startswith("/") or str(Path(value)) != value
+                or ".." in Path(value).parts or any(ord(character) < 32 for character in value)):
+            raise ValueError("identity relink execution roots must be canonical absolute observations")
+    execution_directory = Path(roots["buildRecordRoot"])
+    expected_binary = execution_directory.parent.parent / "runtimes/osx-arm64/native/metal/libGgmlOps.dylib"
+    if (execution_directory.parts[-2:] != ("build", "osx-arm64-metal")
+            or roots["binaryPath"] != str(expected_binary)):
+        raise ValueError("identity relink execution roots have incompatible artifact roles")
+    if before_execution:
+        if directory != execution_directory or str(binary) != roots["binaryPath"] or roots["sourceRoot"] != str(REPO_ROOT):
+            raise ValueError("identity relink admission differs from its actual execution roots")
+        require_unlinked(binary.absolute())
+        if binary.exists():
+            raise ValueError("identity relink refuses an existing output bridge")
+    elif build.get("bridgeSha256") != sha256_bytes(binary.read_bytes()):
+        raise ValueError("identity relink output bytes differ from the recorded bridge")
     old = proof["originalIdentity"]
     if (not isinstance(old, dict) or set(old) != {"format", "tensorsharp", "source", "ggml", "rid", "variant", "cpu", "abi"}
             or identity.get("rid") != "osx-arm64" or identity.get("variant") != "metal" or identity.get("cpu") != "apple-m1"
             or any(identity.get(key) != old.get(key) for key in ("format", "tensorsharp", "ggml", "rid", "variant", "cpu"))):
         raise ValueError("identity relink changes the original target, backend, CPU floor, build or upstream")
+    if before_execution:
+        version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
+        upstream = (REPO_ROOT / "eng/ggml-revision").read_text().strip()
+        if identity["tensorsharp"] != version or identity["ggml"] != upstream or identity["abi"] != native_abi(REPO_ROOT):
+            raise ValueError("identity relink admission differs from the current build, ABI or pinned upstream")
     if (proof["nativeSourceTree"] != native_source_tree(old["source"])
             or proof["nativeSourceTree"] != native_source_tree(identity["source"])):
         raise ValueError("identity relink changes native implementation sources")
@@ -711,6 +753,11 @@ def validate_identity_relink(build, identity, directory, binary):
     link = shlex.split(read_build_file(relink_file(directory, proof["originalLink"])))
     if link != shlex.split(read_build_file(relink_file(directory, proof["freshLink"]))):
         raise ValueError("fresh configuration changes the preserved link topology or flags")
+    object_tokens = link[len(MAC_IDENTITY_LINK_PREFIX):-len(MAC_IDENTITY_LINK_SUFFIX)]
+    if (link[:len(MAC_IDENTITY_LINK_PREFIX)] != MAC_IDENTITY_LINK_PREFIX
+            or link[-len(MAC_IDENTITY_LINK_SUFFIX):] != MAC_IDENTITY_LINK_SUFFIX or len(object_tokens) != 56
+            or any(not re.fullmatch(r"CMakeFiles/GgmlOps\.dir/[A-Za-z0-9_-]+\.(cpp|m|mm)\.o", token) for token in object_tokens)):
+        raise ValueError("identity relink linker command differs from the finite Mac profile")
     original_flags = relink_compile_flags(read_build_file(relink_file(directory, proof["originalFlags"])))
     fresh_flags = relink_compile_flags(read_build_file(relink_file(directory, proof["freshFlags"])))
     expected_flags = {"CXX_FLAGS": ["-O3", "-DNDEBUG", "-std=gnu++17", "-arch", "arm64", "-mmacosx-version-min=14.0", "-fPIC"],
@@ -728,21 +775,36 @@ def validate_identity_relink(build, identity, directory, binary):
     if (paths != expected_paths or len(paths) != len(set(paths)) or link.count(replacement_token) != 1 or len(tokens) != 59
             or archives != {"libggml.a", "libggml-cpu.a", "libggml-metal.a", "libggml-base.a"}):
         raise ValueError("identity relink changes, duplicates or omits original link inputs")
-    resolved = {token: str(relink_file(directory, reference)) for token, reference in zip(tokens, inputs)}
-    replacement = relink_file(directory, proof["replacementObject"])
+    for reference in inputs:
+        relink_file(directory, reference)
+    resolved = {token: str(execution_directory / reference["path"]) for token, reference in zip(tokens, inputs)}
+    replacement_reference = proof["replacementObject"]
+    if not isinstance(replacement_reference, dict) or replacement_reference.get("path") != "identity-relink/replacement/identity.o":
+        raise ValueError("identity relink replacement object has an incompatible role")
+    if before_execution:
+        if set(replacement_reference) != {"path"}:
+            raise ValueError("identity relink cannot invent replacement output evidence before execution")
+        replacement_file = directory / replacement_reference["path"]
+        require_unlinked(replacement_file.absolute())
+        if replacement_file.exists():
+            raise ValueError("identity relink replacement output already exists")
+    else:
+        relink_file(directory, replacement_reference)
+    replacement = execution_directory / replacement_reference["path"]
     source = relink_file(directory, proof["identitySource"])
     if source.read_bytes() != (REPO_ROOT / "TensorSharp.GGML.Native/ggml_ops_build_identity.cpp").read_bytes():
         raise ValueError("identity relink source differs from the current owned implementation")
     includes = proof["compileIncludes"]
-    if includes != identity_include_paths():
+    if includes != identity_include_paths(Path(roots["sourceRoot"])):
         raise ValueError("identity relink include paths are invalid")
-    expected_compile = identity_compile_arguments(source, replacement, identity, old_record["compiler"], includes)
+    expected_compile = identity_compile_arguments(execution_directory / proof["identitySource"]["path"], replacement, identity,
+                                                  old_record["compiler"], includes)
     if proof["compileArgv"] != expected_compile:
         raise ValueError("identity relink compiler arguments differ from the verified identity/profile")
     if link.count("-o") != 1 or link[0] != old_record["compiler"]:
         raise ValueError("original relink command is malformed")
     expected_link = [resolved.get(token, str(replacement) if token == replacement_token else token) for token in link]
-    expected_link[expected_link.index("-o") + 1] = str(binary)
+    expected_link[expected_link.index("-o") + 1] = roots["binaryPath"]
     if proof["linkArgv"] != expected_link:
         raise ValueError("identity relink linker arguments change the preserved link command")
 
@@ -842,8 +904,12 @@ def main():
     parser.add_argument("--developer-package-limit", type=int, default=DEFAULT_DEVELOPER_LIMIT)
     parser.add_argument("--validate-only", action="store_true", help="validate staged inputs without writing release artifacts")
     parser.add_argument("--complete-release", action="store_true",
-                        help="require the entire canonical release matrix during validation-only checks; output generation always requires it")
+                        help="require the entire canonical release matrix during validation-only checks; this remains the default output gate")
+    parser.add_argument("--mac-prerelease", action="store_true",
+                        help="explicitly package only the single osx-arm64 Metal/CPU baseline; full release remains the default")
     args = parser.parse_args()
+    if args.complete_release and args.mac_prerelease:
+        parser.error("--mac-prerelease and --complete-release are mutually exclusive")
 
     version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
     if not version:
@@ -858,7 +924,9 @@ def main():
         if any(root == out or root in out.parents for root in (stage / "runtimes", stage / "build")):
             raise ValueError("output directory overlaps staged artifacts or build records")
         staged, errors = collect_artifacts(stage, version, ggml_commit)
-        if args.complete_release or not args.validate_only:
+        if args.mac_prerelease:
+            errors += check_mac_prerelease_matrix(staged)
+        elif args.complete_release or not args.validate_only:
             errors += check_release_matrix(staged)
         managed = managed_package_record(args.managed_package, version) if args.managed_package else None
     except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:

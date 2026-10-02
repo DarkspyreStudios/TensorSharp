@@ -3,6 +3,7 @@ import copy
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,20 +20,25 @@ class IdentityRelinkTests(unittest.TestCase):
         (ROOT / "tmp").mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="identity-relink-", dir=ROOT / "tmp")
         self.addCleanup(temporary.cleanup)
-        self.directory = Path(temporary.name)
-        self.original = dict(format="1", tensorsharp="test", source="1" * 40, ggml="2" * 40,
+        self.temporary = Path(temporary.name)
+        self.directory = self.temporary / "stage/build/osx-arm64-metal"
+        self.directory.mkdir(parents=True)
+        self.version = pack.ET.parse(ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
+        self.ggml = (ROOT / "eng/ggml-revision").read_text().strip()
+        self.original = dict(format="1", tensorsharp=self.version, source="1" * 40, ggml=self.ggml,
                              rid="osx-arm64", variant="metal", cpu="apple-m1", abi="3" * 64)
         self.identity = self.original | {"source": "4" * 40, "abi": "5" * 64}
         self.settings = {"TENSORSHARP_NATIVE_ABI": self.original["abi"], "TENSORSHARP_NATIVE_RID": "osx-arm64",
                          "TENSORSHARP_NATIVE_VARIANT": "metal", "TENSORSHARP_GGML_NATIVE_PORTABLE": "ON",
                          "GGML_NATIVE": "OFF", "GGML_METAL": "ON", "GGML_CUDA": "OFF", "GGML_VULKAN": "OFF",
                          "CMAKE_CXX_COMPILER": "/usr/bin/c++", "CMAKE_OSX_DEPLOYMENT_TARGET": "14.0"}
-        self.binary = self.directory / "libGgmlOps.dylib"
+        self.binary = self.temporary / "stage/runtimes/osx-arm64/native/metal/libGgmlOps.dylib"
+        self.binary.parent.mkdir(parents=True)
         self.binary.write_bytes(b"controlled relink output")
         old_bridge = self.file("identity-relink/original-bridge.dylib", b"controlled original bridge")
         cache_bytes = "".join(f"{key}:STRING={value}\n" for key, value in self.settings.items()).encode()
         old_cache = self.file("identity-relink/original-cache.txt", cache_bytes)
-        old_build = {"tensorSharpBuild": "test", "sourceCommit": self.original["source"], "ggmlCommit": self.original["ggml"],
+        old_build = {"tensorSharpBuild": self.version, "sourceCommit": self.original["source"], "ggmlCommit": self.original["ggml"],
                      "nativeAbi": self.original["abi"], "rid": "osx-arm64", "variant": "metal", "cpuProfile": "apple-m1",
                      "macosDeploymentTarget": "14.0", "compiler": "/usr/bin/c++", "compilerVersion": "controlled compiler",
                      "bridgeSha256": old_bridge["sha256"], "cmakeCacheSha256": old_cache["sha256"],
@@ -41,8 +47,7 @@ class IdentityRelinkTests(unittest.TestCase):
         objects = [f"CMakeFiles/GgmlOps.dir/controlled-{index}.cpp.o" for index in range(55)]
         objects += ["libggml.a", "libggml-cpu.a", "libggml-metal.a", "libggml-base.a"]
         self.inputs = [self.file("identity-relink/inputs/" + name, name.encode()) for name in objects]
-        link = ["/usr/bin/c++", "-arch", "arm64", "-mmacosx-version-min=14.0", "-dynamiclib", "-o", "libGgmlOps.dylib",
-                "CMakeFiles/GgmlOps.dir/ggml_ops_build_identity.cpp.o", *objects, "-framework", "Metal"]
+        link = pack.MAC_IDENTITY_LINK_PREFIX + ["CMakeFiles/GgmlOps.dir/ggml_ops_build_identity.cpp.o"] + objects[:55] + pack.MAC_IDENTITY_LINK_SUFFIX
         original_link = self.file("identity-relink/original-link.txt", (" ".join(link) + "\n").encode())
         fresh_link = self.file("identity-relink/fresh-link.txt", (" ".join(link) + "\n").encode())
         flag_bytes = b"CXX_DEFINES = -DGGML_USE_CPU -DGGML_USE_METAL -DGgmlOps_EXPORTS -DTSG_GGML_USE_METAL=1\nCXX_FLAGS = -O3 -DNDEBUG -std=gnu++17 -arch arm64 -mmacosx-version-min=14.0 -fPIC\n"
@@ -64,6 +69,7 @@ class IdentityRelinkTests(unittest.TestCase):
                  "originalLink": original_link, "inputs": self.inputs, "replacementObject": replacement,
                  "identitySource": source, "nativeSourceTree": "6" * 40, "compileIncludes": pack.identity_include_paths(),
                  "originalFlags": original_flags, "freshFlags": fresh_flags, "freshLink": fresh_link,
+                 "executionRoots": {"sourceRoot": str(ROOT), "buildRecordRoot": str(self.directory), "binaryPath": str(self.binary)},
                  "compileArgv": self.compile, "linkArgv": self.link}
         self.build = {"identityRelink": proof, "bridgeSha256": pack.sha256_bytes(self.binary.read_bytes())}
         patcher = patch.object(pack, "native_source_tree", return_value="6" * 40)
@@ -176,6 +182,89 @@ class IdentityRelinkTests(unittest.TestCase):
         path.symlink_to(other)
         with self.assertRaises(ValueError):
             self.validate()
+
+    def test_relocated_evidence_preserves_original_execution_arguments(self):
+        relocated = self.temporary / "relocated"
+        shutil.copytree(self.temporary / "stage", relocated)
+        new_directory = relocated / "build/osx-arm64-metal"
+        new_binary = relocated / "runtimes/osx-arm64/native/metal/libGgmlOps.dylib"
+        shutil.rmtree(self.temporary / "stage")
+        pack.validate_identity_relink(self.build, self.identity, new_directory, new_binary)
+        other_source = self.temporary / "other-source"
+        native = other_source / "TensorSharp.GGML.Native"
+        native.mkdir(parents=True)
+        shutil.copyfile(ROOT / "TensorSharp.GGML.Native/ggml_ops_build_identity.cpp", native / "ggml_ops_build_identity.cpp")
+        with patch.object(pack, "REPO_ROOT", other_source):
+            pack.validate_identity_relink(self.build, self.identity, new_directory, new_binary)
+
+    def test_execution_root_role_or_compile_argument_change_refuses(self):
+        proof = self.build["identityRelink"]
+        old = proof["executionRoots"]["binaryPath"]
+        proof["executionRoots"]["binaryPath"] = "/other/bridge.dylib"
+        with self.assertRaises(ValueError):
+            self.validate()
+        proof["executionRoots"]["binaryPath"] = old
+        proof["compileArgv"] = proof["compileArgv"] + ["-wrong"]
+        with self.assertRaises(ValueError):
+            self.validate()
+
+    def test_admission_refuses_existing_outputs(self):
+        with self.assertRaisesRegex(ValueError, "existing output bridge"):
+            pack.validate_identity_relink(self.build, self.identity, self.directory, self.binary, before_execution=True)
+
+    def run_builder_refusal(self, module, mutation):
+        fixture = self.temporary / ("original-" + mutation)
+        configure = self.temporary / ("configure-" + mutation)
+        stage = self.temporary / ("output-" + mutation)
+        fixture.mkdir()
+        configure.mkdir()
+        proof = self.build["identityRelink"]
+        old = json.loads((self.directory / proof["originalBuildRecord"]["path"]).read_text())
+        settings = dict(old["cmakeConfiguration"])
+        link_text = (self.directory / proof["originalLink"]["path"]).read_text()
+        flags_text = (self.directory / proof["originalFlags"]["path"]).read_text()
+        if mutation == "compiler":
+            settings["CMAKE_CXX_COMPILER"] = old["compiler"] = "/bin/echo"
+            link_text = link_text.replace("/usr/bin/c++", "/bin/echo")
+        elif mutation == "flags":
+            flags_text = flags_text.replace("-O3", "-O0")
+        elif mutation == "link":
+            link_text = link_text.replace("-dynamiclib", "-dynamiclib -Wl,-load,/untrusted.dylib")
+        old["cmakeConfiguration"] = settings
+        raw = "".join(f"{key}:STRING={value}\n" for key, value in settings.items()).encode()
+        old["cmakeCacheSha256"] = pack.sha256_bytes(raw)
+        (fixture / "CMakeCache.txt").write_bytes(raw)
+        (fixture / "original-build.json").write_text(json.dumps(old))
+        shutil.copyfile(self.directory / proof["originalBridge"]["path"], fixture / "libGgmlOps.dylib")
+        fresh = settings | {"TENSORSHARP_NATIVE_ABI": self.identity["abi"]}
+        (configure / "CMakeCache.txt").write_text("".join(f"{key}:STRING={value}\n" for key, value in fresh.items()))
+        for directory in (fixture, configure):
+            meta = directory / "CMakeFiles/GgmlOps.dir"
+            meta.mkdir(parents=True)
+            (meta / "flags.make").write_text(flags_text)
+            (meta / "link.txt").write_text(link_text)
+        for reference in proof["inputs"]:
+            relative = reference["path"].removeprefix("identity-relink/inputs/")
+            destination = fixture / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.directory / reference["path"], destination)
+        with patch.object(module.record, "command", return_value=self.identity["source"]), \
+                patch.object(module.record, "verify_clean_source", return_value=self.identity["ggml"]), \
+                patch.object(module.pack, "native_source_tree", return_value="6" * 40), \
+                patch.object(module.pack, "read_identity", return_value=self.original), \
+                patch.object(module.pack, "native_abi", return_value=self.identity["abi"]), \
+                patch.object(module.subprocess, "run", side_effect=AssertionError("external compiler/link invocation")) as execution:
+            with self.assertRaises(ValueError):
+                module.relink(fixture, fixture / "original-build.json", configure, stage)
+            self.assertEqual(0, execution.call_count)
+
+    def test_builder_rejects_untrusted_compiler_flags_and_link_before_execution(self):
+        spec = importlib.util.spec_from_file_location("relink_builder", ROOT / "eng/relink-ggml-native-identity.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for mutation in ("compiler", "flags", "link"):
+            with self.subTest(mutation=mutation):
+                self.run_builder_refusal(module, mutation)
 
 
 if __name__ == "__main__":
