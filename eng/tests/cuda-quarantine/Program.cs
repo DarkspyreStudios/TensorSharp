@@ -51,6 +51,8 @@ internal static class Program
             case "kernels-allocation-rollback": KernelsAllocationRollback(false); break;
             case "kernels-allocation-rollback-refusal": KernelsAllocationRollback(true); break;
             case "kernels-ordinary-faults": KernelsOrdinaryFaults(); break;
+            case "pool-small-failed-free-retention": PoolFailedFreeRetention(false); break;
+            case "pool-large-failed-free-retention": PoolFailedFreeRetention(true); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
             case "foreign-composed-clean": ForeignComposed(false); break;
@@ -101,6 +103,33 @@ internal static class Program
         catch (InvalidOperationException error) when (!refuse && ReferenceEquals(error, original)) { }
         Assert(api.ModuleUnloadCount == 1, "Failed kernel construction loses its transferred loaded module.");
         if (!refuse) context.Dispose();
+    }
+
+    private static void PoolFailedFreeRetention(bool large)
+    {
+        long size = large ? 2L << 20 : 256;
+        int allocations = 0;
+        var attempts = new List<IntPtr>();
+        var original = new InvalidOperationException("Controlled pool backing cleanup refusal.");
+        bool refuse = true;
+        var pool = new CudaDeviceMemoryPool(size * 4, size * 4, true,
+            _ => new IntPtr(6000 + ++allocations), ptr =>
+            {
+                attempts.Add(ptr);
+                if (refuse) throw original;
+            }, shardCount: 1);
+        IntPtr first = pool.Rent(size, out long firstBytes);
+        IntPtr second = pool.Rent(size, out long secondBytes);
+        pool.Return(first, firstBytes);
+        pool.Return(second, secondBytes);
+        try { pool.DrainAndFree(); throw new Exception("Refused pool drain succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(pool.GetStats().CachedBytes == firstBytes + secondBytes, "Refused first free changes cached ownership accounting.");
+        refuse = false;
+        pool.DrainAndFree();
+        Assert(attempts.Count == 3 && attempts[0] == second && attempts[1] == second && attempts[2] == first,
+            "Pool loses the actual refused block before successful callback completion.");
+        Assert(pool.GetStats().CachedBytes == 0, "Successful pool drain leaves cached byte ownership.");
     }
 
     private static object? InvokeKernelBoundary(CudaKernels kernels, string method, params object[] arguments)
