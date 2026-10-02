@@ -421,6 +421,20 @@ class StagingFilesystemTests(unittest.TestCase):
         self.assertEqual(0, code, output)
         self.assertIn("validated 1 staged artifacts; no output written", output)
 
+    def test_collection_applies_optional_relink_proof_before_any_output(self):
+        self.build["identityRelink"] = {"schema": "unverified"}
+        self.write_build()
+        code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("malformed identity-only relink evidence", output)
+
+    def test_collection_propagates_relink_refusal_without_creating_output(self):
+        with patch.object(pack, "validate_identity_relink", side_effect=ValueError("controlled relink refusal")) as validation:
+            code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("controlled relink refusal", output)
+        self.assertEqual(1, validation.call_count)
+
     def test_supplied_components_can_share_actual_evidence_without_a_filename_legal_claim(self):
         suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
         self.add_runtime_component("libfirst" + suffix)

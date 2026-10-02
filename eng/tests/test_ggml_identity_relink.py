@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,15 +38,20 @@ class IdentityRelinkTests(unittest.TestCase):
                      "bridgeSha256": old_bridge["sha256"], "cmakeCacheSha256": old_cache["sha256"],
                      "cmakeConfiguration": self.settings}
         old_record = self.file("identity-relink/original-build.json", json.dumps(old_build).encode())
-        objects = ["CMakeFiles/GgmlOps.dir/ggml_ops_core.cpp.o", "libggml-metal.a"]
+        objects = [f"CMakeFiles/GgmlOps.dir/controlled-{index}.cpp.o" for index in range(55)]
+        objects += ["libggml.a", "libggml-cpu.a", "libggml-metal.a", "libggml-base.a"]
         self.inputs = [self.file("identity-relink/inputs/" + name, name.encode()) for name in objects]
         link = ["/usr/bin/c++", "-arch", "arm64", "-mmacosx-version-min=14.0", "-dynamiclib", "-o", "libGgmlOps.dylib",
                 "CMakeFiles/GgmlOps.dir/ggml_ops_build_identity.cpp.o", *objects, "-framework", "Metal"]
         original_link = self.file("identity-relink/original-link.txt", (" ".join(link) + "\n").encode())
+        fresh_link = self.file("identity-relink/fresh-link.txt", (" ".join(link) + "\n").encode())
+        flag_bytes = b"CXX_DEFINES = -DGGML_USE_CPU -DGGML_USE_METAL -DGgmlOps_EXPORTS -DTSG_GGML_USE_METAL=1\nCXX_FLAGS = -O3 -DNDEBUG -std=gnu++17 -arch arm64 -mmacosx-version-min=14.0 -fPIC\n"
+        original_flags = self.file("identity-relink/original-flags.txt", flag_bytes)
+        fresh_flags = self.file("identity-relink/fresh-flags.txt", flag_bytes)
         replacement = self.file("identity-relink/replacement/identity.o", b"new identity object")
-        source = self.file("identity-relink/identity-source.cpp", b"controlled identity source")
+        source = self.file("identity-relink/identity-source.cpp", (ROOT / "TensorSharp.GGML.Native/ggml_ops_build_identity.cpp").read_bytes())
         self.compile = pack.identity_compile_arguments(self.directory / source["path"], self.directory / replacement["path"],
-                                                       self.identity, "/usr/bin/c++", [])
+                                                       self.identity, "/usr/bin/c++", pack.identity_include_paths())
         self.link = list(link)
         self.link[self.link.index("-o") + 1] = str(self.binary)
         for index, token in enumerate(self.link):
@@ -56,9 +62,16 @@ class IdentityRelinkTests(unittest.TestCase):
         proof = {"schema": "tensorsharp-identity-relink/1", "originalIdentity": self.original,
                  "originalBuildRecord": old_record, "originalCache": old_cache, "originalBridge": old_bridge,
                  "originalLink": original_link, "inputs": self.inputs, "replacementObject": replacement,
-                 "identitySource": source, "nativeSourceTree": "6" * 40, "compileIncludes": [],
+                 "identitySource": source, "nativeSourceTree": "6" * 40, "compileIncludes": pack.identity_include_paths(),
+                 "originalFlags": original_flags, "freshFlags": fresh_flags, "freshLink": fresh_link,
                  "compileArgv": self.compile, "linkArgv": self.link}
         self.build = {"identityRelink": proof, "bridgeSha256": pack.sha256_bytes(self.binary.read_bytes())}
+        patcher = patch.object(pack, "native_source_tree", return_value="6" * 40)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(pack, "read_identity", return_value=self.original)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def file(self, name, data):
         path = self.directory / name
@@ -127,8 +140,42 @@ class IdentityRelinkTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.validate()
 
+    def test_changed_native_source_tree_refuses(self):
+        with patch.object(pack, "native_source_tree", side_effect=["6" * 40, "7" * 40]):
+            with self.assertRaisesRegex(ValueError, "native implementation"):
+                self.validate()
+
+    def test_changed_observed_fresh_flags_or_link_refuses(self):
+        proof = self.build["identityRelink"]
+        for key in ("freshFlags", "freshLink"):
+            old = proof[key]
+            data = (self.directory / old["path"]).read_bytes().replace(b"-arch arm64", b"-arch x86_64")
+            proof[key] = self.file(old["path"], data)
+            with self.assertRaises(ValueError):
+                self.validate()
+            proof[key] = self.file(old["path"], data.replace(b"-arch x86_64", b"-arch arm64"))
+
     def test_absent_relink_preserves_ordinary_build(self):
         pack.validate_identity_relink({}, self.identity, self.directory, self.binary)
+
+    def test_changed_identity_source_and_include_search_refuse(self):
+        proof = self.build["identityRelink"]
+        proof["compileIncludes"] = ["/untrusted/headers"]
+        with self.assertRaises(ValueError):
+            self.validate()
+        proof["compileIncludes"] = pack.identity_include_paths()
+        reference = proof["identitySource"]
+        proof["identitySource"] = self.file(reference["path"], b"changed identity source")
+        with self.assertRaisesRegex(ValueError, "current owned implementation"):
+            self.validate()
+
+    def test_evidence_symbolic_link_refuses(self):
+        path = self.directory / self.inputs[0]["path"]
+        other = path.with_name("backing.o")
+        path.rename(other)
+        path.symlink_to(other)
+        with self.assertRaises(ValueError):
+            self.validate()
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ CUDA_ARCHITECTURES = pack.CUDA_ARCHITECTURES
 INPUTS = ["TensorSharp.GGML.Native", "TensorSharp.Backends.GGML", "eng/GgmlNativeIdentity.cmake",
           "eng/GgmlNativeIdentity.targets", "eng/build-ggml-natives.sh", "eng/record-ggml-native-build.py",
           "eng/pack-ggml-natives.py", "eng/native-artifact-manifest.py", "eng/guard-ggml-interop",
-          "eng/ggml-required-exports.json", "eng/ggml-revision", "Directory.Build.props", "LICENSE"]
+          "eng/ggml-required-exports.json", "eng/relink-ggml-native-identity.py", "eng/ggml-revision", "Directory.Build.props", "LICENSE"]
 
 
 def command(arguments):

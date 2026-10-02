@@ -58,6 +58,7 @@ import importlib.util
 import io
 import json
 import re
+import shlex
 import stat
 import struct
 import subprocess
@@ -627,6 +628,125 @@ def observed_cache_bytes(path, build):
     return data
 
 
+def identity_compile_arguments(source, output, identity, compiler, includes):
+    values = {"TENSORSHARP_VERSION": "tensorsharp", "SOURCE_COMMIT": "source", "GGML_COMMIT": "ggml",
+              "NATIVE_ABI": "abi", "VARIANT": "variant", "RID": "rid", "CPU_PROFILE": "cpu"}
+    arguments = [compiler, "-O3", "-DNDEBUG", "-std=gnu++17", "-arch", "arm64", "-mmacosx-version-min=14.0", "-fPIC",
+                 "-DGGML_USE_CPU", "-DGGML_USE_METAL", "-DGgmlOps_EXPORTS", "-DTSG_GGML_USE_METAL=1"]
+    arguments += ["-I" + str(path) for path in includes]
+    arguments += ['-DTSG_BUILD_' + key + '="' + identity[value] + '"' for key, value in values.items()]
+    return arguments + ["-c", str(source), "-o", str(output)]
+
+
+def native_source_tree(source):
+    if not isinstance(source, str) or not re.fullmatch(r"[a-f0-9]{40}", source):
+        raise ValueError("relink source must be an exact Git commit")
+    try:
+        result = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", source + ":TensorSharp.GGML.Native"],
+                                capture_output=True, text=True, timeout=30, check=True)
+    except subprocess.SubprocessError as error:
+        raise ValueError("relink source tree cannot be verified from local Git evidence") from error
+    tree = result.stdout.strip()
+    if not re.fullmatch(r"[a-f0-9]{40}", tree):
+        raise ValueError("relink native source tree is invalid")
+    return tree
+
+
+def relink_file(directory, reference):
+    if (not isinstance(reference, dict) or set(reference) != {"path", "size", "sha256"}
+            or not isinstance(reference["path"], str) or not portable_path(reference["path"])
+            or not reference["path"].startswith("identity-relink/")
+            or type(reference["size"]) is not int or reference["size"] <= 0
+            or not isinstance(reference["sha256"], str) or not re.fullmatch(r"[a-f0-9]{64}", reference["sha256"])):
+        raise ValueError("invalid relink evidence file")
+    verify_component_file(directory, reference)
+    return directory / reference["path"]
+
+
+def identity_include_paths():
+    return [str(REPO_ROOT / "TensorSharp.GGML.Native"), str(REPO_ROOT / "ExternalProjects/ggml/include"),
+            str(REPO_ROOT / "ExternalProjects/ggml/src")]
+
+
+def relink_compile_flags(text):
+    result = {}
+    for name in ("CXX_DEFINES", "CXX_FLAGS"):
+        matches = re.findall(r"^" + name + r" = (.*)$", text, re.MULTILINE)
+        if len(matches) != 1:
+            raise ValueError("identity relink compiler flags are missing or duplicated")
+        result[name] = shlex.split(matches[0])
+    return result
+
+
+def validate_identity_relink(build, identity, directory, binary):
+    if "identityRelink" not in build:
+        return
+    proof = build["identityRelink"]
+    keys = {"schema", "originalIdentity", "originalBuildRecord", "originalCache", "originalBridge", "originalLink",
+            "inputs", "replacementObject", "identitySource", "nativeSourceTree", "compileIncludes", "compileArgv", "linkArgv",
+            "originalFlags", "freshFlags", "freshLink"}
+    if not isinstance(proof, dict) or set(proof) != keys or proof["schema"] != "tensorsharp-identity-relink/1":
+        raise ValueError("malformed identity-only relink evidence")
+    old = proof["originalIdentity"]
+    if (not isinstance(old, dict) or set(old) != {"format", "tensorsharp", "source", "ggml", "rid", "variant", "cpu", "abi"}
+            or identity.get("rid") != "osx-arm64" or identity.get("variant") != "metal" or identity.get("cpu") != "apple-m1"
+            or any(identity.get(key) != old.get(key) for key in ("format", "tensorsharp", "ggml", "rid", "variant", "cpu"))):
+        raise ValueError("identity relink changes the original target, backend, CPU floor, build or upstream")
+    if (proof["nativeSourceTree"] != native_source_tree(old["source"])
+            or proof["nativeSourceTree"] != native_source_tree(identity["source"])):
+        raise ValueError("identity relink changes native implementation sources")
+    old_record = json.loads(read_build_file(relink_file(directory, proof["originalBuildRecord"])))
+    for key, value in (("tensorSharpBuild", old["tensorsharp"]), ("sourceCommit", old["source"]), ("ggmlCommit", old["ggml"]),
+                       ("nativeAbi", old["abi"]), ("rid", old["rid"]), ("variant", old["variant"])):
+        if old_record.get(key) != value:
+            raise ValueError("original relink record differs from its binary identity")
+    old_cache = relink_file(directory, proof["originalCache"])
+    observed_cache_bytes(old_cache, old_record)
+    old_bridge = relink_file(directory, proof["originalBridge"])
+    if read_identity(old_bridge) != old:
+        raise ValueError("original relink bridge identity differs from its evidence")
+    validate_recorded_profile(old_record, old, read_cmake_cache(old_cache.read_text()), sha256_bytes(old_bridge.read_bytes()))
+    if old_record.get("macosDeploymentTarget") != "14.0" or old_record.get("compiler") != "/usr/bin/c++":
+        raise ValueError("identity relink requires the verified original Mac14.0 compiler profile")
+    link = shlex.split(read_build_file(relink_file(directory, proof["originalLink"])))
+    if link != shlex.split(read_build_file(relink_file(directory, proof["freshLink"]))):
+        raise ValueError("fresh configuration changes the preserved link topology or flags")
+    original_flags = relink_compile_flags(read_build_file(relink_file(directory, proof["originalFlags"])))
+    fresh_flags = relink_compile_flags(read_build_file(relink_file(directory, proof["freshFlags"])))
+    expected_flags = {"CXX_FLAGS": ["-O3", "-DNDEBUG", "-std=gnu++17", "-arch", "arm64", "-mmacosx-version-min=14.0", "-fPIC"],
+                      "CXX_DEFINES": ["-DGGML_USE_CPU", "-DGGML_USE_METAL", "-DGgmlOps_EXPORTS", "-DTSG_GGML_USE_METAL=1"]}
+    if original_flags != expected_flags or fresh_flags != expected_flags:
+        raise ValueError("identity relink changes the verified compiler flags")
+    inputs = proof["inputs"]
+    if not isinstance(inputs, list):
+        raise ValueError("identity relink inputs must be an ordered list")
+    paths = [item.get("path") if isinstance(item, dict) else None for item in inputs]
+    replacement_token = "CMakeFiles/GgmlOps.dir/ggml_ops_build_identity.cpp.o"
+    tokens = [token for token in link if token.endswith((".o", ".a")) and token != replacement_token]
+    expected_paths = ["identity-relink/inputs/" + token for token in tokens]
+    archives = {token for token in tokens if token.endswith(".a")}
+    if (paths != expected_paths or len(paths) != len(set(paths)) or link.count(replacement_token) != 1 or len(tokens) != 59
+            or archives != {"libggml.a", "libggml-cpu.a", "libggml-metal.a", "libggml-base.a"}):
+        raise ValueError("identity relink changes, duplicates or omits original link inputs")
+    resolved = {token: str(relink_file(directory, reference)) for token, reference in zip(tokens, inputs)}
+    replacement = relink_file(directory, proof["replacementObject"])
+    source = relink_file(directory, proof["identitySource"])
+    if source.read_bytes() != (REPO_ROOT / "TensorSharp.GGML.Native/ggml_ops_build_identity.cpp").read_bytes():
+        raise ValueError("identity relink source differs from the current owned implementation")
+    includes = proof["compileIncludes"]
+    if includes != identity_include_paths():
+        raise ValueError("identity relink include paths are invalid")
+    expected_compile = identity_compile_arguments(source, replacement, identity, old_record["compiler"], includes)
+    if proof["compileArgv"] != expected_compile:
+        raise ValueError("identity relink compiler arguments differ from the verified identity/profile")
+    if link.count("-o") != 1 or link[0] != old_record["compiler"]:
+        raise ValueError("original relink command is malformed")
+    expected_link = [resolved.get(token, str(replacement) if token == replacement_token else token) for token in link]
+    expected_link[expected_link.index("-o") + 1] = str(binary)
+    if proof["linkArgv"] != expected_link:
+        raise ValueError("identity relink linker arguments change the preserved link command")
+
+
 def collect_artifacts(stage, version, ggml_commit):
     artifacts = []
     errors = []
@@ -675,6 +795,7 @@ def collect_artifacts(stage, version, ggml_commit):
                             errors.append(f"{rid}/{variant}: binary identity {key}={identity.get(key)}, expected {expected}")
                     bridge_digest = next(item["sha256"] for item in files if item["path"] == entry)
                     validate_recorded_profile(build, identity, settings, bridge_digest)
+                    validate_identity_relink(build, identity, build_dir, variant_dir / entry)
                 artifacts.append({"rid": rid, "variant": variant, "directory": variant_dir, "build": build,
                                   "files": files, "inventory": described, "identity": identity, "components": components})
             except (OSError, ValueError, KeyError, IndexError, UnicodeError, struct.error) as error:

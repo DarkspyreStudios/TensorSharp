@@ -136,6 +136,22 @@ The snapshot is evidence only. Build scripts do not use it as a CMake input. The
 recorded observations; they do not authenticate the recorder, reproduce the build or qualify
 target/compiler/GPU execution. Native source commit evidence remains a separate release check.
 
+### Mac Identity Relink
+
+`eng/relink-ggml-native-identity.py` compiles only the Mac bridge identity object and relinks the
+bridge from verified retained inputs. It accepts the osx-arm64 Metal/CPU baseline with deployment
+target 14.0. It compares the original and current native source trees. All 59 other object/archive
+inputs retain their exact bytes. A fresh configure-only CMake observation supplies the current
+build profile and cache snapshot. The historical cache remains separate evidence and is never a
+build input. Original and fresh compiler flags and link topology must match.
+
+The additive `identityRelink` record contains both original observations and actual new compiler
+and linker arguments. The packer verifies ordinary evidence files, hashes, source-tree equality,
+the original bridge/profile/cache, exact reused input membership, replacement identity source and
+compiler/linker arguments. The ordinary current-ABI, bridge-hash, profile and raw-cache gates also
+remain required. This operation does not compile upstream ggml or accelerator kernels. It does
+not qualify native lifecycle, target execution or GPU safety.
+
 ### Component evidence
 
 The build record and schema-1 artifact manifest include `components`. Each component records an
