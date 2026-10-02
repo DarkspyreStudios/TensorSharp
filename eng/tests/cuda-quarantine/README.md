@@ -40,7 +40,14 @@ later native entry, and leave an independently registered known device usable. S
 construction modes preserve original acquisition and cleanup failures. Foreign stream
 modes check actual private CUDA/Core/fixture roots outside the execution frame.
 
+Module modes exercise actual managed module acquisition, cached function lookup,
+context drain before unload, cleanup refusal and constructor rollback. Functions and
+module ownership remain retained after unsafe cleanup; later lookup refuses before
+publishing even a cached function. Foreign module modes prove managed owner/assembly
+collection or retention after actual explicit cleanup. Their PTX bytes and opaque
+function handles are controlled inputs, not compiled GPU kernels.
+
 This proves managed ownership routing only. It does not qualify primary-context driver
 semantics, GPU execution, physical multi-device cleanup or complete backend integration.
 The allocator, storage, graph, model and GGML dependency callers are not covered by these
-context and stream modes.
+context, stream and module modes.

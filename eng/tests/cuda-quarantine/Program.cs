@@ -25,10 +25,17 @@ internal static class Program
             case "stream-destroy-refusal": StreamRefusal(true); break;
             case "stream-construction-rollback": StreamConstructionRollback(false); break;
             case "stream-construction-rollback-refusal": StreamConstructionRollback(true); break;
+            case "module-clean": ModuleClean(); break;
+            case "module-drain-refusal": ModuleRefusal(false); break;
+            case "module-unload-refusal": ModuleRefusal(true); break;
+            case "module-construction-rollback": ModuleConstructionRollback(false); break;
+            case "module-construction-rollback-refusal": ModuleConstructionRollback(true); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
             case "foreign-stream-clean": ForeignStream(false); break;
             case "foreign-stream-sync-refusal": ForeignStream(true); break;
+            case "foreign-module-clean": ForeignModule(false); break;
+            case "foreign-module-drain-refusal": ForeignModule(true); break;
             default: throw new ArgumentException("Unknown controlled fixture mode.");
         }
         Console.WriteLine(JsonSerializer.Serialize(new
@@ -194,6 +201,80 @@ internal static class Program
         if (!refuseCleanup) context.Dispose();
     }
 
+    private static void ModuleClean()
+    {
+        WeakReference[] roots = CreateAndReleaseModule();
+        Collect();
+        Assert(roots.All(r => !r.IsAlive), "Healthy module/context/API roots survive explicit cleanup.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] CreateAndReleaseModule()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(1, api);
+        var module = CudaModule.LoadFromBytes([0], context);
+        IntPtr function = module.GetFunction("controlled-function");
+        Assert(function != IntPtr.Zero && module.GetFunction("controlled-function") == function
+            && api.FunctionCount == 1, "Actual module does not preserve function caching.");
+        module.Dispose();
+        module.Dispose();
+        Assert(api.ModuleUnloadCount == 1, "Module cleanup is not exactly once.");
+        context.Dispose();
+        return [new(module), new(context), new(api)];
+    }
+
+    private static void ModuleRefusal(bool unload)
+    {
+        WeakReference[] roots = FailModuleRelease(unload);
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Unsafe module cleanup loses its actual dependent owner graph.");
+    }
+
+    private static void ModuleConstructionRollback(bool refuseCleanup)
+    {
+        var original = new InvalidOperationException("Controlled module acquisition refusal.");
+        var cleanup = new InvalidOperationException("Controlled module construction cleanup refusal.");
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(1, api);
+        api.ModuleLoadFailure = original;
+        api.ModuleUnloadFailure = refuseCleanup ? cleanup : null;
+        try { CudaModule.LoadFromBytes([0], context); throw new InvalidOperationException("Failed module construction succeeded."); }
+        catch (AggregateException error) when (refuseCleanup)
+        {
+            Assert(error.InnerExceptions.Count == 2 && ReferenceEquals(error.InnerExceptions[0], original)
+                && ReferenceEquals(error.InnerExceptions[1], cleanup), "Module rollback loses either original cause.");
+            Assert(NativeRuntimeQuarantine.TryGetFailure(cleanup, out _), "Unsafe module rollback is not recorded.");
+        }
+        catch (InvalidOperationException error) when (!refuseCleanup && ReferenceEquals(error, original)) { }
+        Assert(api.ModuleUnloadCount == 1, "Module rollback loses its returned native handle.");
+        if (!refuseCleanup) context.Dispose();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailModuleRelease(bool unload)
+    {
+        var original = new InvalidOperationException("Controlled module cleanup refusal.");
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(1, api);
+        var module = CudaModule.LoadFromBytes([0], context);
+        module.GetFunction("controlled-function");
+        if (unload) api.ModuleUnloadFailure = original;
+        else api.DrainFailure = original;
+        try { module.Dispose(); throw new InvalidOperationException("Module cleanup refusal was accepted."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(api.ModuleUnloadCount == (unload ? 1 : 0), "Module unload occurs after failed drain.");
+        int calls = api.TotalCalls;
+        try { module.GetFunction("controlled-function"); throw new InvalidOperationException("Failed module publishes a cached function."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { module.Dispose(); throw new InvalidOperationException("Failed module retries cleanup."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { context.Dispose(); throw new InvalidOperationException("Dependent context releases after module failure."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        Assert(api.TotalCalls == calls && api.ReleaseCount == 0, "Module quarantine permits dependent native entry.");
+        return [new(module), new(context), new(api)];
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference[] FailStreamRelease(bool destroy)
     {
@@ -251,13 +332,22 @@ internal static class Program
             "Foreign actual stream/dependent owners do not match explicit cleanup outcome.");
     }
 
+    private static void ForeignModule(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false, module: true);
+        Collect();
+        Assert(roots.All(r => r.IsAlive == unsafeRelease),
+            "Foreign actual module/dependent owners do not match explicit cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        string operationName = stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
+        string operationName = module ? nameof(RunForeignModule)
+            : stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
         var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
         Assembly cuda = context.Assemblies.Single(a => a.GetName().Name == "TensorSharp.Backends.Cuda");
@@ -283,6 +373,13 @@ internal static class Program
             "Actual CUDA stream does not execute in the foreign collectible generation.");
         return unsafeRelease ? FailStreamRelease(false) : CreateAndReleaseStream(false);
     }
+
+    public static WeakReference[] RunForeignModule(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaModule).Assembly)?.IsCollectible == true,
+            "Actual CUDA module does not execute in the foreign collectible generation.");
+        return unsafeRelease ? FailModuleRelease(false) : CreateAndReleaseModule();
+    }
 }
 
 internal sealed class FixtureLoadContext : AssemblyLoadContext
@@ -305,8 +402,12 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? StreamSyncFailure;
     internal Exception? StreamDestroyFailure;
     internal Exception? StreamCreateFailure;
+    internal Exception? ModuleUnloadFailure;
+    internal Exception? ModuleLoadFailure;
     internal int StreamSyncCount;
     internal int StreamDestroyCount;
+    internal int ModuleUnloadCount;
+    internal int FunctionCount;
     internal int ReleaseCount;
     internal int TotalCalls;
 
@@ -357,6 +458,22 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         TotalCalls++;
         StreamDestroyCount++;
         if (StreamDestroyFailure != null) throw StreamDestroyFailure;
+        return 0;
+    }
+    public override int cuModuleLoadData(out IntPtr module, IntPtr image)
+    {
+        TotalCalls++;
+        module = new IntPtr(3001);
+        if (ModuleLoadFailure != null) throw ModuleLoadFailure;
+        return 0;
+    }
+    public override int cuModuleGetFunction(out IntPtr function, IntPtr module, string name)
+    { TotalCalls++; FunctionCount++; function = new IntPtr(3002); return 0; }
+    public override int cuModuleUnload(IntPtr module)
+    {
+        TotalCalls++;
+        ModuleUnloadCount++;
+        if (ModuleUnloadFailure != null) throw ModuleUnloadFailure;
         return 0;
     }
 }
