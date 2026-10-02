@@ -67,9 +67,11 @@ internal static class NativeQuarantineAuthority
 
     private static object[] GetState()
     {
+        object? value = AppDomain.CurrentDomain.GetData(Slot);
+        if (value != null) return ValidateShape(value);
         lock (AppDomain.CurrentDomain)
         {
-            object? value = AppDomain.CurrentDomain.GetData(Slot);
+            value = AppDomain.CurrentDomain.GetData(Slot);
             if (value == null)
             {
                 value = new object[]
@@ -83,17 +85,23 @@ internal static class NativeQuarantineAuthority
                 };
                 AppDomain.CurrentDomain.SetData(Slot, value);
             }
-            if (value is not object[] s || s.Length != 10 || s[0] is not int p || p != 1
-                || s[1]?.GetType() != typeof(object) || s[2] is not long
-                || s[3] is not Dictionary<string, object[]> scopes || !ReferenceEquals(scopes.Comparer, StringComparer.Ordinal)
-                || s[4] is not Dictionary<Guid, object[]>
-                || s[5] is not Dictionary<Exception, List<Guid>> causes || !ReferenceEquals(causes.Comparer, ReferenceEqualityComparer.Instance)
-                || s[6] is not ReaderWriterLockSlim rw || rw.RecursionPolicy != LockRecursionPolicy.SupportsRecursion
-                || s[7]?.GetType() != typeof(object) || s[8] is not Guid id || id == Guid.Empty
-                || s[9] is not Dictionary<int, List<object[]>>)
-                throw new InvalidOperationException(ProtocolError);
-            return s;
+            return ValidateShape(value);
         }
+    }
+
+    // Existing-slot validation never takes the initialization monitor beneath metadata.
+    private static object[] ValidateShape(object? value)
+    {
+        if (value is not object[] s || s.Length != 10 || s[0] is not int p || p != 1
+            || s[1]?.GetType() != typeof(object) || s[2] is not long revision || revision < 0
+            || s[3] is not Dictionary<string, object[]> scopes || !ReferenceEquals(scopes.Comparer, StringComparer.Ordinal)
+            || s[4] is not Dictionary<Guid, object[]>
+            || s[5] is not Dictionary<Exception, List<Guid>> causes || !ReferenceEquals(causes.Comparer, ReferenceEqualityComparer.Instance)
+            || s[6] is not ReaderWriterLockSlim rw || rw.RecursionPolicy != LockRecursionPolicy.SupportsRecursion
+            || s[7]?.GetType() != typeof(object) || s[8] is not Guid id || id == Guid.Empty
+            || s[9] is not Dictionary<int, List<object[]>>)
+            throw new InvalidOperationException(ProtocolError);
+        return s;
     }
 
     private static Dictionary<string, object[]> Scopes(object[] s) => (Dictionary<string, object[]>)s[3];
@@ -174,7 +182,8 @@ internal static class NativeQuarantineAuthority
 
     private static void ValidateRegistration(NativeOwnerRegistration r)
     {
-        if (!ReferenceEquals(GetState(), r.State)) throw new InvalidOperationException(ProtocolError);
+        if (!ReferenceEquals(ValidateShape(AppDomain.CurrentDomain.GetData(Slot)), r.State))
+            throw new InvalidOperationException(ProtocolError);
         ValidateCells(r.State);
         if (!Owners(r.State).TryGetValue((Guid)r.Cell[0], out object[]? c) || !ReferenceEquals(c, r.Cell))
             throw new InvalidOperationException("Native ownership was already safely released.");
@@ -275,7 +284,7 @@ internal static class NativeQuarantineAuthority
             throw new InvalidOperationException("Native effect leases are active synchronous thread-affine operations.");
         var frames = Frames(lease.Registration.State);
         if (!frames.TryGetValue(lease.ThreadId, out List<object[]>? stack) || stack.Count == 0
-            || !ReferenceEquals(stack[^1], lease.Frame))
+            || !ReferenceEquals(stack[^1], lease.Frame) || (Guid)lease.Frame[0] != (Guid)lease.Registration.Cell[0])
             throw new InvalidOperationException("Native effect leases must complete in nesting order.");
     }
 
@@ -328,17 +337,22 @@ internal static class NativeQuarantineAuthority
             ValidateRegistration(r);
             if (!ReferenceEquals(owner, r.Owner)) throw new InvalidOperationException("Unsafe publication requires the exact registered owner.");
             string[] keys = (string[])lease.Frame[1];
+            if (!((HashSet<string>)r.Cell[3]).SetEquals(keys)
+                || lease.CudaHeld != keys.Any(IsCuda) || lease.MlxHeld != keys.Contains(Mlx)
+                || lease.DeviceGates.Count != keys.Count(key => IsCuda(key) && key != Wildcard))
+                throw new InvalidOperationException("Unsafe publication requires the originating acquired scope gates.");
             object[][] affected = keys.Select(key => Scope(s, key)).ToArray();
-            foreach (var c in affected)
+            object[][] proposed = affected.Select(c => (object[])c.Clone()).ToArray();
+            long revision = (long)s[2];
+            foreach (var c in proposed)
             {
                 if ((Guid)c[3] == Guid.Empty)
                 {
                     c[3] = Guid.NewGuid(); c[4] = (int)stage;
-                    s[2] = checked((long)s[2] + 1);
-                    c[5] = s[2]; c[6] = DateTimeOffset.UtcNow; c[7] = error;
+                    c[5] = checked(++revision); c[6] = DateTimeOffset.UtcNow; c[7] = error;
                 }
             }
-            object[] first = affected.OrderBy(c => (long)c[5]).First();
+            object[] first = proposed.OrderBy(c => (long)c[5]).First();
             bool allCuda = keys.Contains(Wildcard);
             foreach (var c in Owners(s).Values)
             {
@@ -352,6 +366,9 @@ internal static class NativeQuarantineAuthority
                     if ((Guid)c[5] == Guid.Empty) c[5] = first[3];
                 }
             }
+            // Retain actual dependent owners before exposing any terminal scope facts.
+            for (int i = 0; i < affected.Length; i++) Array.Copy(proposed[i], 3, affected[i], 3, 5);
+            s[2] = revision;
             if (!Causes(s).TryGetValue(error, out List<Guid>? ids)) Causes(s).Add(error, ids = new List<Guid>());
             foreach (var c in affected) if (!ids.Contains((Guid)c[3])) ids.Add((Guid)c[3]);
             return new NativeRuntimeFailure(first);

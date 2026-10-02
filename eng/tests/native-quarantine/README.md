@@ -26,7 +26,12 @@ plus cleanup aggregate; it is not an actual TensorSharp model constructor. `race
 observes the contender's reserved BCL frame before publishing through the active lease,
 then proves zero managed effect entry. `queued` checks again on the executing thread.
 `lease-negatives` rejects owner/thread/nesting/disposed/scope/upgrade violations before
-mutation. No numeric lease count is used as proof of freeing a native buffer.
+mutation. `mismatched-lease` rejects a token with another registration's actual active
+frame. `cross-nesting` proves the same nesting rules across distinct real Core ALCs.
+`roles` checks all six fixed resource roles. `lock-order` holds metadata and AppDomain
+on separate threads/ALCs behind barriers and uses a bounded top-level assertion; on
+failure the fresh process exits without pretending to unlock abandoned gates. No
+numeric lease count is used as proof of freeing a native buffer.
 
 Per-mode reports record actual fixture/Core hashes and MVID. Test public-method
 reflection is used solely to execute the compiled foreign fixture; there is no
