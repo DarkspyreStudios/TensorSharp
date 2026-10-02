@@ -32,7 +32,7 @@ namespace TensorSharp.Cuda
         {
             if (Enabled)
             {
-                string name = KernelNames.TryGetValue(function, out string? registered) ? registered : "unknown";
+                string name = KernelNames.TryGetValue(function, out string registered) ? registered : "unknown";
                 KernelLaunches.AddOrUpdate(name, 1, (_, count) => count + 1);
             }
         }
