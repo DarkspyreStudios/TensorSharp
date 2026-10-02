@@ -29,6 +29,8 @@ MODES = (
     "kernels-clean", "kernels-drain-refusal", "kernels-free-refusal", "kernels-resize-refusal",
     "kernels-allocation-rollback", "kernels-allocation-rollback-refusal", "kernels-ordinary-faults",
     "foreign-kernels-clean", "foreign-kernels-drain-refusal",
+    "pool-small-failed-free-retention", "pool-large-failed-free-retention",
+    "pool-small-partial-free-retention", "pool-large-partial-free-retention",
 )
 
 

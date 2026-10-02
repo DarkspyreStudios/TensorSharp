@@ -83,6 +83,11 @@ cleanup or controlled refusal. Private scratch and attribute boundary observatio
 reflection calls inside the fixture; they do not qualify model execution or GPU kernels.
 All passed pointers and streams remain borrowed and are never dereferenced by this fixture.
 
+The pool modes use actual small and large `CudaDeviceMemoryPool` caches with controlled
+backing callbacks. A refused callback leaves its exact block and byte accounting owned;
+successful callbacks remove only completed blocks. Callback replay observes bookkeeping
+only. It does not permit repeated native cleanup after recorded CUDA quarantine.
+
 After a focused build, `python3 eng/tests/run-cuda-quarantine.py --configuration Debug
 --output tmp/cuda-quarantine/debug` runs the finite controlled modes without building.
 Build and run Debug completely before building and running Release because supplier

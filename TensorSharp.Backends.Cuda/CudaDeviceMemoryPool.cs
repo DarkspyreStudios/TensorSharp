@@ -393,13 +393,16 @@ namespace TensorSharp.Cuda
         {
             lock (largeSync)
             {
-                foreach (Stack<IntPtr> stack in largePool.Values)
+                foreach (var entry in largePool)
                 {
+                    Stack<IntPtr> stack = entry.Value;
                     while (stack.Count > 0)
                     {
-                        IntPtr ptr = stack.Pop();
+                        IntPtr ptr = stack.Peek();
                         if (ptr != IntPtr.Zero)
                             backingFree(ptr);
+                        stack.Pop();
+                        largeCachedBytes -= entry.Key;
                     }
                 }
                 largePool.Clear();
@@ -410,13 +413,16 @@ namespace TensorSharp.Cuda
             {
                 lock (shard.Sync)
                 {
-                    foreach (Stack<IntPtr> stack in shard.Pool.Values)
+                    foreach (var entry in shard.Pool)
                     {
+                        Stack<IntPtr> stack = entry.Value;
                         while (stack.Count > 0)
                         {
-                            IntPtr ptr = stack.Pop();
+                            IntPtr ptr = stack.Peek();
                             if (ptr != IntPtr.Zero)
                                 backingFree(ptr);
+                            stack.Pop();
+                            shard.CachedBytes -= entry.Key;
                         }
                     }
 
