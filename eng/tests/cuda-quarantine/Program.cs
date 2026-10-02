@@ -15,6 +15,7 @@ internal static class Program
         if (args.Length != 1) throw new ArgumentException("One controlled fixture mode is required.");
         switch (args[0])
         {
+            case "reference-overflow": ReferenceOwnershipFixtures.Overflow(); break;
             case "context-clean": ContextClean(); break;
             case "context-composed-clean": ContextComposedClean(false); break;
             case "context-composed-external": ContextComposedClean(true); break;
