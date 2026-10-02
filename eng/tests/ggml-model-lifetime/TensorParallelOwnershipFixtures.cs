@@ -252,6 +252,15 @@ public static partial class ForeignModelLifetime
             _sourceStorage = new WeakReference(source.Storage);
         }
 
+        internal Tensor CreateBroadcastSource()
+        {
+            var source = new Tensor(_rankAllocator, DType.Float32, 2, 2);
+            source.SetElementsAsFloat([1f, 2f, 3f, 4f]);
+            return source;
+        }
+
+        internal Tensor[] Broadcast(Tensor source) => BroadcastTensorToAllRanks(source);
+
         [MethodImpl(MethodImplOptions.NoInlining)]
         internal PartialShardEvidence RefuseSecondShard(string mode)
         {
