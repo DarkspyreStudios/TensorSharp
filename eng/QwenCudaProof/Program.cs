@@ -31,10 +31,13 @@ internal static class Program
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static async Task<int> RunAsync(string modelPath, string evidencePath)
     {
-        KvCacheDtypeConfig.Set(KvCacheDtype.F16);
         using var service = new ModelService();
         using var session = new ChatSession();
         service.LoadModel(modelPath, null!, "Cuda");
+        object lifecycle = typeof(ModelService).GetField("_lifecycle", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(service)!;
+        object model = lifecycle.GetType().GetProperty("Model")!.GetValue(lifecycle)!;
+        object cacheType = typeof(ModelBase).GetField("_kvCacheDtype", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(model)!;
+        Console.WriteLine("Actual model KV cache: " + cacheType);
         Type profile = typeof(TensorSharp.Cuda.CudaAllocator).Assembly.GetType("TensorSharp.Cuda.CudaProfileCounters", throwOnError: true)!;
         Dictionary<string, long> before = ReadCounts(profile, "KernelLaunches", directValues: true);
         Dictionary<string, long> fallbacksBefore = ReadCounts(profile, "Fallbacks", directValues: false);
@@ -52,7 +55,7 @@ internal static class Program
         Dictionary<string, long> fallbacks = Difference(ReadCounts(profile, "Fallbacks", false), fallbacksBefore);
         var evidence = new
         {
-            ModelPath = modelPath, Prompt, Backend = "Cuda", MaxContext = 16384, KvCache = "F16",
+            ModelPath = modelPath, Prompt, Backend = "Cuda", MaxContext = 16384, KvCache = cacheType.ToString(),
             ManagedCudaAssembly = typeof(TensorSharp.Cuda.CudaAllocator).Assembly.Location,
             terminal.PromptTokens, terminal.EvalTokens, terminal.FinishReason, Output = output,
             GenerationKernelLaunches = launches, GenerationCpuFallbacks = fallbacks,
