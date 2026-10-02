@@ -69,6 +69,13 @@ The managed GGML project excludes native binaries from its package. `eng/pack-gg
 packages staged bridges into separate per-RID native packages and variant archives. Ordinary source
 builds still build and copy the platform bridge unless `TensorSharpSkipGgmlNative=true` is set.
 
+`TensorSharpSkipCudaNative=true` disables CUDA compiler discovery, architecture resolution,
+PTX compilation, intermediate PTX copying and committed-PTX updates. The committed PTX content
+still copies through the existing output/publish items. The flag also applies to direct target
+invocation and takes precedence over `TensorSharpUpdateCommittedPtx=true`. An unset or false
+flag preserves normal CUDA build behavior. This flag permits managed-source verification; it
+does not establish CUDA execution, artifact identity, native availability or package closure.
+
 The packer validates all staged inputs before writing release output. It accepts the five baseline
 RIDs above, Vulkan and CUDA13 on Linux and Windows x64, and Vulkan on Windows ARM64. It rejects
 unknown pairs, links and special files, nonportable paths, missing licenses, unresolved or uninspected
