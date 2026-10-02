@@ -19,8 +19,16 @@ internal static class Program
             case "context-drain-refusal": ContextDrainRefusal(); break;
             case "context-construction-rollback": ConstructionRollback(false); break;
             case "context-construction-rollback-refusal": ConstructionRollback(true); break;
+            case "stream-clean": StreamClean(false); break;
+            case "stream-ambient-clean": StreamClean(true); break;
+            case "stream-sync-refusal": StreamRefusal(false); break;
+            case "stream-destroy-refusal": StreamRefusal(true); break;
+            case "stream-construction-rollback": StreamConstructionRollback(false); break;
+            case "stream-construction-rollback-refusal": StreamConstructionRollback(true); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
+            case "foreign-stream-clean": ForeignStream(false); break;
+            case "foreign-stream-sync-refusal": ForeignStream(true); break;
             default: throw new ArgumentException("Unknown controlled fixture mode.");
         }
         Console.WriteLine(JsonSerializer.Serialize(new
@@ -132,6 +140,91 @@ internal static class Program
             "Ordinary construction failure is misclassified as unsafe cleanup.");
     }
 
+    private static void StreamClean(bool ambient)
+    {
+        WeakReference[] roots = CreateAndReleaseStream(ambient);
+        Collect();
+        Assert(roots.All(r => !r.IsAlive), "Healthy stream/context/API roots survive explicit cleanup.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] CreateAndReleaseStream(bool ambient)
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(1, api);
+        var stream = ambient ? CudaStream.Create(api) : CudaStream.Create(context);
+        api.Current = IntPtr.Zero;
+        stream.Synchronize();
+        Assert(api.Current == context.Handle && api.StreamSyncCount == 1,
+            "Actual stream synchronization does not rebind its associated context.");
+        stream.Dispose();
+        stream.Dispose();
+        Assert(stream.Handle == IntPtr.Zero && api.StreamSyncCount == 2 && api.StreamDestroyCount == 1,
+            "Stream cleanup does not drain before exactly one destroy.");
+        try { stream.Synchronize(); throw new InvalidOperationException("Disposed stream entered."); }
+        catch (ObjectDisposedException) { }
+        context.Dispose();
+        return [new(stream), new(context), new(api)];
+    }
+
+    private static void StreamRefusal(bool destroy)
+    {
+        WeakReference[] roots = FailStreamRelease(destroy);
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Unsafe stream cleanup loses its actual dependent owner graph.");
+    }
+
+    private static void StreamConstructionRollback(bool refuseCleanup)
+    {
+        var original = new InvalidOperationException("Controlled stream acquisition refusal.");
+        var cleanup = new InvalidOperationException("Controlled stream construction cleanup refusal.");
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(1, api);
+        api.StreamCreateFailure = original;
+        api.StreamDestroyFailure = refuseCleanup ? cleanup : null;
+        try { CudaStream.Create(context); throw new InvalidOperationException("Failed stream construction succeeded."); }
+        catch (AggregateException error) when (refuseCleanup)
+        {
+            Assert(error.InnerExceptions.Count == 2 && ReferenceEquals(error.InnerExceptions[0], original)
+                && ReferenceEquals(error.InnerExceptions[1], cleanup), "Stream rollback loses either original cause.");
+            Assert(NativeRuntimeQuarantine.TryGetFailure(cleanup, out _), "Unsafe stream rollback is not recorded.");
+        }
+        catch (InvalidOperationException error) when (!refuseCleanup && ReferenceEquals(error, original)) { }
+        Assert(api.StreamDestroyCount == 1, "Stream rollback loses its returned native handle.");
+        if (!refuseCleanup) context.Dispose();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailStreamRelease(bool destroy)
+    {
+        var original = new InvalidOperationException("Controlled stream cleanup refusal.");
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(1, api);
+        var independent = CudaContext.Create(2, api);
+        var stream = CudaStream.Create(context);
+        IntPtr streamHandle = stream.Handle;
+        if (destroy) api.StreamDestroyFailure = original;
+        else api.StreamSyncFailure = original;
+        try { stream.Dispose(); throw new InvalidOperationException("Stream cleanup refusal was accepted."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(stream.Handle == streamHandle && api.StreamDestroyCount == (destroy ? 1 : 0),
+            "Unsafe stream cleanup clears the handle or destroys after failed synchronization.");
+        int calls = api.TotalCalls;
+        try { stream.Synchronize(); throw new InvalidOperationException("Failed stream entered."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { stream.Dispose(); throw new InvalidOperationException("Failed stream retried cleanup."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { context.Dispose(); throw new InvalidOperationException("Dependent context released after stream refusal."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        Assert(api.TotalCalls == calls && api.ReleaseCount == 0,
+            "Unsafe dependent cleanup reaches native calls.");
+        // This independently registered known device has no dependency on the failed stream.
+        independent.MakeCurrent();
+        independent.Dispose();
+        Assert(api.ReleaseCount == 1, "Known independent context is incorrectly quarantined.");
+        return [new(stream), new(context), new(api)];
+    }
+
     private static void Collect()
     {
         for (int i = 0; i < 4; i++)
@@ -144,19 +237,28 @@ internal static class Program
 
     private static void ForeignContext(bool unsafeRelease)
     {
-        WeakReference[] roots = ExecuteForeignContext(unsafeRelease);
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false);
         Collect();
         Assert(roots.All(r => r.IsAlive == unsafeRelease),
             "Foreign actual context/Core/CUDA/fixture roots do not match explicit cleanup outcome.");
     }
 
+    private static void ForeignStream(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: true);
+        Collect();
+        Assert(roots.All(r => r.IsAlive == unsafeRelease),
+            "Foreign actual stream/dependent owners do not match explicit cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        var operation = entry.GetMethod(nameof(RunForeignContext), BindingFlags.Static | BindingFlags.Public)!;
+        string operationName = stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
+        var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
         Assembly cuda = context.Assemblies.Single(a => a.GetName().Name == "TensorSharp.Backends.Cuda");
         Assembly core = context.Assemblies.Single(a => a.GetName().Name == "TensorSharp.Core");
@@ -173,6 +275,13 @@ internal static class Program
         Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaContext).Assembly)?.IsCollectible == true,
             "Actual CUDA context does not execute in the foreign collectible generation.");
         return unsafeRelease ? FailContextRelease() : CreateAndReleaseContext();
+    }
+
+    public static WeakReference[] RunForeignStream(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaStream).Assembly)?.IsCollectible == true,
+            "Actual CUDA stream does not execute in the foreign collectible generation.");
+        return unsafeRelease ? FailStreamRelease(false) : CreateAndReleaseStream(false);
     }
 }
 
@@ -193,11 +302,19 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? ReleaseFailure;
     internal Exception? BindFailure;
     internal Exception? DrainFailure;
+    internal Exception? StreamSyncFailure;
+    internal Exception? StreamDestroyFailure;
+    internal Exception? StreamCreateFailure;
+    internal int StreamSyncCount;
+    internal int StreamDestroyCount;
     internal int ReleaseCount;
     internal int TotalCalls;
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
+    public override int cuDeviceGetCount(out int count) { TotalCalls++; count = 8; return 0; }
+    public override int cuCtxGetDevice(out int device)
+    { TotalCalls++; device = checked((int)Current.ToInt64() - 1000); return 0; }
     public override int cuDevicePrimaryCtxRetain(out IntPtr ctx, int device)
     { TotalCalls++; ctx = new IntPtr(1000 + device); return 0; }
     public override int cuCtxSetCurrent(IntPtr ctx)
@@ -219,6 +336,27 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         TotalCalls++;
         ReleaseCount++;
         if (ReleaseFailure != null) throw ReleaseFailure;
+        return 0;
+    }
+    public override int cuStreamCreate(out IntPtr stream, uint flags)
+    {
+        TotalCalls++;
+        stream = new IntPtr(2001);
+        if (StreamCreateFailure != null) throw StreamCreateFailure;
+        return 0;
+    }
+    public override int cuStreamSynchronize(IntPtr stream)
+    {
+        TotalCalls++;
+        StreamSyncCount++;
+        if (StreamSyncFailure != null) throw StreamSyncFailure;
+        return 0;
+    }
+    public override int cuStreamDestroy(IntPtr stream)
+    {
+        TotalCalls++;
+        StreamDestroyCount++;
+        if (StreamDestroyFailure != null) throw StreamDestroyFailure;
         return 0;
     }
 }

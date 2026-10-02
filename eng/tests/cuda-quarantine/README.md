@@ -30,7 +30,17 @@ context in a private collectible fixture/CUDA/Core generation. The outer frame v
 the real CUDA MVID and uses weak references to the actual owners, API, assemblies and
 ALC. Clean explicit release permits collection. Unsafe release retains those roots.
 
+The stream modes use actual `CudaStream` with either a known owned context or verified
+ambient device discovery. Each stream owner reserves its known scope before acquisition.
+The ambient association borrows the original context handle; its caller must keep that
+external context alive. No primary reference is retained or implicitly transferred.
+`stream-clean` and `stream-ambient-clean` prove explicit drain/destroy and rebinding.
+The sync/destroy refusal modes retain the handle and actual dependent context, prevent
+later native entry, and leave an independently registered known device usable. Stream
+construction modes preserve original acquisition and cleanup failures. Foreign stream
+modes check actual private CUDA/Core/fixture roots outside the execution frame.
+
 This proves managed ownership routing only. It does not qualify primary-context driver
 semantics, GPU execution, physical multi-device cleanup or complete backend integration.
 The allocator, storage, graph, model and GGML dependency callers are not covered by these
-context modes.
+context and stream modes.
