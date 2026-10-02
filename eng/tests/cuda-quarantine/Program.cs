@@ -36,6 +36,11 @@ internal static class Program
             case "module-unload-refusal": ModuleRefusal(true); break;
             case "module-construction-rollback": ModuleConstructionRollback(false); break;
             case "module-construction-rollback-refusal": ModuleConstructionRollback(true); break;
+            case "blas-clean": BlasClean(); break;
+            case "blas-drain-refusal": BlasRefusal(false); break;
+            case "blas-destroy-refusal": BlasRefusal(true); break;
+            case "blas-construction-rollback": BlasConstructionRollback(false); break;
+            case "blas-construction-rollback-refusal": BlasConstructionRollback(true); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
             case "foreign-composed-clean": ForeignComposed(false); break;
@@ -44,6 +49,8 @@ internal static class Program
             case "foreign-stream-sync-refusal": ForeignStream(true); break;
             case "foreign-module-clean": ForeignModule(false); break;
             case "foreign-module-drain-refusal": ForeignModule(true); break;
+            case "foreign-blas-clean": ForeignBlas(false); break;
+            case "foreign-blas-drain-refusal": ForeignBlas(true); break;
             default: throw new ArgumentException("Unknown controlled fixture mode.");
         }
         Console.WriteLine(JsonSerializer.Serialize(new
@@ -301,6 +308,91 @@ internal static class Program
         Assert(roots.All(r => !r.IsAlive), "Healthy stream/context/API roots survive explicit cleanup.");
     }
 
+    private static void BlasClean()
+    {
+        WeakReference[] roots = CreateAndReleaseBlas();
+        Collect();
+        Assert(roots.All(r => !r.IsAlive), "Healthy actual known cuBLAS/context/API graph remains retained.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] CreateAndReleaseBlas()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var blas = CudaCublasHandle.Create(context);
+        api.Current = IntPtr.Zero;
+        blas.SetStream(new IntPtr(2001));
+        Assert(api.Current == context.Handle && api.BlasSetStreamCount == 1,
+            "Known cuBLAS handle does not rebind its actual context.");
+        blas.Dispose();
+        blas.Dispose();
+        Assert(blas.Handle == IntPtr.Zero && api.ContextSyncCount == 1 && api.BlasDestroyCount == 1,
+            "Known cuBLAS cleanup does not drain before one checked destroy.");
+        try { blas.SetStream(IntPtr.Zero); throw new Exception("Disposed cuBLAS handle entered."); }
+        catch (ObjectDisposedException) { }
+        context.Dispose();
+        return [new(blas), new(context), new(api)];
+    }
+
+    private static void BlasRefusal(bool destroy)
+    {
+        WeakReference[] roots = FailBlasRelease(destroy);
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Unsafe known cuBLAS cleanup loses its actual owner graph.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailBlasRelease(bool destroy)
+    {
+        var original = new InvalidOperationException("Controlled known cuBLAS cleanup refusal.");
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var blas = CudaCublasHandle.Create(context);
+        IntPtr handle = blas.Handle;
+        if (destroy) api.BlasDestroyFailure = original;
+        else api.DrainFailure = original;
+        try { blas.Dispose(); throw new Exception("Known cuBLAS cleanup refusal succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(blas.Handle == handle && api.BlasDestroyCount == (destroy ? 1 : 0) && api.ReleaseCount == 0,
+            "cuBLAS refusal clears the handle or releases dependent context ownership.");
+        Assert(NativeRuntimeQuarantine.TryGetFailure(original, out var failure) && failure?.DeviceOrdinal == 0,
+            "Known cuBLAS refusal loses its exact recorded cause.");
+        int effects = api.TotalCalls;
+        try { blas.SetStream(IntPtr.Zero); throw new Exception("Quarantined cuBLAS handle entered."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { blas.Dispose(); throw new Exception("Quarantined cuBLAS teardown repeated."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        Assert(api.TotalCalls == effects, "Quarantined cuBLAS owner enters native effects.");
+        return [new(blas), new(context), new(api)];
+    }
+
+    private static void BlasConstructionRollback(bool refuse)
+    {
+        var original = new InvalidOperationException("Controlled cuBLAS math-mode failure.");
+        var cleanup = new InvalidOperationException("Controlled constructor cuBLAS destroy refusal.");
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        api.BlasMathFailure = original;
+        if (refuse) api.BlasDestroyFailure = cleanup;
+        try { CudaCublasHandle.Create(context); throw new Exception("Failed cuBLAS construction succeeded."); }
+        catch (AggregateException error) when (refuse)
+        {
+            Assert(error.InnerExceptions.Count == 2 && ReferenceEquals(error.InnerExceptions[0], original)
+                && ReferenceEquals(error.InnerExceptions[1], cleanup), "cuBLAS rollback loses original or cleanup cause.");
+            Assert(NativeRuntimeQuarantine.TryGetFailure(cleanup, out _), "Constructor cuBLAS refusal is not recorded.");
+        }
+        catch (InvalidOperationException error) when (!refuse && ReferenceEquals(error, original)) { }
+        Assert(api.BlasDestroyCount == 1 && api.ContextSyncCount == 0 && api.ReleaseCount == 0,
+            "Constructor rollback destroys no handle, drains nonexistent work or disposes borrowed context.");
+        if (!refuse)
+        {
+            Assert(NativeRuntimeQuarantine.Observe().Failures.Count == 0,
+                "Ordinary cuBLAS construction error poisons its context.");
+            context.Dispose();
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference[] CreateAndReleaseStream(bool ambient)
     {
@@ -495,13 +587,21 @@ internal static class Program
             "Foreign composed context/parent generation roots do not match cleanup outcome.");
     }
 
+    private static void ForeignBlas(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false, blas: true);
+        Collect();
+        Assert(roots.All(r => r.IsAlive == unsafeRelease),
+            "Foreign actual known cuBLAS roots do not match cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        string operationName = composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
+        string operationName = blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
             : stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
         var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
@@ -542,6 +642,13 @@ internal static class Program
             "Actual context composition does not execute in the foreign generation.");
         return unsafeRelease ? FailContextPair() : ReleaseContextPair(true, false);
     }
+
+    public static WeakReference[] RunForeignBlas(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaCublasHandle).Assembly)?.IsCollectible == true,
+            "Actual known cuBLAS owner does not execute in the foreign generation.");
+        return unsafeRelease ? FailBlasRelease(false) : CreateAndReleaseBlas();
+    }
 }
 
 internal sealed class FixtureLoadContext : AssemblyLoadContext
@@ -576,6 +683,11 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? RestoreFailure;
     internal readonly List<int> BindThreads = new();
     internal readonly List<IntPtr> BindContexts = new();
+    internal int ContextSyncCount;
+    internal int BlasDestroyCount;
+    internal int BlasSetStreamCount;
+    internal Exception? BlasDestroyFailure;
+    internal Exception? BlasMathFailure;
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
@@ -598,6 +710,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     public override int cuCtxSynchronize()
     {
         TotalCalls++;
+        ContextSyncCount++;
         if (DrainFailure != null) throw DrainFailure;
         return 0;
     }
@@ -643,6 +756,24 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         TotalCalls++;
         ModuleUnloadCount++;
         if (ModuleUnloadFailure != null) throw ModuleUnloadFailure;
+        return 0;
+    }
+
+    public override int cublasCreate(out IntPtr handle)
+    { TotalCalls++; handle = new IntPtr(4001); return 0; }
+    public override int cublasSetMathMode(IntPtr handle, int mode)
+    {
+        TotalCalls++;
+        if (BlasMathFailure != null) throw BlasMathFailure;
+        return 0;
+    }
+    public override int cublasSetStream(IntPtr handle, IntPtr stream)
+    { TotalCalls++; BlasSetStreamCount++; return 0; }
+    public override int cublasDestroy(IntPtr handle)
+    {
+        TotalCalls++;
+        BlasDestroyCount++;
+        if (BlasDestroyFailure != null) throw BlasDestroyFailure;
         return 0;
     }
 }

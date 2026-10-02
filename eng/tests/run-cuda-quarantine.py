@@ -22,6 +22,9 @@ MODES = (
     "context-composed-restore-refusal", "context-composed-thread-refusal",
     "foreign-composed-clean", "foreign-composed-drain-refusal",
     "context-independent-postfault-release",
+    "blas-clean", "blas-drain-refusal", "blas-destroy-refusal",
+    "blas-construction-rollback", "blas-construction-rollback-refusal",
+    "foreign-blas-clean", "foreign-blas-drain-refusal",
 )
 
 

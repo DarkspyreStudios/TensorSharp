@@ -63,6 +63,14 @@ another recorded device failure. A subsequent arbitrary borrowed-context restora
 refuses under the wildcard policy without changing the completed release or poisoning
 the independent device. Its actual released context owner collects.
 
+The `blas-*` modes use the internal known-context `CudaCublasHandle` factory, not the
+public standalone factory. They prove owner reservation, context rebinding, checked drain
+before destroy, original-plus-cleanup constructor errors, actual retained owner graphs,
+and foreign generation collection or retention. Supplied stream pointers are borrowed;
+their actual external owners must remain alive through use. These tests do not execute
+cuBLAS or qualify the public standalone context-acquisition behavior. That public factory
+retains its existing raw path. Allocator construction still calls that path.
+
 After a focused build, `python3 eng/tests/run-cuda-quarantine.py --configuration Debug
 --output tmp/cuda-quarantine/debug` runs the finite controlled modes without building.
 Build and run Debug completely before building and running Release because supplier
