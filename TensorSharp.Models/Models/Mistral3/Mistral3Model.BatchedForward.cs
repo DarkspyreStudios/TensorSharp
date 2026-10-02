@@ -39,6 +39,7 @@ namespace TensorSharp.Models
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
             if (IsTensorParallel)
                 return ForwardBatchTP(ctx);

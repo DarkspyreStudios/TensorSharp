@@ -18,7 +18,9 @@ if (args.Length != 3 || args[0] is not ("normal" or "refusal" or "phase-order" o
     "local-quantized-transfer" or "quantized-fusion-ownership" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "bonsai-registration-refusal" or
     "observe-tp-column-owner" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "observe-tp-concatenated" or "observe-tp-separate" or
     "observe-tp-concatenated-bias" or "observe-tp-separate-bias" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or
-    "observe-tp-sync-retirement" or "tp-sync-preflight-refusal") || args[1] is not ("cpu" or "metal"))
+    "observe-tp-sync-retirement" or "tp-sync-preflight-refusal" or
+    "vision-normal" or "vision-mismatch" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or
+    "execution-cleanup-failure" or "execution-worker-cleanup-failure" or "execution-dispatch-cleanup-failure" or "vision-execution-cleanup-failure") || args[1] is not ("cpu" or "metal"))
     throw new ArgumentException("Expected a model-lifetime mode, cpu|metal and an absolute bridge directory.");
 
 Retirement.Run(args[0], args[1], Path.GetFullPath(args[2]));
@@ -38,7 +40,7 @@ internal static class Retirement
             Thread.Sleep(10);
         }
         string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
-        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy";
+        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal";
         if (!unsafeCleanup && retained.Length != 0)
             throw new InvalidOperationException("Disposed real model generation remains rooted: " + string.Join(",", retained));
         if (unsafeCleanup && retained.Length != evidence.Roots.Length)
@@ -51,12 +53,22 @@ internal static class Retirement
             retained,
             actualModel = mode.StartsWith("observe-tp-", StringComparison.Ordinal) || mode is "tp-view-unregister-refusal" or "tp-sync-preflight-refusal"
                 ? "generated ownership-only sources, logical ranks on one real GGML context, no forward" :
+                mode is "vision-normal" or "vision-mismatch" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or "vision-execution-cleanup-failure"
+                ? "generated one-layer F32 DeepSeek41 text and real vision companion, lifetime only" :
                 mode is "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or
                 "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" or "quantized-fusion-ownership" or "quantized-fusion-source-refusal" ? "generated Q4_0 ownership-only GGUF, no forward" :
                 mode is "bonsai-unregister-refusal" or "bonsai-registration-refusal" or "local-quantized-transfer" or "local-bonsai-transfer-refusal" ?
                     "generated F32 metadata context and Q2_0 owner, no forward" : "generated tiny F32 HunyuanDense",
             pretrainedModelQualification = "not-run",
-            wholeNativeExecutor = "not-run",
+            wholeNativeExecutor = mode switch
+            {
+                "vision-normal" => "real-text-load/vision-attach/dispose-lifetime-only;forward-not-run",
+                "vision-mismatch" => "real-text-load/reset/dispose-lifetime-only;forward-not-run",
+                "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal"
+                    => "real-text-load/managed-cleanup-refusal/retention-lifetime-only;forward-not-run",
+                "vision-execution-cleanup-failure" => "real-text-load/vision-attach/managed-storage-cleanup-refusal/admission-fences;forward-not-run",
+                _ => "not-run"
+            },
             multiDeviceWorkers = "not-run"
         }));
     }
@@ -131,6 +143,23 @@ public static partial class ForeignModelLifetime
         string modelPath = Path.Combine(scratch, "tiny-hunyuan-dense.gguf");
         try
         {
+            if (mode is "execution-cleanup-failure" or "execution-worker-cleanup-failure" or "execution-dispatch-cleanup-failure" or "vision-execution-cleanup-failure")
+            {
+                string executionWork = ExerciseExecutionFences(mode, scratch, backend);
+                GgmlNativeShutdownResult executionShutdown = GgmlNativeLoader.Shutdown();
+                Require(!executionShutdown.Released && ModelLeaseCount() == 1 && GgmlNativeLoader.State == GgmlRuntimeState.Ready,
+                    "Controlled model ownership refusal retains its actual owners and refuses shutdown without poisoning the runtime.");
+                return $"bridgeSha256={hash};nativeAbi={GgmlNativeLoader.NativeAbi};work={executionWork};shutdownReleased={executionShutdown.Released};diagnostic={executionShutdown.Diagnostic}";
+            }
+            if (mode is "vision-normal" or "vision-mismatch" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal")
+            {
+                string visionWork = ExerciseVisionLifetime(mode, scratch, backend);
+                GgmlNativeShutdownResult visionShutdown = GgmlNativeLoader.Shutdown();
+                bool refused = mode is "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal";
+                Require(refused ? !visionShutdown.Released && ModelLeaseCount() == 1 : visionShutdown.Released && ModelLeaseCount() == 0,
+                    "Actual vision lifetime shutdown matches the explicit-clean or controlled-terminal observation.");
+                return $"bridgeSha256={hash};nativeAbi={GgmlNativeLoader.NativeAbi};work={visionWork};shutdownReleased={visionShutdown.Released};diagnostic={visionShutdown.Diagnostic}";
+            }
             new DenseDecoderSyntheticModelBuilder
             {
                 Architecture = "hunyuan-dense",

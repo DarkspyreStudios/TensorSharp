@@ -130,13 +130,18 @@ namespace TensorSharp.Models
         /// usual) for a failed conversation, an empty one, a repeated key, or when
         /// the retention budget cannot take it even after evicting older
         /// conversations.</summary>
-        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+        public bool RetainSequenceCache(string requestId)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return RetainSequenceCacheAs(requestId, requestId);
+        }
 
         /// <summary>The key-parameterised form of <see cref="RetainSequenceCache"/>: the finished
         /// holder of <paramref name="requestId"/> is retained under <paramref name="key"/>
         /// (the prefix cache's tree-minted payload key, or the request id itself).</summary>
         public bool RetainSequenceCacheAs(string requestId, string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsRetainedFusedCache || _fusedHolders == null || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(key))
                 return false;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
@@ -179,6 +184,7 @@ namespace TensorSharp.Models
         /// never moved.</summary>
         public bool TryRebindRetainedCache(string retainedRequestId, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || string.IsNullOrEmpty(retainedRequestId) || string.IsNullOrEmpty(newRequestId))
                 return false;
             if (!_retainedFusedHolders.TryGetValue(retainedRequestId, out var holder))
@@ -203,6 +209,7 @@ namespace TensorSharp.Models
         /// graph that binds them, its tensors, and the draft head's private state.</summary>
         public void DiscardRetainedCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_retainedFusedHolders.TryGetValue(requestId, out var holder))
@@ -221,6 +228,7 @@ namespace TensorSharp.Models
         /// native entries from it.</summary>
         public bool TryCheckpointActiveCache(string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || string.IsNullOrEmpty(key) || _isRecurrent == null)
                 return false;
             if (_specStateFailed || _cacheSeqLen <= 0)
@@ -264,6 +272,7 @@ namespace TensorSharp.Models
         /// cloned as well: its device entries are downloaded like a checkpoint's were.</summary>
         public bool TryCloneRetainedCache(string retainedKey, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || _retainedFusedHolders == null
                 || string.IsNullOrEmpty(retainedKey) || string.IsNullOrEmpty(newRequestId))
                 return false;
@@ -430,6 +439,7 @@ namespace TensorSharp.Models
         /// and those turns re-prefill. Checkpoints stay: each serves every new chat.</summary>
         public override void TrimIdleMemory()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders != null)
             {
                 var victims = new List<string>();

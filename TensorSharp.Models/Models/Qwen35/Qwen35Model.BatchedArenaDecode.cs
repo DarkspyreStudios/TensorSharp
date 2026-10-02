@@ -66,11 +66,17 @@ namespace TensorSharp.Models
 
         public unsafe bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
-            => ForwardArenaBatchedDecodeCore(requestIds, tokens, positions, outLogits, null);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return ForwardArenaBatchedDecodeCore(requestIds, tokens, positions, outLogits, null);
+        }
 
         public unsafe bool TryForwardBatchedFusedDecodeSampled(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, int[] outNextTokens)
-            => ForwardArenaBatchedDecodeCore(requestIds, tokens, positions, null, outNextTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return ForwardArenaBatchedDecodeCore(requestIds, tokens, positions, null, outNextTokens);
+        }
 
         // Convert a holder's host conv RING (rotating write index) into the
         // ggml [time, channel] layout the fused kernels use, in the holder's

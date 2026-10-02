@@ -92,6 +92,7 @@ namespace TensorSharp.Models
             Action<int, int, int, int[]> blockStepCallback = null,
             CancellationToken ct = default)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             var prefix = new List<int>(promptTokens);
             var response = new List<int>();
 
@@ -124,6 +125,7 @@ namespace TensorSharp.Models
         public int[] DenoiseBlock(int[] promptTokens, DiffusionEbParams p,
             Action<int, int, int[]> stepCallback = null, CancellationToken ct = default)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             int P = promptTokens.Length;
             int C = _canvasLength;
             int S = Math.Max(1, p.MaxDenoisingSteps);
@@ -383,6 +385,7 @@ namespace TensorSharp.Models
         /// for the remaining steps so it doesn't waste GPU work on the slower sequences.</summary>
         public void RunBlockBatched(IReadOnlyList<DiffusionSeqRun> active, CancellationToken stopToken = default)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             int A = active.Count;
             if (A == 0) return;
             int C = _canvasLength;

@@ -50,8 +50,11 @@ namespace TensorSharp.Models
         public bool BatchedForwardAvailable => false;
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
-            => throw new NotSupportedException(
+        {
+            ThrowIfOwnershipCleanupFailed();
+            throw new NotSupportedException(
                 "GLM serves concurrency through per-sequence slots, not ForwardBatch.");
+        }
 
         /// <summary>Concurrent requests are served by the native executor's
         /// sequence slots. Only the native executor has slots; the managed
@@ -74,6 +77,7 @@ namespace TensorSharp.Models
         /// position 0).</summary>
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             lock (_nativeSync)
@@ -106,6 +110,7 @@ namespace TensorSharp.Models
         /// allocate a fresh primary for later N==1 use.</summary>
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             lock (_nativeSync)
             {
@@ -124,6 +129,7 @@ namespace TensorSharp.Models
         /// before an N==1 step that follows a concurrent episode.</summary>
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
             {
                 if (_native == IntPtr.Zero || _activeSlotKey == null) return;
@@ -150,6 +156,7 @@ namespace TensorSharp.Models
         public bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
             {
                 if (_native == IntPtr.Zero || _slotByRequest == null) return false;
@@ -227,6 +234,7 @@ namespace TensorSharp.Models
         /// graphs captured against them).</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
             {
                 if (_native == IntPtr.Zero

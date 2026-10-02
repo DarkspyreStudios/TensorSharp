@@ -180,6 +180,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void LoadMtpDraftWeights(string draftGgufPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(draftGgufPath) || !System.IO.File.Exists(draftGgufPath))
                 throw new System.IO.FileNotFoundException("Gemma 4 MTP draft GGUF not found.", draftGgufPath);
 
@@ -387,6 +388,7 @@ namespace TensorSharp.Models
 
         public unsafe void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             // No draft-head requirement: nothing below reads the assistant weights.
             // A weight-free speculator (n-gram) drives this trunk on any checkpoint.
             _mtpBatchedMode = false;   // this is the linear-cache trunk
@@ -716,6 +718,7 @@ namespace TensorSharp.Models
         /// </summary>
         public unsafe void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!HasDraftHead)
                 throw new InvalidOperationException("Model has no Gemma 4 MTP draft head.");
 
@@ -901,7 +904,10 @@ namespace TensorSharp.Models
 
         /// <summary>Gemma 4's draft head holds no KV of its own (it reads the
         /// target's), so there is nothing to replay — the no-op here is correct.</summary>
-        public void DraftCatchUp(int[] tokens, float[] hRows, int startPos) { }
+        public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>The Gemma 4 draft head keeps no state of its own: every draft
         /// step reads the trunk's donor KV and the hidden state it is handed, so it
@@ -999,6 +1005,7 @@ namespace TensorSharp.Models
         /// <inheritdoc />
         public void SpecOnVerifyAccepted(int acceptedRows, int verifyRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             SwaVerifyBackup backup = _swaVerifyBackup;
             _swaVerifyBackup = null;
             if (backup == null)
@@ -1130,16 +1137,23 @@ namespace TensorSharp.Models
         /// so growing the (unused) linear cache would just waste memory.</summary>
         public void SpecEnsureCapacity(int requiredSeqLen)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_mtpBatchedMode) return;
             EnsureCacheCapacity(requiredSeqLen);
         }
 
         /// <summary>No recurrent (GDN/SSM) state in Gemma 4 — drafting is stateless
         /// given (token, h), so verify rollback needs only an attention-KV rewind.</summary>
-        public void SpecSnapshotRecurrentState() { }
+        public void SpecSnapshotRecurrentState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>See <see cref="SpecSnapshotRecurrentState"/>.</summary>
-        public void SpecRestoreRecurrentState() { }
+        public void SpecRestoreRecurrentState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>
         /// Rewind the trunk KV position counter after rejected speculative tokens.
@@ -1149,6 +1163,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (length < 0 || length > _cacheSeqLen)
                 throw new ArgumentOutOfRangeException(nameof(length),
                     $"Rewind length {length} outside [0, {_cacheSeqLen}].");
@@ -1227,6 +1242,7 @@ namespace TensorSharp.Models
         public unsafe void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
             float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(seq);
             if (tokens == null || tokens.Length == 0)
                 throw new ArgumentException("Tokens must not be empty.", nameof(tokens));
@@ -1420,12 +1436,18 @@ namespace TensorSharp.Models
         }
 
         /// <summary>No recurrent state in Gemma 4 — nothing to snapshot per slot.</summary>
-        public void SpecSnapshotRecurrentStateSlots(SequenceState seq) { }
+        public void SpecSnapshotRecurrentStateSlots(SequenceState seq)
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>No recurrent state in Gemma 4 — nothing to restore. Paged
         /// attention needs no KV rewind: each pass passes its own sequence length,
         /// and rejected slots are overwritten by the kept-prefix re-forward.</summary>
-        public void SpecRestoreRecurrentStateSlots(SequenceState seq) { }
+        public void SpecRestoreRecurrentStateSlots(SequenceState seq)
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         // Single-query attention of the draft's Q against the sequence's PAGED
         // donor K/V (_g4PagedK[donor], a host float[] indexed by slot). Mirrors the

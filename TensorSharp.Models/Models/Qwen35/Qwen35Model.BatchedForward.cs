@@ -141,6 +141,7 @@ namespace TensorSharp.Models
         // TS_QWEN35_MIGRATE=0 to force the per-seq fallback.
         public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.Equals(Environment.GetEnvironmentVariable("TS_QWEN35_MIGRATE"), "0", StringComparison.Ordinal))
                 return false;
             try { return MigrateLinearToPaged(owner, blockSize); }
@@ -267,6 +268,7 @@ namespace TensorSharp.Models
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
             int numSeqs = ctx.Sequences.Count;
             if (numSeqs == 0) return Array.Empty<float[]>();

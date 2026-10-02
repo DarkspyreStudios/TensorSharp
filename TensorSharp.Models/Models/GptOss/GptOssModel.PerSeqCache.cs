@@ -189,6 +189,7 @@ namespace TensorSharp.Models
         /// Forward.</summary>
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             _fusedHolders ??= new Dictionary<string, GptOssKvCacheHolder>(StringComparer.Ordinal);
@@ -226,6 +227,7 @@ namespace TensorSharp.Models
         /// primary a fresh empty allocation.</summary>
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             if (!SupportsPerSequenceFusedForward) return;
             _fusedHolders ??= new Dictionary<string, GptOssKvCacheHolder>(StringComparer.Ordinal);
@@ -260,6 +262,7 @@ namespace TensorSharp.Models
         /// never clobbers a still-running concurrent request's holder.</summary>
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_activeFusedKey == null)
                 return;
             _fusedHolders[_activeFusedKey] = SnapshotActiveCache();
@@ -274,6 +277,7 @@ namespace TensorSharp.Models
         /// <summary>Release a finished/aborted request's per-request cache.</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
@@ -359,7 +363,10 @@ namespace TensorSharp.Models
         /// </summary>
         public unsafe bool TryForwardBatchedFusedDecode(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, float[][] outLogits)
-            => ForwardBatchedFusedDecodeCore(requestIds, tokens, positions, outLogits, null);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return ForwardBatchedFusedDecodeCore(requestIds, tokens, positions, outLogits, null);
+        }
 
         /// <summary>Greedy fast path: like <see cref="TryForwardBatchedFusedDecode"/>
         /// but returns only each sequence's argmax token (sampled on-device on
@@ -367,7 +374,10 @@ namespace TensorSharp.Models
         /// when every sequence's sampler is a plain argmax.</summary>
         public unsafe bool TryForwardBatchedFusedDecodeSampled(
             IReadOnlyList<string> requestIds, int[] tokens, int[] positions, int[] outNextTokens)
-            => ForwardBatchedFusedDecodeCore(requestIds, tokens, positions, null, outNextTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return ForwardBatchedFusedDecodeCore(requestIds, tokens, positions, null, outNextTokens);
+        }
 
         /// <summary>A sequence can join the token-batched decode when its holder
         /// exists and needs no growth for this position — growth is the

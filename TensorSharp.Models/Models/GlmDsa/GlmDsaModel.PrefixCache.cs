@@ -198,24 +198,28 @@ namespace TensorSharp.Models
 
         public void AttachPrefixCache(IPrefixPayloadSink sink)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
                 _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
         }
 
         public void DetachPrefixCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
                 _prefixCacheSink = null;
         }
 
         public bool TryCaptureCopy(string requestId, string payloadKey, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return false;
         }
 
         public bool TryCaptureDonate(string requestId, string payloadKey, int length, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             lock (_nativeSync)
             {
@@ -232,6 +236,7 @@ namespace TensorSharp.Models
 
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             lock (_nativeSync)
             {
@@ -247,6 +252,7 @@ namespace TensorSharp.Models
 
         public bool TryMaterialize(in MaterializeRequest request)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (request.Op != MaterializeOp.Donate) return false;   // slots are moved, never copied
             lock (_nativeSync)
             {
@@ -259,6 +265,7 @@ namespace TensorSharp.Models
 
         public bool TryReturnDonation(string requestId, string payloadKey)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
             {
                 if (!UsesNativeExecutor || _slotByRequest == null) return false;
@@ -276,6 +283,7 @@ namespace TensorSharp.Models
 
         public void ReleasePayloads(ReadOnlySpan<string> payloadKeys, ReleaseReason reason)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_nativeSync)
             {
                 if (UsesNativeExecutor)
@@ -294,30 +302,48 @@ namespace TensorSharp.Models
         private PayloadFootprint Footprint(RetainedGlmSlot entry) => new(entry.Tokens, _maxContextLength, default, PositionDelta: 0);
 
         public ResourceVector EstimateCloneBytes(string payloadKey, int targetTokens) => default;
-        public bool TryCopyPagedToHolder(ReadOnlySpan<int> blockIds, int tokens, string requestId) => false;
-        public bool TryExport(string payloadKey, System.IO.Stream destination) => false;
+        public bool TryCopyPagedToHolder(ReadOnlySpan<int> blockIds, int tokens, string requestId)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return false;
+        }
+        public bool TryExport(string payloadKey, System.IO.Stream destination)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return false;
+        }
 
         public bool TryImport(string payloadKey, int tokens, System.IO.Stream source, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return false;
         }
 
         public bool TryBeginImport(int tokens, out object importTicket)
         {
+            ThrowIfOwnershipCleanupFailed();
             importTicket = null;
             return false;
         }
 
-        public bool RunImportRead(object importTicket, System.IO.Stream source) => false;
+        public bool RunImportRead(object importTicket, System.IO.Stream source)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return false;
+        }
 
         public bool TryCommitImport(object importTicket, string payloadKey, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return false;
         }
 
-        public void AbortImport(object importTicket) { }
+        public void AbortImport(object importTicket)
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         public long QuerySpareBytes(ResourceClass cls) => QueryPrefixCacheSpareBytes(cls);
 

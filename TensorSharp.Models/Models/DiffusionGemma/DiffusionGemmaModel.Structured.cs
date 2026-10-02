@@ -36,7 +36,10 @@ namespace TensorSharp.Models
         /// </remarks>
         public float[][] ReadStructured(int[] promptTokens, int[] seedCanvas, int[] positions,
             int[][] tokenIds, CancellationToken cancellationToken = default)
-            => ReadStructuredCore(promptTokens, seedCanvas, positions, tokenIds, false, cancellationToken);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return ReadStructuredCore(promptTokens, seedCanvas, positions, tokenIds, false, cancellationToken);
+        }
 
         /// <summary>
         /// Full-vocabulary reference for validating and benchmarking <see cref="ReadStructured"/>.
@@ -45,7 +48,10 @@ namespace TensorSharp.Models
         /// </summary>
         public float[][] ReadStructuredReference(int[] promptTokens, int[] seedCanvas, int[] positions,
             int[][] tokenIds, CancellationToken cancellationToken = default)
-            => ReadStructuredCore(promptTokens, seedCanvas, positions, tokenIds, true, cancellationToken);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return ReadStructuredCore(promptTokens, seedCanvas, positions, tokenIds, true, cancellationToken);
+        }
 
         private float[][] ReadStructuredCore(int[] promptTokens, int[] seedCanvas, int[] positions,
             int[][] tokenIds, bool fullVocabulary, CancellationToken cancellationToken)
@@ -271,6 +277,7 @@ namespace TensorSharp.Models
         /// <summary>Release the bounded prompt and selected-label caches retained by structured reads.</summary>
         public void ClearStructuredCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             DisposeSeqState(_structuredPrompt);
             _structuredPrompt = null;
             _structuredPromptTokens = null;

@@ -366,6 +366,7 @@ namespace TensorSharp.Models
         /// prefix before the first forward.</summary>
         public bool BindSequenceCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId))
                 throw new ArgumentException("RequestId required", nameof(requestId));
             _fusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
@@ -404,6 +405,7 @@ namespace TensorSharp.Models
         /// fresh empty allocation for later N==1 use.</summary>
         public void AdoptPrimaryCacheToFused(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrEmpty(requestId)) return;
             _fusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
 
@@ -429,6 +431,7 @@ namespace TensorSharp.Models
         /// is already active.</summary>
         public void RestorePrimaryCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_activeFusedKey == null)
                 return;
             // Null-checked like its four siblings (OnSequenceReleased, RetainSequenceCache,
@@ -455,6 +458,7 @@ namespace TensorSharp.Models
         /// by the engine when a sequence leaves the scheduler.</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
@@ -484,13 +488,18 @@ namespace TensorSharp.Models
         /// arena slot intentionally remains registered: it is keyed by the holder's
         /// stable storage pointer, so a later rebind can continue in place; normal
         /// arena eviction flushes it back to the same holder before retiring it.</summary>
-        public bool RetainSequenceCache(string requestId) => RetainSequenceCacheAs(requestId, requestId);
+        public bool RetainSequenceCache(string requestId)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return RetainSequenceCacheAs(requestId, requestId);
+        }
 
         /// <summary>The key-parameterised form of <see cref="RetainSequenceCache"/>: the finished
         /// holder of <paramref name="requestId"/> is retained under <paramref name="key"/>
         /// (the prefix cache's tree-minted payload key, or the request id itself).</summary>
         public bool RetainSequenceCacheAs(string requestId, string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fusedHolders == null || string.IsNullOrEmpty(requestId) || string.IsNullOrEmpty(key))
                 return false;
             if (!_fusedHolders.TryGetValue(requestId, out var holder))
@@ -525,6 +534,7 @@ namespace TensorSharp.Models
         /// calls this when the holder's entire token run is an exact prompt prefix.</summary>
         public bool TryRebindRetainedCache(string retainedRequestId, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null
                 || string.IsNullOrEmpty(retainedRequestId)
                 || string.IsNullOrEmpty(newRequestId))
@@ -548,6 +558,7 @@ namespace TensorSharp.Models
         /// before the stable host pointers can be pooled or freed.</summary>
         public void DiscardRetainedCache(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || string.IsNullOrEmpty(requestId))
                 return;
             if (!_retainedFusedHolders.TryGetValue(requestId, out var holder))
@@ -605,6 +616,7 @@ namespace TensorSharp.Models
         /// capture -- is worth nothing to a process about to be killed for memory.</summary>
         public override void TrimIdleMemory()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_holderPool != null && _holderPool.Count > 0)
             {
                 // Taken out of the pool BEFORE anything is disposed, so a dispose that
@@ -633,6 +645,7 @@ namespace TensorSharp.Models
         /// <paramref name="key"/>. See <see cref="IBatchedPagedModel.TryCheckpointActiveCache"/>.</summary>
         public bool TryCheckpointActiveCache(string key)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || string.IsNullOrEmpty(key) || _isRecurrent == null)
                 return false;
             _retainedFusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);
@@ -667,6 +680,7 @@ namespace TensorSharp.Models
         /// untouched. See <see cref="IBatchedPagedModel.TryCloneRetainedCache"/>.</summary>
         public bool TryCloneRetainedCache(string retainedKey, string newRequestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null
                 || string.IsNullOrEmpty(retainedKey)
                 || string.IsNullOrEmpty(newRequestId))
@@ -715,6 +729,7 @@ namespace TensorSharp.Models
 
         public unsafe bool TryExportRetainedCache(string key, System.IO.Stream destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || destination == null || string.IsNullOrEmpty(key)
                 || _retainedFusedHolders == null || _isRecurrent == null)
                 return false;
@@ -772,6 +787,7 @@ namespace TensorSharp.Models
 
         public unsafe bool TryImportRetainedCache(string key, System.IO.Stream source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsPrefixCheckpoints || source == null || string.IsNullOrEmpty(key) || _isRecurrent == null)
                 return false;
             _retainedFusedHolders ??= new Dictionary<string, Qwen35KvCacheHolder>(StringComparer.Ordinal);

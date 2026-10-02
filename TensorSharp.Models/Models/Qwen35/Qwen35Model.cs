@@ -1155,6 +1155,7 @@ namespace TensorSharp.Models
         /// slots are required.</summary>
         public override void PrepareForPrefill(int requiredContextTokens)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (requiredContextTokens <= 0)
                 return;
             // Tensor-parallel runs keep no host-side attention cache — each rank
@@ -1453,6 +1454,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot) return false;
             long expected = ComputeKVBlockByteSize(tokenCount);
             if (destination.Length != expected) return false;
@@ -1490,6 +1492,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             // A refusal must leave the model exactly as it was: callers treat a refused
             // block as the end of what the model holds and resume from there (an inject
             // shortfall is a miss). Every GDN layer's recurrent state is overwritten in
@@ -2630,6 +2633,7 @@ namespace TensorSharp.Models
         // building the layer graph.
         public override Tensor SubmitGreedyDecodeStep(int? firstTokenForBegin)
         {
+            ThrowIfOwnershipCleanupFailed();
             _forwardSw.Start();
             int seqLen = 1;
             int startPos = _cacheSeqLen;
@@ -2767,6 +2771,7 @@ namespace TensorSharp.Models
         // generation run so resources don't linger.
         public override void ResetPipelinedGreedyState()
         {
+            ThrowIfOwnershipCleanupFailed();
             _pipelineNextInputDevice?.Dispose();
             _pipelineNextInputDevice = null;
         }
@@ -4552,6 +4557,7 @@ namespace TensorSharp.Models
         /// image is in the prompt slice.</summary>
         public void SetMRoPEPositions(int[] flatThw)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingMRoPEPositions = flatThw;
         }
 
@@ -6137,6 +6143,7 @@ namespace TensorSharp.Models
         /// recurrent/attention layers). Forces a device sync per measured batch.</summary>
         public double DebugTimeQuantMatmul(string which, int rows, int reps, out int ggmlType, out long inDim, out long outDim)
         {
+            ThrowIfOwnershipCleanupFailed();
             QuantizedWeight qw = which switch
             {
                 "down" => _ffnDownQW[0],
@@ -6301,12 +6308,14 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             VisionEncoder = new Qwen35VisionEncoder(mmProjPath, _allocator);
             VisionEncoder.SetHostModel(this);
         }
 
         public void SetVisionEmbeddings(Tensor visionEmbeddings, int startPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _visionEmbeddingsList.Add((visionEmbeddings, startPosition));
         }
 

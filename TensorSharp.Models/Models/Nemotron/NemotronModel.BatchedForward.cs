@@ -351,6 +351,7 @@ namespace TensorSharp.Models
         /// safe to call multiple times for the same RequestId.</summary>
         public void OnSequenceReleased(string requestId)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (requestId == null) return;
             if (!_nemoMambaSlotByReqId.TryGetValue(requestId, out int slot))
                 return;
@@ -450,6 +451,7 @@ namespace TensorSharp.Models
         ///   - FFN: stateless, nothing to migrate.</summary>
         public bool TryMigrateLinearKVToPaged(SequenceState owner, int blockSize)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (owner == null) return false;
             if (!SupportsLinearKVMigration) return false;
             int ownerTokens = _cacheSeqLen;
@@ -615,6 +617,7 @@ namespace TensorSharp.Models
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
             int numSeqs = ctx.Sequences.Count;
             if (numSeqs == 0) return Array.Empty<float[]>();

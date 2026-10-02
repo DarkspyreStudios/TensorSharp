@@ -19,6 +19,9 @@ namespace TensorSharp.Models
 
         List<int> IMultimodalPromptExpander.ExpandMultimodalPrompt(
             ModelMultimodalInjector injector, List<ChatMessage> history, List<int> inputTokens)
-            => injector.ProcessQwenVLHistory(VisionEncoder, history, inputTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return injector.ProcessQwenVLHistory(VisionEncoder, history, inputTokens);
+        }
     }
 }

@@ -23,6 +23,14 @@ spec.loader.exec_module(pack)
 
 
 class ArtifactPolicyTests(unittest.TestCase):
+    def test_mac_prerelease_is_exact_and_does_not_replace_the_default_complete_matrix(self):
+        mac = [{"rid": "osx-arm64", "variant": "metal"}]
+        self.assertEqual([], pack.check_mac_prerelease_matrix(mac))
+        self.assertTrue(pack.check_release_matrix(mac))
+        for items in ([], mac * 2, mac + [{"rid": "win-arm64", "variant": "cpu"}],
+                      [{"rid": "osx-arm64", "variant": "cpu"}]):
+            with self.subTest(items=items):
+                self.assertTrue(pack.check_mac_prerelease_matrix(items))
     def test_packaging_and_native_build_compute_the_same_abi(self):
         result = subprocess.run(["cmake", "-P", str(pack.REPO_ROOT / "eng" / "print-ggml-native-abi.cmake")],
                                 capture_output=True, text=True, check=True, timeout=30)
@@ -206,6 +214,124 @@ class ArtifactPolicyTests(unittest.TestCase):
             self.assertIsNone(pack.INVENTORY.run(["inspection-tool"]))
 
 
+class PackageCatalogPolicyTests(unittest.TestCase):
+    """Catalog/payload descriptions only; no package/archive or native build is produced."""
+
+    def artifact(self, rid="linux-x64", variant="vulkan"):
+        entry = pack.ENTRY[rid.split("-")[0]]
+        return {"driverId": pack.DRIVER_ID, "rid": rid, "variant": variant,
+                "version": "2.8.6.8", "tensorSharpBuild": "2.8.6.8", "nativeAbi": "a" * 64,
+                "tensorSharp": {"packageVersion": "2.8.6.8", "packageCommit": "b" * 40,
+                                "nativeSourceCommit": "c" * 40},
+                "ggml": {"version": "0.9.0", "commit": "d" * 40},
+                "backends": pack.BACKENDS[variant], "entryLibrary": entry,
+                "files": [{"path": entry, "size": 7, "sha256": pack.sha256_bytes(b"fixture")},
+                          {"path": "licenses/ggml-LICENSE.txt", "size": 7, "sha256": pack.sha256_bytes(b"license")}],
+                "components": [{"id": "example-evidence"}],
+                "archive": {"name": "not-created.zip"}, "build": {"sourceCommit": "c" * 40}}
+
+    def test_catalog_copies_complete_existing_identity_without_recomputing_evidence(self):
+        artifact = self.artifact()
+        catalog = json.loads(pack.package_catalog(artifact))
+        self.assertEqual(pack.SCHEMA, catalog.pop("schema"))
+        self.assertEqual({key: artifact[key] for key in (
+            "driverId", "rid", "variant", "version", "tensorSharpBuild", "nativeAbi",
+            "tensorSharp", "ggml", "backends", "entryLibrary", "files", "components")}, catalog)
+        self.assertNotIn("archive", catalog)
+        self.assertNotIn("build", catalog)
+        self.assertEqual(pack.package_catalog(artifact), pack.package_catalog(artifact))
+
+    def test_catalog_file_portability_matches_runtime_validation(self):
+        for name in ("wild*card", "question?mark", 'quote"name', "pipe|name", "less<name", "greater>name"):
+            with self.subTest(name=name):
+                self.assertFalse(pack.portable_path(name))
+
+    def test_real_inventory_flags_are_not_runtime_catalog_fields(self):
+        artifact = self.artifact()
+        for item in artifact["files"]:
+            item["executable"] = False
+        original = copy.deepcopy(artifact)
+        catalog = json.loads(pack.package_catalog(artifact))
+        for source, actual in zip(artifact["files"], catalog["files"]):
+            self.assertEqual({key: source[key] for key in ("path", "size", "sha256")}, actual)
+        self.assertEqual(original, artifact)
+
+    def test_baseline_catalog_and_complete_closure_have_fixed_runtime_paths(self):
+        for rid, variant in pack.BASELINE.items():
+            with self.subTest(rid=rid):
+                artifact = self.artifact(rid, variant)
+                files = {item["path"]: b"fixture" for item in artifact["files"]}
+                with patch.object(Path, "read_bytes", lambda path: files[path.as_posix().removeprefix("/fixture/")]):
+                    contents = dict(pack.native_package_contents(artifact, Path("/fixture"), "package", True))
+                for item in artifact["files"]:
+                    self.assertIn(f"runtimes/{rid}/native/{item['path']}", contents)
+                self.assertIn("licenses/ggml-LICENSE.txt", contents)
+                self.assertEqual(json.loads(pack.package_catalog(artifact)),
+                                 json.loads(contents["ggml/baseline.artifact.json"]))
+                self.assertIn("buildTransitive/package.targets", contents)
+
+    def test_developer_catalog_and_native_closure_are_siblings(self):
+        artifact = self.artifact()
+        files = {item["path"]: b"fixture" for item in artifact["files"]}
+        with patch.object(Path, "read_bytes", lambda path: files[path.as_posix().removeprefix("/fixture/")]):
+            contents = dict(pack.native_package_contents(artifact, Path("/fixture"), "package", False))
+        self.assertIn("ggml/vulkan.artifact.json", contents)
+        self.assertIn("ggml/vulkan/licenses/ggml-LICENSE.txt", contents)
+        self.assertIn("ggml/vulkan/libGgmlOps.so", contents)
+
+    def test_copy_targets_include_catalog_for_output_and_publish(self):
+        document = ET.fromstring(pack.developer_targets("package", "vulkan", "linux-x64"))
+        items = document.findall("ItemGroup/None")
+        catalog = next((item for item in items if item.get("Link") == "ggml/vulkan.artifact.json"), None)
+        self.assertIsNotNone(catalog)
+        self.assertEqual("$(MSBuildThisFileDirectory)../ggml/vulkan.artifact.json", catalog.get("Include"))
+        self.assertEqual("PreserveNewest", catalog.get("CopyToOutputDirectory"))
+        self.assertEqual("PreserveNewest", catalog.get("CopyToPublishDirectory"))
+
+    def test_baseline_targets_bind_only_selected_rid_without_architecture_mix(self):
+        document = ET.fromstring(pack.baseline_targets("package", "win-arm64"))
+        group = document.find("ItemGroup")
+        self.assertIn("win-arm64", group.get("Condition"))
+        self.assertIn("RuntimeIdentifier", group.get("Condition"))
+        items = group.findall("None")
+        self.assertEqual({"ggml/baseline.artifact.json", "runtimes/win-arm64/native/%(RecursiveDir)%(Filename)%(Extension)"},
+                         {item.get("Link") for item in items})
+        self.assertTrue(all(item.get("CopyToOutputDirectory") == "PreserveNewest" and
+                            item.get("CopyToPublishDirectory") == "PreserveNewest" for item in items))
+
+    def test_actual_msbuild_evaluation_preserves_catalog_payload_output_and_publish_links(self):
+        (pack.REPO_ROOT / "tmp").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="catalog-copy-", dir=pack.REPO_ROOT / "tmp") as temporary:
+            root = Path(temporary)
+            (root / "buildTransitive").mkdir()
+            (root / "ggml/vulkan").mkdir(parents=True)
+            (root / "runtimes/win-arm64/native/licenses").mkdir(parents=True)
+            for path in ("ggml/vulkan/libGgmlOps.so", "ggml/vulkan.artifact.json",
+                         "ggml/baseline.artifact.json", "runtimes/win-arm64/native/GgmlOps.dll",
+                         "runtimes/win-arm64/native/licenses/ggml-LICENSE.txt"):
+                (root / path).write_text("controlled copy fixture; not native")
+            (root / "buildTransitive/optional.targets").write_bytes(pack.developer_targets("optional", "vulkan", "win-arm64"))
+            (root / "buildTransitive/baseline.targets").write_bytes(pack.baseline_targets("baseline", "win-arm64"))
+            project = root / "copy.proj"
+            project.write_text('<Project><Import Project="buildTransitive/optional.targets" />'
+                               '<Import Project="buildTransitive/baseline.targets" /></Project>')
+            for requested, host, include_baseline in (("win-arm64", "linux-x64", True),
+                                                     ("linux-x64", "win-arm64", False),
+                                                     ("", "win-arm64", True), ("", "linux-x64", False)):
+                result = subprocess.run(["dotnet", "msbuild", str(project), "-nologo", "-getItem:None",
+                                         "-p:RuntimeIdentifier=" + requested, "-p:NETCoreSdkRuntimeIdentifier=" + host],
+                                        capture_output=True, text=True, check=True, timeout=20)
+                items = json.loads(result.stdout)["Items"]["None"]
+                links = {item["Link"] for item in items}
+                self.assertEqual(include_baseline, "ggml/vulkan.artifact.json" in links)
+                self.assertEqual(include_baseline, "ggml/vulkan/libGgmlOps.so" in links)
+                self.assertEqual(include_baseline, "ggml/baseline.artifact.json" in links)
+                if include_baseline:
+                    self.assertIn("runtimes/win-arm64/native/licenses/ggml-LICENSE.txt", links)
+                self.assertTrue(all(item["CopyToOutputDirectory"] == "PreserveNewest" and
+                                    item["CopyToPublishDirectory"] == "PreserveNewest" for item in items))
+
+
 class StagingFilesystemTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -226,7 +352,7 @@ class StagingFilesystemTests(unittest.TestCase):
         cls.entry = pack.ENTRY[cls.rid.split("-")[0]]
         cls.library = Path(cls.fixture.name) / cls.entry
         cls.abi = pack.native_abi(pack.REPO_ROOT)
-        identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu=portable;abi={cls.abi}"
+        identity = f"format=1;tensorsharp={cls.version};source={cls.source};ggml={cls.ggml};rid={cls.rid};variant={cls.variant};cpu={pack.CPU_PROFILES[cls.rid]};abi={cls.abi}"
         source_path = Path(cls.fixture.name) / "identity.c"
         stubs = "".join(f"void {name}(void) {{}}\n" for name in pack.read_required_exports(pack.REPO_ROOT)
                         if name != "TSGgml_GetBuildIdentity")
@@ -258,6 +384,18 @@ class StagingFilesystemTests(unittest.TestCase):
         self.build_dir.mkdir(parents=True)
         self.build = {"tensorSharpBuild": self.version, "sourceCommit": self.source, "ggmlCommit": self.ggml,
                       "rid": self.rid, "variant": self.variant, "nativeAbi": self.abi}
+        settings = {"TENSORSHARP_NATIVE_ABI": self.abi, "TENSORSHARP_NATIVE_RID": self.rid,
+                    "TENSORSHARP_NATIVE_VARIANT": self.variant, "TENSORSHARP_GGML_NATIVE_PORTABLE": "ON",
+                    "GGML_NATIVE": "OFF", "GGML_METAL": "ON" if self.variant == "metal" else "OFF",
+                    "GGML_CUDA": "OFF", "GGML_VULKAN": "OFF", "CMAKE_CXX_COMPILER": "inspection-fixture-compiler"}
+        if self.rid.startswith("linux-"):
+            settings.update(CMAKE_INSTALL_RPATH="$ORIGIN", CMAKE_BUILD_WITH_INSTALL_RPATH="ON")
+        if self.rid.startswith("osx-"):
+            settings["CMAKE_OSX_DEPLOYMENT_TARGET"] = "14.0"
+        self.build.update(cpuProfile=pack.CPU_PROFILES[self.rid], cmakeConfiguration=settings,
+                          compiler=settings["CMAKE_CXX_COMPILER"], compilerVersion="inspection fixture, not release execution",
+                          macosDeploymentTarget=settings.get("CMAKE_OSX_DEPLOYMENT_TARGET"),
+                          bridgeSha256=pack.sha256_bytes((self.artifact / self.entry).read_bytes()))
         self.build["components"] = []
         for expected in pack.core_component_specs(self.build, self.entry):
             self.build["components"].append({key: value for key, value in expected.items() if key not in ("binaryPaths", "evidencePaths")} | {
@@ -267,7 +405,13 @@ class StagingFilesystemTests(unittest.TestCase):
         self.out = self.root / "output"
 
     def write_build(self):
+        settings = self.build["cmakeConfiguration"]
+        snapshot = "//Synthetic inspection fixture cache\n" + "".join(f"{key}:STRING={value}\n" for key, value in sorted(settings.items()))
+        (self.build_dir / pack.CMAKE_CACHE_SNAPSHOT).write_bytes(snapshot.encode())
+        self.build["cmakeCacheSha256"] = pack.sha256_bytes(snapshot.encode())
         (self.build_dir / "build-identity.json").write_text(json.dumps(self.build), encoding="utf-8")
+        (self.build_dir / "cmake-settings.txt").write_text("".join(f"{key}={value}\n" for key, value in
+                                                                 sorted(self.build["cmakeConfiguration"].items())), encoding="utf-8")
 
     def reference(self, name):
         return {key: value for key, value in pack.file_record(self.artifact, self.artifact / name).items() if key != "executable"}
@@ -294,6 +438,20 @@ class StagingFilesystemTests(unittest.TestCase):
         code, output = self.run_cli("--validate-only")
         self.assertEqual(0, code, output)
         self.assertIn("validated 1 staged artifacts; no output written", output)
+
+    def test_collection_applies_optional_relink_proof_before_any_output(self):
+        self.build["identityRelink"] = {"schema": "unverified"}
+        self.write_build()
+        code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("malformed identity-only relink evidence", output)
+
+    def test_collection_propagates_relink_refusal_without_creating_output(self):
+        with patch.object(pack, "validate_identity_relink", side_effect=ValueError("controlled relink refusal")) as validation:
+            code, output = self.run_cli("--validate-only")
+        self.assertEqual(1, code, output)
+        self.assertIn("controlled relink refusal", output)
+        self.assertEqual(1, validation.call_count)
 
     def test_supplied_components_can_share_actual_evidence_without_a_filename_legal_claim(self):
         suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
@@ -399,6 +557,21 @@ class StagingFilesystemTests(unittest.TestCase):
         self.assertEqual(0, code, output)
         self.assertIn("validated 12 staged artifacts; no output written", output)
 
+    def test_mac_prerelease_validates_only_exact_mac_metadata_without_output(self):
+        with patch.object(pack, "collect_artifacts", return_value=([{"rid": "osx-arm64", "variant": "metal"}], [])):
+            code, output = self.run_cli("--validate-only", "--mac-prerelease")
+        self.assertEqual(0, code, output)
+        for items in ([], [{"rid": "win-arm64", "variant": "cpu"}]):
+            with patch.object(pack, "collect_artifacts", return_value=(items, [])):
+                code, output = self.run_cli("--validate-only", "--mac-prerelease")
+            self.assertEqual(1, code, output)
+            self.assertIn("requires exactly", output)
+
+    def test_mac_prerelease_cannot_be_combined_with_the_complete_release_gate(self):
+        with self.assertRaises(SystemExit) as refused:
+            self.run_cli("--validate-only", "--mac-prerelease", "--complete-release")
+        self.assertEqual(2, refused.exception.code)
+
     def test_real_text_sibling_cannot_satisfy_a_claimed_bundled_dependency(self):
         suffix = ".dylib" if self.rid.startswith("osx-") else ".so"
         name = "libdependency" + suffix
@@ -477,9 +650,11 @@ class StagingFilesystemTests(unittest.TestCase):
 
     def test_dangling_settings_links_and_special_files_are_not_silently_ignored(self):
         settings = self.build_dir / "cmake-settings.txt"
+        settings.unlink()
         settings.symlink_to(self.root / "absent")
         self.assertEqual(1, self.run_cli()[0])
         settings.unlink()
+        self.write_build()
         os.mkfifo(self.artifact / "fifo")
         self.assertEqual(1, self.run_cli()[0])
 

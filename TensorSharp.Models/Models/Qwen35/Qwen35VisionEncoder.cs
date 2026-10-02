@@ -159,7 +159,10 @@ namespace TensorSharp.Models
         /// Output: Tensor of shape [numMergedTokens, projectionDim].
         /// </summary>
         public Tensor Encode(float[] pixelValues, int resizedH, int resizedW)
-            => EncodeCore(pixelValues, null, resizedH, resizedW);
+        {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
+            return EncodeCore(pixelValues, null, resizedH, resizedW);
+        }
 
         /// <summary>
         /// Encode one temporal patch of a video: two consecutive sampled frames, both
@@ -173,6 +176,7 @@ namespace TensorSharp.Models
         /// </summary>
         public Tensor Encode(float[] firstFrame, float[] secondFrame, int resizedH, int resizedW)
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(firstFrame);
             ArgumentNullException.ThrowIfNull(secondFrame);
             if (TemporalPatchSize != 2)
@@ -1364,6 +1368,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             foreach (var w in _positionEmbeddingCache.Values)
                 w.Dispose();
             _positionEmbeddingCache.Clear();

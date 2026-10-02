@@ -353,6 +353,7 @@ namespace TensorSharp.Models
         /// </summary>
         public unsafe void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (HasDFlash)
                 throw new NotSupportedException("A DFlash drafter proposes whole blocks; use DraftBlock.");
             if (!HasMtpDraftHead)
@@ -410,6 +411,7 @@ namespace TensorSharp.Models
 
         public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (HasDFlash)
             {
                 // The DFlash ring holds committed positions only, and the executor
@@ -467,6 +469,7 @@ namespace TensorSharp.Models
         public unsafe void DraftCatchUpAndStep(int[] tokens, float[] hRows, int startPos,
             float[] logitsOut, float[] hOut)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!HasMtpDraftHead || HasDFlash)
                 throw new InvalidOperationException("Model has no NextN/MTP draft block to fold.");
             int n = tokens.Length;
@@ -524,6 +527,7 @@ namespace TensorSharp.Models
 
         public unsafe void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             EnterSpecSession();
             _forwardSw.Start();
             int seqLen = tokens.Length;
@@ -710,7 +714,11 @@ namespace TensorSharp.Models
         /// _cacheSeqLen, so growing mid-draft would drop the MTP rows written
         /// past the trunk position; callers pre-grow before drafting instead.
         /// </summary>
-        public void SpecEnsureCapacity(int requiredSeqLen) => EnsureCacheCapacity(requiredSeqLen);
+        public void SpecEnsureCapacity(int requiredSeqLen)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            EnsureCacheCapacity(requiredSeqLen);
+        }
 
         /// <summary>
         /// True when the accepted prefix of the last verify is already committed:
@@ -739,6 +747,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecOnVerifyAccepted(int acceptedRows, int verifyRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             _fvAcceptedPrefixCommitted = false;
             if (_fvSnapshotRows <= 0)
                 return;                       // the old path already drained the state
@@ -780,6 +789,7 @@ namespace TensorSharp.Models
 
         public void SpecSnapshotRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             // A parked run of plain steps goes through the fused decode, which keeps
             // the recurrent state device-resident in ITS slot; the executor takes
             // this snapshot before the verify forward that would sync it, so the
@@ -827,6 +837,7 @@ namespace TensorSharp.Models
         /// <summary>Restore the GDN recurrent state captured by <see cref="SpecSnapshotRecurrentState"/>.</summary>
         public void SpecRestoreRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_fvSnapshotIsDeviceLive)
             {
                 // The pre-verify state is in the live device slices; the host mirrors
@@ -911,6 +922,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (length < 0 || length > _cacheSeqLen)
                 throw new ArgumentOutOfRangeException(nameof(length),
                     $"Rewind length {length} outside [0, {_cacheSeqLen}].");
@@ -1005,6 +1017,7 @@ namespace TensorSharp.Models
         public void SpecForwardBatched(SequenceState seq, int[] tokens, int startPos,
             float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             EnterSpecSession();
             ArgumentNullException.ThrowIfNull(seq);
             if (tokens == null || tokens.Length == 0)
@@ -1057,6 +1070,7 @@ namespace TensorSharp.Models
 
         public unsafe void SpecSnapshotRecurrentStateSlots(SequenceState seq)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(seq);
             if (_q35GdnSlotConvBuf == null)
                 throw new InvalidOperationException(
@@ -1096,6 +1110,7 @@ namespace TensorSharp.Models
 
         public unsafe void SpecRestoreRecurrentStateSlots(SequenceState seq)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(seq);
             int slot = seq.BlockTable.Blocks[0].Id;
             if (_mtpSlotSnapshotSlot != slot)

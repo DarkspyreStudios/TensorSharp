@@ -286,6 +286,7 @@ namespace TensorSharp.Models
         /// </summary>
         public override Tensor SubmitGreedyDecodeStep(int? firstTokenForBegin)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!EnsureMlxDecodeWeightCache())
             {
                 throw new NotSupportedException(
@@ -660,6 +661,7 @@ namespace TensorSharp.Models
         /// <summary>Release the pipelined-decode carry-over state.</summary>
         public override void ResetPipelinedGreedyState()
         {
+            ThrowIfOwnershipCleanupFailed();
             _pipelineNextInputDevice?.Dispose();
             _pipelineNextInputDevice = null;
         }

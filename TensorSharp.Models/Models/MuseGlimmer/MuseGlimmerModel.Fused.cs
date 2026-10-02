@@ -121,6 +121,7 @@ namespace TensorSharp.Models
 
         internal void TraceLayerResidual(Tensor hidden, int layer)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!TraceActive || hidden == null)
                 return;
             float[] v = TensorToFloatArray(hidden);

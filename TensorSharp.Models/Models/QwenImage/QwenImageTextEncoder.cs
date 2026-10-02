@@ -73,7 +73,11 @@ namespace TensorSharp.Models.QwenImage
         private int[] _mropePos;
 
         /// <summary>Text-only conditioning (M-RoPE degenerates to 1D RoPE).</summary>
-        public float[] EncodeHidden(int[] tokens) => EncodeHidden(tokens, (ImageCond[])null);
+        public float[] EncodeHidden(int[] tokens)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return EncodeHidden(tokens, (ImageCond[])null);
+        }
 
         /// <summary>
         /// Run the trunk over <paramref name="tokens"/> and return row-major
@@ -86,6 +90,7 @@ namespace TensorSharp.Models.QwenImage
         /// </summary>
         public unsafe float[] EncodeHidden(int[] tokens, ImageCond[] imgs)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!string.IsNullOrEmpty(TraceDirectory)) System.IO.Directory.CreateDirectory(TraceDirectory);
             int seq = tokens.Length;
             if (imgs != null && imgs.Length == 0) imgs = null;

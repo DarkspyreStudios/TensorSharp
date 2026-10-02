@@ -47,12 +47,14 @@ namespace TensorSharp.Models
 
         public void AttachPrefixCache(IPrefixPayloadSink sink)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
                 _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
         }
 
         public void DetachPrefixCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
                 _prefixCacheSink = null;
         }
@@ -61,6 +63,7 @@ namespace TensorSharp.Models
 
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return SupportsRetainedFusedCache
                 && HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
@@ -69,13 +72,21 @@ namespace TensorSharp.Models
         /// <summary>The native slot decides (<see cref="CanReuseRetainedPrefix"/>: its head is
         /// <paramref name="payloadTokens"/> and the rewind to <paramref name="targetTokens"/> is exact).</summary>
         public bool CanMaterialize(string payloadKey, int payloadTokens, int targetTokens)
-            => CanReuseRetainedPrefix(payloadKey, payloadTokens, targetTokens);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return CanReuseRetainedPrefix(payloadKey, payloadTokens, targetTokens);
+        }
 
         /// <summary>A slot is never copied, so there is nothing to settle and no clone to allow.</summary>
-        public bool SettleForCopy(string payloadKey) => false;
+        public bool SettleForCopy(string payloadKey)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return false;
+        }
 
         public PayloadFootprint MeasureEndState(string payloadKey)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 if (payloadKey == null || _retainedSlotByRequest == null
@@ -92,6 +103,7 @@ namespace TensorSharp.Models
 
         public void DiscardRetainedCaches(ReadOnlySpan<string> payloadKeys, ReleaseReason reason)
         {
+            ThrowIfOwnershipCleanupFailed();
             lock (_sync)
             {
                 foreach (string key in payloadKeys)

@@ -334,6 +334,7 @@ namespace TensorSharp.Models
         /// <returns>[numTokens, ProjectionDim] embeddings in original grid order.</returns>
         public Tensor Encode(float[] pixels, int width, int height)
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             if (pixels == null)
                 throw new ArgumentNullException(nameof(pixels));
 
@@ -1311,6 +1312,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             foreach (var t in _positionEmbeddingCache.Values)
                 t.Dispose();
             _positionEmbeddingCache.Clear();

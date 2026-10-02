@@ -419,6 +419,7 @@ namespace TensorSharp.Models
 
         public override void WarmUpKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
             // One tiny forward allocates the scheduler's compute buffers so the
             // first user request does not pay the allocation cost.
             try
@@ -441,7 +442,7 @@ namespace TensorSharp.Models
             DisposeBaseResources(static () => { }, releaseDerivedGraphs: DisposeDeepSeek4Resources);
         }
 
-        private void DisposeDeepSeek4Resources()
+        private protected void DisposeDeepSeek4Resources()
         {
             lock (_sync)
             {

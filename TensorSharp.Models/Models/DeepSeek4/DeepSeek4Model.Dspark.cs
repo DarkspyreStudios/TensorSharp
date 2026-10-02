@@ -86,6 +86,7 @@ namespace TensorSharp.Models
 
         public void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             RequireDspark();
             lock (_sync)
             {
@@ -110,6 +111,7 @@ namespace TensorSharp.Models
 
         public int DraftBlock(int lastToken, float[] hPrev, int position, int[] draftOut, float[] confOut)
         {
+            ThrowIfOwnershipCleanupFailed();
             RequireDspark();
             lock (_sync)
             {
@@ -124,6 +126,7 @@ namespace TensorSharp.Models
         /// which is exactly the position whose drafter key it writes.</summary>
         public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
         {
+            ThrowIfOwnershipCleanupFailed();
             RequireDspark();
             lock (_sync)
             {
@@ -136,6 +139,7 @@ namespace TensorSharp.Models
 
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             RequireDspark();
             lock (_sync)
             {
@@ -158,17 +162,29 @@ namespace TensorSharp.Models
         /// <summary>DSpark drafts a whole block per step; the per-token draft
         /// entry point is never used.</summary>
         public void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
-            => throw new NotSupportedException("DeepSeek V4 drafts whole blocks; use DraftBlock.");
+        {
+            ThrowIfOwnershipCleanupFailed();
+            throw new NotSupportedException("DeepSeek V4 drafts whole blocks; use DraftBlock.");
+        }
 
         // Native DSpark pads the modular compressor rings by the complete
         // draft width. V4.1 also bounds Rewind to the last successful verify
         // and shrinks Engram history. This retains the accepted prefix at
         // partial compression boundaries without copying every cache per step.
-        public void SpecEnsureCapacity(int requiredSeqLen) { }
+        public void SpecEnsureCapacity(int requiredSeqLen)
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
-        public void SpecSnapshotRecurrentState() { }
+        public void SpecSnapshotRecurrentState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
-        public void SpecRestoreRecurrentState() { }
+        public void SpecRestoreRecurrentState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         private void RequireDspark()
         {

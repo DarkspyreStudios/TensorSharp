@@ -18,6 +18,39 @@ Model files load from file paths through the upstream path APIs.
 
 `Darkspyre.TensorSharp.Backends.GGML` contains managed code only. A consumer installs a separate
 `Darkspyre.TensorSharp.Backends.GGML.Native.<rid>` baseline package for default native probing.
+
+`GgmlNativeLoader.ResolvePackageCandidatesAsync` explicitly reads deployed package catalogs without
+loading native code. It inspects only `AppContext.BaseDirectory` and the managed supplier assembly's
+directory. Baselines use `ggml/baseline.artifact.json` with the fixed
+`runtimes/<rid>/native/` payload. Optional packages use `ggml/<variant>.artifact.json` with
+`ggml/<variant>/`. The resolver does not scan CWD, PATH, parent repositories or download locations.
+Missing catalogs return no candidates. Loose libraries without a catalog do not establish candidates.
+
+The packer derives each catalog from the validated artifact record. Catalogs retain package/native
+source identities, exact ABI and ggml revision, backend declarations, file sizes/hashes and component
+evidence. Runtime catalog file entries contain exactly `path`, `size` and `sha256`. The full artifact
+inventory separately retains `executable` facts. Baselines retain flat package notices and also carry the complete verified file closure,
+including licenses, inside the native directory. Their RID-conditional `buildTransitive` targets copy
+that directory and its catalog for output and publish. An explicit target RID takes precedence over
+the SDK host RID. Optional targets apply the same RID condition and copy their payload and sibling
+catalog for output and publish. Other RID packages remain inert and cannot overwrite these bindings.
+
+Resolution rejects malformed/duplicate JSON, unknown fields, conflicting bindings, wrong build/ABI/
+upstream/RID/variant, incomplete component mappings, unsafe or linked paths and missing/stale file
+bytes. It throws `InvalidDataException` with a fixed safe message and no raw filesystem diagnostic.
+Cancellation never returns a partial candidate list. Results and nested file lists are read-only.
+Catalog checks do not establish native initialization, device availability or redistribution permission.
+Package/native source commits pass exact hash syntax and core-component coherence checks. This resolver
+does not compare them to a managed assembly source commit or read a native bridge identity. Verified
+supplier release provenance and actual loaded bridge identity remain separate downstream gates.
+
+Candidates put accelerator primaries first (CUDA then Vulkan; Metal on macOS), followed by baseline
+CPU and CPU alternatives advertised by optional artifacts. Each artifact/backend pair uses the same
+verified files; it does not represent a second independent library. The configured runtime still
+refuses fallback after a potentially loaded failure. A consumer can derive a stable pair identity from
+the catalog RID/variant and candidate backend. Actual bridge identity and backend remain initialization
+observations, not catalog claims. Existing `Check` and initialization validate candidates again.
+
 The native packaging tool selects these baseline variants from its staged input:
 
 | Runtime | File | Backends | Toolchain |
@@ -36,6 +69,13 @@ layout or successful cross-build does not establish runtime qualification on the
 The managed GGML project excludes native binaries from its package. `eng/pack-ggml-natives.py`
 packages staged bridges into separate per-RID native packages and variant archives. Ordinary source
 builds still build and copy the platform bridge unless `TensorSharpSkipGgmlNative=true` is set.
+
+`TensorSharpSkipCudaNative=true` disables CUDA compiler discovery, architecture resolution,
+PTX compilation, intermediate PTX copying and committed-PTX updates. The committed PTX content
+still copies through the existing output/publish items. The flag also applies to direct target
+invocation and takes precedence over `TensorSharpUpdateCommittedPtx=true`. An unset or false
+flag preserves normal CUDA build behavior. This flag permits managed-source verification; it
+does not establish CUDA execution, artifact identity, native availability or package closure.
 
 The packer validates all staged inputs before writing release output. It accepts the five baseline
 RIDs above, Vulkan and CUDA13 on Linux and Windows x64, and Vulkan on Windows ARM64. It rejects
@@ -82,6 +122,59 @@ CPU profile, a mismatched accelerator, and a Linux runpath other than `$ORIGIN`.
 the bridge hash, CMake cache hash and settings, actual compiler output, exact CPU floor and macOS
 deployment target. CUDA13 records include observed toolkit compiler output and every compiled
 SASS/PTX architecture. Target and GPU execution remain explicitly unrecorded by this inspection.
+
+The recorder and packer use one release-profile policy. Collection requires the recorded portable
+CPU floor, target/backend settings, Linux `$ORIGIN` configuration and an explicit macOS deployment
+target. CUDA13 requires the full recorded SASS/PTX profile and consistent observed CUDA13 compiler
+and toolkit evidence. The recorded bridge SHA-256 must match the actual staged bridge.
+
+Each build record includes `cmake-settings.txt` and `cmake-cache.snapshot.txt`. Both are ordinary
+files. The snapshot preserves the original observed cache bytes, including line endings and
+comments. Its SHA-256 must match `cmakeCacheSha256`. A strict parser rejects empty, malformed or
+duplicate cache entries. Parsed snapshot settings, normalized settings and `cmakeConfiguration`
+must agree exactly. Records without the snapshot fail validation, including partial-matrix stages.
+The snapshot is evidence only. Build scripts do not use it as a CMake input. These checks validate
+recorded observations; they do not authenticate the recorder, reproduce the build or qualify
+target/compiler/GPU execution. Native source commit evidence remains a separate release check.
+
+### Mac Identity Relink
+
+`eng/relink-ggml-native-identity.py` compiles only the Mac bridge identity object and relinks the
+bridge from verified retained inputs. It accepts the osx-arm64 Metal/CPU baseline with deployment
+target 14.0. It compares the original and current native source trees. All 59 other object/archive
+inputs retain their exact bytes. A fresh configure-only CMake observation supplies the current
+build profile and cache snapshot. The historical cache remains separate evidence and is never a
+build input. Original and fresh compiler flags and link topology must match.
+The replacement identity uses the committed current TensorSharp build version. The original
+bridge identity and build record retain their actual original version. Version replacement does
+not change the pinned upstream, native source tree, target, backend or CPU floor.
+
+The additive `identityRelink` record contains both original observations and actual new compiler
+and linker arguments. The packer verifies ordinary evidence files, hashes, source-tree equality,
+the original bridge/profile/cache, exact reused input membership, replacement identity source and
+compiler/linker arguments. The ordinary current-ABI, bridge-hash, profile and raw-cache gates also
+remain required. Every execution invariant is checked before invoking the compiler or linker.
+Recorded absolute command paths bind to explicit immutable execution roots. The evidence files
+use portable relative paths. Copying a stage or pruning its producer worktree does not change the
+recorded arguments or prevent validation in another checkout. This operation does not compile
+upstream ggml or accelerator kernels. It does
+not qualify native lifecycle, target execution or GPU safety.
+
+The packer's explicit `--mac-prerelease` mode requires exactly one osx-arm64 Metal/CPU baseline.
+All artifact, ABI, profile, cache, dependency, component and relink checks remain required. The
+default output mode requires the complete twelve-artifact release matrix. `--complete-release`
+and `--mac-prerelease` cannot be combined. Partial staging validation alone does not authorize
+package output.
+
+### Package Resolver Preflight
+
+`eng/tests/ggml-package-preflight` checks an actual packaged managed loader against an unpacked
+native package. Its three arguments are the absolute managed GGML DLL path, deployed native
+package root and target RID. It invokes the supplier's existing filesystem resolver with that
+explicit root, validates every returned candidate and reports executed DLL hash/MVID/build/ABI.
+Both entry and exit require `Unconfigured` state and no selected native handle. The tool does not
+configure, initialize or execute native code. Invalid catalogs or absent candidates return exit 1.
+This validates actual package/catalog interoperability without claiming native runtime qualification.
 
 ### Component evidence
 
@@ -191,10 +284,20 @@ retains the actual unsafe model and unregistered storage, supported by the exist
 owner’s process-exit root and guarded shutdown refusal. It adds no global root or finalizer and
 does not establish equivalent terminal-failure retention for CUDA or MLX owners. This retention
 applies to construction rollback and failure inside the shared normal `Dispose` pipeline. Cleanup
-outside that pipeline, including the V4.1 vision companion, does not enter this retention path.
+outside that pipeline does not automatically enter this retention path.
 The shared pipeline preserves the original cleanup exception and stack; repeated teardown after failure refuses before any phase
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
+
+The DeepSeek V4.1 vision loader reserves its returned native handle before validating companion
+metadata and attaching it to the text model. Successful rollback explicitly frees and clears
+the handle, then rethrows the original validation error unchanged. Refused rollback retains
+the actual model and reserved handle through the existing GGML failed-owner collection and
+reports the original validation and cleanup errors together. Normal V4.1 disposal releases its
+vision handle and text executor through one shared graph-release callback after the host-read
+barrier. A failure retains the still-owned fields and native identities; repeated teardown
+refuses at the shared terminal guard. These paths do not fence forward/reset operations or
+establish equivalent non-GGML retention, captured GPU teardown or image-encoding qualification.
 
 Weight loading keeps a local disposable owner until ordinary quantized, Bonsai or F32 storage
 transfers to a model dictionary. Owned stacked expert buffers transfer before reading or creating

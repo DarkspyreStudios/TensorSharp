@@ -55,9 +55,16 @@ namespace TensorSharp.Models
         }
 
         public void AttachPrefixCache(IPrefixPayloadSink sink)
-            => _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _prefixCacheSink = sink ?? throw new ArgumentNullException(nameof(sink));
+        }
 
-        public void DetachPrefixCache() => _prefixCacheSink = null;
+        public void DetachPrefixCache()
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _prefixCacheSink = null;
+        }
 
         public long QuerySpareBytes(ResourceClass cls) => QueryPrefixCacheSpareBytes(cls);
 
@@ -65,6 +72,7 @@ namespace TensorSharp.Models
 
         public bool TryConvertPrimary(string payloadKey, int length, out PayloadFootprint footprint)
         {
+            ThrowIfOwnershipCleanupFailed();
             footprint = default;
             return SupportsPerSequenceFusedForward
                 && HolderPrefixCacheAdapter.TryConvertPrimary(this, payloadKey, length, out footprint);
@@ -83,6 +91,7 @@ namespace TensorSharp.Models
         /// active cache. A holder whose host bytes are already current needs nothing.</summary>
         public bool SettleForCopy(string payloadKey)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!TryGetRetained(payloadKey, out var holder)) return false;
             if (!holder.HostDirty) return true;
             if (!IsGgmlBackend) return false;
@@ -137,6 +146,7 @@ namespace TensorSharp.Models
         /// once, before its first disposal. Invalidation and pressure dispose.</summary>
         public void DiscardRetainedCaches(ReadOnlySpan<string> payloadKeys, ReleaseReason reason)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_retainedFusedHolders == null || payloadKeys.IsEmpty) return;
             List<Gemma4KvCacheHolder> released = null;
             foreach (string key in payloadKeys)
@@ -270,6 +280,7 @@ namespace TensorSharp.Models
         /// unattached mode the pool is empty and this is the base trim.</summary>
         public override void TrimIdleMemory()
         {
+            ThrowIfOwnershipCleanupFailed();
             int parked = _holderPool?.Count ?? 0;
             DisposeHolderPool();
             if (parked > 0)

@@ -680,6 +680,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             // Either fused kernel writes K/V on-device; the snapshot walks the caches
@@ -695,6 +696,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             // Drop the dirty flag first: the host copy is about to become
@@ -731,12 +733,14 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             _visionEncoder = new MuseGlimmerVisionEncoder(mmProjPath, _allocator);
             _visionEncoder.SetHostModel(this);
         }
 
         public void SetVisionEmbeddings(Tensor embeddings, int insertPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingVisionEmbeddingsList.Add((embeddings, insertPosition));
         }
 

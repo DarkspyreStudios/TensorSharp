@@ -895,6 +895,7 @@ namespace TensorSharp.Models
 
         public override bool TryExtractKVBlock(int startToken, int tokenCount, Span<byte> destination)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             EnsureKvCacheHostSynchronized();
@@ -905,6 +906,7 @@ namespace TensorSharp.Models
 
         public override bool TryInjectKVBlock(int destToken, int tokenCount, ReadOnlySpan<byte> source)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!SupportsKVStateSnapshot)
                 return false;
             // The injected block lands in host memory and the device windows are

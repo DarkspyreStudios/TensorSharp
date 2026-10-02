@@ -1104,6 +1104,7 @@ namespace TensorSharp.Models
         /// or it operates on pre-arena bytes.</summary>
         internal void FlushArenaSlotForActiveHolder()
         {
+            ThrowIfOwnershipCleanupFailed();
             if ((_backend != BackendType.GgmlCuda && _backend != BackendType.GgmlMetal) ||
                 _kvCacheK == null || _isRecurrent == null)
                 return;
@@ -1187,6 +1188,7 @@ namespace TensorSharp.Models
         // decode to re-seed the device-resident state from the host buffers.
         internal void InvalidateFullDecodeState(bool hardBindings = false)
         {
+            ThrowIfOwnershipCleanupFailed();
             // A graph reset drops the only current copy of recurrent state when
             // fused decode has kept it device-resident.  Preserve it first (reset
             // intentionally discards it by clearing _gdnStateHostDirty beforehand).
@@ -1226,6 +1228,7 @@ namespace TensorSharp.Models
         /// (KV reset / capacity grow), NOT on the per-step spec latch.</summary>
         internal void InvalidateVerifyCache()
         {
+            ThrowIfOwnershipCleanupFailed();
             // The device-resident verify state lives in the same buffers; a KV reset/grow
             // invalidates it, so preserve an in-flight prefill chain before dropping
             // the native slice metadata, then re-seed on the next verify.
@@ -1243,6 +1246,7 @@ namespace TensorSharp.Models
         // the next ResetKVCache. Spec is net-negative for this model anyway.
         internal void EnterSpecSession()
         {
+            ThrowIfOwnershipCleanupFailed();
             // A transition, not a per-step latch: the invalidation below hard-drops
             // the Metal decode graphs of EVERY holder, and it used to run on every
             // speculative step.
@@ -1275,6 +1279,7 @@ namespace TensorSharp.Models
         /// </summary>
         internal void ExitSpecSession()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!_fdSpecSessionActive)
                 return;
             DrainDeviceRecurrentState();
@@ -1372,7 +1377,10 @@ namespace TensorSharp.Models
         };
 
         internal bool TryFullModelDecode(Tensor hidden, int position, float[] logitsOut)
-            => TryFullModelDecodeCore(hidden, -1, position, logitsOut);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return TryFullModelDecodeCore(hidden, -1, position, logitsOut);
+        }
 
         /// <summary>
         /// Metal decode can gather the quantized token embedding as the first node
@@ -1380,7 +1388,10 @@ namespace TensorSharp.Models
         /// row dequantization, tensor allocation, and hidden-vector upload.
         /// </summary>
         internal bool TryFullModelDecodeToken(int tokenId, int position, float[] logitsOut)
-            => TryFullModelDecodeCore(null, tokenId, position, logitsOut);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return TryFullModelDecodeCore(null, tokenId, position, logitsOut);
+        }
 
         // One-time stderr note for why the fused whole-model decode graph is not
         // used (the per-op fallback is silent otherwise, and the two paths differ
@@ -1935,6 +1946,7 @@ namespace TensorSharp.Models
         /// through here first.</summary>
         internal unsafe void DrainDeviceRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!_fvDeviceStateCurrent)
                 return;
             if (!PrepareRecurrentStatePointers())
@@ -1962,6 +1974,7 @@ namespace TensorSharp.Models
         internal unsafe bool TryFullModelVerify(Tensor hidden, int startPos, int seqLen, float[] normedOut, float[] logitsOut, int nLogitRows = -1, int rowOffset = 0,
             float[] captureData = null, int[] captureLayers = null, bool keepDeviceState = false)
         {
+            ThrowIfOwnershipCleanupFailed();
             // Run one whole-model prefill/verify graph on every GGML GPU backend.
             // CUDA and Vulkan use per-head set_rows KV writes. Metal uses contiguous
             // cpy views at a graph-baked offset, matching llama.cpp's linear KV-store
@@ -2545,6 +2558,7 @@ namespace TensorSharp.Models
         internal unsafe bool TryFusedMtpBlock(Tensor x, int startPos, int seqLen,
             float[] normedOut, float[] logitsOut, int nLogitRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             int cachePos = MtpCachePosition(startPos);
             if (!_mtpFusedDraftEnabled)
                 return false;

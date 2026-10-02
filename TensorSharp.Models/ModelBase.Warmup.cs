@@ -39,6 +39,7 @@ namespace TensorSharp.Models
         /// </summary>
         public virtual void WarmUpKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_backend == BackendType.Mlx && !IsMlxKernelWarmupEnabled())
             {
                 long nativeBytes = MlxNativePreloadableQuantizedBytes();
@@ -249,6 +250,7 @@ namespace TensorSharp.Models
 
         public virtual void WarmUpMultimodalKernels()
         {
+            ThrowIfOwnershipCleanupFailed();
         }
 
         /// <summary>

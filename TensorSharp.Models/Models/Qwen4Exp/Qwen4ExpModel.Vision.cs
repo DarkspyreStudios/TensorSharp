@@ -47,6 +47,7 @@ namespace TensorSharp.Models
 
         public void LoadVisionEncoder(string mmProjPath)
         {
+            ThrowIfOwnershipCleanupFailed();
             VisionEncoder = new Qwen35VisionEncoder(mmProjPath, _allocator);
             VisionEncoder.SetHostModel(this);
         }
@@ -55,6 +56,7 @@ namespace TensorSharp.Models
 
         public void SetVisionEmbeddings(Tensor visionEmbeddings, int startPosition)
         {
+            ThrowIfOwnershipCleanupFailed();
             _visionEmbeddingsList.Add((visionEmbeddings, startPosition));
         }
 
@@ -110,6 +112,7 @@ namespace TensorSharp.Models
 
         public void SetMRoPEPositions(int[] flatThw)
         {
+            ThrowIfOwnershipCleanupFailed();
             _pendingMRoPEPositions = flatThw;
         }
 

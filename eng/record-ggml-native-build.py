@@ -16,11 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("ggml_packer", ROOT / "eng/pack-ggml-natives.py")
 pack = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pack)
-CUDA_ARCHITECTURES = "75-real;80-real;86-real;89-real;120-real;120-virtual"
+CUDA_ARCHITECTURES = pack.CUDA_ARCHITECTURES
 INPUTS = ["TensorSharp.GGML.Native", "TensorSharp.Backends.GGML", "eng/GgmlNativeIdentity.cmake",
           "eng/GgmlNativeIdentity.targets", "eng/build-ggml-natives.sh", "eng/record-ggml-native-build.py",
           "eng/pack-ggml-natives.py", "eng/native-artifact-manifest.py", "eng/guard-ggml-interop",
-          "eng/ggml-required-exports.json", "eng/ggml-revision", "Directory.Build.props", "LICENSE"]
+          "eng/ggml-required-exports.json", "eng/relink-ggml-native-identity.py", "eng/ggml-revision", "Directory.Build.props", "LICENSE"]
 
 
 def command(arguments):
@@ -28,15 +28,7 @@ def command(arguments):
 
 
 def read_cache(path):
-    settings = {}
-    for line in pack.read_build_file(path).splitlines():
-        if not line or line.startswith(("#", "//")):
-            continue
-        match = re.fullmatch(r"([^:=]+):([A-Z]+)=(.*)", line)
-        if not match or match[1] in settings:
-            raise ValueError("malformed or duplicate CMake cache entry: " + line)
-        settings[match[1]] = match[3]
-    return settings
+    return pack.read_cmake_cache(pack.read_build_file(path))
 
 
 def verify_clean_source(root, source):
@@ -135,25 +127,7 @@ def create_record(root, build_dir, binary, rid, variant, source, redist_dir=None
                 "rid": rid, "variant": variant, "abi": abi}
     if not identity or any(identity.get(key) != value for key, value in expected.items()):
         raise ValueError("the binary build identity differs from the release source, ABI or target")
-    for key, value in (("TENSORSHARP_NATIVE_ABI", abi), ("TENSORSHARP_NATIVE_RID", rid),
-                       ("TENSORSHARP_NATIVE_VARIANT", variant), ("TENSORSHARP_GGML_NATIVE_PORTABLE", "ON"),
-                       ("GGML_NATIVE", "OFF")):
-        if settings.get(key) != value:
-            raise ValueError("the CMake cache differs from the release profile: " + key)
-    profiles = {"osx-arm64": "apple-m1", "linux-x64": "x86-64", "win-x64": "x86-64",
-                "linux-arm64": "armv8.2-a+dotprod", "win-arm64": "armv8.2-a+dotprod"}
-    if identity.get("cpu") != profiles[rid]:
-        raise ValueError("the binary CPU profile differs from the portable release floor")
-    for backend in ("metal", "cuda13", "vulkan"):
-        flag = "GGML_" + ("CUDA" if backend == "cuda13" else backend.upper())
-        if settings.get(flag) != ("ON" if variant == backend else "OFF"):
-            raise ValueError("the CMake backend differs from the declared variant: " + flag)
-    if rid.startswith("linux-"):
-        if settings.get("CMAKE_INSTALL_RPATH") != "$ORIGIN" or settings.get("CMAKE_BUILD_WITH_INSTALL_RPATH") != "ON":
-            raise ValueError("Linux release libraries require the selected directory's $ORIGIN runpath")
-    deployment = settings.get("CMAKE_OSX_DEPLOYMENT_TARGET") if rid.startswith("osx-") else None
-    if rid.startswith("osx-") and (not deployment or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,2}", deployment)):
-        raise ValueError("macOS release libraries require an explicit deployment target")
+    deployment = pack.validate_release_profile(settings, identity)
     facts = pack.INVENTORY.describe(binary.name, rid, variant, binary)
     os_part, arch = rid.split("-")
     if (facts.get("format") != pack.INVENTORY.RID_FORMAT[os_part]
@@ -172,21 +146,31 @@ def create_record(root, build_dir, binary, rid, variant, source, redist_dir=None
               "cmakeConfiguration": settings,
               "qualification": {"targetExecution": "not-recorded", "gpuExecution": "not-recorded"}}
     if variant == "cuda13":
-        if settings.get("CMAKE_CUDA_ARCHITECTURES") != CUDA_ARCHITECTURES:
-            raise ValueError("the full release CUDA SASS/PTX profile is required")
         compiler = settings.get("CMAKE_CUDA_COMPILER")
-        if not compiler:
-            raise ValueError("the CMake cache has no CUDA compiler")
         compiler_version = command([compiler, "--version"])
-        match = re.search(r"\brelease ([0-9]+)\.([0-9]+)\b", compiler_version)
-        if not match or match[1] != "13":
-            raise ValueError("the cuda13 variant requires an observed CUDA 13 compiler")
-        record["cuda"] = {"compiler": compiler, "compilerVersion": compiler_version,
-                          "toolkitVersion": match[1] + "." + match[2],
-                          "architectures": CUDA_ARCHITECTURES.split(";")}
+        record["cuda"] = pack.cuda_profile_evidence(settings, compiler_version)
+    pack.validate_recorded_profile(record, identity, settings, pack.sha256_bytes(binary.read_bytes()))
     record["components"] = stage_components(root, binary, record, redist_dir, redist_manifest)
     verify_clean_source(root, source)
     return record
+
+
+def write_build_record(out, record, cache_path):
+    # Preserve the observed bytes as evidence, never as a future CMake input.
+    snapshot = pack.observed_cache_bytes(cache_path, record)
+    settings = record["cmakeConfiguration"]
+    normalized = "".join(f"{key}={settings[key]}\n" for key in sorted(settings))
+    if pack.read_cmake_settings(normalized) != settings:
+        raise ValueError("the observed cache cannot be represented by normalized CMake settings")
+    pack.require_unlinked(out.absolute())
+    out.mkdir(parents=True, exist_ok=True)
+    for name in ("build-identity.json", "cmake-settings.txt", pack.CMAKE_CACHE_SNAPSHOT):
+        pack.require_unlinked(out / name)
+        if (out / name).exists() and not (out / name).is_file():
+            raise ValueError("build record output must be an ordinary file: " + name)
+    (out / pack.CMAKE_CACHE_SNAPSHOT).write_bytes(snapshot)
+    (out / "cmake-settings.txt").write_text(normalized, encoding="utf-8")
+    (out / "build-identity.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main():
@@ -204,13 +188,7 @@ def main():
     try:
         record = create_record(ROOT, args.build_dir, args.binary, args.rid, args.variant, args.source_commit,
                                args.redist_dir, args.redist_manifest)
-        pack.require_unlinked(args.out.absolute())
-        args.out.mkdir(parents=True, exist_ok=True)
-        for name in ("build-identity.json", "cmake-settings.txt"):
-            pack.require_unlinked(args.out / name)
-        (args.out / "build-identity.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        settings = record["cmakeConfiguration"]
-        (args.out / "cmake-settings.txt").write_text("".join(f"{key}={settings[key]}\n" for key in sorted(settings)), encoding="utf-8")
+        write_build_record(args.out, record, args.build_dir / "CMakeCache.txt")
         print("Recorded verified build identity; target/GPU execution is not asserted: " + str(args.out))
         return 0
     except (OSError, ValueError, UnicodeError, subprocess.SubprocessError, ET.ParseError) as error:

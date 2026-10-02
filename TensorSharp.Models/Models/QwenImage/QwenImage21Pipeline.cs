@@ -19,6 +19,7 @@ namespace TensorSharp.Models.QwenImage
 
         public RgbImage Run(string prompt, RgbImage[] inputs, QwenImageParams p)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(prompt);
             ArgumentNullException.ThrowIfNull(inputs);
             ArgumentNullException.ThrowIfNull(p);
@@ -248,6 +249,7 @@ namespace TensorSharp.Models.QwenImage
 
         public void Dispose()
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             _dit?.Dispose();
             _vae?.Dispose();
         }

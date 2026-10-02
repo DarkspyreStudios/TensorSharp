@@ -45,6 +45,7 @@ namespace TensorSharp.Models
 
         public IReadOnlyList<float[]> ForwardBatch(BatchedForwardContext ctx)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (ctx == null) throw new ArgumentNullException(nameof(ctx));
 
             int numSeqs = ctx.Sequences.Count;

@@ -187,6 +187,7 @@ namespace TensorSharp.Models
 
         public void LoadProjectors(string mmProjPath)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             if (string.IsNullOrWhiteSpace(mmProjPath))
                 return;
 
@@ -210,6 +211,7 @@ namespace TensorSharp.Models
 
         public List<int> ProcessPromptTokens(List<ChatMessage> history, List<int> inputTokens, string requestId = null)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             string key = NormalizeRequestId(requestId);
             var previous = _preparation.Value;
             var current = new PreparationContext(key,
@@ -291,6 +293,7 @@ namespace TensorSharp.Models
 
         public void TrimPreparedPrompt(int trimStartTokenCount, string requestId = null)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             string key = NormalizeRequestId(requestId);
             TrimPreparedPrompt(GetOrCreateBucket(_visionByRequest, key), trimStartTokenCount);
             TrimPreparedPrompt(GetOrCreateBucket(_audioByRequest, key), trimStartTokenCount);
@@ -298,6 +301,7 @@ namespace TensorSharp.Models
 
         public bool QueuePromptEmbeddings(int reusablePrefixTokenCount, string requestId = null)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             string key = NormalizeRequestId(requestId);
             var visionBucket = GetOrCreateBucket(_visionByRequest, key);
             var audioBucket = GetOrCreateBucket(_audioByRequest, key);
@@ -317,6 +321,7 @@ namespace TensorSharp.Models
         public bool QueuePromptEmbeddings(int reusablePrefixTokenCount, string requestId,
             Action<Tensor, int> sink)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             ArgumentNullException.ThrowIfNull(sink);
             string key = NormalizeRequestId(requestId);
             var visionBucket = GetOrCreateBucket(_visionByRequest, key);
@@ -334,6 +339,7 @@ namespace TensorSharp.Models
 
         public bool QueuePromptEmbeddingsForSlice(int promptStartToken, int tokenCount, string requestId = null)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             if (tokenCount <= 0)
                 return false;
             if (promptStartToken < 0)
@@ -366,6 +372,7 @@ namespace TensorSharp.Models
         /// must equal 3 * promptTokenCount. Pass null to clear.</summary>
         internal void SetMRoPEPositions(string requestId, int[] flatThw)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             string key = NormalizeRequestId(requestId);
             lock (_bucketLock)
             {
@@ -433,6 +440,7 @@ namespace TensorSharp.Models
 
         public void ClearPreparedPromptState(string requestId)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             string key = NormalizeRequestId(requestId);
             lock (_bucketLock)
             {
@@ -452,7 +460,10 @@ namespace TensorSharp.Models
         }
 
         internal List<int> ProcessGemma4History(Gemma4Model model, List<ChatMessage> history, List<int> inputTokens)
-            => ProcessGemma4MediaHistory(model.VisionEncoder, model.AudioEncoder, history, inputTokens);
+        {
+            _model.ThrowIfOwnershipCleanupFailed();
+            return ProcessGemma4MediaHistory(model.VisionEncoder, model.AudioEncoder, history, inputTokens);
+        }
 
         /// <summary>
         /// The image half of <see cref="ProcessGemma4History"/> for a Gemma-4-family
@@ -471,7 +482,10 @@ namespace TensorSharp.Models
         /// </summary>
         internal List<int> ProcessGemma4VisionHistory(
             Gemma4VisionEncoder visionEncoder, List<ChatMessage> history, List<int> inputTokens)
-            => ProcessGemma4MediaHistory(visionEncoder, audioEncoder: null, history, inputTokens);
+        {
+            _model.ThrowIfOwnershipCleanupFailed();
+            return ProcessGemma4MediaHistory(visionEncoder, audioEncoder: null, history, inputTokens);
+        }
 
         private List<int> ProcessGemma4MediaHistory(
             Gemma4VisionEncoder visionEncoder,
@@ -568,6 +582,7 @@ namespace TensorSharp.Models
         /// </summary>
         internal List<int> ProcessMuseGlimmerHistory(MuseGlimmerModel model, List<ChatMessage> history, List<int> inputTokens)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             if (model.VisionEncoder == null)
                 return inputTokens;
 
@@ -618,7 +633,10 @@ namespace TensorSharp.Models
         }
 
         internal List<int> ProcessQwen35History(Qwen35Model model, List<ChatMessage> history, List<int> inputTokens)
-            => ProcessQwenVLHistory(model.VisionEncoder, history, inputTokens);
+        {
+            _model.ThrowIfOwnershipCleanupFailed();
+            return ProcessQwenVLHistory(model.VisionEncoder, history, inputTokens);
+        }
 
         /// <summary>
         /// Shared Qwen-VL-family prompt processing: Qwen3.5-VL and Qwen3.8-Flash-Next
@@ -636,6 +654,7 @@ namespace TensorSharp.Models
         /// </summary>
         internal List<int> ProcessQwenVLHistory(Qwen35VisionEncoder encoder, List<ChatMessage> history, List<int> inputTokens)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             var layouts = new List<(ChatMessage Message, List<QwenVideoFrames.Item> Items)>();
             bool anyVideo = false;
             if (history != null)
@@ -845,6 +864,7 @@ namespace TensorSharp.Models
 
         internal List<int> ProcessMistral3History(Mistral3Model model, List<ChatMessage> history, List<int> inputTokens)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             if (model.VisionEncoder == null)
                 return inputTokens;
 
@@ -899,6 +919,7 @@ namespace TensorSharp.Models
 
         internal List<int> ProcessNemotronHistory(NemotronModel model, List<ChatMessage> history, List<int> inputTokens)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             if (!history.Exists(message => message.ImagePaths?.Count > 0 || message.AudioPaths?.Count > 0))
                 return inputTokens;
             // Audio without a loaded tower is a refusal, not a warning: a request
@@ -1136,6 +1157,7 @@ namespace TensorSharp.Models
         /// </summary>
         internal List<int> ProcessGlmNextHistory(GlmDsaModel model, List<ChatMessage> history, List<int> inputTokens)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             var encoder = model.VisionEncoder;
             if (encoder == null)
                 return inputTokens;
@@ -1175,6 +1197,7 @@ namespace TensorSharp.Models
 
         internal List<int> ProcessDeepSeek41History(DeepSeek41Model model, List<ChatMessage> history, List<int> inputTokens)
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             var imagePaths = GetImagePathsInPromptOrder(history);
             if (imagePaths.Count == 0)
                 return inputTokens;
@@ -1678,6 +1701,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _model.ThrowIfOwnershipCleanupFailed();
             ClearAllPreparedPromptState();
 
             _embeddingCacheBytes = 0;

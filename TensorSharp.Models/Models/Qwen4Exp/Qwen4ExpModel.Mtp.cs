@@ -40,6 +40,7 @@ namespace TensorSharp.Models
 
         public void LoadMtpDraftWeights(string path)
         {
+            ThrowIfOwnershipCleanupFailed();
             ArgumentException.ThrowIfNullOrWhiteSpace(path);
             path = Path.GetFullPath(path);
             if (_mtpFile != null)
@@ -281,11 +282,20 @@ namespace TensorSharp.Models
         }
 
         public void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
-            => RunMtp(new[] { token }, hPrev, pos, logitsOut, hOut);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            RunMtp(new[] { token }, hPrev, pos, logitsOut, hOut);
+        }
         public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
-            => RunMtp(tokens, hRows, startPos, null, null);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            RunMtp(tokens, hRows, startPos, null, null);
+        }
         public void DraftCatchUpAndStep(int[] tokens, float[] hRows, int startPos, float[] logitsOut, float[] hOut)
-            => RunMtp(tokens, hRows, startPos, logitsOut, hOut);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            RunMtp(tokens, hRows, startPos, logitsOut, hOut);
+        }
 
         private unsafe void InitializeMtpCache(Tensor tensor)
         {

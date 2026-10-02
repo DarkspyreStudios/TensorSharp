@@ -136,13 +136,19 @@ namespace TensorSharp.Models
 
         /// <summary>One whole-block draft. See <c>ModelBase.DFlashPropose</c>.</summary>
         public int DraftBlock(int lastToken, float[] hPrev, int position, int[] draftOut, float[] confOut)
-            => DFlashPropose(lastToken, hPrev, position, draftOut, confOut);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return DFlashPropose(lastToken, hPrev, position, draftOut, confOut);
+        }
 
         /// <summary>Replay committed trunk tokens through the drafter so its KV
         /// ring tracks exact trunk hidden states (llama.cpp's draft-mtp
         /// process() for block drafters).</summary>
         public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
-            => DFlashCommit(tokens, hRows, startPos);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            DFlashCommit(tokens, hRows, startPos);
+        }
 
         // ====================================================================
         // ISpeculativeTarget
@@ -187,6 +193,7 @@ namespace TensorSharp.Models
 
         public void SpecEnsureCapacity(int requiredSeqLen)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (IsTensorParallel)
                 EnsureNemotronTpCacheCapacity(requiredSeqLen);
             else
@@ -205,6 +212,7 @@ namespace TensorSharp.Models
         /// </summary>
         public unsafe void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             // Latch that the speculative trunk is in use. The Mamba2 native decode
             // kernel keeps conv/SSM state device-side, which a verify batch cannot see
             // (seqLen > 1, so it runs off the HOST arrays) - and speculation can be
@@ -396,6 +404,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecSnapshotRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!HasMamba2Layers)
                 return;
             int numLayers = Config.NumLayers;
@@ -424,6 +433,7 @@ namespace TensorSharp.Models
         /// from the restored host arrays (same discipline as ResetStateForNewSession).</summary>
         public void SpecRestoreRecurrentState()
         {
+            ThrowIfOwnershipCleanupFailed();
             if (_specConvSnap == null || _specSsmSnap == null)
                 return;
             for (int l = 0; l < Config.NumLayers; l++)
@@ -449,6 +459,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (length < 0 || length > _cacheSeqLen)
             {
                 throw new ArgumentOutOfRangeException(nameof(length),

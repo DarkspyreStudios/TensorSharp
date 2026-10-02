@@ -266,6 +266,7 @@ namespace TensorSharp.Models
 
         public unsafe Tensor Encode(float[] pixelValues, int imgWidth, int imgHeight)
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             if (_isUnified)
                 return EncodeUnified(pixelValues, imgWidth, imgHeight);
 
@@ -1078,6 +1079,7 @@ namespace TensorSharp.Models
 
         public void Dispose()
         {
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
             // The fused block binds each weight ZERO-COPY on unified-memory Metal: GGML
             // keeps an MTLBuffer that wraps these exact host pages, cached by host pointer.
             // Freeing the pages without dropping that wrapper leaves a live GPU mapping of
@@ -1120,4 +1122,3 @@ namespace TensorSharp.Models
         }
     }
 }
-

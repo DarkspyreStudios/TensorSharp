@@ -100,20 +100,30 @@ namespace TensorSharp.Models
         public bool SpecVerifyPersistsAcceptedKv => true;
 
         public int DraftBlock(int lastToken, float[] hPrev, int position, int[] draftOut, float[] confOut)
-            => DFlashPropose(lastToken, hPrev, position, draftOut, confOut);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            return DFlashPropose(lastToken, hPrev, position, draftOut, confOut);
+        }
 
         public void DraftCatchUp(int[] tokens, float[] hRows, int startPos)
-            => DFlashCommit(tokens, hRows, startPos);
+        {
+            ThrowIfOwnershipCleanupFailed();
+            DFlashCommit(tokens, hRows, startPos);
+        }
 
         /// <summary>DFlash drafts whole blocks; the per-token entry point is never
         /// used.</summary>
         public void DraftStep(int token, float[] hPrev, int pos, float[] logitsOut, float[] hOut)
-            => throw new NotSupportedException("Muse-Glimmer DFlash drafts whole blocks; use DraftBlock.");
+        {
+            ThrowIfOwnershipCleanupFailed();
+            throw new NotSupportedException("Muse-Glimmer DFlash drafts whole blocks; use DraftBlock.");
+        }
 
         /// <summary>Pre-grows the trunk KV cache to cover the whole speculative
         /// window. The drafter's ring is fixed-size and needs nothing.</summary>
         public void SpecEnsureCapacity(int requiredSeqLen)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!HasDFlash)
                 return;
             EnsureCacheCapacity(requiredSeqLen);
@@ -121,10 +131,16 @@ namespace TensorSharp.Models
 
         /// <summary>No recurrent (GDN/SSM) state in Muse-Glimmer -- drafting and
         /// verifying are stateless given the KV cache.</summary>
-        public void SpecSnapshotRecurrentState() { }
+        public void SpecSnapshotRecurrentState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>See <see cref="SpecSnapshotRecurrentState"/>.</summary>
-        public void SpecRestoreRecurrentState() { }
+        public void SpecRestoreRecurrentState()
+        {
+            ThrowIfOwnershipCleanupFailed();
+        }
 
         /// <summary>
         /// Rewinds the trunk KV position counter after rejected speculative tokens.
@@ -135,6 +151,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecRewindCache(int length)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (length < 0 || length > _cacheSeqLen)
             {
                 throw new ArgumentOutOfRangeException(nameof(length),
@@ -154,6 +171,7 @@ namespace TensorSharp.Models
         /// </summary>
         public void SpecForward(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            ThrowIfOwnershipCleanupFailed();
             if (!HasDFlash)
                 throw new InvalidOperationException("No DFlash drafter is loaded for this Muse-Glimmer model.");
             if (tokens == null || tokens.Length == 0)
