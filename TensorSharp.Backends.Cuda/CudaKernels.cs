@@ -15,6 +15,8 @@ namespace TensorSharp.Cuda
         private const int GdnBlockSize = 512;
 
         private readonly CudaModule module;
+        private readonly CudaNativeCalls nativeCalls;
+        private bool disposed;
         private readonly IntPtr copy2DBytes;
         private readonly IntPtr fillF32;
         private readonly IntPtr fillF16;
@@ -192,163 +194,176 @@ namespace TensorSharp.Cuda
         private CudaKernels(CudaModule module)
         {
             this.module = module;
-            copy2DBytes = module.GetFunction("ts_copy2d_bytes");
-            fillF32 = module.GetFunction("ts_fill_f32");
-            fillF16 = module.GetFunction("ts_fill_f16");
-            unaryF32 = module.GetFunction("ts_unary_f32");
-            binaryF32 = module.GetFunction("ts_binary_f32");
-            binaryRowBcastF32 = module.GetFunction("ts_binary_row_bcast_f32");
-            scalarF32 = module.GetFunction("ts_scalar_f32");
-            ternaryF32 = module.GetFunction("ts_ternary_f32");
-            addMulScalarF32 = module.GetFunction("ts_addmul_scalar_f32");
-            mulMulAddF32 = module.GetFunction("ts_mulmuladd_f32");
-            binaryActivationF32 = module.GetFunction("ts_binary_activation_f32");
-            binaryActivationStridedF32 = module.GetFunction("ts_binary_activation_strided_f32");
-            deinterleaveQGateF32 = module.GetFunction("ts_deinterleave_qgate_f32");
-            addBiasRowsF32 = module.GetFunction("ts_add_bias_rows_f32");
-            siluMulSplitF32 = module.GetFunction("ts_silu_mul_split_f32");
-            geluMulSplitF32 = module.GetFunction("ts_gelu_mul_split_f32");
-            swigluOaiSplitF32 = module.GetFunction("ts_swiglu_oai_split_f32");
-            qwen35GdnPackedF32 = module.GetFunction("ts_qwen35_gdn_packed_f32");
-            qwen35GdnPrefillConvF32 = module.GetFunction("ts_qwen35_gdn_prefill_conv_f32");
-            qwen35GdnPrefillScanF32 = module.GetFunction("ts_qwen35_gdn_prefill_scan_f32");
-            qwen35GdnPrefillOutF32 = module.GetFunction("ts_qwen35_gdn_prefill_out_f32");
-            qwen35GdnUpdateConvStateF32 = module.GetFunction("ts_qwen35_gdn_update_conv_state_f32");
-            qwen35GdnPackInputsF32 = module.GetFunction("ts_qwen35_gdn_pack_inputs_f32");
-            layerNormF32 = module.GetFunction("ts_layernorm_f32");
-            rmsNormF32 = module.GetFunction("ts_rmsnorm_f32");
-            rmsNormResidualAddF32 = module.GetFunction("ts_rmsnorm_residual_add_f32");
-            softmaxF32 = module.GetFunction("ts_softmax_f32");
-            attentionSoftmaxSinksF32 = module.GetFunction("ts_attention_softmax_sinks_f32");
-            scaledDotProductAttentionF32 = module.GetFunction("ts_scaled_dot_product_attention_f32");
-            // Optional: a PTX built before these kernels existed simply leaves the
-            // table empty and vision attention keeps the generic SDPA kernel.
-            var missingOptional = new System.Collections.Generic.List<string>();
-            foreach (int headDim in new[] { 64, 72, 80, 88, 96, 112, 128 })
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.Graph, module.Context.Api, module.Context.DeviceId);
+            using var lease = nativeCalls.EnterEffect();
+            try
             {
-                try { visionAttentionF32[headDim] = module.GetFunction($"ts_vision_attention_d{headDim}_f32"); }
-                catch { missingOptional.Add($"ts_vision_attention_d{headDim}_f32"); }
+                copy2DBytes = module.GetFunction("ts_copy2d_bytes");
+                fillF32 = module.GetFunction("ts_fill_f32");
+                fillF16 = module.GetFunction("ts_fill_f16");
+                unaryF32 = module.GetFunction("ts_unary_f32");
+                binaryF32 = module.GetFunction("ts_binary_f32");
+                binaryRowBcastF32 = module.GetFunction("ts_binary_row_bcast_f32");
+                scalarF32 = module.GetFunction("ts_scalar_f32");
+                ternaryF32 = module.GetFunction("ts_ternary_f32");
+                addMulScalarF32 = module.GetFunction("ts_addmul_scalar_f32");
+                mulMulAddF32 = module.GetFunction("ts_mulmuladd_f32");
+                binaryActivationF32 = module.GetFunction("ts_binary_activation_f32");
+                binaryActivationStridedF32 = module.GetFunction("ts_binary_activation_strided_f32");
+                deinterleaveQGateF32 = module.GetFunction("ts_deinterleave_qgate_f32");
+                addBiasRowsF32 = module.GetFunction("ts_add_bias_rows_f32");
+                siluMulSplitF32 = module.GetFunction("ts_silu_mul_split_f32");
+                geluMulSplitF32 = module.GetFunction("ts_gelu_mul_split_f32");
+                swigluOaiSplitF32 = module.GetFunction("ts_swiglu_oai_split_f32");
+                qwen35GdnPackedF32 = module.GetFunction("ts_qwen35_gdn_packed_f32");
+                qwen35GdnPrefillConvF32 = module.GetFunction("ts_qwen35_gdn_prefill_conv_f32");
+                qwen35GdnPrefillScanF32 = module.GetFunction("ts_qwen35_gdn_prefill_scan_f32");
+                qwen35GdnPrefillOutF32 = module.GetFunction("ts_qwen35_gdn_prefill_out_f32");
+                qwen35GdnUpdateConvStateF32 = module.GetFunction("ts_qwen35_gdn_update_conv_state_f32");
+                qwen35GdnPackInputsF32 = module.GetFunction("ts_qwen35_gdn_pack_inputs_f32");
+                layerNormF32 = module.GetFunction("ts_layernorm_f32");
+                rmsNormF32 = module.GetFunction("ts_rmsnorm_f32");
+                rmsNormResidualAddF32 = module.GetFunction("ts_rmsnorm_residual_add_f32");
+                softmaxF32 = module.GetFunction("ts_softmax_f32");
+                attentionSoftmaxSinksF32 = module.GetFunction("ts_attention_softmax_sinks_f32");
+                scaledDotProductAttentionF32 = module.GetFunction("ts_scaled_dot_product_attention_f32");
+                // Optional: a PTX built before these kernels existed simply leaves the
+                // table empty and vision attention keeps the generic SDPA kernel.
+                var missingOptional = new System.Collections.Generic.List<string>();
+                foreach (int headDim in new[] { 64, 72, 80, 88, 96, 112, 128 })
+                {
+                    try { visionAttentionF32[headDim] = module.GetFunction($"ts_vision_attention_d{headDim}_f32"); }
+                    catch { missingOptional.Add($"ts_vision_attention_d{headDim}_f32"); }
+                }
+                foreach (int headDim in new[] { 64, 128 })
+                {
+                    try { wanAttentionF32[headDim] = module.GetFunction($"ts_wan_attention_d{headDim}_f32"); }
+                    catch { missingOptional.Add($"ts_wan_attention_d{headDim}_f32"); }
+                }
+                wanRopeF32 = GetOptionalFunction(module, "ts_wan_rope_f32", missingOptional);
+                wanModulateF32 = GetOptionalFunction(module, "ts_wan_modulate_f32", missingOptional);
+                wanGateAddF32 = GetOptionalFunction(module, "ts_wan_gate_add_f32", missingOptional);
+                wanScaleColsF32 = GetOptionalFunction(module, "ts_wan_scale_cols_f32", missingOptional);
+                wanIm2colF32 = GetOptionalFunction(module, "ts_wan_im2col_f32", missingOptional);
+                wanChanRmsF32 = GetOptionalFunction(module, "ts_wan_chan_rms_f32", missingOptional);
+                wanUpsample2xF32 = GetOptionalFunction(module, "ts_wan_upsample2x_f32", missingOptional);
+                WarnOptionalKernelsMissing(missingOptional);
+                gqaPrefillAttentionF32 = module.GetFunction("ts_gqa_prefill_attention_f32");
+                gqaPrefillAttentionF16 = module.GetFunction("ts_gqa_prefill_attention_f16");
+                gqaPrefillAttentionGroup4D256F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f32");
+                gqaPrefillAttentionGroup4D256F16 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f16");
+                gqaPrefillAttentionGroup4D512F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d512_f32");
+                gqaPrefillAttentionGroup4D512F16 = module.GetFunction("ts_gqa_prefill_attention_group4_d512_f16");
+                gqaPrefillAttentionGroup4OnlineD512F32 =
+                    module.GetFunction("ts_gqa_prefill_attention_group4_online_d512_f32");
+                gqaPrefillAttentionGroup4OnlineD512F16 =
+                    module.GetFunction("ts_gqa_prefill_attention_group4_online_d512_f16");
+                gqaPrefillFlashGroup4D256F16 =
+                    module.GetFunction("ts_gqa_prefill_flash_group4_d256_f16");
+                gqaPrefillFlashGroup4D512F16 =
+                    module.GetFunction("ts_gqa_prefill_flash_group4_d512_f16");
+                gqaPrefillFlashGroup4D256F32 =
+                    module.GetFunction("ts_gqa_prefill_flash_group4_d256_f32");
+                gqaPrefillFlashGroup4D512F32 =
+                    module.GetFunction("ts_gqa_prefill_flash_group4_d512_f32");
+                gqaPrefillFlash2Group4D256F16 =
+                    module.GetFunction("ts_gqa_prefill_flash2_group4_d256_f16");
+                gqaPrefillFlash2Group4D512F16 =
+                    module.GetFunction("ts_gqa_prefill_flash2_group4_d512_f16");
+                gqaPrefillFlash2Group4D256F32 =
+                    module.GetFunction("ts_gqa_prefill_flash2_group4_d256_f32");
+                gqaPrefillFlash2Group4D512F32 =
+                    module.GetFunction("ts_gqa_prefill_flash2_group4_d512_f32");
+                gqaPrefillAttentionSinksF32 = module.GetFunction("ts_gqa_prefill_attention_sinks_f32");
+                gqaPrefillAttentionSinksF16 = module.GetFunction("ts_gqa_prefill_attention_sinks_f16");
+                gqaDecodeAttentionF32 = module.GetFunction("ts_gqa_decode_attention_f32");
+                gqaDecodeAttentionF16 = module.GetFunction("ts_gqa_decode_attention_f16");
+                gqaDecodeAttentionGroup4D256F16 = module.GetFunction("ts_gqa_decode_attention_group4_d256_f16");
+                gqaDecodeAttentionGroup4D512F16 = module.GetFunction("ts_gqa_decode_attention_group4_d512_f16");
+                gqaDecodeAttentionPartitionGroup4D256F16 = module.GetFunction("ts_gqa_decode_attention_partition_group4_d256_f16");
+                gqaDecodeAttentionSinksF32 = module.GetFunction("ts_gqa_decode_attention_sinks_f32");
+                gqaDecodeAttentionSinksF16 = module.GetFunction("ts_gqa_decode_attention_sinks_f16");
+                gqaDecodeAttentionPartitionF32 = module.GetFunction("ts_gqa_decode_attention_partition_f32");
+                gqaDecodeAttentionPartitionF16 = module.GetFunction("ts_gqa_decode_attention_partition_f16");
+                gqaDecodeAttentionPartitionGroup4D512F16 =
+                    module.GetFunction("ts_gqa_decode_attention_partition_group4_d512_f16");
+                gqaDecodeAttentionPartitionReduceF32 = module.GetFunction("ts_gqa_decode_attention_partition_reduce_f32");
+                sliceColumnsF32 = module.GetFunction("ts_slice_columns_f32");
+                flatToHeadFirstF32 = module.GetFunction("ts_flat_to_head_first_f32");
+                splitQkvHeadFirstF32 = module.GetFunction("ts_split_qkv_head_first_f32");
+                copyHeadFirstToCacheF32 = module.GetFunction("ts_copy_head_first_to_cache_f32");
+                copyHeadFirstToCacheF16 = module.GetFunction("ts_copy_head_first_to_cache_f16");
+                fillRopePositionsI32 = module.GetFunction("ts_fill_rope_positions_i32");
+                gatherCircularHeadFirstF32 = module.GetFunction("ts_gather_circular_head_first_f32");
+                gatherCircularHeadFirstF16 = module.GetFunction("ts_gather_circular_head_first_f16");
+                expandKvHeadsF32 = module.GetFunction("ts_expand_kv_heads_f32");
+                expandKvHeadsF16 = module.GetFunction("ts_expand_kv_heads_f16");
+                repeatInterleaveF32 = module.GetFunction("ts_repeat_interleave_f32");
+                repeatInterleaveF16 = module.GetFunction("ts_repeat_interleave_f16");
+                concatHeadFirstF32 = module.GetFunction("ts_concat_head_first_f32");
+                neoxRopeHeadFirstF32 = module.GetFunction("ts_neox_rope_head_first_f32");
+                neoxRopeFlatF32 = module.GetFunction("ts_neox_rope_flat_f32");
+                fillNeoXRopeTablesDynamicF32 = module.GetFunction("ts_fill_neox_rope_tables_dyn_f32");
+                indexSelectF32 = module.GetFunction("ts_index_select_f32");
+                addCausalMaskF32 = module.GetFunction("ts_add_causal_mask_f32");
+                ropeF32 = module.GetFunction("ts_rope_f32");
+                ropeExF32 = module.GetFunction("ts_rope_ex_f32");
+                quantMatmulF32 = module.GetFunction("ts_quant_matmul_f32");
+                quantMatmulBatchedF32 = module.GetFunction("ts_quant_matmul_batched_f32");
+                quantMatmulVecF32 = module.GetFunction("ts_quant_matmul_vec_f32");
+                moeRouterF32 = module.GetFunction("ts_moe_router_f32");
+                moeExpertGateUpVecF32 = module.GetFunction("ts_moe_expert_gate_up_vec_f32");
+                moeExpertDownAccumF32 = module.GetFunction("ts_moe_expert_down_accum_f32");
+                moeExpertGateUpDp4aF32 = module.GetFunction("ts_moe_expert_gate_up_dp4a_f32");
+                moeExpertDownDp4aF32 = module.GetFunction("ts_moe_expert_down_dp4a_f32");
+                siluMulF32 = module.GetFunction("ts_silu_mul_f32");
+                siluMulClampF32 = module.GetFunction("ts_silu_mul_clamp_f32");
+                moeSharedGatedAddF32 = module.GetFunction("ts_moe_shared_gated_add");
+                moeRouterBatchedF32 = module.GetFunction("ts_moe_router_batched_f32");
+                moeExpertGateUpBatchedDp4aF32 = module.GetFunction("ts_moe_expert_gate_up_batched_dp4a_f32");
+                moeExpertGateUpBatchedVecF32 = module.GetFunction("ts_moe_expert_gate_up_batched_vec_f32");
+                moeExpertDownBatchedDp4aF32 = module.GetFunction("ts_moe_expert_down_batched_dp4a_f32");
+                moeExpertDownBatchedAccumF32 = module.GetFunction("ts_moe_expert_down_batched_accum_f32");
+                moeSharedGatedAddBatchedF32 = module.GetFunction("ts_moe_shared_gated_add_batched");
+                moeScatterAddWeightedRowsF32 = module.GetFunction("ts_moe_scatter_add_weighted_rows_f32");
+                quantMatmulIq2XxsQ81F32 = module.GetFunction("ts_quant_matmul_iq2_xxs_q8_1_f32");
+                quantMatmulIq2VecQ81F32 = module.GetFunction("ts_quant_matmul_iq2_vec_q8_1_f32");
+                quantMatmulQ40F32 = module.GetFunction("ts_quant_matmul_q4_0_f32");
+                quantMatmulQ40BatchedF32 = module.GetFunction("ts_quant_matmul_q4_0_batched_f32");
+                quantMatmulQ40Dp4aF32 = module.GetFunction("ts_quant_matmul_q4_0_dp4a_f32");
+                quantMatmulQ80SingleF32 = module.GetFunction("ts_quant_matmul_q8_0_single_f32");
+                quantMatmulQ80VecF32 = module.GetFunction("ts_quant_matmul_q8_0_vec_f32");
+                quantMatmulQ4KDp4aF32 = module.GetFunction("ts_quant_matmul_q4k_dp4a_f32");
+                quantMatmulQ5KDp4aF32 = module.GetFunction("ts_quant_matmul_q5k_dp4a_f32");
+                quantMatmulQ6KDp4aF32 = module.GetFunction("ts_quant_matmul_q6k_dp4a_f32");
+                quantMatmulQ80MmqF32 = module.GetFunction("ts_quant_matmul_q8_0_mmq_f32");
+                quantMatmulQ80Mmq2F32 = module.GetFunction("ts_quant_matmul_q8_0_mmq2_f32");
+                quantMatmulQ80F32 = module.GetFunction("ts_quant_matmul_q8_0_f32");
+                quantMatmulQ80Dp4aF32 = module.GetFunction("ts_quant_matmul_q8_0_dp4a_f32");
+                quantMatmulQ80MmaF32 = module.GetFunction("ts_quant_matmul_q8_0_mma_f32");
+                quantizeQ81RowsF32 = module.GetFunction("ts_quantize_q8_1_rows_f32");
+                quantizeQ81RowsWarpF32 = module.GetFunction("ts_quantize_q8_1_rows_warp_f32");
+                quantizeQ81SplitRowsF32 = module.GetFunction("ts_quantize_q8_1_split_rows_f32");
+                dequantWeightF16 = module.GetFunction("ts_dequant_weight_f16");
+                dequantWeightQ80F16 = module.GetFunction("ts_dequant_weight_q8_0_f16");
+                convertF32F16 = module.GetFunction("ts_convert_f32_f16");
+                convertF32Bf16 = module.GetFunction("ts_convert_f32_bf16");
+                matvecBf16F32 = module.GetFunction("ts_matvec_bf16_f32");
+                quantGetRowsF32 = module.GetFunction("ts_quant_get_rows_f32");
+                qkNormRopeNeoxF32 = module.GetFunction("ts_qk_norm_rope_neox_f32");
+                qwen35GdnFusedF32 = module.GetFunction("ts_qwen35_gdn_fused_f32");
             }
-            foreach (int headDim in new[] { 64, 128 })
+            catch (Exception original)
             {
-                try { wanAttentionF32[headDim] = module.GetFunction($"ts_wan_attention_d{headDim}_f32"); }
-                catch { missingOptional.Add($"ts_wan_attention_d{headDim}_f32"); }
+                try { nativeCalls.CompleteSafeRelease(lease); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
             }
-            wanRopeF32 = GetOptionalFunction(module, "ts_wan_rope_f32", missingOptional);
-            wanModulateF32 = GetOptionalFunction(module, "ts_wan_modulate_f32", missingOptional);
-            wanGateAddF32 = GetOptionalFunction(module, "ts_wan_gate_add_f32", missingOptional);
-            wanScaleColsF32 = GetOptionalFunction(module, "ts_wan_scale_cols_f32", missingOptional);
-            wanIm2colF32 = GetOptionalFunction(module, "ts_wan_im2col_f32", missingOptional);
-            wanChanRmsF32 = GetOptionalFunction(module, "ts_wan_chan_rms_f32", missingOptional);
-            wanUpsample2xF32 = GetOptionalFunction(module, "ts_wan_upsample2x_f32", missingOptional);
-            WarnOptionalKernelsMissing(missingOptional);
-            gqaPrefillAttentionF32 = module.GetFunction("ts_gqa_prefill_attention_f32");
-            gqaPrefillAttentionF16 = module.GetFunction("ts_gqa_prefill_attention_f16");
-            gqaPrefillAttentionGroup4D256F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f32");
-            gqaPrefillAttentionGroup4D256F16 = module.GetFunction("ts_gqa_prefill_attention_group4_d256_f16");
-            gqaPrefillAttentionGroup4D512F32 = module.GetFunction("ts_gqa_prefill_attention_group4_d512_f32");
-            gqaPrefillAttentionGroup4D512F16 = module.GetFunction("ts_gqa_prefill_attention_group4_d512_f16");
-            gqaPrefillAttentionGroup4OnlineD512F32 =
-                module.GetFunction("ts_gqa_prefill_attention_group4_online_d512_f32");
-            gqaPrefillAttentionGroup4OnlineD512F16 =
-                module.GetFunction("ts_gqa_prefill_attention_group4_online_d512_f16");
-            gqaPrefillFlashGroup4D256F16 =
-                module.GetFunction("ts_gqa_prefill_flash_group4_d256_f16");
-            gqaPrefillFlashGroup4D512F16 =
-                module.GetFunction("ts_gqa_prefill_flash_group4_d512_f16");
-            gqaPrefillFlashGroup4D256F32 =
-                module.GetFunction("ts_gqa_prefill_flash_group4_d256_f32");
-            gqaPrefillFlashGroup4D512F32 =
-                module.GetFunction("ts_gqa_prefill_flash_group4_d512_f32");
-            gqaPrefillFlash2Group4D256F16 =
-                module.GetFunction("ts_gqa_prefill_flash2_group4_d256_f16");
-            gqaPrefillFlash2Group4D512F16 =
-                module.GetFunction("ts_gqa_prefill_flash2_group4_d512_f16");
-            gqaPrefillFlash2Group4D256F32 =
-                module.GetFunction("ts_gqa_prefill_flash2_group4_d256_f32");
-            gqaPrefillFlash2Group4D512F32 =
-                module.GetFunction("ts_gqa_prefill_flash2_group4_d512_f32");
-            gqaPrefillAttentionSinksF32 = module.GetFunction("ts_gqa_prefill_attention_sinks_f32");
-            gqaPrefillAttentionSinksF16 = module.GetFunction("ts_gqa_prefill_attention_sinks_f16");
-            gqaDecodeAttentionF32 = module.GetFunction("ts_gqa_decode_attention_f32");
-            gqaDecodeAttentionF16 = module.GetFunction("ts_gqa_decode_attention_f16");
-            gqaDecodeAttentionGroup4D256F16 = module.GetFunction("ts_gqa_decode_attention_group4_d256_f16");
-            gqaDecodeAttentionGroup4D512F16 = module.GetFunction("ts_gqa_decode_attention_group4_d512_f16");
-            gqaDecodeAttentionPartitionGroup4D256F16 = module.GetFunction("ts_gqa_decode_attention_partition_group4_d256_f16");
-            gqaDecodeAttentionSinksF32 = module.GetFunction("ts_gqa_decode_attention_sinks_f32");
-            gqaDecodeAttentionSinksF16 = module.GetFunction("ts_gqa_decode_attention_sinks_f16");
-            gqaDecodeAttentionPartitionF32 = module.GetFunction("ts_gqa_decode_attention_partition_f32");
-            gqaDecodeAttentionPartitionF16 = module.GetFunction("ts_gqa_decode_attention_partition_f16");
-            gqaDecodeAttentionPartitionGroup4D512F16 =
-                module.GetFunction("ts_gqa_decode_attention_partition_group4_d512_f16");
-            gqaDecodeAttentionPartitionReduceF32 = module.GetFunction("ts_gqa_decode_attention_partition_reduce_f32");
-            sliceColumnsF32 = module.GetFunction("ts_slice_columns_f32");
-            flatToHeadFirstF32 = module.GetFunction("ts_flat_to_head_first_f32");
-            splitQkvHeadFirstF32 = module.GetFunction("ts_split_qkv_head_first_f32");
-            copyHeadFirstToCacheF32 = module.GetFunction("ts_copy_head_first_to_cache_f32");
-            copyHeadFirstToCacheF16 = module.GetFunction("ts_copy_head_first_to_cache_f16");
-            fillRopePositionsI32 = module.GetFunction("ts_fill_rope_positions_i32");
-            gatherCircularHeadFirstF32 = module.GetFunction("ts_gather_circular_head_first_f32");
-            gatherCircularHeadFirstF16 = module.GetFunction("ts_gather_circular_head_first_f16");
-            expandKvHeadsF32 = module.GetFunction("ts_expand_kv_heads_f32");
-            expandKvHeadsF16 = module.GetFunction("ts_expand_kv_heads_f16");
-            repeatInterleaveF32 = module.GetFunction("ts_repeat_interleave_f32");
-            repeatInterleaveF16 = module.GetFunction("ts_repeat_interleave_f16");
-            concatHeadFirstF32 = module.GetFunction("ts_concat_head_first_f32");
-            neoxRopeHeadFirstF32 = module.GetFunction("ts_neox_rope_head_first_f32");
-            neoxRopeFlatF32 = module.GetFunction("ts_neox_rope_flat_f32");
-            fillNeoXRopeTablesDynamicF32 = module.GetFunction("ts_fill_neox_rope_tables_dyn_f32");
-            indexSelectF32 = module.GetFunction("ts_index_select_f32");
-            addCausalMaskF32 = module.GetFunction("ts_add_causal_mask_f32");
-            ropeF32 = module.GetFunction("ts_rope_f32");
-            ropeExF32 = module.GetFunction("ts_rope_ex_f32");
-            quantMatmulF32 = module.GetFunction("ts_quant_matmul_f32");
-            quantMatmulBatchedF32 = module.GetFunction("ts_quant_matmul_batched_f32");
-            quantMatmulVecF32 = module.GetFunction("ts_quant_matmul_vec_f32");
-            moeRouterF32 = module.GetFunction("ts_moe_router_f32");
-            moeExpertGateUpVecF32 = module.GetFunction("ts_moe_expert_gate_up_vec_f32");
-            moeExpertDownAccumF32 = module.GetFunction("ts_moe_expert_down_accum_f32");
-            moeExpertGateUpDp4aF32 = module.GetFunction("ts_moe_expert_gate_up_dp4a_f32");
-            moeExpertDownDp4aF32 = module.GetFunction("ts_moe_expert_down_dp4a_f32");
-            siluMulF32 = module.GetFunction("ts_silu_mul_f32");
-            siluMulClampF32 = module.GetFunction("ts_silu_mul_clamp_f32");
-            moeSharedGatedAddF32 = module.GetFunction("ts_moe_shared_gated_add");
-            moeRouterBatchedF32 = module.GetFunction("ts_moe_router_batched_f32");
-            moeExpertGateUpBatchedDp4aF32 = module.GetFunction("ts_moe_expert_gate_up_batched_dp4a_f32");
-            moeExpertGateUpBatchedVecF32 = module.GetFunction("ts_moe_expert_gate_up_batched_vec_f32");
-            moeExpertDownBatchedDp4aF32 = module.GetFunction("ts_moe_expert_down_batched_dp4a_f32");
-            moeExpertDownBatchedAccumF32 = module.GetFunction("ts_moe_expert_down_batched_accum_f32");
-            moeSharedGatedAddBatchedF32 = module.GetFunction("ts_moe_shared_gated_add_batched");
-            moeScatterAddWeightedRowsF32 = module.GetFunction("ts_moe_scatter_add_weighted_rows_f32");
-            quantMatmulIq2XxsQ81F32 = module.GetFunction("ts_quant_matmul_iq2_xxs_q8_1_f32");
-            quantMatmulIq2VecQ81F32 = module.GetFunction("ts_quant_matmul_iq2_vec_q8_1_f32");
-            quantMatmulQ40F32 = module.GetFunction("ts_quant_matmul_q4_0_f32");
-            quantMatmulQ40BatchedF32 = module.GetFunction("ts_quant_matmul_q4_0_batched_f32");
-            quantMatmulQ40Dp4aF32 = module.GetFunction("ts_quant_matmul_q4_0_dp4a_f32");
-            quantMatmulQ80SingleF32 = module.GetFunction("ts_quant_matmul_q8_0_single_f32");
-            quantMatmulQ80VecF32 = module.GetFunction("ts_quant_matmul_q8_0_vec_f32");
-            quantMatmulQ4KDp4aF32 = module.GetFunction("ts_quant_matmul_q4k_dp4a_f32");
-            quantMatmulQ5KDp4aF32 = module.GetFunction("ts_quant_matmul_q5k_dp4a_f32");
-            quantMatmulQ6KDp4aF32 = module.GetFunction("ts_quant_matmul_q6k_dp4a_f32");
-            quantMatmulQ80MmqF32 = module.GetFunction("ts_quant_matmul_q8_0_mmq_f32");
-            quantMatmulQ80Mmq2F32 = module.GetFunction("ts_quant_matmul_q8_0_mmq2_f32");
-            quantMatmulQ80F32 = module.GetFunction("ts_quant_matmul_q8_0_f32");
-            quantMatmulQ80Dp4aF32 = module.GetFunction("ts_quant_matmul_q8_0_dp4a_f32");
-            quantMatmulQ80MmaF32 = module.GetFunction("ts_quant_matmul_q8_0_mma_f32");
-            quantizeQ81RowsF32 = module.GetFunction("ts_quantize_q8_1_rows_f32");
-            quantizeQ81RowsWarpF32 = module.GetFunction("ts_quantize_q8_1_rows_warp_f32");
-            quantizeQ81SplitRowsF32 = module.GetFunction("ts_quantize_q8_1_split_rows_f32");
-            dequantWeightF16 = module.GetFunction("ts_dequant_weight_f16");
-            dequantWeightQ80F16 = module.GetFunction("ts_dequant_weight_q8_0_f16");
-            convertF32F16 = module.GetFunction("ts_convert_f32_f16");
-            convertF32Bf16 = module.GetFunction("ts_convert_f32_bf16");
-            matvecBf16F32 = module.GetFunction("ts_matvec_bf16_f32");
-            quantGetRowsF32 = module.GetFunction("ts_quant_get_rows_f32");
-            qkNormRopeNeoxF32 = module.GetFunction("ts_qk_norm_rope_neox_f32");
-            qwen35GdnFusedF32 = module.GetFunction("ts_qwen35_gdn_fused_f32");
         }
 
-        public static CudaKernels TryCreate()
+        public static CudaKernels TryCreate() => TryCreate(null);
+
+        internal static CudaKernels TryCreate(CudaContext context)
         {
             string path = LocatePtxPath();
             if (path == null)
@@ -359,18 +374,39 @@ namespace TensorSharp.Cuda
                 return null;
             }
 
+            CudaModule loadedModule = null;
             try
             {
-                return CreateOwned(CudaModule.LoadFromFile(path));
+                loadedModule = context == null ? CudaModule.LoadFromFile(path)
+                    : CudaModule.LoadFromBytes(File.ReadAllBytes(path), context);
+                var kernels = new CudaKernels(loadedModule);
+                loadedModule = null;
+                return kernels;
             }
             catch (Exception ex)
             {
+                if (loadedModule != null)
+                {
+                    try { loadedModule.Dispose(); }
+                    catch (Exception cleanup) { throw new AggregateException(ex, cleanup); }
+                }
+                if (NativeRuntimeQuarantine.TryGetFailure(ex, out _)) throw;
                 WarnKernelsUnavailable($"loading the PTX module from '{path}' failed: {ex.Message}");
                 return null;
             }
         }
 
-        internal static CudaKernels CreateOwned(CudaModule module) => new CudaKernels(module);
+        internal static CudaKernels CreateOwned(CudaModule module)
+        {
+            ArgumentNullException.ThrowIfNull(module);
+            try { return new CudaKernels(module); }
+            catch (Exception original)
+            {
+                try { module.Dispose(); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
+        }
 
         private static int kernelWarningEmitted;
 
@@ -713,11 +749,32 @@ namespace TensorSharp.Cuda
 
         private IntPtr EnsureGdnSplitScratch(long bytes)
         {
+            using var lease = nativeCalls.EnterEffect();
+            module.Context.BindCurrent(nativeCalls);
             if (gdnSplitScratch != IntPtr.Zero && gdnSplitScratchBytes >= bytes)
                 return gdnSplitScratch;
             if (gdnSplitScratch != IntPtr.Zero)
-                CudaDriverApi.cuMemFree(gdnSplitScratch);
-            CudaDriverApi.cuMemAlloc(out gdnSplitScratch, new UIntPtr((ulong)bytes)).ThrowOnError();
+            {
+                nativeCalls.cuCtxSynchronize();
+                nativeCalls.cuMemFree(gdnSplitScratch);
+                gdnSplitScratch = IntPtr.Zero;
+                gdnSplitScratchBytes = 0;
+            }
+            try
+            {
+                nativeCalls.ThrowOnError(nativeCalls.cuMemAlloc(out gdnSplitScratch, new UIntPtr((ulong)bytes)));
+            }
+            catch (Exception original)
+            {
+                try
+                {
+                    if (gdnSplitScratch != IntPtr.Zero) nativeCalls.cuMemFree(gdnSplitScratch);
+                    gdnSplitScratch = IntPtr.Zero;
+                    gdnSplitScratchBytes = 0;
+                }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
             gdnSplitScratchBytes = bytes;
             return gdnSplitScratch;
         }
@@ -792,12 +849,14 @@ namespace TensorSharp.Cuda
 
         private void EnsureGdnPackedSharedCapacity(uint sharedBytes)
         {
+            using var lease = nativeCalls.EnterEffect();
+            module.Context.BindCurrent(nativeCalls);
             if (sharedBytes <= gdnPackedSharedCapacity)
                 return;
-            CudaDriverApi.cuFuncSetAttribute(
+            nativeCalls.ThrowOnError(nativeCalls.cuFuncSetAttribute(
                 qwen35GdnPackedF32,
                 CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                checked((int)sharedBytes)).ThrowOnError();
+                checked((int)sharedBytes)));
             gdnPackedSharedCapacity = sharedBytes;
         }
 
@@ -1559,22 +1618,24 @@ namespace TensorSharp.Cuda
 
         private void EnsureFlash2SharedCapacity(int headDim, uint sharedBytes)
         {
+            using var lease = nativeCalls.EnterEffect();
+            module.Context.BindCurrent(nativeCalls);
             if (headDim == 256)
             {
                 if (sharedBytes <= flash2SharedCapacityD256) return;
-                CudaDriverApi.cuFuncSetAttribute(gqaPrefillFlash2Group4D256F16,
-                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)).ThrowOnError();
-                CudaDriverApi.cuFuncSetAttribute(gqaPrefillFlash2Group4D256F32,
-                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)).ThrowOnError();
+                nativeCalls.ThrowOnError(nativeCalls.cuFuncSetAttribute(gqaPrefillFlash2Group4D256F16,
+                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)));
+                nativeCalls.ThrowOnError(nativeCalls.cuFuncSetAttribute(gqaPrefillFlash2Group4D256F32,
+                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)));
                 flash2SharedCapacityD256 = sharedBytes;
             }
             else
             {
                 if (sharedBytes <= flash2SharedCapacityD512) return;
-                CudaDriverApi.cuFuncSetAttribute(gqaPrefillFlash2Group4D512F16,
-                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)).ThrowOnError();
-                CudaDriverApi.cuFuncSetAttribute(gqaPrefillFlash2Group4D512F32,
-                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)).ThrowOnError();
+                nativeCalls.ThrowOnError(nativeCalls.cuFuncSetAttribute(gqaPrefillFlash2Group4D512F16,
+                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)));
+                nativeCalls.ThrowOnError(nativeCalls.cuFuncSetAttribute(gqaPrefillFlash2Group4D512F32,
+                    CudaDriverApi.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, checked((int)sharedBytes)));
                 flash2SharedCapacityD512 = sharedBytes;
             }
         }
@@ -3376,18 +3437,36 @@ namespace TensorSharp.Cuda
 
         public void Dispose()
         {
-            if (gdnSplitScratch != IntPtr.Zero)
+            if (disposed) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (disposed) return;
+            nativeCalls.ValidateSafeRelease(lease);
+            try
             {
-                CudaDriverApi.cuMemFree(gdnSplitScratch);
-                gdnSplitScratch = IntPtr.Zero;
-                gdnSplitScratchBytes = 0;
+                module.Context.BindCurrent(nativeCalls);
+                nativeCalls.cuCtxSynchronize();
+                if (gdnSplitScratch != IntPtr.Zero)
+                {
+                    nativeCalls.cuMemFree(gdnSplitScratch);
+                    gdnSplitScratch = IntPtr.Zero;
+                    gdnSplitScratchBytes = 0;
+                }
+                module.Dispose();
+                nativeCalls.CompleteSafeRelease(lease);
+                disposed = true;
             }
-            module.Dispose();
+            catch (Exception cleanup)
+            {
+                nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.ContextRelease);
+                throw;
+            }
         }
 
-        private static void Launch(IntPtr function, uint gx, uint gy, uint gz, int bx, int by, int bz, uint sharedBytes, IntPtr stream, void** args)
+        private void Launch(IntPtr function, uint gx, uint gy, uint gz, int bx, int by, int bz, uint sharedBytes, IntPtr stream, void** args)
         {
-            CudaDriverApi.cuLaunchKernel(
+            using var lease = nativeCalls.EnterEffect();
+            module.Context.BindCurrent(nativeCalls);
+            nativeCalls.ThrowOnError(nativeCalls.cuLaunchKernel(
                 function,
                 gx,
                 gy,
@@ -3398,7 +3477,7 @@ namespace TensorSharp.Cuda
                 sharedBytes,
                 stream,
                 (IntPtr)args,
-                IntPtr.Zero).ThrowOnError();
+                IntPtr.Zero));
         }
 
         private static uint Grid(int count)

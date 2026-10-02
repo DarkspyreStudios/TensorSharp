@@ -71,6 +71,18 @@ their actual external owners must remain alive through use. These tests do not e
 cuBLAS or qualify the public standalone context-acquisition behavior. That public factory
 retains its existing raw path. Allocator construction still calls that path.
 
+The kernel modes exercise actual `CudaKernels` construction and its transferred module,
+central launch path, scratch ownership and shared-memory attributes. Failed required-symbol
+lookup unloads the transferred module; refused cleanup preserves original and cleanup causes.
+Scratch resize drains before freeing the old block. Failed allocation rolls back any returned
+OUT pointer. Kernel cleanup drains before scratch free and module unload. Unsafe refusal
+retains actual kernel/module/context/API owners and prevents later cache or launch publication.
+Ordinary launch and attribute errors remain ordinary and do not publish unsafe cleanup.
+Foreign cases check actual owner and collectible-generation roots after successful explicit
+cleanup or controlled refusal. Private scratch and attribute boundary observations use fixed
+reflection calls inside the fixture; they do not qualify model execution or GPU kernels.
+All passed pointers and streams remain borrowed and are never dereferenced by this fixture.
+
 After a focused build, `python3 eng/tests/run-cuda-quarantine.py --configuration Debug
 --output tmp/cuda-quarantine/debug` runs the finite controlled modes without building.
 Build and run Debug completely before building and running Release because supplier
@@ -78,5 +90,5 @@ assemblies use shared output paths. Every mode has a 20-second process bound.
 
 This proves managed ownership routing only. It does not qualify primary-context driver
 semantics, GPU execution, physical multi-device cleanup or complete backend integration.
-The allocator, storage, graph, model and GGML dependency callers are not covered by these
-context, stream and module modes.
+The allocator, storage, captured graph, model and GGML dependency callers are not covered
+by these leaf-owner modes.

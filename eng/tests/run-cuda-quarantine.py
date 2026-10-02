@@ -25,6 +25,10 @@ MODES = (
     "blas-clean", "blas-drain-refusal", "blas-destroy-refusal",
     "blas-construction-rollback", "blas-construction-rollback-refusal",
     "foreign-blas-clean", "foreign-blas-drain-refusal",
+    "kernels-construction-rollback", "kernels-construction-rollback-refusal",
+    "kernels-clean", "kernels-drain-refusal", "kernels-free-refusal", "kernels-resize-refusal",
+    "kernels-allocation-rollback", "kernels-allocation-rollback-refusal", "kernels-ordinary-faults",
+    "foreign-kernels-clean", "foreign-kernels-drain-refusal",
 )
 
 

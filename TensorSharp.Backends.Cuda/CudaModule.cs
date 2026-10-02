@@ -12,6 +12,8 @@ namespace TensorSharp.Cuda
         private readonly CudaContextBinding context;
         private readonly CudaNativeCalls nativeCalls;
 
+        internal CudaContextBinding Context => context;
+
         private CudaModule(CudaContextBinding context)
         {
             this.context = context;

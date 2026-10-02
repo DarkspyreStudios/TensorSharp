@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Reflection;
 using System.Runtime.Loader;
 using System.Text.Json;
+using System.Runtime.ExceptionServices;
 using TensorSharp;
 using TensorSharp.Cuda;
 
@@ -41,7 +42,15 @@ internal static class Program
             case "blas-destroy-refusal": BlasRefusal(true); break;
             case "blas-construction-rollback": BlasConstructionRollback(false); break;
             case "blas-construction-rollback-refusal": BlasConstructionRollback(true); break;
-            case "kernels-construction-rollback": KernelsConstructionRollback(); break;
+            case "kernels-construction-rollback": KernelsConstructionRollback(false); break;
+            case "kernels-construction-rollback-refusal": KernelsConstructionRollback(true); break;
+            case "kernels-clean": KernelsClean(); break;
+            case "kernels-drain-refusal": KernelsRefusal(false); break;
+            case "kernels-free-refusal": KernelsRefusal(true); break;
+            case "kernels-resize-refusal": KernelsResizeRefusal(); break;
+            case "kernels-allocation-rollback": KernelsAllocationRollback(false); break;
+            case "kernels-allocation-rollback-refusal": KernelsAllocationRollback(true); break;
+            case "kernels-ordinary-faults": KernelsOrdinaryFaults(); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
             case "foreign-composed-clean": ForeignComposed(false); break;
@@ -52,11 +61,15 @@ internal static class Program
             case "foreign-module-drain-refusal": ForeignModule(true); break;
             case "foreign-blas-clean": ForeignBlas(false); break;
             case "foreign-blas-drain-refusal": ForeignBlas(true); break;
+            case "foreign-kernels-clean": ForeignKernels(false); break;
+            case "foreign-kernels-drain-refusal": ForeignKernels(true); break;
             default: throw new ArgumentException("Unknown controlled fixture mode.");
         }
         Console.WriteLine(JsonSerializer.Serialize(new
         {
-            mode = args[0], passed = true, nativeExecution = false,
+            mode = args[0],
+            passed = true,
+            nativeExecution = false,
             fixtureMvid = typeof(Program).Assembly.ManifestModule.ModuleVersionId,
             cudaMvid = typeof(CudaContext).Assembly.ManifestModule.ModuleVersionId,
             coreMvid = typeof(NativeRuntimeQuarantine).Assembly.ManifestModule.ModuleVersionId,
@@ -70,15 +83,171 @@ internal static class Program
         if (!value) throw new InvalidOperationException(message);
     }
 
-    private static void KernelsConstructionRollback()
+    private static void KernelsConstructionRollback(bool refuse)
     {
         var original = new InvalidOperationException("Controlled required kernel lookup failure.");
+        var cleanup = new InvalidOperationException("Controlled kernel module cleanup refusal.");
         var api = new RecordingCudaApi { FunctionFailure = original };
         var context = CudaContext.Create(0, api);
         var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        if (refuse) api.ModuleUnloadFailure = cleanup;
         try { CudaKernels.CreateOwned(module); throw new InvalidOperationException("Construction unexpectedly succeeded."); }
-        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        catch (AggregateException error) when (refuse)
+        {
+            Assert(error.InnerExceptions.Count == 2 && ReferenceEquals(error.InnerExceptions[0], original)
+                && ReferenceEquals(error.InnerExceptions[1], cleanup), "Kernel construction loses original or cleanup failure.");
+            Assert(NativeRuntimeQuarantine.TryGetFailure(cleanup, out _), "Kernel construction cleanup failure is not recorded.");
+        }
+        catch (InvalidOperationException error) when (!refuse && ReferenceEquals(error, original)) { }
         Assert(api.ModuleUnloadCount == 1, "Failed kernel construction loses its transferred loaded module.");
+        if (!refuse) context.Dispose();
+    }
+
+    private static object? InvokeKernelBoundary(CudaKernels kernels, string method, params object[] arguments)
+    {
+        try { return typeof(CudaKernels).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(kernels, arguments); }
+        catch (TargetInvocationException error) when (error.InnerException != null)
+        { ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+    }
+
+    private static IntPtr Scratch(CudaKernels kernels, long bytes)
+        => (IntPtr)InvokeKernelBoundary(kernels, "EnsureGdnSplitScratch", bytes)!;
+
+    private static void KernelsClean()
+    {
+        var roots = CreateAndReleaseKernels();
+        Collect();
+        Assert(roots.All(r => !r.IsAlive), "Healthy actual kernels/module/context/API roots remain retained.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] CreateAndReleaseKernels()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        var kernels = CudaKernels.CreateOwned(module);
+        api.Current = IntPtr.Zero;
+        kernels.LaunchFillF32(IntPtr.Zero, 1, 0, IntPtr.Zero);
+        Assert(api.KernelLaunchCount == 1 && api.Current == context.Handle, "Actual kernel launch does not rebind its verified context.");
+        IntPtr first = Scratch(kernels, 16);
+        Assert(Scratch(kernels, 8) == first && api.MemoryAllocateCount == 1, "Scratch cache reallocates an adequate owned block.");
+        IntPtr second = Scratch(kernels, 32);
+        Assert(second != first && api.MemoryFreeCount == 1 && api.ContextSyncCount == 1,
+            "Scratch resize does not drain before freeing its owned block.");
+        InvokeKernelBoundary(kernels, "EnsureGdnPackedSharedCapacity", 65536u);
+        InvokeKernelBoundary(kernels, "EnsureFlash2SharedCapacity", 256, 65536u);
+        InvokeKernelBoundary(kernels, "EnsureFlash2SharedCapacity", 512, 65536u);
+        Assert(api.AttributeCount == 5, "Actual shared-memory configuration does not use the injected owner path.");
+        kernels.Dispose();
+        kernels.Dispose();
+        Assert(api.MemoryFreeCount == 2 && api.ModuleUnloadCount == 1 && api.ContextSyncCount == 3,
+            "Kernel cleanup does not drain and release scratch before one checked module unload.");
+        int effects = api.TotalCalls;
+        try { kernels.LaunchFillF32(IntPtr.Zero, 1, 0, IntPtr.Zero); throw new Exception("Disposed kernel owner entered."); }
+        catch (InvalidOperationException) { }
+        Assert(api.TotalCalls == effects, "Retired kernel owner executes a native call.");
+        context.Dispose();
+        return [new(kernels), new(module), new(context), new(api)];
+    }
+
+    private static void KernelsRefusal(bool free)
+    {
+        var roots = FailKernelsRelease(free);
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Unsafe actual kernel scratch/module/context/API graph is lost.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailKernelsRelease(bool free)
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        var kernels = CudaKernels.CreateOwned(module);
+        Scratch(kernels, 16);
+        var original = new InvalidOperationException("Controlled kernel cleanup refusal.");
+        if (free) api.MemoryFreeFailure = original;
+        else api.DrainFailure = original;
+        try { kernels.Dispose(); throw new Exception("Unsafe kernel cleanup succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(api.MemoryFreeCount == (free ? 1 : 0) && api.ModuleUnloadCount == 0 && api.ReleaseCount == 0,
+            "Refused kernel cleanup releases dependent owned resources.");
+        Assert(NativeRuntimeQuarantine.TryGetFailure(original, out _), "Kernel cleanup loses its recorded actual cause.");
+        int effects = api.TotalCalls;
+        try { kernels.Dispose(); throw new Exception("Quarantined kernel teardown repeated."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { Scratch(kernels, 8); throw new Exception("Quarantined scratch cache published."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        try { kernels.LaunchFillF32(IntPtr.Zero, 1, 0, IntPtr.Zero); throw new Exception("Quarantined kernel launched."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        Assert(api.TotalCalls == effects, "Quarantined kernels execute later effects.");
+        return [new(kernels), new(module), new(context), new(api)];
+    }
+
+    private static void KernelsResizeRefusal()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        var kernels = CudaKernels.CreateOwned(module);
+        IntPtr old = Scratch(kernels, 16);
+        var original = new InvalidOperationException("Controlled scratch resize drain refusal.");
+        api.DrainFailure = original;
+        try { Scratch(kernels, 32); throw new Exception("Refused scratch resize succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        var actual = (IntPtr)typeof(CudaKernels).GetField("gdnSplitScratch", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(kernels)!;
+        Assert(actual == old && api.MemoryAllocateCount == 1 && api.MemoryFreeCount == 0,
+            "Scratch resize refusal loses old backing ownership or reaches allocate/free.");
+    }
+
+    private static void KernelsAllocationRollback(bool refuse)
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        var kernels = CudaKernels.CreateOwned(module);
+        var original = new InvalidOperationException("Controlled scratch allocation failure after OUT ownership.");
+        var cleanup = new InvalidOperationException("Controlled scratch rollback refusal.");
+        api.MemoryAllocateFailure = original;
+        if (refuse) api.MemoryFreeFailure = cleanup;
+        try { Scratch(kernels, 16); throw new Exception("Failed scratch allocation succeeded."); }
+        catch (AggregateException error) when (refuse)
+        {
+            Assert(error.InnerExceptions.Count == 2 && ReferenceEquals(error.InnerExceptions[0], original)
+                && ReferenceEquals(error.InnerExceptions[1], cleanup), "Scratch rollback loses original or cleanup failure.");
+            Assert(NativeRuntimeQuarantine.TryGetFailure(cleanup, out _), "Unsafe scratch rollback is not recorded.");
+        }
+        catch (InvalidOperationException error) when (!refuse && ReferenceEquals(error, original)) { }
+        Assert(api.MemoryFreeCount == 1 && api.ModuleUnloadCount == 0, "Scratch allocation rollback does not release exactly its local allocation.");
+        if (!refuse)
+        {
+            api.MemoryAllocateFailure = null;
+            Assert(NativeRuntimeQuarantine.Observe().Failures.Count == 0, "Ordinary cleaned scratch allocation failure quarantines runtime.");
+            Scratch(kernels, 16);
+            kernels.Dispose();
+            context.Dispose();
+        }
+    }
+
+    private static void KernelsOrdinaryFaults()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var kernels = CudaKernels.CreateOwned(CudaModule.LoadFromBytes(new byte[] { 1 }, context));
+        var original = new InvalidOperationException("Controlled ordinary launch/attribute error.");
+        api.KernelLaunchFailure = original;
+        try { kernels.LaunchFillF32(IntPtr.Zero, 1, 0, IntPtr.Zero); throw new Exception("Launch failure succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        api.KernelLaunchFailure = null;
+        api.AttributeFailure = original;
+        try { InvokeKernelBoundary(kernels, "EnsureGdnPackedSharedCapacity", 65536u); throw new Exception("Attribute failure succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        api.AttributeFailure = null;
+        InvokeKernelBoundary(kernels, "EnsureGdnPackedSharedCapacity", 65536u);
+        Assert(api.AttributeCount == 2 && NativeRuntimeQuarantine.Observe().Failures.Count == 0,
+            "Ordinary effect failure publishes unsafe cleanup or advances attribute cache before success.");
+        kernels.Dispose();
         context.Dispose();
     }
 
@@ -608,13 +777,20 @@ internal static class Program
             "Foreign actual known cuBLAS roots do not match cleanup outcome.");
     }
 
+    private static void ForeignKernels(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false, kernels: true);
+        Collect();
+        Assert(roots.All(r => r.IsAlive == unsafeRelease), "Foreign actual kernel roots do not match checked cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false, bool kernels = false)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        string operationName = blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
+        string operationName = kernels ? nameof(RunForeignKernels) : blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
             : stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
         var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
@@ -662,6 +838,13 @@ internal static class Program
             "Actual known cuBLAS owner does not execute in the foreign generation.");
         return unsafeRelease ? FailBlasRelease(false) : CreateAndReleaseBlas();
     }
+
+    public static WeakReference[] RunForeignKernels(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaKernels).Assembly)?.IsCollectible == true,
+            "Actual kernel owner does not execute in the foreign generation.");
+        return unsafeRelease ? FailKernelsRelease(false) : CreateAndReleaseKernels();
+    }
 }
 
 internal sealed class FixtureLoadContext : AssemblyLoadContext
@@ -702,6 +885,14 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal int BlasSetStreamCount;
     internal Exception? BlasDestroyFailure;
     internal Exception? BlasMathFailure;
+    internal int MemoryAllocateCount;
+    internal int MemoryFreeCount;
+    internal int KernelLaunchCount;
+    internal int AttributeCount;
+    internal Exception? MemoryAllocateFailure;
+    internal Exception? MemoryFreeFailure;
+    internal Exception? KernelLaunchFailure;
+    internal Exception? AttributeFailure;
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
@@ -792,6 +983,33 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         TotalCalls++;
         BlasDestroyCount++;
         if (BlasDestroyFailure != null) throw BlasDestroyFailure;
+        return 0;
+    }
+
+    public override int cuMemAlloc(out IntPtr ptr, UIntPtr bytes)
+    {
+        TotalCalls++; MemoryAllocateCount++; ptr = new IntPtr(5000 + MemoryAllocateCount);
+        if (MemoryAllocateFailure != null) throw MemoryAllocateFailure;
+        return 0;
+    }
+    public override int cuMemFree(IntPtr ptr)
+    {
+        TotalCalls++; MemoryFreeCount++;
+        if (MemoryFreeFailure != null) throw MemoryFreeFailure;
+        return 0;
+    }
+    public override int cuFuncSetAttribute(IntPtr function, int attribute, int value)
+    {
+        TotalCalls++; AttributeCount++;
+        if (AttributeFailure != null) throw AttributeFailure;
+        return 0;
+    }
+    public override int cuLaunchKernel(IntPtr function, uint gridDimX, uint gridDimY, uint gridDimZ,
+        uint blockDimX, uint blockDimY, uint blockDimZ, uint sharedMemBytes, IntPtr stream,
+        IntPtr kernelParams, IntPtr extra)
+    {
+        TotalCalls++; KernelLaunchCount++;
+        if (KernelLaunchFailure != null) throw KernelLaunchFailure;
         return 0;
     }
 }
