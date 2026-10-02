@@ -15,6 +15,7 @@ public static partial class ForeignModelLifetime
     private static readonly float[] BroadcastMutatedValues = [9f, 8f, 7f, 6f];
     private static WeakReference[]? _broadcastRetainedResources;
     private static int _broadcastRetainedCount;
+    private static int _broadcastActualCopies;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static string ExerciseGgmlBroadcast(string mode, string path, BackendType backend)
@@ -104,17 +105,13 @@ public static partial class ForeignModelLifetime
             new[] { typeof(OpRegistry), typeof(GgmlBasicOps), typeof(CleanupFailingStorage), typeof(ModelBase) }.All(type =>
                 AssemblyLoadContext.GetLoadContext(type.Assembly) == generation && type.Assembly.ManifestModule.ModuleVersionId != Guid.Empty),
             "The finite fixture registration, real copy implementation and storage subclass belong to the same actual private generation.");
-        int actualCopies = 0;
+        _broadcastActualCopies = 0;
         Type[] types = [typeof(GgmlStorage), typeof(CleanupFailingStorage)];
         foreach (Type resultType in types)
             foreach (Type sourceType in types)
                 if (resultType == typeof(CleanupFailingStorage) || sourceType == typeof(CleanupFailingStorage))
-                    OpRegistry.Register("copy", arguments =>
-                    {
-                        GgmlBasicOps.Copy((Tensor)arguments[0]!, (Tensor)arguments[1]!);
-                        actualCopies++;
-                        return null;
-                    }, [new ArgCountConstraint(2), new ArgStorageTypeConstraint(0, resultType, false), new ArgStorageTypeConstraint(1, sourceType, false)]);
+                    OpRegistry.Register("copy", CopyCleanupFixtureStorage,
+                        [new ArgCountConstraint(2), new ArgStorageTypeConstraint(0, resultType, false), new ArgStorageTypeConstraint(1, sourceType, false)]);
         bool refuseSource = mode == "tp-broadcast-source-cleanup-refusal";
         bool refuseTemporary = mode == "tp-broadcast-temporary-cleanup-refusal";
         var source = refuseSource
@@ -137,8 +134,6 @@ public static partial class ForeignModelLifetime
         }
         else
         {
-            // This owning caller retains its borrowed input independently of the broadcast output rollback owner.
-            model.OwnBroadcastSource(source);
             model.Group.Allocator = new CleanupFailingAllocator(allocator.Context, allocator.DeviceId);
             var copied = new List<Tensor>();
             var original = new IOException("controlled second broadcast copy refusal with failed rollback");
@@ -168,7 +163,7 @@ public static partial class ForeignModelLifetime
             Require(outputs.Length == 2, "Both real destinations exist before the controlled second-copy refusal.");
         }
         Tensor[] all = [source, .. outputs];
-        Require(actualCopies == (refuseSource || refuseTemporary ? 2 : 1), "The exact fixture storage handler executes actual GGML copies before the managed cleanup refusal.");
+        Require(_broadcastActualCopies == (refuseSource || refuseTemporary ? 2 : 1), "The exact fixture storage handler executes actual GGML copies before the managed cleanup refusal.");
         _broadcastRetainedResources = [new(model), .. all.SelectMany(tensor => new[] { new WeakReference(tensor), new WeakReference(tensor.Storage) })];
         _broadcastRetainedCount = RuntimeResourceCount();
         ExpectTerminal(model.Dispose, failure);
@@ -178,9 +173,18 @@ public static partial class ForeignModelLifetime
         return "actual-GGML-broadcast-cleanup-refusal;original-errors-preserved;source-and-whole-copy-array-retained;managed-refusal-not-GPU-fault";
     }
 
+    private static object? CopyCleanupFixtureStorage(object?[] arguments)
+    {
+        GgmlBasicOps.Copy((Tensor)arguments[0]!, (Tensor)arguments[1]!);
+        _broadcastActualCopies++;
+        return null;
+    }
+
     private static void VerifyBroadcastRetention()
     {
         var retained = (IList)typeof(ModelBase).GetField("FailedGgmlModelOwners", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        Console.WriteLine($"broadcast-outer-retention: alive={string.Join(',', _broadcastRetainedResources!.Select(reference => reference.IsAlive))};" +
+            $"managedNativeLeases={RuntimeResourceCount()};initialLeases={_broadcastRetainedCount};retainedModels={retained.Count};runtimeState={GgmlNativeLoader.State}");
         Require(_broadcastRetainedResources != null && _broadcastRetainedResources.All(reference => reference.IsAlive) &&
             retained.Count == 1 && ReferenceEquals(retained[0], _broadcastRetainedResources[0].Target) &&
             RuntimeResourceCount() == _broadcastRetainedCount && GgmlNativeLoader.State == GgmlRuntimeState.Ready,
