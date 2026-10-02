@@ -68,14 +68,15 @@ and exact original error. Clean modes drain guarded shutdown before foreign coll
 
 `tp-broadcast-source-cleanup-refusal` refuses source storage destruction after two successful
 copies. `tp-broadcast-rollback-refusal` refuses the second copy and then refuses destruction of
-the first destination during rollback. The owning caller retains its original source.
+the first destination during rollback. The local rollback owner retains the distinct borrowed
+source dependency without disposing it. The fixture supplies no extra source dictionary owner.
 `tp-broadcast-temporary-cleanup-refusal` refuses the first temporary copy's destruction. The
 joint retirement owner also retains its original source without a separate dictionary owner. These
 modes preserve actual source and all returned/partial copy owners after outer-frame finalizer
 drainage; repeated model disposal refuses and guarded shutdown remains busy. Original work
 and cleanup errors are preserved together where both exist. The exact cleanup-failing storage
 subclass has a finite fixture-only copy registration delegating to unchanged `GgmlBasicOps.Copy`.
-Registry, handler, storage and actual model belong to the same private generation; no handler
+The named static handler has no model/source closure. Registry, handler, storage and actual model belong to the same private generation; no handler
 is registered in the default context. This is controlled managed cleanup refusal, not native
 free failure, physical GPU fault or captured asynchronous teardown qualification.
 

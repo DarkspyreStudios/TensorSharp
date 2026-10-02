@@ -322,7 +322,8 @@ source rules do not qualify its synchronization, device cache closure, terminal 
 or physical multi-device execution.
 
 GGML broadcast borrows its input and allocates an independent tensor for every logical rank.
-Partial allocation/copy failure explicitly rolls back the whole destination array. Owning
+Partial allocation/copy failure explicitly rolls back the whole destination array. A refused
+rollback retains its distinct borrowed source dependency without disposing that input. Owning
 model callers retire their original embedding/router/Mamba source only after copying succeeds.
 Temporary-output callers retire every GGML copy, including rank zero, and their original source
 through one ownership boundary. A refused cleanup retains the actual source and remaining

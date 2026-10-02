@@ -1005,7 +1005,7 @@ namespace TensorSharp.Models
 
             if (IsGgmlBackend)
             {
-                var owner = new TensorParallelBroadcastOwner(result);
+                var owner = new TensorParallelBroadcastOwner(result, borrowedSource: tensor);
                 try
                 {
                     for (int r = 0; r < tp; r++)
@@ -1062,12 +1062,18 @@ namespace TensorSharp.Models
             }
         }
 
-        private sealed class TensorParallelBroadcastOwner(Tensor[] copies, Tensor source = null) : IDisposable
+        private sealed class TensorParallelBroadcastOwner(Tensor[] copies, Tensor source = null, Tensor borrowedSource = null) : IDisposable
         {
+            private readonly Tensor _borrowedSource = borrowedSource;
+
             public void Dispose()
             {
-                foreach (var copy in copies) copy?.Dispose();
-                source?.Dispose();
+                try
+                {
+                    foreach (var copy in copies) copy?.Dispose();
+                    source?.Dispose();
+                }
+                finally { GC.KeepAlive(_borrowedSource); }
             }
         }
 
