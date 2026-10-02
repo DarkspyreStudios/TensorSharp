@@ -37,6 +37,9 @@ switch (mode)
     case "resolved-cuda-nesting":
         using (var f = new Foreign(fixturePath)) f.Static("ResolvedCudaNesting");
         break;
+    case "queued-safe-release":
+        using (var f = new Foreign(fixturePath)) f.Static("QueuedSafeRelease");
+        break;
     case "race":
         Race(fixturePath);
         break;

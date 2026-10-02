@@ -161,6 +161,52 @@ public sealed class Fixture
         Require(NativeRuntimeQuarantine.Observe().Revision == 0, "Resolved nesting changed terminal state.");
     }
 
+    public static void QueuedSafeRelease()
+    {
+        var registration = NativeQuarantineAuthority.Register(new Owner(), NativeOwnerRole.NativeHandle);
+        registration.AttachCudaPrimaryDevice(0);
+        int nativeEntries = 0;
+        bool refused = false;
+        Exception? completionFailure = null;
+        var release = registration.EnterEffect();
+        var queued = Task.Run(() =>
+        {
+            try
+            {
+                using var effect = registration.EnterEffect();
+                Interlocked.Increment(ref nativeEntries);
+            }
+            catch (InvalidOperationException) { refused = true; }
+        });
+        try
+        {
+            Require(SpinWait.SpinUntil(() =>
+            {
+                lock (registration.State[1]) return (int)registration.Cell[7] == 2;
+            }, TimeSpan.FromSeconds(3)), "The controlled waiter did not reserve its effect.");
+            registration.CompleteSafeRelease();
+        }
+        catch (Exception error) { completionFailure = error; }
+        finally
+        {
+            release.Dispose();
+            Require(queued.Wait(TimeSpan.FromSeconds(3)), "The controlled waiter did not drain.");
+            if (completionFailure != null)
+            {
+                using var cleanup = registration.EnterEffect();
+                registration.CompleteSafeRelease();
+            }
+        }
+        if (completionFailure != null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(completionFailure).Throw();
+        Require(refused && nativeEntries == 0, "Queued work entered native effects after safe release.");
+        lock (registration.State[1])
+        {
+            Require((int)registration.Cell[7] == 0, "Queued reservations remained active.");
+            Require(((Dictionary<int, List<object[]>>)registration.State[9]).Count == 0, "Thread frames did not drain.");
+        }
+    }
+
     private static void Refuses(Action action)
     {
         try { action(); }
