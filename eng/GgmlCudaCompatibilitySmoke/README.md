@@ -33,7 +33,8 @@ cmake --build build --target GgmlOps GgmlOpsFlashAttnGuardTest --parallel 8
 ```
 
 The reference 3090 Ti build uses CUDA 12.8, MSVC 14.44 x64 and unchanged upstream
-GGML revision 456172ec733a135778adcd32d00e576a58232e45. Import that MSVC toolset's
+GGML revision 353b63b439f27ab2cc19dac97ab1681ba6d2d084, matching the Mac
+bridge's GGML 0.25.3 revision. Import that MSVC toolset's
 full environment before CMake configuration. The repository's eng/fetch-ggml.ps1
 accepts the revision through TENSORSHARP_GGML_GIT_REF.
 
