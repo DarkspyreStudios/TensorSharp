@@ -5,10 +5,8 @@ param(
     # version from Directory.Build.props ($(TensorSharpVersion)). The publish
     # pipeline passes the git tag here (e.g. 2.8.6 from tag v2.8.6).
     [string] $PackageVersion = "",
-    # Skip the native (CMake/CUDA/MLX) build steps while packing. The produced
-    # packages contain only managed assemblies, so the native libraries are not
-    # required to pack them — this lets packing run on a host without the native
-    # toolchain.
+    # Skip the GGML, CUDA and MLX native build steps while packing. Existing
+    # content items, including committed CUDA PTX, retain their package rules.
     [switch] $SkipNativeBuild
 )
 
@@ -27,83 +25,83 @@ $PublicPackages = @(
     @{
         # Package id intentionally differs from the project name - see the
         # PackageId comment in TensorSharp.Core.csproj.
-        Id = "TensorSharp.Tensors"
+        Id = "Darkspyre.TensorSharp.Tensors"
         Project = "TensorSharp.Core/TensorSharp.Core.csproj"
         TensorSharpDependencies = @()
         EmbeddedAssemblies = @("AdvUtils.dll")
     },
     @{
-        Id = "TensorSharp.Runtime.Logging"
+        Id = "Darkspyre.TensorSharp.Runtime.Logging"
         Project = "TensorSharp.Runtime.Logging/TensorSharp.Runtime.Logging.csproj"
         TensorSharpDependencies = @()
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Runtime"
+        Id = "Darkspyre.TensorSharp.Runtime"
         Project = "TensorSharp.Runtime/TensorSharp.Runtime.csproj"
         TensorSharpDependencies = @()
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.AgentHost"
+        Id = "Darkspyre.TensorSharp.AgentHost"
         Project = "TensorSharp.AgentHost/TensorSharp.AgentHost.csproj"
-        TensorSharpDependencies = @("TensorSharp.Runtime")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Runtime")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Backends.Cuda"
+        Id = "Darkspyre.TensorSharp.Backends.Cuda"
         Project = "TensorSharp.Backends.Cuda/TensorSharp.Backends.Cuda.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Tensors")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Backends.GGML"
+        Id = "Darkspyre.TensorSharp.Backends.GGML"
         Project = "TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Tensors")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Backends.MLX"
+        Id = "Darkspyre.TensorSharp.Backends.MLX"
         Project = "TensorSharp.Backends.MLX/TensorSharp.Backends.MLX.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Tensors", "Darkspyre.TensorSharp.Runtime")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Distributed"
+        Id = "Darkspyre.TensorSharp.Distributed"
         Project = "TensorSharp.Distributed/TensorSharp.Distributed.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Backends.Cuda")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Tensors", "Darkspyre.TensorSharp.Backends.Cuda")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Models"
+        Id = "Darkspyre.TensorSharp.Models"
         Project = "TensorSharp.Models/TensorSharp.Models.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Tensors", "Darkspyre.TensorSharp.Runtime", "Darkspyre.TensorSharp.Backends.GGML", "Darkspyre.TensorSharp.Backends.Cuda", "Darkspyre.TensorSharp.Backends.MLX")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Chat"
+        Id = "Darkspyre.TensorSharp.Chat"
         Project = "TensorSharp.Chat/TensorSharp.Chat.csproj"
-        TensorSharpDependencies = @("TensorSharp.Runtime", "TensorSharp.Runtime.Logging", "TensorSharp.AgentHost", "TensorSharp.Models", "TensorSharp.Backends.GGML")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Runtime", "Darkspyre.TensorSharp.Runtime.Logging", "Darkspyre.TensorSharp.AgentHost", "Darkspyre.TensorSharp.Models", "Darkspyre.TensorSharp.Backends.GGML")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Server"
+        Id = "Darkspyre.TensorSharp.Server"
         Project = "TensorSharp.Server/TensorSharp.Server.csproj"
-        TensorSharpDependencies = @("TensorSharp.Runtime", "TensorSharp.Runtime.Logging", "TensorSharp.AgentHost", "TensorSharp.Chat", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.Cuda", "TensorSharp.Backends.MLX", "TensorSharp.Distributed")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Runtime", "Darkspyre.TensorSharp.Runtime.Logging", "Darkspyre.TensorSharp.AgentHost", "Darkspyre.TensorSharp.Chat", "Darkspyre.TensorSharp.Models", "Darkspyre.TensorSharp.Backends.GGML", "Darkspyre.TensorSharp.Backends.Cuda", "Darkspyre.TensorSharp.Backends.MLX", "Darkspyre.TensorSharp.Distributed")
         EmbeddedAssemblies = @()
     },
     @{
         # The runnable server. TensorSharp.Server is the library it builds on,
         # and is its only direct dependency.
-        Id = "TensorSharp.Server.Host"
+        Id = "Darkspyre.TensorSharp.Server.Host"
         Project = "TensorSharp.Server.Host/TensorSharp.Server.Host.csproj"
-        TensorSharpDependencies = @("TensorSharp.Server")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Server")
         EmbeddedAssemblies = @()
     },
     @{
-        Id = "TensorSharp.Cli"
+        Id = "Darkspyre.TensorSharp.Cli"
         Project = "TensorSharp.Cli/TensorSharp.Cli.csproj"
-        TensorSharpDependencies = @("TensorSharp.Tensors", "TensorSharp.Runtime", "TensorSharp.Runtime.Logging", "TensorSharp.AgentHost", "TensorSharp.Chat", "TensorSharp.Models", "TensorSharp.Backends.GGML", "TensorSharp.Backends.MLX", "TensorSharp.Distributed")
+        TensorSharpDependencies = @("Darkspyre.TensorSharp.Tensors", "Darkspyre.TensorSharp.Runtime", "Darkspyre.TensorSharp.Runtime.Logging", "Darkspyre.TensorSharp.AgentHost", "Darkspyre.TensorSharp.Chat", "Darkspyre.TensorSharp.Models", "Darkspyre.TensorSharp.Backends.GGML", "Darkspyre.TensorSharp.Backends.MLX", "Darkspyre.TensorSharp.Distributed")
         EmbeddedAssemblies = @()
     }
 )
@@ -271,6 +269,7 @@ if (-not [string]::IsNullOrWhiteSpace($RequestedVersion)) {
 if ($SkipNativeBuild) {
     $ExtraPackArgs += "-p:TensorSharpSkipGgmlNative=true"
     $ExtraPackArgs += "-p:TensorSharpSkipMlxNative=true"
+    $ExtraPackArgs += "-p:TensorSharpSkipCudaNative=true"
 }
 
 foreach ($package in $PublicPackages) {
@@ -308,7 +307,7 @@ foreach ($package in $PublicPackages) {
     $nupkg = Read-Nupkg $nupkgPath
     $internalDependencies = @(
         $nupkg.Dependencies |
-            Where-Object { $_.Id -eq "AdvUtils" -or $_.Id -like "TensorSharp.*" } |
+            Where-Object { $_.Id -eq "AdvUtils" -or $_.Id -like "Darkspyre.TensorSharp.*" -or $_.Id -like "TensorSharp.*" } |
             ForEach-Object { $_.Id }
     )
 

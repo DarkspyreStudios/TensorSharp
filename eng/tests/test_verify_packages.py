@@ -47,6 +47,19 @@ $defaultArgs = @($ExtraPackArgs)
 $ExtraPackArgs = @(); $SkipNativeBuild = $true
 Invoke-Expression $skip[0].Extent.Text
 $skipArgs = @($ExtraPackArgs)
+$pack = @($ast.FindAll({ param($node)
+    $node -is [System.Management.Automation.Language.CommandAst] -and
+    $node.CommandElements[0].Extent.Text -eq 'Invoke-CheckedDotNet'
+}, $true))
+if ($pack.Count -ne 1) { throw 'Expected one checked pack invocation.' }
+function Invoke-CheckedDotNet([string[]]$Arguments) { $script:capturedArgs = @($Arguments) }
+$projectPath = 'controlled.csproj'; $PackageOutput = 'controlled-output'
+$Configuration = $env:VERIFY_CONFIGURATION
+Invoke-Expression $pack[0].Extent.Text
+$skipPackArgs = @($capturedArgs)
+$ExtraPackArgs = @()
+Invoke-Expression $pack[0].Extent.Text
+$defaultPackArgs = @($capturedArgs)
 $assert = @($ast.FindAll({ param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
     $node.Name -eq 'Assert-SameSet'
@@ -69,6 +82,7 @@ foreach ($case in ($env:VERIFY_DEPENDENCY_CASES | ConvertFrom-Json)) {
         [pscustomobject]@{ Id = $_.Id; Project = $_.Project;
             Dependencies = @($_.TensorSharpDependencies); Embedded = @($_.EmbeddedAssemblies) }
     }); DefaultArgs = $defaultArgs; SkipArgs = $skipArgs; Cases = $cases
+    DefaultPackArgs = $defaultPackArgs; SkipPackArgs = $skipPackArgs
 } | ConvertTo-Json -Depth 8 -Compress
 """
 
@@ -88,6 +102,7 @@ class VerifyPackagesPolicyTests(unittest.TestCase):
             {"Name": "valid", "Actual": ["Darkspyre.TensorSharp.Tensors", "System.Text.Json"],
              "Expected": ["Darkspyre.TensorSharp.Tensors"]},
             {"Name": "unexpected", "Actual": ["Darkspyre.TensorSharp.Unexpected"], "Expected": []},
+            {"Name": "native", "Actual": ["Darkspyre.TensorSharp.Backends.GGML.Native.win-arm64"], "Expected": []},
             {"Name": "legacy", "Actual": ["TensorSharp.Tensors"], "Expected": []},
             {"Name": "embedded", "Actual": ["AdvUtils"], "Expected": []},
             {"Name": "missing", "Actual": ["System.Text.Json"], "Expected": ["Darkspyre.TensorSharp.Tensors"]},
@@ -96,6 +111,7 @@ class VerifyPackagesPolicyTests(unittest.TestCase):
         env = os.environ | {
             "VERIFY_PACKAGES_SCRIPT": str(ROOT / "eng/verify-packages.ps1"),
             "VERIFY_DEPENDENCY_CASES": json.dumps(cases),
+            "VERIFY_CONFIGURATION": os.environ.get("VERIFY_CONFIGURATION", "Release"),
         }
         result = subprocess.run([pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POLICY_READER],
                                 env=env, capture_output=True, text=True, timeout=30, check=True)
@@ -104,6 +120,7 @@ class VerifyPackagesPolicyTests(unittest.TestCase):
 
     def test_inventory_matches_exact_committed_package_ids(self):
         expected = {f"{name}/{name}.csproj": package_id(ROOT / name / f"{name}.csproj") for name in PROJECTS}
+        self.assertEqual(len(expected), len(self.policy["Packages"]))
         self.assertEqual(expected, {item["Project"]: item["Id"] for item in self.policy["Packages"]})
 
     def test_dependencies_match_direct_nonprivate_project_references(self):
@@ -130,6 +147,12 @@ class VerifyPackagesPolicyTests(unittest.TestCase):
     def test_default_does_not_skip_native_builds(self):
         self.assertEqual([], self.policy["DefaultArgs"])
 
+    def test_checked_pack_call_preserves_configuration_and_skip_arguments(self):
+        expected = ["pack", "controlled.csproj", "-c", os.environ.get("VERIFY_CONFIGURATION", "Release"),
+                    "-o", "controlled-output"]
+        self.assertEqual(expected, self.policy["DefaultPackArgs"])
+        self.assertEqual(expected + self.policy["SkipArgs"], self.policy["SkipPackArgs"])
+
     def test_valid_internal_dependencies_and_external_packages_pass(self):
         self.assertIsNone(self.cases["valid"]["Failure"])
         self.assertEqual(["Darkspyre.TensorSharp.Tensors"], self.cases["valid"]["Actual"])
@@ -137,7 +160,7 @@ class VerifyPackagesPolicyTests(unittest.TestCase):
         self.assertEqual([], self.cases["external"]["Actual"])
 
     def test_unexpected_and_legacy_supplier_dependencies_fail(self):
-        for name in ("unexpected", "legacy"):
+        for name in ("unexpected", "native", "legacy"):
             with self.subTest(name=name):
                 self.assertIsNotNone(self.cases[name]["Failure"])
 
