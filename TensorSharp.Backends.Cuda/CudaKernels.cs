@@ -361,7 +361,7 @@ namespace TensorSharp.Cuda
 
             try
             {
-                return new CudaKernels(CudaModule.LoadFromFile(path));
+                return CreateOwned(CudaModule.LoadFromFile(path));
             }
             catch (Exception ex)
             {
@@ -369,6 +369,8 @@ namespace TensorSharp.Cuda
                 return null;
             }
         }
+
+        internal static CudaKernels CreateOwned(CudaModule module) => new CudaKernels(module);
 
         private static int kernelWarningEmitted;
 

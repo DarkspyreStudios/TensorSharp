@@ -41,6 +41,7 @@ internal static class Program
             case "blas-destroy-refusal": BlasRefusal(true); break;
             case "blas-construction-rollback": BlasConstructionRollback(false); break;
             case "blas-construction-rollback-refusal": BlasConstructionRollback(true); break;
+            case "kernels-construction-rollback": KernelsConstructionRollback(); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
             case "foreign-composed-clean": ForeignComposed(false); break;
@@ -67,6 +68,18 @@ internal static class Program
     private static void Assert(bool value, string message)
     {
         if (!value) throw new InvalidOperationException(message);
+    }
+
+    private static void KernelsConstructionRollback()
+    {
+        var original = new InvalidOperationException("Controlled required kernel lookup failure.");
+        var api = new RecordingCudaApi { FunctionFailure = original };
+        var context = CudaContext.Create(0, api);
+        var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        try { CudaKernels.CreateOwned(module); throw new InvalidOperationException("Construction unexpectedly succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(api.ModuleUnloadCount == 1, "Failed kernel construction loses its transferred loaded module.");
+        context.Dispose();
     }
 
     private static void ContextClean()
@@ -673,6 +686,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? StreamCreateFailure;
     internal Exception? ModuleUnloadFailure;
     internal Exception? ModuleLoadFailure;
+    internal Exception? FunctionFailure;
     internal int StreamSyncCount;
     internal int StreamDestroyCount;
     internal int ModuleUnloadCount;
@@ -750,7 +764,11 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         return 0;
     }
     public override int cuModuleGetFunction(out IntPtr function, IntPtr module, string name)
-    { TotalCalls++; FunctionCount++; function = new IntPtr(3002); return 0; }
+    {
+        TotalCalls++; FunctionCount++; function = new IntPtr(3002);
+        if (FunctionFailure != null) throw FunctionFailure;
+        return 0;
+    }
     public override int cuModuleUnload(IntPtr module)
     {
         TotalCalls++;
