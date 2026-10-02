@@ -64,6 +64,7 @@ internal static class Program
             case "dyn-allocation-fallback-refusal": DynFallbackRefusal(); break;
             case "dyn-context-mismatch": DynContextMismatch(); break;
             case "dyn-retired-stream": DynRetiredStream(); break;
+            case "dyn-consumer-disposal": DynConsumerDisposal(); break;
             case "dyn-ordinary-upload-fault": DynOrdinaryUploadFault(); break;
             case "dyn-nested-release-refusal": DynNestedReleaseRefusal(); break;
             case "foreign-dyn-clean": ForeignDyn(false); break;
@@ -294,6 +295,26 @@ internal static class Program
         context.Dispose();
         using var invalid = new CudaDecodeDynParams((IAllocator)null!);
         Assert(!invalid.IsValid, "Non-CUDA invalid block fallback changes.");
+    }
+
+    private static void DynConsumerDisposal()
+    {
+        var api = new RecordingCudaApi { ObserveDynamicLaunch = true };
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        var kernels = CudaKernels.CreateOwned(CudaModule.LoadFromBytes(new byte[] { 1 }, context));
+        var owner = new CudaDecodeDynParams(context, stream);
+        IntPtr pointer = owner.DevicePtr;
+        Exception? failure = null;
+        var disposer = new Thread(() => { try { owner.Dispose(); } catch (Exception error) { failure = error; } });
+        disposer.Start();
+        Assert(disposer.Join(TimeSpan.FromSeconds(5)), "Controlled concurrent disposal did not finish.");
+        Assert(failure == null, "Controlled disposal failed before consumption.");
+        kernels.LaunchFillRopePositionsI32(IntPtr.Zero, 1, IntPtr.Zero, 1, pointer, stream.Handle);
+        Assert(!api.LaunchedFreedDynamicPointer, "Actual kernel enqueue consumes the freed dynamic pointer after its getter lease exits.");
+        kernels.Dispose();
+        stream.Dispose();
+        context.Dispose();
     }
 
     private static void DynContextMismatch()
@@ -1213,6 +1234,9 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? HostAllocateFailure;
     internal Exception? UploadFailure;
     internal int[]? UploadedValues;
+    internal bool ObserveDynamicLaunch;
+    internal IntPtr LastFreedDevicePointer;
+    internal bool LaunchedFreedDynamicPointer;
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
@@ -1317,6 +1341,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     {
         TotalCalls++; MemoryFreeCount++;
         if (MemoryFreeFailure != null) throw MemoryFreeFailure;
+        LastFreedDevicePointer = ptr;
         return 0;
     }
     public override int cuMemHostAlloc(out IntPtr ptr, UIntPtr bytes, uint flags)
@@ -1354,6 +1379,12 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         IntPtr kernelParams, IntPtr extra)
     {
         TotalCalls++; KernelLaunchCount++;
+        if (ObserveDynamicLaunch)
+        {
+            IntPtr argument = System.Runtime.InteropServices.Marshal.ReadIntPtr(kernelParams, 4 * IntPtr.Size);
+            IntPtr dynamicPointer = System.Runtime.InteropServices.Marshal.ReadIntPtr(argument);
+            LaunchedFreedDynamicPointer |= dynamicPointer != IntPtr.Zero && dynamicPointer == LastFreedDevicePointer;
+        }
         if (KernelLaunchFailure != null) throw KernelLaunchFailure;
         return 0;
     }
