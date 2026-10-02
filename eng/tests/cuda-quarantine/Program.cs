@@ -54,6 +54,20 @@ internal static class Program
             case "kernels-diagnostic-outside-effects": KernelsDiagnosticOutsideEffects(); break;
             case "dyn-drain-refusal": DynDrainRefusal(); break;
             case "dyn-host-free-refusal": DynHostFreeRefusal(); break;
+            case "dyn-clean": DynClean(); break;
+            case "dyn-ambient-stream-clean": DynClean(true); break;
+            case "dyn-device-free-refusal": DynRefusal(1); break;
+            case "dyn-construction-rollback": DynConstructionRollback(false); break;
+            case "dyn-construction-rollback-refusal": DynConstructionRollback(true); break;
+            case "dyn-device-allocation-fallback": DynAllocationFallback(false); break;
+            case "dyn-host-allocation-fallback": DynAllocationFallback(true); break;
+            case "dyn-allocation-fallback-refusal": DynFallbackRefusal(); break;
+            case "dyn-context-mismatch": DynContextMismatch(); break;
+            case "dyn-retired-stream": DynRetiredStream(); break;
+            case "dyn-ordinary-upload-fault": DynOrdinaryUploadFault(); break;
+            case "dyn-nested-release-refusal": DynNestedReleaseRefusal(); break;
+            case "foreign-dyn-clean": ForeignDyn(false); break;
+            case "foreign-dyn-drain-refusal": ForeignDyn(true); break;
             case "pool-small-failed-free-retention": PoolFailedFreeRetention(false); break;
             case "pool-large-failed-free-retention": PoolFailedFreeRetention(true); break;
             case "pool-small-partial-free-retention": PoolFailedFreeRetention(false, partial: true); break;
@@ -112,34 +126,227 @@ internal static class Program
 
     private static void DynDrainRefusal()
     {
-        var api = new RecordingCudaApi();
-        var context = CudaContext.Create(0, api);
-        var stream = CudaStream.Create(context);
-        var owner = new CudaDecodeDynParams(context, stream);
-        var failure = new InvalidOperationException("Controlled dynamic parameter drain refusal.");
-        api.DrainFailure = failure;
-        Exception? observed = null;
-        try { owner.Dispose(); }
-        catch (Exception error) { observed = error; }
-        Assert(ReferenceEquals(observed, failure) && api.MemoryFreeCount == 0 && api.HostFreeCount == 0,
-            "Dynamic parameter cleanup frees buffers without checked context completion.");
+        DynRefusal(0);
     }
 
     private static void DynHostFreeRefusal()
     {
-        var api = new RecordingCudaApi { HostFreeResult = 1 };
+        DynRefusal(2);
+    }
+
+    private static void DynRefusal(int phase)
+    {
+        var roots = FailDynRelease(phase);
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Failed actual dynamic parameter owner graph is not retained.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailDynRelease(int phase)
+    {
+        var api = new RecordingCudaApi();
         var context = CudaContext.Create(0, api);
         var stream = CudaStream.Create(context);
         var owner = new CudaDecodeDynParams(context, stream);
+        owner.Activate();
+        var failure = new InvalidOperationException("Controlled dynamic parameter cleanup refusal.");
+        if (phase == 0) api.DrainFailure = failure;
+        if (phase == 1) api.MemoryFreeFailure = failure;
+        if (phase == 2) api.HostFreeResult = 1;
         Exception? observed = null;
         try { owner.Dispose(); }
         catch (Exception error) { observed = error; }
-        Assert(observed != null && DynHostPointer(owner) != IntPtr.Zero,
-            "Dynamic parameter cleanup discards refused pinned host ownership.");
+        Assert(observed != null && (phase == 2 || ReferenceEquals(observed, failure))
+            && NativeRuntimeQuarantine.TryGetFailure(observed!, out _), "Dynamic cleanup loses its authenticated cause.");
+        Assert(api.MemoryFreeCount == (phase == 0 ? 0 : 1) && api.HostFreeCount == (phase == 2 ? 1 : 0)
+            && DynHostPointer(owner) != IntPtr.Zero && DynDevicePointer(owner) == (phase == 2 ? IntPtr.Zero : new IntPtr(5001)),
+            "Dynamic cleanup discards refused ownership or passes an unsafe dependent free.");
+        if (phase == 2) Assert(DynDevicePointer(owner) == IntPtr.Zero, "Completed device free remains falsely owned.");
+        int effects = api.TotalCalls;
+        foreach (Action operation in new Action[] { () => owner.Write(9, 9, 9, 9), owner.EnqueueUpload,
+                     owner.Activate, owner.Dispose, () => _ = owner.DevicePtr,
+                     () => _ = CudaDecodeDynParams.GetActiveDevicePtr(null) })
+        {
+            try { operation(); throw new Exception("Quarantined dynamic parameter operation succeeded."); }
+            catch (NativeRuntimeQuarantinedException error) { Assert(error.InnerException == observed, "Refusal changes first cause."); }
+        }
+        Assert(api.TotalCalls == effects, "Quarantined dynamic parameters execute a later effect.");
+        CudaDecodeDynParams.Deactivate();
+        return [new(owner), new(context), new(stream), new(api)];
     }
 
     private static IntPtr DynHostPointer(CudaDecodeDynParams owner)
         => (IntPtr)typeof(CudaDecodeDynParams).GetField("hostPtr", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner)!;
+
+    private static IntPtr DynDevicePointer(CudaDecodeDynParams owner)
+        => (IntPtr)typeof(CudaDecodeDynParams).GetField("devicePtr", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner)!;
+
+    private static void DynClean(bool ambient = false)
+    {
+        var roots = CreateAndReleaseDyn(ambient);
+        Collect();
+        Assert(roots.All(r => !r.IsAlive), "Healthy dynamic parameter owners remain rooted after explicit release.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] CreateAndReleaseDyn(bool ambient = false)
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var stream = ambient ? CudaStream.Create(api) : CudaStream.Create(context);
+        var owner = new CudaDecodeDynParams(context, stream);
+        Assert(owner.IsValid, "Actual parameter allocation did not succeed.");
+        owner.Write(1, 2, 3, 4);
+        owner.Activate();
+        Assert(CudaDecodeDynParams.GetActiveDevicePtr(null) == DynDevicePointer(owner), "Active pointer lost actual owner association.");
+        owner.EnqueueUpload();
+        Assert(api.UploadedValues!.SequenceEqual(new[] { 1, 2, 3, 4 }), "Actual Write/upload changes pinned parameter bytes.");
+        owner.Dispose();
+        owner.Dispose();
+        Assert(!owner.IsValid && api.MemoryFreeCount == 1 && api.HostFreeCount == 1 && api.ContextSyncCount == 1
+            && context.Handle != IntPtr.Zero && stream.Handle != IntPtr.Zero, "Parameter release does not drain once or disposes borrowed owners.");
+        int effects = api.TotalCalls;
+        foreach (Action operation in new Action[] { () => owner.Write(0, 0, 0, 0), owner.EnqueueUpload, owner.Activate, () => _ = owner.DevicePtr })
+        {
+            try { operation(); throw new Exception("Retired parameters admitted work."); }
+            catch (ObjectDisposedException) { }
+        }
+        Assert(api.TotalCalls == effects, "Retired parameter owner performs native effects.");
+        stream.Dispose();
+        context.Dispose();
+        return [new(owner), new(context), new(stream), new(api)];
+    }
+
+    private static void DynAllocationFallback(bool host)
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        if (host) api.HostAllocateResult = 1; else api.MemoryAllocateResult = 1;
+        var owner = new CudaDecodeDynParams(context, stream);
+        Assert(!owner.IsValid && api.MemoryFreeCount == 1 && api.HostFreeCount == (host ? 1 : 0)
+            && api.ContextSyncCount == 0, "Ordinary allocation fallback skips OUT pointer rollback or changes into unsafe drain.");
+        owner.Dispose();
+        stream.Dispose();
+        context.Dispose();
+    }
+
+    private static void DynConstructionRollback(bool refuse)
+    {
+        var original = new InvalidOperationException("Controlled pinned allocation failure after OUT ownership.");
+        var cleanup = new InvalidOperationException("Controlled dynamic allocation rollback refusal.");
+        var api = new RecordingCudaApi { HostAllocateFailure = original };
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        if (refuse) api.MemoryFreeFailure = cleanup;
+        try { _ = new CudaDecodeDynParams(context, stream); throw new Exception("Failed construction succeeded."); }
+        catch (AggregateException error) when (refuse)
+        {
+            Assert(error.InnerExceptions.Count == 2 && ReferenceEquals(error.InnerExceptions[0], original)
+                && ReferenceEquals(error.InnerExceptions[1], cleanup) && NativeRuntimeQuarantine.TryGetFailure(cleanup, out _),
+                "Constructor rollback loses original/cleanup identity or unsafe evidence.");
+            Assert(api.HostPointer != IntPtr.Zero && api.HostFreeCount == 0, "Unsafe constructor frees dependent pinned bytes.");
+        }
+        catch (InvalidOperationException error) when (!refuse) { Assert(ReferenceEquals(error, original), "Clean rollback replaces original failure."); }
+        if (!refuse)
+        {
+            Assert(api.MemoryFreeCount == 1 && api.HostFreeCount == 1, "Clean constructor rollback loses returned pointers.");
+            stream.Dispose();
+            context.Dispose();
+        }
+    }
+
+    private static void DynFallbackRefusal()
+    {
+        var roots = FailDynFallback();
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Refused fallback loses actual dependent context/stream/API roots.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailDynFallback()
+    {
+        var cleanup = new InvalidOperationException("Controlled failed fallback rollback.");
+        var api = new RecordingCudaApi { HostAllocateResult = 1, MemoryFreeFailure = cleanup };
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        try { _ = new CudaDecodeDynParams(context, stream); throw new Exception("Unsafe fallback succeeded."); }
+        catch (AggregateException error)
+        {
+            Assert(error.InnerExceptions.Count == 2 && error.InnerExceptions[0] is TensorSharp.Cuda.Interop.CudaException
+                && ReferenceEquals(error.InnerExceptions[1], cleanup) && NativeRuntimeQuarantine.TryGetFailure(cleanup, out _)
+                && api.HostPointer != IntPtr.Zero && api.HostFreeCount == 0,
+                "Unsafe allocation-result fallback loses original/cleanup evidence or storage.");
+        }
+        return [new(context), new(stream), new(api)];
+    }
+
+    private static void DynRetiredStream()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        stream.Dispose();
+        int effects = api.TotalCalls;
+        try { _ = new CudaDecodeDynParams(context, stream); throw new Exception("Retired stream acquired buffers."); }
+        catch (ObjectDisposedException) { }
+        Assert(api.TotalCalls == effects && api.MemoryAllocateCount == 0, "Retired stream validation occurs after effects.");
+        context.Dispose();
+        using var invalid = new CudaDecodeDynParams((IAllocator)null!);
+        Assert(!invalid.IsValid, "Non-CUDA invalid block fallback changes.");
+    }
+
+    private static void DynContextMismatch()
+    {
+        var api = new RecordingCudaApi();
+        var first = CudaContext.Create(0, api);
+        var second = CudaContext.Create(1, api);
+        var stream = CudaStream.Create(first);
+        int effects = api.TotalCalls;
+        try { _ = new CudaDecodeDynParams(second, stream); throw new Exception("Mismatched stream succeeded."); }
+        catch (ArgumentException) { }
+        Assert(api.TotalCalls == effects && api.MemoryAllocateCount == 0, "Mismatched stream acquires parameter ownership.");
+        stream.Dispose();
+        first.Dispose();
+        second.Dispose();
+    }
+
+    private static void DynOrdinaryUploadFault()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        var owner = new CudaDecodeDynParams(context, stream);
+        var failure = new InvalidOperationException("Controlled ordinary upload failure.");
+        api.UploadFailure = failure;
+        try { owner.EnqueueUpload(); throw new Exception("Upload failure succeeded."); }
+        catch (InvalidOperationException error) { Assert(ReferenceEquals(error, failure) && !NativeRuntimeQuarantine.TryGetFailure(error, out _), "Ordinary upload error becomes quarantine."); }
+        api.UploadFailure = null;
+        owner.Write(1, 1, 1, 1);
+        owner.EnqueueUpload();
+        owner.Dispose();
+        stream.Dispose();
+        context.Dispose();
+    }
+
+    private static void DynNestedReleaseRefusal()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        var owner = new CudaDecodeDynParams(context, stream);
+        var calls = (CudaNativeCalls)typeof(CudaDecodeDynParams).GetField("nativeCalls", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner)!;
+        using (calls.EnterEffect())
+        {
+            int effects = api.TotalCalls;
+            try { owner.Dispose(); throw new Exception("Recursive release succeeded."); }
+            catch (InvalidOperationException error) { Assert(!NativeRuntimeQuarantine.TryGetFailure(error, out _), "Pre-effect recursive refusal becomes quarantine."); }
+            Assert(api.TotalCalls == effects, "Recursive release drains or frees before validation.");
+        }
+        owner.Dispose();
+        stream.Dispose();
+        context.Dispose();
+    }
 
     private static void PoolFailedFreeRetention(bool large, bool partial = false)
     {
@@ -874,13 +1081,20 @@ internal static class Program
         Assert(roots.All(r => r.IsAlive == unsafeRelease), "Foreign actual kernel roots do not match checked cleanup outcome.");
     }
 
+    private static void ForeignDyn(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false, dyn: true);
+        Collect();
+        Assert(roots.All(r => r.IsAlive == unsafeRelease), "Foreign dynamic parameter roots do not match explicit cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false, bool kernels = false)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false, bool kernels = false, bool dyn = false)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        string operationName = kernels ? nameof(RunForeignKernels) : blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
+        string operationName = dyn ? nameof(RunForeignDyn) : kernels ? nameof(RunForeignKernels) : blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
             : stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
         var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
@@ -935,6 +1149,13 @@ internal static class Program
             "Actual kernel owner does not execute in the foreign generation.");
         return unsafeRelease ? FailKernelsRelease(false) : CreateAndReleaseKernels();
     }
+
+    public static WeakReference[] RunForeignDyn(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaDecodeDynParams).Assembly)?.IsCollectible == true,
+            "Actual dynamic parameters do not execute in the foreign generation.");
+        return unsafeRelease ? FailDynRelease(0) : CreateAndReleaseDyn();
+    }
 }
 
 internal sealed class FixtureLoadContext : AssemblyLoadContext
@@ -987,6 +1208,11 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal IntPtr HostPointer;
     internal int HostFreeCount;
     internal int HostFreeResult;
+    internal int HostAllocateResult;
+    internal int MemoryAllocateResult;
+    internal Exception? HostAllocateFailure;
+    internal Exception? UploadFailure;
+    internal int[]? UploadedValues;
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
@@ -1085,7 +1311,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     {
         TotalCalls++; MemoryAllocateCount++; ptr = new IntPtr(5000 + MemoryAllocateCount);
         if (MemoryAllocateFailure != null) throw MemoryAllocateFailure;
-        return 0;
+        return MemoryAllocateResult;
     }
     public override int cuMemFree(IntPtr ptr)
     {
@@ -1097,7 +1323,8 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     {
         TotalCalls++;
         ptr = HostPointer = System.Runtime.InteropServices.Marshal.AllocHGlobal(checked((int)bytes.ToUInt64()));
-        return 0;
+        if (HostAllocateFailure != null) throw HostAllocateFailure;
+        return HostAllocateResult;
     }
     public override int cuMemFreeHost(IntPtr ptr)
     {
@@ -1105,6 +1332,15 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         if (HostFreeResult != 0) return HostFreeResult;
         System.Runtime.InteropServices.Marshal.FreeHGlobal(ptr);
         HostPointer = IntPtr.Zero;
+        return 0;
+    }
+    public override int cuGetErrorString(int error, out IntPtr text) { TotalCalls++; text = IntPtr.Zero; return 0; }
+    public override int cuMemcpyHtoDAsync(IntPtr destination, IntPtr source, UIntPtr bytes, IntPtr stream)
+    {
+        TotalCalls++;
+        if (UploadFailure != null) throw UploadFailure;
+        UploadedValues = new int[checked((int)bytes.ToUInt64() / sizeof(int))];
+        System.Runtime.InteropServices.Marshal.Copy(source, UploadedValues, 0, UploadedValues.Length);
         return 0;
     }
     public override int cuFuncSetAttribute(IntPtr function, int attribute, int value)

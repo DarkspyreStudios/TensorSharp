@@ -25,7 +25,9 @@ internal readonly struct CudaContextBinding
         return new(owner, IntPtr.Zero, owner.DeviceId, owner.NativeCalls.Api);
     }
 
-    internal bool IsFromOwner(CudaContext owner) => ReferenceEquals(_owner, owner);
+    internal bool MatchesOwner(CudaContext owner) => ReferenceEquals(_owner, owner)
+        || (_owner == null && DeviceId == owner.DeviceId && ReferenceEquals(Api, owner.NativeCalls.Api)
+            && _borrowedHandle != IntPtr.Zero && _borrowedHandle == owner.Handle);
 
     internal static CudaContextBinding Discover(ICudaNativeApi api)
     {

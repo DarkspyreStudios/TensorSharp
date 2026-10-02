@@ -90,6 +90,22 @@ backing callbacks. A refused callback leaves its exact block and byte accounting
 successful callbacks remove only completed blocks. Callback replay observes bookkeeping
 only. It does not permit repeated native cleanup after recorded CUDA quarantine.
 
+The `dyn-*` modes normally construct actual `CudaDecodeDynParams` with a known context
+and a matching owned or verified ambient stream. Device handles remain opaque. The
+fixture allocates ordinary managed-test host memory through Marshal for the four integer
+slots; only those real host bytes are read or written. No pinned CUDA allocation executes.
+Write, active-pointer projections, activation and upload use the owner's device admission.
+Clean disposal checks context completion before device and host frees and leaves borrowed
+context/stream owners untouched. Nonzero allocation results preserve the invalid-block
+fallback only after returned OUT pointers are released. Constructor cleanup refusal keeps
+original and cleanup causes. Drain, device-free and host-free refusals preserve exactly
+the buffers still owned, root the actual owner/context/stream/API graph and fence later
+effects. A recursive same-owner disposal refuses before any drain/free without publishing
+quarantine. An ordinary upload error remains ordinary and supports later safe operations.
+Foreign modes execute actual private fixture/CUDA/Core assemblies and check collection
+or retained ownership outside the execution frame. Caller graph teardown must precede
+parameter disposal; these tests do not prove captured-graph ownership or replay scheduling.
+
 After a focused build, `python3 eng/tests/run-cuda-quarantine.py --configuration Debug
 --output tmp/cuda-quarantine/debug` runs the finite controlled modes without building.
 Build and run Debug completely before building and running Release because supplier

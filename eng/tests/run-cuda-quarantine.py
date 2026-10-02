@@ -32,6 +32,11 @@ MODES = (
     "pool-small-failed-free-retention", "pool-large-failed-free-retention",
     "pool-small-partial-free-retention", "pool-large-partial-free-retention",
     "kernels-diagnostic-outside-effects",
+    "dyn-clean", "dyn-ambient-stream-clean", "dyn-drain-refusal", "dyn-device-free-refusal", "dyn-host-free-refusal",
+    "dyn-construction-rollback", "dyn-construction-rollback-refusal",
+    "dyn-device-allocation-fallback", "dyn-host-allocation-fallback", "dyn-context-mismatch",
+    "dyn-allocation-fallback-refusal", "dyn-retired-stream",
+    "dyn-ordinary-upload-fault", "dyn-nested-release-refusal", "foreign-dyn-clean", "foreign-dyn-drain-refusal",
 )
 
 
