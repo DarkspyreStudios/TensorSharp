@@ -16,7 +16,10 @@ dotnet eng/tests/cuda-quarantine/bin/Debug/net10.0/TensorSharp.CudaQuarantineFix
 
 Each mode runs in a fresh process. `context-clean` proves explicit primary-reference
 release, same-thread current-context rebinding, idempotent disposal and actual managed
-context/API collection. `context-release-refusal` preserves the exact original failure,
+context/API collection. It preserves an unrelated current context using a resource-free
+wildcard restoration after the known-device lease exits. `context-drain-refusal` proves
+checked context drain precedes unbind and primary release: refusal retains the context
+and makes zero primary-release calls. `context-release-refusal` preserves the exact original failure,
 the actual context handle and owner/API graph after finalizer drainage. Later context
 entry and repeated disposal refuse before injected effects. `context-construction-rollback`
 preserves the original factory error after successful release. Its `-refusal` counterpart

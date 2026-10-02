@@ -45,7 +45,7 @@ namespace TensorSharp.Cuda
             }
             catch (Exception original)
             {
-                try { owner.Release(lease); }
+                try { owner.Release(lease, drain: false); }
                 catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
                 throw;
             }
@@ -88,19 +88,31 @@ namespace TensorSharp.Cuda
         public void Dispose()
         {
             if (IsDisposed) return;
-            using var lease = nativeCalls.EnterEffect();
-            if (IsDisposed) return;
-            Release(lease);
+            IntPtr previous;
+            using (var lease = nativeCalls.EnterEffect())
+            {
+                if (IsDisposed) return;
+                previous = Release(lease, drain: true);
+            }
+            if (previous != IntPtr.Zero) RestoreBorrowedContext(previous, nativeCalls.Api);
         }
 
-        private void Release(NativeEffectLease lease)
+        private IntPtr Release(NativeEffectLease lease, bool drain)
         {
             nativeCalls.ValidateSafeRelease(lease);
             try
             {
+                IntPtr previous = IntPtr.Zero;
                 if (context != IntPtr.Zero)
                 {
                     nativeCalls.ThrowOnError(nativeCalls.cuCtxGetCurrent(out IntPtr current));
+                    if (drain)
+                    {
+                        previous = current == context ? IntPtr.Zero : current;
+                        BindCurrent(nativeCalls);
+                        nativeCalls.cuCtxSynchronize();
+                        current = context;
+                    }
                     if (current == context)
                         nativeCalls.ThrowOnError(nativeCalls.cuCtxSetCurrent(IntPtr.Zero));
 
@@ -108,12 +120,23 @@ namespace TensorSharp.Cuda
                     Volatile.Write(ref context, IntPtr.Zero);
                 }
                 nativeCalls.CompleteSafeRelease(lease);
+                return previous;
             }
             catch (Exception cleanup)
             {
                 nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.ContextRelease);
                 throw;
             }
+        }
+
+        private static void RestoreBorrowedContext(IntPtr previous, ICudaNativeApi api)
+        {
+            // A borrowed handle alone is not ordinal proof. No known-device gate is held here.
+            var restoration = new object();
+            var calls = new CudaNativeCalls(restoration, NativeOwnerRole.NativeHandle, api);
+            using var lease = calls.EnterEffect();
+            try { calls.ThrowOnError(calls.cuCtxSetCurrent(previous)); }
+            finally { calls.CompleteSafeRelease(lease); }
         }
     }
 }

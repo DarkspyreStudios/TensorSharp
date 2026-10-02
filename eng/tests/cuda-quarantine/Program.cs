@@ -56,10 +56,12 @@ internal static class Program
         api.Current = IntPtr.Zero;
         context.MakeCurrent();
         Assert(api.Current == context.Handle, "MakeCurrent did not rebind the actual context.");
+        api.Current = new IntPtr(7777);
         context.Dispose();
         context.Dispose();
         Assert(context.IsDisposed && context.Handle == IntPtr.Zero && api.ReleaseCount == 1,
             "Healthy context release is not idempotent.");
+        Assert(api.Current == new IntPtr(7777), "Context cleanup does not restore the unrelated borrowed context.");
         try { context.MakeCurrent(); throw new InvalidOperationException("Disposed context entered."); }
         catch (ObjectDisposedException) { }
         return [new WeakReference(context), new WeakReference(api)];
