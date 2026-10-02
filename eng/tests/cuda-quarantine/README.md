@@ -6,6 +6,16 @@ cuBLAS, GGML, models or a native bridge. Opaque fixture handles are never derefe
 Core and CUDA grant this exact fixture friend access for typed actual-parent effect
 composition. No public native driver or callback injection API is added.
 
+The `reference-*` modes exercise Core reference mutation without a backend call.
+Overflow uses a controlled seeded extreme count and refuses before changing it.
+The internal preallocated census gate
+interlocks addition with retirement validation, and every refusal exits that gate.
+Final release destroys exactly once after the gate exits, including concurrent
+null-gate releases. Actual host Tensor, CopyRef and View objects prove distinct
+storage references; a second field alias adds no reference. Disposed Tensor objects
+contribute no disposal intent. This is reference protocol evidence, not a completed
+CUDA allocator/model census or native lifetime qualification.
+
 Build each configuration with all native hooks disabled:
 
 ```bash

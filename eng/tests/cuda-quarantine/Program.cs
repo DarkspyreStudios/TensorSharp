@@ -16,6 +16,10 @@ internal static class Program
         switch (args[0])
         {
             case "reference-overflow": ReferenceOwnershipFixtures.Overflow(); break;
+            case "reference-gate-admission": ReferenceOwnershipFixtures.GateAdmission(); break;
+            case "reference-gate-refusal": ReferenceOwnershipFixtures.GateRefusal(); break;
+            case "reference-parallel-release": ReferenceOwnershipFixtures.ParallelRelease(); break;
+            case "reference-tensor-intents": ReferenceOwnershipFixtures.TensorIntents(); break;
             case "context-clean": ContextClean(); break;
             case "context-composed-clean": ContextComposedClean(false); break;
             case "context-composed-external": ContextComposedClean(true); break;

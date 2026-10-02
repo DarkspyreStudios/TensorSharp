@@ -9,6 +9,8 @@ import subprocess
 
 
 MODES = (
+    "reference-overflow", "reference-gate-admission", "reference-gate-refusal",
+    "reference-parallel-release", "reference-tensor-intents",
     "context-clean", "context-release-refusal", "context-drain-refusal",
     "context-construction-rollback", "context-construction-rollback-refusal",
     "foreign-context-clean", "foreign-context-release-refusal",
