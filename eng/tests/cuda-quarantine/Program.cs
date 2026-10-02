@@ -51,6 +51,7 @@ internal static class Program
             case "kernels-allocation-rollback": KernelsAllocationRollback(false); break;
             case "kernels-allocation-rollback-refusal": KernelsAllocationRollback(true); break;
             case "kernels-ordinary-faults": KernelsOrdinaryFaults(); break;
+            case "kernels-diagnostic-outside-effects": KernelsDiagnosticOutsideEffects(); break;
             case "pool-small-failed-free-retention": PoolFailedFreeRetention(false); break;
             case "pool-large-failed-free-retention": PoolFailedFreeRetention(true); break;
             case "pool-small-partial-free-retention": PoolFailedFreeRetention(false, partial: true); break;
@@ -151,6 +152,26 @@ internal static class Program
         var roots = CreateAndReleaseKernels();
         Collect();
         Assert(roots.All(r => !r.IsAlive), "Healthy actual kernels/module/context/API roots remain retained.");
+    }
+
+    private static void KernelsDiagnosticOutsideEffects()
+    {
+        var api = new RecordingCudaApi { MissingOptionalKernel = true };
+        var context = CudaContext.Create(0, api);
+        var module = CudaModule.LoadFromBytes(new byte[] { 1 }, context);
+        var diagnostic = new EffectCheckingWriter(api);
+        TextWriter original = Console.Error;
+        CudaKernels? kernels = null;
+        try
+        {
+            Console.SetError(diagnostic);
+            kernels = CudaKernels.CreateOwned(module);
+        }
+        finally { Console.SetError(original); }
+        Assert(diagnostic.Entered && diagnostic.Completed,
+            "Caller-replaceable diagnostic executes while constructor native-effect gates remain held.");
+        kernels.Dispose();
+        context.Dispose();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -903,6 +924,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? ModuleUnloadFailure;
     internal Exception? ModuleLoadFailure;
     internal Exception? FunctionFailure;
+    internal bool MissingOptionalKernel;
     internal int StreamSyncCount;
     internal int StreamDestroyCount;
     internal int ModuleUnloadCount;
@@ -991,6 +1013,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     {
         TotalCalls++; FunctionCount++; function = new IntPtr(3002);
         if (FunctionFailure != null) throw FunctionFailure;
+        if (MissingOptionalKernel && name == "ts_wan_rope_f32") throw new InvalidOperationException("Controlled absent optional kernel.");
         return 0;
     }
     public override int cuModuleUnload(IntPtr module)
@@ -1044,5 +1067,22 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         TotalCalls++; KernelLaunchCount++;
         if (KernelLaunchFailure != null) throw KernelLaunchFailure;
         return 0;
+    }
+}
+
+internal sealed class EffectCheckingWriter : TextWriter
+{
+    private readonly CudaNativeCalls _calls;
+    internal bool Entered;
+    internal bool Completed;
+    internal EffectCheckingWriter(RecordingCudaApi api)
+        => _calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, api);
+    public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
+    public override void WriteLine(string? value)
+    {
+        Entered = true;
+        using var lease = _calls.EnterEffect();
+        _calls.CompleteSafeRelease(lease);
+        Completed = true;
     }
 }
