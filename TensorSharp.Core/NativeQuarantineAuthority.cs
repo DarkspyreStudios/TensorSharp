@@ -28,6 +28,7 @@ internal sealed class NativeOwnerRegistration
     }
 
     internal void AttachMlxSharedRuntime() => NativeQuarantineAuthority.Attach(this, "mlx-shared-runtime");
+    internal void AttachCudaUnresolvedRuntime() => NativeQuarantineAuthority.Attach(this, "cuda-primary/*");
     internal void AttachCudaDependentGgml() => NativeQuarantineAuthority.Attach(this, "cuda-primary/*");
     internal void ThrowIfQuarantined() => NativeQuarantineAuthority.Check(this);
     internal NativeEffectLease EnterEffect() => NativeQuarantineAuthority.Enter(this);
@@ -247,7 +248,10 @@ internal static class NativeQuarantineAuthority
             if (stack.Count != 0)
             {
                 var parent = stack[^1];
-                if (keys.Any(key => !((string[])parent[1]).Contains(key)) || (write && !(bool)parent[2]))
+                string[] parentKeys = (string[])parent[1];
+                bool parentCudaWrite = (bool)parent[2];
+                if (keys.Any(key => !parentKeys.Contains(key)
+                    && !(parentCudaWrite && IsCuda(key) && key != Wildcard)) || (write && !parentCudaWrite))
                     throw new InvalidOperationException("Recursive native effects cannot widen scopes or upgrade CUDA gates.");
             }
             frame = new object[] { r.Cell[0], keys, write };
