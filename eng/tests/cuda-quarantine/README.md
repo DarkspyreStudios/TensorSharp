@@ -49,6 +49,25 @@ publishing even a cached function. Foreign module modes prove managed owner/asse
 collection or retention after actual explicit cleanup. Their PTX bytes and opaque
 function handles are controlled inputs, not compiled GPU kernels.
 
+The composed-context modes hold a real parent effect across checked child release.
+One same-thread token captures the original current opaque handle before the outer
+cleanup gates. Child cleanup does not restore intermediate contexts. The token skips
+only original handles actually released by that cleanup and restores unrelated borrowed
+handles once after all effects exit. Post-release restoration errors do not quarantine
+retired owners. Drain refusal stops later child release and restoration, retaining the
+actual parent/context/API graph. The token rejects cross-thread use and repeated restore.
+Foreign modes prove actual owner/generation collection or retention outside the frame.
+This is context composition, not an allocator, group or model cleanup qualification.
+`context-independent-postfault-release` proves known independent cleanup succeeds despite
+another recorded device failure. A subsequent arbitrary borrowed-context restoration
+refuses under the wildcard policy without changing the completed release or poisoning
+the independent device. Its actual released context owner collects.
+
+After a focused build, `python3 eng/tests/run-cuda-quarantine.py --configuration Debug
+--output tmp/cuda-quarantine/debug` runs the finite controlled modes without building.
+Build and run Debug completely before building and running Release because supplier
+assemblies use shared output paths. Every mode has a 20-second process bound.
+
 This proves managed ownership routing only. It does not qualify primary-context driver
 semantics, GPU execution, physical multi-device cleanup or complete backend integration.
 The allocator, storage, graph, model and GGML dependency callers are not covered by these

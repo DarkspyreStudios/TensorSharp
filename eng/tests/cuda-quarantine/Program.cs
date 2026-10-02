@@ -15,7 +15,12 @@ internal static class Program
         switch (args[0])
         {
             case "context-clean": ContextClean(); break;
-            case "context-composed-clean": ContextComposedClean(); break;
+            case "context-composed-clean": ContextComposedClean(false); break;
+            case "context-composed-external": ContextComposedClean(true); break;
+            case "context-composed-drain-refusal": ContextComposedRefusal(); break;
+            case "context-composed-restore-refusal": ReleaseContextPair(true, true); break;
+            case "context-composed-thread-refusal": ContextComposedThreadRefusal(); break;
+            case "context-independent-postfault-release": ContextIndependentPostfaultRelease(); break;
             case "context-release-refusal": ContextReleaseRefusal(); break;
             case "context-drain-refusal": ContextDrainRefusal(); break;
             case "context-construction-rollback": ConstructionRollback(false); break;
@@ -33,6 +38,8 @@ internal static class Program
             case "module-construction-rollback-refusal": ModuleConstructionRollback(true); break;
             case "foreign-context-clean": ForeignContext(false); break;
             case "foreign-context-release-refusal": ForeignContext(true); break;
+            case "foreign-composed-clean": ForeignComposed(false); break;
+            case "foreign-composed-drain-refusal": ForeignComposed(true); break;
             case "foreign-stream-clean": ForeignStream(false); break;
             case "foreign-stream-sync-refusal": ForeignStream(true); break;
             case "foreign-module-clean": ForeignModule(false); break;
@@ -63,24 +70,143 @@ internal static class Program
         Assert(NativeRuntimeQuarantine.Observe().Failures.Count == 0, "Healthy cleanup records quarantine.");
     }
 
-    private static void ContextComposedClean()
+    private static void ContextComposedClean(bool external)
     {
+        WeakReference[] roots = ReleaseContextPair(external, false);
+        Collect();
+        Assert(roots.All(r => !r.IsAlive), "Healthy actual composed context/token/parent/API roots remain retained.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] ReleaseContextPair(bool external, bool restoreFailure)
+    {
+        var api = new RecordingCudaApi();
+        var first = CudaContext.Create(0, api);
+        var second = CudaContext.Create(1, api);
+        first.MakeCurrent();
+        if (external) api.Current = new IntPtr(7777);
+        object[] actualOwner = { first, second };
+        var calls = new CudaNativeCalls(actualOwner, NativeOwnerRole.Allocator, api, 0, 1);
+        var restoration = CudaContextRestoration.Capture(calls);
+        var original = new InvalidOperationException("Controlled post-release borrowed restoration refusal.");
+        if (restoreFailure) { api.RefusedBind = new IntPtr(7777); api.RestoreFailure = original; }
+        using (var lease = calls.EnterEffect())
+        {
+            calls.ValidateSafeRelease(lease);
+            second.DisposeOwned(restoration);
+            first.DisposeOwned(restoration);
+            calls.CompleteSafeRelease(lease);
+        }
+        try { restoration.Restore(); Assert(!restoreFailure, "Borrowed restoration unexpectedly succeeded."); }
+        catch (InvalidOperationException error) when (restoreFailure && ReferenceEquals(error, original)) { }
+        Assert(first.IsDisposed && second.IsDisposed && api.ReleaseCount == 2,
+            "Composed cleanup does not release both actual contexts.");
+        Assert(api.Current == (external && !restoreFailure ? new IntPtr(7777) : IntPtr.Zero),
+            "Composed cleanup restores an already released owned context or loses a borrowed context.");
+        Assert(api.BindThreads.All(id => id == Environment.CurrentManagedThreadId),
+            "Context restoration crosses executing threads.");
+        Assert(api.BindContexts.Count(h => h == new IntPtr(7777)) == (external ? 1 : 0),
+            "Composed cleanup does not attempt borrowed restoration exactly once.");
+        Assert(NativeRuntimeQuarantine.Observe().Failures.Count == 0,
+            "Post-release restoration failure publishes through a retired owner.");
+        return [new(first), new(second), new(actualOwner), new(restoration), new(api)];
+    }
+
+    private static void ContextComposedRefusal()
+    {
+        WeakReference[] roots = FailContextPair();
+        Collect();
+        Assert(roots.All(r => r.IsAlive), "Failed composed parent loses actual context/API owners.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference[] FailContextPair()
+    {
+        var original = new InvalidOperationException("Controlled composed child drain refusal.");
         var api = new RecordingCudaApi();
         var first = CudaContext.Create(0, api);
         var second = CudaContext.Create(1, api);
         first.MakeCurrent();
         object[] actualOwner = { first, second };
         var calls = new CudaNativeCalls(actualOwner, NativeOwnerRole.Allocator, api, 0, 1);
-        using (var lease = calls.EnterEffect())
+        var restoration = CudaContextRestoration.Capture(calls);
+        api.DrainFailure = original;
+        try
         {
+            using var lease = calls.EnterEffect();
             calls.ValidateSafeRelease(lease);
-            second.Dispose();
-            first.Dispose();
+            second.DisposeOwned(restoration);
+            first.DisposeOwned(restoration);
             calls.CompleteSafeRelease(lease);
+            restoration.Restore();
+            throw new InvalidOperationException("Unsafe composed cleanup succeeded.");
         }
-        Assert(first.IsDisposed && second.IsDisposed && api.ReleaseCount == 2,
-            "Composed cleanup does not release both actual contexts.");
-        Assert(api.Current == IntPtr.Zero, "Composed cleanup restores an already released owned context.");
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        Assert(api.ReleaseCount == 0 && !first.IsDisposed && !second.IsDisposed && api.Current == second.Handle,
+            "Child drain refusal continues dependent cleanup or restores the prior context.");
+        int effects = api.TotalCalls;
+        try { restoration.Restore(); throw new Exception("Unsafe cleanup token permits restoration."); }
+        catch (InvalidOperationException) { }
+        try { calls.ThrowIfQuarantined(); throw new InvalidOperationException("Actual parent is not fenced."); }
+        catch (NativeRuntimeQuarantinedException) { }
+        Assert(api.TotalCalls == effects && NativeRuntimeQuarantine.TryGetFailure(original, out _),
+            "Composed refusal loses its cause or enters native effects.");
+        return [new(first), new(second), new(actualOwner), new(api)];
+    }
+
+    private static void ContextComposedThreadRefusal()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var restoration = CudaContextRestoration.Capture(context.NativeCalls);
+        int effects = api.TotalCalls;
+        Task attempt = Task.Run(() =>
+        {
+            try { context.DisposeOwned(restoration); throw new Exception("Cross-thread token was accepted."); }
+            catch (InvalidOperationException) { }
+        });
+        Assert(attempt.Wait(TimeSpan.FromSeconds(3)), "Cross-thread token refusal did not settle.");
+        Assert(api.TotalCalls == effects && !context.IsDisposed,
+            "Cross-thread token enters cleanup before refusing.");
+        context.DisposeOwned(restoration);
+        restoration.Restore();
+        try { restoration.Restore(); throw new Exception("Restoration token was reused."); }
+        catch (InvalidOperationException) { }
+    }
+
+    private static void ContextIndependentPostfaultRelease()
+    {
+        WeakReference independent = ReleaseIndependentAfterFailure();
+        Collect();
+        Assert(!independent.IsAlive, "Released independent context remains retained by another device failure.");
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference ReleaseIndependentAfterFailure()
+    {
+        var api = new RecordingCudaApi();
+        var failed = CudaContext.Create(0, api);
+        var independent = CudaContext.Create(1, api);
+        var original = new InvalidOperationException("Controlled other-device drain refusal.");
+        api.DrainFailure = original;
+        try { failed.Dispose(); throw new Exception("Drain refusal succeeded."); }
+        catch (InvalidOperationException error) when (ReferenceEquals(error, original)) { }
+        api.DrainFailure = null;
+        Assert(api.Current == failed.Handle, "The prior context is not the failed external context.");
+        try { independent.Dispose(); throw new Exception("Quarantined wildcard restoration was admitted."); }
+        catch (NativeRuntimeQuarantinedException error)
+        {
+            Assert(error.Failure.DeviceOrdinal == 0 && ReferenceEquals(error.InnerException, original),
+                "Post-success restoration refuses with an unrelated cause.");
+        }
+        Assert(independent.IsDisposed && !failed.IsDisposed && api.ReleaseCount == 1,
+            "Other-device failure prevents known independent release or changes failed ownership.");
+        Assert(NativeRuntimeQuarantine.Observe().Failures.All(f => f.DeviceOrdinal == 0),
+            "Post-success restoration poisons the safely released independent device.");
+        int effects = api.TotalCalls;
+        independent.Dispose();
+        Assert(api.TotalCalls == effects, "Already released independent context retries teardown.");
+        return new WeakReference(independent);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -361,13 +487,21 @@ internal static class Program
             "Foreign actual module/dependent owners do not match explicit cleanup outcome.");
     }
 
+    private static void ForeignComposed(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false, composed: true);
+        Collect();
+        Assert(roots.All(r => r.IsAlive == unsafeRelease),
+            "Foreign composed context/parent generation roots do not match cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        string operationName = module ? nameof(RunForeignModule)
+        string operationName = composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
             : stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
         var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
@@ -401,6 +535,13 @@ internal static class Program
             "Actual CUDA module does not execute in the foreign collectible generation.");
         return unsafeRelease ? FailModuleRelease(false) : CreateAndReleaseModule();
     }
+
+    public static WeakReference[] RunForeignComposed(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaContext).Assembly)?.IsCollectible == true,
+            "Actual context composition does not execute in the foreign generation.");
+        return unsafeRelease ? FailContextPair() : ReleaseContextPair(true, false);
+    }
 }
 
 internal sealed class FixtureLoadContext : AssemblyLoadContext
@@ -431,6 +572,10 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal int FunctionCount;
     internal int ReleaseCount;
     internal int TotalCalls;
+    internal IntPtr RefusedBind;
+    internal Exception? RestoreFailure;
+    internal readonly List<int> BindThreads = new();
+    internal readonly List<IntPtr> BindContexts = new();
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
@@ -442,6 +587,9 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     public override int cuCtxSetCurrent(IntPtr ctx)
     {
         TotalCalls++;
+        BindThreads.Add(Environment.CurrentManagedThreadId);
+        BindContexts.Add(ctx);
+        if (ctx == RefusedBind && RestoreFailure != null) throw RestoreFailure;
         if (ctx != IntPtr.Zero && BindFailure != null) throw BindFailure;
         Current = ctx;
         return 0;
