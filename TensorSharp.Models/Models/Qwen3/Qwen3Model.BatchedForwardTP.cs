@@ -101,6 +101,7 @@ namespace TensorSharp.Models
             // ----- embed + broadcast -----
             Tensor hidden0 = Embedding(flatTokens);
             Tensor[] hiddenStates = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hiddenStates);
 
             // ----- per-layer transformer -----
             for (int layer = 0; layer < Config.NumLayers; layer++)
@@ -132,9 +133,7 @@ namespace TensorSharp.Models
                 // 5. Residual add.
                 Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
                 TpResidualAdd(hiddenStates, attnReplicated);
-                for (int r = 1; r < tp; r++)
-                    attnReplicated[r].Dispose();
-                reducedAttn.Dispose();
+                DisposeTensorParallelBroadcast(attnReplicated, reducedAttn);
 
                 // 6. FFN norm (replicated).
                 Tensor[] normed2 = TpRMSNorm(hiddenStates, wn[5]);
@@ -168,9 +167,7 @@ namespace TensorSharp.Models
                 // 10. Residual add.
                 Tensor[] ffnReplicated = BroadcastTensorToAllRanks(ffnOut);
                 TpResidualAdd(hiddenStates, ffnReplicated);
-                for (int r = 1; r < tp; r++)
-                    ffnReplicated[r].Dispose();
-                ffnOut.Dispose();
+                DisposeTensorParallelBroadcast(ffnReplicated, ffnOut);
             }
 
             // ----- final norm + LM head on rank 0 -----

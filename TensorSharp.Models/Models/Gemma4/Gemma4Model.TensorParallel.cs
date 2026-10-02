@@ -674,6 +674,7 @@ namespace TensorSharp.Models
 
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             bool tpDebug = Environment.GetEnvironmentVariable("TS_TP_DEBUG") == "1";
             if (tpDebug)
@@ -809,9 +810,7 @@ namespace TensorSharp.Models
             // 5. Broadcast + post-attention norm + residual.
             Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
             Tensor[] postAttnNormed = TpRMSNorm(attnReplicated, $"{prefix}.post_attention_norm.weight");
-            for (int r = 1; r < tp; r++)
-                attnReplicated[r].Dispose();
-            reducedAttn.Dispose();
+            DisposeTensorParallelBroadcast(attnReplicated, reducedAttn);
 
             TpResidualAdd(postAttnNormed, hidden);
             for (int r = 0; r < tp; r++)
@@ -1341,9 +1340,7 @@ namespace TensorSharp.Models
             if (!_weights.ContainsKey(postFfnNormKey))
                 postFfnNormKey = $"{prefix}.ffn_post_norm.weight";
             Tensor[] postFfnNormed = TpRMSNorm(ffnReplicated, postFfnNormKey);
-            for (int r = 1; r < tp; r++)
-                ffnReplicated[r].Dispose();
-            ffnOut.Dispose();
+            DisposeTensorParallelBroadcast(ffnReplicated, ffnOut);
 
             TpResidualAdd(hidden, postFfnNormed);
             for (int r = 0; r < tp; r++)
@@ -1401,9 +1398,7 @@ namespace TensorSharp.Models
             if (!_weights.ContainsKey(postNorm1Key))
                 postNorm1Key = $"{prefix}.ffn_post_norm_1.weight";
             Tensor[] denseNormed = TpRMSNorm(denseReplicated, postNorm1Key);
-            for (int r = 1; r < tp; r++)
-                denseReplicated[r].Dispose();
-            denseFFNOut.Dispose();
+            DisposeTensorParallelBroadcast(denseReplicated, denseFFNOut);
 
             // Step 2: MoE FFN (tensor-parallel experts)
             // Dense FFN and MoE operate in PARALLEL on the same input (hidden),

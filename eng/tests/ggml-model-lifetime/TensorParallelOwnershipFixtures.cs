@@ -260,6 +260,7 @@ public static partial class ForeignModelLifetime
         }
 
         internal Tensor[] Broadcast(Tensor source) => BroadcastTensorToAllRanks(source);
+        internal void OwnBroadcastSource(Tensor source) => _weights.Add("broadcast.source", source);
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         internal PartialShardEvidence RefuseSecondShard(string mode)

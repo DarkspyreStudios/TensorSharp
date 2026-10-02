@@ -295,6 +295,7 @@ namespace TensorSharp.Models
 
             Tensor hidden0 = Embedding(tokens);
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             bool captureAll = false, captureLast = false;
             if (HasDFlash && hAllOut != null && hAllOut.Length > 0)

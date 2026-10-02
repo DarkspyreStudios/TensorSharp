@@ -403,6 +403,7 @@ namespace TensorSharp.Models
             }
 
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
@@ -475,9 +476,7 @@ namespace TensorSharp.Models
             // 5. Residual add.
             Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
             TpResidualAdd(hidden, attnReplicated);
-            for (int r = 1; r < tp; r++)
-                attnReplicated[r].Dispose();
-            reducedAttn.Dispose();
+            DisposeTensorParallelBroadcast(attnReplicated, reducedAttn);
 
             // 6. Post-attention norm (replicated).
             Tensor[] postAttnNormed = TpRMSNorm(hidden, wn[5]);

@@ -321,6 +321,14 @@ its existing late TP-view/cache order and does not newly release column backing 
 source rules do not qualify its synchronization, device cache closure, terminal strong retention
 or physical multi-device execution.
 
+GGML broadcast borrows its input and allocates an independent tensor for every logical rank.
+Partial allocation/copy failure explicitly rolls back the whole destination array. Owning
+model callers retire their original embedding/router/Mamba source only after copying succeeds.
+Temporary-output callers retire every GGML copy, including rank zero, and their original source
+through one ownership boundary. A refused cleanup retains the actual source and remaining
+copies through existing failed-model ownership; work and cleanup errors stay visible. Direct
+CUDA/MLX broadcast cleanup preserves its existing rank-one-onward/source disposal sequence.
+
 `Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
 Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
 native imports cannot execute afterwards. The loaded library is never unloaded. A process-wide
@@ -408,7 +416,7 @@ every nested allocation helper, actual captured-graph teardown, other RIDs or CU
 current success gate. Run each mode/backend in a separate process against a matching real bridge:
 
 ```sh
-env TMPDIR="$PWD/tmp" dotnet build eng/tests/ggml-model-lifetime/ggml-model-lifetime.csproj -c Release -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+env TMPDIR="$PWD/tmp" TENSORSHARP_GGML_NATIVE_SKIP=true TENSORSHARP_MLX_NATIVE_SKIP=true dotnet build eng/tests/ggml-model-lifetime/ggml-model-lifetime.csproj -c Release -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true -p:TensorSharpSkipCudaNative=true -p:GeneratePackageOnBuild=false -p:PublishAot=false
 env TMPDIR="$PWD/tmp" dotnet eng/tests/ggml-model-lifetime/bin/Release/net10.0/ggml-model-lifetime.dll normal cpu /absolute/bridge/directory
 env TMPDIR="$PWD/tmp" dotnet eng/tests/ggml-model-lifetime/bin/Release/net10.0/ggml-model-lifetime.dll normal metal /absolute/bridge/directory
 ```

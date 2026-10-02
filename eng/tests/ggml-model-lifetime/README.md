@@ -54,6 +54,31 @@ These modes use two logical ranks on one real CPU or Metal context. They do not 
 collective or qualify physical multi-device placement. The retained `observe-*` mode names
 now check explicit production ownership and cleanup; their original red assertions remain in git.
 
+`tp-broadcast-ownership` verifies that every returned GGML rank owns an independent real
+storage, including rank zero. Mutating one rank leaves the other rank and borrowed source
+unchanged. `tp-broadcast-source-disposal` uses the owning caller's retirement helper and
+observes that only the source storage retires. `tp-broadcast-temporary-retirement` explicitly
+retires all temporary copies and their owned original source. The broadcast helper itself
+borrows its input; it never implicitly disposes it.
+
+`tp-broadcast-partial-copy` and `tp-broadcast-second-copy` refuse the first or second copy
+dispatch after actual destination allocation. The hook restores before cleanup. Production
+rollback explicitly destroys every partial destination while preserving the borrowed source
+and exact original error. Clean modes drain guarded shutdown before foreign collection.
+
+`tp-broadcast-source-cleanup-refusal` refuses source storage destruction after two successful
+copies. `tp-broadcast-rollback-refusal` refuses the second copy and then refuses destruction of
+the first destination during rollback. The owning caller retains its original source.
+`tp-broadcast-temporary-cleanup-refusal` refuses the first temporary copy's destruction. The
+joint retirement owner also retains its original source without a separate dictionary owner. These
+modes preserve actual source and all returned/partial copy owners after outer-frame finalizer
+drainage; repeated model disposal refuses and guarded shutdown remains busy. Original work
+and cleanup errors are preserved together where both exist. The exact cleanup-failing storage
+subclass has a finite fixture-only copy registration delegating to unchanged `GgmlBasicOps.Copy`.
+Registry, handler, storage and actual model belong to the same private generation; no handler
+is registered in the default context. This is controlled managed cleanup refusal, not native
+free failure, physical GPU fault or captured asynchronous teardown qualification.
+
 `observe-tp-column-owner` creates an actual owned Q4_0 source and two column views. The source
 leaves the ordinary dictionary. The views hold its exact wrapper until model disposal. Model
 disposal retires the views before explicitly disposing their removed backing owner. Its actual
