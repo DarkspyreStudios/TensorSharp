@@ -19,6 +19,7 @@ if (args.Length != 3 || args[0] is not ("normal" or "refusal" or "phase-order" o
     "observe-tp-column-owner" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "observe-tp-concatenated" or "observe-tp-separate" or
     "observe-tp-concatenated-bias" or "observe-tp-separate-bias" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or
     "observe-tp-sync-retirement" or "tp-sync-preflight-refusal" or
+    "tp-quantized-copy-row" or "tp-quantized-copy-concatenated" or "tp-quantized-requantize-separate" or
     "vision-normal" or "vision-mismatch" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or
     "execution-cleanup-failure" or "execution-worker-cleanup-failure" or "execution-dispatch-cleanup-failure" or "vision-execution-cleanup-failure") || args[1] is not ("cpu" or "metal"))
     throw new ArgumentException("Expected a model-lifetime mode, cpu|metal and an absolute bridge directory.");
@@ -40,7 +41,7 @@ internal static class Retirement
             Thread.Sleep(10);
         }
         string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
-        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal";
+        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal";
         if (!unsafeCleanup && retained.Length != 0)
             throw new InvalidOperationException("Disposed real model generation remains rooted: " + string.Join(",", retained));
         if (unsafeCleanup && retained.Length != evidence.Roots.Length)
@@ -51,7 +52,7 @@ internal static class Retirement
             backend,
             evidence.Report,
             retained,
-            actualModel = mode.StartsWith("observe-tp-", StringComparison.Ordinal) || mode is "tp-view-unregister-refusal" or "tp-sync-preflight-refusal"
+            actualModel = mode.StartsWith("observe-tp-", StringComparison.Ordinal) || mode.StartsWith("tp-quantized-", StringComparison.Ordinal) || mode is "tp-view-unregister-refusal" or "tp-sync-preflight-refusal"
                 ? "generated ownership-only sources, logical ranks on one real GGML context, no forward" :
                 mode is "vision-normal" or "vision-mismatch" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or "vision-execution-cleanup-failure"
                 ? "generated one-layer F32 DeepSeek41 text and real vision companion, lifetime only" :
@@ -202,10 +203,11 @@ public static partial class ForeignModelLifetime
                 "observe-tp-view-cleanup-order" => ExerciseTpViewRefusal(modelPath, backend, poisonLate: true),
                 "observe-tp-sync-retirement" => ExerciseTpSynchronization(modelPath, backend, preflight: false),
                 "tp-sync-preflight-refusal" => ExerciseTpSynchronization(modelPath, backend, preflight: true),
+                "tp-quantized-copy-row" or "tp-quantized-copy-concatenated" or "tp-quantized-requantize-separate" => ExerciseTpQuantizedCopies(mode, modelPath, backend),
                 _ => RefuseModel(modelPath, backend)
             };
             // Finalization is diagnostic here. A failed construction must not require GC to retire its model lease.
-            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy";
+            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement";
             for (int attempt = 0; unsafeCleanup && attempt < 10; attempt++)
             {
                 GC.Collect();
@@ -215,7 +217,7 @@ public static partial class ForeignModelLifetime
             int modelLeases = ModelLeaseCount();
             if (mode.EndsWith("cleanup-failure", StringComparison.Ordinal)) VerifyRetainedOwner(mode);
             if (mode is "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal") VerifyQuantizedRetention(mode);
-            if (mode is "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy") VerifyTpRetention(mode);
+            if (mode is "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement") VerifyTpRetention(mode);
             GgmlNativeShutdownResult shutdown = GgmlNativeLoader.Shutdown();
             if (!unsafeCleanup) Require(shutdown.Released && modelLeases == 0,
                 (mode.StartsWith("observe-tp-", StringComparison.Ordinal)

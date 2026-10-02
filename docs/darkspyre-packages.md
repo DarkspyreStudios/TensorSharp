@@ -310,6 +310,17 @@ alive; the model cleanup boundary retains unsafe local owners and preserves both
 cleanup errors. These paths do not establish tensor-parallel backing-owner or CUDA/MLX shared
 allocator teardown safety.
 
+Tensor-parallel shard arrays reserve model ownership before allocation/copy. Quantized raw copies
+and requantization use owned wrappers before writing. Removed column-parallel sources remain
+explicitly model-owned until their views retire. Temporary source views unwind through the local
+rollback helper; original work and failed cleanup errors remain visible. GGML TP views retire
+before backing owners, bulk buffers and the GGUF mapping. Source disposal precedes dictionary
+removal. GGML group synchronization and its host barrier precede graph/cache/storage teardown.
+A borrowed group's allocator-wide CUDA arena remains with that group. Direct CUDA/MLX retains
+its existing late TP-view/cache order and does not newly release column backing owners. These
+source rules do not qualify its synchronization, device cache closure, terminal strong retention
+or physical multi-device execution.
+
 `Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
 Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
 native imports cannot execute afterwards. The loaded library is never unloaded. A process-wide

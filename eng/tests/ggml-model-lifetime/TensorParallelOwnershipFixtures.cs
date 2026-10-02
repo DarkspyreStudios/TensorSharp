@@ -18,46 +18,57 @@ public static partial class ForeignModelLifetime
         Require(source.IsAlive && model.QuantShardCount == 2 && model.SourceQuantCount == 0,
             "Two actual external views keep the removed owned source wrapper alive before disposal.");
         model.Dispose();
-        Require(HasUndisposedHostOwner(source),
-            "Current model disposal retires the views but does not explicitly dispose their removed backing owner.");
+        Require(HasDisposedHostOwner(source),
+            "Model disposal explicitly retires the removed backing owner after its views, before finalizer drainage.");
         DrainFinalizers();
         Require(!source.IsAlive && RuntimeResourceCount() == 0,
-            "The removed QuantizedWeight wrapper collects without explicit backing-owner disposal.");
-        return "red-column-backing-owner-undisposed-before-collection;actual-owner-weak-reference-collected;" +
+            "The explicitly disposed backing owner collects after successful cleanup.");
+        return "explicit-column-backing-owner-disposed-before-finalizers;actual-owner-weak-reference-collected;" +
             "raw-heap-liveness-not-measured;no-post-disposal-pointer-read;logical-ranks-on-one-real-context-not-multidevice";
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool HasUndisposedHostOwner(WeakReference owner)
-        => owner.Target is QuantizedWeight weight && weight.HasHostData && weight.Data != IntPtr.Zero;
+    private static bool HasDisposedHostOwner(WeakReference reference)
+        => reference.Target is QuantizedWeight owner && !owner.HasHostData && owner.Data == IntPtr.Zero;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static string ObserveTpPartialShard(string mode, string path, BackendType backend)
     {
         var model = new LogicalRankModel(path, backend);
         PartialShardEvidence evidence = model.RefuseSecondShard(mode);
-        Require(evidence.UnregisteredStorages.All(storage => storage.IsAlive) && model.F32ShardCount == 0 &&
-            RuntimeResourceCount() == 2 + model.SourceTensorCount + evidence.UnregisteredStorages.Length,
-            "The real first shard allocates before rank two refuses, but no model-owned array receives it.");
+        Require(evidence.ShardStorages.All(storage => storage.IsAlive) && model.F32ShardCount == evidence.ShardStorages.Length &&
+            RuntimeResourceCount() == 2 + model.SourceTensorCount + evidence.ShardStorages.Length,
+            "Every allocated real shard transfers to the reserved model-owned array before a later allocation/copy refusal.");
         DrainFinalizers();
-        Require(evidence.UnregisteredStorages.All(storage => !storage.IsAlive) && RuntimeResourceCount() == 2 + model.SourceTensorCount,
-            "The unregistered first shard is lost and its actual native storage finalizes while the model stays live.");
-        bool leakedSourceView = mode is "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy";
-        try { model.Dispose(); }
-        catch (InvalidOperationException error) when (leakedSourceView && error.Message.Contains("tensor storages", StringComparison.Ordinal))
-        {
-            model.ContextCleanupRefused = true;
-        }
-        Require(leakedSourceView
-                ? model.ContextCleanupRefused && model.SourceStorageOwned && ModelLeaseCount() == 1 && RuntimeResourceCount() == 3
-                : RuntimeResourceCount() == 0,
-            "The generic route also loses its second Narrow reference: context cleanup refuses before terminal model release.");
-        return $"red-{mode};unregisteredNativeStorages={evidence.UnregisteredStorages.Length};real-first-shard-storage-lost-to-finalizer;reserved-array-absent;" +
-            (leakedSourceView ? "unregistered-source-Narrow-reference-leaked;context-cleanup-terminal-refusal;" : "") +
-            "finalization-is-defect-evidence-not-explicit-shard-cleanup;logical-ranks-on-one-real-context-not-multidevice";
+        Require(evidence.ShardStorages.All(storage => storage.IsAlive) &&
+            RuntimeResourceCount() == 2 + model.SourceTensorCount + evidence.ShardStorages.Length,
+            "Diagnostic finalizer drainage does not release the still-owned partial shards.");
+        model.Dispose();
+        Require(evidence.ShardStorages.All(storage => storage.Target is GgmlStorage actual && StorageDestroyed(actual)) &&
+            !model.SourceStorageOwned && RuntimeResourceCount() == 0,
+            "Explicit model disposal destroys every actual partial shard and source storage, with no leaked Narrow or finalizer dependence.");
+        return $"explicit-{mode};ownedNativeStorages={evidence.ShardStorages.Length};reserved-array-retains-all-partial-shards;" +
+            "actual-native-storage-destroyed-by-explicit-dispose-before-finalizers;logical-ranks-on-one-real-context-not-multidevice";
     }
 
-    private sealed record PartialShardEvidence(WeakReference[] UnregisteredStorages);
+    private sealed record PartialShardEvidence(WeakReference[] ShardStorages);
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string ExerciseTpQuantizedCopies(string mode, string path, BackendType backend)
+    {
+        var model = new LogicalRankModel(path, backend);
+        WeakReference[] sources = model.ShardCopiedQuantSources(mode);
+        Require(model.QuantShardCount == 2 && model.SourceQuantCount == 0 && sources.All(
+            reference => reference.Target is QuantizedWeight source && !source.HasHostData),
+            "Actual independent quantized destinations transfer before their original sources explicitly retire.");
+        QuantizedWeight[] shards = model.QuantShards;
+        Require(shards.All(shard => shard.HasHostData && !shard.HasExternalHostView && shard.RawBytes > 0),
+            "Every completed raw-copy or Q8 requantization shard has an actual owned host buffer.");
+        model.Dispose();
+        Require(shards.All(shard => !shard.HasHostData && shard.Data == IntPtr.Zero) && RuntimeResourceCount() == 0,
+            "Explicit model disposal clears all actual quantized host owners before finalizer drainage.");
+        return "actual-quantized-copy-or-requantize;explicit-source-and-shard-disposal;no-raw-post-disposal-read;logical-ranks-not-multidevice";
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static string ExerciseTpViewRefusal(string path, BackendType backend, bool poisonLate)
@@ -82,10 +93,10 @@ public static partial class ForeignModelLifetime
         catch (InvalidOperationException) { refused = true; }
         Require(refused && view.HasHostData && RegisteredBonsaiKeys(view) == 1,
             "Shared disposal preserves the failed actual view owner and registration after its managed refusal.");
-        Require(model.MappingOpen == !poisonLate,
-            "Early refusal blocks backing-map release; late refusal exposes the current map-before-TP-view order.");
+        Require(model.MappingOpen,
+            "Early and late guarded view unregister refusals both block backing-map release.");
         return poisonLate
-            ? "red-mapping-disposed-before-failed-TP-view-unregister;managed-owner-retained-but-mapping-already-closed;no-pointer-read-after-poison;not-GPU-fault"
+            ? "late-failed-TP-view-unregister-preserves-backing-map;actual-managed-owner-retained;no-pointer-read-after-poison;not-GPU-fault"
             : "positive-real-TP-view-unregister-refusal-blocks-backing-map-release;actual-model-and-view-retained;not-GPU-fault";
     }
 
@@ -99,17 +110,17 @@ public static partial class ForeignModelLifetime
         Require(owners.Count == 1 && owners[0] is LogicalRankModel,
             "The generation retains the actual failed logical-rank model after finalizer drainage.");
         var model = (LogicalRankModel)owners[0]!;
-        if (mode is "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy")
+        if (mode == "observe-tp-sync-retirement")
         {
-            Require(model.ContextCleanupRefused && RuntimeResourceCount() == 2 && !model.SourceStorageOwned,
-                "After terminal context refusal, finalizer drainage releases the abandoned source storage but not the retained context/Model.");
+            Require(model.Group.SynchronizeCalls == 1 && model.GraphCleanupCalls == 0 &&
+                RuntimeResourceCount() == 3 && model.SourceStorageOwned && model.SourceTensorCount == 1,
+                "A failed production synchronization retains the actual source storage and model before graph/cache/weight retirement.");
             return;
         }
         Require(RuntimeResourceCount() == 2 && model.QuantShardCount == 2 && model.FirstQuantShard.HasHostData &&
             RegisteredBonsaiKeys(model.FirstQuantShard) == 1,
             "The actual failed view, context/Model ownership and registration remain, not only numeric lease IDs.");
-        Require(model.MappingOpen == (mode == "tp-view-unregister-refusal"),
-            "The red late-refusal mapping is already closed; the positive early-refusal mapping stays owned.");
+        Require(model.MappingOpen, "Every refused TP view keeps its actual backing mapping owned.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -128,14 +139,28 @@ public static partial class ForeignModelLifetime
                 "Controlled caller preflight synchronization refuses before graph/cache/weight retirement.");
             model.Group.RefuseSynchronization = false;
         }
+        if (!preflight)
+        {
+            Exception? failure = null;
+            try { model.Dispose(); }
+            catch (IOException error) { failure = error; }
+            Require(failure != null && model.Group.SynchronizeCalls == 1 && model.GraphCleanupCalls == 0 &&
+                model.SourceTensorCount == 1 && model.SourceStorageOwned && RuntimeResourceCount() == 3,
+                "Production disposal consults synchronization before any graph/cache/storage retirement and retains the actual owners on refusal.");
+            try { model.Dispose(); }
+            catch (InvalidOperationException repeated)
+            {
+                Require(ReferenceEquals(repeated.InnerException, failure) && model.Group.SynchronizeCalls == 1,
+                    "Terminal repeated teardown preserves the original synchronization fault without retrying work.");
+            }
+            return "production-logical-group-sync-refusal-before-graphs-caches-storage;actual-model-source-retained;not-CUDA-stream-or-GPU-fault";
+        }
         model.Dispose();
         Require(model.GraphCleanupCalls == 1 && !model.SourceStorageOwned && RuntimeResourceCount() == 0,
             "The model executes the controlled graph-phase marker and real storage cleanup, then releases its native resources.");
-        Require(model.Group.SynchronizeCalls == (preflight ? 1 : 0),
-            "Current shared disposal does not consult the supplied group's configured synchronization refusal.");
-        return preflight
-            ? "positive-caller-preflight-refusal-before-any-retirement;not-production-drain-proof;controlled-logical-group-not-CUDA-stream"
-            : "red-model-dispose-retires-graph-callback-and-real-storage-without-group-synchronization;configured-refusal-not-consulted;not-GPU-fault";
+        Require(model.Group.SynchronizeCalls == 2,
+            "Successful production cleanup also synchronizes after the separate caller preflight observation.");
+        return "caller-preflight-refusal-before-retirement;explicit-production-sync-cleanup;controlled-logical-group-not-CUDA-stream";
     }
 
     private static void DrainFinalizers()
@@ -157,7 +182,6 @@ public static partial class ForeignModelLifetime
         private readonly RefusingRankAllocator _rankAllocator;
         private WeakReference? _sourceStorage;
         internal bool PoisonAfterGenericCaches;
-        internal bool ContextCleanupRefused;
         internal int GraphCleanupCalls;
         protected override bool OwnsTensorParallelGroup => false;
         internal int QuantShardCount => _tpQuantWeights.Values.Sum(shards => shards.Count(weight => weight != null));
@@ -165,6 +189,7 @@ public static partial class ForeignModelLifetime
         internal int SourceTensorCount => _weights.Count;
         internal int SourceQuantCount => _quantWeights.Count;
         internal QuantizedWeight FirstQuantShard => _tpQuantWeights.Single().Value[0];
+        internal QuantizedWeight[] QuantShards => _tpQuantWeights.Single().Value;
         internal bool MappingOpen => typeof(GgufFile).GetField("_mappedView", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(_gguf) != null;
         internal bool SourceStorageOwned => _sourceStorage?.Target is GgmlStorage storage && !StorageDestroyed(storage);
 
@@ -197,6 +222,26 @@ public static partial class ForeignModelLifetime
             Require(_gguf.TryGetTensorDataPointer(info, out IntPtr data), "The Q4 GGUF supplies a real mapped source.");
             _quantWeights.Add("probe.weight", QuantizedWeight.CreateExternalView(data, 144, (int)GgmlTensorType.Q4_0, 128, 2, _gguf));
             ShardWeightsForTensorParallelism(["probe"], []);
+        }
+
+        internal WeakReference[] ShardCopiedQuantSources(string mode)
+        {
+            var source = new QuantizedWeight(new byte[288], (int)GgmlTensorType.Q4_0, 128, 4);
+            _quantWeights.Add("source0.weight", source);
+            var sources = new List<WeakReference> { new(source) };
+            switch (mode)
+            {
+                case "tp-quantized-copy-row": ShardWeightsForTensorParallelism([], ["source"]); break;
+                case "tp-quantized-copy-concatenated": ShardConcatenatedColumnParallel("source0.weight", 2, 2); break;
+                case "tp-quantized-requantize-separate":
+                    var second = new QuantizedWeight(new byte[288], (int)GgmlTensorType.Q4_0, 128, 4);
+                    _quantWeights.Add("source1.weight", second);
+                    sources.Add(new(second));
+                    ShardSeparateColumnParallel("fused.weight", ["source0.weight", "source1.weight"], [4, 4]);
+                    break;
+                default: throw new ArgumentException("Unknown quantized TP copy route.", nameof(mode));
+            }
+            return sources.ToArray();
         }
 
         internal void AddSourceTensor(string name, params long[] shape)
@@ -248,6 +293,7 @@ public static partial class ForeignModelLifetime
 
         public override void Dispose() => DisposeBaseResources(
             () => { if (PoisonAfterGenericCaches) PoisonOwner(); },
+            ownsTensorParallelGroup: OwnsTensorParallelGroup,
             releaseDerivedGraphs: () => GraphCleanupCalls++);
 
         protected override float[] ForwardCore(int[] tokens) => throw new NotSupportedException();
