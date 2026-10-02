@@ -163,6 +163,9 @@ namespace TensorSharp.Cuda
         private const int ByteCount = SlotCount * sizeof(int);
 
         private readonly CudaAllocator allocator;
+        private readonly CudaContext context;
+        private readonly CudaStream stream;
+        private readonly ICudaNativeApi api;
         private IntPtr devicePtr;
         private IntPtr hostPtr;
 
@@ -195,20 +198,36 @@ namespace TensorSharp.Cuda
         }
 
         public CudaDecodeDynParams(IAllocator allocator)
+            : this(allocator as CudaAllocator, (allocator as CudaAllocator)?.Context, (allocator as CudaAllocator)?.Stream)
         {
-            this.allocator = allocator as CudaAllocator;
-            if (this.allocator == null)
+        }
+
+        internal CudaDecodeDynParams(CudaContext context, CudaStream stream)
+            : this(null, context, stream)
+        {
+        }
+
+        private CudaDecodeDynParams(CudaAllocator allocator, CudaContext context, CudaStream stream)
+        {
+            this.allocator = allocator;
+            this.context = context;
+            this.stream = stream;
+            if (context == null)
                 return;
-            this.allocator.Context.MakeCurrent();
-            if (CudaDriverApi.cuMemAlloc(out devicePtr, (UIntPtr)ByteCount) != 0)
+            ArgumentNullException.ThrowIfNull(stream);
+            if (!stream.IsFromOwner(context))
+                throw new ArgumentException("The dynamic parameter stream belongs to another context.", nameof(stream));
+            api = context.NativeCalls.Api;
+            context.MakeCurrent();
+            if (api.cuMemAlloc(out devicePtr, (UIntPtr)ByteCount) != 0)
             {
                 devicePtr = IntPtr.Zero;
                 return;
             }
-            if (CudaDriverApi.cuMemHostAlloc(out hostPtr, (UIntPtr)ByteCount, 0) != 0)
+            if (api.cuMemHostAlloc(out hostPtr, (UIntPtr)ByteCount, 0) != 0)
             {
                 hostPtr = IntPtr.Zero;
-                CudaDriverApi.cuMemFree(devicePtr);
+                api.cuMemFree(devicePtr);
                 devicePtr = IntPtr.Zero;
             }
         }
@@ -233,8 +252,8 @@ namespace TensorSharp.Cuda
         /// graph's leading node.</summary>
         public void EnqueueUpload()
         {
-            allocator.Context.MakeCurrent();
-            CudaDriverApi.cuMemcpyHtoDAsync(devicePtr, hostPtr, (UIntPtr)ByteCount, allocator.Stream.Handle)
+            context.MakeCurrent();
+            api.cuMemcpyHtoDAsync(devicePtr, hostPtr, (UIntPtr)ByteCount, stream.Handle)
                 .ThrowOnError();
         }
 
@@ -268,13 +287,13 @@ namespace TensorSharp.Cuda
             {
                 if (ReferenceEquals(activeInstance, this))
                     activeInstance = null;
-                allocator?.Context.MakeCurrent();
-                CudaDriverApi.cuMemFree(devicePtr);
+                context.MakeCurrent();
+                api.cuMemFree(devicePtr);
                 devicePtr = IntPtr.Zero;
             }
             if (hostPtr != IntPtr.Zero)
             {
-                CudaDriverApi.cuMemFreeHost(hostPtr);
+                api.cuMemFreeHost(hostPtr);
                 hostPtr = IntPtr.Zero;
             }
         }

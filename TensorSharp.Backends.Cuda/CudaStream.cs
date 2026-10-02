@@ -17,6 +17,7 @@ namespace TensorSharp.Cuda
         }
 
         public IntPtr Handle => stream;
+        internal bool IsFromOwner(CudaContext owner) => context.IsFromOwner(owner);
 
         public static CudaStream Create()
         {

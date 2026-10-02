@@ -52,6 +52,8 @@ internal static class Program
             case "kernels-allocation-rollback-refusal": KernelsAllocationRollback(true); break;
             case "kernels-ordinary-faults": KernelsOrdinaryFaults(); break;
             case "kernels-diagnostic-outside-effects": KernelsDiagnosticOutsideEffects(); break;
+            case "dyn-drain-refusal": DynDrainRefusal(); break;
+            case "dyn-host-free-refusal": DynHostFreeRefusal(); break;
             case "pool-small-failed-free-retention": PoolFailedFreeRetention(false); break;
             case "pool-large-failed-free-retention": PoolFailedFreeRetention(true); break;
             case "pool-small-partial-free-retention": PoolFailedFreeRetention(false, partial: true); break;
@@ -107,6 +109,37 @@ internal static class Program
         Assert(api.ModuleUnloadCount == 1, "Failed kernel construction loses its transferred loaded module.");
         if (!refuse) context.Dispose();
     }
+
+    private static void DynDrainRefusal()
+    {
+        var api = new RecordingCudaApi();
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        var owner = new CudaDecodeDynParams(context, stream);
+        var failure = new InvalidOperationException("Controlled dynamic parameter drain refusal.");
+        api.DrainFailure = failure;
+        Exception? observed = null;
+        try { owner.Dispose(); }
+        catch (Exception error) { observed = error; }
+        Assert(ReferenceEquals(observed, failure) && api.MemoryFreeCount == 0 && api.HostFreeCount == 0,
+            "Dynamic parameter cleanup frees buffers without checked context completion.");
+    }
+
+    private static void DynHostFreeRefusal()
+    {
+        var api = new RecordingCudaApi { HostFreeResult = 1 };
+        var context = CudaContext.Create(0, api);
+        var stream = CudaStream.Create(context);
+        var owner = new CudaDecodeDynParams(context, stream);
+        Exception? observed = null;
+        try { owner.Dispose(); }
+        catch (Exception error) { observed = error; }
+        Assert(observed != null && DynHostPointer(owner) != IntPtr.Zero,
+            "Dynamic parameter cleanup discards refused pinned host ownership.");
+    }
+
+    private static IntPtr DynHostPointer(CudaDecodeDynParams owner)
+        => (IntPtr)typeof(CudaDecodeDynParams).GetField("hostPtr", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(owner)!;
 
     private static void PoolFailedFreeRetention(bool large, bool partial = false)
     {
@@ -951,6 +984,9 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal Exception? MemoryFreeFailure;
     internal Exception? KernelLaunchFailure;
     internal Exception? AttributeFailure;
+    internal IntPtr HostPointer;
+    internal int HostFreeCount;
+    internal int HostFreeResult;
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
     public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
@@ -1055,6 +1091,20 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     {
         TotalCalls++; MemoryFreeCount++;
         if (MemoryFreeFailure != null) throw MemoryFreeFailure;
+        return 0;
+    }
+    public override int cuMemHostAlloc(out IntPtr ptr, UIntPtr bytes, uint flags)
+    {
+        TotalCalls++;
+        ptr = HostPointer = System.Runtime.InteropServices.Marshal.AllocHGlobal(checked((int)bytes.ToUInt64()));
+        return 0;
+    }
+    public override int cuMemFreeHost(IntPtr ptr)
+    {
+        TotalCalls++; HostFreeCount++;
+        if (HostFreeResult != 0) return HostFreeResult;
+        System.Runtime.InteropServices.Marshal.FreeHGlobal(ptr);
+        HostPointer = IntPtr.Zero;
         return 0;
     }
     public override int cuFuncSetAttribute(IntPtr function, int attribute, int value)
