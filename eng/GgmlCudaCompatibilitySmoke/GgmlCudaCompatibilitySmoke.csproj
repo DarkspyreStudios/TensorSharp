@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TensorSharp.Core" HintPath="$(ApplicationDirectory)/TensorSharp.Core.dll" />
+    <Reference Include="TensorSharp.Backends.GGML" HintPath="$(ApplicationDirectory)/TensorSharp.Backends.GGML.dll" />
+    <Reference Include="TensorSharp.Chat" HintPath="$(ApplicationDirectory)/TensorSharp.Chat.dll" />
+    <Reference Include="TensorSharp.Runtime" HintPath="$(ApplicationDirectory)/TensorSharp.Runtime.dll" />
+    <Reference Include="TensorSharp.Models" HintPath="$(ApplicationDirectory)/TensorSharp.Models.dll" />
+  </ItemGroup>
+</Project>
