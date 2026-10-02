@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <CudaBuildDirectory Condition="'$(CudaBuildDirectory)' == ''">$(MSBuildThisFileDirectory)../../TensorSharp.Backends.Cuda/bin</CudaBuildDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="TensorSharp.Core" HintPath="$(CudaBuildDirectory)/TensorSharp.Core.dll" />
+    <Reference Include="TensorSharp.Backends.Cuda" HintPath="$(CudaBuildDirectory)/TensorSharp.Backends.Cuda.dll" />
+    <Reference Include="AdvUtils" HintPath="$(CudaBuildDirectory)/AdvUtils.dll" />
+    <Content Include="$(CudaBuildDirectory)/cuda_kernels/*.ptx" Link="cuda_kernels/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -125,6 +125,8 @@ On macOS this compiles `libGgmlOps.dylib` with Metal GPU support. On Windows and
 
 The direct `cuda` backend is built as managed C# plus PTX kernels. During `dotnet build`, `TensorSharp.Backends.Cuda` compiles `native/kernels/*.cu` to PTX in its intermediate directory (`obj/cuda_ptx/ptx/`) when `nvcc` is available, and that locally compiled PTX is what lands in every output's `cuda_kernels/` folder — building never modifies the git-tracked files under `native/ptx/`. If `nvcc` is missing, the committed PTX baseline in `native/ptx/` is used instead; if that also fails to load, PTX-backed ops use CPU fallbacks. cuBLAS-backed GEMM still requires the CUDA runtime libraries to be discoverable at run time.
 
+The [Windows RTX 3090 Ti build profile](docs/windows-cuda-sm86.md) records the primary Windows CUDA target, matching compiler/header selection and a smoke that rejects CPU fallback.
+
 After editing a `.cu` kernel, refresh the committed PTX baseline explicitly and commit the diff — machines without `nvcc` run the committed PTX, so an unrefreshed kernel change ships silently-stale kernels to them:
 
 ```powershell

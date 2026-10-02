@@ -29,6 +29,9 @@
 // ---------------------------------------------------------------------------
 
 #include <cuda_fp16.h>
+#include <math_constants.h>
+
+// CUDA supplies a float infinity that nvcc accepts with Windows CRT headers.
 #include <stdint.h>
 
 #include "tensorsharp_dsv4_tables.cuh"
@@ -600,7 +603,7 @@ extern "C" __global__ void ts_dsv4_hc_gates_comb_f32(
 #pragma unroll
     for (int isrc = 0; isrc < 4; ++isrc)
     {
-        float m = -INFINITY;
+        float m = -CUDART_INF_F;
 #pragma unroll
         for (int idst = 0; idst < 4; ++idst)
         {
@@ -929,7 +932,7 @@ extern "C" __global__ void ts_dsv4_compress_f32(
     float acc2 = 0.0f;
     for (int d = threadIdx.x; d < head; d += blockDim.x)
     {
-        float m = -INFINITY;
+        float m = -CUDART_INF_F;
         float se = 0.0f;
         float sv = 0.0f;
         for (int w = 0; w < W; ++w)
@@ -960,7 +963,7 @@ extern "C" __global__ void ts_dsv4_compress_f32(
                 sv *= r;
                 m = sc;
             }
-            const float e = sc == -INFINITY ? 0.0f : expf(sc - m);
+            const float e = sc == -CUDART_INF_F ? 0.0f : expf(sc - m);
             se += e;
             sv += e * (*kvSrc);
         }
@@ -1314,7 +1317,7 @@ extern "C" __global__ void ts_dsv4_attention_f32(
     for (int i = 0; i < 16; ++i)
         qReg[i] = qRow[lane * dimsPerLane + i];
 
-    float m = -INFINITY;
+    float m = -CUDART_INF_F;
     float sum = 0.0f;
     float acc[16];
 #pragma unroll
@@ -1528,7 +1531,7 @@ extern "C" __global__ void ts_dsv4_moe_select_f32(
         __shared__ int shIdx[256];
         for (int k = 0; k < nUsed; ++k)
         {
-            float best = -INFINITY;
+            float best = -CUDART_INF_F;
             int bidx = -1;
             for (int e = threadIdx.x; e < nExpert; e += blockDim.x)
             {
@@ -1561,7 +1564,7 @@ extern "C" __global__ void ts_dsv4_moe_select_f32(
             {
                 const int chosen = shIdx[0] < 0 ? 0 : shIdx[0];
                 selT[k] = chosen;
-                shSel[chosen] = -INFINITY;
+                shSel[chosen] = -CUDART_INF_F;
             }
             __syncthreads();
         }
@@ -2442,7 +2445,7 @@ extern "C" __global__ void ts_dsv4_dspark_argmax_f32(
     __shared__ float shV[256];
     __shared__ int shI[256];
 
-    float best = -INFINITY;
+    float best = -CUDART_INF_F;
     int bestIdx = 0;
     for (int i = threadIdx.x; i < V; i += blockDim.x)
     {
@@ -2741,7 +2744,7 @@ extern "C" __global__ void ts_dsv41_compress_f32(
         }
         else
         {
-            float m = -INFINITY;
+            float m = -CUDART_INF_F;
             for (int w = 0; w < ratio; ++w)
             {
                 const long long tw = start + w;
@@ -2900,7 +2903,7 @@ extern "C" __global__ void ts_dsv41_idx_scores_f32(
     if (candidates && candidates[(size_t)t * rows + r] == 0)
     {
         if (threadIdx.x == 0)
-            out[r] = -INFINITY;
+            out[r] = -CUDART_INF_F;
         return;
     }
 
@@ -2954,13 +2957,13 @@ extern "C" __global__ void ts_dsv41_candidate_f32(
     const long long pinned = p / blockLen;
     for (int b = threadIdx.x; b < nBlocks; b += blockDim.x)
     {
-        float best = -INFINITY;
+        float best = -CUDART_INF_F;
         const int end = min(nVis, (b + 1) * blockLen);
         for (int r = b * blockLen; r < end; ++r)
             best = fmaxf(best, s[r]);
         if (b == (int)pinned)
-            best = INFINITY;
-        if (best == -INFINITY)
+            best = CUDART_INF_F;
+        if (best == -CUDART_INF_F)
             continue;
 
         int rank = 0;
@@ -2968,12 +2971,12 @@ extern "C" __global__ void ts_dsv41_candidate_f32(
         {
             if (o == b)
                 continue;
-            float other = -INFINITY;
+            float other = -CUDART_INF_F;
             const int oend = min(nVis, (o + 1) * blockLen);
             for (int r = o * blockLen; r < oend; ++r)
                 other = fmaxf(other, s[r]);
             if (o == (int)pinned)
-                other = INFINITY;
+                other = CUDART_INF_F;
             if (other > best || (other == best && o < b))
                 ++rank;
         }

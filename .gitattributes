@@ -6,3 +6,6 @@
 *.sh text eol=lf
 # Docker RUN heredocs are shell scripts too.
 Dockerfile* text eol=lf
+# Preserve nvcc's Windows PTX bytes, including CRLF and its final blank line,
+# so committed native artifacts retain the GPU-verified SHA-256 identities.
+TensorSharp.Backends.Cuda/native/ptx/*.ptx -text whitespace=cr-at-eol,-blank-at-eof
