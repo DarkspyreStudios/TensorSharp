@@ -15,6 +15,7 @@ internal static class Program
         switch (args[0])
         {
             case "context-clean": ContextClean(); break;
+            case "context-composed-clean": ContextComposedClean(); break;
             case "context-release-refusal": ContextReleaseRefusal(); break;
             case "context-drain-refusal": ContextDrainRefusal(); break;
             case "context-construction-rollback": ConstructionRollback(false); break;
@@ -60,6 +61,26 @@ internal static class Program
         Collect();
         Assert(roots.All(r => !r.IsAlive), "Healthy context/API roots survive explicit disposal.");
         Assert(NativeRuntimeQuarantine.Observe().Failures.Count == 0, "Healthy cleanup records quarantine.");
+    }
+
+    private static void ContextComposedClean()
+    {
+        var api = new RecordingCudaApi();
+        var first = CudaContext.Create(0, api);
+        var second = CudaContext.Create(1, api);
+        first.MakeCurrent();
+        object[] actualOwner = { first, second };
+        var calls = new CudaNativeCalls(actualOwner, NativeOwnerRole.Allocator, api, 0, 1);
+        using (var lease = calls.EnterEffect())
+        {
+            calls.ValidateSafeRelease(lease);
+            second.Dispose();
+            first.Dispose();
+            calls.CompleteSafeRelease(lease);
+        }
+        Assert(first.IsDisposed && second.IsDisposed && api.ReleaseCount == 2,
+            "Composed cleanup does not release both actual contexts.");
+        Assert(api.Current == IntPtr.Zero, "Composed cleanup restores an already released owned context.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

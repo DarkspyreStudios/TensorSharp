@@ -3,6 +3,8 @@
 This nonpackable executable exercises actual managed CUDA classes with an instance-local
 finite driver implementation. Unconfigured driver calls throw. It never loads CUDA,
 cuBLAS, GGML, models or a native bridge. Opaque fixture handles are never dereferenced.
+Core and CUDA grant this exact fixture friend access for typed actual-parent effect
+composition. No public native driver or callback injection API is added.
 
 Build each configuration with all native hooks disabled:
 
