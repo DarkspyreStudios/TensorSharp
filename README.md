@@ -39,6 +39,16 @@ Backend, modality, feature support, and validation coverage vary by model. See t
 
 The detailed implementation notes and historical benchmark claims have moved to the linked documentation so this page stays useful as a starting point.
 
+## Managed Unsafe-Cleanup Observation
+
+Core exposes `NativeRuntimeQuarantine.Observe()` and exact-exception-identity
+`TryGetFailure` observations for process-scoped unsafe cleanup. The current authority
+is **INERT**: CUDA, MLX, and GGML backend caller integrations are not wired into it,
+and `NoRecordedFailure` does not certify availability, initialization, or safe native
+cleanup. The [managed-only harness](eng/tests/native-quarantine/README.md) validates
+cross-generation admission and failed-owner retention without loading native code.
+Existing GGML process ownership and native shutdown behavior are unchanged.
+
 ## Quick Start
 
 Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.
