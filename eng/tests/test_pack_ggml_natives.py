@@ -246,6 +246,16 @@ class PackageCatalogPolicyTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(pack.portable_path(name))
 
+    def test_real_inventory_flags_are_not_runtime_catalog_fields(self):
+        artifact = self.artifact()
+        for item in artifact["files"]:
+            item["executable"] = False
+        original = copy.deepcopy(artifact)
+        catalog = json.loads(pack.package_catalog(artifact))
+        for source, actual in zip(artifact["files"], catalog["files"]):
+            self.assertEqual({key: source[key] for key in ("path", "size", "sha256")}, actual)
+        self.assertEqual(original, artifact)
+
     def test_baseline_catalog_and_complete_closure_have_fixed_runtime_paths(self):
         for rid, variant in pack.BASELINE.items():
             with self.subTest(rid=rid):
