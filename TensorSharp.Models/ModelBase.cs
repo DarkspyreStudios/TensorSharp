@@ -71,6 +71,7 @@ namespace TensorSharp.Models
 
         /// <summary>Per-GPU sharded quantized weights, keyed by weight name.</summary>
         protected readonly Dictionary<string, QuantizedWeight[]> _tpQuantWeights = new();
+        private readonly List<QuantizedWeight> _tpQuantBackingOwners = new();
 
         /// <summary>Per-GPU sharded F32 weights, keyed by weight name.</summary>
         protected readonly Dictionary<string, Tensor[]> _tpWeights = new();
@@ -2747,7 +2748,11 @@ namespace TensorSharp.Models
                 SignalDistributedWorkersShutdown();
 
             // Some family reset entrypoints free captured buffers without their own async barrier.
-            if (IsGgmlBackend) GgmlBasicOps.HostReadBarrier();
+            if (IsGgmlBackend)
+            {
+                _tpGroup?.Synchronize();
+                GgmlBasicOps.HostReadBarrier();
+            }
             // Family-owned graphs may bind generic scratch/cache buffers as well as model tensors.
             releaseDerivedGraphs?.Invoke();
 
@@ -2785,6 +2790,9 @@ namespace TensorSharp.Models
             if (MultimodalInjector is IDisposable multimodalInjector)
                 multimodalInjector.Dispose();
 
+            // GGML views unregister after its barrier while backing buffers and mappings remain owned.
+            if (IsGgmlBackend) DisposeTensorParallelWeights();
+
             foreach (var w in _weights.Values)
                 w.Dispose();
             _weights.Clear();
@@ -2793,10 +2801,9 @@ namespace TensorSharp.Models
             {
                 foreach (var qw in _quantWeights.Values)
                     CudaQuantizedOps.ReleaseQuantizedWeight(cudaAllocator, qw.CacheKey);
-                // Weights are suballocated from arena slabs; free the slabs now
-                // that every resident weight has been released (individual
-                // releases only drop cache entries — the slabs are freed here).
-                CudaQuantizedOps.ReleaseArena(cudaAllocator);
+                // Individual releases drop entries; allocator-wide slabs remain with a borrowed group.
+                if (!_allocatorFromTensorParallelGroup || ownsTensorParallelGroup)
+                    CudaQuantizedOps.ReleaseArena(cudaAllocator);
             }
 
             if (_backend == BackendType.Mlx && _allocator is MlxAllocator mlxAllocator)
@@ -2808,6 +2815,13 @@ namespace TensorSharp.Models
             foreach (var qw in _quantWeights.Values)
                 qw.Dispose();
             _quantWeights.Clear();
+
+            if (IsGgmlBackend)
+            {
+                foreach (var owner in _tpQuantBackingOwners)
+                    owner.Dispose();
+                _tpQuantBackingOwners.Clear();
+            }
 
             // Free any owned bulk buffers backing stacked-experts views (only
             // populated by the non-mmap path in LoadWeights). External-view
@@ -2822,14 +2836,8 @@ namespace TensorSharp.Models
 
             _gguf?.Dispose();
 
-            // Dispose TP sharded weights.
-            foreach (var shards in _tpQuantWeights.Values)
-                foreach (var qw in shards) qw?.Dispose();
-            _tpQuantWeights.Clear();
-
-            foreach (var shards in _tpWeights.Values)
-                foreach (var w in shards) w?.Dispose();
-            _tpWeights.Clear();
+            // Other backends retain their existing order; no GGML barrier proves their device drain.
+            if (!IsGgmlBackend) DisposeTensorParallelWeights();
 
             releaseAfterModelCaches?.Invoke();
 

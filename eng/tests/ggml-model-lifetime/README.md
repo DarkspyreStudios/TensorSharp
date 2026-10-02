@@ -48,6 +48,65 @@ before checking collection.
 The fixture does not qualify pretrained or complete quantized models,
 whole-native executors, multiple devices, captured CUDA teardown or other operating systems.
 
+## Tensor-Parallel Ownership Observations
+
+These modes use two logical ranks on one real CPU or Metal context. They do not execute a
+collective or qualify physical multi-device placement. The retained `observe-*` mode names
+now check explicit production ownership and cleanup; their original red assertions remain in git.
+
+`observe-tp-column-owner` creates an actual owned Q4_0 source and two column views. The source
+leaves the ordinary dictionary. The views hold its exact wrapper until model disposal. Model
+disposal retires the views before explicitly disposing their removed backing owner. Its actual
+host ownership fields clear before finalizer drainage and foreign generation collection.
+The mode does not read or reclaim a captured pointer after disposal.
+
+Six F32 modes refuse the second real storage allocation after a first real shard allocates:
+
+| Mode | Source Allocation Route |
+| --- | --- |
+| `observe-tp-generic-column` | Generic output-dimension split |
+| `observe-tp-generic-row` | Generic input-dimension split |
+| `observe-tp-concatenated` | Concatenated column segments |
+| `observe-tp-separate` | Separate source projections, F32 destination branch |
+| `observe-tp-concatenated-bias` | Concatenated bias segments |
+| `observe-tp-separate-bias` | Separate source biases |
+
+Every first shard has an actual native storage weak reference and a model-owned array entry
+before the second allocation refuses. Diagnostic finalizer drainage preserves those owned
+storages. `observe-tp-generic-copy` refuses the second copy after both destination storages
+allocate. Its hook restores in `finally` before cleanup. Temporary source `Narrow` views unwind
+through the existing original-plus-cleanup rollback helper. Explicit model disposal destroys all
+actual shard/source storages before finalizer drainage, guarded shutdown and foreign collection.
+No mode resets terminal ownership or manually changes reference/storage counts.
+
+The source inventory also includes raw quantized row copies in the generic split, raw
+quantized concatenated copies, and separate-source Q8 requantization. Those loops allocate
+owned wrappers directly into reserved arrays before writing. The six allocation modes exercise
+their F32 routes, not a simulated native malloc failure. `tp-quantized-copy-row`,
+`tp-quantized-copy-concatenated` and `tp-quantized-requantize-separate` execute those actual
+quantized copy/requantization routes on generated Q4_0 sources. They verify source and destination
+ownership fields clear through explicit disposal. Host ownership observations are not a raw-heap
+measurement or pretrained quantized-model qualification. Source retirement precedes dictionary
+removal; a refused cleanup keeps the model's actual source and destination owners.
+
+`tp-view-unregister-refusal` registers a real mapped view with Bonsai, then poisons the existing
+managed owner. Guarded unregister refuses before model cleanup and the backing mapping stays
+owned. `observe-tp-view-cleanup-order` poisons in the existing derived-resource callback after
+generic GGML caches retire. TP view unregister still precedes backing/mapping retirement, so
+its refusal also keeps the actual mapping open. Both modes
+check managed ownership and the real failed registration after finalizer drainage. Neither
+dereferences a pointer after poisoning or claims an actual GPU fault.
+
+`observe-tp-sync-retirement` supplies a group with a controlled synchronization refusal. GGML
+model disposal consults that group before graphs/caches/storage retire. The actual model/source
+storage and complete foreign generation remain retained. Repeated disposal preserves the first
+failure and does not retry synchronization. `tp-sync-preflight-refusal` separately refuses a
+caller preflight, then explicitly cleans up through the successful production synchronization.
+Neither mode proves CUDA/MLX drainage. Allocator-wide CUDA arena release skips a borrowed group.
+Direct CUDA/MLX retains its existing late TP-view/cache sequence and does not newly release
+column backing owners. Its synchronization, per-shard device cache closure and terminal strong
+retention remain unqualified; a GGML process-exit root does not prove them.
+
 ## DeepSeek41 Vision Lifetime
 
 `vision-normal`, `vision-mismatch`, `vision-load-cleanup-refusal` and
