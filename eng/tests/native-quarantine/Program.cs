@@ -34,6 +34,9 @@ switch (mode)
     case "mismatched-lease":
         using (var f = new Foreign(fixturePath)) f.Static("MismatchedLease");
         break;
+    case "resolved-cuda-nesting":
+        using (var f = new Foreign(fixturePath)) f.Static("ResolvedCudaNesting");
+        break;
     case "race":
         Race(fixturePath);
         break;

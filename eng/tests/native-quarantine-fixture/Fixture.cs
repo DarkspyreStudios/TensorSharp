@@ -134,6 +134,33 @@ public sealed class Fixture
         Require(NativeRuntimeQuarantine.Observe().Revision == 0, "Mismatched lease changed terminal state.");
     }
 
+    public static void ResolvedCudaNesting()
+    {
+        var discovery = NativeQuarantineAuthority.Register(new Owner(), NativeOwnerRole.NativeHandle);
+        discovery.AttachCudaDependentGgml();
+        var known = NativeQuarantineAuthority.Register(new Owner(), NativeOwnerRole.Allocator);
+        known.AttachCudaPrimaryDevice(1);
+        var other = NativeQuarantineAuthority.Register(new Owner(), NativeOwnerRole.Storage);
+        other.AttachCudaPrimaryDevice(2);
+        var mlx = NativeQuarantineAuthority.Register(new Owner(), NativeOwnerRole.Worker);
+        mlx.AttachMlxSharedRuntime();
+        using (var unresolved = discovery.EnterEffect())
+        {
+            using (var resolved = known.EnterEffect())
+            {
+                Refuses(() => other.EnterEffect());
+                Refuses(() => discovery.EnterEffect());
+                Refuses(() => mlx.EnterEffect());
+                Refuses(() => known.AttachCudaPrimaryDevice(2));
+                known.CompleteSafeRelease();
+            }
+            discovery.CompleteSafeRelease();
+        }
+        using (var lease = other.EnterEffect()) other.CompleteSafeRelease();
+        using (var lease = mlx.EnterEffect()) mlx.CompleteSafeRelease();
+        Require(NativeRuntimeQuarantine.Observe().Revision == 0, "Resolved nesting changed terminal state.");
+    }
+
     private static void Refuses(Action action)
     {
         try { action(); }
