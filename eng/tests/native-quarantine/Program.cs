@@ -40,6 +40,14 @@ switch (mode)
     case "queued-safe-release":
         using (var f = new Foreign(fixturePath)) f.Static("QueuedSafeRelease");
         break;
+    case "safe-release-negatives":
+        using (var f = new Foreign(fixturePath)) f.Static("SafeReleaseNegatives");
+        break;
+    case "foreign-queued-safe-release":
+        var released = ForeignQueuedSafeRelease(fixturePath);
+        Collect();
+        Require(released.All(reference => !reference.IsAlive), "Released foreign owner graph did not collect.");
+        break;
     case "race":
         Race(fixturePath);
         break;
@@ -95,6 +103,37 @@ Console.WriteLine(JsonSerializer.Serialize(new
     state = mode is "protocol" or "malformed-cells" ? "incompatible-refused" : NativeRuntimeQuarantine.Observe().State.ToString(),
     qualification = "managed-authority-only; backend integrations inert; no native/model/GPU qualification"
 }));
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static WeakReference[] ForeignQueuedSafeRelease(string path)
+{
+    using var owner = new Foreign(path);
+    using var waiter = new Foreign(path);
+    owner.Create(0, "cuda");
+    var references = new[] { new WeakReference(owner.Alc), new WeakReference(owner.Assembly),
+        (WeakReference)owner.Get("OwnerReference"), (WeakReference)owner.Get("StorageReference"),
+        (WeakReference)owner.Get("CoreReference"), new WeakReference(waiter.Alc), new WeakReference(waiter.Assembly),
+        (WeakReference)waiter.Static("CurrentCoreReference")! };
+    object[] binding = (object[])owner.Get("RegistrationBinding");
+    Task<object?>? queued = null;
+    bool active = false;
+    try
+    {
+        owner.Call("Start");
+        active = true;
+        queued = Task.Run(() => waiter.Static("AttemptForeignEffect", (object)binding));
+        Require(SpinWait.SpinUntil(() => (int)owner.Get("ActiveReservations") == 2,
+            TimeSpan.FromSeconds(3)), "The actual foreign generation did not reserve an effect.");
+        owner.Call("CompleteActive");
+    }
+    finally
+    {
+        if (active) owner.Call("Stop");
+        if (queued != null) Require(queued.Wait(TimeSpan.FromSeconds(3)), "Foreign queued effect did not drain.");
+    }
+    Require((string)queued!.Result! == "refused", "Foreign queued effect reached its native-entry marker.");
+    return references;
+}
 
 [MethodImpl(MethodImplOptions.NoInlining)]
 static (WeakReference Alc, WeakReference Assembly, WeakReference Owner, WeakReference Storage) Healthy(string path)
@@ -377,9 +416,9 @@ sealed class Foreign : IDisposable
         catch (TargetInvocationException ex) when (ex.InnerException != null)
         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
     }
-    public void Static(string method, params object[] args)
+    public object? Static(string method, params object[] args)
     {
-        try { _type.GetMethod(method)!.Invoke(null, args); }
+        try { return _type.GetMethod(method)!.Invoke(null, args); }
         catch (TargetInvocationException ex) when (ex.InnerException != null)
         { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw(); throw; }
     }

@@ -13,6 +13,7 @@ MODES = (
     "causes", "constructor", "initialize", "concurrent-faults", "queued",
     "protocol", "malformed-cells", "roles", "cross-nesting", "lock-order", "mismatched-lease",
     "resolved-cuda-nesting",
+    "queued-safe-release", "safe-release-negatives", "foreign-queued-safe-release",
 )
 
 

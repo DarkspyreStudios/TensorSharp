@@ -46,6 +46,26 @@ public sealed class Fixture
 
     public void Start() => _lease = _registration.EnterEffect();
     public void Stop() { _lease!.Dispose(); _lease = null; }
+    public object[] RegistrationBinding => new[] { _registration.State, _registration.Cell, (object)_owner,
+        typeof(NativeRuntimeQuarantine).Assembly.ManifestModule.ModuleVersionId };
+    public static WeakReference CurrentCoreReference() => new(typeof(NativeRuntimeQuarantine).Assembly);
+    public int ActiveReservations { get { lock (_registration.State[1]) return (int)_registration.Cell[7]; } }
+    public void CompleteActive()
+    {
+        _lease!.ValidateSafeRelease(_owner);
+        _lease.CompleteSafeRelease(_owner);
+    }
+
+    public static string AttemptForeignEffect(object[] binding)
+    {
+        Require(typeof(NativeRuntimeQuarantine).Assembly.IsCollectible
+            && typeof(NativeRuntimeQuarantine).Assembly.ManifestModule.ModuleVersionId == (Guid)binding[3]
+            && !ReferenceEquals(binding[2].GetType().Assembly, typeof(Fixture).Assembly),
+            "The queued effect did not execute in a distinct matching private generation.");
+        var registration = new NativeOwnerRegistration((object[])binding[0], (object[])binding[1], binding[2]);
+        try { using var lease = registration.EnterEffect(); return "native-entry"; }
+        catch (InvalidOperationException) { return "refused"; }
+    }
     public void Complete()
     {
         using var lease = _registration.EnterEffect();
@@ -184,7 +204,8 @@ public sealed class Fixture
             {
                 lock (registration.State[1]) return (int)registration.Cell[7] == 2;
             }, TimeSpan.FromSeconds(3)), "The controlled waiter did not reserve its effect.");
-            registration.CompleteSafeRelease();
+            release.ValidateSafeRelease(registration.Owner);
+            release.CompleteSafeRelease(registration.Owner);
         }
         catch (Exception error) { completionFailure = error; }
         finally
@@ -205,6 +226,34 @@ public sealed class Fixture
             Require((int)registration.Cell[7] == 0, "Queued reservations remained active.");
             Require(((Dictionary<int, List<object[]>>)registration.State[9]).Count == 0, "Thread frames did not drain.");
         }
+    }
+
+    public static void SafeReleaseNegatives()
+    {
+        var owner = new Owner();
+        var registration = NativeQuarantineAuthority.Register(owner, NativeOwnerRole.Storage);
+        registration.AttachCudaPrimaryDevice(0);
+        int frees = 0;
+        var release = registration.EnterEffect();
+        try
+        {
+            Refuses(() => release.ValidateSafeRelease(new Owner()));
+            using (var nested = registration.EnterEffect())
+                Refuses(() =>
+                {
+                    nested.ValidateSafeRelease(owner);
+                    frees++;
+                });
+            var forged = new NativeEffectLease(registration, release.Frame) { CudaHeld = true };
+            forged.DeviceGates.Add(new object());
+            Refuses(() => forged.ValidateSafeRelease(owner));
+            Task.Run(() => Refuses(() => release.ValidateSafeRelease(owner))).GetAwaiter().GetResult();
+            release.ValidateSafeRelease(owner);
+            release.CompleteSafeRelease(owner);
+        }
+        finally { release.Dispose(); }
+        Refuses(() => release.ValidateSafeRelease(owner));
+        Require(frees == 0, "Nested release reached the controlled free callback.");
     }
 
     private static void Refuses(Action action)

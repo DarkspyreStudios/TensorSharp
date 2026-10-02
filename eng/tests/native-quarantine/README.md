@@ -33,6 +33,16 @@ on separate threads/ALCs behind barriers and uses a bounded top-level assertion;
 failure the fresh process exits without pretending to unlock abandoned gates. No
 numeric lease count is used as proof of freeing a native buffer.
 
+`resolved-cuda-nesting` admits known-device work under an already-held unresolved CUDA
+write gate. It rejects device widening, write upgrades and unrelated MLX entry.
+`queued-safe-release` distinguishes blocked reservations from executed effects.
+`foreign-queued-safe-release` executes the queued registration through a second actual
+Core generation, rejects its effect after safe owner removal, drains the BCL frames,
+and collects both foreign generations. `safe-release-negatives` rejects nested release
+before its controlled free callback and rejects wrong-owner, forged-gate, wrong-thread
+and disposed leases. Safe release validates every frozen held gate before teardown;
+blocked reservations do not imply that native work has executed.
+
 Per-mode reports record actual fixture/Core hashes and MVID. Test public-method
 reflection is used solely to execute the compiled foreign fixture; there is no
 private-field reflection into shipping code or reflective Inference observation seam.
