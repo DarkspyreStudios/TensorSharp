@@ -82,6 +82,8 @@ Foreign cases check actual owner and collectible-generation roots after successf
 cleanup or controlled refusal. Private scratch and attribute boundary observations use fixed
 reflection calls inside the fixture; they do not qualify model execution or GPU kernels.
 All passed pointers and streams remain borrowed and are never dereferenced by this fixture.
+The diagnostic mode supplies a caller-replaced error writer. Its reentrant managed wildcard
+admission proves optional-kernel diagnostics run after the constructor's native effects exit.
 
 The pool modes use actual small and large `CudaDeviceMemoryPool` caches with controlled
 backing callbacks. A refused callback leaves its exact block and byte accounting owned;

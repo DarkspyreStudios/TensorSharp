@@ -167,11 +167,14 @@ internal static class Program
             Console.SetError(diagnostic);
             kernels = CudaKernels.CreateOwned(module);
         }
-        finally { Console.SetError(original); }
+        finally
+        {
+            Console.SetError(original);
+            try { kernels?.Dispose(); }
+            finally { context.Dispose(); }
+        }
         Assert(diagnostic.Entered && diagnostic.Completed,
             "Caller-replaceable diagnostic executes while constructor native-effect gates remain held.");
-        kernels.Dispose();
-        context.Dispose();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

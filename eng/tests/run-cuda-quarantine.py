@@ -31,6 +31,7 @@ MODES = (
     "foreign-kernels-clean", "foreign-kernels-drain-refusal",
     "pool-small-failed-free-retention", "pool-large-failed-free-retention",
     "pool-small-partial-free-retention", "pool-large-partial-free-retention",
+    "kernels-diagnostic-outside-effects",
 )
 
 
