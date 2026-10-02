@@ -31,6 +31,9 @@ switch (mode)
     case "lease-negatives":
         using (var f = new Foreign(fixturePath)) f.Static("LeaseNegatives");
         break;
+    case "mismatched-lease":
+        using (var f = new Foreign(fixturePath)) f.Static("MismatchedLease");
+        break;
     case "race":
         Race(fixturePath);
         break;

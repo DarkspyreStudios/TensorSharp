@@ -118,6 +118,22 @@ public sealed class Fixture
         Require(NativeRuntimeQuarantine.Observe().Revision == 0, "Rejected leases changed terminal state.");
     }
 
+    public static void MismatchedLease()
+    {
+        var a = new Owner(); var b = new Owner();
+        var ra = NativeQuarantineAuthority.Register(a, NativeOwnerRole.Model);
+        var rb = NativeQuarantineAuthority.Register(b, NativeOwnerRole.Storage);
+        ra.AttachCudaPrimaryDevice(0); rb.AttachCudaPrimaryDevice(0);
+        using (var actual = ra.EnterEffect())
+        {
+            var mismatched = new NativeEffectLease(rb, actual.Frame);
+            Refuses(() => mismatched.PublishFailure(b, new Exception(), NativeRuntimeFailureStage.StorageRelease));
+            ra.CompleteSafeRelease();
+        }
+        using (var lease = rb.EnterEffect()) rb.CompleteSafeRelease();
+        Require(NativeRuntimeQuarantine.Observe().Revision == 0, "Mismatched lease changed terminal state.");
+    }
+
     private static void Refuses(Action action)
     {
         try { action(); }
