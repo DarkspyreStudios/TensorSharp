@@ -57,7 +57,8 @@ def relink(fixture, original_record_path, build_dir, stage):
             or original_identity["ggml"] != ggml or original_identity["cpu"] != "apple-m1"):
         raise ValueError("original bridge is not the pinned Mac baseline")
     settings = record.read_cache(build_dir / "CMakeCache.txt")
-    identity = original_identity | {"source": source, "abi": pack.native_abi(ROOT)}
+    version = pack.ET.parse(ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
+    identity = original_identity | {"source": source, "abi": pack.native_abi(ROOT), "tensorsharp": version}
     pack.validate_release_profile(settings, identity)
     if settings["CMAKE_CXX_COMPILER"] != original_record["compiler"]:
         raise ValueError("fresh configuration changes the original compiler")

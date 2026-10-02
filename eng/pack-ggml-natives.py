@@ -345,6 +345,7 @@ def package_catalog(artifact):
     catalog.update({key: artifact[key] for key in (
         "driverId", "rid", "variant", "version", "tensorSharpBuild", "nativeAbi",
         "tensorSharp", "ggml", "backends", "entryLibrary", "files", "components")})
+    catalog["files"] = [{key: item[key] for key in ("path", "size", "sha256")} for item in artifact["files"]]
     return (json.dumps(catalog, indent=2) + "\n").encode()
 
 
@@ -727,10 +728,12 @@ def validate_identity_relink(build, identity, directory, binary, before_executio
     old = proof["originalIdentity"]
     if (not isinstance(old, dict) or set(old) != {"format", "tensorsharp", "source", "ggml", "rid", "variant", "cpu", "abi"}
             or identity.get("rid") != "osx-arm64" or identity.get("variant") != "metal" or identity.get("cpu") != "apple-m1"
-            or any(identity.get(key) != old.get(key) for key in ("format", "tensorsharp", "ggml", "rid", "variant", "cpu"))):
-        raise ValueError("identity relink changes the original target, backend, CPU floor, build or upstream")
+            or any(identity.get(key) != old.get(key) for key in ("format", "ggml", "rid", "variant", "cpu"))):
+        raise ValueError("identity relink changes the original target, backend, CPU floor or upstream")
+    version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
+    if identity.get("tensorsharp") != version:
+        raise ValueError("identity relink differs from the current committed build version")
     if before_execution:
-        version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
         upstream = (REPO_ROOT / "eng/ggml-revision").read_text().strip()
         if identity["tensorsharp"] != version or identity["ggml"] != upstream or identity["abi"] != native_abi(REPO_ROOT):
             raise ValueError("identity relink admission differs from the current build, ABI or pinned upstream")

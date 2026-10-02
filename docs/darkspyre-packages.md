@@ -28,7 +28,8 @@ Missing catalogs return no candidates. Loose libraries without a catalog do not 
 
 The packer derives each catalog from the validated artifact record. Catalogs retain package/native
 source identities, exact ABI and ggml revision, backend declarations, file sizes/hashes and component
-evidence. Baselines retain flat package notices and also carry the complete verified file closure,
+evidence. Runtime catalog file entries contain exactly `path`, `size` and `sha256`. The full artifact
+inventory separately retains `executable` facts. Baselines retain flat package notices and also carry the complete verified file closure,
 including licenses, inside the native directory. Their RID-conditional `buildTransitive` targets copy
 that directory and its catalog for output and publish. An explicit target RID takes precedence over
 the SDK host RID. Optional targets apply the same RID condition and copy their payload and sibling
@@ -144,6 +145,9 @@ target 14.0. It compares the original and current native source trees. All 59 ot
 inputs retain their exact bytes. A fresh configure-only CMake observation supplies the current
 build profile and cache snapshot. The historical cache remains separate evidence and is never a
 build input. Original and fresh compiler flags and link topology must match.
+The replacement identity uses the committed current TensorSharp build version. The original
+bridge identity and build record retain their actual original version. Version replacement does
+not change the pinned upstream, native source tree, target, backend or CPU floor.
 
 The additive `identityRelink` record contains both original observations and actual new compiler
 and linker arguments. The packer verifies ordinary evidence files, hashes, source-tree equality,
@@ -161,6 +165,16 @@ All artifact, ABI, profile, cache, dependency, component and relink checks remai
 default output mode requires the complete twelve-artifact release matrix. `--complete-release`
 and `--mac-prerelease` cannot be combined. Partial staging validation alone does not authorize
 package output.
+
+### Package Resolver Preflight
+
+`eng/tests/ggml-package-preflight` checks an actual packaged managed loader against an unpacked
+native package. Its three arguments are the absolute managed GGML DLL path, deployed native
+package root and target RID. It invokes the supplier's existing filesystem resolver with that
+explicit root, validates every returned candidate and reports executed DLL hash/MVID/build/ABI.
+Both entry and exit require `Unconfigured` state and no selected native handle. The tool does not
+configure, initialize or execute native code. Invalid catalogs or absent candidates return exit 1.
+This validates actual package/catalog interoperability without claiming native runtime qualification.
 
 ### Component evidence
 

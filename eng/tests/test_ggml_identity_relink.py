@@ -25,9 +25,9 @@ class IdentityRelinkTests(unittest.TestCase):
         self.directory.mkdir(parents=True)
         self.version = pack.ET.parse(ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
         self.ggml = (ROOT / "eng/ggml-revision").read_text().strip()
-        self.original = dict(format="1", tensorsharp=self.version, source="1" * 40, ggml=self.ggml,
+        self.original = dict(format="1", tensorsharp="2.8.6.8", source="1" * 40, ggml=self.ggml,
                              rid="osx-arm64", variant="metal", cpu="apple-m1", abi="3" * 64)
-        self.identity = self.original | {"source": "4" * 40, "abi": "5" * 64}
+        self.identity = self.original | {"source": "4" * 40, "abi": "5" * 64, "tensorsharp": self.version}
         self.settings = {"TENSORSHARP_NATIVE_ABI": self.original["abi"], "TENSORSHARP_NATIVE_RID": "osx-arm64",
                          "TENSORSHARP_NATIVE_VARIANT": "metal", "TENSORSHARP_GGML_NATIVE_PORTABLE": "ON",
                          "GGML_NATIVE": "OFF", "GGML_METAL": "ON", "GGML_CUDA": "OFF", "GGML_VULKAN": "OFF",
@@ -38,7 +38,7 @@ class IdentityRelinkTests(unittest.TestCase):
         old_bridge = self.file("identity-relink/original-bridge.dylib", b"controlled original bridge")
         cache_bytes = "".join(f"{key}:STRING={value}\n" for key, value in self.settings.items()).encode()
         old_cache = self.file("identity-relink/original-cache.txt", cache_bytes)
-        old_build = {"tensorSharpBuild": self.version, "sourceCommit": self.original["source"], "ggmlCommit": self.original["ggml"],
+        old_build = {"tensorSharpBuild": self.original["tensorsharp"], "sourceCommit": self.original["source"], "ggmlCommit": self.original["ggml"],
                      "nativeAbi": self.original["abi"], "rid": "osx-arm64", "variant": "metal", "cpuProfile": "apple-m1",
                      "macosDeploymentTarget": "14.0", "compiler": "/usr/bin/c++", "compilerVersion": "controlled compiler",
                      "bridgeSha256": old_bridge["sha256"], "cmakeCacheSha256": old_cache["sha256"],
@@ -90,6 +90,16 @@ class IdentityRelinkTests(unittest.TestCase):
 
     def test_complete_record_with_preserved_inputs_accepts(self):
         self.validate()
+
+    def test_version_replacement_preserves_actual_original_record(self):
+        self.assertNotEqual(self.original["tensorsharp"], self.identity["tensorsharp"])
+        self.validate()
+        reference = self.build["identityRelink"]["originalBuildRecord"]
+        original = json.loads((self.directory / reference["path"]).read_text())
+        original["tensorSharpBuild"] = self.version
+        self.build["identityRelink"]["originalBuildRecord"] = self.file(reference["path"], json.dumps(original).encode())
+        with self.assertRaisesRegex(ValueError, "original relink record"):
+            self.validate()
 
     def test_changed_or_missing_reused_inputs_refuse(self):
         for change in ("changed", "missing"):
@@ -194,6 +204,7 @@ class IdentityRelinkTests(unittest.TestCase):
         native = other_source / "TensorSharp.GGML.Native"
         native.mkdir(parents=True)
         shutil.copyfile(ROOT / "TensorSharp.GGML.Native/ggml_ops_build_identity.cpp", native / "ggml_ops_build_identity.cpp")
+        shutil.copyfile(ROOT / "Directory.Build.props", other_source / "Directory.Build.props")
         with patch.object(pack, "REPO_ROOT", other_source):
             pack.validate_identity_relink(self.build, self.identity, new_directory, new_binary)
 
