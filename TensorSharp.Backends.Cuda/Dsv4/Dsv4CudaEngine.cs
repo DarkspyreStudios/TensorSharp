@@ -1911,14 +1911,15 @@ namespace TensorSharp.Cuda
             var m = _m;
             int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
             int ratio = l.Ratio;
-            IntPtr ropeTab = Ptr(ratio != 0 ? dev.RopeComp : dev.RopeRaw);
+            Tensor ropeTab = ratio != 0 ? dev.RopeComp : dev.RopeRaw;
 
             MatMul(dev, l.WqA, dev.Cur, dev.Qr, nt);
             RmsNorm(dev, dev.Qr, l.QANorm, nt);
             MatMul(dev, l.WqB, dev.Qr, dev.Q, nt);
             MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
-            dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK),
-                p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, OwnedPointer(dev, l.KvNorm), OwnedPointer(dev, ropeTab), OwnedPointer(dev, l.RingK),
+                    p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
             Trace(dev, TraceLayer(il, "q"), dev.Q, (long)nt * nh * hd);
             Trace(dev, TraceLayer(il, "raw_k"), dev.KvRaw, (long)nt * hd);
             StageEnd(dev, 2);
@@ -1941,9 +1942,12 @@ namespace TensorSharp.Cuda
             }
 
             DevLayer source = ratio != 0 ? _layers[l.KvSource] : l;
+            Dev sourceDev = DeviceOfLayer(source);
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(source.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
-                p0, m.NSwa, _ringRaw, nh, hd, mode, ratio == 0 ? 1 : ratio, m.IdxTopK, kqScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Attention(dev.Q, OwnedPointer(dev, l.RingK), OwnedPointer(sourceDev, source.CompK),
+                    dev.TopkIdx, dev.TopkCnt, OwnedPointer(dev, l.Sinks), dev.AttnO,
+                    p0, m.NSwa, _ringRaw, nh, hd, mode, ratio == 0 ? 1 : ratio, m.IdxTopK, kqScale, nt, dev.Stream);
             StageEnd(dev, 5);
             CheckSync(dev, $"v41_attn_core L{il}");
 
@@ -1970,8 +1974,9 @@ namespace TensorSharp.Cuda
 
             if (nBlocks > 0)
             {
-                dev.DK.V41Compress(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), Ptr(l.CompNorm),
-                    dev.Latent, firstBoundary, nBlocks, p0, ratio, hd, m.RmsEps, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.V41Compress(dev.StKv, dev.StScore, OwnedPointer(dev, l.HistKv), OwnedPointer(dev, l.HistScore),
+                        OwnedPointer(dev, l.CompNorm), dev.Latent, firstBoundary, nBlocks, p0, ratio, hd, m.RmsEps, dev.Stream);
 
                 using (Tensor latentRows = Rows(dev.Latent, nBlocks))
                 using (Tensor keyRows = Rows(dev.LatentK, nBlocks))
@@ -1980,39 +1985,51 @@ namespace TensorSharp.Cuda
                     RmsNorm(dev, keyRows, l.IndexerKNorm, nBlocks);
                 }
 
-                dev.DK.V41Commit(dev.LatentK, Ptr(dev.RopeComp), Ptr(l.LidK),
-                    firstBoundary, nBlocks, ratio, id, m.NRot, 1, dev.Stream);
-                dev.DK.V41Commit(dev.Latent, Ptr(dev.RopeComp), Ptr(l.CompK),
-                    firstBoundary, nBlocks, ratio, hd, m.NRot, 2, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                {
+                    dev.DK.V41Commit(dev.LatentK, OwnedPointer(dev, dev.RopeComp), OwnedPointer(dev, l.LidK),
+                        firstBoundary, nBlocks, ratio, id, m.NRot, 1, dev.Stream);
+                    dev.DK.V41Commit(dev.Latent, OwnedPointer(dev, dev.RopeComp), OwnedPointer(dev, l.CompK),
+                        firstBoundary, nBlocks, ratio, hd, m.NRot, 2, dev.Stream);
+                }
             }
 
             if (ratio > 1)
-                dev.DK.V41Persist(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), p0, nt, ratio, hd, dev.Stream);
+            {
+                using var effect = EnterDeviceEffect(dev);
+                dev.DK.V41Persist(dev.StKv, dev.StScore, OwnedPointer(dev, l.HistKv), OwnedPointer(dev, l.HistScore),
+                    p0, nt, ratio, hd, dev.Stream);
+            }
         }
 
         private void BuildIndexerV41(Dev dev, DevLayer l, int il, int nt, int p0, int ratio)
         {
             var m = _m;
             DevLayer source = _layers[l.KvSource];
+            Dev sourceDev = DeviceOfLayer(source);
             int rows = dev.IdxScores.Sizes[1] is long c ? (int)c : 0;
 
             MatMul(dev, l.IdxQB, dev.Qr, dev.Iq, nt);
             MatMul(dev, l.IdxProj, dev.Cur, dev.Iw, nt);
             float iwScale = 1.0f / MathF.Sqrt((float)m.IdxHeadSize * m.IdxNHead);
-            dev.DK.V41IdxPrep(dev.Iq, dev.Iw, Ptr(dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, m.NRot,
-                iwScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41IdxPrep(dev.Iq, dev.Iw, OwnedPointer(dev, dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, m.NRot,
+                    iwScale, nt, dev.Stream);
 
             // Rows this layer may see: visibility, then whatever the candidate
             // layer left standing for the layers after it.
             bool prune = _v41CandActive && il > m.CandidateSource;
             int maxVis = (int)(((long)p0 + nt) / ratio);
-            dev.DK.V41IdxScores(dev.Iq, dev.Iw, Ptr(source.LidK), prune ? Ptr(dev.CandMask) : IntPtr.Zero,
-                dev.IdxScores, p0, ratio, m.IdxNHead, m.IdxHeadSize, rows, maxVis, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41IdxScores(dev.Iq, dev.Iw, OwnedPointer(sourceDev, source.LidK),
+                    prune ? OwnedPointer(dev, dev.CandMask) : IntPtr.Zero,
+                    dev.IdxScores, p0, ratio, m.IdxNHead, m.IdxHeadSize, rows, maxVis, nt, dev.Stream);
 
             if (il == m.CandidateSource)
             {
-                dev.DK.V41Candidate(dev.IdxScores, Ptr(dev.CandMask), p0, ratio, rows,
-                    m.CandidateBlock, m.CandidateTopk, nt, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.V41Candidate(dev.IdxScores, OwnedPointer(dev, dev.CandMask), p0, ratio, rows,
+                        m.CandidateBlock, m.CandidateTopk, nt, dev.Stream);
                 _v41CandActive = true;
             }
 
@@ -2021,14 +2038,15 @@ namespace TensorSharp.Cuda
 
         /// <summary>Inverse RoPE on the rope slice, then the grouped LoRA output
         /// projection. Shared by both architectures.</summary>
-        private void OutProjection(Dev dev, DevLayer l, int nt, int p0, IntPtr ropeTab)
+        private void OutProjection(Dev dev, DevLayer l, int nt, int p0, Tensor ropeTab)
         {
             var m = _m;
             int nh = m.NHead, hd = m.HeadDim;
             int hpg = nh / m.OGroups;
             // p0, not 0: the inverse rotation has to undo the rotation each token
             // was given at its OWN absolute position.
-            dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, m.NRot, hpg, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnFinish(dev.AttnO, OwnedPointer(dev, ropeTab), dev.OGrouped, p0, nh, hd, m.NRot, hpg, nt, dev.Stream);
 
             int groupDim = hpg * hd;
             int oCat = m.OGroups * m.OLoraRank;
@@ -2359,6 +2377,16 @@ namespace TensorSharp.Cuda
             if (tensor.Storage is not CudaStorage storage || !ReferenceEquals(storage.Allocator, dev.Alloc))
                 throw new InvalidOperationException("DSV4 effect tensor requires its actual device allocator.");
             return Ptr(tensor);
+        }
+
+        private Dev DeviceOfLayer(DevLayer layer)
+        {
+            if (layer == null || Array.IndexOf(_layers, layer) < 0
+                || layer.Device < 0 || layer.Device >= _devs.Length)
+                throw new InvalidOperationException("DSV4 cache source requires an actual engine layer.");
+            Dev dev = _devs[layer.Device];
+            ValidateDeviceOwner(dev);
+            return dev;
         }
 
         public void Dispose()

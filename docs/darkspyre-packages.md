@@ -317,7 +317,12 @@ native effect gates; the next transfer rebinds its actual context. The engine's 
 events, token uploads, boundary event/copy chains and final logits readbacks use
 the same engine registration. Boundary transfers validate the actual source and destination
 allocators before pointer reads and keep both known-device scopes admitted across context switches.
-Pinned host copies run outside native gates under the parent operation reservation. Remaining Dsv4
+Pinned host copies run outside native gates under the parent operation reservation. V4.1 compressed
+attention and indexer cache sources retain their actual engine-layer and device relationship.
+Compressor, commit, persistence, selection and cache-consuming launches validate the actual backing
+allocator before pointer reads under the same all-device engine admission. The V4.1 RoPE table
+remains a tensor until its guarded launch; tensor views and matmul calls run outside these short
+effect blocks. Remaining Dsv4
 and P2P native effects still require migration. No runtime verification was performed after the
 test hold. These source limits prevent a complete CUDA ownership claim.
 
