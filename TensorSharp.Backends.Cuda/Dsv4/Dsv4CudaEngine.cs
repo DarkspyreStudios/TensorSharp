@@ -254,7 +254,7 @@ namespace TensorSharp.Cuda
         private Exception _cleanupFailure;
         private readonly NativeConstructionCleanupHandle _constructionCleanup;
         private object _retainedParent;
-        private readonly List<System.Threading.Thread> _uploadThreads = new List<System.Threading.Thread>();
+        private readonly List<UploadWorkerResources> _uploadWorkers = new List<UploadWorkerResources>();
         public int ContextSize => _m.NCtx;
 
         /// <summary>Prefill micro-batch the engine chunks by. Speculative prefill
@@ -818,11 +818,14 @@ namespace TensorSharp.Cuda
                         continue;
                     for (int w = 0; w < perDev; w++)
                     {
+                        _uploadWorkers.EnsureCapacity(checked(_uploadWorkers.Count + 1));
+                        var worker = new UploadWorkerResources(this, dev);
+                        _uploadWorkers.Add(worker);
                         var t = new System.Threading.Thread(() =>
                         {
                             try
                             {
-                                StreamUploadWorker(dev);
+                                StreamUploadWorker(worker);
                             }
                             catch (Exception ex)
                             {
@@ -831,8 +834,8 @@ namespace TensorSharp.Cuda
                             }
                         });
                         t.IsBackground = true;
+                        worker.Thread = t;
                         threads.Add(t);
-                        _uploadThreads.Add(t);
                         t.Start();
                     }
                 }
@@ -875,8 +878,10 @@ namespace TensorSharp.Cuda
         internal void WaitForUploadWorkers()
         {
             List<Exception> failures = null;
-            foreach (var thread in _uploadThreads)
+            foreach (var worker in _uploadWorkers)
             {
+                var thread = worker.Thread;
+                if (thread == null) continue;
                 if ((thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0) continue;
                 if (ReferenceEquals(thread, System.Threading.Thread.CurrentThread))
                     throw new InvalidOperationException("An upload worker cannot wait for its own retirement.");
@@ -884,24 +889,94 @@ namespace TensorSharp.Cuda
                 catch (Exception failure) { (failures ??= new List<Exception>()).Add(failure); }
             }
             if (failures != null) throw new AggregateException("DSV4 upload workers have not proven completion.", failures);
-            _uploadThreads.Clear();
+            _uploadWorkers.RemoveAll(worker => worker.IsReleased);
         }
 
-        private static void StreamUploadWorker(Dev dev)
+        private sealed class UploadWorkerResources
         {
-            dev.MakeCurrent();
+            // Unsafe worker cleanup must retain the actual engine and its parent backing owners.
+            private Dsv4CudaEngine _engine;
+            private int _released;
+            internal readonly Dev Device;
+            internal readonly CudaNativeCalls Calls;
+            internal readonly IntPtr[] Buffers = new IntPtr[2];
+            internal readonly IntPtr[] Events = new IntPtr[2];
+            internal readonly bool[] Pending = new bool[2];
+            internal System.Threading.Thread Thread;
+            internal IntPtr Stream;
+            internal bool IsReleased => System.Threading.Volatile.Read(ref _released) != 0;
+
+            internal UploadWorkerResources(Dsv4CudaEngine engine, Dev device)
+            {
+                _engine = engine;
+                Device = device;
+                if (device.Alloc == null || device.Ordinal != device.Alloc.DeviceId)
+                    throw new InvalidOperationException("An upload worker requires its actual known-device allocator.");
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, device.Alloc.NativeCalls.Api, device.Alloc.DeviceId);
+            }
+
+            internal void Release()
+            {
+                if (IsReleased) return;
+                using var lease = Calls.EnterEffect();
+                Calls.ValidateSafeRelease(lease);
+                try
+                {
+                    bool hasResources = Stream != IntPtr.Zero;
+                    for (int i = 0; i < Buffers.Length; i++)
+                        hasResources |= Buffers[i] != IntPtr.Zero || Events[i] != IntPtr.Zero;
+                    if (hasResources)
+                    {
+                        Device.Alloc.Context.BindCurrent(Calls);
+                        Calls.cuStreamSynchronize(Stream);
+                    }
+                    for (int i = 0; i < Events.Length; i++)
+                    {
+                        if (Events[i] != IntPtr.Zero)
+                        {
+                            Calls.cuEventDestroy(Events[i]);
+                            Events[i] = IntPtr.Zero;
+                        }
+                        if (Buffers[i] != IntPtr.Zero)
+                        {
+                            Calls.cuMemFreeHost(Buffers[i]);
+                            Buffers[i] = IntPtr.Zero;
+                        }
+                    }
+                    if (Stream != IntPtr.Zero)
+                    {
+                        Calls.cuStreamDestroy(Stream);
+                        Stream = IntPtr.Zero;
+                    }
+                    Calls.CompleteSafeRelease(lease);
+                    System.Threading.Volatile.Write(ref _released, 1);
+                    _engine = null;
+                }
+                catch (Exception cleanupFailure)
+                {
+                    Calls.PublishFailure(lease, cleanupFailure, NativeRuntimeFailureStage.WorkerRetirement);
+                    throw;
+                }
+            }
+        }
+
+        private static void StreamUploadWorker(UploadWorkerResources worker)
+        {
+            var dev = worker.Device;
+            var calls = worker.Calls;
             int chunk = LoaderChunkBytes;
-            IntPtr stream = IntPtr.Zero;
-            var bufs = new IntPtr[2];
-            var evs = new IntPtr[2];
-            var pending = new bool[2];
+            Exception original = null;
             try
             {
-                CudaDriverApi.cuStreamCreate(out stream, 0x1 /*NON_BLOCKING*/).ThrowOnError();
-                for (int i = 0; i < 2; i++)
+                using (var lease = calls.EnterEffect())
                 {
-                    CudaDriverApi.cuMemHostAlloc(out bufs[i], new UIntPtr((ulong)chunk), 0x1 /*PORTABLE*/).ThrowOnError();
-                    CudaDriverApi.cuEventCreate(out evs[i], 0x02 /*DISABLE_TIMING*/).ThrowOnError();
+                    dev.Alloc.Context.BindCurrent(calls);
+                    calls.ThrowOnError(calls.cuStreamCreate(out worker.Stream, 0x1 /*NON_BLOCKING*/));
+                    for (int i = 0; i < worker.Buffers.Length; i++)
+                    {
+                        calls.ThrowOnError(calls.cuMemHostAlloc(out worker.Buffers[i], new UIntPtr((ulong)chunk), 0x1 /*PORTABLE*/));
+                        calls.ThrowOnError(calls.cuEventCreate(out worker.Events[i], 0x02 /*DISABLE_TIMING*/));
+                    }
                 }
 
                 var jobs = dev.UploadJobs;
@@ -916,37 +991,46 @@ namespace TensorSharp.Cuda
                     {
                         long n = Math.Min(chunk, job.Bytes - done);
                         // Reclaim the staging buffer only once its copy retired.
-                        if (pending[slot])
+                        if (worker.Pending[slot])
                         {
                             long tc = LoaderStats ? Stopwatch.GetTimestamp() : 0;
-                            CudaDriverApi.cuEventSynchronize(evs[slot]).ThrowOnError();
+                            using (var lease = calls.EnterEffect())
+                            {
+                                dev.Alloc.Context.BindCurrent(calls);
+                                calls.cuEventSynchronize(worker.Events[slot]);
+                            }
                             if (LoaderStats)
                                 System.Threading.Interlocked.Add(ref _loaderCopyTicks, Stopwatch.GetTimestamp() - tc);
-                            pending[slot] = false;
+                            worker.Pending[slot] = false;
                         }
                         long t0 = LoaderStats ? Stopwatch.GetTimestamp() : 0;
-                        job.Src.Read(job.SrcOffset + done, bufs[slot], n);
+                        job.Src.Read(job.SrcOffset + done, worker.Buffers[slot], n);
                         if (LoaderStats)
                             System.Threading.Interlocked.Add(ref _loaderReadTicks, Stopwatch.GetTimestamp() - t0);
-                        CudaDriverApi.cuMemcpyHtoDAsync((IntPtr)((long)job.Dst + done), bufs[slot],
-                            new UIntPtr((ulong)n), stream).ThrowOnError();
-                        CudaDriverApi.cuEventRecord(evs[slot], stream).ThrowOnError();
-                        pending[slot] = true;
+                        using (var lease = calls.EnterEffect())
+                        {
+                            dev.Alloc.Context.BindCurrent(calls);
+                            calls.ThrowOnError(calls.cuMemcpyHtoDAsync((IntPtr)((long)job.Dst + done), worker.Buffers[slot],
+                                new UIntPtr((ulong)n), worker.Stream));
+                            calls.ThrowOnError(calls.cuEventRecord(worker.Events[slot], worker.Stream));
+                            worker.Pending[slot] = true;
+                        }
                         done += n;
                         slot ^= 1;
                     }
                 }
-                CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
             }
-            finally
+            catch (Exception failure)
             {
-                for (int i = 0; i < 2; i++)
-                {
-                    if (evs[i] != IntPtr.Zero) CudaDriverApi.cuEventDestroy(evs[i]);
-                    if (bufs[i] != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(bufs[i]);
-                }
-                if (stream != IntPtr.Zero) CudaDriverApi.cuStreamDestroy(stream);
+                original = failure;
             }
+            try { worker.Release(); }
+            catch (Exception cleanup)
+            {
+                if (original != null) throw new AggregateException(original, cleanup);
+                throw;
+            }
+            if (original != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(original).Throw();
         }
 
         /// <summary>Small dense tensor (norm/gate/table) as an allocator-owned
@@ -2234,11 +2318,16 @@ namespace TensorSharp.Cuda
             foreach (var dev in _devs ?? Array.Empty<Dev>())
                 if (dev?.Alloc != null && !plan.Owns(dev.Alloc))
                     throw new InvalidOperationException("DSV4 CUDA cleanup requires its complete actual allocator plan.");
+            foreach (var worker in _uploadWorkers)
+                if (worker.Thread?.IsAlive == true)
+                    throw new InvalidOperationException("DSV4 upload workers must settle before native resource cleanup.");
             _retiring = true;
             using (var cleanupLease = plan.EnterModelCleanupEffect())
             {
                 try
                 {
+                    foreach (var worker in _uploadWorkers) worker.Release();
+                    _uploadWorkers.Clear();
                     foreach (var dev in _devs ?? Array.Empty<Dev>())
                     {
                         if (dev?.Alloc == null) continue;

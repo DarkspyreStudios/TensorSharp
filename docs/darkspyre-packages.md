@@ -290,12 +290,17 @@ grants no pointer, allocator or census authority, adds no process-global healthy
 only after proven release. An ordinary post-release restoration error does not restore that
 dependency or make released resources live again. Public Dsv4 `QuantWeightDesc.HostPtr` inputs remain
 borrowed; their actual backing lifetime is the caller's obligation, not inferred from the pointer.
-Partial device and DSpark records remain visible to that recipe. Started upload threads remain recorded until
-proven joined; these waits occur after the full census, outside native effect gates and before
-destructive cleanup. A join refusal remains pre-effect and retryable. Pinned logits and DSpark
-capture staging are released only after checked completion. Raw upload-worker cleanup and other
-Dsv4 and P2P native effects still require migration. No runtime verification was performed after
-the test hold. These source limits prevent a complete CUDA ownership claim.
+Partial device and DSpark records remain visible to that recipe. Upload worker records reserve
+their actual stream, pinned buffers, events and parent dependency before thread start. Each native
+effect uses the worker's known-device registration. Source reads and thread joins run outside native
+effect gates. A worker rebinds its actual context after each source read before enqueueing a copy.
+Checked stream completion precedes event, pinned-buffer and stream release. Unsafe cleanup retains
+the worker and its actual parent graph; an original upload error and a cleanup error remain distinct.
+Started threads remain recorded until proven joined. Parent retirement waits after the full census
+and before destructive cleanup. A join refusal remains pre-effect and retryable. Pinned logits and
+DSpark capture staging are released only after checked completion. Other Dsv4 and P2P native effects
+still require migration. No runtime verification was performed after the test hold. These source
+limits prevent a complete CUDA ownership claim.
 
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
