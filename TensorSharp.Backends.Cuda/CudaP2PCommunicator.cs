@@ -293,10 +293,13 @@ namespace TensorSharp.Cuda
         internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
         {
             if (_released) return;
+            if (_failure != null && !CudaP2PEffectOwner.IsHealthy(_calls))
+                ExceptionDispatchInfo.Capture(_failure).Throw();
             foreach (CudaAllocator allocator in _allocators)
                 if (!plan.Owns(allocator)) throw new InvalidOperationException("P2P cleanup requires its actual owning plan.");
             try
             {
+                _calls.ThrowIfQuarantined();
                 using (var validation = _calls.EnterEffect()) _calls.ValidateSafeRelease(validation);
                 _probe?.Release();
                 if (_probe != null && !_probe.Released)

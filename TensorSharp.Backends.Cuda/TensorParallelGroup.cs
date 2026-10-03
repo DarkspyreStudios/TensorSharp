@@ -286,11 +286,14 @@ namespace TensorSharp.Cuda
         {
             if (_disposed) return;
             lock (_methodGate) _retirementRequested = true;
+            if (_cleanupFailure != null && _nativeCalls != null && !CudaP2PEffectOwner.IsHealthy(_nativeCalls))
+                ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
             try
             {
                 plan.ValidateGroupRelease(this);
                 if (_nativeCalls != null)
                 {
+                    _nativeCalls.ThrowIfQuarantined();
                     using var validation = _nativeCalls.EnterEffect();
                     _nativeCalls.ValidateSafeRelease(validation);
                 }
