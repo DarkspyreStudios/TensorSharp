@@ -134,5 +134,43 @@ assemblies use shared output paths. Every mode has a 20-second process bound.
 
 This proves managed ownership routing only. It does not qualify primary-context driver
 semantics, GPU execution, physical multi-device cleanup or complete backend integration.
-The allocator, storage, captured graph, model and GGML dependency callers are not covered
-by these leaf-owner modes.
+The allocator/storage modes use normally constructed actual `CudaAllocator` and
+`CudaStorage` classes with the same instance-injected API. Reservations precede storage
+construction and native allocation. The storage owns the OUT buffer before graph hooks
+run. Rollback transfers a safely drained buffer to its actual pool owner; explicit
+allocator disposal later frees it. Refused cleanup preserves actual ownership and both
+original and cleanup errors.
+
+An allocator retirement census fences new allocation and reference addition. A bare
+allocator with live storage reports retryable Busy without native cleanup. An internal
+retirement plan compares deduplicated Tensor identities with actual Storage reference
+counts under stable allocator census gates. It admits healthy owned references and
+refuses escaped references or pending acquisition. Census gates never enclose native
+effects or resource destruction. The copy-disposal mode holds the actual transfer scope
+through the controlled enqueue and proves source disposal cannot free its buffer first.
+Cross-device transfer checks actual owner admission and peer eligibility before allocating
+fallback staging. Peer copies need no host staging. Fallback allocation occurs outside
+this method's transfer gates, and a fresh admission rechecks both storages before pointer
+use. The large-peer mode uses opaque logical device allocations larger than Int32.MaxValue;
+it does not allocate or dereference that device memory. Bounded fallback checks real host
+mirror bytes, and peer-disposal checks actual source ownership through controlled enqueue.
+Only an authenticated declined bare-allocator preflight permits handoff to an explicit
+owning plan. Its census flag is consumed on the next admitted attempt. Successful or
+in-flight cleanup, graph-pending ownership and quarantine do not permit that handoff.
+The admission fence stays set. The quarantine check reads the existing process metadata;
+it does not acquire a native effect or device gate under the census.
+
+The pending-parent finalizer mode refuses destructive storage cleanup when parent graph
+retirement remains unproven. The actual storage, allocator and parent remain retained
+through the existing process authority. Finalizer recognition accepts only this owner's
+authenticated recorded cause or exact quarantine refusal; an aggregate containing the
+cause is not sufficient. Foreign allocator modes execute actual private Core/CUDA/fixture
+assemblies and check explicit healthy cleanup and collection versus failed-owner retention.
+The sibling-quarantine mode faults a different actual stream owner and proves that existing
+authority promotion retains both registered storages before exposing the device failure.
+Finalizer drainage and later sibling refusal perform no further driver calls or frees.
+These modes have empty quantized caches and do not qualify captured graphs, physical
+devices, allocator-cache teardown, group/model preflight integration or full backend
+safety. Callers retain pending owners, release escaped references and explicitly retry;
+these tests do not promise automatic cleanup after caller abandonment. OOM reclamation
+outside a local storage lease does not prove that an outer caller lease is absent.

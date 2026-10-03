@@ -459,4 +459,19 @@ internal static class NativeQuarantineAuthority
             return failure != null;
         }
     }
+
+    internal static bool IsRetainedFailure(NativeOwnerRegistration registration, Exception error)
+    {
+        lock (registration.State[1])
+        {
+            ValidateRegistration(registration);
+            Guid id = (Guid)registration.Cell[5];
+            if (id == Guid.Empty || !ReferenceEquals(registration.Cell[6], registration.Owner)) return false;
+            if (Causes(registration.State).TryGetValue(error, out var ids) && ids.Contains(id)) return true;
+            if (error is not NativeRuntimeQuarantinedException refusal || refusal.Failure.FailureId != id)
+                return false;
+            return Scopes(registration.State).Values.Any(c => (Guid)c[3] == id
+                && ReferenceEquals(c[7], refusal.InnerException));
+        }
+    }
 }

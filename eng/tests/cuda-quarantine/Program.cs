@@ -20,6 +20,27 @@ internal static class Program
             case "reference-gate-refusal": ReferenceOwnershipFixtures.GateRefusal(); break;
             case "reference-parallel-release": ReferenceOwnershipFixtures.ParallelRelease(); break;
             case "reference-tensor-intents": ReferenceOwnershipFixtures.TensorIntents(); break;
+            case "allocator-storage-busy": AllocatorOwnershipFixtures.Busy(); break;
+            case "allocator-storage-owned-plan": AllocatorOwnershipFixtures.OwnedPlan(); break;
+            case "allocator-storage-pending": AllocatorOwnershipFixtures.PendingAcquisition(); break;
+            case "allocator-storage-copy": AllocatorOwnershipFixtures.Copy(); break;
+            case "allocator-storage-large-peer": AllocatorOwnershipFixtures.LargePeerCopy(); break;
+            case "allocator-storage-fallback": AllocatorOwnershipFixtures.FallbackCopy(); break;
+            case "allocator-storage-peer-disposal": AllocatorOwnershipFixtures.CopyDisposal(true); break;
+            case "allocator-storage-copy-disposal": AllocatorOwnershipFixtures.CopyDisposal(); break;
+            case "allocator-storage-rollback": AllocatorOwnershipFixtures.Rollback(false); break;
+            case "allocator-storage-rollback-refusal": AllocatorOwnershipFixtures.Rollback(true); break;
+            case "allocator-storage-drain-refusal": AllocatorOwnershipFixtures.DrainRefusal(); break;
+            case "allocator-storage-parent-finalizer": AllocatorOwnershipFixtures.ParentFinalizer(); break;
+            case "allocator-storage-sibling-quarantine": AllocatorOwnershipFixtures.SiblingQuarantine(); break;
+            case "allocator-construction-no-context": AllocatorOwnershipFixtures.Construction(false); break;
+            case "allocator-construction-partial": AllocatorOwnershipFixtures.Construction(true); break;
+            case "allocator-storage-before-native-refusal": AllocatorOwnershipFixtures.BeforeNativeRefusal(); break;
+            case "allocator-busy-parent-transfer": AllocatorOwnershipFixtures.ParentTransfer(); break;
+            case "allocator-inflight-parent-refusal": AllocatorOwnershipFixtures.InflightParentRefusal(); break;
+            case "allocator-graph-parent-refusal": AllocatorOwnershipFixtures.GraphParentRefusal(); break;
+            case "foreign-allocator-clean": ForeignAllocator(false); break;
+            case "foreign-allocator-drain-refusal": ForeignAllocator(true); break;
             case "context-clean": ContextClean(); break;
             case "context-composed-clean": ContextComposedClean(false); break;
             case "context-composed-external": ContextComposedClean(true); break;
@@ -1181,13 +1202,21 @@ internal static class Program
         Assert(roots.All(r => r.IsAlive == unsafeRelease), "Foreign dynamic parameter roots do not match explicit cleanup outcome.");
     }
 
+    private static void ForeignAllocator(bool unsafeRelease)
+    {
+        WeakReference[] roots = ExecuteForeignContext(unsafeRelease, stream: false, allocator: true);
+        Collect();
+        Assert(roots.All(root => root.IsAlive == unsafeRelease),
+            "Foreign actual allocator/storage roots do not match explicit cleanup outcome.");
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false, bool kernels = false, bool dyn = false)
+    private static WeakReference[] ExecuteForeignContext(bool unsafeRelease, bool stream, bool module = false, bool composed = false, bool blas = false, bool kernels = false, bool dyn = false, bool allocator = false)
     {
         var context = new FixtureLoadContext();
         Assembly fixture = context.LoadFromAssemblyPath(typeof(Program).Assembly.Location);
         Type entry = fixture.GetType(typeof(Program).FullName!, true)!;
-        string operationName = dyn ? nameof(RunForeignDyn) : kernels ? nameof(RunForeignKernels) : blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
+        string operationName = allocator ? nameof(RunForeignAllocator) : dyn ? nameof(RunForeignDyn) : kernels ? nameof(RunForeignKernels) : blas ? nameof(RunForeignBlas) : composed ? nameof(RunForeignComposed) : module ? nameof(RunForeignModule)
             : stream ? nameof(RunForeignStream) : nameof(RunForeignContext);
         var operation = entry.GetMethod(operationName, BindingFlags.Static | BindingFlags.Public)!;
         var ownedRoots = (WeakReference[])operation.Invoke(null, [unsafeRelease])!;
@@ -1249,6 +1278,13 @@ internal static class Program
             "Actual dynamic parameters do not execute in the foreign generation.");
         return unsafeRelease ? FailDynRelease(0) : CreateAndReleaseDyn();
     }
+
+    public static WeakReference[] RunForeignAllocator(bool unsafeRelease)
+    {
+        Assert(AssemblyLoadContext.GetLoadContext(typeof(CudaAllocator).Assembly)?.IsCollectible == true,
+            "Actual allocator/storage do not execute in the foreign generation.");
+        return AllocatorOwnershipFixtures.ReleaseForeign(unsafeRelease);
+    }
 }
 
 internal sealed class FixtureLoadContext : AssemblyLoadContext
@@ -1267,7 +1303,9 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal IntPtr Current;
     internal Exception? ReleaseFailure;
     internal Exception? BindFailure;
+    internal Exception? DeviceFailure;
     internal Exception? DrainFailure;
+    internal Action? BeforeContextSynchronize;
     internal Exception? StreamSyncFailure;
     internal Exception? StreamDestroyFailure;
     internal Exception? StreamCreateFailure;
@@ -1309,9 +1347,26 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     internal bool ObserveDynamicLaunch;
     internal IntPtr LastFreedDevicePointer;
     internal bool LaunchedFreedDynamicPointer;
+    internal bool TrackStorageData;
+    internal Action? BeforeMemoryAllocate;
+    internal Action? BeforeDeviceCopy;
+    internal bool PeerAccessible;
+    internal int PeerCopyCount;
+    internal ulong PeerCopyBytes;
+    internal int HostStageReadCount;
+    internal int HostStageWriteCount;
+    internal readonly Dictionary<IntPtr, byte[]> DeviceBytes = new();
+
+    public override int cuMemGetInfo(out UIntPtr free, out UIntPtr total)
+    { TotalCalls++; free = new UIntPtr(8UL << 30); total = new UIntPtr(16UL << 30); return 0; }
 
     public override int cuInit(uint flags) { TotalCalls++; return 0; }
-    public override int cuDeviceGet(out int device, int ordinal) { TotalCalls++; device = ordinal + 100; return 0; }
+    public override int cuDeviceGet(out int device, int ordinal)
+    {
+        TotalCalls++; device = ordinal + 100;
+        if (DeviceFailure != null) throw DeviceFailure;
+        return 0;
+    }
     public override int cuDeviceGetCount(out int count) { TotalCalls++; count = 8; return 0; }
     public override int cuCtxGetDevice(out int device)
     { TotalCalls++; device = checked((int)Current.ToInt64() - 1000); return 0; }
@@ -1332,6 +1387,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
     {
         TotalCalls++;
         ContextSyncCount++;
+        BeforeContextSynchronize?.Invoke();
         if (DrainFailure != null) throw DrainFailure;
         return 0;
     }
@@ -1405,7 +1461,9 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
 
     public override int cuMemAlloc(out IntPtr ptr, UIntPtr bytes)
     {
+        BeforeMemoryAllocate?.Invoke();
         TotalCalls++; MemoryAllocateCount++; ptr = new IntPtr(5000 + MemoryAllocateCount);
+        if (TrackStorageData) DeviceBytes.Add(ptr, new byte[checked((int)bytes.ToUInt64())]);
         if (MemoryAllocateFailure != null) throw MemoryAllocateFailure;
         return MemoryAllocateResult;
     }
@@ -1414,6 +1472,7 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         TotalCalls++; MemoryFreeCount++;
         if (MemoryFreeFailure != null) throw MemoryFreeFailure;
         LastFreedDevicePointer = ptr;
+        DeviceBytes.Remove(ptr);
         return 0;
     }
     public override int cuMemHostAlloc(out IntPtr ptr, UIntPtr bytes, uint flags)
@@ -1438,6 +1497,42 @@ internal sealed class RecordingCudaApi : RefusingCudaApi
         if (UploadFailure != null) throw UploadFailure;
         UploadedValues = new int[checked((int)bytes.ToUInt64() / sizeof(int))];
         System.Runtime.InteropServices.Marshal.Copy(source, UploadedValues, 0, UploadedValues.Length);
+        if (TrackStorageData) System.Runtime.InteropServices.Marshal.Copy(source, DeviceBytes[destination], 0, checked((int)bytes.ToUInt64()));
+        return 0;
+    }
+    public override int cuMemcpyDtoHAsync(IntPtr destination, IntPtr source, UIntPtr bytes, IntPtr stream)
+    {
+        TotalCalls++;
+        System.Runtime.InteropServices.Marshal.Copy(DeviceBytes[source], 0, destination, checked((int)bytes.ToUInt64()));
+        return 0;
+    }
+    public override int cuMemcpyDtoDAsync(IntPtr destination, IntPtr source, UIntPtr bytes, IntPtr stream)
+    {
+        BeforeDeviceCopy?.Invoke();
+        TotalCalls++;
+        Array.Copy(DeviceBytes[source], DeviceBytes[destination], checked((int)bytes.ToUInt64()));
+        return 0;
+    }
+    public override int cuDeviceCanAccessPeer(out int accessible, int device, int peer)
+    { TotalCalls++; accessible = PeerAccessible ? 1 : 0; return 0; }
+    public override int cuMemcpyPeerAsync(IntPtr destination, IntPtr destinationContext, IntPtr source,
+        IntPtr sourceContext, UIntPtr bytes, IntPtr stream)
+    {
+        BeforeDeviceCopy?.Invoke();
+        TotalCalls++; PeerCopyCount++; PeerCopyBytes = bytes.ToUInt64();
+        if (TrackStorageData) Array.Copy(DeviceBytes[source], DeviceBytes[destination], checked((int)bytes.ToUInt64()));
+        return 0;
+    }
+    public override int cuMemcpyDtoH(IntPtr destination, IntPtr source, UIntPtr bytes)
+    {
+        TotalCalls++; HostStageReadCount++;
+        System.Runtime.InteropServices.Marshal.Copy(DeviceBytes[source], 0, destination, checked((int)bytes.ToUInt64()));
+        return 0;
+    }
+    public override int cuMemcpyHtoD(IntPtr destination, IntPtr source, UIntPtr bytes)
+    {
+        TotalCalls++; HostStageWriteCount++;
+        System.Runtime.InteropServices.Marshal.Copy(source, DeviceBytes[destination], 0, checked((int)bytes.ToUInt64()));
         return 0;
     }
     public override int cuFuncSetAttribute(IntPtr function, int attribute, int value)
