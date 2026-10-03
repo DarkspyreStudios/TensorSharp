@@ -308,7 +308,12 @@ through the existing storage census before touching operation state. This admiss
 no native gates across callbacks, host allocations or waits. Parent preflight fences admission and
 returns healthy Busy before cleanup when an operation remains admitted. A later explicit retry
 uses the same owning census after that operation drains. The engine freezes its actual allocator,
-native API and device identities before child kernel and event acquisition. Its reset and
+native API and device identities before child kernel and event acquisition. Constructor work
+after that reservation participates in the same allocator census. Constructor
+admission holds no native gates across parallel uploads, callbacks or joins and exits before the
+private construction cleanup recipe runs. Boundary and token events, owned pinned buffers, memory
+observations and F32/I32 uploads use short known-device effects. Earlier allocator acquisition and
+raw quantized uploads remain separate ownership boundaries. Its reset and
 diagnostic readback calls validate actual allocator-backed tensors while the engine's
 known-device effect lease remains active through pointer reads and native use. Checked stream
 completion precedes reset and host reads. HostMoE holds separate leases for its input download and

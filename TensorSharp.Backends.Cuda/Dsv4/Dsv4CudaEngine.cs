@@ -340,6 +340,7 @@ namespace TensorSharp.Cuda
                 }
                 _operationCalls = new CudaNativeCalls(this, NativeOwnerRole.Graph,
                     _operationAllocators[0].NativeCalls.Api, ordinals);
+                using var constructionAdmission = CudaOperationAdmission.Enter(this, _operationAllocators);
                 foreach (var dev in _devs)
                 {
                     Dsv4Kernels.Create(dev.Alloc, kernels => dev.DK = kernels, this);
@@ -378,11 +379,10 @@ namespace TensorSharp.Cuda
                 for (int d = 0; d < useDevs; d++)
                 {
                     var dev = _devs[d];
-                    dev.MakeCurrent();
-                    var calls = dev.Alloc.NativeCalls;
-                    calls.ThrowOnError(calls.cuMemHostAlloc(out dev.BoundaryPinned, new UIntPtr((ulong)xsBytes), 0x1 /*PORTABLE*/));
-                    calls.ThrowOnError(calls.cuEventCreate(out dev.XsReadyEv, 0x02));
-                    calls.ThrowOnError(calls.cuEventCreate(out dev.CopyDoneEv, 0x02));
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out dev.BoundaryPinned, new UIntPtr((ulong)xsBytes), 0x1 /*PORTABLE*/));
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.XsReadyEv, 0x02));
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.CopyDoneEv, 0x02));
                 }
 
                 // ---- arena sizing per device (packed quantized weights only) ----
@@ -460,12 +460,11 @@ namespace TensorSharp.Cuda
                 {
                     if (!dev.NeedsTokens)
                         continue;
-                    dev.MakeCurrent();
                     dev.TokensDev0 = AllocI32(dev, m.NUbatch);
                     dev.TokensDev1 = AllocI32(dev, m.NUbatch);
-                    var calls = dev.Alloc.NativeCalls;
-                    calls.ThrowOnError(calls.cuEventCreate(out dev.TokEv0, 0x02));
-                    calls.ThrowOnError(calls.cuEventCreate(out dev.TokEv1, 0x02));
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.TokEv0, 0x02));
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.TokEv1, 0x02));
                 }
 
                 var last = _devs[_lastDev];
@@ -476,13 +475,15 @@ namespace TensorSharp.Cuda
                     _specLogits = AllocF32(last, specRows, m.NVocab);
                 }
 
-                _devs[0].MakeCurrent();
                 // CU_MEMHOSTALLOC_PORTABLE (0x1): the pinned token buffers are copied
                 // from by every device that needs token ids, not just device 0.
-                CudaDriverApi.cuMemHostAlloc(out _pinnedTokens0, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
-                CudaDriverApi.cuMemHostAlloc(out _pinnedTokens1, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
                 long logitRows = m.Dspark != null ? m.Dspark.BlockSize + 1 : 1;
-                CudaDriverApi.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1).ThrowOnError();
+                using (var effect = EnterDeviceEffect(_devs[0]))
+                {
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out _pinnedTokens0, new UIntPtr((ulong)m.NUbatch * 4), 0x1));
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out _pinnedTokens1, new UIntPtr((ulong)m.NUbatch * 4), 0x1));
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1));
+                }
 
                 Reset();
 
@@ -541,8 +542,9 @@ namespace TensorSharp.Cuda
             var freeBytes = new long[nDev];
             for (int d = 0; d < nDev; d++)
             {
-                _devs[d].MakeCurrent();
-                CudaDriverApi.cuMemGetInfo(out UIntPtr free, out UIntPtr _).ThrowOnError();
+                UIntPtr free;
+                using (var effect = EnterDeviceEffect(_devs[d]))
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemGetInfo(out free, out _));
                 freeBytes[d] = (long)free.ToUInt64();
                 long reserve = reserveMb * 1024 * 1024 + PerDeviceFixedBytes(m);
                 budget[d] = Math.Max(freeBytes[d] - reserve, 0);
@@ -1051,23 +1053,29 @@ namespace TensorSharp.Cuda
         /// <summary>Small dense tensor (norm/gate/table) as an allocator-owned
         /// F32 tensor. Null/empty input yields null, which every consumer treats
         /// as "absent".</summary>
-        private static Tensor UploadF32(Dev dev, float[] data)
+        private Tensor UploadF32(Dev dev, float[] data)
         {
             if (data == null || data.Length == 0)
                 return null;
             Tensor t = AllocF32(dev, data.Length);
             fixed (float* src = data)
-                CudaDriverApi.cuMemcpyHtoD(Ptr(t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedPointer(dev, t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)));
+            }
             return t;
         }
 
-        private static Tensor UploadI32(Dev dev, int[] data)
+        private Tensor UploadI32(Dev dev, int[] data)
         {
             if (data == null || data.Length == 0)
                 return null;
             Tensor t = AllocI32(dev, data.Length);
             fixed (int* src = data)
-                CudaDriverApi.cuMemcpyHtoD(Ptr(t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedPointer(dev, t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)));
+            }
             return t;
         }
 
@@ -1275,7 +1283,8 @@ namespace TensorSharp.Cuda
                     long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
                     dev.EngramLookup = AllocF32(dev, nt, cols);
                     dev.EngramKv = AllocF32(dev, nt, (long)(HC + 1) * e);
-                    CudaDriverApi.cuMemHostAlloc(out dev.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/).ThrowOnError();
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out dev.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/));
                 }
             }
             dev.FfnOut = AllocF32(dev, nt, e);
