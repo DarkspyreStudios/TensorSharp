@@ -313,7 +313,11 @@ diagnostic readback calls validate actual allocator-backed tensors while the eng
 known-device effect lease remains active through pointer reads and native use. Checked stream
 completion precedes reset and host reads. HostMoE holds separate leases for its input download and
 result upload. Host expert callbacks, array rents, file writes and diagnostic formatting run outside
-native effect gates; the next transfer rebinds its actual context. The remaining Dsv4
+native effect gates; the next transfer rebinds its actual context. The engine's token parity
+events, token uploads, boundary event/copy chains and final logits readbacks use
+the same engine registration. Boundary transfers validate the actual source and destination
+allocators before pointer reads and keep both known-device scopes admitted across context switches.
+Pinned host copies run outside native gates under the parent operation reservation. Remaining Dsv4
 and P2P native effects still require migration. No runtime verification was performed after the
 test hold. These source limits prevent a complete CUDA ownership claim.
 

@@ -1537,17 +1537,19 @@ namespace TensorSharp.Cuda
             {
                 if (!dev.NeedsTokens)
                     continue;
-                CudaDriverApi.cuEventSynchronize(parity == 0 ? dev.TokEv0 : dev.TokEv1);
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuEventSynchronize(parity == 0 ? dev.TokEv0 : dev.TokEv1);
             }
             Marshal.Copy(tokens, tokOff, pinned, nt);
             foreach (var dev in _devs)
             {
                 if (!dev.NeedsTokens)
                     continue;
-                dev.MakeCurrent();
                 Tensor dst = parity == 0 ? dev.TokensDev0 : dev.TokensDev1;
-                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dst), pinned, new UIntPtr((ulong)nt * 4), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuEventRecord(parity == 0 ? dev.TokEv0 : dev.TokEv1, dev.Stream).ThrowOnError();
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(dev, dst), pinned,
+                    new UIntPtr((ulong)nt * 4), dev.Stream));
+                _operationCalls.ThrowOnError(_operationCalls.cuEventRecord(parity == 0 ? dev.TokEv0 : dev.TokEv1, dev.Stream));
             }
             Tensor TokensOf(Dev dev) => parity == 0 ? dev.TokensDev0 : dev.TokensDev1;
 
@@ -1587,15 +1589,20 @@ namespace TensorSharp.Cuda
                     // driver rejects a cross-context record with "invalid
                     // resource handle"); only the WAITS cross contexts, which
                     // is the supported multi-GPU pattern.
-                    src.MakeCurrent();
-                    CudaDriverApi.cuMemcpyDtoHAsync(src.BoundaryPinned, Ptr(src.Xs), copyBytes, src.Stream).ThrowOnError();
-                    CudaDriverApi.cuEventRecord(src.XsReadyEv, src.Stream).ThrowOnError();
-                    dst.MakeCurrent();
-                    CudaDriverApi.cuStreamWaitEvent(dst.Stream, src.XsReadyEv, 0).ThrowOnError();
-                    CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dst.Xs), src.BoundaryPinned, copyBytes, dst.Stream).ThrowOnError();
-                    CudaDriverApi.cuEventRecord(dst.CopyDoneEv, dst.Stream).ThrowOnError();
-                    src.MakeCurrent();
-                    CudaDriverApi.cuStreamWaitEvent(src.Stream, dst.CopyDoneEv, 0).ThrowOnError();
+                    ValidateDeviceOwner(dst);
+                    using (var effect = EnterDeviceEffect(src))
+                    {
+                        IntPtr source = OwnedPointer(src, src.Xs);
+                        IntPtr target = OwnedPointer(dst, dst.Xs);
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync(src.BoundaryPinned, source, copyBytes, src.Stream));
+                        _operationCalls.ThrowOnError(_operationCalls.cuEventRecord(src.XsReadyEv, src.Stream));
+                        dst.Alloc.Context.BindCurrent(_operationCalls);
+                        _operationCalls.ThrowOnError(_operationCalls.cuStreamWaitEvent(dst.Stream, src.XsReadyEv, 0));
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(target, src.BoundaryPinned, copyBytes, dst.Stream));
+                        _operationCalls.ThrowOnError(_operationCalls.cuEventRecord(dst.CopyDoneEv, dst.Stream));
+                        src.Alloc.Context.BindCurrent(_operationCalls);
+                        _operationCalls.ThrowOnError(_operationCalls.cuStreamWaitEvent(src.Stream, dst.CopyDoneEv, 0));
+                    }
                     curDev = L.Device;
                     StageEnd(dst, 11);
                 }
@@ -1709,8 +1716,12 @@ namespace TensorSharp.Cuda
                 StageEnd(dev, 10);
                 Dump(dev, "head.logits", logitsDst, 8);
                 long logitCount = (long)headRows * m.NVocab;
-                CudaDriverApi.cuMemcpyDtoHAsync(_pinnedLogits, Ptr(logitsDst), new UIntPtr((ulong)logitCount * 4UL), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream).ThrowOnError();
+                using (var effect = EnterDeviceEffect(dev))
+                {
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync(_pinnedLogits, OwnedPointer(dev, logitsDst),
+                        new UIntPtr((ulong)logitCount * 4UL), dev.Stream));
+                    _operationCalls.cuStreamSynchronize(dev.Stream);
+                }
                 fixed (float* dst = logitsOut)
                     Buffer.MemoryCopy((void*)_pinnedLogits, dst, logitsOut.LongLength * 4L, logitCount * 4L);
             }
