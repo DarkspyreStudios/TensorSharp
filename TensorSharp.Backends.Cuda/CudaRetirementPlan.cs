@@ -156,6 +156,8 @@ internal sealed class CudaRetirementPlan
                 entered++;
             }
             foreach (CudaAllocator allocator in _allocators) allocator.Census.FenceParent(_owner, graphsPending);
+            foreach (CudaAllocator allocator in _allocators)
+                if (allocator.Census.HasActiveOperations) return Decline();
             foreach (Tensor tensor in _tensors)
                 if (tensor.GetLiveOwnedStorageForDisposal() is CudaStorage storage && _intents.ContainsKey(storage))
                     _intents[storage]++;

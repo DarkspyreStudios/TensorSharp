@@ -302,7 +302,13 @@ DSpark capture staging are released only after checked completion. Each Dsv4 ker
 reserved before module acquisition and function lookup. Its launch methods hold known-device
 admission across tensor-pointer reads and enqueue, validate actual allocator and stream associations,
 and rebind the known context before launch. Checked module release precedes its dependent engine
-tensors. Cleanup refusal retains the real partial kernel owner and parent dependency. Other Dsv4
+tensors. Cleanup refusal retains the real partial kernel owner and parent dependency. Reset,
+forward, speculative forward, catch-up, draft and rewind reserve all actual engine allocators
+through the existing storage census before touching operation state. This admission token holds
+no native gates across callbacks, host allocations or waits. Parent preflight fences admission and
+returns healthy Busy before cleanup when an operation remains admitted. A later explicit retry
+uses the same owning census after that operation drains. The engine freezes its actual allocator,
+native API and device identities before child kernel and event acquisition. Other Dsv4
 and P2P native effects still require migration. No runtime verification was performed after the
 test hold. These source limits prevent a complete CUDA ownership claim.
 

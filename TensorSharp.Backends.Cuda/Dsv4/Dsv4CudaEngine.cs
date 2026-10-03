@@ -254,6 +254,8 @@ namespace TensorSharp.Cuda
         private Exception _cleanupFailure;
         private readonly NativeConstructionCleanupHandle _constructionCleanup;
         private object _retainedParent;
+        private readonly CudaAllocator[] _operationAllocators;
+        private readonly CudaNativeCalls _operationCalls;
         private readonly List<UploadWorkerResources> _uploadWorkers = new List<UploadWorkerResources>();
         public int ContextSize => _m.NCtx;
 
@@ -300,8 +302,7 @@ namespace TensorSharp.Cuda
                 // on CUDA storage. Idempotent.
                 CudaBackend.Register();
 
-                CudaDriverApi.cuInit(0);
-                CudaDriverApi.cuDeviceGetCount(out int devCount).ThrowOnError();
+                int devCount = DiscoverDeviceCount();
                 int useDevs = nGpu > 0 ? Math.Min(nGpu, devCount) : devCount;
                 if (useDevs < 1)
                     throw new InvalidOperationException("No CUDA devices available for the DSV4 engine.");
@@ -327,9 +328,23 @@ namespace TensorSharp.Cuda
                     var dev = new Dev { Ordinal = d };
                     _devs[d] = dev;
                     dev.Alloc = new CudaAllocator(d);
-                    dev.MakeCurrent();
+                }
+                _operationAllocators = new CudaAllocator[_devs.Length];
+                var ordinals = new int[_devs.Length];
+                for (int d = 0; d < _devs.Length; d++)
+                {
+                    _operationAllocators[d] = _devs[d].Alloc;
+                    ordinals[d] = _devs[d].Alloc.DeviceId;
+                    if (!ReferenceEquals(_devs[d].Alloc.NativeCalls.Api, _devs[0].Alloc.NativeCalls.Api))
+                        throw new InvalidOperationException("DSV4 engine requires one actual native API identity.");
+                }
+                _operationCalls = new CudaNativeCalls(this, NativeOwnerRole.Graph,
+                    _operationAllocators[0].NativeCalls.Api, ordinals);
+                foreach (var dev in _devs)
+                {
                     Dsv4Kernels.Create(dev.Alloc, kernels => dev.DK = kernels, this);
-                    dev.Alloc.NativeCalls.ThrowOnError(dev.Alloc.NativeCalls.cuEventCreate(
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(
                         out dev.Event, 0x02 /*CU_EVENT_DISABLE_TIMING*/));
                 }
 
@@ -1319,7 +1334,7 @@ namespace TensorSharp.Cuda
 
         public void Reset()
         {
-            ThrowIfRetiring();
+            using var operation = EnterOperation();
             foreach (var dev in _devs)
             {
                 dev.MakeCurrent();
@@ -1360,7 +1375,7 @@ namespace TensorSharp.Cuda
 
         public void Forward(int[] tokens, float[] logitsOut)
         {
-            ThrowIfRetiring();
+            using var operation = EnterOperation();
             if (tokens == null || tokens.Length == 0)
                 throw new ArgumentException("empty token batch", nameof(tokens));
             if (NPast + tokens.Length > _m.NCtx)
@@ -2274,6 +2289,60 @@ namespace TensorSharp.Cuda
             if (_retiring) throw new ObjectDisposedException(nameof(Dsv4CudaEngine));
         }
 
+        private static int DiscoverDeviceCount()
+        {
+            var discovery = new object();
+            var calls = new CudaNativeCalls(discovery, NativeOwnerRole.NativeHandle, CudaNativeApi.Instance);
+            using var lease = calls.EnterEffect();
+            try
+            {
+                calls.ThrowOnError(calls.cuInit(0));
+                calls.ThrowOnError(calls.cuDeviceGetCount(out int count));
+                return count;
+            }
+            finally { calls.CompleteSafeRelease(lease); }
+        }
+
+        private CudaOperationAdmission EnterOperation()
+        {
+            ThrowIfRetiring();
+            return CudaOperationAdmission.Enter(this, _operationAllocators);
+        }
+
+        private NativeEffectLease EnterDeviceEffect(Dev dev)
+        {
+            ValidateDeviceOwner(dev);
+            var lease = _operationCalls.EnterEffect();
+            try
+            {
+                dev.Alloc.Context.BindCurrent(_operationCalls);
+                return lease;
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
+        }
+
+        private void ValidateDeviceOwner(Dev dev)
+        {
+            if (dev == null || Array.IndexOf(_devs, dev) < 0 || dev.Alloc == null
+                || Array.IndexOf(_operationAllocators, dev.Alloc) < 0
+                || !ReferenceEquals(dev.Alloc.NativeCalls.Api, _operationCalls.Api)
+                || !_operationCalls.CoversDevice(dev.Alloc.DeviceId))
+                throw new InvalidOperationException("DSV4 effects require their actual frozen device owner.");
+        }
+
+        private IntPtr OwnedPointer(Dev dev, Tensor tensor)
+        {
+            ValidateDeviceOwner(dev);
+            if (tensor == null) return IntPtr.Zero;
+            if (tensor.Storage is not CudaStorage storage || !ReferenceEquals(storage.Allocator, dev.Alloc))
+                throw new InvalidOperationException("DSV4 effect tensor requires its actual device allocator.");
+            return Ptr(tensor);
+        }
+
         public void Dispose()
             => ReleaseResources();
 
@@ -2402,6 +2471,11 @@ namespace TensorSharp.Cuda
                 }
             }
             foreach (var dev in _devs ?? Array.Empty<Dev>()) dev?.Alloc?.DisposeOwned(plan, restoration);
+            if (_operationCalls != null)
+            {
+                using var lease = _operationCalls.EnterEffect();
+                _operationCalls.CompleteSafeRelease(lease);
+            }
             _disposed = true;
             _retainedParent = null;
             _constructionCleanup.CompleteRelease(this);

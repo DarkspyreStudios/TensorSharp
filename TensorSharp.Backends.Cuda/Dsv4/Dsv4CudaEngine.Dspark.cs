@@ -287,6 +287,7 @@ namespace TensorSharp.Cuda
         /// </remarks>
         public void ForwardSpec(int[] tokens, float[] hAllOut, float[] logitsOut, bool allLogitsRows)
         {
+            using var operation = EnterOperation();
             if (_ds == null)
                 throw new InvalidOperationException("[dsv4-cuda] no DSpark module loaded");
             if (tokens == null || tokens.Length == 0)
@@ -428,6 +429,7 @@ namespace TensorSharp.Cuda
         /// </summary>
         public void DsparkCatchUp(float[] hRows, int rows, int firstPos)
         {
+            using var operation = EnterOperation();
             if (_ds == null || rows <= 0)
                 return;
 
@@ -460,6 +462,7 @@ namespace TensorSharp.Cuda
         /// </summary>
         public int DsparkDraft(int anchorToken, float[] hPrev, int position, int[] draftOut, float[] confOut)
         {
+            using var operation = EnterOperation();
             var rt = _ds;
             if (rt == null || position <= 0)
                 return 0;
@@ -649,6 +652,7 @@ namespace TensorSharp.Cuda
         /// </summary>
         public void Rewind(int nPast)
         {
+            using var operation = EnterOperation();
             if (nPast < 0 || nPast > NPast)
                 throw new ArgumentOutOfRangeException(nameof(nPast));
             NPast = nPast;
