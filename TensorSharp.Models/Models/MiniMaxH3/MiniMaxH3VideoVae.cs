@@ -1139,12 +1139,23 @@ namespace TensorSharp.Models.MiniMaxH3
             _directEnc3D?.CollectDisposalOwnership(tensors);
         }
 
-        public void Dispose()
+        public void Dispose() => DisposeResources(modelOwned: false);
+
+        internal void DisposeOwned() => DisposeResources(modelOwned: true);
+
+        private void DisposeResources(bool modelOwned)
         {
             if (_disposed) return;
-            _disposed = true;
-            _direct?.Dispose();
-            _directEnc3D?.Dispose();
+            if (modelOwned)
+            {
+                _direct?.DisposeOwned();
+                _directEnc3D?.DisposeOwned();
+            }
+            else
+            {
+                _direct?.Dispose();
+                _directEnc3D?.Dispose();
+            }
             if (_blocksPin.IsAllocated) _blocksPin.Free();
             if (_encLevelsPin.IsAllocated) _encLevelsPin.Free();
             foreach (IntPtr ptr in _bound)
@@ -1155,6 +1166,7 @@ namespace TensorSharp.Models.MiniMaxH3
             foreach (var h in _pins) if (h.IsAllocated) h.Free();
             _pins.Clear();
             _model?.Dispose();
+            _disposed = true;
         }
     }
 }

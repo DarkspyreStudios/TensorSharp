@@ -348,7 +348,7 @@ Standalone cache retirement declines active operations with retryable Busy befor
 releases its temporary admission fence on exit. Checked drain and slab release precede pointer
 clear; snapshot and metadata retirement run outside native effects. Model cleanup defers owning
 arena release to the later allocator cleanup, while borrowed allocator/group arenas stay with their
-owner. Model-owned Wan context cleanup omits the redundant allocator-wide clear. TP preload falls
+owner. Model-owned Wan and MiniMax direct context cleanup omits the redundant allocator-wide clear. TP preload falls
 back only on the original CUDA out-of-memory error, not an aggregate cleanup failure.
 The earlier allocator acquisition interval, raw pointer tables, broader graph consumers and P2P
 effects remain incomplete. No runtime verification was performed after the test hold. These source

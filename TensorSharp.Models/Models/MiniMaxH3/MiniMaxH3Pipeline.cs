@@ -1182,15 +1182,25 @@ namespace TensorSharp.Models.MiniMaxH3
         public void Dispose()
         {
             _model.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            DisposeResources(modelOwned: false);
         }
 
-        internal void DisposeOwned()
+        internal void DisposeOwned() => DisposeResources(modelOwned: true);
+
+        private void DisposeResources(bool modelOwned)
         {
             _model.ThrowIfUnsafeOwnershipCleanup();
             if (_disposed) return;
-            _dit?.Dispose();
-            _vae?.Dispose();
+            if (modelOwned)
+            {
+                _dit?.DisposeOwned();
+                _vae?.DisposeOwned();
+            }
+            else
+            {
+                _dit?.Dispose();
+                _vae?.Dispose();
+            }
             _audioVae?.Dispose();
             _disposed = true;
         }
