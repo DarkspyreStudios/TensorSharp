@@ -7,18 +7,41 @@ namespace TensorSharp.Cuda
     public sealed class CudaStream : IDisposable
     {
         private IntPtr stream;
+        private readonly CudaContextBinding context;
+        private readonly CudaNativeCalls nativeCalls;
 
-        private CudaStream(IntPtr stream)
+        private CudaStream(CudaContextBinding context)
         {
-            this.stream = stream;
+            this.context = context;
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle, context.Api, context.DeviceId);
         }
 
         public IntPtr Handle => stream;
 
         public static CudaStream Create()
         {
-            CudaDriverApi.cuStreamCreate(out IntPtr stream, 0).ThrowOnError();
-            return new CudaStream(stream);
+            return Create(CudaNativeApi.Instance);
+        }
+
+        internal static CudaStream Create(ICudaNativeApi api) => Create(CudaContextBinding.Discover(api));
+        internal static CudaStream Create(CudaContext context) => Create(CudaContextBinding.FromOwner(context));
+
+        private static CudaStream Create(CudaContextBinding context)
+        {
+            var owner = new CudaStream(context);
+            using var lease = owner.nativeCalls.EnterEffect();
+            try
+            {
+                context.BindCurrent(owner.nativeCalls);
+                owner.nativeCalls.ThrowOnError(owner.nativeCalls.cuStreamCreate(out owner.stream, 0));
+                return owner;
+            }
+            catch (Exception original)
+            {
+                try { owner.Release(lease); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
         }
 
         public void Synchronize()
@@ -26,19 +49,45 @@ namespace TensorSharp.Cuda
             if (stream == IntPtr.Zero)
                 throw new ObjectDisposedException(nameof(CudaStream));
 
+            nativeCalls.ThrowIfQuarantined();
+
             // A synchronize on a stream that is capturing a CUDA graph means some
             // op needs device data on the host mid-capture; that cannot be part of
             // a graph. Abort the capture (the site catches this, re-runs plainly).
             CudaGraphCapture.OnStreamSynchronize(stream);
 
-            CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
+            using var lease = nativeCalls.EnterEffect();
+            context.BindCurrent(nativeCalls);
+            nativeCalls.cuStreamSynchronize(stream);
         }
 
         public void Dispose()
         {
-            IntPtr handle = Interlocked.Exchange(ref stream, IntPtr.Zero);
-            if (handle != IntPtr.Zero)
-                CudaDriverApi.cuStreamDestroy(handle);
+            if (Volatile.Read(ref stream) == IntPtr.Zero) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (stream == IntPtr.Zero) return;
+            Release(lease);
+        }
+
+        private void Release(NativeEffectLease lease)
+        {
+            nativeCalls.ValidateSafeRelease(lease);
+            try
+            {
+                if (stream != IntPtr.Zero)
+                {
+                    context.BindCurrent(nativeCalls);
+                    nativeCalls.cuStreamSynchronize(stream);
+                    nativeCalls.cuStreamDestroy(stream);
+                    Volatile.Write(ref stream, IntPtr.Zero);
+                }
+                nativeCalls.CompleteSafeRelease(lease);
+            }
+            catch (Exception cleanup)
+            {
+                nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.WorkerRetirement);
+                throw;
+            }
         }
     }
 }

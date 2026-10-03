@@ -42,12 +42,14 @@ The detailed implementation notes and historical benchmark claims have moved to 
 ## Managed Unsafe-Cleanup Observation
 
 Core exposes `NativeRuntimeQuarantine.Observe()` and exact-exception-identity
-`TryGetFailure` observations for process-scoped unsafe cleanup. The current authority
-is **INERT**: CUDA, MLX, and GGML backend caller integrations are not wired into it,
-and `NoRecordedFailure` does not certify availability, initialization, or safe native
-cleanup. The [managed-only harness](eng/tests/native-quarantine/README.md) validates
-cross-generation admission and failed-owner retention without loading native code.
-Existing GGML process ownership and native shutdown behavior are unchanged.
+`TryGetFailure` observations for process-scoped unsafe cleanup. CUDA context and
+stream owners use this authority for admission, checked completion and cleanup.
+Cleanup uncertainty retains their actual owners and fences the affected device.
+Module, kernel, allocator, storage, model, MLX and GGML caller integrations are not
+wired into this authority. `NoRecordedFailure` does not certify availability,
+initialization or safe native cleanup. The [managed-only harness](eng/tests/native-quarantine/README.md)
+validates cross-generation admission and failed-owner retention without loading
+native code. Existing GGML process ownership and native shutdown behavior are unchanged.
 
 ## Quick Start
 

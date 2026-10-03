@@ -28,6 +28,7 @@ internal sealed class NativeOwnerRegistration
     }
 
     internal void AttachMlxSharedRuntime() => NativeQuarantineAuthority.Attach(this, "mlx-shared-runtime");
+    internal void AttachCudaUnresolvedRuntime() => NativeQuarantineAuthority.Attach(this, "cuda-primary/*");
     internal void AttachCudaDependentGgml() => NativeQuarantineAuthority.Attach(this, "cuda-primary/*");
     internal void ThrowIfQuarantined() => NativeQuarantineAuthority.Check(this);
     internal NativeEffectLease EnterEffect() => NativeQuarantineAuthority.Enter(this);
@@ -53,6 +54,9 @@ internal sealed class NativeEffectLease : IDisposable
 
     internal NativeRuntimeFailure PublishFailure(object actualOwner, Exception cleanupError, NativeRuntimeFailureStage stage)
         => NativeQuarantineAuthority.Publish(this, actualOwner, cleanupError, stage);
+
+    internal void ValidateSafeRelease(object actualOwner) => NativeQuarantineAuthority.ValidateSafeRelease(this, actualOwner);
+    internal void CompleteSafeRelease(object actualOwner) => NativeQuarantineAuthority.Complete(this, actualOwner);
 
     public void Dispose() => NativeQuarantineAuthority.Exit(this);
 }
@@ -247,7 +251,10 @@ internal static class NativeQuarantineAuthority
             if (stack.Count != 0)
             {
                 var parent = stack[^1];
-                if (keys.Any(key => !((string[])parent[1]).Contains(key)) || (write && !(bool)parent[2]))
+                string[] parentKeys = (string[])parent[1];
+                bool parentCudaWrite = (bool)parent[2];
+                if (keys.Any(key => !parentKeys.Contains(key)
+                    && !(parentCudaWrite && IsCuda(key) && key != Wildcard)) || (write && !parentCudaWrite))
                     throw new InvalidOperationException("Recursive native effects cannot widen scopes or upgrade CUDA gates.");
             }
             frame = new object[] { r.Cell[0], keys, write };
@@ -317,10 +324,59 @@ internal static class NativeQuarantineAuthority
             if (!Frames(r.State).TryGetValue(Environment.CurrentManagedThreadId, out List<object[]>? stack)
                 || stack.Count == 0 || (Guid)stack[^1][0] != (Guid)r.Cell[0])
                 throw new InvalidOperationException("Safe release requires the originating active effect lease.");
-            if ((int)r.Cell[7] != 1)
-                throw new InvalidOperationException("Safe release requires all other effects to have drained.");
+            if (stack.Count(frame => (Guid)frame[0] == (Guid)r.Cell[0]) != 1)
+                throw new InvalidOperationException("Safe release refuses recursive effects on the same owner.");
             ThrowFailure(r);
             Owners(r.State).Remove((Guid)r.Cell[0]);
+        }
+    }
+
+    private static string[] ValidateHeldOwnerGates(NativeEffectLease lease, object actualOwner)
+    {
+        ValidateLease(lease);
+        var r = lease.Registration;
+        ValidateRegistration(r);
+        if (!ReferenceEquals(actualOwner, r.Owner))
+            throw new InvalidOperationException("Native ownership requires the exact registered owner.");
+        string[] keys = (string[])lease.Frame[1];
+        if (!((HashSet<string>)r.Cell[3]).SetEquals(keys)
+            || lease.CudaHeld != keys.Any(IsCuda) || lease.MlxHeld != keys.Contains(Mlx)
+            || lease.DeviceGates.Count != keys.Count(key => IsCuda(key) && key != Wildcard))
+            throw new InvalidOperationException("Native ownership requires the originating acquired scope gates.");
+        if (lease.CudaHeld)
+        {
+            var cuda = (ReaderWriterLockSlim)r.State[6];
+            if ((bool)lease.Frame[2] ? !cuda.IsWriteLockHeld : !cuda.IsReadLockHeld)
+                throw new InvalidOperationException("The originating CUDA gate is not held by this thread.");
+            string[] devices = keys.Where(key => IsCuda(key) && key != Wildcard).ToArray();
+            for (int i = 0; i < devices.Length; i++)
+                if (!ReferenceEquals(lease.DeviceGates[i], Scopes(r.State)[devices[i]][8])
+                    || !Monitor.IsEntered(lease.DeviceGates[i]))
+                    throw new InvalidOperationException("The originating device gates are not held by this thread.");
+        }
+        if (lease.MlxHeld && !Monitor.IsEntered(r.State[7]))
+            throw new InvalidOperationException("The originating MLX gate is not held by this thread.");
+        return keys;
+    }
+
+    internal static void ValidateSafeRelease(NativeEffectLease lease, object actualOwner)
+    {
+        lock (lease.Registration.State[1])
+        {
+            ValidateHeldOwnerGates(lease, actualOwner);
+            var r = lease.Registration;
+            if (Frames(r.State)[lease.ThreadId].Count(frame => (Guid)frame[0] == (Guid)r.Cell[0]) != 1)
+                throw new InvalidOperationException("Safe release refuses recursive effects on the same owner.");
+            ThrowFailure(r);
+        }
+    }
+
+    internal static void Complete(NativeEffectLease lease, object actualOwner)
+    {
+        lock (lease.Registration.State[1])
+        {
+            ValidateSafeRelease(lease, actualOwner);
+            Complete(lease.Registration);
         }
     }
 
@@ -333,14 +389,7 @@ internal static class NativeQuarantineAuthority
         object[] s = r.State;
         lock (s[1])
         {
-            ValidateLease(lease);
-            ValidateRegistration(r);
-            if (!ReferenceEquals(owner, r.Owner)) throw new InvalidOperationException("Unsafe publication requires the exact registered owner.");
-            string[] keys = (string[])lease.Frame[1];
-            if (!((HashSet<string>)r.Cell[3]).SetEquals(keys)
-                || lease.CudaHeld != keys.Any(IsCuda) || lease.MlxHeld != keys.Contains(Mlx)
-                || lease.DeviceGates.Count != keys.Count(key => IsCuda(key) && key != Wildcard))
-                throw new InvalidOperationException("Unsafe publication requires the originating acquired scope gates.");
+            string[] keys = ValidateHeldOwnerGates(lease, owner);
             object[][] affected = keys.Select(key => Scope(s, key)).ToArray();
             object[][] proposed = affected.Select(c => (object[])c.Clone()).ToArray();
             long revision = (long)s[2];
