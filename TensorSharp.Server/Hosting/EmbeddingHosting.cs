@@ -23,7 +23,7 @@ public static class EmbeddingHosting
             throw new ArgumentException(error, nameof(requestedBackend));
         string backend = ResolveModelBackend(selectedBackend);
         services.TryAddSingleton(options);
-        services.AddSingleton<IEmbeddingModel>(_ => EmbeddingModel.Load(options.StartupModelPath,
+        services.AddSingleton<IEmbeddingModel>(_ => EmbeddingModelFactory.Load(options.StartupModelPath,
             new EmbeddingModelOptions { Backend = backend, Threads = options.EmbeddingThreads,
                 MaxTokens = options.EmbeddingContextSize }));
         services.AddSingleton<EmbeddingAdapter>();
