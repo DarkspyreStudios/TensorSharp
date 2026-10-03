@@ -127,6 +127,7 @@ namespace TensorSharp.Cuda
 
         private void EnsureStagingBuffer(long bytes)
         {
+            if (bytes == 0) return;
             if (_staging != null && _staging.Capacity >= bytes) return;
             if (_staging != null)
             {
@@ -191,7 +192,7 @@ namespace TensorSharp.Cuda
                     {
                         _allocators[0].Context.BindCurrent(peer.Calls);
                         peer.Calls.ThrowOnError(peer.Calls.cuMemcpyPeerAsync(
-                            _staging.Pointer, _allocators[0].Context.Handle,
+                            _staging?.Pointer ?? IntPtr.Zero, _allocators[0].Context.Handle,
                             source, _allocators[rank].Context.Handle,
                             new UIntPtr((ulong)operation.ByteCount), _allocators[0].Stream.Handle));
                     }
@@ -200,7 +201,7 @@ namespace TensorSharp.Cuda
                     using (var lease = launch.Calls.EnterEffect())
                     {
                         _allocators[0].Context.BindCurrent(launch.Calls);
-                        _allocators[0].Kernels.LaunchBinaryF32(destination, _staging.Pointer, destination,
+                        _allocators[0].Kernels.LaunchBinaryF32(destination, _staging?.Pointer ?? IntPtr.Zero, destination,
                             operation.ElementCount, 0, _allocators[0].Stream.Handle);
                     }
                 }

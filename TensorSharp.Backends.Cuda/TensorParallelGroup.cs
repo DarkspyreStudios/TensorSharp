@@ -358,8 +358,23 @@ namespace TensorSharp.Cuda
         {
             Parent = parent;
             Allocators = (CudaAllocator[])allocators.Clone();
-            Calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, Allocators[0].NativeCalls.Api,
-                Allocators.Select(a => a.DeviceId).Distinct().ToArray());
+            Calls = CreateCalls(this, Allocators);
+        }
+
+        internal static CudaNativeCalls CreateCalls(object owner, CudaAllocator[] allocators) =>
+            new CudaNativeCalls(owner, NativeOwnerRole.Worker, allocators[0].NativeCalls.Api,
+                allocators.Select(a => a.DeviceId).Distinct().ToArray());
+
+        internal static void ValidateRelease(CudaNativeCalls calls)
+        {
+            using var lease = calls.EnterEffect();
+            calls.ValidateSafeRelease(lease);
+        }
+
+        internal static void CompleteRelease(CudaNativeCalls calls)
+        {
+            using var lease = calls.EnterEffect();
+            calls.CompleteSafeRelease(lease);
         }
 
         internal static bool IsHealthy(CudaNativeCalls calls)
@@ -505,9 +520,10 @@ namespace TensorSharp.Cuda
         internal IntPtr PinBuffer(Array buffer)
         {
             RetainBuffer(buffer);
+            if (buffer.Length == 0) return IntPtr.Zero;
+            _pins.EnsureCapacity(_pins.Count + 1);
             var pin = GCHandle.Alloc(buffer, GCHandleType.Pinned);
-            try { _pins.Add(pin); }
-            catch { pin.Free(); throw; }
+            _pins.Add(pin);
             return pin.AddrOfPinnedObject();
         }
 

@@ -118,8 +118,7 @@ namespace TensorSharp.Distributed
         }
 
         private CudaNativeCalls CreateNativeCalls() => _cudaAllocators.Length == 0 ? null
-            : new CudaNativeCalls(this, NativeOwnerRole.Worker, _cudaAllocators[0].NativeCalls.Api,
-                _cudaAllocators.Select(a => a.DeviceId).Distinct().ToArray());
+            : CudaP2PEffectOwner.CreateCalls(this, _cudaAllocators);
 
         public int Degree => _localGroup.Degree;
         public bool IsActive => true;
@@ -380,16 +379,14 @@ namespace TensorSharp.Distributed
                 if (_nativeCalls != null)
                 {
                     _nativeCalls.ThrowIfQuarantined();
-                    using var validation = _nativeCalls.EnterEffect();
-                    _nativeCalls.ValidateSafeRelease(validation);
+                    CudaP2PEffectOwner.ValidateRelease(_nativeCalls);
                 }
                 plan.Drain(restoration);
                 DisposeTransport();
                 local.DisposeOwned(plan, restoration);
                 if (_nativeCalls != null)
                 {
-                    using var completion = _nativeCalls.EnterEffect();
-                    _nativeCalls.CompleteSafeRelease(completion);
+                    CudaP2PEffectOwner.CompleteRelease(_nativeCalls);
                 }
                 _disposed = true;
             }
