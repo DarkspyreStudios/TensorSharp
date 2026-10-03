@@ -109,6 +109,7 @@ namespace TensorSharp.Models.Direct
         private Tensor _wCpuT;                // transposed view [ne0, ne1]
         private Tensor _bias;                 // [ne1] F32 or null
         private readonly bool _prescale;      // q8_1-activation overflow guard (quantized types)
+        private bool _released;
 
         public long InDim { get; }
         public long OutDim { get; }
@@ -295,11 +296,13 @@ namespace TensorSharp.Models.Direct
 
         public void Dispose()
         {
+            if (_released) return;
             if (_ctx.IsCuda && _host != IntPtr.Zero && _ctx.CudaAllocator != null)
                 CudaQuantizedOps.ReleaseQuantizedWeight(_ctx.CudaAllocator, _host);
             if (_ownedHost != IntPtr.Zero)
                 Marshal.FreeHGlobal(_ownedHost);
             // _wCpu/_bias are context-owned tensors.
+            _released = true;
         }
     }
 

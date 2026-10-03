@@ -8301,6 +8301,10 @@ namespace TensorSharp.Models
 
         private void DisposeGemma4Resources()
         {
+            _pipelineNextInputHidden?.Dispose();
+            _pipelineNextInputHidden = null;
+            _pipelineNextPLE?.Dispose();
+            _pipelineNextPLE = null;
             // Free the on-device MoE per-expert pointer tables (raw device buffers)
             // while the allocator is still alive (base.Dispose frees the arena).
             if (_allocator is CudaAllocator moeCudaAllocator)
