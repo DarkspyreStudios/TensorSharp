@@ -308,7 +308,12 @@ through the existing storage census before touching operation state. This admiss
 no native gates across callbacks, host allocations or waits. Parent preflight fences admission and
 returns healthy Busy before cleanup when an operation remains admitted. A later explicit retry
 uses the same owning census after that operation drains. The engine freezes its actual allocator,
-native API and device identities before child kernel and event acquisition. Other Dsv4
+native API and device identities before child kernel and event acquisition. Its reset and
+diagnostic readback calls validate actual allocator-backed tensors while the engine's
+known-device effect lease remains active through pointer reads and native use. Checked stream
+completion precedes reset and host reads. HostMoE holds separate leases for its input download and
+result upload. Host expert callbacks, array rents, file writes and diagnostic formatting run outside
+native effect gates; the next transfer rebinds its actual context. The remaining Dsv4
 and P2P native effects still require migration. No runtime verification was performed after the
 test hold. These source limits prevent a complete CUDA ownership claim.
 

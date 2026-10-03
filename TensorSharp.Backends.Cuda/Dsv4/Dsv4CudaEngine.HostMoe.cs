@@ -146,7 +146,8 @@ namespace TensorSharp.Cuda
             // The host reads what the GPU just produced, so the stream has to be
             // drained first; everything queued after this call is ordered behind
             // the upload at the end.
-            CudaDriverApi.cuStreamSynchronize(dev.Stream).ThrowOnError();
+            using (var effect = EnterDeviceEffect(dev))
+                _operationCalls.cuStreamSynchronize(dev.Stream);
 
             float[] cur = ArrayPool<float>.Shared.Rent(nt * e);
             int[] sel = ArrayPool<int>.Shared.Rent(slots);
@@ -161,15 +162,19 @@ namespace TensorSharp.Cuda
                 fixed (float* gateP = gate)
                 fixed (float* upP = up)
                 {
-                    CudaDriverApi.cuMemcpyDtoH((IntPtr)curP, Ptr(dev.Cur), new UIntPtr((ulong)nt * (ulong)e * sizeof(float)))
-                        .ThrowOnError();
-                    CudaDriverApi.cuMemcpyDtoH((IntPtr)selP, Ptr(dev.Sel), new UIntPtr((ulong)slots * sizeof(int)))
-                        .ThrowOnError();
+                    using (var effect = EnterDeviceEffect(dev))
+                    {
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)curP, OwnedPointer(dev, dev.Cur),
+                            new UIntPtr((ulong)nt * (ulong)e * sizeof(float))));
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)selP, OwnedPointer(dev, dev.Sel),
+                            new UIntPtr((ulong)slots * sizeof(int))));
+                    }
 
                     HostExpertFfn(hm, curP, selP, gateP, upP, outP, nt, nUsed, e, ff);
 
-                    CudaDriverApi.cuMemcpyHtoD(Ptr(dev.ExpDown), (IntPtr)outP,
-                        new UIntPtr((ulong)slots * (ulong)e * sizeof(float))).ThrowOnError();
+                    using (var effect = EnterDeviceEffect(dev))
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedPointer(dev, dev.ExpDown), (IntPtr)outP,
+                            new UIntPtr((ulong)slots * (ulong)e * sizeof(float))));
                 }
             }
             finally

@@ -1337,20 +1337,20 @@ namespace TensorSharp.Cuda
             using var operation = EnterOperation();
             foreach (var dev in _devs)
             {
-                dev.MakeCurrent();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream);
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
             }
             for (int il = 0; il < _m.NLayer; il++)
             {
                 var L = _layers[il];
-                _devs[L.Device].MakeCurrent();
-                Memset0(L.RingK);
-                Memset0(L.CompK);
-                Memset0(L.LidK);
-                Memset0(L.HistKv);
-                Memset0(L.HistScore);
-                Memset0(L.LidHistKv);
-                Memset0(L.LidHistScore);
+                var dev = _devs[L.Device];
+                Memset0(dev, L.RingK);
+                Memset0(dev, L.CompK);
+                Memset0(dev, L.LidK);
+                Memset0(dev, L.HistKv);
+                Memset0(dev, L.HistScore);
+                Memset0(dev, L.LidHistKv);
+                Memset0(dev, L.LidHistScore);
             }
             ResetDspark();
             // Engram lookbacks reach earlier positions, so the hash history has
@@ -1360,13 +1360,16 @@ namespace TensorSharp.Cuda
             NPast = 0;
         }
 
-        private static void Memset0(Tensor t)
+        private void Memset0(Dev dev, Tensor t)
         {
             if (t == null)
                 return;
             long bytes = t.ElementCount() * t.ElementType.Size();
             if (bytes > 0)
-                CudaDriverApi.cuMemsetD8(Ptr(t), 0, new UIntPtr((ulong)bytes)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemsetD8(OwnedPointer(dev, t), 0, new UIntPtr((ulong)bytes)));
+            }
         }
 
         // -------------------------------------------------------------------
@@ -1403,9 +1406,8 @@ namespace TensorSharp.Cuda
         {
             if (!_syncDebug)
                 return;
-            int rc = CudaDriverApi.cuStreamSynchronize(dev.Stream);
-            if (rc != 0)
-                throw new InvalidOperationException($"[dsv4-cuda] CUDA error {rc} after {stage} on device {dev.Ordinal}");
+            using var effect = EnterDeviceEffect(dev);
+            _operationCalls.cuStreamSynchronize(dev.Stream);
         }
 
         // TS_DSV4_PERF>=2: per-stage wall time. Each Stage() call synchronizes
@@ -1430,7 +1432,8 @@ namespace TensorSharp.Cuda
         {
             if (_perf < 2)
                 return;
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
+            using var effect = EnterDeviceEffect(dev);
+            _operationCalls.cuStreamSynchronize(dev.Stream);
             _stageTicks[stage] += Stopwatch.GetTimestamp() - _stageT0;
             _stageT0 = Stopwatch.GetTimestamp();
         }
@@ -1469,11 +1472,13 @@ namespace TensorSharp.Cuda
             if (TraceDir == null || t == null)
                 return;
             System.IO.Directory.CreateDirectory(TraceDir);
-            dev.MakeCurrent();
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
             var host = new float[count];
             fixed (float* h = host)
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)h, Ptr(t), new UIntPtr((ulong)count * 4)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)h, OwnedPointer(dev, t), new UIntPtr((ulong)count * 4)));
+            }
             var bytes = new byte[count * 4];
             Buffer.BlockCopy(host, 0, bytes, 0, bytes.Length);
             System.IO.File.WriteAllBytes(System.IO.Path.Combine(TraceDir, $"p{_traceP0:D6}_{name}.f32"), bytes);
@@ -1485,12 +1490,13 @@ namespace TensorSharp.Cuda
         {
             if (!StageDebug || t == null)
                 return;
-            IntPtr ptr = Ptr(t);
-            dev.MakeCurrent();
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
             var tmp = new float[n];
             fixed (float* p = tmp)
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)p, ptr, new UIntPtr((ulong)n * 4));
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)p, OwnedPointer(dev, t), new UIntPtr((ulong)n * 4)));
+            }
             Console.Error.WriteLine($"[dbg-cuda] {label}: {string.Join(" ", Array.ConvertAll(tmp, v => v.ToString("G6")))}");
         }
 
@@ -1498,12 +1504,13 @@ namespace TensorSharp.Cuda
         {
             if (!StageDebug || t == null)
                 return;
-            IntPtr ptr = Ptr(t);
-            dev.MakeCurrent();
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
             var tmp = new ushort[n];
             fixed (ushort* p = tmp)
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)p, ptr, new UIntPtr((ulong)n * 2));
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)p, OwnedPointer(dev, t), new UIntPtr((ulong)n * 2)));
+            }
             var vals = new float[n];
             for (int i = 0; i < n; i++)
                 vals[i] = (float)BitConverter.UInt16BitsToHalf(tmp[i]);

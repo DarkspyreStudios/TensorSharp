@@ -249,7 +249,7 @@ namespace TensorSharp.Cuda
                 new UIntPtr((ulong)((long)_m.NUbatch * feat * 4L)), 0x1 /*PORTABLE*/).ThrowOnError();
 
             foreach (var st in rt.Stages)
-                Memset0(st.RingK);
+                Memset0(dev, st.RingK);
 
             Console.Error.WriteLine(
                 $"[dsv4-cuda] DSpark drafter ready on device {dev.Ordinal}: {d.Stages.Length} stage(s), " +
@@ -261,9 +261,8 @@ namespace TensorSharp.Cuda
         {
             if (_ds == null)
                 return;
-            _ds.Dev.MakeCurrent();
             foreach (var st in _ds.Stages)
-                Memset0(st.RingK);
+                Memset0(_ds.Dev, st.RingK);
         }
 
         // -------------------------------------------------------------------
