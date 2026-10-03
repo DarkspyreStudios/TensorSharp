@@ -130,7 +130,8 @@ namespace TensorSharp.Cuda
 
         internal sealed class UploadJob
         {
-            public IntPtr Dst;
+            public Tensor Backing;
+            public long DestinationOffset;
             public IDsv4WeightSource Src;
             public long SrcOffset;
             public long Bytes;
@@ -138,7 +139,9 @@ namespace TensorSharp.Cuda
 
         private struct DevQW
         {
-            public IntPtr Ptr;
+            public Tensor Backing;
+            public long ByteOffset;
+            public long RawBytes;
             public int Type;
             public int Ne0;
             public int Ne1;
@@ -181,7 +184,6 @@ namespace TensorSharp.Cuda
             // A single block keeps the ~7k weight tensors from each paying an
             // allocation-granularity tax (and keeps upload segments contiguous).
             public Tensor Arena;
-            public IntPtr ArenaBase;
             public long ArenaBytes;
             public long ArenaUsed;
             public Tensor RopeRaw, RopeComp;
@@ -403,7 +405,6 @@ namespace TensorSharp.Cuda
                     var dev = _devs[d];
                     dev.ArenaBytes = Math.Max(arenaNeed[d], 256);
                     dev.Arena = AllocT(_devs[d], DType.UInt8, dev.ArenaBytes);
-                    dev.ArenaBase = Ptr(dev.Arena);
                     dev.ArenaUsed = 0;
                 }
 
@@ -747,25 +748,36 @@ namespace TensorSharp.Cuda
 
         // ---- arena sub-allocation + upload helpers (device context must be current) ----
 
-        private static IntPtr ArenaTake(Dev dev, long bytes)
+        private static long ArenaTake(Dev dev, long bytes)
         {
             long aligned = Align(bytes);
-            if (dev.ArenaUsed + aligned > dev.ArenaBytes)
+            if (bytes <= 0 || aligned <= 0 || dev.ArenaUsed > dev.ArenaBytes - aligned)
                 throw new InvalidOperationException($"[dsv4-cuda] arena overflow on device {dev.Ordinal}");
-            IntPtr p = (IntPtr)((long)dev.ArenaBase + dev.ArenaUsed);
-            dev.ArenaUsed += aligned;
-            return p;
+            long offset = dev.ArenaUsed;
+            dev.ArenaUsed = checked(dev.ArenaUsed + aligned);
+            return offset;
         }
 
-        private static DevQW UploadQuant(Dev dev, in QuantWeightDesc qw)
+        private DevQW UploadQuant(Dev dev, in QuantWeightDesc qw)
         {
             if (!qw.IsValid)
                 return default;
             long bytes = qw.TotalBytes;
-            IntPtr p = ArenaTake(dev, bytes);
+            long offset = ArenaTake(dev, bytes);
+            var resident = new DevQW
+            {
+                Backing = dev.Arena,
+                ByteOffset = offset,
+                RawBytes = bytes,
+                Type = qw.GgmlType,
+                Ne0 = qw.Ne0,
+                Ne1 = qw.Ne1,
+                RowBytes = qw.RowBytes
+            };
             if (qw.HostPtr != IntPtr.Zero)
             {
-                CudaDriverApi.cuMemcpyHtoD(p, qw.HostPtr, new UIntPtr((ulong)bytes)).ThrowOnError();
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedWeightPointer(dev, resident), qw.HostPtr, new UIntPtr((ulong)bytes)));
             }
             else
             {
@@ -777,14 +789,15 @@ namespace TensorSharp.Cuda
                 {
                     dev.UploadPlan.Add(new UploadJob
                     {
-                        Dst = (IntPtr)((long)p + off),
+                        Backing = dev.Arena,
+                        DestinationOffset = checked(offset + off),
                         Src = qw.Source,
                         SrcOffset = qw.SourceOffset + off,
                         Bytes = Math.Min(UploadSegmentBytes, bytes - off),
                     });
                 }
             }
-            return new DevQW { Ptr = p, Type = qw.GgmlType, Ne0 = qw.Ne0, Ne1 = qw.Ne1, RowBytes = qw.RowBytes };
+            return resident;
         }
 
         // Loader tuning. The read side is the bottleneck on network filesystems
@@ -911,6 +924,10 @@ namespace TensorSharp.Cuda
 
         private sealed class UploadWorkerResources
         {
+            internal IntPtr DestinationPointer(UploadJob job, long transferredBytes)
+                => new IntPtr(checked(_engine.OwnedPointer(Device, job.Backing).ToInt64()
+                    + job.DestinationOffset + transferredBytes));
+
             // Unsafe worker cleanup must retain the actual engine and its parent backing owners.
             private Dsv4CudaEngine _engine;
             private int _released;
@@ -1027,7 +1044,12 @@ namespace TensorSharp.Cuda
                         using (var lease = calls.EnterEffect())
                         {
                             dev.Alloc.Context.BindCurrent(calls);
-                            calls.ThrowOnError(calls.cuMemcpyHtoDAsync((IntPtr)((long)job.Dst + done), worker.Buffers[slot],
+                            if (!ReferenceEquals(job.Backing, dev.Arena) || done < 0 || n <= 0
+                                || done > job.Bytes - n || job.DestinationOffset < 0
+                                || checked(job.DestinationOffset + done) > job.Backing.Storage.ByteLength - n)
+                                throw new InvalidOperationException("Upload destination is outside its actual arena.");
+                            IntPtr destination = worker.DestinationPointer(job, done);
+                            calls.ThrowOnError(calls.cuMemcpyHtoDAsync(destination, worker.Buffers[slot],
                                 new UIntPtr((ulong)n), worker.Stream));
                             calls.ThrowOnError(calls.cuEventRecord(worker.Events[slot], worker.Stream));
                             worker.Pending[slot] = true;
@@ -1573,7 +1595,9 @@ namespace TensorSharp.Cuda
             var dev0 = _devs[0];
             dev0.MakeCurrent();
             StageBegin();
-            dev0.DK.Embed(_tokEmbdQW.Ptr, TokensOf(dev0), dev0.Xs, _tokEmbdQW.Type, _tokEmbdQW.RowBytes, nt, e, dev0.Stream);
+            using (var effect = EnterDeviceEffect(dev0))
+                dev0.DK.Embed(OwnedWeightPointer(dev0, _tokEmbdQW), TokensOf(dev0), dev0.Xs,
+                    _tokEmbdQW.Type, _tokEmbdQW.RowBytes, nt, e, dev0.Stream);
             StageEnd(dev0, 0);
             CheckSync(dev0, "embed");
             Dump(dev0, "embed.xs", dev0.Xs);
@@ -1716,7 +1740,8 @@ namespace TensorSharp.Cuda
                 else
                 using (Tensor headX = allLogitsRows ? dev.Xs.CopyRef() : dev.Xs.Narrow(0, nt - 1, 1))
                 {
-                    dev.DK.HcHead(headX, Ptr(_hcHeadFn), Ptr(_hcHeadScale), Ptr(_hcHeadBase), dev.Cur, e,
+                        using var effect = EnterDeviceEffect(dev);
+                    dev.DK.HcHead(headX, OwnedPointer(dev, _hcHeadFn), OwnedPointer(dev, _hcHeadScale), OwnedPointer(dev, _hcHeadBase), dev.Cur, e,
                         m.HcHeadScale.Length, m.HcHeadBase.Length, m.RmsEps, dev.Stream, headRows);
                 }
                 Dump(dev, "head.cur", dev.Cur);
@@ -1766,7 +1791,7 @@ namespace TensorSharp.Cuda
 
             dev.DK.HcRms(dev.Xs, dev.Inv, nt, flatDim, m.RmsEps, dev.Stream);
             // mixes = hc_fn (F32 [24, flatDim]) x flat streams
-            MatMulF32(dev, Ptr(fn), dev.Xs, dev.Mixes, flatDim, HcMixDim, nt);
+            MatMulF32(dev, fn, dev.Xs, dev.Mixes, flatDim, HcMixDim, nt);
             using (var effect = EnterDeviceEffect(dev))
                 dev.DK.HcGatesComb(dev.Mixes, dev.Inv, OwnedPointer(dev, scale), OwnedPointer(dev, baseW), dev.Pre, dev.Post, dev.Comb,
                     nt, m.HcSinkhornIters, m.HcEps, dev.Stream);
@@ -1897,7 +1922,8 @@ namespace TensorSharp.Cuda
             {
                 // Decode: the 8 group matvecs are ~11us each, so folding them
                 // into one grid saves more in launch gaps than it costs.
-                dev.Alloc.Kernels.LaunchMatvecBf16(woA.Ptr, Ptr(dev.OGrouped), Ptr(dev.OGroupedOut),
+                using var effect = EnterDeviceEffect(dev);
+                dev.Alloc.Kernels.LaunchMatvecBf16(OwnedWeightPointer(dev, woA), OwnedPointer(dev, dev.OGrouped), OwnedPointer(dev, dev.OGroupedOut),
                     groupDim, m.OLoraRank, dev.Stream, m.OGroups);
             }
             else
@@ -1905,8 +1931,9 @@ namespace TensorSharp.Cuda
                 for (int g = 0; g < m.OGroups; g++)
                 {
                     var slice = woA;
-                    slice.Ptr = (IntPtr)((long)woA.Ptr + (long)g * m.OLoraRank * woA.RowBytes);
+                    slice.ByteOffset = checked(woA.ByteOffset + (long)g * m.OLoraRank * woA.RowBytes);
                     slice.Ne1 = m.OLoraRank;
+                    slice.RawBytes = checked((long)slice.Ne1 * slice.RowBytes);
                     using Tensor input = Block(dev.OGrouped, (long)g * nt, nt, groupDim);
                     using Tensor output = Block(dev.OGroupedOut, (long)g * nt, nt, m.OLoraRank);
                     MatMul(dev, slice, input, output, nt);
@@ -2078,8 +2105,9 @@ namespace TensorSharp.Cuda
             for (int g = 0; g < m.OGroups; g++)
             {
                 var slice = woA;
-                slice.Ptr = (IntPtr)((long)woA.Ptr + (long)g * m.OLoraRank * woA.RowBytes);
+                slice.ByteOffset = checked(woA.ByteOffset + (long)g * m.OLoraRank * woA.RowBytes);
                 slice.Ne1 = m.OLoraRank;
+                slice.RawBytes = checked((long)slice.Ne1 * slice.RowBytes);
                 using Tensor input = Block(dev.OGrouped, (long)g * nt, nt, groupDim);
                 using Tensor output = Block(dev.OGroupedOut, (long)g * nt, nt, m.OLoraRank);
                 MatMul(dev, slice, input, output, nt);
@@ -2148,7 +2176,7 @@ namespace TensorSharp.Cuda
 
             // router logits (gate_inp is F32) + selection/weights
             bool dbg = StageDebug && il == 0;
-            MatMulF32(dev, Ptr(l.GateInp), dev.Cur, dev.RouterLogits, e, nEx, nt);
+            MatMulF32(dev, l.GateInp, dev.Cur, dev.RouterLogits, e, nEx, nt);
             using (var effect = EnterDeviceEffect(dev))
                 dev.DK.MoeSelect(dev.RouterLogits, OwnedPointer(dev, l.ExpProbsBias), OwnedPointer(dev, l.Tid2Eid), tokensDev, dev.Sel, dev.SelW,
                     nEx, nUsed, m.ExpertWeightsNorm ? 1 : 0, m.ExpertWeightsScale, nt, dev.Stream);
@@ -2206,11 +2234,13 @@ namespace TensorSharp.Cuda
                 QuantizeQ81(dev, dev.Cur, dev.ActQ8A, e, nt);
             if (nt == 1)
             {
-                dev.DK.MoeGateUpDecode(l.GateExps.Ptr, l.UpExps.Ptr, dev.ActQ8A, dev.Sel,
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.MoeGateUpDecode(OwnedWeightPointer(dev, l.GateExps), OwnedWeightPointer(dev, l.UpExps), dev.ActQ8A, dev.Sel,
                     dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nUsed, dev.Stream);
                 SwigluClamp(dev.ExpGate, dev.ExpUp, (long)nUsed * ff, l.ClampExp);
                 QuantizeQ81(dev, dev.ExpGate, dev.ActQ8B, ff, nUsed);
-                dev.DK.MoeDownDecode(l.DownExps.Ptr, dev.ActQ8B, dev.Sel, dev.ExpDown,
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.MoeDownDecode(OwnedWeightPointer(dev, l.DownExps), dev.ActQ8B, dev.Sel, dev.ExpDown,
                     downType, e, ff, l.DownExps.RowBytes, nUsed, dev.Stream);
                 dev.DK.MoeScatterAdd(dev.ExpDown, null, dev.SelW, dev.ShDown, dev.FfnOut, 1, nUsed, e, dev.Stream);
             }
@@ -2230,21 +2260,25 @@ namespace TensorSharp.Cuda
                 // prefill.
                 if (staged)
                 {
-                    dev.DK.MoeGateUpStaged(l.GateExps.Ptr, l.UpExps.Ptr, dev.SplitQsA, dev.SplitDA,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeGateUpStaged(OwnedWeightPointer(dev, l.GateExps), OwnedWeightPointer(dev, l.UpExps), dev.SplitQsA, dev.SplitDA,
                         dev.Counts, dev.Offsets, dev.SlotToken,
                         dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nEx, dev.Stream);
                     SwigluClamp(dev.ExpGate, dev.ExpUp, (long)s * ff, l.ClampExp);
                     QuantizeQ81Split(dev, dev.ExpGate, dev.SplitQsB, dev.SplitDB, ff, s);
-                    dev.DK.MoeDownStaged(l.DownExps.Ptr, dev.SplitQsB, dev.SplitDB, dev.Counts, dev.Offsets, dev.ExpDown,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeDownStaged(OwnedWeightPointer(dev, l.DownExps), dev.SplitQsB, dev.SplitDB, dev.Counts, dev.Offsets, dev.ExpDown,
                         downType, e, ff, l.DownExps.RowBytes, nEx, dev.Stream);
                 }
                 else
                 {
-                    dev.DK.MoeGateUp(l.GateExps.Ptr, l.UpExps.Ptr, dev.ActQ8A, dev.Counts, dev.Offsets, dev.SlotToken,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeGateUp(OwnedWeightPointer(dev, l.GateExps), OwnedWeightPointer(dev, l.UpExps), dev.ActQ8A, dev.Counts, dev.Offsets, dev.SlotToken,
                         dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nEx, dev.Stream);
                     SwigluClamp(dev.ExpGate, dev.ExpUp, (long)s * ff, l.ClampExp);
                     QuantizeQ81(dev, dev.ExpGate, dev.ActQ8B, ff, s);
-                    dev.DK.MoeDown(l.DownExps.Ptr, dev.ActQ8B, dev.Counts, dev.Offsets, dev.ExpDown,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeDown(OwnedWeightPointer(dev, l.DownExps), dev.ActQ8B, dev.Counts, dev.Offsets, dev.ExpDown,
                         downType, e, ff, l.DownExps.RowBytes, nEx, dev.Stream);
                 }
                 dev.DK.MoeScatterAdd(dev.ExpDown, dev.RowOfSlot, dev.SelW, dev.ShDown, dev.FfnOut, nt, nUsed, e, dev.Stream);
@@ -2330,16 +2364,22 @@ namespace TensorSharp.Cuda
             // blocks at the front of the buffer, not full-width row views.
             using Tensor a = Block(input, 0, rows, w.Ne0);
             using Tensor r = Block(output, 0, rows, w.Ne1);
-            CudaQuantizedOps.AddmmResidentToFloat32(r, a, w.Ptr, w.Type, w.Ne0, w.Ne1);
+            ValidateDeviceOwner(dev);
+            if (!ReferenceEquals(w.Backing, dev.Arena))
+                throw new InvalidOperationException("Resident weight does not belong to the actual device arena.");
+            CudaQuantizedOps.AddmmOwnedResidentToFloat32(r, a, w.Backing, w.ByteOffset, w.RawBytes,
+                w.Type, w.Ne0, w.Ne1, _operationCalls);
         }
 
         /// <summary>Dense F32 weight (MoE router, hyper-connection mixer) held in
-        /// the arena rather than as a tensor: same shared routing, type F32.</summary>
-        private void MatMulF32(Dev dev, IntPtr wF32, Tensor input, Tensor output, int inDim, int outDim, int rows)
+        /// an actual tensor: same shared routing, type F32.</summary>
+        private void MatMulF32(Dev dev, Tensor weight, Tensor input, Tensor output, int inDim, int outDim, int rows)
         {
             using Tensor a = Block(input, 0, rows, inDim);
             using Tensor r = Block(output, 0, rows, outDim);
-            CudaQuantizedOps.AddmmResidentToFloat32(r, a, wF32, TF32, inDim, outDim);
+            ValidateDeviceOwner(dev);
+            CudaQuantizedOps.AddmmOwnedResidentToFloat32(r, a, weight, 0, checked((long)inDim * outDim * sizeof(float)),
+                TF32, inDim, outDim, _operationCalls);
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
@@ -2403,6 +2443,14 @@ namespace TensorSharp.Cuda
                 || !ReferenceEquals(dev.Alloc.NativeCalls.Api, _operationCalls.Api)
                 || !_operationCalls.CoversDevice(dev.Alloc.DeviceId))
                 throw new InvalidOperationException("DSV4 effects require their actual frozen device owner.");
+        }
+
+        private IntPtr OwnedWeightPointer(Dev dev, in DevQW weight)
+        {
+            if (!ReferenceEquals(weight.Backing, dev.Arena) || weight.ByteOffset < 0 || weight.RawBytes <= 0
+                || weight.ByteOffset > dev.Arena.Storage.ByteLength - weight.RawBytes)
+                throw new InvalidOperationException("Resident weight is outside its actual device arena.");
+            return new IntPtr(checked(OwnedPointer(dev, weight.Backing).ToInt64() + weight.ByteOffset));
         }
 
         private IntPtr OwnedPointer(Dev dev, Tensor tensor)

@@ -601,7 +601,9 @@ namespace TensorSharp.Cuda
                 _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(src, idsDev), (IntPtr)p,
                     new UIntPtr((ulong)b * 4), src.Stream));
             }
-            src.DK.Embed(_tokEmbdQW.Ptr, idsDev, src.Xs, _tokEmbdQW.Type, _tokEmbdQW.RowBytes, b, e, src.Stream);
+            using (var effect = EnterDeviceEffect(src))
+                src.DK.Embed(OwnedWeightPointer(src, _tokEmbdQW), idsDev, src.Xs,
+                    _tokEmbdQW.Type, _tokEmbdQW.RowBytes, b, e, src.Stream);
 
             if (ReferenceEquals(src, dev))
                 return;
@@ -654,8 +656,9 @@ namespace TensorSharp.Cuda
             for (int g = 0; g < m.OGroups; g++)
             {
                 var slice = st.WoA;
-                slice.Ptr = (IntPtr)((long)st.WoA.Ptr + (long)g * m.OLoraRank * st.WoA.RowBytes);
+                slice.ByteOffset = checked(st.WoA.ByteOffset + (long)g * m.OLoraRank * st.WoA.RowBytes);
                 slice.Ne1 = m.OLoraRank;
+                slice.RawBytes = checked((long)slice.Ne1 * slice.RowBytes);
                 using Tensor input = Block(dev.OGrouped, (long)g * b, b, groupDim);
                 using Tensor output = Block(dev.OGroupedOut, (long)g * b, b, m.OLoraRank);
                 MatMul(dev, slice, input, output, b);

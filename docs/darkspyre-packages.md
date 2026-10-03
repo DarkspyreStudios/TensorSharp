@@ -330,8 +330,16 @@ remains a tensor until its guarded launch; tensor views and matmul calls run out
 effect blocks. V4 attention, compressor and Engram launches validate their actual tensor backing
 under short engine effects. DSpark staging, pinned uploads, capture readbacks and tensor-backed
 attention launches use the same actual device admission. Engram callbacks and host result copies
-run outside native gates. Quantized resident weights, shared scratch and remaining constructor
-and P2P native effects still require migration. No runtime verification was performed after the
+run outside native gates. Resident arena weights and streamed upload jobs retain the actual
+backing tensor, byte offset and descriptor byte length. Every embedding, expert and matmul path
+validates that relationship before pointer reads under a short known-device effect. Shared matmul
+entries count the actual allocator through scratch preparation and result publication. Scratch
+generation records are reserved before native acquisition and remain visible until checked
+allocator retirement; growth retains old generations for captured pointer lifetime. Scratch
+metadata snapshot and removal run outside the allocator's teardown effect. The known-context
+cuBLAS lease spans stream selection and GEMM. The public raw resident pointer remains borrowed.
+Legacy quantized cache/arena native cleanup and lock ordering, the earlier allocator acquisition
+interval and P2P effects remain incomplete. No runtime verification was performed after the
 test hold. These source limits prevent a complete CUDA ownership claim.
 
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.

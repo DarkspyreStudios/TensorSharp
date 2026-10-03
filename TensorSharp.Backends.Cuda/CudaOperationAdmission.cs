@@ -54,6 +54,12 @@ internal sealed class CudaOperationAdmission : IDisposable
         }
     }
 
+    internal void ValidateAllocator(CudaAllocator allocator)
+    {
+        if (Volatile.Read(ref _released) != 0 || Array.IndexOf(_allocators, allocator) < 0)
+            throw new InvalidOperationException("CUDA operation admission does not cover the actual allocator.");
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
