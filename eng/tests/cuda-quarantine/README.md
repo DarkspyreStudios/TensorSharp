@@ -175,3 +175,12 @@ devices, allocator-cache teardown, group/model preflight integration or full bac
 safety. Callers retain pending owners, release escaped references and explicitly retry;
 these tests do not promise automatic cleanup after caller abandonment. OOM reclamation
 outside a local storage lease does not prove that an outer caller lease is absent.
+
+The explicit `group-owned-storage-busy`, `model-owned-storage-busy` and
+`model-construction-owned-storage-busy` modes assert zero destructive effects before
+the complete parent ownership preflight. The real group accepts a cloned, validated
+array of actual instance-injected allocators through an internal transfer constructor.
+It has no communicator. The minimal model is normally constructed from generated
+metadata and that actual group. Its constructor rollback owns a distinct derived
+allocator and Tensor. These modes do not execute collective operations, native model
+loading, pretrained forward passes or device discovery.

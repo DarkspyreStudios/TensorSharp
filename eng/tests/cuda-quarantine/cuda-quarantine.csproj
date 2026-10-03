@@ -10,5 +10,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../../TensorSharp.Backends.Cuda/TensorSharp.Backends.Cuda.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Models/TensorSharp.Models.csproj" />
   </ItemGroup>
 </Project>

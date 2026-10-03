@@ -26,6 +26,17 @@ namespace TensorSharp.Cuda
         private static readonly bool _forceHostAllReduce =
             string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_TP_HOST_ALLREDUCE"), "1", StringComparison.Ordinal);
 
+        internal TensorParallelGroup(CudaAllocator[] allocators)
+        {
+            ArgumentNullException.ThrowIfNull(allocators);
+            var transferred = (CudaAllocator[])allocators.Clone();
+            if (transferred.Length == 0 || transferred.Any(a => a == null)
+                || transferred.Distinct().Count() != transferred.Length)
+                throw new ArgumentException("A group requires non-null, distinct allocators.", nameof(allocators));
+            _allocators = transferred;
+            Degree = transferred.Length;
+        }
+
         public TensorParallelGroup(int degree)
         {
             if (degree < 1)

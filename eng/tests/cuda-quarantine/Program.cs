@@ -15,6 +15,9 @@ internal static class Program
         if (args.Length != 1) throw new ArgumentException("One controlled fixture mode is required.");
         switch (args[0])
         {
+            case "group-owned-storage-busy": GroupModelOwnershipFixtures.GroupBusy(); break;
+            case "model-owned-storage-busy": GroupModelOwnershipFixtures.ModelBusy(); break;
+            case "model-construction-owned-storage-busy": GroupModelOwnershipFixtures.ConstructorBusy(); break;
             case "reference-overflow": ReferenceOwnershipFixtures.Overflow(); break;
             case "reference-gate-admission": ReferenceOwnershipFixtures.GateAdmission(); break;
             case "reference-gate-refusal": ReferenceOwnershipFixtures.GateRefusal(); break;
@@ -122,6 +125,7 @@ internal static class Program
             fixtureMvid = typeof(Program).Assembly.ManifestModule.ModuleVersionId,
             cudaMvid = typeof(CudaContext).Assembly.ManifestModule.ModuleVersionId,
             coreMvid = typeof(NativeRuntimeQuarantine).Assembly.ManifestModule.ModuleVersionId,
+            modelsMvid = typeof(TensorSharp.Models.ModelBase).Assembly.ManifestModule.ModuleVersionId,
             observation = "actual-managed-class/instance-injected-native-calls-only"
         }));
         return 0;
