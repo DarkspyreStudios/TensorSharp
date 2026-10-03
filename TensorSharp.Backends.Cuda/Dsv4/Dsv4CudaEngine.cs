@@ -1758,8 +1758,9 @@ namespace TensorSharp.Cuda
             dev.DK.HcRms(dev.Xs, dev.Inv, nt, flatDim, m.RmsEps, dev.Stream);
             // mixes = hc_fn (F32 [24, flatDim]) x flat streams
             MatMulF32(dev, Ptr(fn), dev.Xs, dev.Mixes, flatDim, HcMixDim, nt);
-            dev.DK.HcGatesComb(dev.Mixes, dev.Inv, Ptr(scale), Ptr(baseW), dev.Pre, dev.Post, dev.Comb,
-                nt, m.HcSinkhornIters, m.HcEps, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.HcGatesComb(dev.Mixes, dev.Inv, OwnedPointer(dev, scale), OwnedPointer(dev, baseW), dev.Pre, dev.Post, dev.Comb,
+                    nt, m.HcSinkhornIters, m.HcEps, dev.Stream);
 
             if (meanCollapse)
                 dev.DK.HcMean(dev.Xs, dev.Cur, nt, m.NEmbd, m.NEmbd, 0, dev.Stream);
@@ -1767,8 +1768,11 @@ namespace TensorSharp.Cuda
                 dev.DK.HcCollapse(dev.Xs, delayed ?? dev.Pre, dev.Cur, nt, m.NEmbd, dev.Stream);
 
             if (publish != null)
-                CudaDriverApi.cuMemcpyDtoDAsync(Ptr(publish), Ptr(dev.Pre),
-                    new UIntPtr((ulong)((long)nt * HC * 4)), dev.Stream).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoDAsync(OwnedPointer(dev, publish), OwnedPointer(dev, dev.Pre),
+                    new UIntPtr((ulong)((long)nt * HC * 4)), dev.Stream));
+            }
         }
 
         // -------------------------------------------------------------------
@@ -1780,7 +1784,7 @@ namespace TensorSharp.Cuda
             var m = _m;
             int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
             bool comp = l.Ratio != 0;
-            IntPtr ropeTab = Ptr(comp ? dev.RopeComp : dev.RopeRaw);
+            Tensor ropeTab = comp ? dev.RopeComp : dev.RopeRaw;
 
             // q = wq_b(rms(wq_a(cur))), kv = wkv(cur)
             bool dbg = StageDebug && il == 0;
@@ -1792,7 +1796,9 @@ namespace TensorSharp.Cuda
             MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
             if (dbg)
                 Dump(dev, "L0.kv_raw", dev.KvRaw);
-            dev.DK.AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK), p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnPrep(dev.Q, dev.KvRaw, OwnedPointer(dev, l.KvNorm), OwnedPointer(dev, ropeTab),
+                    OwnedPointer(dev, l.RingK), p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
             StageEnd(dev, 2);
             if (dbg)
             {
@@ -1807,14 +1813,16 @@ namespace TensorSharp.Cuda
                 int cw = 2 * hd;
                 MatMul(dev, l.CompWkv, dev.Cur, dev.StKv, nt);
                 MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
-                dev.DK.ApeAdd(dev.StScore, Ptr(l.CompApe), p0, CsaRatio, nt, cw, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.ApeAdd(dev.StScore, OwnedPointer(dev, l.CompApe), p0, CsaRatio, nt, cw, dev.Stream);
                 RunCompressor(dev, nt, p0, CsaRatio, 2, hd, 2 * CsaRatio + _maxDraft, cw,
                     dev.StKv, dev.StScore, l.HistKv, l.HistScore, l.CompNorm, l.CompK, dev.RopeComp);
 
                 int lcw = 2 * m.IdxHeadSize;
                 MatMul(dev, l.IdxCompWkv, dev.Cur, dev.LidStKv, nt);
                 MatMul(dev, l.IdxCompWgate, dev.Cur, dev.LidStScore, nt);
-                dev.DK.ApeAdd(dev.LidStScore, Ptr(l.IdxCompApe), p0, CsaRatio, nt, lcw, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.ApeAdd(dev.LidStScore, OwnedPointer(dev, l.IdxCompApe), p0, CsaRatio, nt, lcw, dev.Stream);
                 RunCompressor(dev, nt, p0, CsaRatio, 2, m.IdxHeadSize, 2 * CsaRatio + _maxDraft, lcw,
                     dev.LidStKv, dev.LidStScore, l.LidHistKv, l.LidHistScore, l.IdxCompNorm, l.LidK, dev.RopeComp);
                 StageEnd(dev, 3);
@@ -1827,9 +1835,12 @@ namespace TensorSharp.Cuda
                     MatMul(dev, l.IdxQB, dev.Qr, dev.Iq, nt);
                     MatMul(dev, l.IdxProj, dev.Cur, dev.Iw, nt);
                     float iwScale = 1.0f / MathF.Sqrt((float)m.IdxHeadSize * m.IdxNHead);
-                    dev.DK.IdxPrep(dev.Iq, dev.Iw, Ptr(dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, rot, iwScale, nt, dev.Stream);
-                    dev.DK.IdxScores(dev.Iq, dev.Iw, Ptr(l.LidK), dev.IdxScores, p0, CsaRatio, m.IdxNHead, m.IdxHeadSize,
-                        nt, _compRowsCsa, maxVis, dev.Stream);
+                    using (var effect = EnterDeviceEffect(dev))
+                    {
+                        dev.DK.IdxPrep(dev.Iq, dev.Iw, OwnedPointer(dev, dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, rot, iwScale, nt, dev.Stream);
+                        dev.DK.IdxScores(dev.Iq, dev.Iw, OwnedPointer(dev, l.LidK), dev.IdxScores, p0, CsaRatio, m.IdxNHead, m.IdxHeadSize,
+                            nt, _compRowsCsa, maxVis, dev.Stream);
+                    }
                     dev.DK.TopK(dev.IdxScores, dev.TopkIdx, dev.TopkCnt, p0, CsaRatio, m.IdxTopK, _compRowsCsa, nt, dev.Stream);
                     StageEnd(dev, 4);
                     CheckSync(dev, $"indexer L{il}");
@@ -1844,7 +1855,8 @@ namespace TensorSharp.Cuda
             {
                 MatMul(dev, l.CompWkv, dev.Cur, dev.StKv, nt);
                 MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
-                dev.DK.ApeAdd(dev.StScore, Ptr(l.CompApe), p0, HcaRatio, nt, hd, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.ApeAdd(dev.StScore, OwnedPointer(dev, l.CompApe), p0, HcaRatio, nt, hd, dev.Stream);
                 RunCompressor(dev, nt, p0, HcaRatio, 1, hd, HcaRatio + _maxDraft, hd,
                     dev.StKv, dev.StScore, l.HistKv, l.HistScore, l.CompNorm, l.CompK, dev.RopeComp);
                 StageEnd(dev, 3);
@@ -1853,8 +1865,10 @@ namespace TensorSharp.Cuda
             }
 
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(l.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
-                p0, m.NSwa, _ringRaw, nh, hd, mode, l.Ratio == 0 ? 1 : l.Ratio, m.IdxTopK, kqScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Attention(dev.Q, OwnedPointer(dev, l.RingK), OwnedPointer(dev, l.CompK), dev.TopkIdx, dev.TopkCnt,
+                    OwnedPointer(dev, l.Sinks), dev.AttnO,
+                    p0, m.NSwa, _ringRaw, nh, hd, mode, l.Ratio == 0 ? 1 : l.Ratio, m.IdxTopK, kqScale, nt, dev.Stream);
             StageEnd(dev, 5);
             if (dbg)
                 Dump(dev, "L0.attn_core", dev.AttnO);
@@ -1862,7 +1876,8 @@ namespace TensorSharp.Cuda
 
             // inverse rope + grouped LoRA out-projection
             int hpg = nh / m.OGroups;
-            dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, rot, hpg, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnFinish(dev.AttnO, OwnedPointer(dev, ropeTab), dev.OGrouped, p0, nh, hd, rot, hpg, nt, dev.Stream);
 
             int groupDim = hpg * hd;
             int oCat = m.OGroups * m.OLoraRank;
@@ -2075,11 +2090,13 @@ namespace TensorSharp.Cuda
             var m = _m;
             long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
             m.Engram.GatherEngramRows(l.EngramIndex, nt, (float*)dev.EngramPinned);
-            CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.EngramLookup), dev.EngramPinned,
-                new UIntPtr((ulong)(nt * cols * 4)), dev.Stream).ThrowOnError();
+            using (var effect = EnterDeviceEffect(dev))
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(dev, dev.EngramLookup), dev.EngramPinned,
+                    new UIntPtr((ulong)(nt * cols * 4)), dev.Stream));
             MatMul(dev, l.EngramWkv, dev.EngramLookup, dev.EngramKv, nt);
-            dev.DK.V41EngramGate(dev.Xs, dev.EngramKv, Ptr(l.EngramQ), Ptr(l.EngramK),
-                HC, m.NEmbd, m.RmsEps, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41EngramGate(dev.Xs, dev.EngramKv, OwnedPointer(dev, l.EngramQ), OwnedPointer(dev, l.EngramK),
+                    HC, m.NEmbd, m.RmsEps, nt, dev.Stream);
         }
 
         /// <summary>A candidate mask belongs to one ubatch: the rows it names are
@@ -2101,10 +2118,13 @@ namespace TensorSharp.Cuda
             if (firstBoundary >= 0)
             {
                 int nBlocks = (int)(((long)p0 + nt - 1 - firstBoundary) / ratio) + 1;
-                dev.DK.Compress(stKv, stScore, Ptr(histKv), Ptr(histScore), Ptr(normW), Ptr(ropeTab), Ptr(cache),
+                using var effect = EnterDeviceEffect(dev);
+                dev.DK.Compress(stKv, stScore, OwnedPointer(dev, histKv), OwnedPointer(dev, histScore), OwnedPointer(dev, normW),
+                    OwnedPointer(dev, ropeTab), OwnedPointer(dev, cache),
                     firstBoundary, nBlocks, p0, ratio, coff, head, stateSize, _m.NRot, _m.RmsEps, dev.Stream);
             }
-            dev.DK.Persist(stKv, stScore, Ptr(histKv), Ptr(histScore), p0, nt, stateSize, cw, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Persist(stKv, stScore, OwnedPointer(dev, histKv), OwnedPointer(dev, histScore), p0, nt, stateSize, cw, dev.Stream);
         }
 
         // -------------------------------------------------------------------
@@ -2120,8 +2140,9 @@ namespace TensorSharp.Cuda
             // router logits (gate_inp is F32) + selection/weights
             bool dbg = StageDebug && il == 0;
             MatMulF32(dev, Ptr(l.GateInp), dev.Cur, dev.RouterLogits, e, nEx, nt);
-            dev.DK.MoeSelect(dev.RouterLogits, Ptr(l.ExpProbsBias), Ptr(l.Tid2Eid), tokensDev, dev.Sel, dev.SelW,
-                nEx, nUsed, m.ExpertWeightsNorm ? 1 : 0, m.ExpertWeightsScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.MoeSelect(dev.RouterLogits, OwnedPointer(dev, l.ExpProbsBias), OwnedPointer(dev, l.Tid2Eid), tokensDev, dev.Sel, dev.SelW,
+                    nEx, nUsed, m.ExpertWeightsNorm ? 1 : 0, m.ExpertWeightsScale, nt, dev.Stream);
             StageEnd(dev, 7);
             if (dbg)
             {
@@ -2188,7 +2209,8 @@ namespace TensorSharp.Cuda
             {
                 // grouping plan (all on device; Counts zeroed via the fill kernel
                 // so everything stays stream-ordered)
-                dev.Alloc.Kernels.LaunchFillF32(Ptr(dev.Counts), nEx, 0f, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.Alloc.Kernels.LaunchFillF32(OwnedPointer(dev, dev.Counts), nEx, 0f, dev.Stream);
                 dev.DK.MoeCount(dev.Sel, dev.Counts, s, dev.Stream);
                 dev.DK.MoeScan(dev.Counts, dev.Offsets, dev.Cursors, nEx, dev.Stream);
                 dev.DK.MoeScatter(dev.Sel, dev.Cursors, dev.RowOfSlot, dev.SlotToken, s, nUsed, dev.Stream);
@@ -2266,7 +2288,9 @@ namespace TensorSharp.Cuda
 
         private void QuantizeQ81(Dev dev, Tensor input, Tensor scratch, int inDim, int rows)
         {
-            dev.Alloc.Kernels.LaunchQuantizeQ81Rows(Ptr(input), Ptr(scratch), inDim, rows, dev.Stream, warpCooperative: true);
+            using var effect = EnterDeviceEffect(dev);
+            dev.Alloc.Kernels.LaunchQuantizeQ81Rows(OwnedPointer(dev, input), OwnedPointer(dev, scratch),
+                inDim, rows, dev.Stream, warpCooperative: true);
         }
 
         /// <summary>Dense split q8_1 (contiguous int8 row + separate per-block
@@ -2275,7 +2299,9 @@ namespace TensorSharp.Cuda
         /// vectorizable.</summary>
         private void QuantizeQ81Split(Dev dev, Tensor input, Tensor qs, Tensor d, int inDim, int rows)
         {
-            dev.Alloc.Kernels.LaunchQuantizeQ81SplitRows(Ptr(input), Ptr(qs), Ptr(d), inDim, rows, dev.Stream);
+            using var effect = EnterDeviceEffect(dev);
+            dev.Alloc.Kernels.LaunchQuantizeQ81SplitRows(OwnedPointer(dev, input), OwnedPointer(dev, qs), OwnedPointer(dev, d),
+                inDim, rows, dev.Stream);
         }
 
         /// <summary>

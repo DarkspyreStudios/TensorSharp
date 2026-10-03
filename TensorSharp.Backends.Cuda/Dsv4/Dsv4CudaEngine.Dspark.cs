@@ -154,7 +154,6 @@ namespace TensorSharp.Cuda
         private void SetupDspark(DsparkDesc d)
         {
             var dev = _devs[_lastDev];
-            dev.MakeCurrent();
 
             foreach (int lid in d.TargetLayerIds)
             {
@@ -245,8 +244,9 @@ namespace TensorSharp.Cuda
             rt.HostConf = new float[b];
             rt.HostToks = new int[b];
             rt.HostBlockEmbd = new float[(long)b * HC * e];
-            CudaDriverApi.cuMemHostAlloc(out rt.PinnedCap,
-                new UIntPtr((ulong)((long)_m.NUbatch * feat * 4L)), 0x1 /*PORTABLE*/).ThrowOnError();
+            using (var effect = EnterDeviceEffect(dev))
+                _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out rt.PinnedCap,
+                    new UIntPtr((ulong)((long)_m.NUbatch * feat * 4L)), 0x1 /*PORTABLE*/));
 
             foreach (var st in rt.Stages)
                 Memset0(dev, st.RingK);
@@ -318,10 +318,13 @@ namespace TensorSharp.Cuda
             if (lastRowOnly && lastNt > 0)
             {
                 var dev = _ds.Dev;
-                dev.MakeCurrent();
                 using Tensor row = Block(_ds.CapH, lastNt - 1, 1, feat);
-                CudaDriverApi.cuMemcpyDtoHAsync(_ds.PinnedCap, Ptr(row), new UIntPtr((ulong)feat * 4), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream).ThrowOnError();
+                using (var effect = EnterDeviceEffect(dev))
+                {
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync(_ds.PinnedCap, OwnedPointer(dev, row),
+                        new UIntPtr((ulong)feat * 4), dev.Stream));
+                    _operationCalls.cuStreamSynchronize(dev.Stream);
+                }
                 fixed (float* dst = hAllOut)
                     Buffer.MemoryCopy((void*)_ds.PinnedCap, dst, hAllOut.LongLength * 4L, feat * 4L);
             }
@@ -365,9 +368,12 @@ namespace TensorSharp.Cuda
             long count = (long)nt * feat;
             if ((long)rowOff * feat + count > hAllOut.LongLength)
                 throw new ArgumentException("[dsv4-cuda] hidden capture buffer too small", nameof(hAllOut));
-            rt.Dev.MakeCurrent();
-            CudaDriverApi.cuMemcpyDtoHAsync(rt.PinnedCap, Ptr(rt.CapH), new UIntPtr((ulong)count * 4), rt.Dev.Stream).ThrowOnError();
-            CudaDriverApi.cuStreamSynchronize(rt.Dev.Stream).ThrowOnError();
+            using (var effect = EnterDeviceEffect(rt.Dev))
+            {
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync(rt.PinnedCap, OwnedPointer(rt.Dev, rt.CapH),
+                    new UIntPtr((ulong)count * 4), rt.Dev.Stream));
+                _operationCalls.cuStreamSynchronize(rt.Dev.Stream);
+            }
             fixed (float* dst = &hAllOut[(long)rowOff * feat])
                 Buffer.MemoryCopy((void*)rt.PinnedCap, dst, count * 4L, count * 4L);
         }
@@ -389,11 +395,11 @@ namespace TensorSharp.Cuda
             int keep = Math.Min(rows, rt.RingRows);
             int first = rows - keep;
 
-            rt.Dev.MakeCurrent();
             fixed (float* src = &hRows[(long)(hRowOff + first) * feat])
             {
-                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(rt.MainH), (IntPtr)src,
-                    new UIntPtr((ulong)((long)keep * feat) * 4), rt.Dev.Stream).ThrowOnError();
+                using var effect = EnterDeviceEffect(rt.Dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(rt.Dev, rt.MainH), (IntPtr)src,
+                    new UIntPtr((ulong)((long)keep * feat) * 4), rt.Dev.Stream));
             }
             MatMul(rt.Dev, rt.MainProj, rt.MainH, rt.MainX, keep);
             RmsNorm(rt.Dev, rt.MainX, rt.MainNorm, keep);
@@ -413,7 +419,8 @@ namespace TensorSharp.Cuda
             foreach (var st in rt.Stages)
             {
                 MatMul(dev, st.Wkv, rt.MainX, dev.KvRaw, keep);
-                dev.DK.DsparkPrep(dev.Q, dev.KvRaw, Ptr(st.KvNorm), Ptr(dev.RopeRaw), Ptr(st.RingK),
+                using var effect = EnterDeviceEffect(dev);
+                dev.DK.DsparkPrep(dev.Q, dev.KvRaw, OwnedPointer(dev, st.KvNorm), OwnedPointer(dev, dev.RopeRaw), OwnedPointer(dev, st.RingK),
                     pos0, pos0 % rt.RingRows, rt.RingRows, _m.NHead, _m.HeadDim, _m.NRot, _m.RmsEps,
                     keep, kvOnly: true, dev.Stream);
             }
@@ -445,7 +452,8 @@ namespace TensorSharp.Cuda
 
             if (_perf > 0)
             {
-                CudaDriverApi.cuStreamSynchronize(_ds.Dev.Stream);
+                using (var effect = EnterDeviceEffect(_ds.Dev))
+                    _operationCalls.cuStreamSynchronize(_ds.Dev.Stream);
                 _dsPhaseMs[5] += (Stopwatch.GetTimestamp() - tc0) * 1000.0 / Stopwatch.Frequency;
                 Console.Error.WriteLine($"[dsv4-cuda] dspark catch-up total {_dsPhaseMs[5]:F0}ms");
             }
@@ -469,7 +477,6 @@ namespace TensorSharp.Cuda
             var dev = rt.Dev;
             var m = _m;
             int e = m.NEmbd, b = rt.Desc.BlockSize, rank = rt.Desc.MarkovRank;
-            dev.MakeCurrent();
 
             bool timed = _perf > 0;
             long t0 = timed ? Stopwatch.GetTimestamp() : 0;
@@ -477,7 +484,8 @@ namespace TensorSharp.Cuda
             {
                 if (!timed)
                     return;
-                CudaDriverApi.cuStreamSynchronize(dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    _operationCalls.cuStreamSynchronize(dev.Stream);
                 long now = Stopwatch.GetTimestamp();
                 _dsPhaseMs[i] += (now - t0) * 1000.0 / Stopwatch.Frequency;
                 t0 = now;
@@ -514,8 +522,9 @@ namespace TensorSharp.Cuda
             Phase(1);
 
             // Head: hc_head -> norm -> the TARGET's lm head.
-            dev.DK.HcHead(dev.Xs, Ptr(rt.HcHeadFn), Ptr(rt.HcHeadScale), Ptr(rt.HcHeadBase), rt.Head, e,
-                rt.Desc.HcHeadScale.Length, rt.Desc.HcHeadBase.Length, m.RmsEps, dev.Stream, b);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.HcHead(dev.Xs, OwnedPointer(dev, rt.HcHeadFn), OwnedPointer(dev, rt.HcHeadScale), OwnedPointer(dev, rt.HcHeadBase), rt.Head, e,
+                    rt.Desc.HcHeadScale.Length, rt.Desc.HcHeadBase.Length, m.RmsEps, dev.Stream, b);
             {
                 // The confidence head reads the pre-norm hc_head output, so norm
                 // into Cur instead of in place.
@@ -531,7 +540,8 @@ namespace TensorSharp.Cuda
             for (int i = 0; i < b; i++)
             {
                 using Tensor w1Row = Block(rt.W1Rows, i, 1, rank);
-                dev.DK.DsparkGather(Ptr(rt.MarkovW1), rt.Toks, i - 1, anchorToken, w1Row, rank, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.DsparkGather(OwnedPointer(dev, rt.MarkovW1), rt.Toks, i - 1, anchorToken, w1Row, rank, dev.Stream);
                 MatMul(dev, rt.MarkovW2, w1Row, rt.Bias, 1);
                 using Tensor lg = Block(rt.Logits, i, 1, m.NVocab);
                 dev.DK.DsparkArgmax(lg, rt.Bias, rt.Toks, i, m.NVocab, dev.Stream);
@@ -539,14 +549,16 @@ namespace TensorSharp.Cuda
 
             Phase(3);
 
-            dev.DK.DsparkConf(rt.Head, rt.W1Rows, Ptr(rt.ConfProj), rt.Conf, e, rank, b, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.DsparkConf(rt.Head, rt.W1Rows, OwnedPointer(dev, rt.ConfProj), rt.Conf, e, rank, b, dev.Stream);
 
             fixed (int* tp = rt.HostToks)
             fixed (float* cp = rt.HostConf)
             {
-                CudaDriverApi.cuMemcpyDtoHAsync((IntPtr)tp, Ptr(rt.Toks), new UIntPtr((ulong)b * 4), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuMemcpyDtoHAsync((IntPtr)cp, Ptr(rt.Conf), new UIntPtr((ulong)b * 4), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream).ThrowOnError();
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync((IntPtr)tp, OwnedPointer(dev, rt.Toks), new UIntPtr((ulong)b * 4), dev.Stream));
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync((IntPtr)cp, OwnedPointer(dev, rt.Conf), new UIntPtr((ulong)b * 4), dev.Stream));
+                _operationCalls.cuStreamSynchronize(dev.Stream);
             }
 
             Phase(4);
@@ -582,10 +594,13 @@ namespace TensorSharp.Cuda
             for (int i = 1; i < b; i++)
                 ids[i] = rt.Desc.NoiseTokenId;
 
-            src.MakeCurrent();
             Tensor idsDev = ReferenceEquals(src, dev) ? rt.BlockTokens : src.TokensDev0;
             fixed (int* p = ids)
-                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(idsDev), (IntPtr)p, new UIntPtr((ulong)b * 4), src.Stream).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(src);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(src, idsDev), (IntPtr)p,
+                    new UIntPtr((ulong)b * 4), src.Stream));
+            }
             src.DK.Embed(_tokEmbdQW.Ptr, idsDev, src.Xs, _tokEmbdQW.Type, _tokEmbdQW.RowBytes, b, e, src.Stream);
 
             if (ReferenceEquals(src, dev))
@@ -594,10 +609,14 @@ namespace TensorSharp.Cuda
             long bytes = (long)b * HC * e * 4;
             fixed (float* h = rt.HostBlockEmbd)
             {
-                CudaDriverApi.cuMemcpyDtoHAsync((IntPtr)h, Ptr(src.Xs), new UIntPtr((ulong)bytes), src.Stream).ThrowOnError();
-                CudaDriverApi.cuStreamSynchronize(src.Stream).ThrowOnError();
-                dev.MakeCurrent();
-                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.Xs), (IntPtr)h, new UIntPtr((ulong)bytes), dev.Stream).ThrowOnError();
+                ValidateDeviceOwner(dev);
+                using var effect = EnterDeviceEffect(src);
+                IntPtr source = OwnedPointer(src, src.Xs);
+                IntPtr target = OwnedPointer(dev, dev.Xs);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync((IntPtr)h, source, new UIntPtr((ulong)bytes), src.Stream));
+                _operationCalls.cuStreamSynchronize(src.Stream);
+                dev.Alloc.Context.BindCurrent(_operationCalls);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(target, (IntPtr)h, new UIntPtr((ulong)bytes), dev.Stream));
             }
         }
 
@@ -617,15 +636,19 @@ namespace TensorSharp.Cuda
             RmsNorm(dev, dev.Qr, st.QANorm, b);
             MatMul(dev, st.WqB, dev.Qr, dev.Q, b);
             MatMul(dev, st.Wkv, dev.Cur, dev.KvRaw, b);
-            dev.DK.DsparkPrep(dev.Q, dev.KvRaw, Ptr(st.KvNorm), Ptr(dev.RopeRaw), Ptr(rt.BlockKv),
-                position, 0, b, nh, hd, rot, m.RmsEps, b, kvOnly: false, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.DsparkPrep(dev.Q, dev.KvRaw, OwnedPointer(dev, st.KvNorm), OwnedPointer(dev, dev.RopeRaw), OwnedPointer(dev, rt.BlockKv),
+                    position, 0, b, nh, hd, rot, m.RmsEps, b, kvOnly: false, dev.Stream);
 
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(st.RingK), Ptr(rt.BlockKv), null, null, Ptr(st.Sinks), dev.AttnO,
-                position - 1, m.NSwa, rt.RingRows, nh, hd, 3, 1, b, kqScale, b, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Attention(dev.Q, OwnedPointer(dev, st.RingK), OwnedPointer(dev, rt.BlockKv), null, null,
+                    OwnedPointer(dev, st.Sinks), dev.AttnO,
+                    position - 1, m.NSwa, rt.RingRows, nh, hd, 3, 1, b, kqScale, b, dev.Stream);
 
             int hpg = nh / m.OGroups;
-            dev.DK.AttnFinish(dev.AttnO, Ptr(dev.RopeRaw), dev.OGrouped, position, nh, hd, rot, hpg, b, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnFinish(dev.AttnO, OwnedPointer(dev, dev.RopeRaw), dev.OGrouped, position, nh, hd, rot, hpg, b, dev.Stream);
 
             int groupDim = hpg * hd;
             for (int g = 0; g < m.OGroups; g++)

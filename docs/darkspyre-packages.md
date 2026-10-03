@@ -322,7 +322,10 @@ attention and indexer cache sources retain their actual engine-layer and device 
 Compressor, commit, persistence, selection and cache-consuming launches validate the actual backing
 allocator before pointer reads under the same all-device engine admission. The V4.1 RoPE table
 remains a tensor until its guarded launch; tensor views and matmul calls run outside these short
-effect blocks. Remaining Dsv4
+effect blocks. V4 attention, compressor and Engram launches validate their actual tensor backing
+under short engine effects. DSpark staging, pinned uploads, capture readbacks and tensor-backed
+attention launches use the same actual device admission. Engram callbacks and host result copies
+run outside native gates. Quantized resident weights, shared scratch and remaining constructor
 and P2P native effects still require migration. No runtime verification was performed after the
 test hold. These source limits prevent a complete CUDA ownership claim.
 
