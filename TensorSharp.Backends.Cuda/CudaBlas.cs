@@ -206,7 +206,7 @@ namespace TensorSharp.Cuda
                     using var effect = Calls.EnterEffect();
                     Calls.CompleteSafeRelease(effect);
                 }
-                catch (NativeRuntimeQuarantinedException refusal) when (Calls.IsRetainedFailure(refusal)) { }
+                catch (NativeRuntimeQuarantinedException refusal) when (Failure != null && Calls.IsRetainedFailure(refusal)) { }
                 catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
                 try { _admission?.Dispose(); }
                 catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
