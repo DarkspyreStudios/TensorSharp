@@ -473,7 +473,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeNemotronResources, releaseDerivedGraphs: DisposeNemotronGraphs);
+                RollBackFailedConstruction(loadError, DisposeNemotronResources, releaseDerivedGraphs: DisposeNemotronGraphs,
+                    collectDerivedOwnership: CollectNemotronDisposalOwnership);
                 throw;
             }
         }
@@ -3615,6 +3616,27 @@ namespace TensorSharp.Models
             _pendingAudioEmbeddings.Clear();
         }
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectNemotronDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectNemotronDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            ModelDisposalOwnership.Add(tensors, _kvCacheK);
+            ModelDisposalOwnership.Add(tensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheV);
+            ModelDisposalOwnership.Add(tensors, _mamba2NativeDecodeProjected);
+            ModelDisposalOwnership.Add(tensors, _mamba2NativeDecodeHidden);
+            ModelDisposalOwnership.Add(tensors, _expertUpResult, _expertDownResult, _latentAccumTensor, _latentOutResult);
+            foreach (var (embeddings, _) in _pendingVisionEmbeddings) ModelDisposalOwnership.Add(tensors, embeddings);
+            foreach (var (embeddings, _) in _pendingAudioEmbeddings) ModelDisposalOwnership.Add(tensors, embeddings);
+            _visionEncoder?.CollectDisposalOwnership(tensors);
+            _audioEncoder?.CollectDisposalOwnership(tensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeNemotronResources, releaseDerivedGraphs: DisposeNemotronGraphs);
@@ -3642,9 +3664,9 @@ namespace TensorSharp.Models
 
             ClearPendingMultimodalEmbeddings();
 
-            _visionEncoder?.Dispose();
+            _visionEncoder?.DisposeOwned();
             _visionEncoder = null;
-            _audioEncoder?.Dispose();
+            _audioEncoder?.DisposeOwned();
             _audioEncoder = null;
 
         }

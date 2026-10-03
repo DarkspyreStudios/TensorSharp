@@ -83,7 +83,8 @@ internal sealed class QwenImage21DiT : ModelBase
         catch (Exception loadError)
         {
             RollBackFailedConstruction(loadError, static () => { }, ownsTensorParallelGroup: false,
-                releaseAfterModelCaches: DisposeDiTResources);
+                releaseAfterModelCaches: DisposeDiTResources,
+                collectDerivedOwnership: static (_, _) => { });
             throw;
         }
     }

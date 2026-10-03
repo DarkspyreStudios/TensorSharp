@@ -297,10 +297,13 @@ model, allocator, tensor or native pointer. Cleanup attempts are serialized;
 successful release clears retained owner and recipe references. The handle has no
 finalizer or healthy process-global root.
 
-Canonical model and engine constructors do not yet create or emit these carriers.
-The declarations are not a constructor-recovery or native-safety implementation.
-The existing constructor rollback and disposal behavior described above remains
-unchanged.
+Model and Dsv4 engine constructors reserve nonvirtual release recipes before
+acquisition. Failed cleanup emits the carrier with the actual retained owner.
+Model cleanup collects actual owned tensors and allocators before CUDA retirement.
+Outstanding external storage references refuse cleanup before destructive effects;
+the same owner can retry after those references drain. Nested media encoder
+construction is not wired into these recipes. These source paths do not certify
+native completion or hardware qualification.
 
 The multimodal injector retains displaced in-use embedding cache entries until teardown. Its
 reference-distinct snapshot includes cached and displaced entries. Ownership and cache accounting

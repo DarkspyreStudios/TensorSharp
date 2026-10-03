@@ -166,9 +166,9 @@ namespace TensorSharp.Models
         {
             lock (NativeSync)
             {
-                _visionQueue.Clear();
-                DisposeBaseResources(static () => { }, releaseDerivedGraphs: () =>
+                DisposeBaseResources(DisposeDeepSeek4TensorResources, releaseDerivedGraphs: () =>
                 {
+                    _visionQueue.Clear();
                     ReleaseVisionResources();
                     DisposeDeepSeek4Resources();
                 });

@@ -41,6 +41,7 @@ internal sealed class CudaNativeCalls
         return result;
     }
     internal void ThrowIfQuarantined() => _registration.ThrowIfQuarantined();
+    internal bool IsRetainedFailure(Exception error) => NativeQuarantineAuthority.IsRetainedFailure(_registration, error);
     internal void ValidateSafeRelease(NativeEffectLease lease) => lease.ValidateSafeRelease(_registration.Owner);
     internal void CompleteSafeRelease(NativeEffectLease lease) => lease.CompleteSafeRelease(_registration.Owner);
     internal NativeRuntimeFailure PublishFailure(NativeEffectLease lease, Exception error, NativeRuntimeFailureStage stage)

@@ -43,6 +43,14 @@ namespace TensorSharp.Models
             string draftModelPath = null)
             : base(ggufPath, NormalizeBackend(backend), 1, null)
         {
+            SetOwnedChildRelease((plan, restoration) =>
+            {
+                lock (_sync)
+                {
+                    _cudaExec?.DisposeOwned(plan, restoration);
+                    _cudaExec = null;
+                }
+            }, () => _cudaExec?.WaitForUploadWorkers());
             try
             {
                 string arch = _gguf.GetString("general.architecture") ?? "deepseek4";
@@ -108,7 +116,8 @@ namespace TensorSharp.Models
                     Console.WriteLine($"Model: {arch} (direct-CUDA whole-model executor), Layers={Config.NumLayers}, " +
                         $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
                         (dspark != null ? ", DSpark drafter" : string.Empty));
-                    _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark, ResolveCpuMoeLayers());
+                    _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark,
+                        ResolveCpuMoeLayers(), executor => _cudaExec = executor, this);
                 }
                 else if (_backend == BackendType.Cpu)
                 {
@@ -156,7 +165,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, static () => { }, releaseDerivedGraphs: DisposeDeepSeek4Resources);
+                RollBackFailedConstruction(loadError, DisposeDeepSeek4TensorResources,
+                    releaseDerivedGraphs: DisposeDeepSeek4Resources, collectDerivedOwnership: CollectDeepSeek4DisposalOwnership);
                 throw;
             }
         }
@@ -437,25 +447,41 @@ namespace TensorSharp.Models
             }
         }
 
+        protected override void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectDeepSeek4DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectDeepSeek4DisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            _cpuExec?.CollectDisposalOwnership(ownedTensors);
+            _cudaExec?.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
         public override void Dispose()
         {
-            DisposeBaseResources(static () => { }, releaseDerivedGraphs: DisposeDeepSeek4Resources);
+            DisposeBaseResources(DisposeDeepSeek4TensorResources, releaseDerivedGraphs: DisposeDeepSeek4Resources);
+        }
+
+        private protected void DisposeDeepSeek4TensorResources()
+        {
+            lock (_sync)
+            {
+                if (_cpuExec != null)
+                {
+                    _cpuExec.Dispose();
+                    _cpuExec = null;
+                }
+            }
         }
 
         private protected void DisposeDeepSeek4Resources()
         {
             lock (_sync)
             {
-                if (_cudaExec != null)
-                {
-                    _cudaExec.Dispose();
-                    _cudaExec = null;
-                }
-                if (_cpuExec != null)
-                {
-                    _cpuExec.Dispose();
-                    _cpuExec = null;
-                }
                 if (_handle != IntPtr.Zero)
                 {
                     GgmlDeepSeek4Native.Free(_handle);

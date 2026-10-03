@@ -1313,6 +1313,18 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            ModelDisposalOwnership.AddRange(tensors, _positionEmbeddingCache.Values);
+            ModelDisposalOwnership.AddRange(tensors, _weights.Values);
+        }
+
+        internal void DisposeOwned()
+        {
+            _hostModel?.ThrowIfUnsafeOwnershipCleanup();
             foreach (var t in _positionEmbeddingCache.Values)
                 t.Dispose();
             _positionEmbeddingCache.Clear();

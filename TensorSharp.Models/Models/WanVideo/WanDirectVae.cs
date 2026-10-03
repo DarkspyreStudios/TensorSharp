@@ -788,6 +788,9 @@ namespace TensorSharp.Models.WanVideo
             }
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+            => ModelDisposalOwnership.AddRange(tensors, _cache);
+
         public override void Dispose()
         {
             ResetCaches();

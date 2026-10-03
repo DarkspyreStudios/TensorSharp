@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Collections.Generic;
 
 namespace TensorSharp.Cuda
 {
@@ -12,11 +13,12 @@ namespace TensorSharp.Cuda
     /// <see cref="AllReduce"/> at row-parallel boundaries and
     /// <see cref="GetAllocator"/> to place per-rank tensors.
     /// </summary>
-    public sealed class TensorParallelGroup : ITensorParallelGroup
+    public sealed class TensorParallelGroup : ITensorParallelGroup, ICudaTensorParallelRetirement
     {
         private readonly CudaAllocator[] _allocators;
         private readonly CudaP2PCommunicator _communicator;
         private bool _disposed;
+        private bool _retirementRequested;
 
         // Diagnostic/fallback: when set, reduce across the local GPUs by staging
         // through host memory (device→host, sum, host→device) instead of the
@@ -25,6 +27,19 @@ namespace TensorSharp.Cuda
         // isolate P2P-specific correctness issues.
         private static readonly bool _forceHostAllReduce =
             string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_TP_HOST_ALLREDUCE"), "1", StringComparison.Ordinal);
+
+        internal TensorParallelGroup(CudaAllocator[] allocators)
+        {
+            ArgumentNullException.ThrowIfNull(allocators);
+            var transferred = (CudaAllocator[])allocators.Clone();
+            if (transferred.Length == 0 || transferred.Any(a => a == null)
+                || transferred.Distinct().Count() != transferred.Length)
+                throw new ArgumentException("A group requires non-null, distinct allocators.", nameof(allocators));
+            if (transferred.Any(a => !ReferenceEquals(a.NativeCalls.Api, transferred[0].NativeCalls.Api)))
+                throw new ArgumentException("A group requires one shared native API.", nameof(allocators));
+            _allocators = transferred;
+            Degree = transferred.Length;
+        }
 
         public TensorParallelGroup(int degree)
         {
@@ -75,6 +90,16 @@ namespace TensorSharp.Cuda
 
         public IAllocator GetAllocator(int rank) => GetCudaAllocator(rank);
 
+        public void RunPerRank(Action<int> body)
+        {
+            ThrowIfRetiring();
+            for (int rank = 0; rank < Degree; rank++)
+            {
+                ThrowIfRetiring();
+                body(rank);
+            }
+        }
+
         /// <summary>Concretely-typed accessor for CUDA-only call sites.</summary>
         public CudaAllocator GetCudaAllocator(int rank)
         {
@@ -90,6 +115,7 @@ namespace TensorSharp.Cuda
         /// </summary>
         public void AllReduce(Tensor[] tensors)
         {
+            ThrowIfRetiring();
             if (!IsActive) return;
             if (_forceHostAllReduce)
                 HostAllReduce(tensors);
@@ -135,29 +161,62 @@ namespace TensorSharp.Cuda
         /// <summary>Synchronize all GPU streams.</summary>
         public void Synchronize()
         {
+            ThrowIfRetiring();
             for (int i = 0; i < Degree; i++)
                 _allocators[i].Synchronize();
         }
 
         /// <summary>Single-node: all GPUs share the process, no barrier needed.</summary>
-        public void Barrier() { }
+        public void Barrier() { ThrowIfRetiring(); }
 
         // Single-node group: there are no worker nodes, so the driver/worker
         // control channel is never used. (NodeCount == 1.)
-        public void BroadcastControl(int op, int[] payload) =>
+        public void BroadcastControl(int op, int[] payload)
+        {
+            ThrowIfRetiring();
             throw new NotSupportedException("Control broadcast is only meaningful for multi-node distributed groups.");
+        }
 
-        public (int op, int[] payload) ReceiveControl() =>
+        public (int op, int[] payload) ReceiveControl()
+        {
+            ThrowIfRetiring();
             throw new NotSupportedException("Control receive is only meaningful for multi-node distributed groups.");
+        }
 
         public void Dispose()
         {
             if (_disposed) return;
-            _disposed = true;
+            _retirementRequested = true;
+            var plan = CudaRetirementPlan.PrepareGroup(this, this);
+            var restoration = plan.CaptureRestoration();
+            plan.AllowStorageRelease();
+            ((ICudaTensorParallelRetirement)this).DisposeOwned(plan, restoration);
+            plan.Complete();
+            restoration?.Restore();
+        }
 
+        void ICudaTensorParallelRetirement.CollectOwnedAllocators(ICollection<IAllocator> allocators)
+        {
+            foreach (CudaAllocator allocator in _allocators) allocators.Add(allocator);
+        }
+
+        bool ICudaTensorParallelRetirement.OwnsCudaAllocators => true;
+
+        void ICudaTensorParallelRetirement.DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (_disposed) return;
+            _retirementRequested = true;
+            plan.ValidateGroupRelease(this);
+            plan.Drain(restoration);
             _communicator?.Dispose();
             for (int i = 0; i < Degree; i++)
-                _allocators[i]?.Dispose();
+                _allocators[i].DisposeOwned(plan, restoration);
+            _disposed = true;
+        }
+
+        private void ThrowIfRetiring()
+        {
+            if (_retirementRequested) throw new ObjectDisposedException(nameof(TensorParallelGroup));
         }
     }
 }

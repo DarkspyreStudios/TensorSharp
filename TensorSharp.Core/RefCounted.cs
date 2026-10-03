@@ -24,6 +24,7 @@ namespace TensorSharp
 
         internal virtual object? ReferenceMutationGate => null;
         internal virtual void ValidateReferenceAddition() { }
+        internal virtual bool IsRetainedFinalizerFailure(Exception error) => false;
         internal int ReadReferenceCount() => Volatile.Read(ref refCount);
 
         /// <summary>
@@ -35,11 +36,15 @@ namespace TensorSharp
 
         ~RefCounted()
         {
-            if (refCount > 0)
+            try
             {
-                Destroy();
-                refCount = 0;
+                if (ReadReferenceCount() > 0)
+                {
+                    Destroy();
+                    Volatile.Write(ref refCount, 0);
+                }
             }
+            catch (Exception error) when (IsRetainedFinalizerFailure(error)) { }
         }
 
         /// <summary>

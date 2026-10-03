@@ -622,14 +622,31 @@ namespace TensorSharp.Models.WanVideo
                     }
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+        {
+            _dctx?.CollectDisposalOwnership(tensors);
+            if (_dit is WanDirectDiT dit) dit.CollectDisposalOwnership(tensors);
+            if (_ditLow is WanDirectDiT ditLow) ditLow.CollectDisposalOwnership(tensors);
+            if (_vae is WanDirectVae vae) vae.CollectDisposalOwnership(tensors);
+        }
+
         public void Dispose()
         {
             _model.ThrowIfOwnershipCleanupFailed();
+            DisposeResources(false);
+        }
+
+        internal void DisposeOwned() => DisposeResources(true);
+
+        private void DisposeResources(bool modelOwned)
+        {
+            _model.ThrowIfUnsafeOwnershipCleanup();
             _te?.Dispose();
             _dit?.Dispose();
             _ditLow?.Dispose();
             _vae?.Dispose();
-            _dctx?.Dispose();
+            if (modelOwned) _dctx?.DisposeOwned();
+            else _dctx?.Dispose();
         }
     }
 

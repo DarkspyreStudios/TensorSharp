@@ -163,6 +163,10 @@ namespace TensorSharp.Cuda
         private const int ByteCount = SlotCount * sizeof(int);
 
         private readonly CudaAllocator allocator;
+        private readonly CudaContext context;
+        private readonly CudaStream stream;
+        private readonly CudaNativeCalls nativeCalls;
+        private bool retired;
         private IntPtr devicePtr;
         private IntPtr hostPtr;
 
@@ -184,43 +188,124 @@ namespace TensorSharp.Cuda
         /// <summary>Returns the ambient dynamic-parameter pointer only when it
         /// belongs to the allocator issuing this launch. Otherwise the caller
         /// must use its ordinary scalar kernel arguments.</summary>
-        internal static IntPtr GetActiveDevicePtr(CudaAllocator launchAllocator)
+        internal static CudaDecodeDynParams GetActiveOwner(CudaAllocator launchAllocator)
         {
             CudaDecodeDynParams active = activeInstance;
-            return active != null &&
-                ReferenceEquals(active.allocator, launchAllocator) &&
-                active.devicePtr != IntPtr.Zero
-                    ? active.devicePtr
-                    : IntPtr.Zero;
+            if (active == null || !ReferenceEquals(active.allocator, launchAllocator))
+                return null;
+            return active;
         }
 
         public CudaDecodeDynParams(IAllocator allocator)
+            : this(allocator as CudaAllocator, (allocator as CudaAllocator)?.Context, (allocator as CudaAllocator)?.Stream)
         {
-            this.allocator = allocator as CudaAllocator;
-            if (this.allocator == null)
+        }
+
+        internal CudaDecodeDynParams(CudaContext context, CudaStream stream)
+            : this(null, context, stream)
+        {
+        }
+
+        private CudaDecodeDynParams(CudaAllocator allocator, CudaContext context, CudaStream stream)
+        {
+            this.allocator = allocator;
+            this.context = context;
+            this.stream = stream;
+            if (context == null)
                 return;
-            this.allocator.Context.MakeCurrent();
-            if (CudaDriverApi.cuMemAlloc(out devicePtr, (UIntPtr)ByteCount) != 0)
+            ArgumentNullException.ThrowIfNull(stream);
+            if (!stream.MatchesContext(context))
+                throw new ArgumentException("The dynamic parameter stream belongs to another context.", nameof(stream));
+            if (stream.Handle == IntPtr.Zero)
+                throw new ObjectDisposedException(nameof(stream));
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle, context.NativeCalls.Api, context.DeviceId);
+            using var lease = nativeCalls.EnterEffect();
+            bool allocationResultFailure = false;
+            try
             {
-                devicePtr = IntPtr.Zero;
-                return;
+                context.BindCurrent(nativeCalls);
+                int result = nativeCalls.cuMemAlloc(out devicePtr, (UIntPtr)ByteCount);
+                allocationResultFailure = result != 0;
+                nativeCalls.ThrowOnError(result);
+                result = nativeCalls.cuMemHostAlloc(out hostPtr, (UIntPtr)ByteCount, 0);
+                allocationResultFailure = result != 0;
+                nativeCalls.ThrowOnError(result);
             }
-            if (CudaDriverApi.cuMemHostAlloc(out hostPtr, (UIntPtr)ByteCount, 0) != 0)
+            catch (Exception original)
             {
-                hostPtr = IntPtr.Zero;
-                CudaDriverApi.cuMemFree(devicePtr);
-                devicePtr = IntPtr.Zero;
+                try { Release(lease, drain: false); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                if (allocationResultFailure && original is CudaException)
+                    return;
+                throw;
             }
         }
 
-        public bool IsValid => devicePtr != IntPtr.Zero && hostPtr != IntPtr.Zero;
+        public bool IsValid
+        {
+            get
+            {
+                if (retired) return false;
+                nativeCalls?.ThrowIfQuarantined();
+                return !retired && devicePtr != IntPtr.Zero && hostPtr != IntPtr.Zero;
+            }
+        }
 
-        internal IntPtr DevicePtr => devicePtr;
+        internal bool MatchesConsumer(CudaAllocator launchAllocator, CudaKernels kernels)
+            => ReferenceEquals(allocator, launchAllocator) && launchAllocator != null
+                && MatchesConsumer(launchAllocator.Context, launchAllocator.Stream, kernels);
+
+        internal bool MatchesConsumer(CudaContext launchContext, CudaStream launchStream, CudaKernels kernels)
+            => ReferenceEquals(context, launchContext) && ReferenceEquals(stream, launchStream)
+                && context != null && stream.MatchesContext(context) && kernels != null && kernels.MatchesContext(context);
+
+        internal DeviceBorrow BorrowFor(CudaAllocator launchAllocator, CudaKernels kernels)
+            => MatchesConsumer(launchAllocator, kernels)
+                ? BorrowFor(launchAllocator.Context, launchAllocator.Stream, kernels) : default;
+
+        internal DeviceBorrow BorrowFor(CudaContext launchContext, CudaStream launchStream, CudaKernels kernels)
+        {
+            if (!MatchesConsumer(launchContext, launchStream, kernels)) return default;
+            var lease = EnterValidEffect();
+            return new DeviceBorrow(this, lease, devicePtr);
+        }
+
+        internal readonly struct DeviceBorrow : IDisposable
+        {
+            private readonly CudaDecodeDynParams owner;
+            private readonly NativeEffectLease lease;
+            internal IntPtr Pointer { get; }
+            internal DeviceBorrow(CudaDecodeDynParams owner, NativeEffectLease lease, IntPtr pointer)
+            {
+                this.owner = owner;
+                this.lease = lease;
+                Pointer = pointer;
+            }
+            public void Dispose()
+            {
+                lease?.Dispose();
+                GC.KeepAlive(owner);
+            }
+        }
+
+        private NativeEffectLease EnterValidEffect()
+        {
+            if (nativeCalls == null || retired)
+                throw new ObjectDisposedException(nameof(CudaDecodeDynParams));
+            var lease = nativeCalls.EnterEffect();
+            if (retired || devicePtr == IntPtr.Zero || hostPtr == IntPtr.Zero || stream.Handle == IntPtr.Zero || context.IsDisposed)
+            {
+                lease.Dispose();
+                throw new ObjectDisposedException(nameof(CudaDecodeDynParams));
+            }
+            return lease;
+        }
 
         /// <summary>Writes this token's values into the pinned host block. Must
         /// run before Replay (and before EndCaptureAndLaunch when capturing).</summary>
         public unsafe void Write(int attendLen, int kvWritePos, int convWriteIdx, int ropePos)
         {
+            using var lease = EnterValidEffect();
             int* p = (int*)hostPtr;
             p[0] = attendLen;
             p[1] = kvWritePos;
@@ -233,9 +318,9 @@ namespace TensorSharp.Cuda
         /// graph's leading node.</summary>
         public void EnqueueUpload()
         {
-            allocator.Context.MakeCurrent();
-            CudaDriverApi.cuMemcpyHtoDAsync(devicePtr, hostPtr, (UIntPtr)ByteCount, allocator.Stream.Handle)
-                .ThrowOnError();
+            using var lease = EnterValidEffect();
+            context.BindCurrent(nativeCalls);
+            nativeCalls.ThrowOnError(nativeCalls.cuMemcpyHtoDAsync(devicePtr, hostPtr, (UIntPtr)ByteCount, stream.Handle));
         }
 
         /// <summary>Makes this block the ambient dyn-parameter source for the
@@ -243,6 +328,7 @@ namespace TensorSharp.Cuda
         /// <see cref="Deactivate"/> in a finally).</summary>
         public void Activate()
         {
+            using var lease = EnterValidEffect();
             activeInstance = this;
             captureMaxAttendLen = 0;
         }
@@ -258,24 +344,47 @@ namespace TensorSharp.Cuda
                 limit > 0 &&
                 (captureMaxAttendLen == 0 || limit < captureMaxAttendLen))
             {
+                using var lease = activeInstance.EnterValidEffect();
                 captureMaxAttendLen = limit;
             }
         }
 
         public void Dispose()
         {
-            if (devicePtr != IntPtr.Zero)
+            if (nativeCalls == null || retired) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (retired) return;
+            Release(lease, drain: true);
+        }
+
+        private void Release(NativeEffectLease lease, bool drain)
+        {
+            nativeCalls.ValidateSafeRelease(lease);
+            try
             {
-                if (ReferenceEquals(activeInstance, this))
-                    activeInstance = null;
-                allocator?.Context.MakeCurrent();
-                CudaDriverApi.cuMemFree(devicePtr);
-                devicePtr = IntPtr.Zero;
+                if (devicePtr != IntPtr.Zero || hostPtr != IntPtr.Zero)
+                {
+                    context.BindCurrent(nativeCalls);
+                    if (drain) nativeCalls.cuCtxSynchronize();
+                    if (devicePtr != IntPtr.Zero)
+                    {
+                        nativeCalls.cuMemFree(devicePtr);
+                        devicePtr = IntPtr.Zero;
+                    }
+                    if (hostPtr != IntPtr.Zero)
+                    {
+                        nativeCalls.cuMemFreeHost(hostPtr);
+                        hostPtr = IntPtr.Zero;
+                    }
+                }
+                if (ReferenceEquals(activeInstance, this)) activeInstance = null;
+                nativeCalls.CompleteSafeRelease(lease);
+                retired = true;
             }
-            if (hostPtr != IntPtr.Zero)
+            catch (Exception cleanup)
             {
-                CudaDriverApi.cuMemFreeHost(hostPtr);
-                hostPtr = IntPtr.Zero;
+                nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.StorageRelease);
+                throw;
             }
         }
     }
@@ -330,6 +439,7 @@ namespace TensorSharp.Cuda
         }
 
         private readonly CudaAllocator allocator;
+        private readonly CudaNativeCalls nativeCalls;
         private readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
         private readonly HashSet<string> blacklist = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> seenOnce = new HashSet<string>(StringComparer.Ordinal);
@@ -344,6 +454,9 @@ namespace TensorSharp.Cuda
         public CudaPrefillGraphCache(IAllocator allocator)
         {
             this.allocator = allocator as CudaAllocator;
+            if (this.allocator != null)
+                nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.Graph,
+                    this.allocator.NativeCalls.Api, this.allocator.DeviceId);
         }
 
         public bool IsUsable => Enabled && allocator != null && !disposed;
@@ -577,31 +690,63 @@ namespace TensorSharp.Cuda
         private void DisposeEntry(string key)
         {
             Entry entry = entries[key];
-            entries.Remove(key);
-            allocator.Context.MakeCurrent();
-            // The graph may have a replay in flight; entries are only disposed
-            // between forwards (each forward ends in a logits sync), so the
-            // stream is idle with respect to this graph here.
-            CudaDriverApi.cuGraphExecDestroy(entry.Exec);
-            foreach (Tensor t in entry.KeepAlive)
-                t.Dispose();
-            entry.InputHidden.Dispose();
-            foreach ((IntPtr ptr, long bytes) in entry.OwnedBlocks)
-                allocator.ReturnDeviceMemory(ptr, bytes);
-            foreach (IntPtr host in entry.OwnedHostBuffers)
-                CudaStorage.FreeDonatedHostBuffer(host);
+            using var lease = nativeCalls.EnterEffect();
+            try
+            {
+                ReleaseGraph(entry);
+                foreach (Tensor t in entry.KeepAlive) t.Dispose();
+                entry.InputHidden.Dispose();
+                foreach ((IntPtr ptr, long bytes) in entry.OwnedBlocks) allocator.ReturnDeviceMemory(ptr, bytes);
+                foreach (IntPtr host in entry.OwnedHostBuffers) CudaStorage.FreeDonatedHostBuffer(host);
+                entries.Remove(key);
+            }
+            catch (Exception failure)
+            {
+                nativeCalls.PublishFailure(lease, failure, NativeRuntimeFailureStage.GraphRelease);
+                throw;
+            }
             if (Log)
                 Console.WriteLine($"[cuda-graph] evicted {key}");
+        }
+
+        private void ReleaseGraph(Entry entry)
+        {
+            if (entry.Exec == IntPtr.Zero) return;
+            using var lease = nativeCalls.EnterEffect();
+            allocator.Context.BindCurrent(nativeCalls);
+            nativeCalls.cuCtxSynchronize();
+            nativeCalls.cuGraphExecDestroy(entry.Exec);
+            entry.Exec = IntPtr.Zero;
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            foreach (Entry entry in entries.Values)
+            {
+                if (entry.InputHidden != null) tensors.Add(entry.InputHidden);
+                foreach (Tensor tensor in entry.KeepAlive)
+                    if (tensor != null) tensors.Add(tensor);
+            }
+        }
+
+        internal void ReleaseGraphsForRetirement()
+        {
+            foreach (Entry entry in entries.Values) ReleaseGraph(entry);
         }
 
         public void Dispose()
         {
             if (disposed)
                 return;
-            disposed = true;
             var keys = new List<string>(entries.Keys);
             foreach (string key in keys)
                 DisposeEntry(key);
+            if (nativeCalls != null)
+            {
+                using var lease = nativeCalls.EnterEffect();
+                nativeCalls.CompleteSafeRelease(lease);
+            }
+            disposed = true;
         }
     }
 }

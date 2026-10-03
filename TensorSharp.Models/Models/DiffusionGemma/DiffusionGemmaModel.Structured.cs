@@ -278,7 +278,12 @@ namespace TensorSharp.Models
         public void ClearStructuredCache()
         {
             ThrowIfOwnershipCleanupFailed();
-            DisposeSeqState(_structuredPrompt);
+            ClearStructuredCacheOwned();
+        }
+
+        private void ClearStructuredCacheOwned()
+        {
+            DisposeSeqStateOwned(_structuredPrompt);
             _structuredPrompt = null;
             _structuredPromptTokens = null;
             ReleaseStructuredHead();

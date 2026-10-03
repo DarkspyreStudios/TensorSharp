@@ -1703,6 +1703,17 @@ namespace TensorSharp.Models
             return -1;
         }
 
+        public void Dispose()
+        {
+            _model.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            foreach (var cached in SnapshotOwnedEmbeddings()) tensors.Add(cached.Embeddings);
+        }
+
         private HashSet<CachedEmbedding> SnapshotOwnedEmbeddings()
         {
             var owned = new HashSet<CachedEmbedding>(_displacedEmbeddings, ReferenceEqualityComparer.Instance);
@@ -1712,9 +1723,9 @@ namespace TensorSharp.Models
             return owned;
         }
 
-        public void Dispose()
+        internal void DisposeOwned()
         {
-            _model.ThrowIfOwnershipCleanupFailed();
+            _model.ThrowIfUnsafeOwnershipCleanup();
             var owned = SnapshotOwnedEmbeddings();
             ClearAllPreparedPromptState();
 

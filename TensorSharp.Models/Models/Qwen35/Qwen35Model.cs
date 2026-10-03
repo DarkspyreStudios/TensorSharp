@@ -414,7 +414,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs);
+                RollBackFailedConstruction(loadError, DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs,
+                    collectDerivedOwnership: CollectQwen35DisposalOwnership);
                 throw;
             }
         }
@@ -6458,6 +6459,47 @@ namespace TensorSharp.Models
             resetNativeVerifyState();
         }
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectQwen35DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectQwen35DisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheK);
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheV);
+            ModelDisposalOwnership.AddRange(ownedTensors, _cudaGdnConvStateTensor);
+            ModelDisposalOwnership.AddRange(ownedTensors, _deltaStateTensor);
+            ModelDisposalOwnership.AddRows(ownedTensors, _q35GdnSlotSsmTensor);
+            ModelDisposalOwnership.AddRange(ownedTensors, _mtpGdnConvDevSnap);
+            ModelDisposalOwnership.AddRange(ownedTensors, _mtpGdnDeltaDevSnap);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheV);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpDeltaState);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpConvState);
+            ModelDisposalOwnership.Add(ownedTensors, _gdnGatedOutT, _gdnChunkedQBuf, _gdnChunkedKBuf,
+                _gdnChunkedVBuf, _gdnChunkedZBuf, _gdnChunkedAlphaBuf, _gdnChunkedBetaBuf, _gdnDecodePackedBuf,
+                _moeTokenInput, _moeGateBuf, _moeUpBuf, _moeDownBuf, _moeBatchedResult, _moeBatchedGate,
+                _moeBatchedUp, _moeBatchedDown, _moeBatchedExpertIndices, _moeBatchedRouteWeights,
+                _attnDecodeQBuf, _attnDecodeGBuf, _attnDecodeOutBuf, _attnDecodeQkvBuf, _ffnDecodeGateUpBuf);
+            void AddHolder(Qwen35KvCacheHolder holder)
+            {
+                if (holder == null) return;
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.K);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.V);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.DeltaState);
+            }
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) AddHolder(holder);
+            if (_retainedFusedHolders != null) foreach (var holder in _retainedFusedHolders.Values) AddHolder(holder);
+            if (_holderPool != null) foreach (var holder in _holderPool) AddHolder(holder);
+            AddHolder(_primaryHolder);
+            foreach (var (embedding, _) in _visionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
+            _cudaPrefillGraphs?.CollectDisposalOwnership(ownedTensors);
+            CollectDFlashDisposalOwnership(ownedTensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs);
@@ -6486,12 +6528,13 @@ namespace TensorSharp.Models
 
             // Cached CUDA prefill graphs own pool blocks + pinned tensors; free
             // them before the tensors/caches they reference are torn down.
-            _cudaPrefillGraphs?.Dispose();
-            _cudaPrefillGraphs = null;
+            _cudaPrefillGraphs?.ReleaseGraphsForRetirement();
         }
 
         private void DisposeQwen35Resources()
         {
+            _cudaPrefillGraphs?.Dispose();
+            _cudaPrefillGraphs = null;
             _cudaDecodeDynParams?.Dispose();
             _cudaDecodeDynParams = null;
 
@@ -6500,7 +6543,7 @@ namespace TensorSharp.Models
 
             DisposeDFlash();
 
-            VisionEncoder?.Dispose();
+            VisionEncoder?.DisposeOwned();
             foreach (var (visionEmbeddings, _) in _visionEmbeddingsList)
                 visionEmbeddings?.Dispose();
             _visionEmbeddingsList.Clear();

@@ -334,6 +334,9 @@ namespace TensorSharp.Models.WanVideo
             return WanDiT.ReorderHeadOutput(outTokens, seq, OutDim);
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+            => ModelDisposalOwnership.Add(tensors, _cosT, _sinT);
+
         public void Dispose()
         {
             _cosT?.Dispose(); _sinT?.Dispose();

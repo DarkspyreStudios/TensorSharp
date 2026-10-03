@@ -1369,6 +1369,20 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            ModelDisposalOwnership.AddRange(tensors, _positionEmbeddingCache.Values);
+            ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
+            ModelDisposalOwnership.AddRange(tensors, _weights.Values);
+            foreach (var (cos, sin) in _ropeDeviceCache.Values) ModelDisposalOwnership.Add(tensors, cos, sin);
+        }
+
+        internal void DisposeOwned()
+        {
+            _hostModel?.ThrowIfUnsafeOwnershipCleanup();
             foreach (var w in _positionEmbeddingCache.Values)
                 w.Dispose();
             _positionEmbeddingCache.Clear();
