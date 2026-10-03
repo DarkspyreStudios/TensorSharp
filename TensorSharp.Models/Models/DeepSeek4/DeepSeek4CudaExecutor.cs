@@ -42,6 +42,10 @@ namespace TensorSharp.Models
         private readonly Dictionary<string, (GgufFile File, GgufTensorInfo Info)> _tensorMap
             = new Dictionary<string, (GgufFile, GgufTensorInfo)>(StringComparer.Ordinal);
         private readonly List<IntPtr> _ownedBuffers = new List<IntPtr>();
+        private ModelBase _retainedParent;
+        private readonly NativeConstructionCleanupHandle _constructionCleanup;
+        private bool _resourcesReleased;
+        private Exception _cleanupFailure;
         private ShardSource[] _shardSources;
         private Dictionary<string, IntPtr> _prefetched;
         private readonly Dictionary<GgufFile, int> _shardIndexOf = new Dictionary<GgufFile, int>();
@@ -219,54 +223,72 @@ namespace TensorSharp.Models
         /// layers, <see cref="int.MaxValue"/> every layer, -1 auto (the fewest
         /// leading layers that make the model fit; opt-in only).</param>
         public DeepSeek4CudaExecutor(string ggufPath, int maxContext, int nUbatch, int nGpu, string dsparkPath = null,
-            int nCpuMoe = 0, Action<DeepSeek4CudaExecutor> reserveOwner = null)
+            int nCpuMoe = 0, Action<DeepSeek4CudaExecutor> reserveOwner = null, ModelBase retainedParent = null)
         {
+            if ((reserveOwner == null) != (retainedParent == null))
+                throw new ArgumentException("A reserved DeepSeek4 executor requires its actual model lifetime dependency.");
+            _retainedParent = retainedParent;
+            _constructionCleanup = new NativeConstructionCleanupHandle(this, ReleaseResources,
+                () => _resourcesReleased, () => _cleanupFailure != null);
             // The actual model owns this partial executor before files or native children are acquired.
             reserveOwner?.Invoke(this);
-            var sw = Stopwatch.StartNew();
-            bool stats = ParseEnvInt("TS_DSV4_LOAD_STATS", 0) != 0;
-            void Mark(string phase)
+            try
             {
-                if (stats)
-                    Console.Error.WriteLine($"[dsv4-cuda]   +{sw.Elapsed.TotalSeconds,6:F1}s {phase}");
+                var sw = Stopwatch.StartNew();
+                bool stats = ParseEnvInt("TS_DSV4_LOAD_STATS", 0) != 0;
+                void Mark(string phase)
+                {
+                    if (stats)
+                        Console.Error.WriteLine($"[dsv4-cuda]   +{sw.Elapsed.TotalSeconds,6:F1}s {phase}");
+                }
+
+                OpenShards(ggufPath, dsparkPath);
+                ParseHparams();
+                if (_isV41)
+                    LoadEngramMetadata();
+                Mark("shards opened / hparams parsed");
+
+                // Large weights are read exactly once, on their way to VRAM, so the
+                // engine streams them straight from the shards through pinned
+                // chunks instead of staging the whole (hundreds of GB) model in
+                // host RAM first. TS_DSV4_MMAP=1 opts back into the mmap path.
+                bool stream = ParseEnvInt("TS_DSV4_MMAP", 0) == 0;
+                if (stream)
+                {
+                    _shardSources = new ShardSource[_shardPaths.Count];
+                    for (int s = 0; s < _shardPaths.Count; s++)
+                        _shardSources[s] = new ShardSource(_shardPaths[s]);
+                    PrefetchSmallTensors();
+                    Mark("small tensors prefetched");
+                }
+
+                int nCtx = maxContext > 0 ? maxContext : 16384;
+                int ubatch = nUbatch > 0 ? nUbatch : 1024;
+
+                var desc = BuildModelDesc(nCtx, ubatch);
+                Mark("model desc built");
+                _engine = new Dsv4CudaEngine(desc, nGpu, nCpuMoe, engine => _engine = engine, this);
+                Mark("engine ready");
+
+                // Everything lives in VRAM now; drop the host-side scraps.
+                _prefetched = null;
+                foreach (var p in _ownedBuffers)
+                    Marshal.FreeHGlobal(p);
+                _ownedBuffers.Clear();
+                ReleaseShardReaders();
+
+                Console.Error.WriteLine($"[dsv4-cuda] model ready in {sw.Elapsed.TotalSeconds:F1}s");
             }
-
-            OpenShards(ggufPath, dsparkPath);
-            ParseHparams();
-            if (_isV41)
-                LoadEngramMetadata();
-            Mark("shards opened / hparams parsed");
-
-            // Large weights are read exactly once, on their way to VRAM, so the
-            // engine streams them straight from the shards through pinned
-            // chunks instead of staging the whole (hundreds of GB) model in
-            // host RAM first. TS_DSV4_MMAP=1 opts back into the mmap path.
-            bool stream = ParseEnvInt("TS_DSV4_MMAP", 0) == 0;
-            if (stream)
+            catch (Exception loadError)
             {
-                _shardSources = new ShardSource[_shardPaths.Count];
-                for (int s = 0; s < _shardPaths.Count; s++)
-                    _shardSources[s] = new ShardSource(_shardPaths[s]);
-                PrefetchSmallTensors();
-                Mark("small tensors prefetched");
+                if (reserveOwner != null) throw;
+                try { ReleaseResources(); }
+                catch (Exception cleanupError)
+                {
+                    throw new NativeConstructionCleanupException(loadError, cleanupError, _constructionCleanup);
+                }
+                throw;
             }
-
-            int nCtx = maxContext > 0 ? maxContext : 16384;
-            int ubatch = nUbatch > 0 ? nUbatch : 1024;
-
-            var desc = BuildModelDesc(nCtx, ubatch);
-            Mark("model desc built");
-            _engine = new Dsv4CudaEngine(desc, nGpu, nCpuMoe, engine => _engine = engine);
-            Mark("engine ready");
-
-            // Everything lives in VRAM now; drop the host-side scraps.
-            _prefetched = null;
-            foreach (var p in _ownedBuffers)
-                Marshal.FreeHGlobal(p);
-            _ownedBuffers.Clear();
-            ReleaseShardReaders();
-
-            Console.Error.WriteLine($"[dsv4-cuda] model ready in {sw.Elapsed.TotalSeconds:F1}s");
         }
 
         private static int ParseEnvInt(string name, int fallback)
@@ -1037,16 +1059,63 @@ namespace TensorSharp.Models
 
         internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
         {
-            _engine?.DisposeOwned(plan, restoration);
-            _engine = null;
-            DisposeHostResources();
+            if (_resourcesReleased) return;
+            ThrowIfCleanupFailed();
+            using (var cleanupLease = plan.EnterModelCleanupEffect())
+            {
+                try
+                {
+                    _engine?.DisposeOwned(plan, restoration);
+                    _engine = null;
+                    DisposeHostResources();
+                }
+                catch (Exception failure)
+                {
+                    _cleanupFailure ??= failure;
+                    restoration?.MarkCleanupFailed();
+                    plan.PublishModelCleanupFailure(cleanupLease, failure);
+                    throw;
+                }
+            }
+            _resourcesReleased = true;
+            _retainedParent = null;
+            _constructionCleanup.CompleteRelease(this);
         }
 
         public void Dispose()
+            => ReleaseResources();
+
+        private void ReleaseResources()
         {
-            _engine?.Dispose();
-            _engine = null;
-            DisposeHostResources();
+            if (_resourcesReleased) return;
+            ThrowIfCleanupFailed();
+            _engine?.FenceRetirement();
+            var tensors = new List<Tensor>();
+            var allocators = new List<IAllocator>();
+            CollectDisposalOwnership(tensors, allocators);
+            var plan = CudaRetirementPlan.PrepareModel(this, tensors, allocators);
+            var restoration = plan.CaptureRestoration();
+            WaitForUploadWorkers();
+            try
+            {
+                plan.Drain(restoration);
+                plan.AllowStorageRelease();
+                DisposeOwned(plan, restoration);
+                plan.Complete();
+            }
+            catch (Exception failure)
+            {
+                _cleanupFailure ??= failure;
+                restoration?.MarkCleanupFailed();
+                throw;
+            }
+            restoration?.Restore();
+        }
+
+        private void ThrowIfCleanupFailed()
+        {
+            if (_cleanupFailure != null)
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
         }
 
         private void DisposeHostResources()

@@ -117,7 +117,7 @@ namespace TensorSharp.Models
                         $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
                         (dspark != null ? ", DSpark drafter" : string.Empty));
                     _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark,
-                        ResolveCpuMoeLayers(), executor => _cudaExec = executor);
+                        ResolveCpuMoeLayers(), executor => _cudaExec = executor, this);
                 }
                 else if (_backend == BackendType.Cpu)
                 {

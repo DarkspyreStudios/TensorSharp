@@ -253,6 +253,7 @@ namespace TensorSharp.Cuda
         private bool _disposed;
         private Exception _cleanupFailure;
         private readonly NativeConstructionCleanupHandle _constructionCleanup;
+        private object _retainedParent;
         private readonly List<System.Threading.Thread> _uploadThreads = new List<System.Threading.Thread>();
         public int ContextSize => _m.NCtx;
 
@@ -267,12 +268,16 @@ namespace TensorSharp.Cuda
         /// int.MaxValue every layer, -1 auto (the fewest leading layers that make
         /// the model fit; opt-in only). See Dsv4CudaEngine.HostMoe.cs.</param>
         public Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe = 0)
-            : this(m, nGpu, nCpuMoe, null)
+            : this(m, nGpu, nCpuMoe, null, null)
         {
         }
 
-        internal Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe, Action<Dsv4CudaEngine> reserveOwner)
+        internal Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe, Action<Dsv4CudaEngine> reserveOwner,
+            object retainedParent)
         {
+            if ((reserveOwner == null) != (retainedParent == null))
+                throw new ArgumentException("A reserved Dsv4 engine requires its actual parent lifetime dependency.");
+            _retainedParent = retainedParent;
             _m = m ?? throw new ArgumentNullException(nameof(m));
             if (m.HeadDim != 512)
                 throw new NotSupportedException($"DSV4 CUDA engine requires head_dim 512, got {m.HeadDim}.");
@@ -2188,6 +2193,12 @@ namespace TensorSharp.Cuda
         public void Dispose()
             => ReleaseResources();
 
+        internal void FenceRetirement()
+        {
+            if (_cleanupFailure != null) ThrowIfRetiring();
+            _retiring = true;
+        }
+
         private void ReleaseResources()
         {
             if (_disposed) return;
@@ -2303,6 +2314,7 @@ namespace TensorSharp.Cuda
             }
             foreach (var dev in _devs ?? Array.Empty<Dev>()) dev?.Alloc?.DisposeOwned(plan, restoration);
             _disposed = true;
+            _retainedParent = null;
             _constructionCleanup.CompleteRelease(this);
         }
     }

@@ -284,8 +284,13 @@ pre-effect collector refusal or healthy Busy, but uncertain cleanup blocks furth
 DeepSeek4 reserves its actual executor, and the executor reserves the actual Dsv4 engine, before
 child acquisition. The partial engine participates in the parent's same census and release
 recipe; the public cleanup handle grants no child extraction or independent ownership. Standalone
-Dsv4 construction reserves its own release-only handle and private census recipe. Partial device
-and DSpark records remain visible to that recipe. Started upload threads remain recorded until
+Dsv4 and direct internal executor construction reserve their own release-only handles and private
+census recipes. The internal ingress carries a private actual-parent lifetime dependency; it
+grants no pointer, allocator or census authority, adds no process-global healthy root and clears
+only after proven release. An ordinary post-release restoration error does not restore that
+dependency or make released resources live again. Public Dsv4 `QuantWeightDesc.HostPtr` inputs remain
+borrowed; their actual backing lifetime is the caller's obligation, not inferred from the pointer.
+Partial device and DSpark records remain visible to that recipe. Started upload threads remain recorded until
 proven joined; these waits occur after the full census, outside native effect gates and before
 destructive cleanup. A join refusal remains pre-effect and retryable. Pinned logits and DSpark
 capture staging are released only after checked completion. Raw upload-worker cleanup and other
