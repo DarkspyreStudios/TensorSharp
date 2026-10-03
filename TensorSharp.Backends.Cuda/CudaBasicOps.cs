@@ -47,7 +47,8 @@ namespace TensorSharp.Cuda
                 if (result == null)
                 {
                     releaseAttempted = true;
-                    ((CudaStorage)writeTarget.Storage).AllocatorImpl.NativeCalls.ThrowIfQuarantined();
+                    if (writeTarget.Storage is CudaStorage targetStorage)
+                        targetStorage.AllocatorImpl.NativeCalls.ThrowIfQuarantined();
                     writeTarget.Dispose();
                 }
             }
@@ -58,11 +59,14 @@ namespace TensorSharp.Cuda
                     releaseAttempted = true;
                     try
                     {
-                        var calls = ((CudaStorage)writeTarget.Storage).AllocatorImpl.NativeCalls;
                         bool healthy = true;
-                        try { calls.ThrowIfQuarantined(); }
-                        catch (NativeRuntimeQuarantinedException refusal) when (calls.IsRetainedFailure(refusal))
-                        { healthy = false; }
+                        if (writeTarget.Storage is CudaStorage targetStorage)
+                        {
+                            var calls = targetStorage.AllocatorImpl.NativeCalls;
+                            try { calls.ThrowIfQuarantined(); }
+                            catch (NativeRuntimeQuarantinedException refusal) when (calls.IsRetainedFailure(refusal))
+                            { healthy = false; }
+                        }
                         if (healthy) writeTarget.Dispose();
                     }
                     catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
@@ -86,7 +90,8 @@ namespace TensorSharp.Cuda
                 if (result == null)
                 {
                     releaseAttempted = true;
-                    ((CudaStorage)writeTarget.Storage).AllocatorImpl.NativeCalls.ThrowIfQuarantined();
+                    if (writeTarget.Storage is CudaStorage targetStorage)
+                        targetStorage.AllocatorImpl.NativeCalls.ThrowIfQuarantined();
                     writeTarget.Dispose();
                 }
             }
@@ -97,11 +102,14 @@ namespace TensorSharp.Cuda
                     releaseAttempted = true;
                     try
                     {
-                        var calls = ((CudaStorage)writeTarget.Storage).AllocatorImpl.NativeCalls;
                         bool healthy = true;
-                        try { calls.ThrowIfQuarantined(); }
-                        catch (NativeRuntimeQuarantinedException refusal) when (calls.IsRetainedFailure(refusal))
-                        { healthy = false; }
+                        if (writeTarget.Storage is CudaStorage targetStorage)
+                        {
+                            var calls = targetStorage.AllocatorImpl.NativeCalls;
+                            try { calls.ThrowIfQuarantined(); }
+                            catch (NativeRuntimeQuarantinedException refusal) when (calls.IsRetainedFailure(refusal))
+                            { healthy = false; }
+                        }
                         if (healthy) writeTarget.Dispose();
                     }
                     catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
