@@ -79,7 +79,8 @@ before destroy, original-plus-cleanup constructor errors, actual retained owner 
 and foreign generation collection or retention. Supplied stream pointers are borrowed;
 their actual external owners must remain alive through use. These tests do not execute
 cuBLAS or qualify the public standalone context-acquisition behavior. That public factory
-retains its existing raw path. Allocator construction still calls that path.
+retains its existing raw path. Allocator construction uses the known-context factory
+with its actual owned context; the standalone factory remains outside this qualification.
 
 The kernel modes exercise actual `CudaKernels` construction and its transferred module,
 central launch path, scratch ownership and shared-memory attributes. Failed required-symbol
