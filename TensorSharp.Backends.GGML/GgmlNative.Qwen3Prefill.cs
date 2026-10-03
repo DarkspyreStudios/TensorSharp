@@ -48,5 +48,31 @@ namespace TensorSharp.GGML
                 eps, ropeBase, ropeFreqScale, ropeMode,
                 ropeOriginalContext, ropeExtFactor, ropeAttnFactor,
                 ropeBetaFast, ropeBetaSlow) != 0;
+
+        /// <summary>Runs the prefill graph and writes the last token's final-normed hidden state (hiddenSize floats) to <paramref name="hidden"/>.</summary>
+        internal static bool TryQwen3ModelPrefillHiddenState(
+            Qwen3PrefillLayerArgs[] layers, int numLayers,
+            int[] tokenIds, int numTokens, int startPos,
+            IntPtr hidden, int vocabSize,
+            IntPtr tokenEmbd, int tokenEmbdType,
+            long tokenEmbdNe0, long tokenEmbdNe1, long tokenEmbdBytes,
+            IntPtr outputNorm,
+            int hiddenSize, int numHeads, int numKvHeads, int headDim,
+            int intermediateSize, int maxSeqLen, int kvCacheType,
+            float eps, float ropeBase, float ropeFreqScale, int ropeMode,
+            int ropeOriginalContext, float ropeExtFactor, float ropeAttnFactor,
+            float ropeBetaFast, float ropeBetaSlow)
+            => TSGgml_Qwen3ModelPrefill(
+                layers, numLayers, tokenIds, numTokens, startPos,
+                hidden, vocabSize, 2,
+                tokenEmbd, tokenEmbdType,
+                tokenEmbdNe0, tokenEmbdNe1, tokenEmbdBytes,
+                outputNorm,
+                IntPtr.Zero, 0, 0, 0, 0,
+                hiddenSize, numHeads, numKvHeads, headDim,
+                intermediateSize, maxSeqLen, kvCacheType,
+                eps, ropeBase, ropeFreqScale, ropeMode,
+                ropeOriginalContext, ropeExtFactor, ropeAttnFactor,
+                ropeBetaFast, ropeBetaSlow) != 0;
     }
 }

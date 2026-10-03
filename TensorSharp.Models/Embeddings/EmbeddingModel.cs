@@ -97,7 +97,8 @@ public sealed class EmbeddingModel : IEmbeddingModel
     // probes, loads, or changes process-wide state for any native backend.
     private static IntPtr LoadNative(string path, string backend, int device, int threads)
     {
-        var handle = GgmlEmbeddingNative.TSGgml_EmbeddingLoad(Path.GetFullPath(path), backend, device, threads);
+        // The native loader names backends without the GGML_ prefix (cpu, metal, cuda).
+        var handle = GgmlEmbeddingNative.TSGgml_EmbeddingLoad(Path.GetFullPath(path), backend.Substring("GGML_".Length).ToLowerInvariant(), device, threads);
         if (handle == IntPtr.Zero) throw new InvalidOperationException(GgmlEmbeddingNative.LastError("Cannot load embedding model."));
         return handle;
     }

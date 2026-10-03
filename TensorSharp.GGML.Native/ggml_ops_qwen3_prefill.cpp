@@ -153,8 +153,9 @@ TSG_EXPORT int TSGgml_Qwen3ModelPrefill(
             set_last_error("Qwen3 model prefill: descriptor size mismatch.");
             return 0;
         }
-        if (num_heads % num_kv_heads != 0 ||
-            hidden_size != num_heads * head_dim)
+        // Qwen3-0.6B and -4B project to a query width (num_heads * head_dim) that
+        // differs from hidden_size; the graph uses q_dim for every attention shape.
+        if (num_heads % num_kv_heads != 0)
         {
             set_last_error("Qwen3 model prefill: invalid GQA dimensions.");
             return 0;
@@ -179,7 +180,15 @@ TSG_EXPORT int TSGgml_Qwen3ModelPrefill(
             set_last_error("Qwen3 model prefill: invalid embedding/final norm.");
             return 0;
         }
-        if (compute_logits != 0 &&
+        // compute_logits: 0 = no output, 1 = last-token logits, 2 = the last token's
+        // final-normed hidden state (hidden_size floats), for embedding models.
+        const bool hidden_output = compute_logits == 2;
+        if (hidden_output && logits_data == nullptr)
+        {
+            set_last_error("Qwen3 model prefill: missing hidden-state output.");
+            return 0;
+        }
+        if (compute_logits == 1 &&
             (logits_data == nullptr ||
              !valid_weight(lm_head_data, lm_head_ne0, lm_head_ne1, lm_head_bytes) ||
              lm_head_ne0 != hidden_size || lm_head_ne1 != vocab_size))
@@ -475,7 +484,14 @@ TSG_EXPORT int TSGgml_Qwen3ModelPrefill(
         ggml_tensor* logits = nullptr;
         ggml_tensor* output_norm = nullptr;
         ggml_tensor* lm_head = nullptr;
-        if (compute_logits != 0)
+        if (hidden_output)
+        {
+            output_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hidden_size);
+            logits = ggml_mul(ctx, ggml_rms_norm(ctx, hidden, eps), output_norm);
+            logits = ggml_reshape_1d(ctx, logits, hidden_size);
+            ggml_set_output(logits);
+        }
+        else if (compute_logits != 0)
         {
             output_norm = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, hidden_size);
             const bool tied = token_embd_data == lm_head_data &&
@@ -635,7 +651,7 @@ TSG_EXPORT int TSGgml_Qwen3ModelPrefill(
         {
             finalize_compute_with_download(
                 logits, logits_data,
-                static_cast<std::size_t>(vocab_size) * sizeof(float));
+                static_cast<std::size_t>(hidden_output ? hidden_size : vocab_size) * sizeof(float));
             // Unlike the managed per-op path, the caller's pinned array must be
             // fully populated before this ABI call returns. This also closes the
             // Metal async lifetime hole that motivated the model-wide graph.
