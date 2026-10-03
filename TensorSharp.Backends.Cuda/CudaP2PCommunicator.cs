@@ -1,382 +1,532 @@
 using System;
-using TensorSharp.Cuda.Interop;
+using System.Linq;
+using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 
 namespace TensorSharp.Cuda
 {
-    /// <summary>
-    /// Multi-GPU collective operations using CUDA peer-to-peer memory access.
-    /// Works on any platform with CUDA (Windows, Linux) without requiring NCCL.
-    /// 
-    /// AllReduce algorithm (reduce-to-zero + broadcast):
-    ///   1. Each non-zero GPU copies its partial to GPU 0's staging buffer
-    ///   2. GPU 0 accumulates: buffer[0] += staging (via elementwise-add kernel)
-    ///   3. GPU 0 broadcasts the reduced result to all other GPUs
-    /// 
-    /// For N=2 this is optimal (1 copy + 1 add + 1 broadcast). For N≤8 the
-    /// serial reduction on GPU 0 is bandwidth-bound on the P2P links, which
-    /// matches ring-allreduce throughput when NVLink is not available.
-    /// </summary>
-    internal sealed class CudaP2PCommunicator : IDisposable
+    /// <summary>Owned scratch for the existing reduce-to-zero and broadcast collective.</summary>
+    internal sealed class CudaP2PCommunicator
     {
+        private readonly TensorParallelGroup _owner;
         private readonly CudaAllocator[] _allocators;
         private readonly int _worldSize;
         private readonly bool[] _p2pEnabled;
+        private readonly CudaNativeCalls _calls;
+        private readonly List<CudaP2PEffectOwner> _initializationEffects = new();
+        private ProbeOwner _probe;
+        private StagingOwner _staging;
+        private StagingOwner _stagingCandidate;
+        private bool _initialized;
+        private bool _released;
+        private Exception _failure;
 
-        // Staging buffer on GPU 0 for accumulation during AllReduce.
-        private IntPtr _stagingBuffer;
-        private long _stagingBufferBytes;
-
-        public CudaP2PCommunicator(CudaAllocator[] allocators)
+        internal CudaP2PCommunicator(TensorParallelGroup owner, CudaAllocator[] allocators)
         {
-            _allocators = allocators ?? throw new ArgumentNullException(nameof(allocators));
-            _worldSize = allocators.Length;
-
-            if (_worldSize < 2)
-                throw new ArgumentException("P2P communicator requires at least 2 GPUs.", nameof(allocators));
-
-            _p2pEnabled = EnablePeerAccess(allocators);
+            _owner = owner ?? throw new ArgumentNullException(nameof(owner));
+            _allocators = (CudaAllocator[])(allocators ?? throw new ArgumentNullException(nameof(allocators))).Clone();
+            _worldSize = _allocators.Length;
+            if (_worldSize < 2 || _allocators.Any(a => a == null)
+                || _allocators.Distinct<CudaAllocator>(ReferenceEqualityComparer.Instance).Count() != _worldSize)
+                throw new ArgumentException("P2P requires distinct actual rank allocators.", nameof(allocators));
+            if (_allocators.Any(a => !ReferenceEquals(a.NativeCalls.Api, _allocators[0].NativeCalls.Api)))
+                throw new ArgumentException("P2P requires one shared native API.", nameof(allocators));
+            _calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, _allocators[0].NativeCalls.Api,
+                _allocators.Select(a => a.DeviceId).Distinct().ToArray());
+            _p2pEnabled = new bool[_worldSize * _worldSize];
         }
 
-        public int WorldSize => _worldSize;
-
-        // Device pointer to a tensor's storage. NOTE: Storage.PtrAtElement returns
-        // a HOST pointer and marks the storage host-dirty (it's the "raw host write"
-        // checkout), so it must NOT be used for device-to-device / peer copies —
-        // doing so passes a host address where CUDA expects a device address
-        // (CUDA_ERROR_INVALID_VALUE) and corrupts the tensor's dirty state,
-        // clobbering the reduced result on the next EnsureDeviceCurrent.
-        private static IntPtr DevicePtr(Tensor t) => ((CudaStorage)t.Storage).DevicePtrAtElement(0);
-
-        private static bool[] EnablePeerAccess(CudaAllocator[] allocators)
+        internal void InitializePeerAccess()
         {
-            int n = allocators.Length;
-            var enabled = new bool[n * n];
-
-            // TENSORSHARP_TP_DISABLE_P2P=1 → leave every pair disabled so all
-            // cross-GPU transfers stage through host memory, matching the
-            // behaviour of no-peer hardware (A16 vGPU, consumer cards) exactly.
+            if (_initialized) throw new InvalidOperationException("Peer access is already initialized.");
+            using var admission = CudaOperationAdmission.Enter(this, _allocators);
+            _owner.ThrowIfRetiring();
             if (CudaStorage.DisableP2P)
             {
                 Console.WriteLine("  TP: P2P disabled by TENSORSHARP_TP_DISABLE_P2P; all cross-GPU transfers use host staging.");
-                return enabled;
+                _initialized = true;
+                return;
             }
-
-            for (int i = 0; i < n; i++)
+            for (int source = 0; source < _worldSize; source++)
             {
-                for (int j = 0; j < n; j++)
+                for (int destination = 0; destination < _worldSize; destination++)
                 {
-                    if (i == j) continue;
-
-                    allocators[i].Context.MakeCurrent();
-                    CudaDriverApi.cuDeviceCanAccessPeer(out int canAccess,
-                        allocators[i].DeviceId, allocators[j].DeviceId).ThrowOnError();
-
-                    if (canAccess == 1)
+                    if (source == destination) continue;
+                    _owner.ThrowIfRetiring();
+                    var phase = new CudaP2PEffectOwner(this, new[] { _allocators[source], _allocators[destination] });
+                    _initializationEffects.Add(phase);
+                    using (var lease = phase.Calls.EnterEffect())
                     {
-                        // cuCtxEnablePeerAccess returns CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED
-                        // (704) if already enabled — treat that as success.
-                        int result = CudaDriverApi.cuCtxEnablePeerAccess(allocators[j].Context.Handle, 0);
-                        if (result == 0 || result == 704)
-                            enabled[i * n + j] = true;
-                        else
-                            result.ThrowOnError();
+                        _allocators[source].Context.BindCurrent(phase.Calls);
+                        phase.Calls.ThrowOnError(phase.Calls.cuDeviceCanAccessPeer(out int canAccess,
+                            _allocators[source].DeviceId, _allocators[destination].DeviceId));
+                        if (canAccess == 1)
+                        {
+                            int result = phase.Calls.cuCtxEnablePeerAccess(_allocators[destination].Context.Handle, 0);
+                            if (result == 0 || result == 704)
+                                _p2pEnabled[source * _worldSize + destination] = true;
+                            else phase.Calls.ThrowOnError(result);
+                        }
                     }
+                    phase.Complete();
                 }
             }
-
-            // Verify that P2P DMA actually round-trips correctly. Some platforms
-            // (L4 behind certain PCIe switches, IOMMU-enabled hosts, constrained
-            // BAR1) report canAccessPeer=1 and accept cuCtxEnablePeerAccess, yet
-            // cuMemcpyPeerAsync silently transfers corrupt data. Write a known
-            // pattern on GPU i, peer-copy to GPU j, read back and compare.
-            // Failed pairs are demoted to host-staged transfers permanently.
-            for (int i = 0; i < n; i++)
+            for (int source = 0; source < _worldSize; source++)
             {
-                for (int j = 0; j < n; j++)
+                for (int destination = 0; destination < _worldSize; destination++)
                 {
-                    if (i == j || !enabled[i * n + j]) continue;
-
-                    if (!VerifyP2PRoundTrip(allocators, i, j))
+                    if (source == destination || !CanAccessPeer(source, destination)) continue;
+                    _owner.ThrowIfRetiring();
+                    if (!VerifyP2PRoundTrip(source, destination))
                     {
                         Console.WriteLine(
-                            $"  TP: P2P DMA self-test FAILED for GPU {i} → GPU {j} " +
-                            $"(cuDeviceCanAccessPeer=1 but data is corrupt). " +
-                            $"Falling back to host-staged transfers for this pair.");
-                        // Demote BOTH directions. A pair whose DMA is corrupt one
-                        // way is not trustworthy the other way either, and
-                        // CudaStorage.MarkPeerAccessFailed (used by every ordinary
-                        // cross-GPU tensor copy) already demotes the pair
-                        // symmetrically — leaving this table asymmetric would let a
-                        // collective peer-copy over a link that every other code
-                        // path has already given up on.
-                        enabled[i * n + j] = false;
-                        enabled[j * n + i] = false;
-                        CudaStorage.MarkPeerAccessFailed(
-                            allocators[i].DeviceId, allocators[j].DeviceId);
+                            $"  TP: P2P DMA self-test FAILED for GPU {source} → GPU {destination} " +
+                            "(cuDeviceCanAccessPeer=1 but data is corrupt). " +
+                            "Falling back to host-staged transfers for this pair.");
+                        _p2pEnabled[source * _worldSize + destination] = false;
+                        _p2pEnabled[destination * _worldSize + source] = false;
+                        CudaStorage.MarkPeerAccessFailed(_allocators[source].DeviceId, _allocators[destination].DeviceId);
                     }
                 }
             }
-
-            return enabled;
+            _owner.ThrowIfRetiring();
+            _calls.ThrowIfQuarantined();
+            _initialized = true;
         }
 
-        /// <summary>
-        /// Allocate a small buffer on GPU <paramref name="src"/>, fill it with a
-        /// known pattern, peer-copy it to GPU <paramref name="dst"/>, read the
-        /// result back to the host and verify every byte. Returns false when the
-        /// round-trip corrupts data — the exact failure mode seen on some L4
-        /// PCIe topologies where the driver reports P2P as available but the
-        /// platform silently breaks the DMA.
-        /// </summary>
-        private static unsafe bool VerifyP2PRoundTrip(CudaAllocator[] allocators, int src, int dst)
+        private bool VerifyP2PRoundTrip(int source, int destination)
         {
-            const int testBytes = 4096;
-            IntPtr srcBuf = IntPtr.Zero;
-            IntPtr dstBuf = IntPtr.Zero;
+            _probe = new ProbeOwner(this, _allocators[source], _allocators[destination]);
+            Exception original = null;
+            bool valid = false;
+            try { valid = _probe.Run(source, destination); }
+            catch (Exception failure) { original = failure; _probe.Failure = failure; }
+            try { _probe.Release(); }
+            catch (Exception cleanup)
+            {
+                _failure = original == null ? cleanup : new AggregateException(original, cleanup);
+                _probe.Failure = _failure;
+                ExceptionDispatchInfo.Capture(_failure).Throw();
+            }
+            if (!_probe.Released)
+            {
+                if (original != null)
+                {
+                    _failure = original;
+                    ExceptionDispatchInfo.Capture(original).Throw();
+                }
+                _calls.ThrowIfQuarantined();
+                throw new InvalidOperationException("Probe ownership did not complete.");
+            }
+            _probe = null;
+            return original == null && valid;
+        }
 
+        private bool CanAccessPeer(int source, int destination) => _p2pEnabled[source * _worldSize + destination];
+
+        private void EnsureStagingBuffer(long bytes)
+        {
+            if (_staging != null && _staging.Capacity >= bytes) return;
+            if (_staging != null)
+            {
+                _staging.Release();
+                _staging = null;
+            }
+            _stagingCandidate = new StagingOwner(this, _allocators[0]);
             try
             {
-                // Allocate on source GPU and write a recognisable pattern.
-                allocators[src].Context.MakeCurrent();
-                CudaDriverApi.cuMemAlloc(out srcBuf, new UIntPtr(testBytes)).ThrowOnError();
-
-                var pattern = new byte[testBytes];
-                for (int k = 0; k < testBytes; k++)
-                    pattern[k] = (byte)((k * 7 + src * 31 + dst * 17) & 0xFF);
-
-                fixed (byte* p = pattern)
-                    CudaDriverApi.cuMemcpyHtoD(srcBuf, (IntPtr)p, new UIntPtr(testBytes)).ThrowOnError();
-
-                // Allocate on destination GPU (zero-fill so a failed copy is visible).
-                allocators[dst].Context.MakeCurrent();
-                CudaDriverApi.cuMemAlloc(out dstBuf, new UIntPtr(testBytes)).ThrowOnError();
-                CudaDriverApi.cuMemsetD8(dstBuf, 0, new UIntPtr(testBytes)).ThrowOnError();
-
-                // Peer copy: src GPU → dst GPU, enqueued on dst's stream.
-                CudaDriverApi.cuMemcpyPeerAsync(
-                    dstBuf, allocators[dst].Context.Handle,
-                    srcBuf, allocators[src].Context.Handle,
-                    new UIntPtr(testBytes),
-                    allocators[dst].Stream.Handle).ThrowOnError();
-
-                allocators[dst].Stream.Synchronize();
-
-                // Read back and compare.
-                var readback = new byte[testBytes];
-                fixed (byte* r = readback)
-                    CudaDriverApi.cuMemcpyDtoH((IntPtr)r, dstBuf, new UIntPtr(testBytes)).ThrowOnError();
-
-                for (int k = 0; k < testBytes; k++)
+                _stagingCandidate.Allocate(bytes);
+                _staging = _stagingCandidate;
+                _stagingCandidate = null;
+            }
+            catch (Exception original)
+            {
+                try
                 {
-                    if (readback[k] != pattern[k])
-                        return false;
+                    if (CudaP2PEffectOwner.IsHealthy(_stagingCandidate.Calls))
+                    {
+                        _stagingCandidate.Release();
+                        _stagingCandidate = null;
+                    }
                 }
+                catch (Exception cleanup)
+                {
+                    _failure = new AggregateException(original, cleanup);
+                    ExceptionDispatchInfo.Capture(_failure).Throw();
+                }
+                throw;
+            }
+        }
 
+        internal void AllReduce(CudaCollectiveOperation operation)
+        {
+            _owner.ThrowIfRetiring();
+            operation.ValidateAllocators(_allocators);
+            if (!_initialized || _released) throw new InvalidOperationException("Peer access is not available.");
+            for (int rank = 0; rank < _worldSize; rank++)
+            {
+                _owner.ThrowIfRetiring();
+                operation.Check();
+                operation.MarkPending(rank);
+                operation.Storages[rank].EnsureDeviceCurrent();
+            }
+            for (int rank = 0; rank < _worldSize; rank++)
+            {
+                _allocators[rank].Synchronize();
+                operation.RecordDrained(rank);
+            }
+            for (int rank = 1; rank < _worldSize; rank++)
+            {
+                _owner.ThrowIfRetiring();
+                operation.Check();
+                if (CanAccessPeer(rank, 0) && _allocators[0].Kernels != null)
+                {
+                    EnsureStagingBuffer(operation.ByteCount);
+                    IntPtr source = operation.Storages[rank].DevicePtrAtElement(0);
+                    IntPtr destination = operation.Storages[0].DevicePtrAtElement(0);
+                    var peer = operation.PeerEffect(rank, 0);
+                    operation.MarkPending(0);
+                    using (var lease = peer.Calls.EnterEffect())
+                    {
+                        _allocators[0].Context.BindCurrent(peer.Calls);
+                        peer.Calls.ThrowOnError(peer.Calls.cuMemcpyPeerAsync(
+                            _staging.Pointer, _allocators[0].Context.Handle,
+                            source, _allocators[rank].Context.Handle,
+                            new UIntPtr((ulong)operation.ByteCount), _allocators[0].Stream.Handle));
+                    }
+                    var launch = operation.RankEffect(0);
+                    operation.MarkPending(0);
+                    using (var lease = launch.Calls.EnterEffect())
+                    {
+                        _allocators[0].Context.BindCurrent(launch.Calls);
+                        _allocators[0].Kernels.LaunchBinaryF32(destination, _staging.Pointer, destination,
+                            operation.ElementCount, 0, _allocators[0].Stream.Handle);
+                    }
+                }
+                else AllReduceViaHost(operation, rank, 0);
+            }
+            operation.DrainPending();
+            _allocators[0].Synchronize();
+            for (int rank = 1; rank < _worldSize; rank++)
+            {
+                _owner.ThrowIfRetiring();
+                operation.Check();
+                if (CanAccessPeer(0, rank))
+                {
+                    IntPtr source = operation.Storages[0].DevicePtrAtElement(0);
+                    IntPtr destination = operation.Storages[rank].DevicePtrAtElement(0);
+                    var peer = operation.PeerEffect(0, rank);
+                    operation.MarkPending(rank);
+                    using var lease = peer.Calls.EnterEffect();
+                    _allocators[rank].Context.BindCurrent(peer.Calls);
+                    peer.Calls.ThrowOnError(peer.Calls.cuMemcpyPeerAsync(
+                        destination, _allocators[rank].Context.Handle,
+                        source, _allocators[0].Context.Handle,
+                        new UIntPtr((ulong)operation.ByteCount), _allocators[rank].Stream.Handle));
+                }
+                else BroadcastViaHost(operation, 0, rank);
+            }
+            operation.DrainPending();
+            for (int rank = 0; rank < _worldSize; rank++)
+            {
+                _owner.ThrowIfRetiring();
+                operation.Check();
+                _allocators[rank].Synchronize();
+            }
+            for (int rank = 0; rank < _worldSize; rank++)
+            {
+                _owner.ThrowIfRetiring();
+                operation.Check();
+                operation.Storages[rank].MarkDeviceModified();
+            }
+        }
+
+        private void AllReduceViaHost(CudaCollectiveOperation operation, int sourceRank, int destinationRank)
+        {
+            var source = new float[operation.ElementCount];
+            var destination = new float[operation.ElementCount];
+            IntPtr sourceHost = operation.PinBuffer(source);
+            IntPtr destinationHost = operation.PinBuffer(destination);
+            Download(operation, sourceRank, sourceHost);
+            Download(operation, destinationRank, destinationHost);
+            for (int element = 0; element < operation.ElementCount; element++)
+                destination[element] += source[element];
+            _owner.ThrowIfRetiring();
+            operation.Check();
+            Upload(operation, destinationRank, destinationHost);
+        }
+
+        private void BroadcastViaHost(CudaCollectiveOperation operation, int sourceRank, int destinationRank)
+        {
+            var host = new float[operation.ElementCount];
+            IntPtr pointer = operation.PinBuffer(host);
+            Download(operation, sourceRank, pointer);
+            _owner.ThrowIfRetiring();
+            operation.Check();
+            Upload(operation, destinationRank, pointer);
+        }
+
+        private void Download(CudaCollectiveOperation operation, int rank, IntPtr hostPointer)
+        {
+            _owner.ThrowIfRetiring();
+            operation.Check();
+            IntPtr device = operation.Storages[rank].DevicePtrAtElement(0);
+            var phase = operation.RankEffect(rank);
+            using var lease = phase.Calls.EnterEffect();
+            _allocators[rank].Context.BindCurrent(phase.Calls);
+            phase.Calls.ThrowOnError(phase.Calls.cuMemcpyDtoH(hostPointer, device,
+                new UIntPtr((ulong)operation.ByteCount)));
+        }
+
+        private void Upload(CudaCollectiveOperation operation, int rank, IntPtr hostPointer)
+        {
+            IntPtr device = operation.Storages[rank].DevicePtrAtElement(0);
+            var phase = operation.RankEffect(rank);
+            operation.MarkDefaultPending(rank);
+            using var lease = phase.Calls.EnterEffect();
+            _allocators[rank].Context.BindCurrent(phase.Calls);
+            phase.Calls.ThrowOnError(phase.Calls.cuMemcpyHtoD(device, hostPointer,
+                new UIntPtr((ulong)operation.ByteCount)));
+        }
+
+        internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (_released) return;
+            foreach (CudaAllocator allocator in _allocators)
+                if (!plan.Owns(allocator)) throw new InvalidOperationException("P2P cleanup requires its actual owning plan.");
+            try
+            {
+                using (var validation = _calls.EnterEffect()) _calls.ValidateSafeRelease(validation);
+                _probe?.Release();
+                if (_probe != null && !_probe.Released)
+                {
+                    if (_failure != null) ExceptionDispatchInfo.Capture(_failure).Throw();
+                    _calls.ThrowIfQuarantined();
+                }
+                _probe = null;
+                _stagingCandidate?.Release();
+                _stagingCandidate = null;
+                _staging?.Release();
+                _staging = null;
+                foreach (var phase in _initializationEffects) phase.Complete();
+                using (var completion = _calls.EnterEffect()) _calls.CompleteSafeRelease(completion);
+                _released = true;
+            }
+            catch (Exception failure)
+            {
+                _failure = failure;
+                restoration?.MarkCleanupFailed();
+                throw;
+            }
+        }
+
+        private sealed class ProbeOwner
+        {
+            private readonly CudaP2PCommunicator _parent;
+            private readonly CudaAllocator _source;
+            private readonly CudaAllocator _destination;
+            private readonly CudaNativeCalls _calls;
+            private ProbeBufferOwner _sourceBuffer;
+            private ProbeBufferOwner _destinationBuffer;
+            private CudaP2PEffectOwner _pair;
+            private byte[] _pattern;
+            private byte[] _readback;
+            private GCHandle _patternPin;
+            private GCHandle _readbackPin;
+            private bool _sourceDefaultPending;
+            private bool _destinationDefaultPending;
+            private bool _destinationPeerPending;
+            internal Exception Failure;
+            internal bool Released { get; private set; }
+
+            internal ProbeOwner(CudaP2PCommunicator parent, CudaAllocator source, CudaAllocator destination)
+            {
+                _parent = parent;
+                _source = source;
+                _destination = destination;
+                _calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, source.NativeCalls.Api,
+                    new[] { source.DeviceId, destination.DeviceId }.Distinct().ToArray());
+            }
+
+            internal bool Run(int sourceRank, int destinationRank)
+            {
+                const int bytes = 4096;
+                _pattern = new byte[bytes];
+                _readback = new byte[bytes];
+                for (int element = 0; element < bytes; element++)
+                    _pattern[element] = (byte)((element * 7 + sourceRank * 31 + destinationRank * 17) & 0xFF);
+                _patternPin = GCHandle.Alloc(_pattern, GCHandleType.Pinned);
+                _readbackPin = GCHandle.Alloc(_readback, GCHandleType.Pinned);
+                _sourceBuffer = new ProbeBufferOwner(this, _source);
+                _sourceBuffer.Allocate(bytes);
+                _sourceDefaultPending = true;
+                using (var lease = _sourceBuffer.Calls.EnterEffect())
+                {
+                    _source.Context.BindCurrent(_sourceBuffer.Calls);
+                    _sourceBuffer.Calls.ThrowOnError(_sourceBuffer.Calls.cuMemcpyHtoD(
+                        _sourceBuffer.Pointer, _patternPin.AddrOfPinnedObject(), new UIntPtr(bytes)));
+                }
+                _destinationBuffer = new ProbeBufferOwner(this, _destination);
+                _destinationBuffer.Allocate(bytes);
+                _destinationDefaultPending = true;
+                using (var lease = _destinationBuffer.Calls.EnterEffect())
+                {
+                    _destination.Context.BindCurrent(_destinationBuffer.Calls);
+                    _destinationBuffer.Calls.ThrowOnError(_destinationBuffer.Calls.cuMemsetD8(
+                        _destinationBuffer.Pointer, 0, new UIntPtr(bytes)));
+                }
+                _sourceBuffer.DrainDefaultWork();
+                _sourceDefaultPending = false;
+                _destinationBuffer.DrainDefaultWork();
+                _destinationDefaultPending = false;
+                _pair = new CudaP2PEffectOwner(this, new[] { _source, _destination });
+                _destinationPeerPending = true;
+                using (var lease = _pair.Calls.EnterEffect())
+                {
+                    _destination.Context.BindCurrent(_pair.Calls);
+                    _pair.Calls.ThrowOnError(_pair.Calls.cuMemcpyPeerAsync(
+                        _destinationBuffer.Pointer, _destination.Context.Handle,
+                        _sourceBuffer.Pointer, _source.Context.Handle,
+                        new UIntPtr(bytes), _destination.Stream.Handle));
+                }
+                _destination.Stream.Synchronize();
+                _destinationPeerPending = false;
+                using (var lease = _destinationBuffer.Calls.EnterEffect())
+                {
+                    _destination.Context.BindCurrent(_destinationBuffer.Calls);
+                    _destinationBuffer.Calls.ThrowOnError(_destinationBuffer.Calls.cuMemcpyDtoH(
+                        _readbackPin.AddrOfPinnedObject(), _destinationBuffer.Pointer, new UIntPtr(bytes)));
+                }
+                for (int element = 0; element < bytes; element++)
+                    if (_readback[element] != _pattern[element]) return false;
                 return true;
             }
-            catch
+
+            internal void Release()
             {
-                // Any CUDA error during the self-test → treat P2P as broken.
-                return false;
-            }
-            finally
-            {
-                if (srcBuf != IntPtr.Zero)
+                if (Released) return;
+                bool healthy = CudaP2PEffectOwner.IsHealthy(_calls);
+                if (healthy)
                 {
-                    allocators[src].Context.MakeCurrent();
-                    CudaDriverApi.cuMemFree(srcBuf);
+                    using var validation = _calls.EnterEffect();
+                    _calls.ValidateSafeRelease(validation);
                 }
-                if (dstBuf != IntPtr.Zero)
+                List<Exception> failures = null;
+                if (_sourceDefaultPending && CudaP2PEffectOwner.IsHealthy(_source.NativeCalls))
                 {
-                    allocators[dst].Context.MakeCurrent();
-                    CudaDriverApi.cuMemFree(dstBuf);
+                    try { _sourceBuffer.DrainDefaultWork(); _sourceDefaultPending = false; }
+                    catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
+                }
+                if (_destinationDefaultPending && CudaP2PEffectOwner.IsHealthy(_destination.NativeCalls))
+                {
+                    try { _destinationBuffer.DrainDefaultWork(); _destinationDefaultPending = false; }
+                    catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
+                }
+                if (_destinationPeerPending && CudaP2PEffectOwner.IsHealthy(_destination.NativeCalls))
+                {
+                    try { _destination.Stream.Synchronize(); _destinationPeerPending = false; }
+                    catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
+                }
+                if (failures != null)
+                    throw failures.Count == 1 ? failures[0] : new AggregateException(failures);
+                if (_sourceDefaultPending || _destinationDefaultPending || _destinationPeerPending
+                    || !CudaP2PEffectOwner.IsHealthy(_calls)) return;
+                _sourceBuffer?.Release();
+                _destinationBuffer?.Release();
+                _pair?.Complete();
+                if (_patternPin.IsAllocated) { _patternPin.Free(); _patternPin = default; }
+                if (_readbackPin.IsAllocated) { _readbackPin.Free(); _readbackPin = default; }
+                using (var completion = _calls.EnterEffect()) _calls.CompleteSafeRelease(completion);
+                Released = true;
+                _pattern = null;
+                _readback = null;
+                GC.KeepAlive(_parent);
+            }
+
+            private sealed class ProbeBufferOwner
+            {
+                private readonly ProbeOwner _parent;
+                private readonly CudaAllocator _allocator;
+                internal readonly CudaNativeCalls Calls;
+                internal IntPtr Pointer;
+                internal long Capacity;
+
+                internal ProbeBufferOwner(ProbeOwner parent, CudaAllocator allocator)
+                {
+                    _parent = parent;
+                    _allocator = allocator;
+                    Calls = new CudaNativeCalls(this, NativeOwnerRole.Storage, allocator.NativeCalls.Api, allocator.DeviceId);
+                }
+
+                internal void Allocate(long bytes)
+                {
+                    using var lease = Calls.EnterEffect();
+                    _allocator.Context.BindCurrent(Calls);
+                    Calls.ThrowOnError(Calls.cuMemAlloc(out Pointer, new UIntPtr((ulong)bytes)));
+                    Capacity = bytes;
+                }
+
+                internal void DrainDefaultWork()
+                {
+                    using var lease = Calls.EnterEffect();
+                    _allocator.Context.BindCurrent(Calls);
+                    Calls.cuCtxSynchronize();
+                }
+
+                internal void Release()
+                {
+                    using var lease = Calls.EnterEffect();
+                    Calls.ValidateSafeRelease(lease);
+                    if (Pointer != IntPtr.Zero)
+                    {
+                        _allocator.Context.BindCurrent(Calls);
+                        Calls.cuMemFree(Pointer);
+                        Pointer = IntPtr.Zero;
+                        Capacity = 0;
+                    }
+                    Calls.CompleteSafeRelease(lease);
+                    GC.KeepAlive(_parent);
                 }
             }
         }
 
-        /// <summary>
-        /// True when a peer DMA moving data FROM GPU <paramref name="from"/> TO GPU
-        /// <paramref name="to"/> is known good. Matches the direction convention of
-        /// <see cref="VerifyP2PRoundTrip"/> (which writes on <c>src</c> and reads
-        /// back on <c>dst</c>) and of <see cref="CudaStorage.CopyDeviceFrom"/>.
-        /// Callers must pass the direction the BYTES travel, not the direction of
-        /// the context that happens to enqueue the copy.
-        /// </summary>
-        private bool CanAccessPeer(int from, int to) => _p2pEnabled[from * _worldSize + to];
-
-        private void EnsureStagingBuffer(long requiredBytes)
+        private sealed class StagingOwner
         {
-            if (_stagingBufferBytes >= requiredBytes)
-                return;
+            private readonly CudaP2PCommunicator _parent;
+            private readonly CudaAllocator _allocator;
+            internal readonly CudaNativeCalls Calls;
+            internal IntPtr Pointer;
+            internal long Capacity;
 
-            if (_stagingBuffer != IntPtr.Zero)
+            internal StagingOwner(CudaP2PCommunicator parent, CudaAllocator allocator)
             {
-                _allocators[0].Context.MakeCurrent();
-                CudaDriverApi.cuMemFree(_stagingBuffer);
+                _parent = parent;
+                _allocator = allocator;
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.Storage, allocator.NativeCalls.Api, allocator.DeviceId);
             }
 
-            _allocators[0].Context.MakeCurrent();
-            CudaDriverApi.cuMemAlloc(out _stagingBuffer, new UIntPtr((ulong)requiredBytes)).ThrowOnError();
-            _stagingBufferBytes = requiredBytes;
-        }
-
-        /// <summary>
-        /// In-place AllReduce (sum) across all GPUs. After this call, every
-        /// tensor in <paramref name="tensors"/> holds the element-wise sum of
-        /// all input values. tensors[i] must reside on GPU i.
-        /// </summary>
-        public void AllReduce(Tensor[] tensors)
-        {
-            if (tensors == null || tensors.Length != _worldSize)
-                throw new ArgumentException($"Expected {_worldSize} tensors, got {tensors?.Length ?? 0}.");
-
-            long byteCount = tensors[0].Storage.ByteLength;
-            int elementCount = (int)tensors[0].Storage.ElementCount;
-
-            // Flush any pending HOST writes to the device before we read the raw
-            // device pointers below. A partial that was accumulated host-side (any
-            // GetFloatPtr/PtrAtElement checkout marks the storage host-dirty) still
-            // has a STALE device buffer until this runs, and we would reduce the
-            // stale contents. Mirrors CudaStorage.CopyDeviceFrom, which does the
-            // same before a cross-device copy.
-            for (int i = 0; i < _worldSize; i++)
-                ((CudaStorage)tensors[i].Storage).EnsureDeviceCurrent();
-
-            // Synchronize all GPUs to ensure partial results are complete
-            // (this also flushes the async HtoD uploads issued just above).
-            for (int i = 0; i < _worldSize; i++)
-                _allocators[i].Synchronize();
-
-            // Phase 1: Reduce to GPU 0.
-            _allocators[0].Context.MakeCurrent();
-            for (int i = 1; i < _worldSize; i++)
+            internal void Allocate(long bytes)
             {
-                IntPtr srcPtr = DevicePtr(tensors[i]);
-                IntPtr dstPtr = DevicePtr(tensors[0]);
+                using var lease = Calls.EnterEffect();
+                _allocator.Context.BindCurrent(Calls);
+                Calls.ThrowOnError(Calls.cuMemAlloc(out Pointer, new UIntPtr((ulong)bytes)));
+                Capacity = bytes;
+            }
 
-                // The bytes travel FROM GPU i TO GPU 0, so that is the direction to
-                // vet. This used to ask CanAccessPeer(0, i) — the opposite link.
-                // On a host where only one direction of a pair is corrupt (the
-                // self-test above flags exactly that) the reduce then ran its
-                // cuMemcpyPeerAsync over the known-bad direction while consulting
-                // the healthy one, silently summing garbage into rank 0 on every
-                // row-parallel layer.
-                if (CanAccessPeer(i, 0) && _allocators[0].Kernels != null)
+            internal void Release()
+            {
+                using var lease = Calls.EnterEffect();
+                Calls.ValidateSafeRelease(lease);
+                if (Pointer != IntPtr.Zero)
                 {
-                    // P2P copy: GPU i → GPU 0 staging, then add.
-                    EnsureStagingBuffer(byteCount);
-                    CudaDriverApi.cuMemcpyPeerAsync(
-                        _stagingBuffer, _allocators[0].Context.Handle,
-                        srcPtr, _allocators[i].Context.Handle,
-                        new UIntPtr((ulong)byteCount),
-                        _allocators[0].Stream.Handle).ThrowOnError();
-
-                    _allocators[0].Kernels.LaunchBinaryF32(
-                        dstPtr, _stagingBuffer, dstPtr,
-                        elementCount, 0, // op=0 → Add
-                        _allocators[0].Stream.Handle);
+                    _allocator.Context.BindCurrent(Calls);
+                    Calls.cuMemFree(Pointer);
+                    Pointer = IntPtr.Zero;
+                    Capacity = 0;
                 }
-                else
-                {
-                    // Fallback: stage through host memory.
-                    AllReduceViaHost(tensors[0], tensors[i], elementCount, byteCount);
-                }
-            }
-
-            _allocators[0].Synchronize();
-
-            // Phase 2: Broadcast from GPU 0 to all other GPUs.
-            IntPtr resultPtr = DevicePtr(tensors[0]);
-            for (int i = 1; i < _worldSize; i++)
-            {
-                _allocators[i].Context.MakeCurrent();
-                IntPtr dstPtr = DevicePtr(tensors[i]);
-
-                // Bytes travel FROM GPU 0 TO GPU i here (the mirror image of the
-                // reduce above), so vet that direction.
-                if (CanAccessPeer(0, i))
-                {
-                    CudaDriverApi.cuMemcpyPeerAsync(
-                        dstPtr, _allocators[i].Context.Handle,
-                        resultPtr, _allocators[0].Context.Handle,
-                        new UIntPtr((ulong)byteCount),
-                        _allocators[i].Stream.Handle).ThrowOnError();
-                }
-                else
-                {
-                    BroadcastViaHost(tensors[0], tensors[i], byteCount);
-                }
-            }
-
-            // Final sync so all GPUs have the reduced result.
-            for (int i = 0; i < _worldSize; i++)
-                _allocators[i].Synchronize();
-
-            // Every tensor's DEVICE buffer was just rewritten through raw pointers,
-            // which bypasses the storage's dirty tracking. Without this the flags
-            // still claim host and device agree (EnsureDeviceCurrent clears BOTH),
-            // so the next SyncHostFromDevice short-circuits on !deviceDirty and
-            // hands back the pre-AllReduce host contents — silently discarding the
-            // reduced result. Mark device-authoritative so host reads re-fetch.
-            for (int i = 0; i < _worldSize; i++)
-                ((CudaStorage)tensors[i].Storage).MarkDeviceModified();
-        }
-
-        private unsafe void AllReduceViaHost(Tensor dst, Tensor src, int elementCount, long byteCount)
-        {
-            // Copy src (GPU i) → host, copy dst (GPU 0) → host, add on host,
-            // then upload result back to GPU 0.  When CUDA kernels are
-            // unavailable we cannot use LaunchBinaryF32 on device, so the
-            // entire reduce happens on the CPU.
-            int srcDevice = ((CudaStorage)src.Storage).DeviceId;
-            int dstDevice = ((CudaStorage)dst.Storage).DeviceId;
-            var srcBuf = new float[elementCount];
-            var dstBuf = new float[elementCount];
-            fixed (float* srcPtr = srcBuf)
-            fixed (float* dstPtr = dstBuf)
-            {
-                _allocators[srcDevice].Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)srcPtr, DevicePtr(src),
-                    new UIntPtr((ulong)byteCount)).ThrowOnError();
-
-                _allocators[dstDevice].Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)dstPtr, DevicePtr(dst),
-                    new UIntPtr((ulong)byteCount)).ThrowOnError();
-
-                for (int j = 0; j < elementCount; j++)
-                    dstBuf[j] += srcBuf[j];
-
-                _allocators[0].Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyHtoD(DevicePtr(dst), (IntPtr)dstPtr,
-                    new UIntPtr((ulong)byteCount)).ThrowOnError();
-            }
-        }
-
-        private unsafe void BroadcastViaHost(Tensor src, Tensor dst, long byteCount)
-        {
-            int elementCount = (int)src.Storage.ElementCount;
-            var hostBuf = new float[elementCount];
-            fixed (float* hostPtr = hostBuf)
-            {
-                _allocators[0].Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)hostPtr, DevicePtr(src),
-                    new UIntPtr((ulong)byteCount)).ThrowOnError();
-
-                int dstDevice = dst.Storage.Allocator.DeviceId;
-                _allocators[dstDevice].Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyHtoD(DevicePtr(dst), (IntPtr)hostPtr,
-                    new UIntPtr((ulong)byteCount)).ThrowOnError();
-            }
-        }
-
-        public void Dispose()
-        {
-            if (_stagingBuffer != IntPtr.Zero)
-            {
-                _allocators[0].Context.MakeCurrent();
-                CudaDriverApi.cuMemFree(_stagingBuffer);
-                _stagingBuffer = IntPtr.Zero;
-                _stagingBufferBytes = 0;
+                Calls.CompleteSafeRelease(lease);
+                GC.KeepAlive(_parent);
             }
         }
     }
