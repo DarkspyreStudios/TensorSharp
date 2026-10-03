@@ -1061,21 +1061,31 @@ namespace TensorSharp.Models
         {
             if (_resourcesReleased) return;
             ThrowIfCleanupFailed();
-            using (var cleanupLease = plan.EnterModelCleanupEffect())
+            try
             {
-                try
+                // Child allocator retirement prepares cache snapshots outside native cleanup gates.
+                _engine?.DisposeOwned(plan, restoration);
+                _engine = null;
+                using (var cleanupLease = plan.EnterModelCleanupEffect())
                 {
-                    _engine?.DisposeOwned(plan, restoration);
-                    _engine = null;
-                    DisposeHostResources();
+                    try
+                    {
+                        DisposeHostResources();
+                    }
+                    catch (Exception failure)
+                    {
+                        _cleanupFailure ??= failure;
+                        restoration?.MarkCleanupFailed();
+                        plan.PublishModelCleanupFailure(cleanupLease, failure);
+                        throw;
+                    }
                 }
-                catch (Exception failure)
-                {
-                    _cleanupFailure ??= failure;
-                    restoration?.MarkCleanupFailed();
-                    plan.PublishModelCleanupFailure(cleanupLease, failure);
-                    throw;
-                }
+            }
+            catch (Exception failure)
+            {
+                _cleanupFailure ??= failure;
+                restoration?.MarkCleanupFailed();
+                throw;
             }
             _resourcesReleased = true;
             _retainedParent = null;
