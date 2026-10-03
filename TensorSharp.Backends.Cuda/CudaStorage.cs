@@ -13,6 +13,8 @@ namespace TensorSharp.Cuda
         private bool hostDirty;
         private bool deviceDirty;
         private readonly CudaNativeCalls nativeCalls;
+        private readonly CudaGraphCapture.StorageCapturePayload capturePayload;
+        private bool allocationIsRental;
         internal CudaStorageReservation Reservation { get; }
 
         public CudaStorage(CudaAllocator allocator, DType elementType, long elementCount)
@@ -23,6 +25,7 @@ namespace TensorSharp.Cuda
             : base(allocator, elementType, elementCount)
         {
             AllocatorImpl = allocator ?? throw new ArgumentNullException(nameof(allocator));
+            capturePayload = new CudaGraphCapture.StorageCapturePayload(this);
             if (ByteLength < 0)
                 throw new ArgumentOutOfRangeException(nameof(elementCount));
 
@@ -57,8 +60,11 @@ namespace TensorSharp.Cuda
 
         internal IntPtr AllocateDeviceMemory(long allocationBytes)
         {
+            CudaGraphCapture.CaptureContext capture = CudaGraphCapture.PrepareStorageTransfer(this, capturePayload);
             if (TryAllocateDeviceMemory(allocationBytes) == 2)
             {
+                if (CudaGraphCapture.CanTransferStorage(capture, capturePayload))
+                    throw new CudaGraphCaptureAbortedException("Device allocation requires reclamation during graph capture.");
                 // This allocation's lease exits before reclamation. This method does not
                 // release caller-owned outer native frames.
                 AllocatorImpl.ReclaimOutsideEffects();
@@ -77,6 +83,7 @@ namespace TensorSharp.Cuda
             int result = nativeCalls.cuMemAlloc(out deviceBuffer, new UIntPtr((ulong)allocationBytes));
             if (result == 2)
             {
+                if (CudaGraphCapture.CanTransferStorage(capturePayload.Context, capturePayload)) return result;
                 if (deviceBuffer != IntPtr.Zero)
                 {
                     nativeCalls.cuCtxSynchronize();
@@ -93,6 +100,7 @@ namespace TensorSharp.Cuda
         {
             deviceBuffer = pointer;
             deviceAllocationBytes = allocationBytes;
+            allocationIsRental = true;
         }
 
         internal CudaAllocator AllocatorImpl { get; }
@@ -104,10 +112,42 @@ namespace TensorSharp.Cuda
         protected override void Destroy()
         {
             if (Reservation == null || Reservation.State == CudaStorageReservationState.Released) return;
+            CudaGraphCapture.CaptureContext capture = CudaGraphCapture.PrepareStorageTransfer(this, capturePayload);
             bool graphsPending = AllocatorImpl.Census.BeginRelease(Reservation);
             if (nativeCalls == null)
             {
                 AllocatorImpl.Census.Complete(Reservation);
+                return;
+            }
+            if (capture != null)
+            {
+                using (var transferLease = nativeCalls.EnterEffect())
+                {
+                    nativeCalls.ValidateSafeRelease(transferLease);
+                    try
+                    {
+                        if (graphsPending)
+                            throw new InvalidOperationException("CUDA storage release cannot transfer pending parent graph ownership.");
+                        if (!CudaGraphCapture.CanTransferStorage(capture, capturePayload))
+                            throw new InvalidOperationException("The prepared storage capture is no longer active.");
+                        capturePayload.Device = deviceBuffer;
+                        capturePayload.Bytes = deviceAllocationBytes;
+                        capturePayload.PartialAllocation = !allocationIsRental;
+                        capturePayload.Host = hostBuffer;
+                        capturePayload.Transferred = true;
+                        deviceBuffer = IntPtr.Zero;
+                        deviceAllocationBytes = 0;
+                        hostBuffer = IntPtr.Zero;
+                        nativeCalls.CompleteSafeRelease(transferLease);
+                    }
+                    catch (Exception cleanup)
+                    {
+                        nativeCalls.PublishFailure(transferLease, cleanup, NativeRuntimeFailureStage.StorageRelease);
+                        throw;
+                    }
+                }
+                AllocatorImpl.Census.Complete(Reservation);
+                AllocatorImpl.ReturnCapturedPayloadToPool(capturePayload);
                 return;
             }
             using (var lease = nativeCalls.EnterEffect())

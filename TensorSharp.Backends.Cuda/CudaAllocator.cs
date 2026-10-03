@@ -117,6 +117,15 @@ namespace TensorSharp.Cuda
             pool.Return(ptr, allocationBytes);
         }
 
+        internal void ReturnCapturedPayloadToPool(CudaGraphCapture.StorageCapturePayload payload)
+        {
+            if (!ReferenceEquals(payload.Source.AllocatorImpl, this) || !payload.Transferred
+                || !CudaGraphCapture.CanTransferStorage(payload.Context, payload))
+                throw new InvalidOperationException("The payload does not belong to this active capture.");
+            if (payload.Device == IntPtr.Zero || payload.PartialAllocation || payload.PoolOwned) return;
+            if (pool.TryReturnToPool(payload.Device, payload.Bytes)) payload.PoolOwned = true;
+        }
+
         /// <summary>Remove a specific free block from the pool so a cached CUDA
         /// graph can own it (see <see cref="CudaPrefillGraphCache"/>).</summary>
         internal bool TryStealPooledBlock(IntPtr ptr, long allocationBytes)
