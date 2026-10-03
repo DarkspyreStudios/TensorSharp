@@ -633,17 +633,20 @@ namespace TensorSharp.Models.WanVideo
         public void Dispose()
         {
             _model.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            DisposeResources(false);
         }
 
-        internal void DisposeOwned()
+        internal void DisposeOwned() => DisposeResources(true);
+
+        private void DisposeResources(bool modelOwned)
         {
             _model.ThrowIfUnsafeOwnershipCleanup();
             _te?.Dispose();
             _dit?.Dispose();
             _ditLow?.Dispose();
             _vae?.Dispose();
-            _dctx?.Dispose();
+            if (modelOwned) _dctx?.DisposeOwned();
+            else _dctx?.Dispose();
         }
     }
 

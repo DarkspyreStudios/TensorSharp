@@ -27,6 +27,7 @@ internal sealed class CudaStorageCensus
     private bool _parentGraphsPending;
     private bool _bareBusyDeclined;
     private int _activeOperations;
+    private bool _cacheRetirementActive;
 
     internal CudaStorageCensus(CudaAllocator allocator) => Allocator = allocator;
 
@@ -79,6 +80,7 @@ internal sealed class CudaStorageCensus
     {
         ValidateAddition();
         Allocator.NativeCalls.ThrowIfQuarantined();
+        if (_cacheRetirementActive) throw new CudaAllocatorBusyException(Allocator);
         if (_activeOperations == int.MaxValue)
             throw new InvalidOperationException("CUDA operation admission count is exhausted.");
     }
@@ -88,6 +90,22 @@ internal sealed class CudaStorageCensus
         if (!System.Threading.Monitor.IsEntered(Gate))
             throw new InvalidOperationException("CUDA operation admission requires its census gate.");
         _activeOperations++;
+    }
+
+    internal void AdmitCacheRetirement()
+    {
+        ValidateOperationAdmission();
+        if (_activeOperations != 0) throw new CudaAllocatorBusyException(Allocator);
+        _cacheRetirementActive = true;
+        _activeOperations++;
+    }
+
+    internal void ReleaseCacheRetirement()
+    {
+        if (!System.Threading.Monitor.IsEntered(Gate) || !_cacheRetirementActive || _activeOperations != 1)
+            throw new InvalidOperationException("CUDA cache retirement requires its exclusive counted reservation.");
+        _cacheRetirementActive = false;
+        _activeOperations--;
     }
 
     internal void ReleaseOperation()

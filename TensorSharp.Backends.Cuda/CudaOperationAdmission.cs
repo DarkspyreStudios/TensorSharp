@@ -11,11 +11,13 @@ internal sealed class CudaOperationAdmission : IDisposable
     private readonly object _owner;
     private readonly CudaAllocator[] _allocators;
     private int _released;
+    private readonly bool _cacheRetirement;
 
-    private CudaOperationAdmission(object owner, CudaAllocator[] allocators)
+    private CudaOperationAdmission(object owner, CudaAllocator[] allocators, bool cacheRetirement = false)
     {
         _owner = owner;
         _allocators = allocators;
+        _cacheRetirement = cacheRetirement;
     }
 
     internal static CudaOperationAdmission Enter(object owner, CudaAllocator[] actualAllocators)
@@ -60,6 +62,16 @@ internal sealed class CudaOperationAdmission : IDisposable
             throw new InvalidOperationException("CUDA operation admission does not cover the actual allocator.");
     }
 
+    internal static CudaOperationAdmission EnterCacheRetirement(CudaAllocator allocator)
+    {
+        var admission = new CudaOperationAdmission(allocator, new[] { allocator }, true);
+        lock (allocator.Census.Gate)
+        {
+            allocator.Census.AdmitCacheRetirement();
+        }
+        return admission;
+    }
+
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _released, 1) != 0) return;
@@ -71,7 +83,9 @@ internal sealed class CudaOperationAdmission : IDisposable
                 Monitor.Enter(allocator.Census.Gate);
                 entered++;
             }
-            foreach (CudaAllocator allocator in _allocators) allocator.Census.ReleaseOperation();
+            foreach (CudaAllocator allocator in _allocators)
+                if (_cacheRetirement) allocator.Census.ReleaseCacheRetirement();
+                else allocator.Census.ReleaseOperation();
         }
         finally
         {

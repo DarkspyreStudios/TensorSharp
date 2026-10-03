@@ -274,34 +274,45 @@ namespace TensorSharp.Cuda
         {
             if (Volatile.Read(ref disposed) != 0) return;
             var scratch = CudaQuantizedOps.ScratchRetirement.Prepare(this);
-            using (var lease = nativeCalls.EnterEffect())
+            var weights = CudaQuantizedOps.WeightRetirement.Prepare(this);
+            bool releaseEligible = false;
+            try
             {
-                nativeCalls.ValidateSafeRelease(lease);
-                try
+                using (var lease = nativeCalls.EnterEffect())
                 {
-                    if (Context != null)
+                    nativeCalls.ValidateSafeRelease(lease);
+                    releaseEligible = true;
+                    try
                     {
-                        Context.BindCurrent(nativeCalls);
-                        if (drain) nativeCalls.cuCtxSynchronize();
-                        scratch.Release();
-                        CudaQuantizedOps.ReleaseArena(this);
+                        if (Context != null)
+                        {
+                            Context.BindCurrent(nativeCalls);
+                            if (drain) nativeCalls.cuCtxSynchronize();
+                            scratch.Release();
+                            weights.Release();
+                        }
+                        pool?.DrainAndFree();
+                        Kernels?.Dispose();
+                        Blas?.Dispose();
+                        Stream?.Dispose();
+                        if (Context != null) Context.DisposeOwned(restoration);
+                        nativeCalls.CompleteSafeRelease(lease);
+                        Volatile.Write(ref disposed, 1);
                     }
-                    pool?.DrainAndFree();
-                    Kernels?.Dispose();
-                    Blas?.Dispose();
-                    Stream?.Dispose();
-                    if (Context != null) Context.DisposeOwned(restoration);
-                    nativeCalls.CompleteSafeRelease(lease);
-                    Volatile.Write(ref disposed, 1);
-                }
-                catch (Exception cleanup)
-                {
-                    restoration?.MarkCleanupFailed();
-                    nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.AllocatorRelease);
-                    throw;
+                    catch (Exception cleanup)
+                    {
+                        restoration?.MarkCleanupFailed();
+                        nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.AllocatorRelease);
+                        throw;
+                    }
                 }
             }
+            finally
+            {
+                if (!releaseEligible) weights.CancelBeforeRelease();
+            }
             scratch.Complete();
+            weights.Complete();
         }
 
         private void ThrowIfDisposed()

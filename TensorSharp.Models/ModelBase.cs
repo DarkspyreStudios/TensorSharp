@@ -2831,9 +2831,8 @@ namespace TensorSharp.Models
                     {
                         foreach (var qw in _quantWeights.Values)
                             CudaQuantizedOps.ReleaseQuantizedWeight(cudaAllocator, qw.CacheKey);
-                        // Individual releases drop entries; allocator-wide slabs remain with a borrowed group.
-                        if (!_allocatorFromTensorParallelGroup || ownsTensorParallelGroup)
-                            CudaQuantizedOps.ReleaseArena(cudaAllocator);
+                        // Slabs retire later with the actual owning allocator, after graphs and storage.
+                        // A borrowed allocator/group keeps its arena until its owner releases it.
                     }
 
                     if (_backend == BackendType.Mlx && _allocator is MlxAllocator mlxAllocator)

@@ -232,7 +232,14 @@ namespace TensorSharp.Models
         private void DisposeTensorParallelWeights()
         {
             foreach (var shards in _tpQuantWeights.Values)
-                foreach (var weight in shards) weight?.Dispose();
+                for (int rank = 0; rank < shards.Length; rank++)
+                {
+                    var weight = shards[rank];
+                    if (_backend == BackendType.Cuda && weight != null
+                        && _tpGroup.GetAllocator(rank) is CudaAllocator allocator)
+                        CudaQuantizedOps.ReleaseQuantizedWeight(allocator, weight.CacheKey);
+                    weight?.Dispose();
+                }
             _tpQuantWeights.Clear();
             foreach (var shards in _tpWeights.Values)
                 foreach (var weight in shards) weight?.Dispose();
@@ -1470,7 +1477,7 @@ namespace TensorSharp.Models
                         CudaQuantizedOps.PreloadQuantizedWeight(
                             alloc, cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
                     }
-                    catch (Exception ex) when (ex.Message.Contains("out of memory"))
+                    catch (TensorSharp.Cuda.Interop.CudaException ex) when (ex.ErrorCode == 2)
                     {
                         // With experts now preloaded this can fire thousands of
                         // times on an undersized GPU, so report the first per rank
@@ -1514,7 +1521,7 @@ namespace TensorSharp.Models
                         CudaQuantizedOps.PreloadQuantizedWeight(
                             cudaAllocator, cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
                     }
-                    catch (Exception ex) when (ex.Message.Contains("out of memory"))
+                    catch (TensorSharp.Cuda.Interop.CudaException ex) when (ex.ErrorCode == 2)
                     {
                         // GPU is full — keep the host copy so the CPU fallback
                         // path (EmbeddingManagedQuantized / AddmmQuantManaged)

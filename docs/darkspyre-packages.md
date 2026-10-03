@@ -338,9 +338,21 @@ generation records are reserved before native acquisition and remain visible unt
 allocator retirement; growth retains old generations for captured pointer lifetime. Scratch
 metadata snapshot and removal run outside the allocator's teardown effect. The known-context
 cuBLAS lease spans stream selection and GEMM. The public raw resident pointer remains borrowed.
-Legacy quantized cache/arena native cleanup and lock ordering, the earlier allocator acquisition
-interval and P2P effects remain incomplete. No runtime verification was performed after the
-test hold. These source limits prevent a complete CUDA ownership claim.
+Cached weights retain actual allocator-owned slabs and checked aligned byte intervals. Preload,
+matmul and row lookup count the actual allocator before reservations and upload. Row lookup reads
+actual tensor and slab pointers only under its known-device effect. Slab owners are reserved before
+native OUT acquisition. Cache reuse requires the same byte length, quantized type and dimensions.
+Concurrent publication validates the winning descriptor after upload and before kernel dispatch.
+Logical key invalidation does not free memory referenced by a graph.
+Standalone cache retirement declines active operations with retryable Busy before cleanup and
+releases its temporary admission fence on exit. Checked drain and slab release precede pointer
+clear; snapshot and metadata retirement run outside native effects. Model cleanup defers owning
+arena release to the later allocator cleanup, while borrowed allocator/group arenas stay with their
+owner. Model-owned Wan context cleanup omits the redundant allocator-wide clear. TP preload falls
+back only on the original CUDA out-of-memory error, not an aggregate cleanup failure.
+The earlier allocator acquisition interval, raw pointer tables, broader graph consumers and P2P
+effects remain incomplete. No runtime verification was performed after the test hold. These source
+limits prevent a complete CUDA ownership claim.
 
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
