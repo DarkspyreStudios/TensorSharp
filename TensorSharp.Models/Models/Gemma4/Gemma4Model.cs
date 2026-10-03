@@ -8294,6 +8294,7 @@ namespace TensorSharp.Models
             ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheK);
             ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheV);
             ModelDisposalOwnership.AddRange(ownedTensors, _tpVNormOnes);
+            ModelDisposalOwnership.Add(ownedTensors, _pipelineNextInputHidden, _pipelineNextPLE);
             ModelDisposalOwnership.Add(ownedTensors, _cudaDecodeGraphPleInput, _cudaDecodeRopeFreqsLocal,
                 _cudaDecodeRopeFreqsGlobal, _cudaDecodeRopeCosLocal, _cudaDecodeRopeSinLocal,
                 _cudaDecodeRopeCosGlobal, _cudaDecodeRopeSinGlobal, _onesForVNorm, _neoXRopeCosTensor, _neoXRopeSinTensor);
@@ -8341,6 +8342,10 @@ namespace TensorSharp.Models
         {
             _cudaDecodeGraphs?.Dispose();
             _cudaDecodeGraphs = null;
+            _pipelineNextInputHidden?.Dispose();
+            _pipelineNextInputHidden = null;
+            _pipelineNextPLE?.Dispose();
+            _pipelineNextPLE = null;
             // Free the on-device MoE per-expert pointer tables (raw device buffers)
             // while the allocator is still alive (base.Dispose frees the arena).
             if (_allocator is CudaAllocator moeCudaAllocator)
