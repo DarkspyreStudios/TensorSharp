@@ -1,5 +1,6 @@
 using System;
 using System.Net;
+using System.Collections.Generic;
 using TensorSharp.Cuda;
 
 namespace TensorSharp.Distributed
@@ -17,7 +18,7 @@ namespace TensorSharp.Distributed
     /// This minimises network traffic: only one buffer per AllReduce
     /// crosses the network, regardless of how many local GPUs participate.
     /// </summary>
-    public sealed class DistributedTensorParallelGroup : ITensorParallelGroup, INestedTensorParallelGroup
+    public sealed class DistributedTensorParallelGroup : ITensorParallelGroup, INestedTensorParallelGroup, ICudaTensorParallelRetirement
     {
         /// <summary>The group that owns this node's GPUs.</summary>
         public ITensorParallelGroup LocalGroup => _localGroup;
@@ -27,6 +28,7 @@ namespace TensorSharp.Distributed
         private readonly int _nodeId;
         private readonly int _nodeCount;
         private bool _disposed;
+        private bool _retirementRequested;
 
         // Reusable host buffers for GPU↔network transfers. Pinned so the
         // kernel can DMA directly to/from the NIC without an extra copy.
@@ -34,6 +36,33 @@ namespace TensorSharp.Distributed
         private float[] _resultBuffer = Array.Empty<float>();
         private System.Runtime.InteropServices.GCHandle _hostPin;
         private System.Runtime.InteropServices.GCHandle _resultPin;
+
+        internal DistributedTensorParallelGroup(TensorParallelGroup localGroup, float[] hostBuffer, float[] resultBuffer)
+        {
+            ArgumentNullException.ThrowIfNull(localGroup);
+            ArgumentNullException.ThrowIfNull(hostBuffer);
+            ArgumentNullException.ThrowIfNull(resultBuffer);
+            if (ReferenceEquals(hostBuffer, resultBuffer) || hostBuffer.Length != resultBuffer.Length)
+                throw new ArgumentException("Owned transfer buffers must be distinct and equal in length.");
+            try
+            {
+                _hostPin = System.Runtime.InteropServices.GCHandle.Alloc(hostBuffer,
+                    System.Runtime.InteropServices.GCHandleType.Pinned);
+                _resultPin = System.Runtime.InteropServices.GCHandle.Alloc(resultBuffer,
+                    System.Runtime.InteropServices.GCHandleType.Pinned);
+            }
+            catch
+            {
+                if (_hostPin.IsAllocated) _hostPin.Free();
+                if (_resultPin.IsAllocated) _resultPin.Free();
+                throw;
+            }
+            _localGroup = localGroup;
+            _nodeCount = 2;
+            _hostBuffer = hostBuffer;
+            _resultBuffer = resultBuffer;
+            _bufferSize = hostBuffer.Length;
+        }
 
         /// <param name="localDegree">Number of GPUs on this node.</param>
         /// <param name="nodeId">This node's ID (0..nodeCount-1).</param>
@@ -92,7 +121,15 @@ namespace TensorSharp.Distributed
         public IAllocator GetAllocator(int rank) => _localGroup.GetAllocator(rank);
 
         /// <summary>Delegate rank fan-out to the local group's dispatch policy.</summary>
-        public void RunPerRank(Action<int> body) => _localGroup.RunPerRank(body);
+        public void RunPerRank(Action<int> body)
+        {
+            ThrowIfRetiring();
+            _localGroup.RunPerRank(rank =>
+            {
+                ThrowIfRetiring();
+                body(rank);
+            });
+        }
 
         /// <summary>
         /// Hierarchical AllReduce: local P2P reduce → TCP reduce → local broadcast.
@@ -101,6 +138,7 @@ namespace TensorSharp.Distributed
         /// </summary>
         public void AllReduce(Tensor[] tensors)
         {
+            ThrowIfRetiring();
             if (tensors == null || tensors.Length != Degree)
                 throw new ArgumentException($"Expected {Degree} tensors, got {tensors?.Length ?? 0}.");
 
@@ -141,6 +179,7 @@ namespace TensorSharp.Distributed
         /// exchange between nodes remains.</summary>
         public void CrossNodeAllReduce(float[] buffer, int count)
         {
+            ThrowIfRetiring();
             ArgumentNullException.ThrowIfNull(buffer);
             if (count > 0)
                 _tcp.AllReduce(buffer, count);
@@ -148,21 +187,33 @@ namespace TensorSharp.Distributed
 
         public void Synchronize()
         {
+            ThrowIfRetiring();
             _localGroup.Synchronize();
         }
 
         /// <summary>Block until every node has reached this point.</summary>
         public void Barrier()
         {
+            ThrowIfRetiring();
             _localGroup.Synchronize();
             _tcp.Barrier();
         }
 
         /// <summary>Driver (node 0) broadcasts a control op + payload to worker nodes.</summary>
-        public void BroadcastControl(int op, int[] payload) => _tcp.BroadcastControl(op, payload);
+        public void BroadcastControl(int op, int[] payload)
+        {
+            ThrowIfRetiring();
+            _tcp.BroadcastControl(op, payload);
+        }
 
         /// <summary>Worker node blocks for the next control message from the driver.</summary>
-        public (int op, int[] payload) ReceiveControl() => _tcp.ReceiveControl();
+        public (int op, int[] payload) ReceiveControl()
+        {
+            ThrowIfRetiring();
+            var control = _tcp.ReceiveControl();
+            ThrowIfRetiring();
+            return control;
+        }
 
         private int _bufferSize;
 
@@ -187,13 +238,54 @@ namespace TensorSharp.Distributed
         public void Dispose()
         {
             if (_disposed) return;
-            _disposed = true;
+            _retirementRequested = true;
+            if (((ICudaTensorParallelRetirement)this).OwnsCudaAllocators)
+            {
+                var plan = CudaRetirementPlan.PrepareGroup(this, this);
+                var restoration = plan.CaptureRestoration();
+                plan.AllowStorageRelease();
+                ((ICudaTensorParallelRetirement)this).DisposeOwned(plan, restoration);
+                plan.Complete();
+                restoration?.Restore();
+                return;
+            }
 
+            DisposeTransport();
+            _localGroup?.Dispose();
+            _disposed = true;
+        }
+
+        void ICudaTensorParallelRetirement.CollectOwnedAllocators(ICollection<IAllocator> allocators)
+        {
+            if (_localGroup is ICudaTensorParallelRetirement local) local.CollectOwnedAllocators(allocators);
+        }
+
+        bool ICudaTensorParallelRetirement.OwnsCudaAllocators =>
+            _localGroup is ICudaTensorParallelRetirement local && local.OwnsCudaAllocators;
+
+        void ICudaTensorParallelRetirement.DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (_disposed) return;
+            if (_localGroup is not ICudaTensorParallelRetirement local)
+                throw new InvalidOperationException("CUDA retirement requires an actual local CUDA group.");
+            _retirementRequested = true;
+            plan.ValidateGroupRelease(this);
+            plan.Drain(restoration);
+            DisposeTransport();
+            local.DisposeOwned(plan, restoration);
+            _disposed = true;
+        }
+
+        private void DisposeTransport()
+        {
             if (_hostPin.IsAllocated) _hostPin.Free();
             if (_resultPin.IsAllocated) _resultPin.Free();
-
             _tcp?.Dispose();
-            _localGroup?.Dispose();
+        }
+
+        private void ThrowIfRetiring()
+        {
+            if (_retirementRequested) throw new ObjectDisposedException(nameof(DistributedTensorParallelGroup));
         }
     }
 }

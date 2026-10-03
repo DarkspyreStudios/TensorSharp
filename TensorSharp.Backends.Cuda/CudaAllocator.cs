@@ -244,6 +244,25 @@ namespace TensorSharp.Cuda
             ReleaseResources(restoration, true);
         }
 
+        internal void DrainForRetirement(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (!plan.Owns(this)) throw new InvalidOperationException("CUDA completion requires its actual retirement plan.");
+            if (Volatile.Read(ref disposed) != 0) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (Volatile.Read(ref disposed) != 0) return;
+            try
+            {
+                Context.BindCurrent(nativeCalls);
+                nativeCalls.cuCtxSynchronize();
+            }
+            catch (Exception failure)
+            {
+                restoration?.MarkCleanupFailed();
+                nativeCalls.PublishFailure(lease, failure, NativeRuntimeFailureStage.Synchronization);
+                throw;
+            }
+        }
+
         private void ReleaseConstruction()
         {
             var restoration = Context == null ? null : CudaContextRestoration.Capture(nativeCalls);

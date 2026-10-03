@@ -247,6 +247,16 @@ load no native code. First import binding applies the native environment tunable
 
 ## Native runtime ownership
 
+Direct CUDA groups compare every owned allocator's live storage references before communicator
+or rank teardown. The Distributed wrapper performs that preflight before releasing pins, TCP or
+its local CUDA group. Healthy Busy keeps allocation/reference and group execution admission
+fenced. Callers release escaped storage and explicitly retry disposal. Both group implementations
+carry one validated owning plan and one same-thread context restoration token through cleanup;
+child cleanup does not start a competing parent census or restore an intermediate context.
+The internal composition applies to the actual CUDA and Distributed implementations, not an
+arbitrary custom group. The managed checks do not qualify physical multi-device execution,
+communicator construction, TCP operation or model-family cleanup.
+
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
 code. `InitializeAsync(CancellationToken)` shares one initialization task for the same plan;

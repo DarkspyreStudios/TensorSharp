@@ -53,6 +53,32 @@ internal sealed class CudaRetirementPlan
         return plan;
     }
 
+    internal static CudaRetirementPlan PrepareGroup(object owner, ICudaTensorParallelRetirement group)
+    {
+        var allocators = new List<IAllocator>();
+        group.CollectOwnedAllocators(allocators);
+        return Prepare(owner, Array.Empty<Tensor>(), allocators, false);
+    }
+
+    internal CudaContextRestoration CaptureRestoration() => _allocators.Length == 0
+        ? null : CudaContextRestoration.Capture(_allocators[0].NativeCalls);
+
+    internal void Drain(CudaContextRestoration restoration)
+    {
+        foreach (CudaAllocator allocator in _allocators) allocator.DrainForRetirement(this, restoration);
+    }
+
+    internal void ValidateGroupRelease(ICudaTensorParallelRetirement group)
+    {
+        var allocators = new List<IAllocator>();
+        group.CollectOwnedAllocators(allocators);
+        if (!group.OwnsCudaAllocators || allocators.Count == 0)
+            throw new InvalidOperationException("CUDA group cleanup requires actual owned CUDA allocators.");
+        foreach (IAllocator candidate in allocators)
+            if (candidate is not CudaAllocator allocator || !Owns(allocator) || allocator.Census.HasChildren)
+                throw new InvalidOperationException("CUDA group cleanup requires its fully drained owning plan.");
+    }
+
     private bool Validate(bool graphsPending)
     {
         int entered = 0;
