@@ -8,6 +8,21 @@ public abstract partial class ModelBase
     private bool _ownershipRetirementStarted;
     private bool _ownershipResourcesReleased;
     private System.Action<CudaRetirementPlan, CudaContextRestoration> _releaseOwnedChildren;
+    private readonly NativeConstructionCleanupHandle _constructionCleanup;
+    private bool _constructionOwnsTensorParallelGroup;
+    private System.Action _constructionReleaseResources;
+    private System.Action _constructionReleaseAfterCaches;
+    private System.Action _constructionReleaseGraphs;
+    private System.Action<ICollection<Tensor>, ICollection<IAllocator>> _constructionCollector;
+
+    private void RetryConstructionCleanup()
+    {
+        if (_ownershipCleanupFailed && _ownershipCleanupFailure != null)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_ownershipCleanupFailure).Throw();
+        DisposeBaseResources(_constructionOwnsTensorParallelGroup, _constructionReleaseResources,
+            _constructionReleaseAfterCaches, constructionRollback: true,
+            releaseDerivedGraphs: _constructionReleaseGraphs, collectDerivedOwnership: _constructionCollector);
+    }
 
     internal void SetOwnedChildRelease(System.Action<CudaRetirementPlan, CudaContextRestoration> release)
         => _releaseOwnedChildren = release;

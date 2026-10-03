@@ -276,6 +276,8 @@ namespace TensorSharp.Models
             NativeDequant.PreferManaged = backend == BackendType.Cpu;
             ExecutionPlan = new BackendExecutionPlan(backend);
             MultimodalInjector = new ModelMultimodalInjector(this);
+            _constructionCleanup = new NativeConstructionCleanupHandle(this, RetryConstructionCleanup,
+                () => _ownershipResourcesReleased, () => _ownershipCleanupFailed);
 
             try
             {
@@ -288,10 +290,12 @@ namespace TensorSharp.Models
                 {
                     case BackendType.GgmlCpu:
                         _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Cpu);
+                        _ownsGgmlContext = true;
                         _allocator = new GgmlAllocator(_ggmlContext, 0);
                         break;
                     case BackendType.GgmlMetal:
                         _ggmlContext = new GgmlContext(new[] { 0 }, GgmlBackendType.Metal);
+                        _ownsGgmlContext = true;
                         _allocator = new GgmlAllocator(_ggmlContext, 0);
                         break;
                     case BackendType.GgmlCuda:
@@ -309,6 +313,7 @@ namespace TensorSharp.Models
                                 // and leaving it set would also make the startup banner claim a
                                 // transport that is never used.
                                 _ggmlContext = CreateGgmlContext(ggmlType, LayerSplitDegree, enableCollectives: false);
+                                _ownsGgmlContext = true;
                                 _allocator = new GgmlAllocator(_ggmlContext, 0);
                             }
                             else
@@ -316,7 +321,9 @@ namespace TensorSharp.Models
                                 // A caller-supplied group (multi-node) already owns the
                                 // multi-GPU context; reuse it rather than initializing the
                                 // devices a second time.
-                                _ggmlContext = FindGgmlContext(_tpGroup) ?? CreateGgmlContext(ggmlType, tpDegree);
+                                var inheritedContext = FindGgmlContext(_tpGroup);
+                                _ggmlContext = inheritedContext ?? CreateGgmlContext(ggmlType, tpDegree);
+                                _ownsGgmlContext = inheritedContext == null;
                                 _tpGroup ??= CreateGgmlTpGroup(_ggmlContext);
                                 _allocatorFromTensorParallelGroup = _tpGroup != null;
                                 _allocator = _tpGroup != null ? _tpGroup.GetAllocator(0) : new GgmlAllocator(_ggmlContext, 0);
@@ -337,7 +344,6 @@ namespace TensorSharp.Models
                     default:
                         throw new ArgumentException($"Unsupported backend: {backend}");
                 }
-                _ownsGgmlContext = _ggmlContext != null && !ReferenceEquals(_ggmlContext, FindGgmlContext(tpGroup));
                 _ggmlRuntimeLease = _ggmlContext == null ? null : GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
                 Console.WriteLine($"Backend: {backend}");
 
@@ -362,19 +368,7 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                try
-                {
-                    if (!ReferenceEquals(_tpGroup, tpGroup)) _tpGroup?.Dispose();
-                    if (!_allocatorFromTensorParallelGroup && _allocator is IDisposable allocator) allocator.Dispose();
-                    if (_ggmlContext != null && !ReferenceEquals(_ggmlContext, FindGgmlContext(tpGroup)))
-                        _ggmlContext.Dispose();
-                    _ggmlRuntimeLease?.Dispose();
-                }
-                catch (Exception cleanupError)
-                {
-                    RetainFailedModelOwnership(cleanupFailure: cleanupError);
-                    throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
-                }
+                RollBackFailedConstruction(loadError, static () => { });
                 throw;
             }
         }
@@ -2680,17 +2674,20 @@ namespace TensorSharp.Models
             bool ownsTensorParallelGroup = true, Action releaseAfterModelCaches = null, Action releaseDerivedGraphs = null,
             Action<ICollection<Tensor>, ICollection<IAllocator>> collectDerivedOwnership = null)
         {
-            if (_ownershipCleanupFailed) return;
+            _constructionOwnsTensorParallelGroup = ownsTensorParallelGroup
+                && !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup);
+            _constructionReleaseResources = releaseDerivedResources;
+            _constructionReleaseAfterCaches = releaseAfterModelCaches;
+            _constructionReleaseGraphs = releaseDerivedGraphs;
+            _constructionCollector = collectDerivedOwnership;
             try
             {
                 // Stop at a failed dependency teardown. Its buffers and runtime lease remain owned.
-                DisposeBaseResources(ownsTensorParallelGroup && !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup),
-                    releaseDerivedResources, releaseAfterModelCaches, constructionRollback: true, releaseDerivedGraphs: releaseDerivedGraphs,
-                    collectDerivedOwnership: collectDerivedOwnership);
+                RetryConstructionCleanup();
             }
             catch (Exception cleanupError)
             {
-                throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
+                throw new NativeConstructionCleanupException(loadError, cleanupError, _constructionCleanup);
             }
         }
 
@@ -2755,6 +2752,7 @@ namespace TensorSharp.Models
                     releaseDerivedGraphs, plan, restoration);
                 plan.Complete();
                 _ownershipResourcesReleased = true;
+                _constructionCleanup.CompleteRelease(this);
             }
             catch (Exception cleanupError)
             {

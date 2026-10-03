@@ -276,9 +276,12 @@ not rewrite completed release as live ownership when restoration itself fails.
 Core declares `NativeConstructionCleanupException` and its release-only `Cleanup` handle.
 The handle serializes synchronous cleanup attempts, reports `IsReleased` only after proven
 release, and retains actual private ownership on refusal. It exposes no model, allocator or
-native pointer and has no finalizer or process-global healthy root. Actual model constructor
-preflight refusal still preserves errors without returning that handle. Base-constructor rollback and independent CUDA
-engine partial construction do not yet share the full model census. P2P communicator native
+native pointer and has no finalizer or process-global healthy root. Base and family constructor
+rollback reserve that handle before acquisition and retry the same private cleanup recipe with
+a fresh full census. Successful rollback preserves the original load exception. A refused
+rollback returns both original errors in the typed exception. Its handle stays retryable on
+pre-effect collector refusal or healthy Busy, but uncertain cleanup blocks further teardown.
+Independent CUDA engine partial construction does not yet share the full parent census. P2P communicator native
 effects remain unmigrated. These source limits prevent a complete CUDA ownership claim.
 
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
