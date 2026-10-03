@@ -111,6 +111,9 @@ namespace TensorSharp
             }
         }
 
+        internal Storage? GetLiveOwnedStorageForDisposal()
+            => Volatile.Read(ref isDisposed) == 0 ? storage : null;
+
         public override bool Equals(object? obj)
         {
             Tensor? o = obj as Tensor;
