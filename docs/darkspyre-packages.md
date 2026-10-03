@@ -273,8 +273,11 @@ an uncertain failure retains the real owner through process quarantine. Worker s
 joins run outside that device-effect lease. Context restoration follows proven cleanup and does
 not rewrite completed release as live ownership when restoration itself fails.
 
-Failed-constructor preflight refusal preserves the original load error and cleanup error but
-does not expose a public cleanup retry handle. Base-constructor rollback and independent CUDA
+Core declares `NativeConstructionCleanupException` and its release-only `Cleanup` handle.
+The handle serializes synchronous cleanup attempts, reports `IsReleased` only after proven
+release, and retains actual private ownership on refusal. It exposes no model, allocator or
+native pointer and has no finalizer or process-global healthy root. Actual model constructor
+preflight refusal still preserves errors without returning that handle. Base-constructor rollback and independent CUDA
 engine partial construction do not yet share the full model census. P2P communicator native
 effects remain unmigrated. These source limits prevent a complete CUDA ownership claim.
 
