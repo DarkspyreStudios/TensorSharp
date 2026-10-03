@@ -1781,6 +1781,9 @@ namespace TensorSharp.Models
             ModelDisposalOwnership.AddRange(ownedTensors, _idxKCache);
             ModelDisposalOwnership.AddRange(ownedTensors, _gdnConvStateT);
             ModelDisposalOwnership.AddRange(ownedTensors, _gdnStateT);
+            ModelDisposalOwnership.Add(ownedTensors, _moeScratchGate, _moeScratchUp, _moeScratchDown);
+            foreach (var (embedding, _) in _visionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
             void AddHolder(Qwen4ExpKvCacheHolder holder)
             {
                 if (holder == null) return;
@@ -1814,6 +1817,12 @@ namespace TensorSharp.Models
         {
             DisposeMtpHead();
             ReleaseSpecSnapshot();
+            VisionEncoder?.DisposeOwned();
+            foreach (var (embedding, _) in _visionEmbeddingsList) embedding?.Dispose();
+            _visionEmbeddingsList.Clear();
+            _moeScratchGate?.Dispose();
+            _moeScratchUp?.Dispose();
+            _moeScratchDown?.Dispose();
             DisposeAllFusedHolders();
             if (_kCache != null)
                 foreach (var t in _kCache) t?.Dispose();
@@ -1821,6 +1830,10 @@ namespace TensorSharp.Models
                 foreach (var t in _vCache) t?.Dispose();
             if (_idxKCache != null)
                 foreach (var t in _idxKCache) t?.Dispose();
+            if (_gdnConvStateT != null)
+                foreach (var t in _gdnConvStateT) t?.Dispose();
+            if (_gdnStateT != null)
+                foreach (var t in _gdnStateT) t?.Dispose();
         }
     }
 }
