@@ -328,7 +328,7 @@ namespace TensorSharp.Cuda
                     _devs[d] = dev;
                     dev.Alloc = new CudaAllocator(d);
                     dev.MakeCurrent();
-                    dev.DK = Dsv4Kernels.Create();
+                    Dsv4Kernels.Create(dev.Alloc, kernels => dev.DK = kernels, this);
                     dev.Alloc.NativeCalls.ThrowOnError(dev.Alloc.NativeCalls.cuEventCreate(
                         out dev.Event, 0x02 /*CU_EVENT_DISABLE_TIMING*/));
                 }
@@ -2341,6 +2341,8 @@ namespace TensorSharp.Cuda
                         if (dev?.Alloc == null) continue;
                         var calls = dev.Alloc.NativeCalls;
                         dev.Alloc.Context.BindCurrent(calls);
+                        dev.DK?.Dispose();
+                        dev.DK = null;
                         foreach (var tensor in dev.OwnedTensors) tensor.Dispose();
                         dev.OwnedTensors.Clear();
                         ReleaseEvent(ref dev.Event);
@@ -2350,8 +2352,6 @@ namespace TensorSharp.Cuda
                         ReleaseEvent(ref dev.CopyDoneEv);
                         ReleasePinned(ref dev.BoundaryPinned);
                         ReleasePinned(ref dev.EngramPinned);
-                        dev.DK?.Dispose();
-                        dev.DK = null;
 
                         void ReleaseEvent(ref IntPtr handle)
                         {

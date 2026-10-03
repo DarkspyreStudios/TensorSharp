@@ -298,9 +298,13 @@ Checked stream completion precedes event, pinned-buffer and stream release. Unsa
 the worker and its actual parent graph; an original upload error and a cleanup error remain distinct.
 Started threads remain recorded until proven joined. Parent retirement waits after the full census
 and before destructive cleanup. A join refusal remains pre-effect and retryable. Pinned logits and
-DSpark capture staging are released only after checked completion. Other Dsv4 and P2P native effects
-still require migration. No runtime verification was performed after the test hold. These source
-limits prevent a complete CUDA ownership claim.
+DSpark capture staging are released only after checked completion. Each Dsv4 kernel owner is
+reserved before module acquisition and function lookup. Its launch methods hold known-device
+admission across tensor-pointer reads and enqueue, validate actual allocator and stream associations,
+and rebind the known context before launch. Checked module release precedes its dependent engine
+tensors. Cleanup refusal retains the real partial kernel owner and parent dependency. Other Dsv4
+and P2P native effects still require migration. No runtime verification was performed after the
+test hold. These source limits prevent a complete CUDA ownership claim.
 
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
