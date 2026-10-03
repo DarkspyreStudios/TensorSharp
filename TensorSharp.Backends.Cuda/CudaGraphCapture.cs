@@ -1238,8 +1238,8 @@ namespace TensorSharp.Cuda
         {
             if (disposed) return;
             if (allocator == null) { retainedParent = null; disposed = true; return; }
-            using var admission = CudaOperationAdmission.EnterCacheRetirement(allocator);
             retirementRequested = true;
+            using var admission = CudaOperationAdmission.EnterCacheRetirement(allocator);
             CudaContextRestoration restoration = CudaContextRestoration.Capture(nativeCalls);
             try { ReleaseAll(); }
             catch { restoration.MarkCleanupFailed(); throw; }
