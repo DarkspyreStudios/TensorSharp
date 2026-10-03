@@ -50,7 +50,7 @@ namespace TensorSharp.Models
                     _cudaExec?.DisposeOwned(plan, restoration);
                     _cudaExec = null;
                 }
-            });
+            }, () => _cudaExec?.WaitForUploadWorkers());
             try
             {
                 string arch = _gguf.GetString("general.architecture") ?? "deepseek4";
@@ -116,7 +116,8 @@ namespace TensorSharp.Models
                     Console.WriteLine($"Model: {arch} (direct-CUDA whole-model executor), Layers={Config.NumLayers}, " +
                         $"Hidden={Config.HiddenSize}, Heads={Config.NumHeads}, HeadDim={Config.KeyLength}, Vocab={Config.VocabSize}" +
                         (dspark != null ? ", DSpark drafter" : string.Empty));
-                    _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark, ResolveCpuMoeLayers());
+                    _cudaExec = new DeepSeek4CudaExecutor(ggufPath, maxContext, nUbatch, nGpu, dspark,
+                        ResolveCpuMoeLayers(), executor => _cudaExec = executor);
                 }
                 else if (_backend == BackendType.Cpu)
                 {

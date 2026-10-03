@@ -176,6 +176,7 @@ namespace TensorSharp.Cuda
                 RingRows = Pad(_m.NSwa + d.BlockSize + 1, 32),
                 CaptureSlot = new int[_m.NLayer],
             };
+            _ds = rt;
             for (int i = 0; i < _m.NLayer; i++)
                 rt.CaptureSlot[i] = -1;
             for (int i = 0; i < d.TargetLayerIds.Length; i++)
@@ -247,7 +248,6 @@ namespace TensorSharp.Cuda
             CudaDriverApi.cuMemHostAlloc(out rt.PinnedCap,
                 new UIntPtr((ulong)((long)_m.NUbatch * feat * 4L)), 0x1 /*PORTABLE*/).ThrowOnError();
 
-            _ds = rt;
             foreach (var st in rt.Stages)
                 Memset0(st.RingK);
 

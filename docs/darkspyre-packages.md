@@ -281,8 +281,16 @@ rollback reserve that handle before acquisition and retry the same private clean
 a fresh full census. Successful rollback preserves the original load exception. A refused
 rollback returns both original errors in the typed exception. Its handle stays retryable on
 pre-effect collector refusal or healthy Busy, but uncertain cleanup blocks further teardown.
-Independent CUDA engine partial construction does not yet share the full parent census. P2P communicator native
-effects remain unmigrated. These source limits prevent a complete CUDA ownership claim.
+DeepSeek4 reserves its actual executor, and the executor reserves the actual Dsv4 engine, before
+child acquisition. The partial engine participates in the parent's same census and release
+recipe; the public cleanup handle grants no child extraction or independent ownership. Standalone
+Dsv4 construction reserves its own release-only handle and private census recipe. Partial device
+and DSpark records remain visible to that recipe. Started upload threads remain recorded until
+proven joined; these waits occur after the full census, outside native effect gates and before
+destructive cleanup. A join refusal remains pre-effect and retryable. Pinned logits and DSpark
+capture staging are released only after checked completion. Raw upload-worker cleanup and other
+Dsv4 and P2P native effects still require migration. No runtime verification was performed after
+the test hold. These source limits prevent a complete CUDA ownership claim.
 
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native

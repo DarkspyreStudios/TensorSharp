@@ -8,6 +8,7 @@ public abstract partial class ModelBase
     private bool _ownershipRetirementStarted;
     private bool _ownershipResourcesReleased;
     private System.Action<CudaRetirementPlan, CudaContextRestoration> _releaseOwnedChildren;
+    private System.Action _waitForOwnedChildWorkers;
     private readonly NativeConstructionCleanupHandle _constructionCleanup;
     private bool _constructionOwnsTensorParallelGroup;
     private System.Action _constructionReleaseResources;
@@ -24,8 +25,12 @@ public abstract partial class ModelBase
             releaseDerivedGraphs: _constructionReleaseGraphs, collectDerivedOwnership: _constructionCollector);
     }
 
-    internal void SetOwnedChildRelease(System.Action<CudaRetirementPlan, CudaContextRestoration> release)
-        => _releaseOwnedChildren = release;
+    internal void SetOwnedChildRelease(System.Action<CudaRetirementPlan, CudaContextRestoration> release,
+        System.Action waitForWorkers = null)
+    {
+        _releaseOwnedChildren = release;
+        _waitForOwnedChildWorkers = waitForWorkers;
+    }
 
     /// <summary>
     /// Collects the actual tensors and allocators this model releases. Overrides call

@@ -219,8 +219,10 @@ namespace TensorSharp.Models
         /// layers, <see cref="int.MaxValue"/> every layer, -1 auto (the fewest
         /// leading layers that make the model fit; opt-in only).</param>
         public DeepSeek4CudaExecutor(string ggufPath, int maxContext, int nUbatch, int nGpu, string dsparkPath = null,
-            int nCpuMoe = 0)
+            int nCpuMoe = 0, Action<DeepSeek4CudaExecutor> reserveOwner = null)
         {
+            // The actual model owns this partial executor before files or native children are acquired.
+            reserveOwner?.Invoke(this);
             var sw = Stopwatch.StartNew();
             bool stats = ParseEnvInt("TS_DSV4_LOAD_STATS", 0) != 0;
             void Mark(string phase)
@@ -254,7 +256,7 @@ namespace TensorSharp.Models
 
             var desc = BuildModelDesc(nCtx, ubatch);
             Mark("model desc built");
-            _engine = new Dsv4CudaEngine(desc, nGpu, nCpuMoe);
+            _engine = new Dsv4CudaEngine(desc, nGpu, nCpuMoe, engine => _engine = engine);
             Mark("engine ready");
 
             // Everything lives in VRAM now; drop the host-side scraps.
@@ -1030,6 +1032,8 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
             => _engine?.CollectDisposalOwnership(tensors, allocators);
+
+        internal void WaitForUploadWorkers() => _engine?.WaitForUploadWorkers();
 
         internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
         {

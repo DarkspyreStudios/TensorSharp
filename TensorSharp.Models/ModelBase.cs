@@ -2743,6 +2743,8 @@ namespace TensorSharp.Models
             else CollectDisposalOwnership(ownedTensors, ownedAllocators);
             var plan = CudaRetirementPlan.PrepareModel(this, ownedTensors, ownedAllocators);
             var restoration = plan.CaptureRestoration();
+            // Completion waits are after the full census but before any native effect gates or cleanup.
+            _waitForOwnedChildWorkers?.Invoke();
             try
             {
                 if (!constructionRollback || !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup))
@@ -2879,6 +2881,7 @@ namespace TensorSharp.Models
 
             _releaseOwnedChildren?.Invoke(plan, restoration);
             _releaseOwnedChildren = null;
+            _waitForOwnedChildWorkers = null;
 
             if (ownsTensorParallelGroup)
             {

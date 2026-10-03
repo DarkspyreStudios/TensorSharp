@@ -252,6 +252,8 @@ namespace TensorSharp.Cuda
         private bool _retiring;
         private bool _disposed;
         private Exception _cleanupFailure;
+        private readonly NativeConstructionCleanupHandle _constructionCleanup;
+        private readonly List<System.Threading.Thread> _uploadThreads = new List<System.Threading.Thread>();
         public int ContextSize => _m.NCtx;
 
         /// <summary>Prefill micro-batch the engine chunks by. Speculative prefill
@@ -265,6 +267,11 @@ namespace TensorSharp.Cuda
         /// int.MaxValue every layer, -1 auto (the fewest leading layers that make
         /// the model fit; opt-in only). See Dsv4CudaEngine.HostMoe.cs.</param>
         public Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe = 0)
+            : this(m, nGpu, nCpuMoe, null)
+        {
+        }
+
+        internal Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe, Action<Dsv4CudaEngine> reserveOwner)
         {
             _m = m ?? throw new ArgumentNullException(nameof(m));
             if (m.HeadDim != 512)
@@ -274,194 +281,208 @@ namespace TensorSharp.Cuda
             if (m.NExpertUsed > 16)
                 throw new NotSupportedException($"DSV4 CUDA engine supports at most 16 experts per token, got {m.NExpertUsed}.");
 
-            _perf = EnvInt("TS_DSV4_PERF", 0);
-            _syncDebug = EnvInt("TS_DSV4_CUDA_SYNCDBG", 0) != 0;
-
-            // The model layer coerces DSV4's backend to Cpu (it only needs a cheap
-            // host allocator), so the CUDA op handlers are not registered for us:
-            // do it here, since this engine drives Ops.RMSNorm / Ops.SiLUMulClamp
-            // on CUDA storage. Idempotent.
-            CudaBackend.Register();
-
-            CudaDriverApi.cuInit(0);
-            CudaDriverApi.cuDeviceGetCount(out int devCount).ThrowOnError();
-            int useDevs = nGpu > 0 ? Math.Min(nGpu, devCount) : devCount;
-            if (useDevs < 1)
-                throw new InvalidOperationException("No CUDA devices available for the DSV4 engine.");
-
-            // A speculative verify writes KV for tokens that may be rejected. The
-            // rejected tail is never restored -- instead every ring the next pass
-            // still reads from is widened by the draft window, so a stale write
-            // can no longer alias a live position (the raw ring already has
-            // NUbatch of headroom; the compressor state rings do not).
-            _maxDraft = m.Dspark != null ? m.Dspark.BlockSize : 0;
-            _ringRaw = Pad(m.NSwa + m.NUbatch, 256);
-            // V4.1 compresses at ratios 1 and 2 rather than 4 and 128, so the
-            // same two row counts stand for a different pair of groups.
-            _compRowsCsa = m.NCtx / (m.V41 ? 2 : CsaRatio) + 1;
-            _compRowsHca = m.NCtx / (m.V41 ? 1 : HcaRatio) + 1;
-
-            // ---- devices ----
-            // Created before the layer split, which needs each device's free
-            // VRAM (cuMemGetInfo wants a current context) to size its share.
-            _devs = new Dev[useDevs];
-            for (int d = 0; d < useDevs; d++)
+            _constructionCleanup = new NativeConstructionCleanupHandle(this, ReleaseResources,
+                () => _disposed, () => _cleanupFailure != null);
+            reserveOwner?.Invoke(this);
+            try
             {
-                var dev = new Dev { Ordinal = d };
-                dev.Alloc = new CudaAllocator(d);
-                dev.MakeCurrent();
-                dev.DK = Dsv4Kernels.Create();
-                CudaDriverApi.cuEventCreate(out IntPtr ev, 0x02 /*CU_EVENT_DISABLE_TIMING*/).ThrowOnError();
-                dev.Event = ev;
-                _devs[d] = dev;
-            }
+                _perf = EnvInt("TS_DSV4_PERF", 0);
+                _syncDebug = EnvInt("TS_DSV4_CUDA_SYNCDBG", 0) != 0;
 
-            // ---- layer placement: contiguous ranges balanced by quantized bytes ----
-            var layerBytes = new long[m.NLayer];
-            var layerExpBytes = new long[m.NLayer];
-            long totalBytes = 0;
-            for (int il = 0; il < m.NLayer; il++)
-            {
-                var L = m.Layers[il];
-                long b = 0;
-                foreach (var qw in EnumerateQuantWeights(L))
-                    b += qw.TotalBytes;
-                layerBytes[il] = b;
-                layerExpBytes[il] = L.GateExps.TotalBytes + L.UpExps.TotalBytes + L.DownExps.TotalBytes;
-                totalBytes += b;
-            }
+                // The model layer coerces DSV4's backend to Cpu (it only needs a cheap
+                // host allocator), so the CUDA op handlers are not registered for us:
+                // do it here, since this engine drives Ops.RMSNorm / Ops.SiLUMulClamp
+                // on CUDA storage. Idempotent.
+                CudaBackend.Register();
 
-            long dsparkBytes = DsparkBytes(m.Dspark);
-            var assignment = new int[m.NLayer];
-            _nCpuMoe = PlaceLayers(m, useDevs, layerBytes, layerExpBytes, dsparkBytes, nCpuMoe, assignment);
-            _hostMatMul = m.HostMatMul;
-            if (_nCpuMoe > 0 && _hostMatMul == null)
-                throw new InvalidOperationException(
-                    "[dsv4-cuda] routed-expert CPU offload is required to fit this model but no host matmul was " +
-                    "supplied (ModelDesc.HostMatMul).");
-            _lastDev = useDevs - 1;
+                CudaDriverApi.cuInit(0);
+                CudaDriverApi.cuDeviceGetCount(out int devCount).ThrowOnError();
+                int useDevs = nGpu > 0 ? Math.Min(nGpu, devCount) : devCount;
+                if (useDevs < 1)
+                    throw new InvalidOperationException("No CUDA devices available for the DSV4 engine.");
 
-            // per-device boundary staging (pinned + events)
-            long xsBytes = (long)m.NUbatch * HC * m.NEmbd * 4;
-            for (int d = 0; d < useDevs; d++)
-            {
-                var dev = _devs[d];
-                dev.MakeCurrent();
-                CudaDriverApi.cuMemHostAlloc(out IntPtr pinnedXs, new UIntPtr((ulong)xsBytes), 0x1 /*PORTABLE*/).ThrowOnError();
-                dev.BoundaryPinned = pinnedXs;
-                CudaDriverApi.cuEventCreate(out IntPtr xr, 0x02).ThrowOnError();
-                CudaDriverApi.cuEventCreate(out IntPtr cd, 0x02).ThrowOnError();
-                dev.XsReadyEv = xr;
-                dev.CopyDoneEv = cd;
-            }
+                // A speculative verify writes KV for tokens that may be rejected. The
+                // rejected tail is never restored -- instead every ring the next pass
+                // still reads from is widened by the draft window, so a stale write
+                // can no longer alias a live position (the raw ring already has
+                // NUbatch of headroom; the compressor state rings do not).
+                _maxDraft = m.Dspark != null ? m.Dspark.BlockSize : 0;
+                _ringRaw = Pad(m.NSwa + m.NUbatch, 256);
+                // V4.1 compresses at ratios 1 and 2 rather than 4 and 128, so the
+                // same two row counts stand for a different pair of groups.
+                _compRowsCsa = m.NCtx / (m.V41 ? 2 : CsaRatio) + 1;
+                _compRowsHca = m.NCtx / (m.V41 ? 1 : HcaRatio) + 1;
 
-            // ---- arena sizing per device (packed quantized weights only) ----
-            // Norms, gates, APE/RoPE tables and the caches are separate allocator
-            // tensors, so they are not counted here.
-            var arenaNeed = new long[useDevs];
-            for (int il = 0; il < m.NLayer; il++)
-            {
-                int d = assignment[il];
-                foreach (var qw in EnumerateQuantWeights(m.Layers[il], skipRoutedExperts: il < _nCpuMoe))
-                    arenaNeed[d] += Align(qw.TotalBytes);
-            }
-            arenaNeed[0] += Align(m.TokEmbd.TotalBytes);
-            arenaNeed[_lastDev] += Align(m.Output.TotalBytes) + dsparkBytes;
-
-            for (int d = 0; d < useDevs; d++)
-            {
-                var dev = _devs[d];
-                dev.ArenaBytes = Math.Max(arenaNeed[d], 256);
-                dev.Arena = AllocT(_devs[d], DType.UInt8, dev.ArenaBytes);
-                dev.ArenaBase = Ptr(dev.Arena);
-                dev.ArenaUsed = 0;
-            }
-
-            // ---- upload weights (parallel across devices) ----
-            _layers = new DevLayer[m.NLayer];
-            _hostMoe = new HostMoeLayer[m.NLayer];
-            for (int il = 0; il < m.NLayer; il++)
-                _layers[il] = new DevLayer { Device = assignment[il], Ratio = m.Layers[il].Ratio };
-
-            var perDevLayers = new List<int>[useDevs];
-            for (int d = 0; d < useDevs; d++)
-                perDevLayers[d] = new List<int>();
-            for (int il = 0; il < m.NLayer; il++)
-                perDevLayers[assignment[il]].Add(il);
-
-            var uploadSw = Stopwatch.StartNew();
-            Parallel.For(0, useDevs, d =>
-            {
-                var dev = _devs[d];
-                dev.MakeCurrent();
-                foreach (int il in perDevLayers[d])
-                    UploadLayer(dev, il);
-                if (d == 0)
-                    _tokEmbdQW = UploadQuant(dev, m.TokEmbd);
-                if (d == _lastDev)
+                // ---- devices ----
+                // Created before the layer split, which needs each device's free
+                // VRAM (cuMemGetInfo wants a current context) to size its share.
+                _devs = new Dev[useDevs];
+                for (int d = 0; d < useDevs; d++)
                 {
-                    _outputQW = UploadQuant(dev, m.Output);
-                    _outputNorm = UploadF32(dev, m.OutputNorm);
-                    _hcHeadFn = UploadF32(dev, m.HcHeadFn);
-                    _hcHeadScale = UploadF32(dev, m.HcHeadScale);
-                    _hcHeadBase = UploadF32(dev, m.HcHeadBase);
+                    var dev = new Dev { Ordinal = d };
+                    _devs[d] = dev;
+                    dev.Alloc = new CudaAllocator(d);
+                    dev.MakeCurrent();
+                    dev.DK = Dsv4Kernels.Create();
+                    dev.Alloc.NativeCalls.ThrowOnError(dev.Alloc.NativeCalls.cuEventCreate(
+                        out dev.Event, 0x02 /*CU_EVENT_DISABLE_TIMING*/));
                 }
-                dev.RopeRaw = UploadF32(dev, m.RopeRawTable);
-                dev.RopeComp = UploadF32(dev, m.RopeCompTable);
-            });
 
-            // The drafter shares the loader pass: it plans its uploads here so
-            // its (few GiB of) weights stream in with everything else.
-            if (m.Dspark != null)
-                SetupDspark(m.Dspark);
+                // ---- layer placement: contiguous ranges balanced by quantized bytes ----
+                var layerBytes = new long[m.NLayer];
+                var layerExpBytes = new long[m.NLayer];
+                long totalBytes = 0;
+                for (int il = 0; il < m.NLayer; il++)
+                {
+                    var L = m.Layers[il];
+                    long b = 0;
+                    foreach (var qw in EnumerateQuantWeights(L))
+                        b += qw.TotalBytes;
+                    layerBytes[il] = b;
+                    layerExpBytes[il] = L.GateExps.TotalBytes + L.UpExps.TotalBytes + L.DownExps.TotalBytes;
+                    totalBytes += b;
+                }
 
-            // Weights sourced from disk were only *placed* above; move the bytes
-            // now, with the reader concurrency the filesystem actually likes.
-            RunStreamedUploads();
+                long dsparkBytes = DsparkBytes(m.Dspark);
+                var assignment = new int[m.NLayer];
+                _nCpuMoe = PlaceLayers(m, useDevs, layerBytes, layerExpBytes, dsparkBytes, nCpuMoe, assignment);
+                _hostMatMul = m.HostMatMul;
+                if (_nCpuMoe > 0 && _hostMatMul == null)
+                    throw new InvalidOperationException(
+                        "[dsv4-cuda] routed-expert CPU offload is required to fit this model but no host matmul was " +
+                        "supplied (ModelDesc.HostMatMul).");
+                _lastDev = useDevs - 1;
 
-            // ---- scratch + tokens + logits ----
-            for (int d = 0; d < useDevs; d++)
-                AllocateScratch(_devs[d]);
+                // per-device boundary staging (pinned + events)
+                long xsBytes = (long)m.NUbatch * HC * m.NEmbd * 4;
+                for (int d = 0; d < useDevs; d++)
+                {
+                    var dev = _devs[d];
+                    dev.MakeCurrent();
+                    var calls = dev.Alloc.NativeCalls;
+                    calls.ThrowOnError(calls.cuMemHostAlloc(out dev.BoundaryPinned, new UIntPtr((ulong)xsBytes), 0x1 /*PORTABLE*/));
+                    calls.ThrowOnError(calls.cuEventCreate(out dev.XsReadyEv, 0x02));
+                    calls.ThrowOnError(calls.cuEventCreate(out dev.CopyDoneEv, 0x02));
+                }
 
-            _devs[0].NeedsTokens = true;
-            for (int il = 0; il < Math.Min(m.HashLayerCount, m.NLayer); il++)
-                _devs[assignment[il]].NeedsTokens = true;
-            foreach (var dev in _devs)
-            {
-                if (!dev.NeedsTokens)
-                    continue;
-                dev.MakeCurrent();
-                dev.TokensDev0 = AllocI32(dev, m.NUbatch);
-                dev.TokensDev1 = AllocI32(dev, m.NUbatch);
-                CudaDriverApi.cuEventCreate(out IntPtr te0, 0x02).ThrowOnError();
-                CudaDriverApi.cuEventCreate(out IntPtr te1, 0x02).ThrowOnError();
-                dev.TokEv0 = te0;
-                dev.TokEv1 = te1;
+                // ---- arena sizing per device (packed quantized weights only) ----
+                // Norms, gates, APE/RoPE tables and the caches are separate allocator
+                // tensors, so they are not counted here.
+                var arenaNeed = new long[useDevs];
+                for (int il = 0; il < m.NLayer; il++)
+                {
+                    int d = assignment[il];
+                    foreach (var qw in EnumerateQuantWeights(m.Layers[il], skipRoutedExperts: il < _nCpuMoe))
+                        arenaNeed[d] += Align(qw.TotalBytes);
+                }
+                arenaNeed[0] += Align(m.TokEmbd.TotalBytes);
+                arenaNeed[_lastDev] += Align(m.Output.TotalBytes) + dsparkBytes;
+
+                for (int d = 0; d < useDevs; d++)
+                {
+                    var dev = _devs[d];
+                    dev.ArenaBytes = Math.Max(arenaNeed[d], 256);
+                    dev.Arena = AllocT(_devs[d], DType.UInt8, dev.ArenaBytes);
+                    dev.ArenaBase = Ptr(dev.Arena);
+                    dev.ArenaUsed = 0;
+                }
+
+                // ---- upload weights (parallel across devices) ----
+                _layers = new DevLayer[m.NLayer];
+                _hostMoe = new HostMoeLayer[m.NLayer];
+                for (int il = 0; il < m.NLayer; il++)
+                    _layers[il] = new DevLayer { Device = assignment[il], Ratio = m.Layers[il].Ratio };
+
+                var perDevLayers = new List<int>[useDevs];
+                for (int d = 0; d < useDevs; d++)
+                    perDevLayers[d] = new List<int>();
+                for (int il = 0; il < m.NLayer; il++)
+                    perDevLayers[assignment[il]].Add(il);
+
+                var uploadSw = Stopwatch.StartNew();
+                Parallel.For(0, useDevs, d =>
+                {
+                    var dev = _devs[d];
+                    dev.MakeCurrent();
+                    foreach (int il in perDevLayers[d])
+                        UploadLayer(dev, il);
+                    if (d == 0)
+                        _tokEmbdQW = UploadQuant(dev, m.TokEmbd);
+                    if (d == _lastDev)
+                    {
+                        _outputQW = UploadQuant(dev, m.Output);
+                        _outputNorm = UploadF32(dev, m.OutputNorm);
+                        _hcHeadFn = UploadF32(dev, m.HcHeadFn);
+                        _hcHeadScale = UploadF32(dev, m.HcHeadScale);
+                        _hcHeadBase = UploadF32(dev, m.HcHeadBase);
+                    }
+                    dev.RopeRaw = UploadF32(dev, m.RopeRawTable);
+                    dev.RopeComp = UploadF32(dev, m.RopeCompTable);
+                });
+
+                // The drafter shares the loader pass: it plans its uploads here so
+                // its (few GiB of) weights stream in with everything else.
+                if (m.Dspark != null)
+                    SetupDspark(m.Dspark);
+
+                // Weights sourced from disk were only *placed* above; move the bytes
+                // now, with the reader concurrency the filesystem actually likes.
+                RunStreamedUploads();
+
+                // ---- scratch + tokens + logits ----
+                for (int d = 0; d < useDevs; d++)
+                    AllocateScratch(_devs[d]);
+
+                _devs[0].NeedsTokens = true;
+                for (int il = 0; il < Math.Min(m.HashLayerCount, m.NLayer); il++)
+                    _devs[assignment[il]].NeedsTokens = true;
+                foreach (var dev in _devs)
+                {
+                    if (!dev.NeedsTokens)
+                        continue;
+                    dev.MakeCurrent();
+                    dev.TokensDev0 = AllocI32(dev, m.NUbatch);
+                    dev.TokensDev1 = AllocI32(dev, m.NUbatch);
+                    var calls = dev.Alloc.NativeCalls;
+                    calls.ThrowOnError(calls.cuEventCreate(out dev.TokEv0, 0x02));
+                    calls.ThrowOnError(calls.cuEventCreate(out dev.TokEv1, 0x02));
+                }
+
+                var last = _devs[_lastDev];
+                last.Logits = AllocF32(last, 1, m.NVocab);
+                if (m.Dspark != null)
+                {
+                    int specRows = m.Dspark.BlockSize + 1;
+                    _specLogits = AllocF32(last, specRows, m.NVocab);
+                }
+
+                _devs[0].MakeCurrent();
+                // CU_MEMHOSTALLOC_PORTABLE (0x1): the pinned token buffers are copied
+                // from by every device that needs token ids, not just device 0.
+                CudaDriverApi.cuMemHostAlloc(out _pinnedTokens0, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
+                CudaDriverApi.cuMemHostAlloc(out _pinnedTokens1, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
+                long logitRows = m.Dspark != null ? m.Dspark.BlockSize + 1 : 1;
+                CudaDriverApi.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1).ThrowOnError();
+
+                Reset();
+
+                double gib = totalBytes / (1024.0 * 1024 * 1024);
+                Console.Error.WriteLine(
+                    $"[dsv4-cuda] {gib:F1} GiB of weights resident across {useDevs} GPU(s) " +
+                    $"(layer split {string.Join("/", CountPerDev(assignment, useDevs))}), uploaded in {uploadSw.Elapsed.TotalSeconds:F1}s " +
+                    $"(n_ctx={m.NCtx}, ubatch={m.NUbatch})");
             }
-
-            var last = _devs[_lastDev];
-            last.Logits = AllocF32(last, 1, m.NVocab);
-            if (m.Dspark != null)
+            catch (Exception loadError)
             {
-                int specRows = m.Dspark.BlockSize + 1;
-                _specLogits = AllocF32(last, specRows, m.NVocab);
+                // An actual parent reservation uses its one complete census and private cleanup recipe.
+                if (reserveOwner != null) throw;
+                try { ReleaseResources(); }
+                catch (Exception cleanupError)
+                {
+                    throw new NativeConstructionCleanupException(loadError, cleanupError, _constructionCleanup);
+                }
+                throw;
             }
-
-            _devs[0].MakeCurrent();
-            // CU_MEMHOSTALLOC_PORTABLE (0x1): the pinned token buffers are copied
-            // from by every device that needs token ids, not just device 0.
-            CudaDriverApi.cuMemHostAlloc(out _pinnedTokens0, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
-            CudaDriverApi.cuMemHostAlloc(out _pinnedTokens1, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
-            long logitRows = m.Dspark != null ? m.Dspark.BlockSize + 1 : 1;
-            CudaDriverApi.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1).ThrowOnError();
-
-            Reset();
-
-            double gib = totalBytes / (1024.0 * 1024 * 1024);
-            Console.Error.WriteLine(
-                $"[dsv4-cuda] {gib:F1} GiB of weights resident across {useDevs} GPU(s) " +
-                $"(layer split {string.Join("/", CountPerDev(assignment, useDevs))}), uploaded in {uploadSw.Elapsed.TotalSeconds:F1}s " +
-                $"(n_ctx={m.NCtx}, ubatch={m.NUbatch})");
         }
 
         /// <summary>
@@ -781,35 +802,57 @@ namespace TensorSharp.Cuda
             int perDev = Math.Max(1, LoaderThreads / _devs.Length);
             var errors = new List<Exception>();
             var threads = new List<System.Threading.Thread>(perDev * _devs.Length);
+            Exception startupFailure = null;
 
-            foreach (var devLocal in _devs)
+            try
             {
-                var dev = devLocal;
-                if (dev.UploadJobs.Length == 0)
-                    continue;
-                for (int w = 0; w < perDev; w++)
+                foreach (var devLocal in _devs)
                 {
-                    var t = new System.Threading.Thread(() =>
+                    var dev = devLocal;
+                    if (dev.UploadJobs.Length == 0)
+                        continue;
+                    for (int w = 0; w < perDev; w++)
                     {
-                        try
+                        var t = new System.Threading.Thread(() =>
                         {
-                            StreamUploadWorker(dev);
-                        }
-                        catch (Exception ex)
-                        {
-                            lock (errors)
-                                errors.Add(ex);
-                        }
-                    });
-                    t.IsBackground = true;
-                    threads.Add(t);
-                    t.Start();
+                            try
+                            {
+                                StreamUploadWorker(dev);
+                            }
+                            catch (Exception ex)
+                            {
+                                lock (errors)
+                                    errors.Add(ex);
+                            }
+                        });
+                        t.IsBackground = true;
+                        threads.Add(t);
+                        _uploadThreads.Add(t);
+                        t.Start();
+                    }
                 }
             }
-            foreach (var t in threads)
-                t.Join();
-            if (errors.Count > 0)
-                throw new AggregateException("[dsv4-cuda] weight streaming failed", errors);
+            catch (Exception startupError)
+            {
+                startupFailure = startupError;
+            }
+            try { WaitForUploadWorkers(); }
+            catch (Exception joinError)
+            {
+                lock (errors) errors.Add(joinError);
+            }
+            Exception[] uploadErrors;
+            lock (errors) uploadErrors = errors.ToArray();
+            if (startupFailure != null)
+            {
+                if (uploadErrors.Length == 0)
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startupFailure).Throw();
+                var combined = new List<Exception>(uploadErrors.Length + 1) { startupFailure };
+                combined.AddRange(uploadErrors);
+                throw new AggregateException("[dsv4-cuda] weight worker startup and completion failed", combined);
+            }
+            if (uploadErrors.Length > 0)
+                throw new AggregateException("[dsv4-cuda] weight streaming failed", uploadErrors);
 
             double gib = total / (1024.0 * 1024 * 1024);
             Console.Error.WriteLine($"[dsv4-cuda] streamed {gib:F1} GiB of weights into VRAM in " +
@@ -822,6 +865,21 @@ namespace TensorSharp.Cuda
                 Console.Error.WriteLine($"[dsv4-cuda]   thread-seconds: read {readS:F1}s " +
                     $"({gib / Math.Max(0.001, readS) * threads.Count:F2} GiB/s aggregate), copy-wait {copyS:F1}s");
             }
+        }
+
+        internal void WaitForUploadWorkers()
+        {
+            List<Exception> failures = null;
+            foreach (var thread in _uploadThreads)
+            {
+                if ((thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0) continue;
+                if (ReferenceEquals(thread, System.Threading.Thread.CurrentThread))
+                    throw new InvalidOperationException("An upload worker cannot wait for its own retirement.");
+                try { thread.Join(); }
+                catch (Exception failure) { (failures ??= new List<Exception>()).Add(failure); }
+            }
+            if (failures != null) throw new AggregateException("DSV4 upload workers have not proven completion.", failures);
+            _uploadThreads.Clear();
         }
 
         private static void StreamUploadWorker(Dev dev)
@@ -1028,6 +1086,7 @@ namespace TensorSharp.Cuda
         private static Tensor AllocT(Dev dev, DType type, params long[] sizes)
         {
             dev.MakeCurrent();
+            dev.OwnedTensors.EnsureCapacity(checked(dev.OwnedTensors.Count + 1));
             var t = new Tensor(dev.Alloc, type, sizes);
             dev.OwnedTensors.Add(t);
             return t;
@@ -2127,6 +2186,9 @@ namespace TensorSharp.Cuda
         }
 
         public void Dispose()
+            => ReleaseResources();
+
+        private void ReleaseResources()
         {
             if (_disposed) return;
             if (_cleanupFailure != null) ThrowIfRetiring();
@@ -2136,12 +2198,14 @@ namespace TensorSharp.Cuda
             CollectDisposalOwnership(tensors, allocators);
             var plan = CudaRetirementPlan.PrepareModel(this, tensors, allocators);
             var restoration = plan.CaptureRestoration();
+            WaitForUploadWorkers();
             try
             {
                 plan.Drain(restoration);
                 plan.AllowStorageRelease();
                 DisposeOwned(plan, restoration);
                 plan.Complete();
+                _constructionCleanup.CompleteRelease(this);
             }
             catch (Exception failure)
             {
@@ -2156,7 +2220,7 @@ namespace TensorSharp.Cuda
         {
             if (_disposed) return;
             if (_cleanupFailure != null) ThrowIfRetiring();
-            foreach (var dev in _devs)
+            foreach (var dev in _devs ?? Array.Empty<Dev>())
                 if (dev?.Alloc != null && !plan.Owns(dev.Alloc))
                     throw new InvalidOperationException("DSV4 CUDA cleanup requires its complete actual allocator plan.");
             _retiring = true;
@@ -2164,7 +2228,7 @@ namespace TensorSharp.Cuda
             {
                 try
                 {
-                    foreach (var dev in _devs)
+                    foreach (var dev in _devs ?? Array.Empty<Dev>())
                     {
                         if (dev?.Alloc == null) continue;
                         var calls = dev.Alloc.NativeCalls;
@@ -2172,7 +2236,7 @@ namespace TensorSharp.Cuda
                         calls.cuStreamSynchronize(dev.Stream);
                     }
                     FreeHostMoeBuffers();
-                    foreach (var dev in _devs)
+                    foreach (var dev in _devs ?? Array.Empty<Dev>())
                     {
                         if (dev?.Alloc == null) continue;
                         var calls = dev.Alloc.NativeCalls;
@@ -2202,7 +2266,7 @@ namespace TensorSharp.Cuda
                             handle = IntPtr.Zero;
                         }
                     }
-                    if (_devs.Length > 0 && _devs[0]?.Alloc != null)
+                    if (_devs != null && _devs.Length > 0 && _devs[0]?.Alloc != null)
                     {
                         var calls = _devs[0].Alloc.NativeCalls;
                         _devs[0].Alloc.Context.BindCurrent(calls);
@@ -2216,6 +2280,17 @@ namespace TensorSharp.Cuda
                             calls.cuMemFreeHost(_pinnedTokens1);
                             _pinnedTokens1 = IntPtr.Zero;
                         }
+                        if (_pinnedLogits != IntPtr.Zero)
+                        {
+                            calls.cuMemFreeHost(_pinnedLogits);
+                            _pinnedLogits = IntPtr.Zero;
+                        }
+                        if (_ds != null && _ds.PinnedCap != IntPtr.Zero)
+                        {
+                            _ds.Dev.Alloc.Context.BindCurrent(_ds.Dev.Alloc.NativeCalls);
+                            _ds.Dev.Alloc.NativeCalls.cuMemFreeHost(_ds.PinnedCap);
+                            _ds.PinnedCap = IntPtr.Zero;
+                        }
                     }
                 }
                 catch (Exception failure)
@@ -2226,8 +2301,9 @@ namespace TensorSharp.Cuda
                     throw;
                 }
             }
-            foreach (var dev in _devs) dev?.Alloc?.DisposeOwned(plan, restoration);
+            foreach (var dev in _devs ?? Array.Empty<Dev>()) dev?.Alloc?.DisposeOwned(plan, restoration);
             _disposed = true;
+            _constructionCleanup.CompleteRelease(this);
         }
     }
 }
