@@ -354,6 +354,12 @@ The earlier allocator acquisition interval, raw pointer tables, broader graph co
 effects remain incomplete. No runtime verification was performed after the test hold. These source
 limits prevent a complete CUDA ownership claim.
 
+The multimodal injector retains displaced in-use cache entries independently of request buckets
+and preparation pins. Its existing ownership collector and teardown use the same reference-distinct
+snapshot of cached and displaced entries. Teardown releases the originals before clearing that
+ownership. Request clear and trim do not perform native release. Sink clones remain caller-owned.
+The cache byte budget counts cached entries, not displaced entries retained until teardown.
+
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
 code. `InitializeAsync(CancellationToken)` shares one initialization task for the same plan;

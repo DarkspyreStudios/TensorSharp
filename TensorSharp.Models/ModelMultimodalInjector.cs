@@ -24,6 +24,7 @@ namespace TensorSharp.Models
         private readonly Dictionary<string, CachedEmbedding> _visionCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CachedEmbedding> _videoFrameCache = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CachedEmbedding> _audioCache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<CachedEmbedding> _displacedEmbeddings = new(ReferenceEqualityComparer.Instance);
 
         // Per-request buckets. "" is the default bucket used by direct
         // single-threaded callers (for example InteractiveSession);
@@ -1377,9 +1378,12 @@ namespace TensorSharp.Models
 
         private void RemoveCachedEmbedding(Dictionary<string, CachedEmbedding> cache, string key, CachedEmbedding entry)
         {
+            bool inUse = IsEmbeddingInUse(entry);
+            if (inUse)
+                _displacedEmbeddings.Add(entry);
             cache.Remove(key);
             _embeddingCacheBytes -= entry.Bytes;
-            if (!IsEmbeddingInUse(entry))
+            if (!inUse)
                 entry.Dispose();
         }
 
@@ -1707,28 +1711,31 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
-            foreach (var cached in _visionCache.Values) tensors.Add(cached.Embeddings);
-            foreach (var cached in _videoFrameCache.Values) tensors.Add(cached.Embeddings);
-            foreach (var cached in _audioCache.Values) tensors.Add(cached.Embeddings);
+            foreach (var cached in SnapshotOwnedEmbeddings()) tensors.Add(cached.Embeddings);
+        }
+
+        private HashSet<CachedEmbedding> SnapshotOwnedEmbeddings()
+        {
+            var owned = new HashSet<CachedEmbedding>(_displacedEmbeddings, ReferenceEqualityComparer.Instance);
+            owned.UnionWith(_visionCache.Values);
+            owned.UnionWith(_videoFrameCache.Values);
+            owned.UnionWith(_audioCache.Values);
+            return owned;
         }
 
         internal void DisposeOwned()
         {
             _model.ThrowIfUnsafeOwnershipCleanup();
+            var owned = SnapshotOwnedEmbeddings();
             ClearAllPreparedPromptState();
 
+            foreach (var cached in owned)
+                cached.Dispose();
             _embeddingCacheBytes = 0;
-            foreach (var cached in _visionCache.Values)
-                cached.Dispose();
             _visionCache.Clear();
-
-            foreach (var cached in _videoFrameCache.Values)
-                cached.Dispose();
             _videoFrameCache.Clear();
-
-            foreach (var cached in _audioCache.Values)
-                cached.Dispose();
             _audioCache.Clear();
+            _displacedEmbeddings.Clear();
         }
     }
 }
