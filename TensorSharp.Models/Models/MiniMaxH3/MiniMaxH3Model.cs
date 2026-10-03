@@ -37,6 +37,21 @@ namespace TensorSharp.Models.MiniMaxH3
         private readonly string _audioVaePath;
         private MiniMaxH3Pipeline _pipeline;
 
+        protected override void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectMiniMaxDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectMiniMaxDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+            => _pipeline?.CollectDisposalOwnership(ownedTensors);
+
+        private void DisposeMiniMaxResources() => _pipeline?.DisposeOwned();
+
+        public override void Dispose() => DisposeBaseResources(DisposeMiniMaxResources);
+
         /// <summary>The backend this model was loaded for; the pipeline needs it to
         /// make the matching GGML backend the active one.</summary>
         internal BackendType Backend => _backend;
@@ -85,7 +100,8 @@ namespace TensorSharp.Models.MiniMaxH3
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, static () => { });
+                RollBackFailedConstruction(loadError, DisposeMiniMaxResources,
+                    collectDerivedOwnership: CollectMiniMaxDisposalOwnership);
                 throw;
             }
         }

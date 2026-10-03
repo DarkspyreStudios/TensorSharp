@@ -12,13 +12,32 @@ internal sealed class CudaAllocatorBusyException : InvalidOperationException
         : base("CUDA retirement requires outstanding storage references and acquisitions to drain.") => Owner = owner;
 }
 
+internal sealed class CudaModelCleanupEffect : IDisposable
+{
+    private readonly CudaNativeCalls _calls;
+    private readonly NativeEffectLease _lease;
+
+    internal CudaModelCleanupEffect(CudaNativeCalls calls)
+    {
+        _calls = calls;
+        _lease = calls.EnterEffect();
+    }
+
+    internal void PublishFailure(Exception failure)
+        => _calls.PublishFailure(_lease, failure, NativeRuntimeFailureStage.GraphRelease);
+
+    public void Dispose() => _lease.Dispose();
+}
+
 internal sealed class CudaRetirementPlan
 {
     private readonly object _owner;
     private readonly CudaAllocator[] _allocators;
+    private readonly CudaAllocator[] _completionAllocators;
     private readonly Tensor[] _tensors;
     private readonly Dictionary<CudaStorage, int> _intents;
     private readonly bool _bareAllocatorAttempt;
+    private CudaNativeCalls _modelCleanupCalls;
 
     private CudaRetirementPlan(object owner, IEnumerable<Tensor> tensors, IEnumerable<IAllocator> allocators,
         bool bareAllocatorAttempt = false)
@@ -29,9 +48,18 @@ internal sealed class CudaRetirementPlan
         _allocators = allocators.OfType<CudaAllocator>().Distinct<CudaAllocator>(ReferenceEqualityComparer.Instance)
             .OrderBy(a => a.DeviceId).ThenBy(a => a.Census.OrderingId).ToArray();
         _intents = new Dictionary<CudaStorage, int>(ReferenceEqualityComparer.Instance);
+        var completion = new List<CudaAllocator>(_allocators);
         foreach (Tensor tensor in _tensors)
-            if (tensor.Storage is CudaStorage storage && Array.IndexOf(_allocators, storage.AllocatorImpl) >= 0)
-                _intents.TryAdd(storage, 0);
+            if (tensor.GetLiveOwnedStorageForDisposal() is CudaStorage storage)
+            {
+                completion.Add(storage.AllocatorImpl);
+                if (Array.IndexOf(_allocators, storage.AllocatorImpl) >= 0) _intents.TryAdd(storage, 0);
+            }
+        _completionAllocators = completion.Distinct<CudaAllocator>(ReferenceEqualityComparer.Instance)
+            .OrderBy(a => a.DeviceId).ThenBy(a => a.Census.OrderingId).ToArray();
+        foreach (CudaAllocator allocator in _completionAllocators)
+            if (!ReferenceEquals(allocator.NativeCalls.Api, _completionAllocators[0].NativeCalls.Api))
+                throw new InvalidOperationException("CUDA retirement completion requires one actual native API identity.");
         for (int i = 1; i < _allocators.Length; i++)
             if (_allocators[i - 1].DeviceId == _allocators[i].DeviceId
                 && _allocators[i - 1].Census.OrderingId == _allocators[i].Census.OrderingId)
@@ -53,6 +81,44 @@ internal sealed class CudaRetirementPlan
         return plan;
     }
 
+    internal static CudaRetirementPlan PrepareModel(object owner, IEnumerable<Tensor> tensors,
+        IEnumerable<IAllocator> allocators)
+    {
+        var plan = Prepare(owner, tensors, allocators, true);
+        if (plan._completionAllocators.Length != 0)
+            plan._modelCleanupCalls = new CudaNativeCalls(owner, NativeOwnerRole.Model,
+                plan._completionAllocators[0].NativeCalls.Api,
+                plan._completionAllocators.Select(a => a.DeviceId).Distinct().ToArray());
+        return plan;
+    }
+
+    internal CudaModelCleanupEffect EnterModelCleanupEffect()
+        => _modelCleanupCalls == null ? null : new CudaModelCleanupEffect(_modelCleanupCalls);
+
+    internal void PublishModelCleanupFailure(CudaModelCleanupEffect lease, Exception failure)
+    {
+        lease?.PublishFailure(failure);
+    }
+
+    internal static void FenceOwnership(object owner, IEnumerable<IAllocator> allocators)
+    {
+        var plan = new CudaRetirementPlan(owner, Array.Empty<Tensor>(), allocators);
+        int entered = 0;
+        try
+        {
+            foreach (CudaAllocator allocator in plan._allocators)
+            {
+                Monitor.Enter(allocator.Census.Gate);
+                entered++;
+            }
+            foreach (CudaAllocator allocator in plan._allocators) allocator.Census.FenceParent(owner, true);
+        }
+        finally
+        {
+            for (int i = entered - 1; i >= 0; i--) Monitor.Exit(plan._allocators[i].Census.Gate);
+        }
+    }
+
     internal static CudaRetirementPlan PrepareGroup(object owner, ICudaTensorParallelRetirement group)
     {
         var allocators = new List<IAllocator>();
@@ -60,12 +126,12 @@ internal sealed class CudaRetirementPlan
         return Prepare(owner, Array.Empty<Tensor>(), allocators, false);
     }
 
-    internal CudaContextRestoration CaptureRestoration() => _allocators.Length == 0
-        ? null : CudaContextRestoration.Capture(_allocators[0].NativeCalls);
+    internal CudaContextRestoration CaptureRestoration() => _completionAllocators.Length == 0
+        ? null : CudaContextRestoration.Capture(_completionAllocators[0].NativeCalls);
 
     internal void Drain(CudaContextRestoration restoration)
     {
-        foreach (CudaAllocator allocator in _allocators) allocator.DrainForRetirement(this, restoration);
+        foreach (CudaAllocator allocator in _completionAllocators) allocator.DrainForRetirement(this, restoration);
     }
 
     internal void ValidateGroupRelease(ICudaTensorParallelRetirement group)
@@ -128,8 +194,15 @@ internal sealed class CudaRetirementPlan
 
     internal bool Owns(CudaAllocator allocator) => Array.IndexOf(_allocators, allocator) >= 0;
 
+    internal bool Completes(CudaAllocator allocator) => Array.IndexOf(_completionAllocators, allocator) >= 0;
+
     internal void Complete()
     {
         foreach (CudaAllocator allocator in _allocators) allocator.Census.CompleteParent(_owner);
+        if (_modelCleanupCalls != null)
+        {
+            using var lease = _modelCleanupCalls.EnterEffect();
+            _modelCleanupCalls.CompleteSafeRelease(lease);
+        }
     }
 }

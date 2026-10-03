@@ -1028,10 +1028,25 @@ namespace TensorSharp.Models
             return table;
         }
 
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+            => _engine?.CollectDisposalOwnership(tensors, allocators);
+
+        internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            _engine?.DisposeOwned(plan, restoration);
+            _engine = null;
+            DisposeHostResources();
+        }
+
         public void Dispose()
         {
             _engine?.Dispose();
             _engine = null;
+            DisposeHostResources();
+        }
+
+        private void DisposeHostResources()
+        {
             DisposeShardSources();
             foreach (var p in _ownedBuffers)
                 Marshal.FreeHGlobal(p);

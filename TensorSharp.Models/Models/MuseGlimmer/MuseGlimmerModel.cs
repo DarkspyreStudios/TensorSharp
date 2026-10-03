@@ -186,7 +186,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeMuseGlimmerResources, releaseDerivedGraphs: DisposeMuseGlimmerGraphs);
+                RollBackFailedConstruction(loadError, DisposeMuseGlimmerResources, releaseDerivedGraphs: DisposeMuseGlimmerGraphs,
+                    collectDerivedOwnership: CollectMuseGlimmerDisposalOwnership);
                 throw;
             }
         }
@@ -1578,6 +1579,24 @@ namespace TensorSharp.Models
             InvalidateTensorDeviceCache(scores);
         }
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectMuseGlimmerDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectMuseGlimmerDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            ModelDisposalOwnership.Add(tensors, _kvCacheK);
+            ModelDisposalOwnership.Add(tensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheV);
+            ModelDisposalOwnership.Add(tensors, _onesForEmbNorm);
+            foreach (var (embeddings, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(tensors, embeddings);
+            _visionEncoder?.CollectDisposalOwnership(tensors);
+            CollectDFlashDisposalOwnership(tensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeMuseGlimmerResources, releaseDerivedGraphs: DisposeMuseGlimmerGraphs);
@@ -1591,7 +1610,7 @@ namespace TensorSharp.Models
 
         private void DisposeMuseGlimmerResources()
         {
-            _visionEncoder?.Dispose();
+            _visionEncoder?.DisposeOwned();
             foreach (var (embeddings, _) in _pendingVisionEmbeddingsList)
                 embeddings?.Dispose();
             _pendingVisionEmbeddingsList.Clear();

@@ -1133,11 +1133,18 @@ namespace TensorSharp.Models.MiniMaxH3
                     latent[i + c] = latent[i + c] * LatentsStd[c] + LatentsMean[c];
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+        {
+            _direct?.CollectDisposalOwnership(tensors);
+            _directEnc3D?.CollectDisposalOwnership(tensors);
+        }
+
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
             _direct?.Dispose();
+            _directEnc3D?.Dispose();
             if (_blocksPin.IsAllocated) _blocksPin.Free();
             if (_encLevelsPin.IsAllocated) _encLevelsPin.Free();
             foreach (IntPtr ptr in _bound)

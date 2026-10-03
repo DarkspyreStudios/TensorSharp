@@ -379,7 +379,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeDiffusionGemmaResources);
+                RollBackFailedConstruction(loadError, DisposeDiffusionGemmaResources,
+                    collectDerivedOwnership: CollectDiffusionGemmaDisposalOwnership);
                 throw;
             }
         }
@@ -1485,6 +1486,11 @@ namespace TensorSharp.Models
         public void DisposeSeqState(DiffusionSeqState seq)
         {
             ThrowIfOwnershipCleanupFailed();
+            DisposeSeqStateOwned(seq);
+        }
+
+        private void DisposeSeqStateOwned(DiffusionSeqState seq)
+        {
             if (seq == null) return;
             if (seq.PromptK != null)
                 for (int l = 0; l < seq.PromptK.Length; l++) ReleasePromptKvTensor(ref seq.PromptK[l]);
@@ -2786,6 +2792,31 @@ namespace TensorSharp.Models
                 $"lm_head={_tLmHead * f:F0}ms  selfCond={_tSc * f:F0}ms (topK_host={_tScTopK * f:F0}ms device={_tScDevice * f:F0}ms)");
         }
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectDiffusionGemmaDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectDiffusionGemmaDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _onesByDim.Values);
+            ModelDisposalOwnership.AddRange(ownedTensors, _ropePosCache.Values);
+            ModelDisposalOwnership.AddRange(ownedTensors, _promptK);
+            ModelDisposalOwnership.AddRange(ownedTensors, _promptV);
+            ModelDisposalOwnership.Add(ownedTensors, _cosGlobalTensor, _sinGlobalTensor, _maskLocal, _maskGlobal,
+                _decodeMaskLocal, _decodeMaskGlobal, _moeLhsGateConst, _moeLhsArangeConst, _structuredFloatHead);
+            if (_structuredPrompt != null)
+            {
+                ModelDisposalOwnership.AddRange(ownedTensors, _structuredPrompt.PromptK);
+                ModelDisposalOwnership.AddRange(ownedTensors, _structuredPrompt.PromptV);
+                if (_structuredPrompt.VisionEmbeddings != null)
+                    foreach (var (embedding, _) in _structuredPrompt.VisionEmbeddings) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            }
+            foreach (var (embedding, _) in _ownedVisionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            _visionEncoder?.CollectDisposalOwnership(ownedTensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeDiffusionGemmaResources);
@@ -2793,7 +2824,7 @@ namespace TensorSharp.Models
 
         private void DisposeDiffusionGemmaResources()
         {
-            ClearStructuredCache();
+            ClearStructuredCacheOwned();
             DisposeVisionState();
             foreach (var t in _onesByDim.Values) t?.Dispose();
             _onesByDim.Clear();

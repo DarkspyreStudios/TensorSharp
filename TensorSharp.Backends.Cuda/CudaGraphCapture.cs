@@ -439,6 +439,7 @@ namespace TensorSharp.Cuda
         }
 
         private readonly CudaAllocator allocator;
+        private readonly CudaNativeCalls nativeCalls;
         private readonly Dictionary<string, Entry> entries = new Dictionary<string, Entry>(StringComparer.Ordinal);
         private readonly HashSet<string> blacklist = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> seenOnce = new HashSet<string>(StringComparer.Ordinal);
@@ -453,6 +454,9 @@ namespace TensorSharp.Cuda
         public CudaPrefillGraphCache(IAllocator allocator)
         {
             this.allocator = allocator as CudaAllocator;
+            if (this.allocator != null)
+                nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.Graph,
+                    this.allocator.NativeCalls.Api, this.allocator.DeviceId);
         }
 
         public bool IsUsable => Enabled && allocator != null && !disposed;
@@ -686,31 +690,63 @@ namespace TensorSharp.Cuda
         private void DisposeEntry(string key)
         {
             Entry entry = entries[key];
-            entries.Remove(key);
-            allocator.Context.MakeCurrent();
-            // The graph may have a replay in flight; entries are only disposed
-            // between forwards (each forward ends in a logits sync), so the
-            // stream is idle with respect to this graph here.
-            CudaDriverApi.cuGraphExecDestroy(entry.Exec);
-            foreach (Tensor t in entry.KeepAlive)
-                t.Dispose();
-            entry.InputHidden.Dispose();
-            foreach ((IntPtr ptr, long bytes) in entry.OwnedBlocks)
-                allocator.ReturnDeviceMemory(ptr, bytes);
-            foreach (IntPtr host in entry.OwnedHostBuffers)
-                CudaStorage.FreeDonatedHostBuffer(host);
+            using var lease = nativeCalls.EnterEffect();
+            try
+            {
+                ReleaseGraph(entry);
+                foreach (Tensor t in entry.KeepAlive) t.Dispose();
+                entry.InputHidden.Dispose();
+                foreach ((IntPtr ptr, long bytes) in entry.OwnedBlocks) allocator.ReturnDeviceMemory(ptr, bytes);
+                foreach (IntPtr host in entry.OwnedHostBuffers) CudaStorage.FreeDonatedHostBuffer(host);
+                entries.Remove(key);
+            }
+            catch (Exception failure)
+            {
+                nativeCalls.PublishFailure(lease, failure, NativeRuntimeFailureStage.GraphRelease);
+                throw;
+            }
             if (Log)
                 Console.WriteLine($"[cuda-graph] evicted {key}");
+        }
+
+        private void ReleaseGraph(Entry entry)
+        {
+            if (entry.Exec == IntPtr.Zero) return;
+            using var lease = nativeCalls.EnterEffect();
+            allocator.Context.BindCurrent(nativeCalls);
+            nativeCalls.cuCtxSynchronize();
+            nativeCalls.cuGraphExecDestroy(entry.Exec);
+            entry.Exec = IntPtr.Zero;
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            foreach (Entry entry in entries.Values)
+            {
+                if (entry.InputHidden != null) tensors.Add(entry.InputHidden);
+                foreach (Tensor tensor in entry.KeepAlive)
+                    if (tensor != null) tensors.Add(tensor);
+            }
+        }
+
+        internal void ReleaseGraphsForRetirement()
+        {
+            foreach (Entry entry in entries.Values) ReleaseGraph(entry);
         }
 
         public void Dispose()
         {
             if (disposed)
                 return;
-            disposed = true;
             var keys = new List<string>(entries.Keys);
             foreach (string key in keys)
                 DisposeEntry(key);
+            if (nativeCalls != null)
+            {
+                using var lease = nativeCalls.EnterEffect();
+                nativeCalls.CompleteSafeRelease(lease);
+            }
+            disposed = true;
         }
     }
 }

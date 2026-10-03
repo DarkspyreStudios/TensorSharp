@@ -247,9 +247,19 @@ namespace TensorSharp.Models.QwenImage
             return result;
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors,
+            System.Collections.Generic.ICollection<IAllocator> allocators)
+            => _dit?.CollectOwnedModelDisposalOwnership(tensors, allocators);
+
         public void Dispose()
         {
             _model.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void DisposeOwned()
+        {
+            _model.ThrowIfUnsafeOwnershipCleanup();
             _dit?.Dispose();
             _vae?.Dispose();
         }

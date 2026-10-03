@@ -1173,14 +1173,26 @@ namespace TensorSharp.Models.MiniMaxH3
             _dit.ReleaseDeviceResidency();
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+        {
+            _dit?.CollectDisposalOwnership(tensors);
+            _vae?.CollectDisposalOwnership(tensors);
+        }
+
         public void Dispose()
         {
             _model.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void DisposeOwned()
+        {
+            _model.ThrowIfUnsafeOwnershipCleanup();
             if (_disposed) return;
-            _disposed = true;
             _dit?.Dispose();
             _vae?.Dispose();
             _audioVae?.Dispose();
+            _disposed = true;
         }
 
         /// <summary>A small counter-based normal generator. Deterministic across

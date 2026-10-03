@@ -8,6 +8,7 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using TensorSharp.Core;
 using TensorSharp.GGML;
@@ -1765,6 +1766,35 @@ namespace TensorSharp.Models
                 _expertUpView[il][e] = QuantizedWeight.CreateExpertView(u, e);
                 _expertDownView[il][e] = QuantizedWeight.CreateExpertView(d, e);
             }
+        }
+
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectQwen4ExpDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectQwen4ExpDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _kCache);
+            ModelDisposalOwnership.AddRange(ownedTensors, _vCache);
+            ModelDisposalOwnership.AddRange(ownedTensors, _idxKCache);
+            ModelDisposalOwnership.AddRange(ownedTensors, _gdnConvStateT);
+            ModelDisposalOwnership.AddRange(ownedTensors, _gdnStateT);
+            void AddHolder(Qwen4ExpKvCacheHolder holder)
+            {
+                if (holder == null) return;
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.K);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.V);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.IdxK);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.GdnConvStateT);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.GdnStateT);
+            }
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) AddHolder(holder);
+            if (_retainedFusedHolders != null) foreach (var holder in _retainedFusedHolders.Values) AddHolder(holder);
+            AddHolder(_primaryHolder);
+            foreach (var state in _mtpStates.Values)
+                ModelDisposalOwnership.Add(ownedTensors, state.K, state.V, state.RetiringK, state.RetiringV);
         }
 
         public override void Dispose()

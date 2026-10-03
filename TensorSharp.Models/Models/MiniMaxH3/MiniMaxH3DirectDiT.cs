@@ -452,6 +452,9 @@ namespace TensorSharp.Models.MiniMaxH3
             }
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+            => _ctx.CollectDisposalOwnership(tensors);
+
         public void Dispose()
         {
             if (_disposed) return;

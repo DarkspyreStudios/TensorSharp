@@ -132,7 +132,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeQwen4ExpResources, releaseDerivedGraphs: DisposeQwen4ExpGraphs);
+                RollBackFailedConstruction(loadError, DisposeQwen4ExpResources, releaseDerivedGraphs: DisposeQwen4ExpGraphs,
+                    collectDerivedOwnership: CollectQwen4ExpDisposalOwnership);
                 throw;
             }
         }

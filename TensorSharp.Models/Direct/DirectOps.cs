@@ -78,6 +78,12 @@ namespace TensorSharp.Models.Direct
         }
 
         /// <summary>Hand back everything this context holds on the device.</summary>
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            ModelDisposalOwnership.AddRange(tensors, _owned);
+            ModelDisposalOwnership.AddRange(tensors, _ones.Values);
+        }
+
         public void Dispose()
         {
             foreach (var t in _owned) t.Dispose();

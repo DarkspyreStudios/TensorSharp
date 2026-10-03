@@ -257,6 +257,27 @@ The internal composition applies to the actual CUDA and Distributed implementati
 arbitrary custom group. The managed checks do not qualify physical multi-device execution,
 communicator construction, TCP operation or model-family cleanup.
 
+`ModelBase.CollectDisposalOwnership` collects the actual owned tensors and allocators before
+normal disposal. Overrides call the base collector and add initialized family-owned resources.
+The construction rollback callback uses a private collector without virtual dispatch. Models
+deduplicate actual tensor identities; aliases do not grant an extra storage release. Escaped
+storage references keep owned-allocator retirement Busy before workers, graphs or buffers change.
+Admission stays fenced, and the caller retains the model, releases its escaped references and
+explicitly retries. A pure collector failure also precedes cleanup effects.
+
+Actual CUDA tensor allocators also supply completion dependencies when a component borrows its
+allocator. Completion does not grant allocator disposal or census ownership. One same-thread
+restoration token covers the frozen owning and completion dependencies. Managed graph/resource
+cleanup runs under an existing Model-role registration for those actual known CUDA devices;
+an uncertain failure retains the real owner through process quarantine. Worker shutdown and
+joins run outside that device-effect lease. Context restoration follows proven cleanup and does
+not rewrite completed release as live ownership when restoration itself fails.
+
+Failed-constructor preflight refusal preserves the original load error and cleanup error but
+does not expose a public cleanup retry handle. Base-constructor rollback and independent CUDA
+engine partial construction do not yet share the full model census. P2P communicator native
+effects remain unmigrated. These source limits prevent a complete CUDA ownership claim.
+
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
 code. `InitializeAsync(CancellationToken)` shares one initialization task for the same plan;

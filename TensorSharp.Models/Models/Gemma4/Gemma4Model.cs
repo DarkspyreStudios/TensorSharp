@@ -541,7 +541,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs);
+                RollBackFailedConstruction(loadError, DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs,
+                    collectDerivedOwnership: CollectGemma4DisposalOwnership);
                 throw;
             }
         }
@@ -8280,6 +8281,43 @@ namespace TensorSharp.Models
 
         #endregion
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectGemma4DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectGemma4DisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheK);
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheV);
+            ModelDisposalOwnership.AddRange(ownedTensors, _tpVNormOnes);
+            ModelDisposalOwnership.Add(ownedTensors, _cudaDecodeGraphPleInput, _cudaDecodeRopeFreqsLocal,
+                _cudaDecodeRopeFreqsGlobal, _cudaDecodeRopeCosLocal, _cudaDecodeRopeSinLocal,
+                _cudaDecodeRopeCosGlobal, _cudaDecodeRopeSinGlobal, _onesForVNorm, _neoXRopeCosTensor, _neoXRopeSinTensor);
+            foreach (var slot in _neoXRopeSlotByFreqs.Values)
+                ModelDisposalOwnership.Add(ownedTensors, slot.CosTensor, slot.SinTensor);
+            if (_swaPrevWindow != null)
+                foreach (var window in _swaPrevWindow.Values) ModelDisposalOwnership.Add(ownedTensors, window.k, window.v);
+            void AddHolder(Gemma4KvCacheHolder holder)
+            {
+                if (holder == null) return;
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.K);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.V);
+            }
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) AddHolder(holder);
+            if (_retainedFusedHolders != null) foreach (var holder in _retainedFusedHolders.Values) AddHolder(holder);
+            if (_holderPool != null) foreach (var holder in _holderPool) AddHolder(holder);
+            AddHolder(_primaryHolder);
+            foreach (var (embedding, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            foreach (var (embedding, _) in _pendingAudioEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            _visionEncoder?.CollectDisposalOwnership(ownedTensors);
+            _audioEncoder?.CollectDisposalOwnership(ownedTensors);
+            _cudaDecodeGraphs?.CollectDisposalOwnership(ownedTensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs);
@@ -8289,7 +8327,7 @@ namespace TensorSharp.Models
         {
             // Graph entries own captured scratch blocks and refs to KV/PLE/RoPE
             // inputs; release them before tearing down those model tensors.
-            InvalidateCudaDecodeGraphs();
+            _cudaDecodeGraphs?.ReleaseGraphsForRetirement();
             if (IsGgmlBackend)
             {
                 GgmlBasicOps.Gemma4ResetDecodeCache();
@@ -8301,6 +8339,8 @@ namespace TensorSharp.Models
 
         private void DisposeGemma4Resources()
         {
+            _cudaDecodeGraphs?.Dispose();
+            _cudaDecodeGraphs = null;
             // Free the on-device MoE per-expert pointer tables (raw device buffers)
             // while the allocator is still alive (base.Dispose frees the arena).
             if (_allocator is CudaAllocator moeCudaAllocator)
@@ -8336,8 +8376,8 @@ namespace TensorSharp.Models
                 slot.SinTensor?.Dispose();
             }
             _neoXRopeSlotByFreqs.Clear();
-            _visionEncoder?.Dispose();
-            _audioEncoder?.Dispose();
+            _visionEncoder?.DisposeOwned();
+            _audioEncoder?.DisposeOwned();
             foreach (var (emb, _) in _pendingVisionEmbeddingsList)
                 emb?.Dispose();
             _pendingVisionEmbeddingsList.Clear();

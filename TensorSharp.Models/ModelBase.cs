@@ -2677,18 +2677,19 @@ namespace TensorSharp.Models
         }
 
         protected void RollBackFailedConstruction(Exception loadError, Action releaseDerivedResources,
-            bool ownsTensorParallelGroup = true, Action releaseAfterModelCaches = null, Action releaseDerivedGraphs = null)
+            bool ownsTensorParallelGroup = true, Action releaseAfterModelCaches = null, Action releaseDerivedGraphs = null,
+            Action<ICollection<Tensor>, ICollection<IAllocator>> collectDerivedOwnership = null)
         {
             if (_ownershipCleanupFailed) return;
             try
             {
                 // Stop at a failed dependency teardown. Its buffers and runtime lease remain owned.
                 DisposeBaseResources(ownsTensorParallelGroup && !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup),
-                    releaseDerivedResources, releaseAfterModelCaches, constructionRollback: true, releaseDerivedGraphs: releaseDerivedGraphs);
+                    releaseDerivedResources, releaseAfterModelCaches, constructionRollback: true, releaseDerivedGraphs: releaseDerivedGraphs,
+                    collectDerivedOwnership: collectDerivedOwnership);
             }
             catch (Exception cleanupError)
             {
-                RetainFailedModelOwnership(cleanupFailure: cleanupError);
                 throw new AggregateException("Model construction and ownership rollback both failed.", loadError, cleanupError);
             }
         }
@@ -2719,133 +2720,180 @@ namespace TensorSharp.Models
         {
             if (_ownershipCleanupFailed)
                 throw new InvalidOperationException("Model ownership cleanup previously failed; execution and resource mutation are unsafe.", _ownershipCleanupFailure);
+            if (_ownershipRetirementStarted)
+                throw new ObjectDisposedException(GetType().Name, "Model retirement has fenced new execution and resource mutation.");
         }
 
         private void DisposeBaseResources(bool ownsTensorParallelGroup, Action releaseDerivedResources = null,
-            Action releaseAfterModelCaches = null, bool constructionRollback = false, Action releaseDerivedGraphs = null)
+            Action releaseAfterModelCaches = null, bool constructionRollback = false, Action releaseDerivedGraphs = null,
+            Action<ICollection<Tensor>, ICollection<IAllocator>> collectDerivedOwnership = null)
         {
             if (_ownershipCleanupFailed)
                 throw new InvalidOperationException("Model ownership cleanup previously failed; repeated teardown is unsafe.", _ownershipCleanupFailure);
+            if (_ownershipResourcesReleased) return;
+            _ownershipRetirementStarted = true;
+
+            // Collection and the complete census are pre-effect. A healthy refusal keeps admission fenced.
+            var ownedTensors = new List<Tensor>();
+            var ownedAllocators = new List<IAllocator>();
+            CollectBaseOwnedAllocators(ownedAllocators, ownsTensorParallelGroup);
+            CudaRetirementPlan.FenceOwnership(this, ownedAllocators);
+            if (constructionRollback)
+            {
+                CollectBaseDisposalOwnership(ownedTensors, ownedAllocators, ownsTensorParallelGroup);
+                collectDerivedOwnership?.Invoke(ownedTensors, ownedAllocators);
+            }
+            else CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            var plan = CudaRetirementPlan.PrepareModel(this, ownedTensors, ownedAllocators);
+            var restoration = plan.CaptureRestoration();
             try
             {
+                if (!constructionRollback || !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup))
+                    SignalDistributedWorkersShutdown();
+                plan.Drain(restoration);
                 DisposeBaseResourcesCore(ownsTensorParallelGroup, releaseDerivedResources, releaseAfterModelCaches,
-                    constructionRollback, releaseDerivedGraphs);
+                    releaseDerivedGraphs, plan, restoration);
+                plan.Complete();
+                _ownershipResourcesReleased = true;
             }
             catch (Exception cleanupError)
             {
+                restoration?.MarkCleanupFailed();
                 RetainFailedModelOwnership(cleanupFailure: cleanupError);
                 throw;
             }
+            // A restoration error does not turn proven completed cleanup into live native ownership.
+            restoration?.Restore();
         }
 
         private void DisposeBaseResourcesCore(bool ownsTensorParallelGroup, Action releaseDerivedResources,
-            Action releaseAfterModelCaches, bool constructionRollback, Action releaseDerivedGraphs)
+            Action releaseAfterModelCaches, Action releaseDerivedGraphs, CudaRetirementPlan plan,
+            CudaContextRestoration restoration)
         {
-            // Release any distributed worker nodes before tearing down the TP
-            // group, so every driver exit path (normal or exception) lets the
-            // workers leave their loops cleanly.
-            if (!constructionRollback || !ReferenceEquals(_tpGroup, _borrowedTensorParallelGroup))
-                SignalDistributedWorkersShutdown();
-
-            // Some family reset entrypoints free captured buffers without their own async barrier.
-            if (IsGgmlBackend)
+            using (var cleanupLease = plan.EnterModelCleanupEffect())
             {
-                _tpGroup?.Synchronize();
-                GgmlBasicOps.HostReadBarrier();
+                try
+                {
+                    // Some family reset entrypoints free captured buffers without their own async barrier.
+                    if (IsGgmlBackend)
+                    {
+                        _tpGroup?.Synchronize();
+                        GgmlBasicOps.HostReadBarrier();
+                    }
+                    // Family-owned graphs may bind generic scratch/cache buffers as well as model tensors.
+                    releaseDerivedGraphs?.Invoke();
+
+                    if (IsGgmlBackend)
+                    {
+                        if (_hasDFlash) GgmlBasicOps.DFlashResetCaches();
+                        // Clear offloadable registrations FIRST so they don't outlive
+                        // the host pointers (which become invalid once the GgufFile
+                        // mmap below is disposed). ClearHostBufferCache then frees the
+                        // MTLBuffer wrappers; the LRU state goes with it.
+                        GgmlBasicOps.ClearOffloadableState();
+                        // The persistent per-graph compute buffer and reuse gallocr are
+                        // this model's graph scratch, sized to its widest prefill, and
+                        // neither ClearOffloadableState nor ClearHostBufferCache touches
+                        // them. The two diffusion pipelines release the scratch by hand
+                        // between stages (QwenImage21Pipeline, WanVideoPipeline) precisely
+                        // because nothing else does; a model that only ever loaded and
+                        // unloaded had no such call anywhere, and left them allocated.
+                        // On Metal each carries an
+                        // MTLResidencySet registered with the device: the ggml-metal
+                        // device singleton is a C++ static whose deleter asserts that
+                        // collection is empty, so a process that had ever generated on
+                        // Metal aborted at exit
+                        // (GGML_ASSERT([rsets->data count] == 0)) after unloading
+                        // perfectly cleanly. It is also close to a gigabyte a phone
+                        // does not get back when the user switches models.
+                        GgmlBasicOps.ReleaseReuseComputeBuffers();
+                        GgmlBasicOps.ClearHostBufferCache();
+                    }
+
+                    // Generic native graphs/caches can bind both derived and base-owned buffers.
+                    // If their teardown fails, no referenced model buffer may be released.
+                    plan.AllowStorageRelease();
+                    releaseDerivedResources?.Invoke();
+
+                    if (MultimodalInjector is ModelMultimodalInjector ownedInjector)
+                        ownedInjector.DisposeOwned();
+                    else if (MultimodalInjector is IDisposable multimodalInjector)
+                        multimodalInjector.Dispose();
+
+                    // GGML views unregister after its barrier while backing buffers and mappings remain owned.
+                    if (IsGgmlBackend) DisposeTensorParallelWeights();
+
+                    foreach (var w in _weights.Values)
+                        w.Dispose();
+                    _weights.Clear();
+
+                    if (_backend == BackendType.Cuda && _allocator is CudaAllocator cudaAllocator)
+                    {
+                        foreach (var qw in _quantWeights.Values)
+                            CudaQuantizedOps.ReleaseQuantizedWeight(cudaAllocator, qw.CacheKey);
+                        // Individual releases drop entries; allocator-wide slabs remain with a borrowed group.
+                        if (!_allocatorFromTensorParallelGroup || ownsTensorParallelGroup)
+                            CudaQuantizedOps.ReleaseArena(cudaAllocator);
+                    }
+
+                    if (_backend == BackendType.Mlx && _allocator is MlxAllocator mlxAllocator)
+                    {
+                        foreach (var qw in _quantWeights.Values)
+                            MlxQuantizedOps.ReleaseQuantizedWeight(mlxAllocator, qw.CacheKey);
+                    }
+
+                    foreach (var qw in _quantWeights.Values)
+                        qw.Dispose();
+                    _quantWeights.Clear();
+
+                    if (IsGgmlBackend)
+                    {
+                        foreach (var owner in _tpQuantBackingOwners)
+                            owner.Dispose();
+                        _tpQuantBackingOwners.Clear();
+                    }
+
+                    // Free any owned bulk buffers backing stacked-experts views (only
+                    // populated by the non-mmap path in LoadWeights). External-view
+                    // entries that point into the GgufFile mmap have OwnedBuffer == 0
+                    // and are released when the GgufFile itself is disposed below.
+                    foreach (var stacked in _stackedExpertWeights.Values)
+                    {
+                        if (stacked.OwnedBuffer != IntPtr.Zero)
+                            QuantizedWeight.FreeBuffer(stacked.OwnedBuffer);
+                    }
+                    _stackedExpertWeights.Clear();
+
+                    _gguf?.Dispose();
+
+                    // Other backends retain their existing order; no GGML barrier proves their device drain.
+                    if (!IsGgmlBackend) DisposeTensorParallelWeights();
+
+                    releaseAfterModelCaches?.Invoke();
+
+                }
+                catch (Exception failure)
+                {
+                    plan.PublishModelCleanupFailure(cleanupLease, failure);
+                    throw;
+                }
             }
-            // Family-owned graphs may bind generic scratch/cache buffers as well as model tensors.
-            releaseDerivedGraphs?.Invoke();
 
-            if (IsGgmlBackend)
-            {
-                if (_hasDFlash) GgmlBasicOps.DFlashResetCaches();
-                // Clear offloadable registrations FIRST so they don't outlive
-                // the host pointers (which become invalid once the GgufFile
-                // mmap below is disposed). ClearHostBufferCache then frees the
-                // MTLBuffer wrappers; the LRU state goes with it.
-                GgmlBasicOps.ClearOffloadableState();
-                // The persistent per-graph compute buffer and reuse gallocr are
-                // this model's graph scratch, sized to its widest prefill, and
-                // neither ClearOffloadableState nor ClearHostBufferCache touches
-                // them. The two diffusion pipelines release the scratch by hand
-                // between stages (QwenImage21Pipeline, WanVideoPipeline) precisely
-                // because nothing else does; a model that only ever loaded and
-                // unloaded had no such call anywhere, and left them allocated.
-                // On Metal each carries an
-                // MTLResidencySet registered with the device: the ggml-metal
-                // device singleton is a C++ static whose deleter asserts that
-                // collection is empty, so a process that had ever generated on
-                // Metal aborted at exit
-                // (GGML_ASSERT([rsets->data count] == 0)) after unloading
-                // perfectly cleanly. It is also close to a gigabyte a phone
-                // does not get back when the user switches models.
-                GgmlBasicOps.ReleaseReuseComputeBuffers();
-                GgmlBasicOps.ClearHostBufferCache();
-            }
-
-            // Generic native graphs/caches can bind both derived and base-owned buffers.
-            // If their teardown fails, no referenced model buffer may be released.
-            releaseDerivedResources?.Invoke();
-
-            if (MultimodalInjector is IDisposable multimodalInjector)
-                multimodalInjector.Dispose();
-
-            // GGML views unregister after its barrier while backing buffers and mappings remain owned.
-            if (IsGgmlBackend) DisposeTensorParallelWeights();
-
-            foreach (var w in _weights.Values)
-                w.Dispose();
-            _weights.Clear();
-
-            if (_backend == BackendType.Cuda && _allocator is CudaAllocator cudaAllocator)
-            {
-                foreach (var qw in _quantWeights.Values)
-                    CudaQuantizedOps.ReleaseQuantizedWeight(cudaAllocator, qw.CacheKey);
-                // Individual releases drop entries; allocator-wide slabs remain with a borrowed group.
-                if (!_allocatorFromTensorParallelGroup || ownsTensorParallelGroup)
-                    CudaQuantizedOps.ReleaseArena(cudaAllocator);
-            }
-
-            if (_backend == BackendType.Mlx && _allocator is MlxAllocator mlxAllocator)
-            {
-                foreach (var qw in _quantWeights.Values)
-                    MlxQuantizedOps.ReleaseQuantizedWeight(mlxAllocator, qw.CacheKey);
-            }
-
-            foreach (var qw in _quantWeights.Values)
-                qw.Dispose();
-            _quantWeights.Clear();
-
-            if (IsGgmlBackend)
-            {
-                foreach (var owner in _tpQuantBackingOwners)
-                    owner.Dispose();
-                _tpQuantBackingOwners.Clear();
-            }
-
-            // Free any owned bulk buffers backing stacked-experts views (only
-            // populated by the non-mmap path in LoadWeights). External-view
-            // entries that point into the GgufFile mmap have OwnedBuffer == 0
-            // and are released when the GgufFile itself is disposed below.
-            foreach (var stacked in _stackedExpertWeights.Values)
-            {
-                if (stacked.OwnedBuffer != IntPtr.Zero)
-                    QuantizedWeight.FreeBuffer(stacked.OwnedBuffer);
-            }
-            _stackedExpertWeights.Clear();
-
-            _gguf?.Dispose();
-
-            // Other backends retain their existing order; no GGML barrier proves their device drain.
-            if (!IsGgmlBackend) DisposeTensorParallelWeights();
-
-            releaseAfterModelCaches?.Invoke();
+            _releaseOwnedChildren?.Invoke(plan, restoration);
+            _releaseOwnedChildren = null;
 
             if (ownsTensorParallelGroup)
-                _tpGroup?.Dispose();
+            {
+                if (_tpGroup is ICudaTensorParallelRetirement cudaGroup && cudaGroup.OwnsCudaAllocators)
+                    cudaGroup.DisposeOwned(plan, restoration);
+                else _tpGroup?.Dispose();
+            }
 
-            if (!_allocatorFromTensorParallelGroup && _allocator is IDisposable allocatorDisposable)
-                allocatorDisposable.Dispose();
+            if (!_allocatorFromTensorParallelGroup)
+            {
+                if (_allocator is CudaAllocator cudaOwnedAllocator) cudaOwnedAllocator.DisposeOwned(plan, restoration);
+                else if (_allocator is IDisposable allocatorDisposable) allocatorDisposable.Dispose();
+            }
             if (_ownsGgmlContext) _ggmlContext.Dispose();
             _ggmlRuntimeLease?.Dispose();
         }

@@ -1702,6 +1702,19 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _model.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            foreach (var cached in _visionCache.Values) tensors.Add(cached.Embeddings);
+            foreach (var cached in _videoFrameCache.Values) tensors.Add(cached.Embeddings);
+            foreach (var cached in _audioCache.Values) tensors.Add(cached.Embeddings);
+        }
+
+        internal void DisposeOwned()
+        {
+            _model.ThrowIfUnsafeOwnershipCleanup();
             ClearAllPreparedPromptState();
 
             _embeddingCacheBytes = 0;

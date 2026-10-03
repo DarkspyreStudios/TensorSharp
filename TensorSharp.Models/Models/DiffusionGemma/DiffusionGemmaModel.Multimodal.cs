@@ -279,7 +279,7 @@ namespace TensorSharp.Models
                     $"DiffusionGemma has embedding_length {Config.HiddenSize}. The tower does not belong to this model.");
             }
 
-            _visionEncoder?.Dispose();
+            _visionEncoder?.DisposeOwned();
             _visionEncoder = encoder;
             // Lets the per-block encode loop yield ModelBase.GpuComputeLock so the engine stays
             // responsive during a long image encode.

@@ -246,7 +246,7 @@ namespace TensorSharp.Cuda
 
         internal void DrainForRetirement(CudaRetirementPlan plan, CudaContextRestoration restoration)
         {
-            if (!plan.Owns(this)) throw new InvalidOperationException("CUDA completion requires its actual retirement plan.");
+            if (!plan.Completes(this)) throw new InvalidOperationException("CUDA completion requires its actual retirement plan dependency.");
             if (Volatile.Read(ref disposed) != 0) return;
             using var lease = nativeCalls.EnterEffect();
             if (Volatile.Read(ref disposed) != 0) return;

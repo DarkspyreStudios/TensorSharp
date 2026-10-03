@@ -260,7 +260,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeGptOssResources, releaseDerivedGraphs: DisposeGptOssGraphs);
+                RollBackFailedConstruction(loadError, DisposeGptOssResources, releaseDerivedGraphs: DisposeGptOssGraphs,
+                    collectDerivedOwnership: CollectGptOssDisposalOwnership);
                 throw;
             }
         }
@@ -2835,6 +2836,32 @@ namespace TensorSharp.Models
         }
 
         #endregion
+
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectGptOssDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectGptOssDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            ModelDisposalOwnership.Add(tensors, _kvCacheK);
+            ModelDisposalOwnership.Add(tensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheV);
+            ModelDisposalOwnership.Add(tensors, _layerSinksMlx);
+            ModelDisposalOwnership.Add(tensors, _moeGateBiasMlx);
+            ModelDisposalOwnership.Add(tensors, _moeUpBiasMlx);
+            ModelDisposalOwnership.Add(tensors, _moeDownBiasMlx);
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) CollectHolder(holder);
+            if (_holderPool != null) foreach (var holder in _holderPool) CollectHolder(holder);
+            CollectHolder(_primaryHolder);
+            void CollectHolder(GptOssKvCacheHolder holder)
+            {
+                ModelDisposalOwnership.Add(tensors, holder?.K);
+                ModelDisposalOwnership.Add(tensors, holder?.V);
+            }
+        }
 
         public override void Dispose()
         {

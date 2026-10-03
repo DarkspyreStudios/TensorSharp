@@ -480,6 +480,9 @@ namespace TensorSharp.Models.MiniMaxH3
             // needs them, and a later Forward re-caches under the very same keys.
         }
 
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+            => _direct?.CollectDisposalOwnership(tensors);
+
         public void Dispose()
         {
             if (_disposed) return;

@@ -249,6 +249,9 @@ namespace TensorSharp.Cuda
         private readonly bool _syncDebug;
 
         public int NPast { get; private set; }
+        private bool _retiring;
+        private bool _disposed;
+        private Exception _cleanupFailure;
         public int ContextSize => _m.NCtx;
 
         /// <summary>Prefill micro-batch the engine chunks by. Speculative prefill
@@ -1168,6 +1171,7 @@ namespace TensorSharp.Cuda
 
         public void Reset()
         {
+            ThrowIfRetiring();
             foreach (var dev in _devs)
             {
                 dev.MakeCurrent();
@@ -1208,6 +1212,7 @@ namespace TensorSharp.Cuda
 
         public void Forward(int[] tokens, float[] logitsOut)
         {
+            ThrowIfRetiring();
             if (tokens == null || tokens.Length == 0)
                 throw new ArgumentException("empty token batch", nameof(tokens));
             if (NPast + tokens.Length > _m.NCtx)
@@ -2103,45 +2108,126 @@ namespace TensorSharp.Cuda
             CudaQuantizedOps.AddmmResidentToFloat32(r, a, wF32, TF32, inDim, outDim);
         }
 
-        public void Dispose()
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
         {
-            FreeHostMoeBuffers();
+            if (_devs == null) return;
             foreach (var dev in _devs)
             {
-                if (dev == null)
-                    continue;
+                if (dev == null) continue;
+                if (dev.Alloc != null) allocators.Add(dev.Alloc);
+                foreach (var tensor in dev.OwnedTensors) if (tensor != null) tensors.Add(tensor);
+            }
+        }
+
+        private void ThrowIfRetiring()
+        {
+            if (_cleanupFailure != null)
+                throw new InvalidOperationException("DSV4 CUDA cleanup previously failed; native ownership remains unsafe.", _cleanupFailure);
+            if (_retiring) throw new ObjectDisposedException(nameof(Dsv4CudaEngine));
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            if (_cleanupFailure != null) ThrowIfRetiring();
+            _retiring = true;
+            var tensors = new List<Tensor>();
+            var allocators = new List<IAllocator>();
+            CollectDisposalOwnership(tensors, allocators);
+            var plan = CudaRetirementPlan.PrepareModel(this, tensors, allocators);
+            var restoration = plan.CaptureRestoration();
+            try
+            {
+                plan.Drain(restoration);
+                plan.AllowStorageRelease();
+                DisposeOwned(plan, restoration);
+                plan.Complete();
+            }
+            catch (Exception failure)
+            {
+                restoration?.MarkCleanupFailed();
+                _cleanupFailure ??= failure;
+                throw;
+            }
+            restoration?.Restore();
+        }
+
+        internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (_disposed) return;
+            if (_cleanupFailure != null) ThrowIfRetiring();
+            foreach (var dev in _devs)
+                if (dev?.Alloc != null && !plan.Owns(dev.Alloc))
+                    throw new InvalidOperationException("DSV4 CUDA cleanup requires its complete actual allocator plan.");
+            _retiring = true;
+            using (var cleanupLease = plan.EnterModelCleanupEffect())
+            {
                 try
                 {
-                    dev.MakeCurrent();
-                    CudaDriverApi.cuStreamSynchronize(dev.Stream);
-                    // Scratch, caches, small tensors and the weight arena are all
-                    // allocator-owned: returning them to the pool is the only
-                    // teardown needed (the allocator frees the pool on Dispose).
-                    foreach (var t in dev.OwnedTensors)
-                        t.Dispose();
-                    dev.OwnedTensors.Clear();
-                    if (dev.Event != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.Event);
-                    if (dev.TokEv0 != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.TokEv0);
-                    if (dev.TokEv1 != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.TokEv1);
-                    if (dev.XsReadyEv != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.XsReadyEv);
-                    if (dev.CopyDoneEv != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.CopyDoneEv);
-                    if (dev.BoundaryPinned != IntPtr.Zero)
-                        CudaDriverApi.cuMemFreeHost(dev.BoundaryPinned);
-                    dev.DK?.Dispose();
-                    dev.Alloc?.Dispose();
+                    foreach (var dev in _devs)
+                    {
+                        if (dev?.Alloc == null) continue;
+                        var calls = dev.Alloc.NativeCalls;
+                        dev.Alloc.Context.BindCurrent(calls);
+                        calls.cuStreamSynchronize(dev.Stream);
+                    }
+                    FreeHostMoeBuffers();
+                    foreach (var dev in _devs)
+                    {
+                        if (dev?.Alloc == null) continue;
+                        var calls = dev.Alloc.NativeCalls;
+                        dev.Alloc.Context.BindCurrent(calls);
+                        foreach (var tensor in dev.OwnedTensors) tensor.Dispose();
+                        dev.OwnedTensors.Clear();
+                        ReleaseEvent(ref dev.Event);
+                        ReleaseEvent(ref dev.TokEv0);
+                        ReleaseEvent(ref dev.TokEv1);
+                        ReleaseEvent(ref dev.XsReadyEv);
+                        ReleaseEvent(ref dev.CopyDoneEv);
+                        ReleasePinned(ref dev.BoundaryPinned);
+                        ReleasePinned(ref dev.EngramPinned);
+                        dev.DK?.Dispose();
+                        dev.DK = null;
+
+                        void ReleaseEvent(ref IntPtr handle)
+                        {
+                            if (handle == IntPtr.Zero) return;
+                            calls.cuEventDestroy(handle);
+                            handle = IntPtr.Zero;
+                        }
+                        void ReleasePinned(ref IntPtr handle)
+                        {
+                            if (handle == IntPtr.Zero) return;
+                            calls.cuMemFreeHost(handle);
+                            handle = IntPtr.Zero;
+                        }
+                    }
+                    if (_devs.Length > 0 && _devs[0]?.Alloc != null)
+                    {
+                        var calls = _devs[0].Alloc.NativeCalls;
+                        _devs[0].Alloc.Context.BindCurrent(calls);
+                        if (_pinnedTokens0 != IntPtr.Zero)
+                        {
+                            calls.cuMemFreeHost(_pinnedTokens0);
+                            _pinnedTokens0 = IntPtr.Zero;
+                        }
+                        if (_pinnedTokens1 != IntPtr.Zero)
+                        {
+                            calls.cuMemFreeHost(_pinnedTokens1);
+                            _pinnedTokens1 = IntPtr.Zero;
+                        }
+                    }
                 }
-                catch
+                catch (Exception failure)
                 {
-                    // teardown must not throw
+                    _cleanupFailure ??= failure;
+                    restoration?.MarkCleanupFailed();
+                    plan.PublishModelCleanupFailure(cleanupLease, failure);
+                    throw;
                 }
             }
-            if (_pinnedTokens0 != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(_pinnedTokens0);
-            if (_pinnedTokens1 != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(_pinnedTokens1);
+            foreach (var dev in _devs) dev?.Alloc?.DisposeOwned(plan, restoration);
+            _disposed = true;
         }
     }
 }
