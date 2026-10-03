@@ -289,6 +289,19 @@ The shared pipeline preserves the original cleanup exception and stack; repeated
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
 
+Core exposes `NativeConstructionCleanupException` and its release-only
+`NativeConstructionCleanupHandle`. Both constructors are internal. The exception
+preserves the original construction error and cleanup refusal. Its `Cleanup`
+handle exposes only `IsReleased` and synchronous `Dispose`, not a usable partial
+model, allocator, tensor or native pointer. Cleanup attempts are serialized;
+successful release clears retained owner and recipe references. The handle has no
+finalizer or healthy process-global root.
+
+Canonical model and engine constructors do not yet create or emit these carriers.
+The declarations are not a constructor-recovery or native-safety implementation.
+The existing constructor rollback and disposal behavior described above remains
+unchanged.
+
 The multimodal injector retains displaced in-use embedding cache entries until teardown. Its
 reference-distinct snapshot includes cached and displaced entries. Ownership and cache accounting
 clear only after every release returns. Request buckets and preparation pins do not replace that
