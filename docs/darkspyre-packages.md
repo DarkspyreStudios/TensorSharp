@@ -289,6 +289,16 @@ The shared pipeline preserves the original cleanup exception and stack; repeated
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
 
+The multimodal injector retains displaced in-use embedding cache entries until teardown. Its
+reference-distinct snapshot includes cached and displaced entries. Ownership and cache accounting
+clear only after every release returns. Request buckets and preparation pins do not replace that
+ownership; sink clones remain caller-owned. The cache byte budget excludes displaced entries.
+Gemma releases its retained next-step hidden and PLE tensors in its existing resource callback,
+after the graph-release phase. Consuming a pending step transfers those fields and clears them.
+DirectLinear records completed disposal only after its existing weight-key retirement and owned
+host-memory release return. Repeated disposal does not repeat those completed releases. This
+marker does not establish checked CUDA native completion or concurrent-disposal safety.
+
 The DeepSeek V4.1 vision loader reserves its returned native handle before validating companion
 metadata and attaching it to the text model. Successful rollback explicitly frees and clears
 the handle, then rethrows the original validation error unchanged. Refused rollback retains
