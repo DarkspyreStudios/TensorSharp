@@ -73,6 +73,11 @@ namespace TensorSharp.GGML
         {
             private bool released;
             internal void RetainCleanupFailure(object owner, Exception error) => lease.RetainCleanupFailure(owner, error);
+            internal void CompleteRelease(object owner, NativeOwnerRegistration registration)
+            {
+                lease.CompleteRelease(owner, registration);
+                Dispose();
+            }
             public void Dispose()
             {
                 lock (context.lifetimeGate)
@@ -96,7 +101,7 @@ namespace TensorSharp.GGML
             }
         }
 
-        private void RetainCleanupFailure(Exception error)
+        internal void RetainCleanupFailure(Exception error)
         {
             cleanupFailure ??= error;
             runtimeLease?.RetainCleanupFailure(this, error);
@@ -117,8 +122,7 @@ namespace TensorSharp.GGML
                 reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
                 GgmlBasicOps.HostReadBarrier();
                 MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
-                using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
-                runtimeLease.Dispose();
+                runtimeLease.CompleteRelease(this, registration);
                 lock (lifetimeGate) disposed = true;
                 reservation.Complete();
                 GC.SuppressFinalize(this);
@@ -237,8 +241,7 @@ namespace TensorSharp.GGML
                             reservation.Complete();
                         }
                     }
-                    using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
-                    runtimeLease.Dispose();
+                    runtimeLease.CompleteRelease(this, registration);
                     disposed = true;
                     GC.SuppressFinalize(this);
                 }

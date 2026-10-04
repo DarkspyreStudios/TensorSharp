@@ -61,8 +61,11 @@ public static partial class GgmlNativeLoader
 
         internal void CompleteRelease()
         {
-            using var effect = Registration.EnterEffect();
-            effect.CompleteSafeRelease(this);
+            if (CudaAttached)
+            {
+                using var effect = Registration.EnterEffect();
+                effect.CompleteSafeRelease(this);
+            }
             State = AcquisitionState.Released;
         }
     }
@@ -161,17 +164,17 @@ public static partial class GgmlNativeLoader
         if (!ReferenceEquals(registration.Owner, actualOwner))
             throw new InvalidOperationException("The GGML resource registration must belong to its actual owner.");
         long id;
-        ResourceRecord record;
+        OwnedResourceLease lease;
         lock (s_gate)
         {
             EnsureOperational();
             CheckCleanupAdmission();
             ClaimProcess();
             id = ++s_nextLease;
-            record = new(kind, actualOwner, registration);
+            var record = new ResourceRecord(kind, actualOwner, registration);
             s_resources.Add(id, record);
+            lease = new OwnedResourceLease(id);
         }
-        var lease = new OwnedResourceLease(id);
         try { EnsureEffectiveCudaDependency(registration, requestedBackend); }
         catch
         {
@@ -200,6 +203,26 @@ public static partial class GgmlNativeLoader
         }
 
         internal bool HasCleanupFailure { get { lock (s_gate) return _record.CleanupFailure != null; } }
+
+        internal void CompleteRelease(object actualOwner, NativeOwnerRegistration registration)
+        {
+            using var reservation = ReserveResourceCleanup(actualOwner);
+            bool attached;
+            lock (s_gate)
+            {
+                if (_record.Owner == null || !_record.Owner.TryGetTarget(out var owner) || !ReferenceEquals(owner, actualOwner) ||
+                    _record.Registration == null || !_record.Registration.TryGetTarget(out var actual) || !ReferenceEquals(actual, registration))
+                    throw new InvalidOperationException("Release must complete the actual GGML resource registration.");
+                attached = _record.CudaAttached;
+            }
+            if (attached)
+            {
+                using var effect = registration.EnterEffect();
+                effect.CompleteSafeRelease(actualOwner);
+            }
+            Dispose();
+            reservation.Complete();
+        }
 
         public void Dispose()
         {
@@ -267,7 +290,7 @@ public static partial class GgmlNativeLoader
             if (_thread != Environment.CurrentManagedThreadId)
                 throw new InvalidOperationException("The GGML native phase must resume on its originating thread.");
             CheckProcessDependency();
-            var registration = _resource?.Registration ?? s_processOwnerToken.CudaDependency;
+            var registration = _resource?.CudaAttached == true ? _resource.Registration : s_processOwnerToken.CudaDependency;
             _effect = registration?.EnterEffect();
             _phase = CallPhase.Native;
         }
@@ -406,16 +429,21 @@ public static partial class GgmlNativeLoader
                 throw new InvalidOperationException("Resource memory cannot be released while native calls or other cleanup are active.");
             s_cleanup ??= new(actualOwner);
             s_cleanup.Depth++;
-            return new ResourceCleanupReservation();
+            return new ResourceCleanupReservation(actualOwner);
         }
     }
 
     internal sealed class ResourceCleanupReservation : IDisposable
     {
         private readonly CleanupState _state;
+        private object? _caller;
         private bool _disposed;
         private bool _completed;
-        internal ResourceCleanupReservation() => _state = s_cleanup!;
+        internal ResourceCleanupReservation(object actualOwner)
+        {
+            _state = s_cleanup!;
+            _caller = actualOwner;
+        }
         internal void Complete() => _completed = true;
         public void Dispose()
         {
@@ -427,6 +455,8 @@ public static partial class GgmlNativeLoader
                 _disposed = true;
                 if (!_completed) _state.Incomplete = true;
                 if (--_state.Depth == 0) s_cleanup = null;
+                GC.KeepAlive(_caller);
+                _caller = null;
             }
         }
     }

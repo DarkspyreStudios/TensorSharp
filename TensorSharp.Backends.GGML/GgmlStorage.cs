@@ -54,8 +54,7 @@ namespace TensorSharp.GGML
                 {
                     try
                     {
-                        using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
-                        runtimeLease.Dispose();
+                        runtimeLease.CompleteRelease(this, registration);
                         released = true;
                         GC.SuppressFinalize(this);
                     }
@@ -80,6 +79,7 @@ namespace TensorSharp.GGML
             try
             {
                 ValidateReferenceAddition();
+                using var reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
                 if (buffer != IntPtr.Zero)
                 {
                     // Note: under async compute, a freshly disposed pool block may be
@@ -93,10 +93,10 @@ namespace TensorSharp.GGML
                     //      drains pending work first.
                     Context.MemoryPool.Free(buffer, ByteLength);
                 }
-                using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
+                runtimeLease.CompleteRelease(this, registration);
                 buffer = IntPtr.Zero;
-                runtimeLease.Dispose();
                 released = true;
+                reservation.Complete();
             }
             catch (Exception error)
             {

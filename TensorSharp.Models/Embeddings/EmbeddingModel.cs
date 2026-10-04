@@ -108,9 +108,8 @@ public sealed class EmbeddingModel : IEmbeddingModel
                 try
                 {
                     if (_handle != IntPtr.Zero) GgmlEmbeddingNative.TSGgml_EmbeddingFree(_handle);
-                    using (var effect = _nativeRegistration.EnterEffect()) effect.CompleteSafeRelease(this);
+                    _runtimeLease.CompleteRelease(this, _nativeRegistration);
                     _handle = IntPtr.Zero;
-                    _runtimeLease.Dispose();
                 }
                 catch (Exception cleanup)
                 {
@@ -127,6 +126,13 @@ public sealed class EmbeddingModel : IEmbeddingModel
     // probes, loads, or changes process-wide state for any native backend.
     private static IntPtr LoadNative(string path, string backend, int device, int threads)
     {
+        backend = backend switch
+        {
+            "GGML_CPU" => "cpu",
+            "GGML_METAL" => "metal",
+            "GGML_CUDA" => "cuda",
+            _ => throw new NotSupportedException("Unsupported native embedding backend."),
+        };
         var handle = GgmlEmbeddingNative.TSGgml_EmbeddingLoad(Path.GetFullPath(path), backend, device, threads);
         if (handle == IntPtr.Zero) throw new InvalidOperationException(GgmlEmbeddingNative.LastError("Cannot load embedding model."));
         return handle;
@@ -229,12 +235,7 @@ public sealed class EmbeddingModel : IEmbeddingModel
             if (_cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
             _managed?.Dispose();
             if (_handle != IntPtr.Zero) { GgmlEmbeddingNative.TSGgml_EmbeddingFree(_handle); _handle = IntPtr.Zero; }
-            if (_nativeRegistration != null)
-            {
-                using var effect = _nativeRegistration.EnterEffect();
-                effect.CompleteSafeRelease(this);
-            }
-            _runtimeLease?.Dispose();
+            _runtimeLease?.CompleteRelease(this, _nativeRegistration);
             _disposed = true;
         }
         catch (Exception error)

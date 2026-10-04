@@ -2923,12 +2923,7 @@ namespace TensorSharp.Models
                 else if (_allocator is IDisposable allocatorDisposable) allocatorDisposable.Dispose();
             }
             if (_ownsGgmlContext) _ggmlContext.Dispose();
-            if (_ggmlRegistration != null)
-            {
-                using var effect = _ggmlRegistration.EnterEffect();
-                effect.CompleteSafeRelease(this);
-            }
-            _ggmlRuntimeLease?.Dispose();
+            _ggmlRuntimeLease?.CompleteRelease(this, _ggmlRegistration);
         }
 
         /// <summary>

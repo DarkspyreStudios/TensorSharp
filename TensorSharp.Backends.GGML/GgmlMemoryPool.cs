@@ -203,30 +203,41 @@ namespace TensorSharp.GGML
         {
             List<PoolBlock> release;
             lock (_lock) release = new(_pendingRelease);
-            if (!hostOnly && release.Exists(block => block.State == BlockState.PendingNativeDetach))
-                GgmlBasicOps.HostReadBarrier();
-            long bytes = 0;
-            foreach (PoolBlock block in release)
+            try
             {
-                try
+                foreach (var block in release)
+                    if (block.CleanupFailure != null)
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(block.CleanupFailure).Throw();
+                if (!hostOnly && release.Exists(block => block.State == BlockState.PendingNativeDetach))
+                    GgmlBasicOps.HostReadBarrier();
+                long bytes = 0;
+                foreach (PoolBlock block in release)
                 {
-                    if (block.State == BlockState.PendingNativeDetach)
+                    try
                     {
-                        beforeFree?.Invoke(block.Ptr);
-                        block.State = BlockState.NativeDetached;
+                        if (block.State == BlockState.PendingNativeDetach)
+                        {
+                            beforeFree?.Invoke(block.Ptr);
+                            block.State = BlockState.NativeDetached;
+                        }
+                        FreeToSystem(block);
+                        block.State = BlockState.HostReleaseReturned;
+                        lock (_lock) _pendingRelease.Remove(block);
+                        bytes += (long)block.Size;
                     }
-                    FreeToSystem(block);
-                    block.State = BlockState.HostReleaseReturned;
-                    lock (_lock) _pendingRelease.Remove(block);
-                    bytes += (long)block.Size;
+                    catch (Exception error)
+                    {
+                        block.CleanupFailure ??= error;
+                        throw;
+                    }
                 }
-                catch (Exception error)
-                {
-                    block.CleanupFailure ??= error;
-                    throw;
-                }
+                return bytes;
             }
-            return bytes;
+            catch (Exception error)
+            {
+                _context.RetainCleanupFailure(error);
+                throw;
+            }
         }
 
         private nuint AlignSize(nuint size)

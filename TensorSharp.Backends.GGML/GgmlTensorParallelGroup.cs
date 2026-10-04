@@ -100,8 +100,7 @@ namespace TensorSharp.GGML
                     _workers?.Dispose();
                     if (Degree > 1) OpRegistry.PreInvokeHook = null;
                     if (_ownsContext) context.Dispose();
-                    using (var effect = _registration.EnterEffect()) effect.CompleteSafeRelease(this);
-                    _runtimeLease.Dispose();
+                    _runtimeLease.CompleteRelease(this, _registration);
                 }
                 catch (Exception cleanup)
                 {
@@ -314,8 +313,7 @@ namespace TensorSharp.GGML
                 reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
                 if (_ownsContext) _context.Dispose();
                 if (Degree > 1) OpRegistry.PreInvokeHook = null;
-                using (var effect = _registration.EnterEffect()) effect.CompleteSafeRelease(this);
-                _runtimeLease.Dispose();
+                _runtimeLease.CompleteRelease(this, _registration);
                 lock (_lifetimeGate) _disposed = true;
                 reservation.Complete();
             }

@@ -106,7 +106,8 @@ namespace TensorSharp.GGML
                 !IsHexIdentity(Get("abi"), 64))
                 throw new FormatException("The native build identity has an unsupported format or lacks exact source and ABI identities.");
             return new GgmlNativeBuildIdentity(Get("tensorsharp"), Get("source"), Get("ggml"), Get("variant"),
-                Get("rid"), Get("cpu"), raw) { NativeAbi = Get("abi") };
+                Get("rid"), Get("cpu"), raw)
+            { NativeAbi = Get("abi") };
         }
 
         private static bool IsHexIdentity(string value, int length) =>
@@ -350,69 +351,69 @@ namespace TensorSharp.GGML
         {
             ArgumentNullException.ThrowIfNull(candidates);
 
-                if (s_shutDown)
-                    throw new InvalidOperationException("GgmlOps was shut down in this process.");
-                if (s_candidateInProcess)
-                    throw new InvalidOperationException("A GgmlOps library from an earlier selection is already in this process.");
-                if (s_defaultProbingBound)
-                    throw new InvalidOperationException("GgmlOps already bound through default probing in this process.");
+            if (s_shutDown)
+                throw new InvalidOperationException("GgmlOps was shut down in this process.");
+            if (s_candidateInProcess)
+                throw new InvalidOperationException("A GgmlOps library from an earlier selection is already in this process.");
+            if (s_defaultProbingBound)
+                throw new InvalidOperationException("GgmlOps already bound through default probing in this process.");
 
-                EnsureImportResolverRegistered();
+            EnsureImportResolverRegistered();
 
-                var refusals = new List<GgmlNativeRefusal>();
-                for (int i = 0; i < candidates.Count; i++)
+            var refusals = new List<GgmlNativeRefusal>();
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                GgmlNativeCandidate candidate = candidates[i];
+                GgmlNativeRefusal? refusal = Check(candidate);
+                if (refusal != null)
                 {
-                    GgmlNativeCandidate candidate = candidates[i];
-                    GgmlNativeRefusal? refusal = Check(candidate);
-                    if (refusal != null)
-                    {
-                        refusals.Add(refusal);
-                        continue;
-                    }
-
-                    string libraryPath = Path.Combine(Path.GetFullPath(candidate.Directory), EntryLibraryName);
-                    if (!TryLoad(candidate, libraryPath, out IntPtr handle, out refusal))
-                    {
-                        refusals.Add(refusal!);
-                        continue;
-                    }
-
-                    s_candidateInProcess = true;
-                    s_nativeUseStarted = true;
-                    IReadOnlyList<GgmlNativeCandidate> untried = candidates.Skip(i + 1).ToArray();
-
-                    GgmlNativeBuildIdentity? identity = ReadIdentity(handle);
-                    s_processOwnerToken.Identity = identity;
-                    string? identityProblem = CompareIdentity(candidate, identity);
-                    if (identityProblem != null)
-                    {
-                        refusals.Add(Refuse(candidate, GgmlNativeRefusalCodes.LoadFailed, identityProblem));
-                        return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.PartiallyInitialized,
-                            candidate, libraryPath, null, identity, refusals, untried));
-                    }
-
-                    s_selectedHandle = handle;
-                    GgmlBackendType backend = s_plan!.RequestedBackend;
-                    string? backendProblem = InitializeBackend(backend);
-                    if (backendProblem != null)
-                    {
-                        refusals.Add(Refuse(candidate, GgmlNativeRefusalCodes.IncompatibleHardware, backendProblem));
-                        return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.PartiallyInitialized,
-                            candidate, libraryPath, null, identity, refusals, untried));
-                    }
-
-                    foreach (GgmlNativeCandidate skipped in untried)
-                        refusals.Add(Refuse(skipped, GgmlNativeRefusalCodes.NotSelected,
-                            $"An earlier candidate ({candidate.Variant}) was loaded."));
-
-                    RegisterProcessExitHook();
-
-                    return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Loaded,
-                        candidate, libraryPath, backend, identity, refusals, Array.Empty<GgmlNativeCandidate>()));
+                    refusals.Add(refusal);
+                    continue;
                 }
 
-                return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Unavailable,
-                    null, null, null, null, refusals, Array.Empty<GgmlNativeCandidate>()));
+                string libraryPath = Path.Combine(Path.GetFullPath(candidate.Directory), EntryLibraryName);
+                if (!TryLoad(candidate, libraryPath, out IntPtr handle, out refusal))
+                {
+                    refusals.Add(refusal!);
+                    continue;
+                }
+
+                s_candidateInProcess = true;
+                s_nativeUseStarted = true;
+                IReadOnlyList<GgmlNativeCandidate> untried = candidates.Skip(i + 1).ToArray();
+
+                GgmlNativeBuildIdentity? identity = ReadIdentity(handle);
+                s_processOwnerToken.Identity = identity;
+                string? identityProblem = CompareIdentity(candidate, identity);
+                if (identityProblem != null)
+                {
+                    refusals.Add(Refuse(candidate, GgmlNativeRefusalCodes.LoadFailed, identityProblem));
+                    return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.PartiallyInitialized,
+                        candidate, libraryPath, null, identity, refusals, untried));
+                }
+
+                s_selectedHandle = handle;
+                GgmlBackendType backend = s_plan!.RequestedBackend;
+                string? backendProblem = InitializeBackend(backend);
+                if (backendProblem != null)
+                {
+                    refusals.Add(Refuse(candidate, GgmlNativeRefusalCodes.IncompatibleHardware, backendProblem));
+                    return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.PartiallyInitialized,
+                        candidate, libraryPath, null, identity, refusals, untried));
+                }
+
+                foreach (GgmlNativeCandidate skipped in untried)
+                    refusals.Add(Refuse(skipped, GgmlNativeRefusalCodes.NotSelected,
+                        $"An earlier candidate ({candidate.Variant}) was loaded."));
+
+                RegisterProcessExitHook();
+
+                return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Loaded,
+                    candidate, libraryPath, backend, identity, refusals, Array.Empty<GgmlNativeCandidate>()));
+            }
+
+            return Finish(new GgmlNativeSelection(GgmlNativeSelectionState.Unavailable,
+                null, null, null, null, refusals, Array.Empty<GgmlNativeCandidate>()));
         }
 
         /// <summary>
@@ -484,8 +485,8 @@ namespace TensorSharp.GGML
         {
             lock (s_gate)
             {
-            s_current = selection with { Refusals = Array.AsReadOnly(selection.Refusals.ToArray()), Untried = Array.AsReadOnly(selection.Untried.ToArray()) };
-            return s_current;
+                s_current = selection with { Refusals = Array.AsReadOnly(selection.Refusals.ToArray()), Untried = Array.AsReadOnly(selection.Untried.ToArray()) };
+                return s_current;
             }
         }
 
