@@ -329,33 +329,33 @@ namespace TensorSharp.MLX
                     new ReadOnlySpan<float>((float*)src, length).CopyTo(result);
                     break;
                 case DType.Float64:
-                {
-                    double* typed = (double*)src;
-                    for (int i = 0; i < length; i++)
-                        result[i] = (float)typed[i];
-                    break;
-                }
+                    {
+                        double* typed = (double*)src;
+                        for (int i = 0; i < length; i++)
+                            result[i] = (float)typed[i];
+                        break;
+                    }
                 case DType.Float16:
-                {
-                    half* typed = (half*)src;
-                    for (int i = 0; i < length; i++)
-                        result[i] = typed[i];
-                    break;
-                }
+                    {
+                        half* typed = (half*)src;
+                        for (int i = 0; i < length; i++)
+                            result[i] = typed[i];
+                        break;
+                    }
                 case DType.Int32:
-                {
-                    int* typed = (int*)src;
-                    for (int i = 0; i < length; i++)
-                        result[i] = typed[i];
-                    break;
-                }
+                    {
+                        int* typed = (int*)src;
+                        for (int i = 0; i < length; i++)
+                            result[i] = typed[i];
+                        break;
+                    }
                 case DType.UInt8:
-                {
-                    byte* typed = (byte*)src;
-                    for (int i = 0; i < length; i++)
-                        result[i] = typed[i];
-                    break;
-                }
+                    {
+                        byte* typed = (byte*)src;
+                        for (int i = 0; i < length; i++)
+                            result[i] = typed[i];
+                        break;
+                    }
                 default:
                     throw new NotSupportedException("Element type " + ElementType + " not supported");
             }
@@ -420,33 +420,33 @@ namespace TensorSharp.MLX
                     value.AsSpan().CopyTo(new Span<float>((float*)dst, length));
                     break;
                 case DType.Float64:
-                {
-                    double* typed = (double*)dst;
-                    for (int i = 0; i < length; i++)
-                        typed[i] = value[i];
-                    break;
-                }
+                    {
+                        double* typed = (double*)dst;
+                        for (int i = 0; i < length; i++)
+                            typed[i] = value[i];
+                        break;
+                    }
                 case DType.Float16:
-                {
-                    half* typed = (half*)dst;
-                    for (int i = 0; i < length; i++)
-                        typed[i] = value[i];
-                    break;
-                }
+                    {
+                        half* typed = (half*)dst;
+                        for (int i = 0; i < length; i++)
+                            typed[i] = value[i];
+                        break;
+                    }
                 case DType.Int32:
-                {
-                    int* typed = (int*)dst;
-                    for (int i = 0; i < length; i++)
-                        typed[i] = (int)value[i];
-                    break;
-                }
+                    {
+                        int* typed = (int*)dst;
+                        for (int i = 0; i < length; i++)
+                            typed[i] = (int)value[i];
+                        break;
+                    }
                 case DType.UInt8:
-                {
-                    byte* typed = (byte*)dst;
-                    for (int i = 0; i < length; i++)
-                        typed[i] = (byte)value[i];
-                    break;
-                }
+                    {
+                        byte* typed = (byte*)dst;
+                        for (int i = 0; i < length; i++)
+                            typed[i] = (byte)value[i];
+                        break;
+                    }
                 default:
                     // Thrown before hostDirty is raised, as in the per-element path.
                     throw new NotSupportedException("Element type " + ElementType + " not supported");
