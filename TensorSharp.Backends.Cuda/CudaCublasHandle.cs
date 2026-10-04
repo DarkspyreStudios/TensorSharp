@@ -10,9 +10,10 @@ namespace TensorSharp.Cuda
         private readonly CudaContext context;
         private readonly CudaNativeCalls nativeCalls;
 
-        private CudaCublasHandle(IntPtr handle)
+        private CudaCublasHandle()
         {
-            this.handle = handle;
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle,
+                CudaNativeApi.Instance);
         }
 
         private CudaCublasHandle(CudaContext context)
@@ -24,29 +25,20 @@ namespace TensorSharp.Cuda
 
         public IntPtr Handle => handle;
 
-        public static CudaCublasHandle Create()
-        {
-            CublasApi.cublasCreate(out IntPtr handle).ThrowOnCublasError();
-            try
-            {
-                CublasApi.cublasSetMathMode(handle, CublasApi.CUBLAS_TENSOR_OP_MATH).ThrowOnCublasError();
-                return new CudaCublasHandle(handle);
-            }
-            catch
-            {
-                CublasApi.cublasDestroy(handle);
-                throw;
-            }
-        }
+        public static CudaCublasHandle Create() => CreateOwned(new CudaCublasHandle());
 
         internal static CudaCublasHandle Create(CudaContext context)
         {
             ArgumentNullException.ThrowIfNull(context);
-            var owner = new CudaCublasHandle(context);
+            return CreateOwned(new CudaCublasHandle(context));
+        }
+
+        private static CudaCublasHandle CreateOwned(CudaCublasHandle owner)
+        {
             using var lease = owner.nativeCalls.EnterEffect();
             try
             {
-                context.BindCurrent(owner.nativeCalls);
+                owner.context?.BindCurrent(owner.nativeCalls);
                 owner.nativeCalls.cublasCreate(out owner.handle).ThrowOnCublasError();
                 owner.nativeCalls.cublasSetMathMode(owner.handle, CublasApi.CUBLAS_TENSOR_OP_MATH).ThrowOnCublasError();
                 return owner;
@@ -59,39 +51,24 @@ namespace TensorSharp.Cuda
             }
         }
 
-        internal CudaNativeCalls NativeCalls => nativeCalls
-            ?? throw new InvalidOperationException("Standalone cuBLAS scope is not qualified for owner-scoped operations.");
+        internal CudaNativeCalls NativeCalls => nativeCalls;
 
         public void SetStream(IntPtr stream)
         {
             if (handle == IntPtr.Zero)
                 throw new ObjectDisposedException(nameof(CudaCublasHandle));
 
-            if (nativeCalls == null)
-            {
-                CublasApi.cublasSetStream(handle, stream).ThrowOnCublasError();
-                return;
-            }
-
             using var lease = nativeCalls.EnterEffect();
-            context.BindCurrent(nativeCalls);
+            context?.BindCurrent(nativeCalls);
             nativeCalls.cublasSetStream(handle, stream).ThrowOnCublasError();
         }
 
         public void Dispose()
         {
-            if (nativeCalls != null)
-            {
-                if (handle == IntPtr.Zero) return;
-                using var lease = nativeCalls.EnterEffect();
-                if (handle == IntPtr.Zero) return;
-                Release(lease, drain: true);
-                return;
-            }
-
-            IntPtr nativeHandle = Interlocked.Exchange(ref handle, IntPtr.Zero);
-            if (nativeHandle != IntPtr.Zero)
-                CublasApi.cublasDestroy(nativeHandle);
+            if (handle == IntPtr.Zero) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (handle == IntPtr.Zero) return;
+            Release(lease, drain: true);
         }
 
         private void Release(NativeEffectLease lease, bool drain)
@@ -101,8 +78,8 @@ namespace TensorSharp.Cuda
             {
                 if (handle != IntPtr.Zero)
                 {
-                    context.BindCurrent(nativeCalls);
-                    if (drain) nativeCalls.cuCtxSynchronize();
+                    context?.BindCurrent(nativeCalls);
+                    if (drain && context != null) nativeCalls.cuCtxSynchronize();
                     nativeCalls.cublasDestroy(handle);
                     Volatile.Write(ref handle, IntPtr.Zero);
                 }

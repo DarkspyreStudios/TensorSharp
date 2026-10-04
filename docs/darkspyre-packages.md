@@ -262,6 +262,20 @@ load no native code. First import binding applies the native environment tunable
 
 ## Native runtime ownership
 
+CUDA cuBLAS handles register their actual owner before native acquisition. Known-context
+creation uses that context's device scope and explicit binding. Parameterless
+`CudaCublasHandle.Create()` uses the existing unresolved `cuda-primary/*` scope;
+its creation, configuration and release acquire the same process-wide CUDA gate.
+It does not discover a device, query the current context or bind an inferred context.
+The caller keeps the handle's associated device unchanged, as required by
+[NVIDIA's cuBLAS context contract](https://docs.nvidia.com/cuda/cublas/index.html#cublas-context).
+Standalone release checks `cublasDestroy`, which performs the library's documented
+implicit device synchronization; it adds no ambient `cuCtxSynchronize` call.
+The owner clears its handle only after checked destruction succeeds. Failed destruction
+retains the handle and actual owner in the existing terminal quarantine authority;
+later effects refuse without retrying release. This source contract does not qualify
+CUDA execution or concurrent handle disposal.
+
 The existing `GgmlNativeLoader` owns configuration, loading, initialization and terminal teardown.
 `Configure(GgmlRuntimePlan)` snapshots its ordered candidate and file lists without loading native
 code. `InitializeAsync(CancellationToken)` shares one initialization task for the same plan;
