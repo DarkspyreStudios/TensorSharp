@@ -14,8 +14,8 @@ namespace TensorSharp.GGML
         public static IntPtr TSGgml_Dsv41VisionLoad(string path, string backendName, int device, int nThreads)
         {
             backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("deepseek-vision", Native_TSGgml_Dsv41VisionLoad(path, backendName, device, nThreads));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("deepseek-vision");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_Dsv41VisionLoad(path, backendName, device, nThreads));
         }
 
         [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_Dsv41VisionLoad")]
@@ -23,10 +23,7 @@ namespace TensorSharp.GGML
         private static partial IntPtr Native_TSGgml_Dsv41VisionLoad(string path, string backendName, int device, int nThreads);
         public static void TSGgml_Dsv41VisionFree(IntPtr handle)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("deepseek-vision", handle);
-            Native_TSGgml_Dsv41VisionFree(handle);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("deepseek-vision", handle, () => Native_TSGgml_Dsv41VisionFree(handle));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv41VisionFree")]
