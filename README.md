@@ -96,6 +96,10 @@ has production compilation and source-review evidence, not executed native or
 device qualification. Protocol-2 MLX callbacks, checked backend retirement and
 the final-release hook have no executed runtime qualification.
 
+MLX's shared array-reference release helper waits for the native free and checks
+its return status. Worker reentrant calls remain inline. Raw native cleanup sites,
+compiled callbacks and all-used-stream retirement are not covered by this helper.
+
 ## Quick Start
 
 Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.

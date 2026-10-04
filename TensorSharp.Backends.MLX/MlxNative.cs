@@ -32,8 +32,6 @@ namespace TensorSharp.MLX
         // you can measure each change independently with the same binary.
         private static readonly bool DisableStreamCache =
             string.Equals(Environment.GetEnvironmentVariable("TS_MLX_BASELINE_STREAM"), "1", StringComparison.Ordinal);
-        private static readonly bool DisableFreeDispatch =
-            string.Equals(Environment.GetEnvironmentVariable("TS_MLX_BASELINE_FREE"), "1", StringComparison.Ordinal);
         private static MlxFastMetalKernel iq4XsMatmulKernel;
         private static MlxFastMetalKernel iq4XsMatmulSimdgroupKernel;
         private static MlxFastMetalKernel iq4XsMatmul4Kernel;
@@ -3471,27 +3469,14 @@ if (kind == 0) {
             if (!array.IsValid)
                 return;
 
-            // mlx_array_free is a side-effect-only ref-decrement; the worker is
-            // FIFO so any later Invoke that touches the array still serializes
-            // correctly. Dispatch avoids the signal/wait round trip — meaningful
-            // since this is called hundreds of times per layer.
-            //
-            // Hot path: when we're already on the worker thread (typical for
-            // ops invoked from inside MlxWorker.Shared.Invoke), call the
-            // unmanaged free directly. This skips the closure allocation + the
-            // _dispatchCount Interlocked.Increment + the IsOnWorkerThread
-            // check that the Dispatch wrapper would do. With ~5000+ FreeArray
-            // calls per decode token on Gemma 4, those ~50ns saved per call
-            // add up to a meaningful slice of the per-token MLX overhead.
+            // A caller retains ownership until the actual free returns successfully.
+            // Reentrant trace calls stay inline on the worker and report native errors.
             if (MlxWorker.Shared.IsOnWorkerThread)
             {
-                _ = mlx_array_free(array);
+                Check(mlx_array_free(array), "freeing MLX array");
                 return;
             }
-            if (DisableFreeDispatch)
-                MlxWorker.Shared.Invoke(() => _ = mlx_array_free(array));
-            else
-                MlxWorker.Shared.Dispatch(() => _ = mlx_array_free(array));
+            MlxWorker.Shared.Invoke(() => Check(mlx_array_free(array), "freeing MLX array"));
         }
 
         internal static MlxArray Astype(MlxArray array, DType dtype)
