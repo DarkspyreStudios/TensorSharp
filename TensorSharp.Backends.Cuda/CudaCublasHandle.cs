@@ -65,10 +65,19 @@ namespace TensorSharp.Cuda
 
         public void Dispose()
         {
-            if (handle == IntPtr.Zero) return;
-            using var lease = nativeCalls.EnterEffect();
-            if (handle == IntPtr.Zero) return;
-            Release(lease, drain: true);
+            if (Volatile.Read(ref handle) == IntPtr.Zero) return;
+            NativeEffectLease lease;
+            try { lease = nativeCalls.EnterEffect(); }
+            catch (InvalidOperationException) when (Volatile.Read(ref handle) == IntPtr.Zero)
+            {
+                // A concurrent successful disposer can unregister the owner before admission completes.
+                return;
+            }
+            using (lease)
+            {
+                if (Volatile.Read(ref handle) == IntPtr.Zero) return;
+                Release(lease, drain: true);
+            }
         }
 
         private void Release(NativeEffectLease lease, bool drain)
