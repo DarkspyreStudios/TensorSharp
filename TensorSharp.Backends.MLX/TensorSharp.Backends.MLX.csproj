@@ -28,8 +28,8 @@
   </ItemGroup>
   <Target Name="BuildMlxNative"
           BeforeTargets="BeforeBuild"
-          Condition="'$(MlxNativeBuildScript)' != '' And '$(TensorSharpSkipMlxNative)' != 'true' And '$(TENSORSHARP_MLX_NATIVE_SKIP)' != 'true' And '$(TargetPlatformIdentifier)' != 'ios' And ('$(TensorSharpBuildMlxNative)' == 'true' Or '$(TENSORSHARP_MLX_NATIVE_BUILD)' == 'true' Or !Exists('$(MlxNativeInstallDir)/$(MlxNativeBinaryName)'))">
-    <Message Importance="high" Text="Building MLX native library via $(MlxNativeBuildScript) (this may take several minutes on first build; set TENSORSHARP_MLX_NATIVE_SKIP=true to skip)..." />
+          Condition="'$(MlxNativeBuildScript)' != '' And '$(TensorSharpSkipMlxNative)' != 'true' And '$(TENSORSHARP_MLX_NATIVE_SKIP)' != 'true' And '$(TargetPlatformIdentifier)' != 'ios' And ('$(TensorSharpBuildMlxNative)' == 'true' Or '$(TENSORSHARP_MLX_NATIVE_BUILD)' == 'true')">
+    <Message Importance="high" Text="Building MLX native library via $(MlxNativeBuildScript) (explicitly requested)..." />
     <Exec Command="bash &quot;$(MSBuildProjectDirectory)/$(MlxNativeBuildScript)&quot;" />
   </Target>
   <!-- MLX is a macOS-only backend; an iOS build must never shell out to the

@@ -1,5 +1,22 @@
 # TensorSharp
 
+## Native compilation is explicit
+
+Managed `dotnet build`, `test`, `publish` and `pack` do not compile GGML, MLX or CUDA code by default.
+A missing native binary does not trigger compilation. Ordinary source builds need no native toolchain.
+Native-backed inference needs a separately prepared native binary at runtime.
+
+After the owner requests native compilation, enable only the required backend:
+
+- GGML: `-p:TensorSharpBuildGgmlNative=true`.
+- MLX: `-p:TensorSharpBuildMlxNative=true` (or `TENSORSHARP_MLX_NATIVE_BUILD=true`).
+- CUDA PTX: `-p:TensorSharpBuildCudaNative=true`.
+
+Backend options such as `TENSORSHARP_GGML_NATIVE_ENABLE_CUDA=ON` select the native build configuration;
+they do not enable compilation. The existing native-skip switches take precedence over an opt-in.
+Managed builds neither create a native NuGet package nor fetch a native build into a worktree.
+
+
 <p align="center">
   <img src="imgs/banner_1.png" alt="TensorSharp logo" width="320">
 </p>
@@ -108,7 +125,7 @@ New-Item -ItemType Directory -Force models | Out-Null
 curl.exe -L --fail "https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q8_0.gguf?download=true" -o models\gemma-4-E4B-it-Q8_0.gguf
 'Answer in one short sentence: what is TensorSharp?' | Set-Content prompt.txt
 $env:TENSORSHARP_GGML_NATIVE_ENABLE_CUDA = 'ON'
-dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpSkipMlxNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
+dotnet run --project TensorSharp.Cli -c Release -p:TensorSharpBuildGgmlNative=true -- --model models\gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 128 --backend ggml_cuda
 ```
 
 **macOS (Apple Silicon)** — drop the CUDA env var and use `--backend ggml_metal`.
@@ -172,7 +189,7 @@ node runs a `TensorSharp.Cli` worker. Full reference:
 Host the same model as a server (browser UI at <http://localhost:5000>, plus Ollama/OpenAI APIs):
 
 ```bash
-dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
+dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpBuildGgmlNative=true -- --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --max-tokens 512
 ```
 
 > The server binds `0.0.0.0:5000` by default (change it with `--port` / `--host`, or the `PORT` / `HOST` environment variables; on macOS port 5000 is taken by the AirPlay Receiver) with no built-in auth or TLS — keep it behind a firewall or an authenticated HTTPS reverse proxy. For image/video/audio add the companion [`mmproj-gemma-4-E4B-it-Q8_0.gguf`](https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/mmproj-gemma-4-E4B-it-Q8_0.gguf) with `--mmproj`.
