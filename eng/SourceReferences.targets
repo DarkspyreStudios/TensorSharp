@@ -1,0 +1,34 @@
+<Project>
+  <!--
+    Source mode for consumers of the TensorSharp packages. A consuming repository imports this file from its
+    Directory.Build.targets when TensorSharpSourceRoot names a TensorSharp checkout. Each managed
+    Darkspyre.TensorSharp.* PackageReference then becomes a ProjectReference to the project that builds it: the
+    project named for the package id without its "Darkspyre." prefix, and TensorSharp.Core for Darkspyre.TensorSharp.Tensors.
+
+    The references build with TensorSharpSkipGgmlNative and TensorSharpSkipMlxNative, so a consumer build runs no
+    native development build. The GGML natives a consumer ships come from the release native package that
+    eng/build-ggml-natives.sh and eng/pack-ggml-natives.py write under artifacts/ggml-natives/<version>/dist;
+    docs/darkspyre-packages.md describes both. The Darkspyre.TensorSharp.Backends.GGML.Native.* PackageReferences are
+    left to the consumer.
+  -->
+  <PropertyGroup>
+    <_TensorSharpSourceRoot>$([MSBuild]::EnsureTrailingSlash('$([System.IO.Path]::GetFullPath('$(TensorSharpSourceRoot)'))'))</_TensorSharpSourceRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.AgentHost')->'$(_TensorSharpSourceRoot)TensorSharp.AgentHost/TensorSharp.AgentHost.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Backends.Cuda')->'$(_TensorSharpSourceRoot)TensorSharp.Backends.Cuda/TensorSharp.Backends.Cuda.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Backends.GGML')->'$(_TensorSharpSourceRoot)TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Backends.MLX')->'$(_TensorSharpSourceRoot)TensorSharp.Backends.MLX/TensorSharp.Backends.MLX.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Chat')->'$(_TensorSharpSourceRoot)TensorSharp.Chat/TensorSharp.Chat.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Cli')->'$(_TensorSharpSourceRoot)TensorSharp.Cli/TensorSharp.Cli.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Distributed')->'$(_TensorSharpSourceRoot)TensorSharp.Distributed/TensorSharp.Distributed.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Models')->'$(_TensorSharpSourceRoot)TensorSharp.Models/TensorSharp.Models.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Runtime')->'$(_TensorSharpSourceRoot)TensorSharp.Runtime/TensorSharp.Runtime.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Runtime.Logging')->'$(_TensorSharpSourceRoot)TensorSharp.Runtime.Logging/TensorSharp.Runtime.Logging.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Server')->'$(_TensorSharpSourceRoot)TensorSharp.Server/TensorSharp.Server.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Server.Host')->'$(_TensorSharpSourceRoot)TensorSharp.Server.Host/TensorSharp.Server.Host.csproj')" />
+    <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Tensors')->'$(_TensorSharpSourceRoot)TensorSharp.Core/TensorSharp.Core.csproj')" />
+    <PackageReference Remove="Darkspyre.TensorSharp.AgentHost;Darkspyre.TensorSharp.Backends.Cuda;Darkspyre.TensorSharp.Backends.GGML;Darkspyre.TensorSharp.Backends.MLX;Darkspyre.TensorSharp.Chat;Darkspyre.TensorSharp.Cli;Darkspyre.TensorSharp.Distributed;Darkspyre.TensorSharp.Models;Darkspyre.TensorSharp.Runtime;Darkspyre.TensorSharp.Runtime.Logging;Darkspyre.TensorSharp.Server;Darkspyre.TensorSharp.Server.Host;Darkspyre.TensorSharp.Tensors" />
+    <ProjectReference Include="@(_TensorSharpSourceProject)" AdditionalProperties="TensorSharpSkipGgmlNative=true;TensorSharpSkipMlxNative=true" />
+  </ItemGroup>
+</Project>
