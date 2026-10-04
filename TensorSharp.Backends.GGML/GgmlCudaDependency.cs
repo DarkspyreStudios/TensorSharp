@@ -46,6 +46,7 @@ public static partial class GgmlNativeLoader
         internal IntPtr Handle;
         internal int Calls;
         internal bool Releasing;
+        internal bool ReleaseReturned;
         internal bool CudaAttached;
         internal AcquisitionState State;
         internal Exception? CleanupFailure;
@@ -217,19 +218,24 @@ public static partial class GgmlNativeLoader
     {
         if (mode == NativeAdmissionMode.BackendEffect && knownBackend == GgmlBackendType.Cuda)
             EstablishCudaDependency();
-        NativeCallLease call;
+        NativeCallLease call = ReserveCall(kind, handle);
+        try { call.ResumeNative(); }
+        catch { call.Dispose(); throw; }
+        return call;
+    }
+
+    private static NativeCallLease ReserveCall(string? kind = null, IntPtr handle = default)
+    {
         lock (s_gate)
         {
             if (!(s_runtimeState == GgmlRuntimeState.Stopping && s_teardownThread == Environment.CurrentManagedThreadId))
                 EnsureOperational();
             CheckCleanupAdmission(nativeCall: true);
             ClaimProcess();
-            call = new(++s_nextLease, kind, handle);
+            var call = new NativeCallLease(++s_nextLease, kind, handle);
             s_calls.Add(call.Id, call);
+            return call;
         }
-        try { call.ResumeNative(); }
-        catch { call.Dispose(); throw; }
-        return call;
     }
 
     internal sealed class NativeCallLease : IDisposable
@@ -249,6 +255,7 @@ public static partial class GgmlNativeLoader
             {
                 if (!s_nativeResources.TryGetValue((kind, handle), out _resource) || _resource.Releasing)
                     throw new InvalidOperationException("The native handle is not owned or is being released.");
+                if (_resource.CleanupFailure != null) ExceptionDispatchInfo.Capture(_resource.CleanupFailure).Throw();
                 _resource.Calls++;
             }
         }
@@ -310,21 +317,35 @@ public static partial class GgmlNativeLoader
         private readonly NativeCallLease _call;
         internal NativeResourceReservation(string kind)
         {
-            _resource = new(kind);
-            if (s_processOwnerToken.MayUseCudaPrimaryContexts)
+            bool attach;
+            lock (s_gate)
             {
-                _resource.Registration.AttachCudaDependentGgml();
-                _resource.CudaAttached = true;
+                _resource = new(kind);
+                _call = ReserveCall();
+                _call.RetainAcquisition(_resource);
+                attach = s_processOwnerToken.MayUseCudaPrimaryContexts;
             }
-            _call = EnterNativeCall();
-            _call.RetainAcquisition(_resource);
+            try
+            {
+                if (attach)
+                {
+                    _resource.Registration.AttachCudaDependentGgml();
+                    _resource.CudaAttached = true;
+                }
+                _call.ResumeNative();
+            }
+            catch { _call.Dispose(); throw; }
         }
 
         internal IntPtr Track(IntPtr handle)
         {
             _resource.Handle = handle;
             _resource.State = handle == IntPtr.Zero ? AcquisitionState.ReturnedZero : AcquisitionState.Owned;
-            if (handle == IntPtr.Zero) return handle;
+            if (handle == IntPtr.Zero)
+            {
+                CheckProcessDependency();
+                return handle;
+            }
             lock (s_gate)
             {
                 if (!s_nativeResources.TryAdd((_resource.Kind, handle), _resource))
@@ -339,9 +360,16 @@ public static partial class GgmlNativeLoader
         }
         public void Dispose()
         {
-            if (_resource.State is AcquisitionState.Reserved or AcquisitionState.ReturnedZero)
-                _resource.CompleteRelease();
-            _call.Dispose();
+            try
+            {
+                if (_resource.State is AcquisitionState.Reserved or AcquisitionState.ReturnedZero)
+                {
+                    // No native payload exists. A terminal scope already retains the empty record.
+                    try { _resource.CompleteRelease(); }
+                    catch (NativeRuntimeQuarantinedException error) { _resource.CleanupFailure ??= error; }
+                }
+            }
+            finally { _call.Dispose(); }
         }
     }
 

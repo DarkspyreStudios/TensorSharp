@@ -208,15 +208,23 @@ namespace TensorSharp.GGML
             long bytes = 0;
             foreach (PoolBlock block in release)
             {
-                if (block.State == BlockState.PendingNativeDetach)
+                try
                 {
-                    beforeFree?.Invoke(block.Ptr);
-                    block.State = BlockState.NativeDetached;
+                    if (block.State == BlockState.PendingNativeDetach)
+                    {
+                        beforeFree?.Invoke(block.Ptr);
+                        block.State = BlockState.NativeDetached;
+                    }
+                    FreeToSystem(block);
+                    block.State = BlockState.HostReleaseReturned;
+                    lock (_lock) _pendingRelease.Remove(block);
+                    bytes += (long)block.Size;
                 }
-                FreeToSystem(block);
-                block.State = BlockState.HostReleaseReturned;
-                lock (_lock) _pendingRelease.Remove(block);
-                bytes += (long)block.Size;
+                catch (Exception error)
+                {
+                    block.CleanupFailure ??= error;
+                    throw;
+                }
             }
             return bytes;
         }
@@ -270,6 +278,7 @@ namespace TensorSharp.GGML
             public readonly nuint Size;
             public readonly bool IsVirtual;
             public BlockState State;
+            public Exception CleanupFailure;
 
             public PoolBlock(IntPtr ptr, nuint size, bool isVirtual)
             {

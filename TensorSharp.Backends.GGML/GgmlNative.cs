@@ -4472,7 +4472,7 @@ internal enum GgmlIndexReductionOp
 
         private static IntPtr TSGgml_GetBuildIdentity()
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.IdentityOnly);
             return Native_TSGgml_GetBuildIdentity();
         }
 

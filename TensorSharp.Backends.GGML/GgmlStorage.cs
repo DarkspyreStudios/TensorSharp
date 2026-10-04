@@ -18,7 +18,7 @@ namespace TensorSharp.GGML
         private IntPtr buffer;
         private GgmlContext.StorageLease runtimeLease;
         private NativeOwnerRegistration registration;
-        private Exception cleanupFailure;
+        private volatile Exception cleanupFailure;
         private bool released;
         private readonly object referenceGate = new();
 
@@ -79,24 +79,24 @@ namespace TensorSharp.GGML
             if (runtimeLease == null && buffer == IntPtr.Zero) return;
             try
             {
-            ValidateReferenceAddition();
-            if (buffer != IntPtr.Zero)
-            {
-                // Note: under async compute, a freshly disposed pool block may be
-                // reused for the next allocation while a previous GPU op is still
-                // writing to it. That's safe in two ways:
-                //   1) If the next GPU op uses the recycled block via zero-copy
-                //      bind, Metal's command queue is FIFO so the previous op's
-                //      writes complete before the next op's reads/writes begin.
-                //   2) If host code writes to the recycled block via
-                //      TensorComputePrimitives.GetFloatPointer, EnsureHostReadable()
-                //      drains pending work first.
-                Context.MemoryPool.Free(buffer, ByteLength);
-            }
-            using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
-            buffer = IntPtr.Zero;
-            runtimeLease.Dispose();
-            released = true;
+                ValidateReferenceAddition();
+                if (buffer != IntPtr.Zero)
+                {
+                    // Note: under async compute, a freshly disposed pool block may be
+                    // reused for the next allocation while a previous GPU op is still
+                    // writing to it. That's safe in two ways:
+                    //   1) If the next GPU op uses the recycled block via zero-copy
+                    //      bind, Metal's command queue is FIFO so the previous op's
+                    //      writes complete before the next op's reads/writes begin.
+                    //   2) If host code writes to the recycled block via
+                    //      TensorComputePrimitives.GetFloatPointer, EnsureHostReadable()
+                    //      drains pending work first.
+                    Context.MemoryPool.Free(buffer, ByteLength);
+                }
+                using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
+                buffer = IntPtr.Zero;
+                runtimeLease.Dispose();
+                released = true;
             }
             catch (Exception error)
             {

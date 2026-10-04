@@ -42,9 +42,9 @@ public sealed class EmbeddingModel : IEmbeddingModel
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ManagedEmbeddingEncoder _managed;
     private IntPtr _handle;
-    private bool _disposed;
-    private bool _retirementRequested;
-    private Exception _cleanupFailure;
+    private volatile bool _disposed;
+    private volatile bool _retirementRequested;
+    private volatile Exception _cleanupFailure;
     private readonly NativeOwnerRegistration _nativeRegistration;
     private readonly GgmlNativeLoader.OwnedResourceLease _runtimeLease;
 

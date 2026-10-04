@@ -42,7 +42,7 @@ namespace TensorSharp.GGML
         private readonly bool _ownsContext;
         private readonly GgmlNativeLoader.OwnedResourceLease _runtimeLease;
         private readonly NativeOwnerRegistration _registration;
-        private Exception _cleanupFailure;
+        private volatile Exception _cleanupFailure;
         private readonly object _lifetimeGate = new();
         private int _activeRuns;
         private bool _stopping;
@@ -72,26 +72,26 @@ namespace TensorSharp.GGML
             try
             {
 
-            Degree = context.Degree;
-            _allocators = new GgmlAllocator[Degree];
-            for (int r = 0; r < Degree; r++)
-                _allocators[r] = new GgmlAllocator(context, r);
-
-            if (Degree > 1)
-            {
-                _workers = ParallelRanks ? new RankWorkerPool(Degree) : null;
-                InstallDispatchHook();
-
-                var names = new List<string>(Degree);
+                Degree = context.Degree;
+                _allocators = new GgmlAllocator[Degree];
                 for (int r = 0; r < Degree; r++)
+                    _allocators[r] = new GgmlAllocator(context, r);
+
+                if (Degree > 1)
                 {
-                    string desc = GgmlNative.GetGpuDeviceDescription(context.BackendType, context.DeviceIds[r]);
-                    names.Add(desc ?? $"device {context.DeviceIds[r]}");
+                    _workers = ParallelRanks ? new RankWorkerPool(Degree) : null;
+                    InstallDispatchHook();
+
+                    var names = new List<string>(Degree);
+                    for (int r = 0; r < Degree; r++)
+                    {
+                        string desc = GgmlNative.GetGpuDeviceDescription(context.BackendType, context.DeviceIds[r]);
+                        names.Add(desc ?? $"device {context.DeviceIds[r]}");
+                    }
+                    Console.WriteLine($"Tensor parallelism (GGML {context.BackendType}): {Degree} GPUs ({string.Join(", ", names)})");
+                    Console.WriteLine($"  AllReduce: {DescribeAllReduce(context.HasDeviceAllReduce)}" +
+                                      $"; rank dispatch: {(_workers != null ? "parallel" : "sequential")}");
                 }
-                Console.WriteLine($"Tensor parallelism (GGML {context.BackendType}): {Degree} GPUs ({string.Join(", ", names)})");
-                Console.WriteLine($"  AllReduce: {DescribeAllReduce(context.HasDeviceAllReduce)}" +
-                                  $"; rank dispatch: {(_workers != null ? "parallel" : "sequential")}");
-            }
             }
             catch (Exception operation)
             {
@@ -170,23 +170,23 @@ namespace TensorSharp.GGML
             }
             try
             {
-            if (Degree == 1)
-            {
-                body(0);
-                _registration.ThrowIfQuarantined();
-                return;
-            }
+                if (Degree == 1)
+                {
+                    body(0);
+                    _registration.ThrowIfQuarantined();
+                    return;
+                }
 
-            if (_workers == null)
-            {
-                for (int r = 0; r < Degree; r++)
-                    RunPinned(r, body);
-                _registration.ThrowIfQuarantined();
-                return;
-            }
+                if (_workers == null)
+                {
+                    for (int r = 0; r < Degree; r++)
+                        RunPinned(r, body);
+                    _registration.ThrowIfQuarantined();
+                    return;
+                }
 
-            _workers.Run(body);
-            _registration.ThrowIfQuarantined();
+                _workers.Run(body);
+                _registration.ThrowIfQuarantined();
             }
             finally { lock (_lifetimeGate) _activeRuns--; }
         }
