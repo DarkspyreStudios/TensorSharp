@@ -29,8 +29,8 @@ namespace TensorSharp.GGML
         private static IntPtr TSGgml_Dsv4LoadModel(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe, string backendName)
         {
             backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("deepseek-model", Native_TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("deepseek-model");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_Dsv4LoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName));
         }
 
         [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_Dsv4LoadModel")]
@@ -40,8 +40,8 @@ namespace TensorSharp.GGML
         private static IntPtr TSGgml_Dsv4LoadModelDspark(string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, string dsparkPath, int nCpuMoe, string backendName)
         {
             backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("deepseek-model", Native_TSGgml_Dsv4LoadModelDspark(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath, nCpuMoe, backendName));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("deepseek-model");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_Dsv4LoadModelDspark(ggufPath, nGpu, nCtx, nUbatch, nThreads, dsparkPath, nCpuMoe, backendName));
         }
 
         [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_Dsv4LoadModelDspark")]
@@ -180,10 +180,7 @@ namespace TensorSharp.GGML
 
         private static void TSGgml_Dsv4Free(IntPtr handle)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("deepseek-model", handle);
-            Native_TSGgml_Dsv4Free(handle);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("deepseek-model", handle, () => Native_TSGgml_Dsv4Free(handle));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_Dsv4Free")]

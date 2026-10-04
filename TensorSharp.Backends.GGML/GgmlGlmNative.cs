@@ -35,8 +35,8 @@ namespace TensorSharp.GGML
         private static IntPtr TSGgml_GlmLoadModel([MarshalAs(UnmanagedType.LPUTF8Str)] string ggufPath, int nGpu, int nCtx, int nUbatch, int nThreads, int nCpuMoe, [MarshalAs(UnmanagedType.LPUTF8Str)] string backendName, int tp, int ctxIsHardLimit, int loadMtp)
         {
             backendName = GgmlNativeLoader.PrepareModelBackend(backendName);
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("glm-model", Native_TSGgml_GlmLoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName, tp, ctxIsHardLimit, loadMtp));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("glm-model");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_GlmLoadModel(ggufPath, nGpu, nCtx, nUbatch, nThreads, nCpuMoe, backendName, tp, ctxIsHardLimit, loadMtp));
         }
 
         [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmLoadModel")]
@@ -134,10 +134,7 @@ namespace TensorSharp.GGML
 
         private static void TSGgml_GlmFree(IntPtr handle)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("glm-model", handle);
-            Native_TSGgml_GlmFree(handle);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("glm-model", handle, () => Native_TSGgml_GlmFree(handle));
         }
 
         [DllImport(DllName, CallingConvention = Conv, EntryPoint = "TSGgml_GlmFree")]

@@ -21,7 +21,7 @@ namespace TensorSharp.GGML
     {
         private static int TSGgml_GetGpuDeviceCount(int backendType)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.BackendEffect, knownBackend: (GgmlBackendType)backendType);
             return Native_TSGgml_GetGpuDeviceCount(backendType);
         }
 
@@ -31,7 +31,7 @@ namespace TensorSharp.GGML
 
         private static int TSGgml_GetGpuDeviceDescription(int backendType, int deviceIndex, byte[] description, int descriptionSize)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.BackendEffect, knownBackend: (GgmlBackendType)backendType);
             return Native_TSGgml_GetGpuDeviceDescription(backendType, deviceIndex, description, descriptionSize);
         }
 
@@ -41,7 +41,7 @@ namespace TensorSharp.GGML
 
         private static int TSGgml_TensorParallelInit(int backendType, int[] deviceIndices, int count, int concurrentRanks)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.BackendEffect, knownBackend: (GgmlBackendType)backendType);
             return Native_TSGgml_TensorParallelInit(backendType, deviceIndices, count, concurrentRanks);
         }
 
@@ -51,7 +51,7 @@ namespace TensorSharp.GGML
 
         private static int TSGgml_MultiDeviceInit(int backendType, int[] deviceIndices, int count)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.BackendEffect, knownBackend: (GgmlBackendType)backendType);
             return Native_TSGgml_MultiDeviceInit(backendType, deviceIndices, count);
         }
 
@@ -61,7 +61,7 @@ namespace TensorSharp.GGML
 
         private static int TSGgml_TensorParallelInitLoopback(int backendType, int count)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.BackendEffect, knownBackend: (GgmlBackendType)backendType);
             return Native_TSGgml_TensorParallelInitLoopback(backendType, count);
         }
 
@@ -158,12 +158,6 @@ namespace TensorSharp.GGML
         [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelExecutePlans")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int Native_TSGgml_TensorParallelExecutePlans(IntPtr[] plans, int rankCount);
-
-        private static int TSGgml_TensorParallelExecutePlansDistributed(IntPtr[] plans, int rankCount, IntPtr crossNodeCallback, IntPtr crossNodeUser)
-        {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return Native_TSGgml_TensorParallelExecutePlansDistributed(plans, rankCount, crossNodeCallback, crossNodeUser);
-        }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_TensorParallelExecutePlansDistributed")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -438,16 +432,21 @@ namespace TensorSharp.GGML
             if (plans == null || plans.Length == 0)
                 throw new ArgumentException("At least one plan is required.", nameof(plans));
             ArgumentNullException.ThrowIfNull(crossNode);
-            IntPtr fn = Marshal.GetFunctionPointerForDelegate(crossNode);
+            using var call = GgmlNativeLoader.EnterNativeCall();
+            CrossNodeAllReduce wrapped = (user, data, count) => call.InvokeBorrowed(() => crossNode(user, data, count));
+            IntPtr fn = Marshal.GetFunctionPointerForDelegate(wrapped);
             try
             {
-                if (TSGgml_TensorParallelExecutePlansDistributed(plans, plans.Length, fn, IntPtr.Zero) == 0)
+                int result = Native_TSGgml_TensorParallelExecutePlansDistributed(plans, plans.Length, fn, IntPtr.Zero);
+                call.ThrowCallbackFailure();
+                if (result == 0)
                     throw new InvalidOperationException(
                         GetLastErrorMessage("GGML distributed tensor-parallel plan execution failed."));
             }
             finally
             {
                 GC.KeepAlive(crossNode);
+                GC.KeepAlive(wrapped);
             }
         }
 

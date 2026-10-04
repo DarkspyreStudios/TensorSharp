@@ -42,7 +42,11 @@ public sealed class EmbeddingModel : IEmbeddingModel
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly ManagedEmbeddingEncoder _managed;
     private IntPtr _handle;
-    private bool _disposed;
+    private volatile bool _disposed;
+    private volatile bool _retirementRequested;
+    private volatile Exception _cleanupFailure;
+    private readonly NativeOwnerRegistration _nativeRegistration;
+    private readonly GgmlNativeLoader.OwnedResourceLease _runtimeLease;
 
     public string ModelName { get; }
     public string Architecture { get; }
@@ -90,13 +94,45 @@ public sealed class EmbeddingModel : IEmbeddingModel
         if (Backend == "CPU")
             _managed = new ManagedEmbeddingEncoder(file, options.Threads);
         else
-            _handle = LoadNative(path, Backend, options.Device, options.Threads);
+        {
+            _nativeRegistration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Model);
+            _runtimeLease = GgmlNativeLoader.AcquireOwnedLease(GgmlRuntimeResourceKind.Model, this, _nativeRegistration,
+                Backend == "GGML_CUDA" ? GgmlBackendType.Cuda : Backend == "GGML_METAL" ? GgmlBackendType.Metal : GgmlBackendType.Cpu);
+            try
+            {
+                _handle = LoadNative(path, Backend, options.Device, options.Threads);
+                _nativeRegistration.ThrowIfQuarantined();
+            }
+            catch (Exception operation)
+            {
+                try
+                {
+                    if (_handle != IntPtr.Zero) GgmlEmbeddingNative.TSGgml_EmbeddingFree(_handle);
+                    _runtimeLease.CompleteRelease(this, _nativeRegistration);
+                    _handle = IntPtr.Zero;
+                }
+                catch (Exception cleanup)
+                {
+                    _cleanupFailure = cleanup;
+                    _runtimeLease.RetainCleanupFailure(this, cleanup);
+                    throw new AggregateException(operation, cleanup);
+                }
+                throw;
+            }
+        }
     }
 
     // Keep native initialization behind a distinct call so the pure C# path never
     // probes, loads, or changes process-wide state for any native backend.
     private static IntPtr LoadNative(string path, string backend, int device, int threads)
     {
+        backend = backend switch
+        {
+            "GGML_CPU" => "cpu",
+            "GGML_METAL" => "metal",
+            "GGML_CUDA" => "cuda",
+            _ => throw new NotSupportedException("Unsupported native embedding backend."),
+        };
         var handle = GgmlEmbeddingNative.TSGgml_EmbeddingLoad(Path.GetFullPath(path), backend, device, threads);
         if (handle == IntPtr.Zero) throw new InvalidOperationException(GgmlEmbeddingNative.LastError("Cannot load embedding model."));
         return handle;
@@ -106,7 +142,7 @@ public sealed class EmbeddingModel : IEmbeddingModel
 
     public int[] Tokenize(string text, bool truncate = false)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfUnavailable();
         ArgumentNullException.ThrowIfNull(text);
         var tokens = _tokenizer.Encode(text, addSpecial: true);
         if (tokens.Count > MaxTokens)
@@ -118,12 +154,13 @@ public sealed class EmbeddingModel : IEmbeddingModel
             if (_tokenizer.IsEos(last)) tokens[^1] = last;
         }
         if (tokens.Count == 0) throw new ArgumentException("Input produces no tokens.", nameof(text));
+        ThrowIfUnavailable();
         return tokens.ToArray();
     }
 
     public async Task<EmbeddingBatchResult> EmbedTokensAsync(IReadOnlyList<int[]> inputs, CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfUnavailable();
         ArgumentNullException.ThrowIfNull(inputs);
         cancellationToken.ThrowIfCancellationRequested();
         if (inputs.Count == 0) return new(Array.Empty<float[]>(), 0);
@@ -142,7 +179,7 @@ public sealed class EmbeddingModel : IEmbeddingModel
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfUnavailable();
             // Run computation off the caller's synchronization context. The gate
             // remains held until an in-flight device submission completes, even on cancellation.
             return await Task.Run(() =>
@@ -175,6 +212,7 @@ public sealed class EmbeddingModel : IEmbeddingModel
                     start = end;
                 }
                 cancellationToken.ThrowIfCancellationRequested();
+                ThrowIfUnavailable();
                 return new EmbeddingBatchResult(results, totalTokens);
             }, CancellationToken.None).ConfigureAwait(false);
         }
@@ -189,14 +227,30 @@ public sealed class EmbeddingModel : IEmbeddingModel
 
     public void Dispose()
     {
+        _retirementRequested = true;
         _gate.Wait();
         try
         {
             if (_disposed) return;
-            _disposed = true;
+            if (_cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
             _managed?.Dispose();
             if (_handle != IntPtr.Zero) { GgmlEmbeddingNative.TSGgml_EmbeddingFree(_handle); _handle = IntPtr.Zero; }
+            _runtimeLease?.CompleteRelease(this, _nativeRegistration);
+            _disposed = true;
+        }
+        catch (Exception error)
+        {
+            _cleanupFailure ??= error;
+            _runtimeLease?.RetainCleanupFailure(this, error);
+            throw;
         }
         finally { _gate.Release(); }
+    }
+
+    private void ThrowIfUnavailable()
+    {
+        if (_cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
+        ObjectDisposedException.ThrowIf(_disposed || _retirementRequested, this);
+        _nativeRegistration?.ThrowIfQuarantined();
     }
 }
