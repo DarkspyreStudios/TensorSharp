@@ -5,6 +5,7 @@
 //
 // TensorSharp is licensed under the BSD-3-Clause license found in the LICENSE file in the root directory of this source tree.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using TensorSharp;
 using TensorSharp.GGML;
@@ -72,7 +73,7 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeHunyuanResources);
+                RollBackFailedConstruction(loadError, DisposeHunyuanResources, collectDerivedOwnership: CollectHunyuanDisposalOwnership);
                 throw;
             }
         }
@@ -545,6 +546,18 @@ namespace TensorSharp.Models
 
             using Tensor reshaped = data.View(seqLen * numHeads, headDim);
             Ops.RMSNorm(reshaped, reshaped, alpha, null, Config.Eps);
+        }
+
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectHunyuanDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectHunyuanDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            ModelDisposalOwnership.Add(tensors, _kvCacheK);
+            ModelDisposalOwnership.Add(tensors, _kvCacheV);
         }
 
         public override void Dispose()

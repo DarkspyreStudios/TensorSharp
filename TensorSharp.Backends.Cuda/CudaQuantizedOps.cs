@@ -1,32 +1,91 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
+using System.Threading;
 using TensorSharp.Cuda.Interop;
 
 namespace TensorSharp.Cuda
 {
     public static class CudaQuantizedOps
     {
-        private sealed class DeviceWeight : IDisposable
+        private sealed class DeviceWeight
         {
-            public IntPtr DevicePtr;
+            internal WeightSlab Slab;
+            internal long Offset;
             public long RawBytes;
             public int GgmlType;
             public long Ne0;
             public long Ne1;
-            public int DeviceId;
-            /// <summary>When true the bytes live inside a <see cref="WeightArena"/>
-            /// slab (bump-suballocated), so this weight must NOT be individually
-            /// cuMemFree'd — the arena owns and frees the whole slab.</summary>
-            public bool ArenaBacked;
 
-            public void Dispose()
+            internal void ValidateDescriptor(int ggmlType, long ne0, long ne1, long rawBytes)
             {
-                if (DevicePtr != IntPtr.Zero)
+                if (RawBytes != rawBytes || GgmlType != ggmlType || Ne0 != ne0 || Ne1 != ne1)
+                    throw new InvalidOperationException("CUDA weight cache key requires the same byte length, type, and dimensions.");
+            }
+
+            internal IntPtr Pointer(CudaAllocator allocator)
+            {
+                if (Slab == null || Slab.Released || Slab.Ptr == IntPtr.Zero
+                    || !ReferenceEquals(Slab.Arena.Allocator, allocator)
+                    || !ReferenceEquals(Slab.Calls.Api, allocator.NativeCalls.Api)
+                    || Offset < 0 || RawBytes <= 0 || Offset > Slab.Bytes - RawBytes)
+                    throw new InvalidOperationException("Resident weight requires its actual live arena interval.");
+                return new IntPtr(checked(Slab.Ptr.ToInt64() + Offset));
+            }
+        }
+
+        private sealed class WeightCacheEntry
+        {
+            internal readonly WeightArena Arena;
+            internal readonly CacheKey Key;
+            internal readonly List<DeviceWeight> Reservations = new List<DeviceWeight>();
+            internal DeviceWeight Published;
+            internal int Retired;
+            internal WeightCacheEntry(WeightArena arena, CacheKey key)
+            {
+                Arena = arena;
+                Key = key;
+            }
+        }
+
+        private sealed class WeightSlab
+        {
+            internal readonly WeightArena Arena;
+            internal readonly CudaNativeCalls Calls;
+            internal readonly long Bytes;
+            internal IntPtr Ptr;
+            internal long Offset;
+            internal bool Acquired;
+            internal bool Released;
+
+            internal WeightSlab(WeightArena arena, long bytes)
+            {
+                Arena = arena;
+                Bytes = bytes;
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle,
+                    arena.Allocator.NativeCalls.Api, arena.Allocator.DeviceId);
+            }
+
+            internal void Acquire()
+            {
+                using var effect = Calls.EnterEffect();
+                Arena.Allocator.Context.BindCurrent(Calls);
+                Calls.ThrowOnError(Calls.cuMemAlloc(out Ptr, new UIntPtr(checked((ulong)Bytes))));
+            }
+
+            internal void Release()
+            {
+                if (Released) return;
+                using var effect = Calls.EnterEffect();
+                Calls.ValidateSafeRelease(effect);
+                Arena.Allocator.Context.BindCurrent(Calls);
+                if (Ptr != IntPtr.Zero)
                 {
-                    if (!ArenaBacked)
-                        CudaDriverApi.cuMemFree(DevicePtr);
-                    DevicePtr = IntPtr.Zero;
+                    Calls.cuMemFree(Ptr);
+                    Ptr = IntPtr.Zero;
                 }
+                Calls.CompleteSafeRelease(effect);
+                Released = true;
             }
         }
 
@@ -42,82 +101,146 @@ namespace TensorSharp.Cuda
             // 256 MB slabs: large enough that per-tensor rounding disappears, small
             // enough that the final slab wastes little tail and never fails to
             // allocate late in the preload when free VRAM is low.
-            private const long SlabBytes = 256L << 20;
-            private readonly CudaAllocator allocator;
-            private readonly List<IntPtr> slabs = new List<IntPtr>();
-            private IntPtr currentSlab;
-            private long currentSlabSize;
-            private long currentOffset;
+            internal const long SlabBytes = 256L << 20;
+            internal readonly CudaAllocator Allocator;
+            internal readonly List<WeightSlab> Slabs = new List<WeightSlab>();
+            internal readonly List<WeightCacheEntry> Entries = new List<WeightCacheEntry>();
+            internal WeightSlab Current;
+            internal bool Retiring;
 
-            public WeightArena(CudaAllocator allocator) => this.allocator = allocator;
-
-            /// <summary>Bump-suballocate <paramref name="rawBytes"/> from a slab.
-            /// Each block is 256-byte aligned and carries 16 trailing slack bytes
-            /// (the cp.async MMQ kernel over-reads up to 8 bytes past the last
-            /// block), matching the old per-tensor <c>cuMemAlloc(rawBytes + 16)</c>.</summary>
-            public IntPtr Allocate(long rawBytes)
-            {
-                const long align = 256;
-                long need = ((rawBytes + 16 + align - 1) / align) * align;
-                if (currentSlab == IntPtr.Zero || currentOffset + need > currentSlabSize)
-                {
-                    long slabSize = Math.Max(SlabBytes, need);
-                    allocator.Context.MakeCurrent();
-                    CudaDriverApi.cuMemAlloc(out IntPtr slab, new UIntPtr((ulong)slabSize)).ThrowOnError();
-                    slabs.Add(slab);
-                    currentSlab = slab;
-                    currentSlabSize = slabSize;
-                    currentOffset = 0;
-                }
-
-                IntPtr ptr = new IntPtr(currentSlab.ToInt64() + currentOffset);
-                currentOffset += need;
-                return ptr;
-            }
-
-            public void FreeAll()
-            {
-                allocator.Context.MakeCurrent();
-                foreach (IntPtr slab in slabs)
-                {
-                    if (slab != IntPtr.Zero)
-                        CudaDriverApi.cuMemFree(slab);
-                }
-                slabs.Clear();
-                currentSlab = IntPtr.Zero;
-                currentSlabSize = 0;
-                currentOffset = 0;
-            }
+            internal WeightArena(CudaAllocator allocator) => Allocator = allocator;
         }
 
         private static readonly object Sync = new object();
-        private static readonly Dictionary<CacheKey, DeviceWeight> Cache = new Dictionary<CacheKey, DeviceWeight>();
-        private static readonly Dictionary<CudaAllocator, WeightArena> Arenas = new Dictionary<CudaAllocator, WeightArena>();
+        private static readonly ConcurrentDictionary<CacheKey, WeightCacheEntry> Cache = new ConcurrentDictionary<CacheKey, WeightCacheEntry>();
+        private static readonly Dictionary<CudaAllocator, WeightArena> Arenas =
+            new Dictionary<CudaAllocator, WeightArena>(ReferenceEqualityComparer.Instance);
+
+        internal sealed class WeightRetirement
+        {
+            private readonly CudaAllocator _allocator;
+            private readonly WeightArena _arena;
+            private readonly WeightSlab[] _slabs;
+            private readonly WeightCacheEntry[] _entries;
+            private bool _releaseStarted;
+
+            private WeightRetirement(CudaAllocator allocator, WeightArena arena,
+                WeightSlab[] slabs, WeightCacheEntry[] entries)
+            {
+                _allocator = allocator;
+                _arena = arena;
+                _slabs = slabs;
+                _entries = entries;
+            }
+
+            internal static WeightRetirement Prepare(CudaAllocator allocator)
+            {
+                lock (Sync)
+                {
+                    Arenas.TryGetValue(allocator, out var arena);
+                    if (arena != null && arena.Retiring) throw new CudaAllocatorBusyException(allocator);
+                    var retirement = new WeightRetirement(allocator, arena,
+                        arena?.Slabs.ToArray() ?? Array.Empty<WeightSlab>(),
+                        arena?.Entries.ToArray() ?? Array.Empty<WeightCacheEntry>());
+                    if (arena != null) Volatile.Write(ref arena.Retiring, true);
+                    return retirement;
+                }
+            }
+
+            internal void Release()
+            {
+                _releaseStarted = true;
+                foreach (var slab in _slabs) slab.Release();
+            }
+
+            internal bool HasSlabs => _slabs.Length != 0;
+
+            internal void CancelBeforeRelease()
+            {
+                if (_releaseStarted || _arena == null) return;
+                lock (Sync) Volatile.Write(ref _arena.Retiring, false);
+            }
+
+            internal void Complete()
+            {
+                foreach (var slab in _slabs)
+                    if (!slab.Released) throw new InvalidOperationException("CUDA weight retirement requires checked slab release.");
+                lock (Sync)
+                {
+                    foreach (var entry in _entries)
+                    {
+                        Interlocked.Exchange(ref entry.Retired, 1);
+                        if (Cache.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry))
+                            Cache.TryRemove(entry.Key, out _);
+                    }
+                    if (_arena != null && Arenas.TryGetValue(_allocator, out var arena) && ReferenceEquals(arena, _arena))
+                        Arenas.Remove(_allocator);
+                }
+            }
+        }
 
         private sealed class ScratchAllocation
         {
-            public IntPtr Ptr;
-            public long Bytes;
-            public readonly List<IntPtr> Retired = new List<IntPtr>();
+            public ScratchGeneration Current;
+            public readonly List<ScratchGeneration> Generations = new List<ScratchGeneration>();
+        }
+
+        private sealed class ScratchGeneration
+        {
+            internal readonly CudaAllocator Allocator;
+            internal readonly CudaNativeCalls Calls;
+            internal readonly long Bytes;
+            internal IntPtr Ptr;
+            internal bool Released;
+
+            internal ScratchGeneration(CudaAllocator allocator, long bytes)
+            {
+                Allocator = allocator;
+                Bytes = bytes;
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle,
+                    allocator.NativeCalls.Api, allocator.DeviceId);
+            }
+
+            internal void Acquire()
+            {
+                using var effect = Calls.EnterEffect();
+                Allocator.Context.BindCurrent(Calls);
+                Calls.ThrowOnError(Calls.cuMemAlloc(out Ptr, new UIntPtr(checked((ulong)Bytes))));
+            }
+
+            internal void Release()
+            {
+                if (Released) return;
+                using var effect = Calls.EnterEffect();
+                Calls.ValidateSafeRelease(effect);
+                Allocator.Context.BindCurrent(Calls);
+                if (Ptr != IntPtr.Zero)
+                {
+                    Calls.cuMemFree(Ptr);
+                    Ptr = IntPtr.Zero;
+                }
+                Calls.CompleteSafeRelease(effect);
+                Released = true;
+            }
         }
 
         private sealed class ScratchPool
         {
             public readonly Dictionary<CudaAllocator, ScratchAllocation> Allocations =
-                new Dictionary<CudaAllocator, ScratchAllocation>();
+                new Dictionary<CudaAllocator, ScratchAllocation>(ReferenceEqualityComparer.Instance);
         }
 
         // Scratch is allocator-owned rather than device-owned: different
         // allocators have different streams and may execute concurrently.
         // Growth retains the previous generation because CUDA graphs bake raw
-        // scratch pointers into kernel nodes. Geometric growth bounds all
-        // retained generations to less than the current allocation for gradual
-        // growth; CudaAllocator.Dispose releases them after synchronizing.
+        // scratch pointers into kernel nodes. Sequential geometric growth bounds
+        // prior generations; concurrent reservations retain every actual allocation.
+        // CudaAllocator.Dispose releases them after synchronizing.
         //
         // q8_1-quantized activation scratch for the dp4a Q8_0 matmul path.
         private static readonly ScratchPool Q81Scratch = new ScratchPool();
-        private static IntPtr EnsureQ81Scratch(CudaAllocator allocator, long bytes)
-            => EnsureScratch(Q81Scratch, allocator, bytes);
+        private static ScratchGeneration EnsureQ81Scratch(CudaAllocator allocator, long bytes, CudaOperationAdmission admission)
+            => EnsureScratch(Q81Scratch, allocator, bytes, admission);
 
         // Row-batched quantized matmul (weight-reuse across small row counts).
         // On by default; set TS_CUDA_QMM_BATCHED=0 to force the legacy per-row
@@ -167,62 +290,89 @@ namespace TensorSharp.Cuda
         private static readonly ScratchPool Q81SplitQsScratch = new ScratchPool();
         private static readonly ScratchPool Q81SplitDScratch = new ScratchPool();
 
-        private static IntPtr EnsureScratch(ScratchPool pool, CudaAllocator allocator, long bytes)
+        private static ScratchGeneration EnsureScratch(ScratchPool pool, CudaAllocator allocator, long bytes,
+            CudaOperationAdmission admission)
         {
+            admission.ValidateAllocator(allocator);
+            long alloc;
             lock (Sync)
             {
-                if (pool.Allocations.TryGetValue(allocator, out ScratchAllocation scratch) &&
-                    scratch.Bytes >= bytes)
-                {
-                    return scratch.Ptr;
-                }
-
-                allocator.Context.MakeCurrent();
-                long doubled = scratch == null || scratch.Bytes > long.MaxValue / 2
+                pool.Allocations.TryGetValue(allocator, out ScratchAllocation scratch);
+                if (scratch?.Current is { Released: false } current && current.Bytes >= bytes)
+                    return current;
+                long doubled = scratch?.Current == null || scratch.Current.Bytes > long.MaxValue / 2
                     ? 0
-                    : scratch.Bytes * 2;
-                long alloc = Math.Max(bytes, Math.Max(64 * 1024L, doubled));
-                CudaDriverApi.cuMemAlloc(out IntPtr ptr, new UIntPtr((ulong)alloc)).ThrowOnError();
-
-                if (scratch == null)
-                {
-                    scratch = new ScratchAllocation();
-                    pool.Allocations.Add(allocator, scratch);
-                }
-                else if (scratch.Ptr != IntPtr.Zero)
-                {
-                    scratch.Retired.Add(scratch.Ptr);
-                }
-
-                scratch.Ptr = ptr;
-                scratch.Bytes = alloc;
-                return ptr;
+                    : scratch.Current.Bytes * 2;
+                alloc = Math.Max(bytes, Math.Max(64 * 1024L, doubled));
             }
-        }
 
-        internal static void ReleaseScratch(CudaAllocator allocator)
-        {
+            var generation = new ScratchGeneration(allocator, alloc);
+            ScratchAllocation entry;
             lock (Sync)
             {
-                allocator.Context.MakeCurrent();
-                ReleaseScratch(Q81Scratch, allocator);
-                ReleaseScratch(WF16Scratch, allocator);
-                ReleaseScratch(AF16Scratch, allocator);
-                ReleaseScratch(Q81SplitQsScratch, allocator);
-                ReleaseScratch(Q81SplitDScratch, allocator);
+                if (!pool.Allocations.TryGetValue(allocator, out entry))
+                {
+                    entry = new ScratchAllocation();
+                    pool.Allocations.Add(allocator, entry);
+                }
+                entry.Generations.Add(generation);
+            }
+            try { generation.Acquire(); }
+            catch (Exception allocationError)
+            {
+                try { generation.Release(); }
+                catch (Exception cleanupError) { throw new AggregateException(allocationError, cleanupError); }
+                lock (Sync) entry.Generations.Remove(generation);
+                throw;
+            }
+            lock (Sync)
+            {
+                // Every allocated generation stays reserved until allocator retirement.
+                if (entry.Current == null || entry.Current.Bytes < generation.Bytes)
+                    entry.Current = generation;
+                return entry.Current;
             }
         }
 
-        private static void ReleaseScratch(ScratchPool pool, CudaAllocator allocator)
+        internal sealed class ScratchRetirement
         {
-            if (!pool.Allocations.TryGetValue(allocator, out ScratchAllocation scratch))
-                return;
+            private readonly CudaAllocator _allocator;
+            private readonly ScratchPool[] _pools;
+            private readonly ScratchGeneration[] _generations;
 
-            pool.Allocations.Remove(allocator);
-            if (scratch.Ptr != IntPtr.Zero)
-                CudaDriverApi.cuMemFree(scratch.Ptr);
-            foreach (IntPtr ptr in scratch.Retired)
-                CudaDriverApi.cuMemFree(ptr);
+            private ScratchRetirement(CudaAllocator allocator, ScratchPool[] pools, ScratchGeneration[] generations)
+            {
+                _allocator = allocator;
+                _pools = pools;
+                _generations = generations;
+            }
+
+            internal void Release()
+            {
+                foreach (var generation in _generations) generation.Release();
+            }
+
+            internal void Complete()
+            {
+                lock (Sync)
+                {
+                    foreach (var generation in _generations)
+                        if (!generation.Released)
+                            throw new InvalidOperationException("Scratch retirement has an unreleased generation.");
+                    foreach (var pool in _pools) pool.Allocations.Remove(_allocator);
+                }
+            }
+
+            internal static ScratchRetirement Prepare(CudaAllocator allocator)
+            {
+                var pools = new[] { Q81Scratch, WF16Scratch, AF16Scratch, Q81SplitQsScratch, Q81SplitDScratch };
+                var generations = new List<ScratchGeneration>();
+                lock (Sync)
+                    foreach (var pool in pools)
+                        if (pool.Allocations.TryGetValue(allocator, out var entry))
+                            generations.AddRange(entry.Generations);
+                return new ScratchRetirement(allocator, pools, generations.ToArray());
+            }
         }
 
         /// <summary>
@@ -235,6 +385,83 @@ namespace TensorSharp.Cuda
             !string.Equals(Environment.GetEnvironmentVariable("TS_CUDA_BF16_MATVEC"), "0", StringComparison.Ordinal) &&
             !string.Equals(Environment.GetEnvironmentVariable("TS_DSV4_BF16_MATVEC"), "0", StringComparison.Ordinal);
 
+        private sealed class ResidentOperands
+        {
+            internal readonly CudaAllocator Allocator;
+            private readonly Tensor _input;
+            private readonly Tensor _result;
+            private readonly Tensor _weightBacking;
+            private readonly long _weightOffset;
+            private readonly long _weightBytes;
+            private readonly IntPtr _borrowedWeight;
+            private readonly CudaNativeCalls _calls;
+            private readonly DeviceWeight _cachedWeight;
+
+            internal ResidentOperands(CudaAllocator allocator, Tensor input, Tensor result, IntPtr borrowedWeight,
+                Tensor weightBacking = null, long weightOffset = 0, long weightBytes = 0, CudaNativeCalls calls = null,
+                DeviceWeight cachedWeight = null)
+            {
+                Allocator = allocator;
+                _input = input;
+                _result = result;
+                _borrowedWeight = borrowedWeight;
+                _weightBacking = weightBacking;
+                _weightOffset = weightOffset;
+                _weightBytes = weightBytes;
+                _calls = calls ?? allocator.NativeCalls;
+                _cachedWeight = cachedWeight;
+                Validate();
+            }
+
+            private void Validate()
+            {
+                if (!ReferenceEquals((_input.Storage as CudaStorage)?.AllocatorImpl, Allocator)
+                    || !ReferenceEquals((_result.Storage as CudaStorage)?.AllocatorImpl, Allocator)
+                    || !ReferenceEquals(_calls.Api, Allocator.NativeCalls.Api)
+                    || !_calls.CoversDevice(Allocator.DeviceId))
+                    throw new InvalidOperationException("Resident operands require one actual allocator and native API.");
+                if (_weightBacking == null) return;
+                long backingBytes = checked(_weightBacking.ElementType.ByteLengthFor(_weightBacking.ElementCount()));
+                if (!ReferenceEquals((_weightBacking.Storage as CudaStorage)?.AllocatorImpl, Allocator)
+                    || !_weightBacking.IsContiguous()
+                    || (_weightBacking.ElementType != DType.UInt8 && _weightBacking.ElementType != DType.Float32)
+                    || _weightOffset < 0 || _weightBytes <= 0 || _weightOffset > backingBytes - _weightBytes)
+                    throw new ArgumentException("Resident weight interval is outside its actual backing tensor.");
+                long firstByte = checked(_weightBacking.StorageOffset * _weightBacking.ElementType.Size() + _weightOffset);
+                if (firstByte > _weightBacking.Storage.ByteLength - _weightBytes)
+                    throw new ArgumentException("Resident weight interval is outside its actual storage.");
+            }
+
+            internal NativeEffectLease Enter(CudaOperationAdmission admission,
+                out IntPtr weight, out IntPtr input, out IntPtr result)
+            {
+                admission.ValidateAllocator(Allocator);
+                Validate();
+                var effect = _calls.EnterEffect();
+                try
+                {
+                    Validate();
+                    Allocator.Context.BindCurrent(_calls);
+                    input = ((CudaStorage)_input.Storage).DevicePtrAtElement(_input.StorageOffset);
+                    result = ((CudaStorage)_result.Storage).DevicePtrAtElement(_result.StorageOffset);
+                    weight = _cachedWeight != null ? _cachedWeight.Pointer(Allocator)
+                        : _weightBacking == null ? _borrowedWeight : new IntPtr(checked(
+                            ((CudaStorage)_weightBacking.Storage).DevicePtrAtElement(_weightBacking.StorageOffset).ToInt64() + _weightOffset));
+                    return effect;
+                }
+                catch { effect.Dispose(); throw; }
+            }
+        }
+
+        private static IntPtr ScratchPointer(ScratchGeneration generation, CudaAllocator allocator)
+        {
+            if (generation.Released || generation.Ptr == IntPtr.Zero
+                || !ReferenceEquals(generation.Allocator, allocator)
+                || !ReferenceEquals(generation.Calls.Api, allocator.NativeCalls.Api))
+                throw new InvalidOperationException("Scratch generation does not belong to the actual allocator.");
+            return generation.Ptr;
+        }
+
         /// <summary>
         /// C[rows, outDim] (row-major) = A[rows, inDim] x W[outDim, inDim]^T via
         /// cuBLAS, for operands already in <paramref name="wType"/>/<paramref name="aType"/>
@@ -244,10 +471,15 @@ namespace TensorSharp.Cuda
             CudaAllocator allocator, IntPtr weightPtr, int wType, IntPtr aPtr, int aType,
             IntPtr resultPtr, int inDim, int outDim, int rows)
         {
-            allocator.Blas.SetStream(allocator.Stream.Handle);
+            var calls = allocator.Blas.NativeCalls;
+            using var effect = calls.EnterEffect();
+            allocator.Context.BindCurrent(calls);
+            IntPtr handle = allocator.Blas.Handle;
+            if (handle == IntPtr.Zero) throw new ObjectDisposedException(nameof(CudaCublasHandle));
+            calls.cublasSetStream(handle, allocator.Stream.Handle).ThrowOnCublasError();
             float alpha = 1.0f, beta = 0.0f;
-            CublasApi.cublasGemmEx(
-                allocator.Blas.Handle,
+            calls.cublasGemmEx(
+                handle,
                 CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
                 outDim, rows, inDim,
                 ref alpha,
@@ -260,13 +492,15 @@ namespace TensorSharp.Cuda
 
         private static void RunF16Gemm(
             CudaAllocator allocator, CudaKernels kernels,
-            IntPtr weightPtr, int ggmlType, IntPtr inputPtr, IntPtr resultPtr,
+            ResidentOperands operands, CudaOperationAdmission admission, int ggmlType,
             int inDim, int outDim, int rows)
         {
             long wElems = (long)inDim * outDim;
             long aElems = (long)rows * inDim;
-            IntPtr aF16 = EnsureScratch(AF16Scratch, allocator, aElems * 2);
-            allocator.Context.MakeCurrent();
+            var activation = EnsureScratch(AF16Scratch, allocator, checked(aElems * 2), admission);
+            var weight = ggmlType == 1 ? null : EnsureScratch(WF16Scratch, allocator, checked(wElems * 2), admission);
+            using var effect = operands.Enter(admission, out IntPtr weightPtr, out IntPtr inputPtr, out IntPtr resultPtr);
+            IntPtr aF16 = ScratchPointer(activation, allocator);
             IntPtr stream = allocator.Stream.Handle;
             IntPtr wF16;
             if (ggmlType == 1)
@@ -278,7 +512,7 @@ namespace TensorSharp.Cuda
             }
             else
             {
-                wF16 = EnsureScratch(WF16Scratch, allocator, wElems * 2);
+                wF16 = ScratchPointer(weight, allocator);
                 if (ggmlType == 8 && Q80F16DequantEnabled)
                     kernels.LaunchDequantWeightQ80F16(weightPtr, wF16, wElems, stream);
                 else
@@ -448,7 +682,8 @@ namespace TensorSharp.Cuda
         {
             if (allocator == null)
                 throw new ArgumentNullException(nameof(allocator));
-            EnsureWeight(allocator, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
+            using var admission = CudaOperationAdmission.Enter(allocator, new[] { allocator });
+            EnsureWeight(allocator, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes, admission);
         }
 
         public static void ReleaseQuantizedWeight(CudaAllocator allocator, IntPtr cacheKey)
@@ -456,16 +691,9 @@ namespace TensorSharp.Cuda
             if (allocator == null || cacheKey == IntPtr.Zero)
                 return;
 
-            var key = new CacheKey(allocator, cacheKey);
-            lock (Sync)
-            {
-                if (Cache.TryGetValue(key, out DeviceWeight entry))
-                {
-                    allocator.Context.MakeCurrent();
-                    entry.Dispose();
-                    Cache.Remove(key);
-                }
-            }
+            // Logical invalidation cannot free a slab embedded in an existing graph.
+            if (Cache.TryGetValue(new CacheKey(allocator, cacheKey), out var entry))
+                Interlocked.Exchange(ref entry.Retired, 1);
         }
 
         public static void ClearDeviceCache(CudaAllocator allocator)
@@ -473,24 +701,7 @@ namespace TensorSharp.Cuda
             if (allocator == null)
                 return;
 
-            lock (Sync)
-            {
-                allocator.Context.MakeCurrent();
-                var remove = new List<CacheKey>();
-                foreach (var kv in Cache)
-                {
-                    if (ReferenceEquals(kv.Key.Allocator, allocator))
-                    {
-                        kv.Value.Dispose();
-                        remove.Add(kv.Key);
-                    }
-                }
-
-                foreach (CacheKey key in remove)
-                    Cache.Remove(key);
-
-                ReleaseArenaLocked(allocator);
-            }
+            ReleaseArena(allocator);
         }
 
         /// <summary>Frees the arena slabs backing this allocator's resident weights.
@@ -502,31 +713,23 @@ namespace TensorSharp.Cuda
         {
             if (allocator == null)
                 return;
-            lock (Sync)
+            using var admission = CudaOperationAdmission.EnterCacheRetirement(allocator);
+            var retirement = WeightRetirement.Prepare(allocator);
+            try
             {
-                allocator.Context.MakeCurrent();
-                // Drop only entries owned by this allocator's arena. Other
-                // allocators on the same device have independent slabs/streams
-                // and must remain resident when this model is unloaded.
-                var remove = new List<CacheKey>();
-                foreach (var kv in Cache)
+                if (retirement.HasSlabs)
                 {
-                    if (ReferenceEquals(kv.Key.Allocator, allocator) && kv.Value.ArenaBacked)
-                        remove.Add(kv.Key);
+                    using var effect = allocator.NativeCalls.EnterEffect();
+                    allocator.Context.BindCurrent(allocator.NativeCalls);
+                    allocator.NativeCalls.cuCtxSynchronize();
+                    retirement.Release();
                 }
-                foreach (CacheKey key in remove)
-                    Cache.Remove(key);
-
-                ReleaseArenaLocked(allocator);
+                retirement.Complete();
             }
-        }
-
-        private static void ReleaseArenaLocked(CudaAllocator allocator)
-        {
-            if (Arenas.TryGetValue(allocator, out WeightArena arena))
+            catch (Exception failure)
             {
-                arena.FreeAll();
-                Arenas.Remove(allocator);
+                if (!allocator.NativeCalls.IsRetainedFailure(failure)) retirement.CancelBeforeRelease();
+                throw;
             }
         }
 
@@ -541,16 +744,19 @@ namespace TensorSharp.Cuda
                 return false;
 
             var key = new CacheKey(allocator, cacheKey);
+            using var admission = CudaOperationAdmission.Enter(allocator, new[] { allocator });
+            DeviceWeight weight;
             lock (Sync)
             {
-                if (Cache.TryGetValue(key, out DeviceWeight w) && w.DevicePtr != IntPtr.Zero)
-                {
-                    devicePtr = w.DevicePtr;
-                    ggmlType = w.GgmlType;
-                    return true;
-                }
+                if (!Cache.TryGetValue(key, out var entry) || Volatile.Read(ref entry.Retired) != 0
+                    || entry.Arena.Retiring || entry.Published == null) return false;
+                weight = entry.Published;
             }
-            return false;
+            using var effect = allocator.NativeCalls.EnterEffect();
+            allocator.Context.BindCurrent(allocator.NativeCalls);
+            devicePtr = weight.Pointer(allocator);
+            ggmlType = weight.GgmlType;
+            return true;
         }
 
         /// <summary>Uploads a small array of device pointers to a device buffer
@@ -593,6 +799,20 @@ namespace TensorSharp.Cuda
 
         // q8Kernel override for the multi-row Q8_0 path (lets a test drive MMA and dp4a
         // in one process): 0 = auto (env flags), 1 = dp4a, 2 = tensor-core MMA, 3 = scalar.
+        private static bool TryGetContiguousFloatStorage(Tensor tensor, out CudaStorage storage, out int count)
+        {
+            storage = tensor?.Storage as CudaStorage;
+            if (storage != null && tensor.IsContiguous() && tensor.ElementType == DType.Float32
+                && tensor.ElementCount() <= int.MaxValue)
+            {
+                count = checked((int)tensor.ElementCount());
+                return true;
+            }
+            storage = null;
+            count = 0;
+            return false;
+        }
+
         public static bool TryAddmmQuantizedToFloat32(
             Tensor result,
             Tensor input,
@@ -614,8 +834,9 @@ namespace TensorSharp.Cuda
             if (!IsDenseGemmType(ggmlType) && !SupportsQuantizedType(ggmlType))
                 return false;
 
-            if (!CudaKernelOps.TryGetContiguousFloat(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int resultCount) ||
-                !CudaKernelOps.TryGetContiguousFloat(input, out CudaStorage inputStorage, out IntPtr inputPtr, out int inputCount) ||
+            if (!TryGetContiguousFloatStorage(result, out CudaStorage resultStorage, out int resultCount) ||
+                !TryGetContiguousFloatStorage(input, out CudaStorage inputStorage, out int inputCount) ||
+                !ReferenceEquals(resultStorage.AllocatorImpl, inputStorage.AllocatorImpl) ||
                 input.DimensionCount != 2 ||
                 result.DimensionCount != 2 ||
                 input.Sizes[1] != ne0 ||
@@ -632,11 +853,13 @@ namespace TensorSharp.Cuda
             if (kernels == null)
                 return false;
 
-            DeviceWeight weight = EnsureWeight(allocator, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
+            using var admission = CudaOperationAdmission.Enter(result, new[] { allocator });
+            DeviceWeight weight = EnsureWeight(allocator, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes, admission);
             inputStorage.EnsureDeviceCurrent();
+            var operands = new ResidentOperands(allocator, input, result, IntPtr.Zero, cachedWeight: weight);
             RunResidentMatmul(
-                allocator, kernels, weight.DevicePtr, ggmlType,
-                inputPtr, resultPtr, checked((int)ne0), checked((int)ne1),
+                allocator, kernels, operands, admission, ggmlType,
+                checked((int)ne0), checked((int)ne1),
                 checked((int)input.Sizes[0]), q8Kernel);
             resultStorage.MarkDeviceModified();
             return true;
@@ -669,8 +892,9 @@ namespace TensorSharp.Cuda
             if (!SupportsMatmulType(ggmlType))
                 throw new NotSupportedException($"CUDA matmul does not support ggml weight type {ggmlType}.");
 
-            if (!CudaKernelOps.TryGetContiguousFloat(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int resultCount) ||
-                !CudaKernelOps.TryGetContiguousFloat(input, out CudaStorage inputStorage, out IntPtr inputPtr, out int inputCount) ||
+            if (!TryGetContiguousFloatStorage(result, out CudaStorage resultStorage, out int resultCount) ||
+                !TryGetContiguousFloatStorage(input, out CudaStorage inputStorage, out int inputCount) ||
+                !ReferenceEquals(resultStorage.AllocatorImpl, inputStorage.AllocatorImpl) ||
                 input.DimensionCount != 2 ||
                 result.DimensionCount != 2 ||
                 input.Sizes[1] != ne0 ||
@@ -688,11 +912,41 @@ namespace TensorSharp.Cuda
             if (kernels == null)
                 throw new InvalidOperationException("CUDA kernels are unavailable for this allocator.");
 
+            using var admission = CudaOperationAdmission.Enter(result, new[] { allocator });
             inputStorage.EnsureDeviceCurrent();
+            var operands = new ResidentOperands(allocator, input, result, deviceWeight);
             RunResidentMatmul(
-                allocator, kernels, deviceWeight, ggmlType,
-                inputPtr, resultPtr, checked((int)ne0), checked((int)ne1),
+                allocator, kernels, operands, admission, ggmlType,
+                checked((int)ne0), checked((int)ne1),
                 checked((int)input.Sizes[0]), q8Kernel);
+            resultStorage.MarkDeviceModified();
+        }
+
+        internal static void AddmmOwnedResidentToFloat32(Tensor result, Tensor input,
+            Tensor weightBacking, long weightByteOffset, long weightByteLength,
+            int ggmlType, long ne0, long ne1, CudaNativeCalls effectOwner, int q8Kernel = 0)
+        {
+            ArgumentNullException.ThrowIfNull(weightBacking);
+            ArgumentNullException.ThrowIfNull(effectOwner);
+            if (!SupportsMatmulType(ggmlType))
+                throw new NotSupportedException($"CUDA matmul does not support ggml weight type {ggmlType}.");
+            if (!TryGetContiguousFloatStorage(result, out CudaStorage resultStorage, out int resultCount)
+                || !TryGetContiguousFloatStorage(input, out CudaStorage inputStorage, out int inputCount)
+                || !ReferenceEquals(resultStorage.AllocatorImpl, inputStorage.AllocatorImpl)
+                || input.DimensionCount != 2 || result.DimensionCount != 2 || input.Sizes[1] != ne0
+                || result.Sizes[0] != input.Sizes[0] || result.Sizes[1] != ne1
+                || inputCount != input.Sizes[0] * ne0 || resultCount != result.Sizes[0] * ne1)
+                throw new ArgumentException("Owned resident matmul requires matching contiguous F32 operands.");
+            var allocator = resultStorage.AllocatorImpl;
+            var operands = new ResidentOperands(allocator, input, result, IntPtr.Zero,
+                weightBacking, weightByteOffset, weightByteLength, effectOwner);
+            var kernels = allocator.Kernels;
+            if (kernels == null) throw new InvalidOperationException("CUDA kernels are unavailable for this allocator.");
+            using var admission = CudaOperationAdmission.Enter(result, new[] { allocator });
+            inputStorage.EnsureDeviceCurrent();
+            ((CudaStorage)weightBacking.Storage).EnsureDeviceCurrent();
+            RunResidentMatmul(allocator, kernels, operands, admission, ggmlType,
+                checked((int)ne0), checked((int)ne1), checked((int)input.Sizes[0]), q8Kernel);
             resultStorage.MarkDeviceModified();
         }
 
@@ -708,26 +962,26 @@ namespace TensorSharp.Cuda
         /// on quant type and row count only, so any executor calling it picks up
         /// the same MMQ / dp4a / dequant+cuBLAS decisions.
         /// </summary>
-        internal static void RunResidentMatmul(
+        private static void RunResidentMatmul(
             CudaAllocator allocator,
             CudaKernels kernels,
-            IntPtr weightPtr,
+            ResidentOperands operands,
+            CudaOperationAdmission admission,
             int ggmlType,
-            IntPtr inputPtr,
-            IntPtr resultPtr,
             int inDim,
             int outDim,
             int rows,
             int q8Kernel = 0)
         {
-            allocator.Context.MakeCurrent();
+            admission.ValidateAllocator(allocator);
+            IntPtr weightPtr, inputPtr, resultPtr;
 
             // F16 weights: the resident bytes are already the GEMM operand, so
             // every row count (a rows==1 decode is just a GEMV) goes straight
             // to cuBLAS with only the activation's f32->f16 convert on top.
             if (ggmlType == 1)
             {
-                RunF16Gemm(allocator, kernels, weightPtr, ggmlType, inputPtr, resultPtr, inDim, outDim, rows);
+                RunF16Gemm(allocator, kernels, operands, admission, ggmlType, inDim, outDim, rows);
                 return;
             }
 
@@ -739,11 +993,14 @@ namespace TensorSharp.Cuda
             {
                 if (rows == 1 && Bf16MatvecEnabled && (inDim & 7) == 0)
                 {
+                    using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                     kernels.LaunchMatvecBf16(weightPtr, inputPtr, resultPtr, inDim, outDim, allocator.Stream.Handle);
                 }
                 else
                 {
-                    IntPtr aBf16 = EnsureScratch(AF16Scratch, allocator, (long)rows * inDim * 2);
+                    var activation = EnsureScratch(AF16Scratch, allocator, checked((long)rows * inDim * 2), admission);
+                    using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                    IntPtr aBf16 = ScratchPointer(activation, allocator);
                     kernels.LaunchConvertF32Bf16(inputPtr, aBf16, (long)rows * inDim, allocator.Stream.Handle);
                     RunGemm(allocator, weightPtr, CublasApi.CUDA_R_16BF, aBf16, CublasApi.CUDA_R_16BF,
                         resultPtr, inDim, outDim, rows);
@@ -755,6 +1012,7 @@ namespace TensorSharp.Cuda
             // hyper-connection mixing matrices) go straight to cuBLAS.
             if (ggmlType == 0)
             {
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 RunGemm(allocator, weightPtr, CublasApi.CUDA_R_32F, inputPtr, CublasApi.CUDA_R_32F,
                     resultPtr, inDim, outDim, rows);
                 return;
@@ -772,8 +1030,11 @@ namespace TensorSharp.Cuda
                 {
                     // cp.async variant: split activation scratch (dense qs rows +
                     // float scales), raw weight windows async-staged in shared.
-                    IntPtr qsScratch = EnsureScratch(Q81SplitQsScratch, allocator, (long)rows * inDim);
-                    IntPtr dScratch = EnsureScratch(Q81SplitDScratch, allocator, (long)rows * (inDim / 32) * sizeof(float));
+                    var qs = EnsureScratch(Q81SplitQsScratch, allocator, checked((long)rows * inDim), admission);
+                    var scales = EnsureScratch(Q81SplitDScratch, allocator, checked((long)rows * (inDim / 32) * sizeof(float)), admission);
+                    using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                    IntPtr qsScratch = ScratchPointer(qs, allocator);
+                    IntPtr dScratch = ScratchPointer(scales, allocator);
                     kernels.LaunchQuantizeQ81SplitRows(inputPtr, qsScratch, dScratch, inDim, rows, allocator.Stream.Handle);
                     kernels.LaunchQuantMatmulQ80Mmq2(
                         weightPtr, qsScratch, dScratch, resultPtr, inDim, outDim, rows, allocator.Stream.Handle);
@@ -781,7 +1042,9 @@ namespace TensorSharp.Cuda
                 else
                 {
                     long mmqScratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
-                    IntPtr mmqXq = EnsureQ81Scratch(allocator, mmqScratchBytes);
+                    var activation = EnsureQ81Scratch(allocator, mmqScratchBytes, admission);
+                    using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                    IntPtr mmqXq = ScratchPointer(activation, allocator);
                     kernels.LaunchQuantizeQ81Rows(
                         inputPtr, mmqXq, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
                     kernels.LaunchQuantMatmulQ80Mmq(
@@ -796,7 +1059,7 @@ namespace TensorSharp.Cuda
             if (F16GemmEnabled && q8Kernel == 0 && rows >= F16GemmMinRows
                 && 2L * inDim * outDim <= F16GemmMaxWeightBytes)
             {
-                RunF16Gemm(allocator, kernels, weightPtr, ggmlType, inputPtr, resultPtr, inDim, outDim, rows);
+                RunF16Gemm(allocator, kernels, operands, admission, ggmlType, inDim, outDim, rows);
                 return;
             }
             // Small multi-row batches (speculative MTP verify windows, short
@@ -844,6 +1107,7 @@ namespace TensorSharp.Cuda
             if (BatchedMatmulEnabled && rows >= 2
                 && ggmlType != 2 && ggmlType != 8 && ggmlType != 16)
             {
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 kernels.LaunchQuantMatmulBatchedF32(
                     weightPtr, inputPtr, resultPtr,
                     ggmlType, inDim, outDim, rows, allocator.Stream.Handle);
@@ -863,7 +1127,9 @@ namespace TensorSharp.Cuda
             if (Q4KDp4aEnabled && ggmlType == 12 && rows == 1 && (inDim & 255) == 0)
             {
                 long scratchBytes = (long)(inDim / 32) * CudaKernels.Q81BlockBytes;
-                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                var activation = EnsureQ81Scratch(allocator, scratchBytes, admission);
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                IntPtr xqScratch = ScratchPointer(activation, allocator);
                 kernels.LaunchQuantizeQ81Rows(
                     inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
                 kernels.LaunchQuantMatmulQ4KDp4a(
@@ -878,7 +1144,9 @@ namespace TensorSharp.Cuda
                     || (ggmlType == 14 && Q6KDp4aEnabled)))
             {
                 long scratchBytes = (long)(inDim / 32) * CudaKernels.Q81BlockBytes;
-                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                var activation = EnsureQ81Scratch(allocator, scratchBytes, admission);
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                IntPtr xqScratch = ScratchPointer(activation, allocator);
                 kernels.LaunchQuantizeQ81Rows(
                     inputPtr, xqScratch, inDim, 1,
                     allocator.Stream.Handle, Q81WarpQuantizeEnabled);
@@ -905,7 +1173,9 @@ namespace TensorSharp.Cuda
                 && (inDim & 255) == 0)
             {
                 long scratchBytes = (long)(inDim / 32) * CudaKernels.Q81BlockBytes;
-                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                var activation = EnsureQ81Scratch(allocator, scratchBytes, admission);
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                IntPtr xqScratch = ScratchPointer(activation, allocator);
                 kernels.LaunchQuantizeQ81Rows(
                     inputPtr, xqScratch, inDim, 1,
                     allocator.Stream.Handle, Q81WarpQuantizeEnabled);
@@ -917,6 +1187,7 @@ namespace TensorSharp.Cuda
             if (VecMatmulEnabled && rows == 1
                 && ggmlType != 2 && ggmlType != 8 && ggmlType != 16)
             {
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 kernels.LaunchQuantMatmulVecF32(
                     weightPtr, inputPtr, resultPtr,
                     ggmlType, inDim, outDim, allocator.Stream.Handle);
@@ -934,7 +1205,9 @@ namespace TensorSharp.Cuda
                 if (Q40Dp4aEnabled && (inDim & 31) == 0)
                 {
                     long scratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
-                    IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                    var activation = EnsureQ81Scratch(allocator, scratchBytes, admission);
+                    using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                    IntPtr xqScratch = ScratchPointer(activation, allocator);
                     kernels.LaunchQuantizeQ81Rows(
                         inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
                     kernels.LaunchQuantMatmulQ40Dp4a(
@@ -946,11 +1219,13 @@ namespace TensorSharp.Cuda
                 // and the per-row kernel for single-row decode.
                 if (BatchedMatmulEnabled && rows >= 2 && rows <= CudaKernels.QuantMatmulBatchMaxRows)
                 {
+                    using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                     kernels.LaunchQuantMatmulQ40BatchedF32(
                         weightPtr, inputPtr, resultPtr,
                         inDim, outDim, rows, allocator.Stream.Handle);
                     return;
                 }
+                using var scalarEffect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 kernels.LaunchQuantMatmulQ40F32(
                     weightPtr,
                     inputPtr,
@@ -975,7 +1250,9 @@ namespace TensorSharp.Cuda
                 // and decode reads every weight once per token.
                 bool useMma = q8Kernel == 2 || (q8Kernel == 0 && CudaKernels.Q8MmaEnabled && rows >= 2);
                 long scratchBytes = (long)rows * (inDim / 32) * CudaKernels.Q81BlockBytes;
-                IntPtr xqScratch = EnsureQ81Scratch(allocator, scratchBytes);
+                var activation = EnsureQ81Scratch(allocator, scratchBytes, admission);
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
+                IntPtr xqScratch = ScratchPointer(activation, allocator);
                 kernels.LaunchQuantizeQ81Rows(
                     inputPtr, xqScratch, inDim, rows, allocator.Stream.Handle, Q81WarpQuantizeEnabled);
                 if (useMma)
@@ -990,6 +1267,7 @@ namespace TensorSharp.Cuda
             }
             else if (ggmlType == 8)
             {
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 kernels.LaunchQuantMatmulQ80F32(
                     weightPtr,
                     inputPtr,
@@ -1001,6 +1279,7 @@ namespace TensorSharp.Cuda
             }
             else if (ggmlType == 16 && (inDim & 255) == 0 && ((inDim / 32) * 36) <= 48 * 1024)
             {
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 kernels.LaunchQuantMatmulIq2XxsQ81F32(
                     weightPtr,
                     inputPtr,
@@ -1012,6 +1291,7 @@ namespace TensorSharp.Cuda
             }
             else
             {
+                using var effect = operands.Enter(admission, out weightPtr, out inputPtr, out resultPtr);
                 kernels.LaunchQuantMatmulF32(
                     weightPtr,
                     inputPtr,
@@ -1039,11 +1319,16 @@ namespace TensorSharp.Cuda
             if (!SupportsQuantizedType(ggmlType))
                 return false;
 
-            if (!CudaKernelOps.TryGetContiguousRows(result, out CudaStorage resultStorage, out IntPtr resultPtr, out int rows, out int cols) ||
-                !CudaKernelOps.TryGetContiguous(indices, out CudaStorage indicesStorage, out IntPtr indicesPtr, out long indexCount) ||
-                cols != ne0 ||
-                indexCount != rows ||
-                result.ElementType != DType.Float32 ||
+            if (!TryGetContiguousFloatStorage(result, out CudaStorage resultStorage, out int resultCount)
+                || result.DimensionCount <= 0 || result.Sizes[result.DimensionCount - 1] <= 0
+                || result.Sizes[result.DimensionCount - 1] > int.MaxValue)
+                return false;
+            int cols = checked((int)result.Sizes[result.DimensionCount - 1]);
+            int rows = resultCount / cols;
+            var indicesStorage = indices?.Storage as CudaStorage;
+            if (resultCount % cols != 0 || indicesStorage == null || !indices.IsContiguous()
+                || !ReferenceEquals(resultStorage.AllocatorImpl, indicesStorage.AllocatorImpl)
+                || cols != ne0 || indices.ElementCount() != rows ||
                 (indices.ElementType != DType.Int32 && indices.ElementType != DType.Float32))
             {
                 return false;
@@ -1054,18 +1339,22 @@ namespace TensorSharp.Cuda
             if (kernels == null)
                 return false;
 
-            DeviceWeight weight = EnsureWeight(allocator, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
+            using var admission = CudaOperationAdmission.Enter(result, new[] { allocator });
+            DeviceWeight weight = EnsureWeight(allocator, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes, admission);
             indicesStorage.EnsureDeviceCurrent();
-            allocator.Context.MakeCurrent();
-            kernels.LaunchQuantGetRowsF32(
-                weight.DevicePtr,
-                indicesPtr,
-                resultPtr,
-                ggmlType,
-                checked((int)ne0),
-                rows,
-                indices.ElementType == DType.Int32 ? 1 : 0,
-                allocator.Stream.Handle);
+            using (var effect = allocator.NativeCalls.EnterEffect())
+            {
+                allocator.Context.BindCurrent(allocator.NativeCalls);
+                kernels.LaunchQuantGetRowsF32(
+                    weight.Pointer(allocator),
+                    indicesStorage.DevicePtrAtElement(indices.StorageOffset),
+                    resultStorage.DevicePtrAtElement(result.StorageOffset),
+                    ggmlType,
+                    checked((int)ne0),
+                    rows,
+                    indices.ElementType == DType.Int32 ? 1 : 0,
+                    allocator.Stream.Handle);
+            }
             resultStorage.MarkDeviceModified();
             return true;
         }
@@ -1077,49 +1366,119 @@ namespace TensorSharp.Cuda
             int ggmlType,
             long ne0,
             long ne1,
-            long rawBytes)
+            long rawBytes, CudaOperationAdmission admission)
         {
+            admission.ValidateAllocator(allocator);
             if (cacheKey == IntPtr.Zero)
                 cacheKey = hostData;
             if (cacheKey == IntPtr.Zero)
                 throw new ArgumentException("CUDA quantized weight cache key cannot be zero.", nameof(cacheKey));
 
             var key = new CacheKey(allocator, cacheKey);
+            WeightCacheEntry entry;
+            WeightArena arena;
+            DeviceWeight weight;
+            long need;
             lock (Sync)
             {
-                if (Cache.TryGetValue(key, out DeviceWeight existing))
-                    return existing;
-
+                if (Cache.TryGetValue(key, out entry) && Volatile.Read(ref entry.Retired) == 0)
+                {
+                    if (entry.Arena.Retiring) throw new CudaAllocatorBusyException(allocator);
+                    if (entry.Published != null)
+                    {
+                        entry.Published.ValidateDescriptor(ggmlType, ne0, ne1, rawBytes);
+                        return entry.Published;
+                    }
+                }
                 if (hostData == IntPtr.Zero)
                     throw new InvalidOperationException("Quantized weight is not preloaded on this CUDA device and no host data was provided.");
-
-                allocator.Context.MakeCurrent();
-                // Suballocate from the per-allocator weight arena instead of one
-                // cuMemAlloc per tensor: model weights live for the model's whole
-                // lifetime and are freed together at unload, so packing them into
-                // large slabs removes the per-tensor driver rounding that otherwise
-                // wastes ~1.6 GB on a 26B MoE (the +16 trailing slack the cp.async
-                // MMQ kernel needs is reserved inside Allocate).
-                if (!Arenas.TryGetValue(allocator, out WeightArena arena))
+                ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rawBytes);
+                need = checked((rawBytes + 16 + 255) / 256 * 256);
+                if (!Arenas.TryGetValue(allocator, out arena))
                 {
                     arena = new WeightArena(allocator);
                     Arenas.Add(allocator, arena);
                 }
-
-                IntPtr devicePtr = arena.Allocate(rawBytes);
-                CudaDriverApi.cuMemcpyHtoD(devicePtr, hostData, new UIntPtr((ulong)rawBytes)).ThrowOnError();
-                var entry = new DeviceWeight
+                if (arena.Retiring) throw new CudaAllocatorBusyException(allocator);
+                if (entry == null || Volatile.Read(ref entry.Retired) != 0)
                 {
-                    DevicePtr = devicePtr,
+                    entry = new WeightCacheEntry(arena, key);
+                    arena.Entries.EnsureCapacity(checked(arena.Entries.Count + 1));
+                    arena.Entries.Add(entry);
+                    Cache[key] = entry;
+                }
+                weight = new DeviceWeight
+                {
                     RawBytes = rawBytes,
                     GgmlType = ggmlType,
                     Ne0 = ne0,
                     Ne1 = ne1,
-                    DeviceId = allocator.DeviceId,
-                    ArenaBacked = true,
                 };
-                Cache.Add(key, entry);
-                return entry;
+                entry.Reservations.EnsureCapacity(checked(entry.Reservations.Count + 1));
+                entry.Reservations.Add(weight);
+                var slab = arena.Current;
+                if (slab != null && slab.Acquired && !slab.Released && slab.Offset <= slab.Bytes - need)
+                {
+                    weight.Slab = slab;
+                    weight.Offset = slab.Offset;
+                    slab.Offset = checked(slab.Offset + need);
+                }
+            }
+
+            if (weight.Slab == null)
+            {
+                var candidate = new WeightSlab(arena, Math.Max(WeightArena.SlabBytes, need));
+                lock (Sync)
+                {
+                    arena.Slabs.EnsureCapacity(checked(arena.Slabs.Count + 1));
+                    arena.Slabs.Add(candidate);
+                    weight.Slab = candidate;
+                    candidate.Offset = need;
+                }
+                try { candidate.Acquire(); }
+                catch (Exception allocationError)
+                {
+                    try { candidate.Release(); }
+                    catch (Exception cleanupError) { throw new AggregateException(allocationError, cleanupError); }
+                    lock (Sync)
+                    {
+                        arena.Slabs.Remove(candidate);
+                        entry.Reservations.Remove(weight);
+                    }
+                    throw;
+                }
+                lock (Sync)
+                {
+                    candidate.Acquired = true;
+                    arena.Current = candidate;
+                }
+            }
+
+            using (var effect = weight.Slab.Calls.EnterEffect())
+            {
+                if (Volatile.Read(ref entry.Retired) != 0)
+                    throw new InvalidOperationException("CUDA weight cache key retired during upload.");
+                allocator.Context.BindCurrent(weight.Slab.Calls);
+                try
+                {
+                    weight.Slab.Calls.ThrowOnError(weight.Slab.Calls.cuMemcpyHtoD(
+                        weight.Pointer(allocator), hostData, new UIntPtr(checked((ulong)rawBytes))));
+                }
+                catch (Exception uploadError)
+                {
+                    // Other weights may already occupy this slab. Prove completion without freeing it.
+                    try { weight.Slab.Calls.cuCtxSynchronize(); }
+                    catch (Exception cleanupError) { throw new AggregateException(uploadError, cleanupError); }
+                    throw;
+                }
+            }
+            lock (Sync)
+            {
+                if (Volatile.Read(ref entry.Retired) != 0 || arena.Retiring)
+                    throw new InvalidOperationException("CUDA weight cache key retired before publication.");
+                entry.Published ??= weight;
+                entry.Published.ValidateDescriptor(ggmlType, ne0, ne1, rawBytes);
+                return entry.Published;
             }
         }
 

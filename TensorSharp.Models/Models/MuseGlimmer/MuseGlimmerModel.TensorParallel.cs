@@ -480,7 +480,8 @@ namespace TensorSharp.Models
             SyncMuseGlimmerTpKvCacheToHost();
 
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
-            hidden0.Dispose();
+            if (IsGgmlBackend) RetireTensorParallelBroadcastSource(hidden0, hidden);
+            else hidden0.Dispose();
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
                 hidden = TransformerBlockTP(hidden, layer, seqLen, startPos);

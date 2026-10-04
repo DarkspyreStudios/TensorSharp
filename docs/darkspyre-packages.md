@@ -289,6 +289,32 @@ The shared pipeline preserves the original cleanup exception and stack; repeated
 and retains the first diagnostic. This is terminal disposal retention, not forward/reset operation
 fencing or proof of failed-GPU synchronization safety.
 
+Core exposes `NativeConstructionCleanupException` and its release-only
+`NativeConstructionCleanupHandle`. Both constructors are internal. The exception
+preserves the original construction error and cleanup refusal. Its `Cleanup`
+handle exposes only `IsReleased` and synchronous `Dispose`, not a usable partial
+model, allocator, tensor or native pointer. Cleanup attempts are serialized;
+successful release clears retained owner and recipe references. The handle has no
+finalizer or healthy process-global root.
+
+Model and Dsv4 engine constructors reserve nonvirtual release recipes before
+acquisition. Failed cleanup emits the carrier with the actual retained owner.
+Model cleanup collects actual owned tensors and allocators before CUDA retirement.
+Outstanding external storage references refuse cleanup before destructive effects;
+the same owner can retry after those references drain. Nested media encoder
+construction is not wired into these recipes. These source paths do not certify
+native completion or hardware qualification.
+
+The multimodal injector retains displaced in-use embedding cache entries until teardown. Its
+reference-distinct snapshot includes cached and displaced entries. Ownership and cache accounting
+clear only after every release returns. Request buckets and preparation pins do not replace that
+ownership; sink clones remain caller-owned. The cache byte budget excludes displaced entries.
+Gemma releases its retained next-step hidden and PLE tensors in its existing resource callback,
+after the graph-release phase. Consuming a pending step transfers those fields and clears them.
+DirectLinear records completed disposal only after its existing weight-key retirement and owned
+host-memory release return. Repeated disposal does not repeat those completed releases. This
+marker does not establish checked CUDA native completion or concurrent-disposal safety.
+
 The DeepSeek V4.1 vision loader reserves its returned native handle before validating companion
 metadata and attaching it to the text model. Successful rollback explicitly frees and clears
 the handle, then rethrows the original validation error unchanged. Refused rollback retains
@@ -309,6 +335,26 @@ successfully retired identities. Failed unregister keeps host storage and GCHand
 alive; the model cleanup boundary retains unsafe local owners and preserves both work and
 cleanup errors. These paths do not establish tensor-parallel backing-owner or CUDA/MLX shared
 allocator teardown safety.
+
+Tensor-parallel shard arrays reserve model ownership before allocation/copy. Quantized raw copies
+and requantization use owned wrappers before writing. Removed column-parallel sources remain
+explicitly model-owned until their views retire. Temporary source views unwind through the local
+rollback helper; original work and failed cleanup errors remain visible. GGML TP views retire
+before backing owners, bulk buffers and the GGUF mapping. Source disposal precedes dictionary
+removal. GGML group synchronization and its host barrier precede graph/cache/storage teardown.
+A borrowed group's allocator-wide CUDA arena remains with that group. Direct CUDA/MLX retains
+its existing late TP-view/cache order and does not newly release column backing owners. These
+source rules do not qualify its synchronization, device cache closure, terminal strong retention
+or physical multi-device execution.
+
+GGML broadcast borrows its input and allocates an independent tensor for every logical rank.
+Partial allocation/copy failure explicitly rolls back the whole destination array. A refused
+rollback retains its distinct borrowed source dependency without disposing that input. Owning
+model callers retire their original embedding/router/Mamba source only after copying succeeds.
+Temporary-output callers retire every GGML copy, including rank zero, and their original source
+through one ownership boundary. A refused cleanup retains the actual source and remaining
+copies through existing failed-model ownership; work and cleanup errors stay visible. Direct
+CUDA/MLX broadcast cleanup preserves its existing rank-one-onward/source disposal sequence.
 
 `Shutdown()` refuses active initialization, calls, contexts, tensors, models or native handles.
 Every public shutdown/recreation path uses that guard. Success is terminal and idempotent; cached
@@ -397,7 +443,7 @@ every nested allocation helper, actual captured-graph teardown, other RIDs or CU
 current success gate. Run each mode/backend in a separate process against a matching real bridge:
 
 ```sh
-env TMPDIR="$PWD/tmp" dotnet build eng/tests/ggml-model-lifetime/ggml-model-lifetime.csproj -c Release -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+env TMPDIR="$PWD/tmp" TENSORSHARP_GGML_NATIVE_SKIP=true TENSORSHARP_MLX_NATIVE_SKIP=true dotnet build eng/tests/ggml-model-lifetime/ggml-model-lifetime.csproj -c Release -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true -p:TensorSharpSkipCudaNative=true -p:GeneratePackageOnBuild=false -p:PublishAot=false
 env TMPDIR="$PWD/tmp" dotnet eng/tests/ggml-model-lifetime/bin/Release/net10.0/ggml-model-lifetime.dll normal cpu /absolute/bridge/directory
 env TMPDIR="$PWD/tmp" dotnet eng/tests/ggml-model-lifetime/bin/Release/net10.0/ggml-model-lifetime.dll normal metal /absolute/bridge/directory
 ```

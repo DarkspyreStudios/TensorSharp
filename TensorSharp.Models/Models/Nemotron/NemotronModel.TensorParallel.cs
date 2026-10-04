@@ -491,6 +491,7 @@ namespace TensorSharp.Models
 
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
@@ -563,7 +564,9 @@ namespace TensorSharp.Models
                 hidden[r].Dispose();
 
             // Broadcast the updated rank-0 result to all ranks.
-            return BroadcastTensorToAllRanks(result);
+            Tensor[] copies = BroadcastTensorToAllRanks(result);
+            RetireTensorParallelBroadcastSource(result, copies);
+            return copies;
         }
 
         // ====================================================================
@@ -676,9 +679,7 @@ namespace TensorSharp.Models
             // 5. Residual add.
             Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
             TpResidualAdd(hidden, attnReplicated);
-            for (int r = 1; r < tp; r++)
-                attnReplicated[r].Dispose();
-            reducedAttn.Dispose();
+            DisposeTensorParallelBroadcast(attnReplicated, reducedAttn);
 
             return hidden;
         }
@@ -720,9 +721,7 @@ namespace TensorSharp.Models
 
             Tensor[] ffnReplicated = BroadcastTensorToAllRanks(ffnOut);
             TpResidualAdd(hidden, ffnReplicated);
-            for (int r = 1; r < tp; r++)
-                ffnReplicated[r].Dispose();
-            ffnOut.Dispose();
+            DisposeTensorParallelBroadcast(ffnReplicated, ffnOut);
 
             return hidden;
         }
@@ -924,8 +923,7 @@ namespace TensorSharp.Models
             // 6. Broadcast the contribution to all ranks and add the residual.
             Tensor[] contribReplicated = BroadcastTensorToAllRanks(contribution);
             TpResidualAdd(hidden, contribReplicated);
-            for (int r = 1; r < tp; r++) contribReplicated[r].Dispose();
-            contribution.Dispose();
+            DisposeTensorParallelBroadcast(contribReplicated, contribution);
 
             return hidden;
         }

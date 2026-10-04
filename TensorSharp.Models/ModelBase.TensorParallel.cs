@@ -72,6 +72,7 @@ namespace TensorSharp.Models
 
                 var qw = kv.Value;
                 var shards = new QuantizedWeight[tp];
+                _tpQuantWeights.Add(name, shards);
 
                 if (isCol)
                 {
@@ -92,6 +93,7 @@ namespace TensorSharp.Models
                     // are external views into its buffer. Disposing it here
                     // would leave the shards with dangling pointers.
                     colParallelOwners.Add(qw);
+                    _tpQuantBackingOwners.Add(qw);
                 }
                 else
                 {
@@ -125,7 +127,9 @@ namespace TensorSharp.Models
                     Parallel.For(0, tp, lr =>
                     {
                         int globalRank = rankOffset + lr;
-                        IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytesPerShard);
+                        var shard = QuantizedWeight.AllocateOwnedBuffer(totalBytesPerShard, qw.GgmlType, ne0PerShard, qw.Ne1);
+                        shards[lr] = shard;
+                        IntPtr shardPtr = shard.Data;
                         unsafe
                         {
                             byte* src = (byte*)qw.Data.ToPointer();
@@ -140,8 +144,6 @@ namespace TensorSharp.Models
                                     blockBytesPerShard);
                             }
                         }
-                        shards[lr] = new QuantizedWeight(shardPtr, totalBytesPerShard,
-                            qw.GgmlType, ne0PerShard, qw.Ne1);
                         // A per-tensor scale is shard-invariant: it does not depend on
                         // the output row, and it distributes over the row-parallel
                         // AllReduce, so every shard carries the parent's value.
@@ -149,7 +151,6 @@ namespace TensorSharp.Models
                     });
                 }
 
-                _tpQuantWeights[name] = shards;
                 RecordTpWeightScale(name, qw);
                 quantToRemove.Add(name);
             }
@@ -162,7 +163,7 @@ namespace TensorSharp.Models
             {
                 var qw = _quantWeights[name];
                 if (!colParallelOwners.Contains(qw))
-                    qw.Dispose();
+                    RetireOwnedResource(qw);
                 _quantWeights.Remove(name);
             }
 
@@ -177,6 +178,7 @@ namespace TensorSharp.Models
 
                 var w = kv.Value;
                 var shards = new Tensor[tp];
+                _tpWeights.Add(name, shards);
 
                 if (isCol)
                 {
@@ -185,9 +187,7 @@ namespace TensorSharp.Models
                     for (int lr = 0; lr < tp; lr++)
                     {
                         int globalRank = rankOffset + lr;
-                        var view = w.Narrow(0, globalRank * shardSize, shardSize);
-                        shards[lr] = Ops.NewContiguous(view);
-                        view.Dispose();
+                        CopyTensorParallelView(w, 0, globalRank * shardSize, shardSize, shards, lr);
                     }
                 }
                 else
@@ -197,23 +197,53 @@ namespace TensorSharp.Models
                     for (int lr = 0; lr < tp; lr++)
                     {
                         int globalRank = rankOffset + lr;
-                        var view = w.Narrow(1, globalRank * shardSize, shardSize);
-                        shards[lr] = Ops.NewContiguous(view);
-                        view.Dispose();
+                        CopyTensorParallelView(w, 1, globalRank * shardSize, shardSize, shards, lr);
                     }
                 }
 
-                _tpWeights[name] = shards;
                 f32ToRemove.Add(name);
             }
 
             foreach (var name in f32ToRemove)
             {
-                _weights[name].Dispose();
+                RetireOwnedResource(_weights[name]);
                 _weights.Remove(name);
             }
 
             Console.WriteLine($"  TP sharded: {quantToRemove.Count} quantized + {f32ToRemove.Count} F32 weights across {tp} GPUs.");
+        }
+
+        private void CopyTensorParallelView(Tensor source, int dimension, long start, long length, Tensor[] shards, int rank)
+        {
+            var view = source.Narrow(dimension, start, length);
+            try
+            {
+                shards[rank] = new Tensor(view.Allocator, view.ElementType, view.Sizes);
+                Ops.Copy(shards[rank], view);
+            }
+            catch (Exception original)
+            {
+                RollBackLocalResource(view, original);
+                throw;
+            }
+            RetireOwnedResource(view);
+        }
+
+        private void DisposeTensorParallelWeights()
+        {
+            foreach (var shards in _tpQuantWeights.Values)
+                for (int rank = 0; rank < shards.Length; rank++)
+                {
+                    var weight = shards[rank];
+                    if (_backend == BackendType.Cuda && weight != null
+                        && _tpGroup.GetAllocator(rank) is CudaAllocator allocator)
+                        CudaQuantizedOps.ReleaseQuantizedWeight(allocator, weight.CacheKey);
+                    weight?.Dispose();
+                }
+            _tpQuantWeights.Clear();
+            foreach (var shards in _tpWeights.Values)
+                foreach (var weight in shards) weight?.Dispose();
+            _tpWeights.Clear();
         }
 
         /// <summary>
@@ -275,11 +305,14 @@ namespace TensorSharp.Models
             {
                 long rowBytes = NativeDequant.RowSize(qw.GgmlType, qw.Ne0);
                 var shards = new QuantizedWeight[tp];
+                _tpQuantWeights.Add(weightName, shards);
                 for (int r = 0; r < tp; r++)
                 {
                     int[] rows = BuildRows(rankOffset + r);
                     long totalBytes = rows.Length * rowBytes;
-                    IntPtr shardPtr = QuantizedWeight.AllocateBuffer(totalBytes);
+                    var shard = QuantizedWeight.AllocateOwnedBuffer(totalBytes, qw.GgmlType, qw.Ne0, rows.Length);
+                    shards[r] = shard;
+                    IntPtr shardPtr = shard.Data;
                     unsafe
                     {
                         byte* src = (byte*)qw.Data.ToPointer();
@@ -290,27 +323,26 @@ namespace TensorSharp.Models
                                 dst + (long)row * rowBytes,
                                 rowBytes, rowBytes);
                     }
-                    shards[r] = new QuantizedWeight(shardPtr, totalBytes,
-                        qw.GgmlType, qw.Ne0, rows.Length);
                     // A per-tensor scale is shard-invariant: it does not depend on
                     // the output row, and it distributes over the row-parallel
                     // AllReduce, so every shard carries the parent's value.
                     shards[r].Scale = qw.Scale;
                 }
 
-                _tpQuantWeights[weightName] = shards;
                 RecordTpWeightScale(weightName, qw);
+                RetireOwnedResource(qw);
                 _quantWeights.Remove(weightName);
-                qw.Dispose();
             }
             else if (_weights.TryGetValue(weightName, out var w))
             {
                 int inDim = (int)w.Sizes[1];
                 var shards = new Tensor[tp];
+                _tpWeights.Add(weightName, shards);
                 for (int r = 0; r < tp; r++)
                 {
                     int[] rows = BuildRows(rankOffset + r);
                     var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, rows.Length, inDim);
+                    shards[r] = shard;
                     unsafe
                     {
                         float* srcPtr = GetFloatPtr(w);
@@ -321,13 +353,11 @@ namespace TensorSharp.Models
                                 dstPtr + (long)row * inDim,
                                 (long)inDim * 4, (long)inDim * 4);
                     }
-                    shards[r] = shard;
                 }
 
-                _tpWeights[weightName] = shards;
                 RecordTpWeightScale(weightName, qw);
+                RetireOwnedResource(w);
                 _weights.Remove(weightName);
-                w.Dispose();
             }
         }
 
@@ -402,6 +432,8 @@ namespace TensorSharp.Models
 
             var shards = requantize ? null : new Tensor[tp];
             var quantShards = requantize ? new QuantizedWeight[tp] : null;
+            if (requantize) _tpQuantWeights.Add(fusedName, quantShards);
+            else _tpWeights.Add(fusedName, shards);
             long q8RowBytes = requantize ? NativeDequant.RowSize(q8Type, inDim) : 0;
 
             for (int r = 0; r < tp; r++)
@@ -414,9 +446,12 @@ namespace TensorSharp.Models
                 Tensor shard = requantize
                     ? null
                     : new Tensor(_tpGroup.GetAllocator(r), DType.Float32, totalRows, inDim);
-                IntPtr quantPtr = requantize
-                    ? QuantizedWeight.AllocateBuffer((long)totalRows * q8RowBytes)
-                    : IntPtr.Zero;
+                if (!requantize) shards[r] = shard;
+                QuantizedWeight quantShard = requantize
+                    ? QuantizedWeight.AllocateOwnedBuffer((long)totalRows * q8RowBytes, q8Type, inDim, totalRows)
+                    : null;
+                if (requantize) quantShards[r] = quantShard;
+                IntPtr quantPtr = quantShard?.Data ?? IntPtr.Zero;
                 // One reusable row buffer when re-quantizing: the shard is written
                 // row at a time, so no full-size F32 intermediate is ever allocated.
                 float[] rowScratch = requantize ? new float[inDim] : null;
@@ -471,31 +506,22 @@ namespace TensorSharp.Models
                     }
                 }
 
-                if (requantize)
-                    quantShards[r] = new QuantizedWeight(quantPtr, (long)totalRows * q8RowBytes,
-                        q8Type, inDim, totalRows);
-                else
-                    shards[r] = shard;
             }
 
             // This pack is built from several sources; the F32 fallback already
             // baked each source's scale into its rows, so record nothing here.
-            if (requantize)
-                _tpQuantWeights[fusedName] = quantShards;
-            else
-                _tpWeights[fusedName] = shards;
 
             for (int s = 0; s < sourceNames.Length; s++)
             {
                 if (quants[s] != null)
                 {
+                    RetireOwnedResource(quants[s]);
                     _quantWeights.Remove(sourceNames[s]);
-                    quants[s].Dispose();
                 }
                 else
                 {
+                    RetireOwnedResource(tensors[s]);
                     _weights.Remove(sourceNames[s]);
-                    tensors[s].Dispose();
                 }
             }
         }
@@ -533,10 +559,12 @@ namespace TensorSharp.Models
             }
 
             var shards = new Tensor[tp];
+            _tpWeights.Add(biasName, shards);
             for (int r = 0; r < tp; r++)
             {
                 int[] rows = BuildRows(rankOffset + r);
                 var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, rows.Length);
+                shards[r] = shard;
                 unsafe
                 {
                     float* srcPtr = GetFloatPtr(bias);
@@ -544,12 +572,10 @@ namespace TensorSharp.Models
                     for (int i = 0; i < rows.Length; i++)
                         dstPtr[i] = srcPtr[rows[i]];
                 }
-                shards[r] = shard;
             }
 
-            _tpWeights[biasName] = shards;
+            RetireOwnedResource(bias);
             _weights.Remove(biasName);
-            bias.Dispose();
         }
 
         /// <summary>
@@ -584,10 +610,12 @@ namespace TensorSharp.Models
                 totalLen += segDim / globalTp;
 
             var shards = new Tensor[tp];
+            _tpWeights.Add(fusedBiasName, shards);
             for (int r = 0; r < tp; r++)
             {
                 int globalRank = rankOffset + r;
                 var shard = new Tensor(_tpGroup.GetAllocator(r), DType.Float32, totalLen);
+                shards[r] = shard;
                 unsafe
                 {
                     float* dst = GetFloatPtr(shard);
@@ -602,14 +630,12 @@ namespace TensorSharp.Models
                         dstOff += perRank;
                     }
                 }
-                shards[r] = shard;
             }
 
-            _tpWeights[fusedBiasName] = shards;
             for (int s = 0; s < sourceNames.Length; s++)
             {
+                RetireOwnedResource(sources[s]);
                 _weights.Remove(sourceNames[s]);
-                sources[s].Dispose();
             }
         }
 
@@ -976,13 +1002,32 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
-        /// Broadcast a rank-0 tensor to all other GPUs. Returns an array where
-        /// element 0 is the original tensor and elements 1..tp-1 are copies.
+        /// Broadcast a borrowed rank-0 tensor. Every returned rank owns a copy;
+        /// the caller keeps ownership of the input.
         /// </summary>
         protected Tensor[] BroadcastTensorToAllRanks(Tensor tensor)
         {
             int tp = TpDegree;
             var result = new Tensor[tp];
+
+            if (IsGgmlBackend)
+            {
+                var owner = new TensorParallelBroadcastOwner(result, borrowedSource: tensor);
+                try
+                {
+                    for (int r = 0; r < tp; r++)
+                    {
+                        result[r] = new Tensor(_tpGroup.GetAllocator(r), tensor.ElementType, tensor.Sizes);
+                        Ops.Copy(result[r], tensor);
+                    }
+                }
+                catch (Exception original)
+                {
+                    RollBackLocalResource(owner, original);
+                    throw;
+                }
+                return result;
+            }
 
             // Note: do NOT collapse the GGML case to one shared buffer, even
             // though every rank's backend can read the same host memory. Callers
@@ -1000,6 +1045,43 @@ namespace TensorSharp.Models
             for (int r = 1; r < tp; r++)
                 result[r] = ReplicateTensorToRank(tensor, r);
             return result;
+        }
+
+        private protected void RetireTensorParallelBroadcastSource(Tensor source, Tensor[] copies)
+        {
+            if (!IsGgmlBackend) return;
+            var owner = new TensorParallelBroadcastOwner(copies);
+            try { RetireOwnedResource(source); }
+            catch (Exception cleanupError)
+            {
+                RetainFailedModelOwnership(owner, cleanupError);
+                throw;
+            }
+        }
+
+        private protected void DisposeTensorParallelBroadcast(Tensor[] copies, Tensor source)
+        {
+            if (IsGgmlBackend) RetireOwnedResource(new TensorParallelBroadcastOwner(copies, source));
+            else
+            {
+                for (int r = 1; r < copies.Length; r++) copies[r].Dispose();
+                source.Dispose();
+            }
+        }
+
+        private sealed class TensorParallelBroadcastOwner(Tensor[] copies, Tensor source = null, Tensor borrowedSource = null) : IDisposable
+        {
+            private readonly Tensor _borrowedSource = borrowedSource;
+
+            public void Dispose()
+            {
+                try
+                {
+                    foreach (var copy in copies) copy?.Dispose();
+                    source?.Dispose();
+                }
+                finally { GC.KeepAlive(_borrowedSource); }
+            }
         }
 
         // Per-rank copies of REPLICATED weights (norm alphas, gate vectors) that a
@@ -1395,7 +1477,7 @@ namespace TensorSharp.Models
                         CudaQuantizedOps.PreloadQuantizedWeight(
                             alloc, cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
                     }
-                    catch (Exception ex) when (ex.Message.Contains("out of memory"))
+                    catch (TensorSharp.Cuda.Interop.CudaException ex) when (ex.ErrorCode == 2)
                     {
                         // With experts now preloaded this can fire thousands of
                         // times on an undersized GPU, so report the first per rank
@@ -1439,7 +1521,7 @@ namespace TensorSharp.Models
                         CudaQuantizedOps.PreloadQuantizedWeight(
                             cudaAllocator, cacheKey, qw.Data, qw.GgmlType, qw.Ne0, qw.Ne1, qw.RawBytes);
                     }
-                    catch (Exception ex) when (ex.Message.Contains("out of memory"))
+                    catch (TensorSharp.Cuda.Interop.CudaException ex) when (ex.ErrorCode == 2)
                     {
                         // GPU is full — keep the host copy so the CPU fallback
                         // path (EmbeddingManagedQuantized / AddmmQuantManaged)

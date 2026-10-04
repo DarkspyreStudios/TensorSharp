@@ -480,11 +480,18 @@ namespace TensorSharp.Models.MiniMaxH3
             // needs them, and a later Forward re-caches under the very same keys.
         }
 
-        public void Dispose()
+        internal void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> tensors)
+            => _direct?.CollectDisposalOwnership(tensors);
+
+        public void Dispose() => DisposeResources(modelOwned: false);
+
+        internal void DisposeOwned() => DisposeResources(modelOwned: true);
+
+        private void DisposeResources(bool modelOwned)
         {
             if (_disposed) return;
-            _disposed = true;
-            _direct?.Dispose();
+            if (modelOwned) _direct?.DisposeOwned();
+            else _direct?.Dispose();
             if (_blocksPin.IsAllocated) _blocksPin.Free();
             if (_refinerPin.IsAllocated) _refinerPin.Free();
             foreach (IntPtr ptr in _bound)
@@ -493,6 +500,7 @@ namespace TensorSharp.Models.MiniMaxH3
             foreach (var h in _pins) if (h.IsAllocated) h.Free();
             _pins.Clear();
             _gguf?.Dispose();
+            _disposed = true;
         }
     }
 }

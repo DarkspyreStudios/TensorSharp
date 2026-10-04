@@ -406,6 +406,7 @@ namespace TensorSharp.Models
 
         public Gemma4Model(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null) : base(ggufPath, backend, tpDegree, tpGroup)
         {
+            SetOwnedChildRelease(DisposeGemma4CudaChildren);
             try
             {
                 Config = new ModelConfig { Architecture = _gguf.GetString("general.architecture") };
@@ -541,7 +542,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs);
+                RollBackFailedConstruction(loadError, DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs,
+                    collectDerivedOwnership: CollectGemma4DisposalOwnership);
                 throw;
             }
         }
@@ -2324,7 +2326,7 @@ namespace TensorSharp.Models
             int startPos,
             ref Tensor perLayerInputs)
         {
-            _cudaDecodeGraphs ??= new CudaPrefillGraphCache(_allocator);
+            _cudaDecodeGraphs ??= new CudaPrefillGraphCache(_allocator, this);
             CudaPrefillGraphCache graphs = _cudaDecodeGraphs;
             if (!graphs.IsUsable)
                 return RunCudaDecodePerOpLoop(hidden, startPos, perLayerInputs);
@@ -2348,16 +2350,19 @@ namespace TensorSharp.Models
             int attendLen = startPos + 1;
             string key = BuildCudaDecodeGraphKey(graphPle, attendLen);
 
-            if (graphs.TryGetReplayInput(key, attendLen, out Tensor pinned))
+            if (graphs.TryReserveReplay(key, attendLen, hidden, out var replay))
             {
-                Ops.Copy(pinned, hidden);
-                hidden.Dispose();
-                if (graphPle != null)
-                    CudaFusedOps.TryEnsureDeviceResident(graphPle);
-                dyn.Write(attendLen, startPos, 0, startPos);
-                graphs.Replay(key);
-                MarkCudaDecodeGraphStateModified();
-                return pinned;
+                try
+                {
+                    Ops.Copy(replay.Input, hidden);
+                    replay.ReleaseIncomingHidden();
+                    if (graphPle != null) CudaFusedOps.TryEnsureDeviceResident(graphPle);
+                    dyn.Write(attendLen, startPos, 0, startPos);
+                    graphs.Replay(replay);
+                    MarkCudaDecodeGraphStateModified();
+                    return replay.TransferResult();
+                }
+                catch (Exception original) { throw replay.CleanupAfterFailure(original); }
             }
 
             if (!graphs.ShouldCapture(key))
@@ -2371,83 +2376,54 @@ namespace TensorSharp.Models
                 CudaFusedOps.TryEnsureDeviceResident(graphPle);
 
             var pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
-            Ops.Copy(pinnedIn, hidden);
-            hidden.Dispose();
-
-            if (!graphs.BeginCapture(key))
-                return RunCudaDecodePerOpLoop(pinnedIn, startPos, graphPle);
-
+            CudaPrefillGraphCache.CaptureAttempt attempt;
+            try { attempt = graphs.ReserveCapture(key, pinnedIn, GetCudaDecodeGraphKeepAlive(graphPle), dyn); }
+            catch (Exception original)
+            {
+                if (!graphs.RetainsInput(pinnedIn))
+                    try { pinnedIn.Dispose(); }
+                    catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
             bool captured = false;
             try
             {
+                attempt.AcceptIncoming(hidden);
+                Ops.Copy(attempt.Input, hidden);
+                attempt.ReleaseIncoming();
                 dyn.Write(attendLen, startPos, 0, startPos);
-                dyn.EnqueueUpload();
-                dyn.Activate();
-                if (!CudaFusedOps.TryFillNeoXRopeTablesDynamic(
-                    _cudaDecodeRopeCosLocal,
-                    _cudaDecodeRopeSinLocal,
-                    _cudaDecodeRopeFreqsLocal,
-                    _cudaDecodeRopeCosGlobal,
-                    _cudaDecodeRopeSinGlobal,
-                    _cudaDecodeRopeFreqsGlobal))
+                if (graphs.BeginCapture(attempt))
                 {
-                    throw new CudaGraphCaptureAbortedException(
-                        "Gemma dynamic NeoX RoPE table fill kernel unavailable.");
-                }
-
-                _cudaDecodeGraphCaptureActive = true;
-                Tensor result;
-                try
-                {
-                    result = RunCudaDecodePerOpLoop(pinnedIn, startPos, graphPle);
-                }
-                finally
-                {
+                    dyn.EnqueueUpload();
+                    dyn.Activate();
+                    if (!CudaFusedOps.TryFillNeoXRopeTablesDynamic(
+                        _cudaDecodeRopeCosLocal,
+                        _cudaDecodeRopeSinLocal,
+                        _cudaDecodeRopeFreqsLocal,
+                        _cudaDecodeRopeCosGlobal,
+                        _cudaDecodeRopeSinGlobal,
+                        _cudaDecodeRopeFreqsGlobal))
+                        throw new CudaGraphCaptureAbortedException("Gemma dynamic NeoX RoPE table fill kernel unavailable.");
+                    _cudaDecodeGraphCaptureActive = true;
+                    Tensor result = RunCudaDecodePerOpLoop(attempt.Input, startPos, graphPle);
+                    attempt.RecordLoopResult(result);
                     _cudaDecodeGraphCaptureActive = false;
-                }
-                CudaDecodeDynParams.Deactivate();
-                if (ReferenceEquals(result, pinnedIn))
-                {
-                    captured = graphs.EndCaptureAndLaunch(
-                        key,
-                        pinnedIn,
-                        GetCudaDecodeGraphKeepAlive(graphPle),
-                        CudaDecodeDynParams.CaptureMaxAttendLen);
-                }
-                else
-                {
-                    graphs.AbortCapture(
-                        key,
-                        "Gemma CUDA decode did not preserve the graph-owned residual input.");
+                    CudaDecodeDynParams.Deactivate();
+                    captured = graphs.EndCaptureAndLaunch(attempt, result, CudaDecodeDynParams.CaptureMaxAttendLen);
                 }
             }
-            catch (CudaGraphCaptureAbortedException ex)
+            catch (Exception original)
             {
-                graphs.AbortCapture(key, ex.Message);
-            }
-            catch (TensorSharp.Cuda.Interop.CudaException ex)
-            {
-                graphs.AbortCapture(key, ex.ToString());
-            }
-            catch
-            {
-                graphs.AbortCapture(key);
-                throw;
+                bool fallback = graphs.AbortAfterFailure(attempt, original, out Exception preserved);
+                if (!fallback) throw preserved;
             }
             finally
             {
                 _cudaDecodeGraphCaptureActive = false;
                 CudaDecodeDynParams.Deactivate();
             }
-
-            if (!captured)
-            {
-                // A failed capture executes no kernels. Run the same step
-                // plainly; the key is blacklisted so future tokens stay safe.
-                return RunCudaDecodePerOpLoop(pinnedIn, startPos, graphPle);
-            }
-
-            return pinnedIn;
+            if (captured) return attempt.TakeSuccessfulResult();
+            return RunCudaDecodePerOpLoop(attempt.TakeFallbackInput(), startPos, graphPle);
         }
 
         private Tensor PrepareCudaDecodeGraphPleInput(Tensor source)
@@ -8280,6 +8256,44 @@ namespace TensorSharp.Models
 
         #endregion
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectGemma4DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectGemma4DisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheK);
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheV);
+            ModelDisposalOwnership.AddRange(ownedTensors, _tpVNormOnes);
+            ModelDisposalOwnership.Add(ownedTensors, _pipelineNextInputHidden, _pipelineNextPLE);
+            ModelDisposalOwnership.Add(ownedTensors, _cudaDecodeGraphPleInput, _cudaDecodeRopeFreqsLocal,
+                _cudaDecodeRopeFreqsGlobal, _cudaDecodeRopeCosLocal, _cudaDecodeRopeSinLocal,
+                _cudaDecodeRopeCosGlobal, _cudaDecodeRopeSinGlobal, _onesForVNorm, _neoXRopeCosTensor, _neoXRopeSinTensor);
+            foreach (var slot in _neoXRopeSlotByFreqs.Values)
+                ModelDisposalOwnership.Add(ownedTensors, slot.CosTensor, slot.SinTensor);
+            if (_swaPrevWindow != null)
+                foreach (var window in _swaPrevWindow.Values) ModelDisposalOwnership.Add(ownedTensors, window.k, window.v);
+            void AddHolder(Gemma4KvCacheHolder holder)
+            {
+                if (holder == null) return;
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.K);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.V);
+            }
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) AddHolder(holder);
+            if (_retainedFusedHolders != null) foreach (var holder in _retainedFusedHolders.Values) AddHolder(holder);
+            if (_holderPool != null) foreach (var holder in _holderPool) AddHolder(holder);
+            AddHolder(_primaryHolder);
+            foreach (var (embedding, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            foreach (var (embedding, _) in _pendingAudioEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            _visionEncoder?.CollectDisposalOwnership(ownedTensors);
+            _audioEncoder?.CollectDisposalOwnership(ownedTensors);
+            _cudaDecodeGraphs?.CollectDisposalOwnership(ownedTensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeGemma4Resources, releaseDerivedGraphs: DisposeGemma4Graphs);
@@ -8289,7 +8303,7 @@ namespace TensorSharp.Models
         {
             // Graph entries own captured scratch blocks and refs to KV/PLE/RoPE
             // inputs; release them before tearing down those model tensors.
-            InvalidateCudaDecodeGraphs();
+            _cudaDecodeGraphs?.ReleaseGraphsForRetirement();
             if (IsGgmlBackend)
             {
                 GgmlBasicOps.Gemma4ResetDecodeCache();
@@ -8299,8 +8313,20 @@ namespace TensorSharp.Models
             }
         }
 
+        private void DisposeGemma4CudaChildren(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            _cudaDecodeGraphs?.DisposeOwned(plan, restoration);
+            _cudaDecodeGraphs = null;
+            _cudaDecodeDynParams?.Dispose();
+            _cudaDecodeDynParams = null;
+        }
+
         private void DisposeGemma4Resources()
         {
+            _pipelineNextInputHidden?.Dispose();
+            _pipelineNextInputHidden = null;
+            _pipelineNextPLE?.Dispose();
+            _pipelineNextPLE = null;
             // Free the on-device MoE per-expert pointer tables (raw device buffers)
             // while the allocator is still alive (base.Dispose frees the arena).
             if (_allocator is CudaAllocator moeCudaAllocator)
@@ -8310,8 +8336,6 @@ namespace TensorSharp.Models
                 _cudaMoEGateUpPtrTable = null;
                 _cudaMoEDownPtrTable = null;
             }
-            _cudaDecodeDynParams?.Dispose();
-            _cudaDecodeDynParams = null;
             _cudaDecodeGraphPleInput?.Dispose();
             _cudaDecodeGraphPleInput = null;
             _cudaDecodeRopeFreqsLocal?.Dispose();
@@ -8336,8 +8360,8 @@ namespace TensorSharp.Models
                 slot.SinTensor?.Dispose();
             }
             _neoXRopeSlotByFreqs.Clear();
-            _visionEncoder?.Dispose();
-            _audioEncoder?.Dispose();
+            _visionEncoder?.DisposeOwned();
+            _audioEncoder?.DisposeOwned();
             foreach (var (emb, _) in _pendingVisionEmbeddingsList)
                 emb?.Dispose();
             _pendingVisionEmbeddingsList.Clear();

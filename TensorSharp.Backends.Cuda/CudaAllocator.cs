@@ -8,6 +8,9 @@ namespace TensorSharp.Cuda
     public sealed class CudaAllocator : IAllocator, IDisposable
     {
         private int disposed;
+        private readonly CudaNativeCalls nativeCalls;
+        internal CudaStorageCensus Census { get; }
+        internal CudaNativeCalls NativeCalls => nativeCalls;
 
         // Striped, size-classed device-memory cache. Replaces the original single
         // global `poolSync` monitor + Dictionary<long, Stack<IntPtr>>, which became a
@@ -15,8 +18,16 @@ namespace TensorSharp.Cuda
         // transient tensors. See CudaDeviceMemoryPool for the design.
         private readonly CudaDeviceMemoryPool pool;
 
-        public CudaAllocator(int deviceId = 0)
+        public CudaAllocator(int deviceId = 0) : this(deviceId, CudaNativeApi.Instance) { }
+
+        internal CudaAllocator(int deviceId, ICudaNativeApi api)
         {
+            ArgumentOutOfRangeException.ThrowIfNegative(deviceId);
+            ArgumentNullException.ThrowIfNull(api);
+            DeviceId = deviceId;
+            Census = new CudaStorageCensus(this);
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.Allocator, api, deviceId);
+            if (ReferenceEquals(api, CudaNativeApi.Instance)) CudaLibraryResolver.Register();
             CudaBackend.Register();
             bool poolEnabled = !string.Equals(Environment.GetEnvironmentVariable("TENSORSHARP_CUDA_POOL"), "0", StringComparison.Ordinal);
             long maxCachedBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MAX_MB", 512L) * 1024L * 1024L;
@@ -33,44 +44,27 @@ namespace TensorSharp.Cuda
             // memory. 0 disables the valve (unbounded caching, the old behaviour).
             long minFreeReserveBytes = ReadPoolLimit("TENSORSHARP_CUDA_POOL_MIN_FREE_MB", 256L) * 1024L * 1024L;
 
-            CudaContext context = null;
-            CudaStream stream = null;
-            CudaCublasHandle blas = null;
-            CudaKernels kernels = null;
-
             try
             {
-                context = CudaContext.Create(deviceId);
-                context.MakeCurrent();
-                stream = CudaStream.Create();
-                blas = CudaCublasHandle.Create();
-                blas.SetStream(stream.Handle);
-                kernels = CudaKernels.TryCreate();
+                Context = CudaContext.Create(deviceId, api);
+                Stream = CudaStream.Create(Context);
+                Blas = CudaCublasHandle.Create(Context);
+                Blas.SetStream(Stream.Handle);
+                Kernels = CudaKernels.TryCreate(Context);
+                pool = new CudaDeviceMemoryPool(
+                    maxCachedBytes, maxCachedBlockBytes, poolEnabled,
+                    backingAllocate: RequireStorageAllocation,
+                    backingFree: FreeDeviceMemory,
+                    largeCachedBytesCap: largeCachedBytes,
+                    queryFreeBytes: QueryFreeDeviceBytes,
+                    minFreeReserveBytes: minFreeReserveBytes);
             }
-            catch
+            catch (Exception original)
             {
-                kernels?.Dispose();
-                blas?.Dispose();
-                stream?.Dispose();
-                context?.Dispose();
+                try { ReleaseConstruction(); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
                 throw;
             }
-
-            Context = context;
-            Stream = stream;
-            Blas = blas;
-            Kernels = kernels;
-            DeviceId = deviceId;
-
-            pool = new CudaDeviceMemoryPool(
-                maxCachedBytes,
-                maxCachedBlockBytes,
-                poolEnabled,
-                backingAllocate: AllocateDeviceMemory,
-                backingFree: FreeDeviceMemory,
-                largeCachedBytesCap: largeCachedBytes,
-                queryFreeBytes: QueryFreeDeviceBytes,
-                minFreeReserveBytes: minFreeReserveBytes);
         }
 
         public BlasEnum BlasEnum => BlasEnum.CUDA;
@@ -87,15 +81,23 @@ namespace TensorSharp.Cuda
 
         public Storage Allocate(DType elementType, long elementCount)
         {
-            return new CudaStorage(this, elementType, elementCount);
+            ThrowIfDisposed();
+            nativeCalls.ThrowIfQuarantined();
+            var reservation = Census.Reserve();
+            try { return new CudaStorage(this, elementType, elementCount, reservation); }
+            catch
+            {
+                Census.CancelPending(reservation);
+                throw;
+            }
         }
 
-        internal IntPtr RentDeviceMemory(long requestedBytes, out long allocationBytes)
+        internal void RentDeviceMemory(CudaStorage storage, long requestedBytes)
         {
-            ThrowIfDisposed();
-            IntPtr ptr = pool.Rent(requestedBytes, out allocationBytes);
+            if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(CudaAllocator));
+            IntPtr ptr = pool.Rent(requestedBytes, out long allocationBytes, storage.AllocateDeviceMemory);
+            storage.AcceptDeviceMemory(ptr, allocationBytes);
             CudaGraphCapture.OnRent(this, ptr, allocationBytes);
-            return ptr;
         }
 
         internal void ReturnDeviceMemory(IntPtr ptr, long allocationBytes)
@@ -115,6 +117,15 @@ namespace TensorSharp.Cuda
             pool.Return(ptr, allocationBytes);
         }
 
+        internal void ReturnCapturedPayloadToPool(CudaGraphCapture.StorageCapturePayload payload)
+        {
+            if (!ReferenceEquals(payload.Source.AllocatorImpl, this) || !payload.Transferred
+                || !CudaGraphCapture.CanTransferStorage(payload.Context, payload))
+                throw new InvalidOperationException("The payload does not belong to this active capture.");
+            if (payload.Device == IntPtr.Zero || payload.PartialAllocation || payload.PoolOwned) return;
+            if (pool.TryReturnToPool(payload.Device, payload.Bytes)) payload.PoolOwned = true;
+        }
+
         /// <summary>Remove a specific free block from the pool so a cached CUDA
         /// graph can own it (see <see cref="CudaPrefillGraphCache"/>).</summary>
         internal bool TryStealPooledBlock(IntPtr ptr, long allocationBytes)
@@ -122,30 +133,25 @@ namespace TensorSharp.Cuda
             return pool.TrySteal(ptr, allocationBytes);
         }
 
-        private IntPtr AllocateDeviceMemory(long allocationBytes)
+        private static IntPtr RequireStorageAllocation(long allocationBytes)
+            => throw new InvalidOperationException("CUDA pool acquisition requires the actual constructing storage owner.");
+
+        internal void ReclaimOutsideEffects()
         {
-            Context.MakeCurrent();
-            int rc = CudaDriverApi.cuMemAlloc(out IntPtr ptr, new UIntPtr((ulong)allocationBytes));
-            if (rc == 2 /* CUDA_ERROR_OUT_OF_MEMORY */)
-            {
-                // Storages whose last reference is an unreachable-but-unfinalized
-                // tensor (view chains) only release on collection; reclaim them and
-                // the pool's cached blocks before giving up.
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-                GC.Collect();
-                Stream.Synchronize();
-                pool.DrainAndFree();
-                rc = CudaDriverApi.cuMemAlloc(out ptr, new UIntPtr((ulong)allocationBytes));
-            }
-            rc.ThrowOnError();
-            return ptr;
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            using var lease = nativeCalls.EnterEffect();
+            Synchronize();
+            pool.DrainAndFree();
         }
 
         private void FreeDeviceMemory(IntPtr ptr)
         {
-            Context.MakeCurrent();
-            CudaDriverApi.cuMemFree(ptr);
+            using var lease = nativeCalls.EnterEffect();
+            Context.BindCurrent(nativeCalls);
+            nativeCalls.cuCtxSynchronize();
+            nativeCalls.cuMemFree(ptr);
         }
 
         /// <summary>Free dedicated device memory in bytes, for the pool's
@@ -153,16 +159,19 @@ namespace TensorSharp.Cuda
         /// cuMemGetInfo cost stays off the hot return path.</summary>
         private long QueryFreeDeviceBytes()
         {
-            Context.MakeCurrent();
-            if (CudaDriverApi.cuMemGetInfo(out UIntPtr free, out UIntPtr _) != 0)
+            using var lease = nativeCalls.EnterEffect();
+            Context.BindCurrent(nativeCalls);
+            if (nativeCalls.cuMemGetInfo(out UIntPtr free, out UIntPtr _) != 0)
                 return long.MaxValue; // on query failure, don't throttle caching
             return (long)free.ToUInt64();
         }
 
         public float GetAllocatedMemoryRatio()
         {
-            Context.MakeCurrent();
-            CudaDriverApi.cuMemGetInfo(out UIntPtr free, out UIntPtr total).ThrowOnError();
+            if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(CudaAllocator));
+            using var lease = nativeCalls.EnterEffect();
+            Context.BindCurrent(nativeCalls);
+            nativeCalls.ThrowOnError(nativeCalls.cuMemGetInfo(out UIntPtr free, out UIntPtr total));
             ulong totalBytes = total.ToUInt64();
             if (totalBytes == 0)
                 return 0.0f;
@@ -176,8 +185,10 @@ namespace TensorSharp.Cuda
         /// near zero while performance collapses).</summary>
         public (long freeBytes, long totalBytes) GetMemoryInfo()
         {
-            Context.MakeCurrent();
-            CudaDriverApi.cuMemGetInfo(out UIntPtr free, out UIntPtr total).ThrowOnError();
+            if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(CudaAllocator));
+            using var lease = nativeCalls.EnterEffect();
+            Context.BindCurrent(nativeCalls);
+            nativeCalls.ThrowOnError(nativeCalls.cuMemGetInfo(out UIntPtr free, out UIntPtr total));
             return ((long)free.ToUInt64(), (long)total.ToUInt64());
         }
 
@@ -204,7 +215,9 @@ namespace TensorSharp.Cuda
 
         public void Synchronize()
         {
-            Context.MakeCurrent();
+            if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(CudaAllocator));
+            using var lease = nativeCalls.EnterEffect();
+            Context.BindCurrent(nativeCalls);
             Stream.Synchronize();
         }
 
@@ -216,31 +229,106 @@ namespace TensorSharp.Cuda
         public void TrimPool()
         {
             ThrowIfDisposed();
-            Context.MakeCurrent();
-            Stream.Synchronize();
+            using var lease = nativeCalls.EnterEffect();
+            Synchronize();
             pool.DrainAndFree();
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref disposed, 1) != 0)
-                return;
+            if (Volatile.Read(ref disposed) != 0) return;
+            var plan = CudaRetirementPlan.PrepareBareAllocator(this);
+            plan.AllowStorageRelease();
+            var restoration = CudaContextRestoration.Capture(nativeCalls);
+            DisposeOwned(plan, restoration);
+            plan.Complete();
+            restoration.Restore();
+        }
 
-            Context.MakeCurrent();
-            Stream.Synchronize();
-            CudaQuantizedOps.ReleaseScratch(this);
-            CudaQuantizedOps.ReleaseArena(this);
-            pool.DrainAndFree();
-            Kernels?.Dispose();
-            Blas.Dispose();
-            Stream.Dispose();
-            Context.Dispose();
+        internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (!plan.Owns(this)) throw new InvalidOperationException("CUDA allocator cleanup requires its actual retirement plan.");
+            if (Volatile.Read(ref disposed) != 0) return;
+            if (Census.HasChildren) throw new InvalidOperationException("CUDA allocator storage retirement is incomplete.");
+            ReleaseResources(restoration, true);
+        }
+
+        internal void DrainForRetirement(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (!plan.Completes(this)) throw new InvalidOperationException("CUDA completion requires its actual retirement plan dependency.");
+            if (Volatile.Read(ref disposed) != 0) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (Volatile.Read(ref disposed) != 0) return;
+            try
+            {
+                Context.BindCurrent(nativeCalls);
+                nativeCalls.cuCtxSynchronize();
+            }
+            catch (Exception failure)
+            {
+                restoration?.MarkCleanupFailed();
+                nativeCalls.PublishFailure(lease, failure, NativeRuntimeFailureStage.Synchronization);
+                throw;
+            }
+        }
+
+        private void ReleaseConstruction()
+        {
+            var restoration = Context == null ? null : CudaContextRestoration.Capture(nativeCalls);
+            ReleaseResources(restoration, false);
+            restoration?.Restore();
+        }
+
+        private void ReleaseResources(CudaContextRestoration restoration, bool drain)
+        {
+            if (Volatile.Read(ref disposed) != 0) return;
+            var scratch = CudaQuantizedOps.ScratchRetirement.Prepare(this);
+            var weights = CudaQuantizedOps.WeightRetirement.Prepare(this);
+            bool releaseEligible = false;
+            try
+            {
+                using (var lease = nativeCalls.EnterEffect())
+                {
+                    nativeCalls.ValidateSafeRelease(lease);
+                    releaseEligible = true;
+                    try
+                    {
+                        if (Context != null)
+                        {
+                            Context.BindCurrent(nativeCalls);
+                            if (drain) nativeCalls.cuCtxSynchronize();
+                            scratch.Release();
+                            weights.Release();
+                        }
+                        pool?.DrainAndFree();
+                        Kernels?.Dispose();
+                        Blas?.Dispose();
+                        Stream?.Dispose();
+                        if (Context != null) Context.DisposeOwned(restoration);
+                        nativeCalls.CompleteSafeRelease(lease);
+                        Volatile.Write(ref disposed, 1);
+                    }
+                    catch (Exception cleanup)
+                    {
+                        restoration?.MarkCleanupFailed();
+                        nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.AllocatorRelease);
+                        throw;
+                    }
+                }
+            }
+            finally
+            {
+                if (!releaseEligible) weights.CancelBeforeRelease();
+            }
+            scratch.Complete();
+            weights.Complete();
         }
 
         private void ThrowIfDisposed()
         {
             if (Volatile.Read(ref disposed) != 0)
                 throw new ObjectDisposedException(nameof(CudaAllocator));
+            lock (Census.Gate) Census.ValidateAddition();
         }
 
         private static long ReadPoolLimit(string name, long defaultMb)

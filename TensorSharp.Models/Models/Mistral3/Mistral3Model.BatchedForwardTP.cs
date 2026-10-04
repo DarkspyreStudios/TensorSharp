@@ -105,6 +105,7 @@ namespace TensorSharp.Models
                 _pendingVisionEmbeddingsList.Clear();
             }
             Tensor[] hiddenStates = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hiddenStates);
 
             // Per-(token,head) positions for RoPE (reduced head counts).
             using var positionsTensorQ = BuildRoPEPositionsTensor(positions, numHeadsPerGpu);
@@ -161,9 +162,7 @@ namespace TensorSharp.Models
                 // 4. Residual add.
                 Tensor[] attnReplicated = BroadcastTensorToAllRanks(reducedAttn);
                 TpResidualAdd(hiddenStates, attnReplicated);
-                for (int r = 1; r < tp; r++)
-                    attnReplicated[r].Dispose();
-                reducedAttn.Dispose();
+                DisposeTensorParallelBroadcast(attnReplicated, reducedAttn);
 
                 // 5. FFN norm (replicated).
                 Tensor[] normed2 = TpRMSNorm(hiddenStates, wn[ffnNormIdx]);
@@ -197,9 +196,7 @@ namespace TensorSharp.Models
                 // 9. Residual add.
                 Tensor[] ffnReplicated = BroadcastTensorToAllRanks(ffnOut);
                 TpResidualAdd(hiddenStates, ffnReplicated);
-                for (int r = 1; r < tp; r++)
-                    ffnReplicated[r].Dispose();
-                ffnOut.Dispose();
+                DisposeTensorParallelBroadcast(ffnReplicated, ffnOut);
             }
 
             // Final norm + LM head on rank 0.

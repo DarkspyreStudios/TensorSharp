@@ -7,13 +7,13 @@ namespace TensorSharp.Cuda
     public sealed class CudaContext : IDisposable
     {
         private IntPtr context;
-        private readonly int device;
+        private int device;
+        private readonly CudaNativeCalls nativeCalls;
 
-        private CudaContext(IntPtr context, int deviceId, int device)
+        private CudaContext(int deviceId, ICudaNativeApi api)
         {
-            this.context = context;
             DeviceId = deviceId;
-            this.device = device;
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle, api, deviceId);
         }
 
         public int DeviceId { get; }
@@ -23,51 +23,116 @@ namespace TensorSharp.Cuda
         public static CudaContext Create(int deviceId)
         {
             CudaLibraryResolver.Register();
-            CudaDriverApi.cuInit(0).ThrowOnError();
-            CudaDriverApi.cuDeviceGet(out int device, deviceId).ThrowOnError();
+            return Create(deviceId, CudaNativeApi.Instance);
+        }
 
-            // cuBLAS and the CUDA runtime use the device primary context. Retaining
-            // it keeps the direct backend compatible with GGML CUDA probing and WSL.
-            CudaDriverApi.cuDevicePrimaryCtxRetain(out IntPtr context, device).ThrowOnError();
+        internal static CudaContext Create(int deviceId, ICudaNativeApi api)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(deviceId);
+            ArgumentNullException.ThrowIfNull(api);
+            InitializeDriver(api);
 
+            var owner = new CudaContext(deviceId, api);
+            using var lease = owner.nativeCalls.EnterEffect();
             try
             {
-                CudaDriverApi.cuCtxSetCurrent(context).ThrowOnError();
+                owner.nativeCalls.ThrowOnError(owner.nativeCalls.cuDeviceGet(out owner.device, deviceId));
+                // Reserve the owner before the driver can return a primary-context reference.
+                int result = owner.nativeCalls.cuDevicePrimaryCtxRetain(out owner.context, owner.device);
+                owner.nativeCalls.ThrowOnError(result);
+                owner.nativeCalls.ThrowOnError(owner.nativeCalls.cuCtxSetCurrent(owner.context));
+                return owner;
             }
-            catch
+            catch (Exception original)
             {
-                CudaDriverApi.cuDevicePrimaryCtxRelease(device);
+                try { owner.Release(lease, drain: false); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
                 throw;
             }
+        }
 
-            return new CudaContext(context, deviceId, device);
+        private static void InitializeDriver(ICudaNativeApi api)
+        {
+            var discovery = new object();
+            var calls = new CudaNativeCalls(discovery, NativeOwnerRole.NativeHandle, api);
+            using var lease = calls.EnterEffect();
+            try { calls.ThrowOnError(calls.cuInit(0)); }
+            finally { calls.CompleteSafeRelease(lease); }
         }
 
         /// <summary>
-        /// True once the primary context has been released. Releasing it already
-        /// freed every allocation made against it, so finalizers that run after
-        /// teardown must not try to make it current or free through it.
+        /// True once this owner's primary-context reference has been released.
+        /// Other owners can still retain the same device primary context.
         /// </summary>
         public bool IsDisposed => Volatile.Read(ref context) == IntPtr.Zero;
 
+        internal CudaNativeCalls NativeCalls => nativeCalls;
+
         public void MakeCurrent()
         {
+            if (IsDisposed) throw new ObjectDisposedException(nameof(CudaContext));
+            using var lease = nativeCalls.EnterEffect();
+            BindCurrent(nativeCalls);
+        }
+
+        internal void BindCurrent(CudaNativeCalls calls)
+        {
+            if (!calls.CoversDevice(DeviceId))
+                throw new InvalidOperationException("The CUDA effect does not cover the context device.");
+            nativeCalls.ThrowIfQuarantined();
             if (context == IntPtr.Zero)
                 throw new ObjectDisposedException(nameof(CudaContext));
-
-            CudaDriverApi.cuCtxSetCurrent(context).ThrowOnError();
+            calls.ThrowOnError(calls.cuCtxSetCurrent(context));
         }
 
         public void Dispose()
         {
-            IntPtr handle = Interlocked.Exchange(ref context, IntPtr.Zero);
-            if (handle == IntPtr.Zero)
-                return;
+            if (IsDisposed) return;
+            var restoration = CudaContextRestoration.Capture(nativeCalls);
+            DisposeOwned(restoration);
+            restoration.Restore();
+        }
 
-            if (CudaDriverApi.cuCtxGetCurrent(out IntPtr current) == 0 && current == handle)
-                CudaDriverApi.cuCtxSetCurrent(IntPtr.Zero);
+        internal void DisposeOwned(CudaContextRestoration restoration)
+        {
+            ArgumentNullException.ThrowIfNull(restoration);
+            restoration.Validate(nativeCalls.Api);
+            if (IsDisposed) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (IsDisposed) return;
+            Release(lease, drain: true, restoration);
+        }
 
-            CudaDriverApi.cuDevicePrimaryCtxRelease(device);
+        private void Release(NativeEffectLease lease, bool drain, CudaContextRestoration restoration = null)
+        {
+            nativeCalls.ValidateSafeRelease(lease);
+            int releasedIndex = restoration?.ReserveRelease(context, nativeCalls.Api) ?? -1;
+            try
+            {
+                if (context != IntPtr.Zero)
+                {
+                    nativeCalls.ThrowOnError(nativeCalls.cuCtxGetCurrent(out IntPtr current));
+                    if (drain)
+                    {
+                        BindCurrent(nativeCalls);
+                        nativeCalls.cuCtxSynchronize();
+                        current = context;
+                    }
+                    if (current == context)
+                        nativeCalls.ThrowOnError(nativeCalls.cuCtxSetCurrent(IntPtr.Zero));
+
+                    nativeCalls.cuDevicePrimaryCtxRelease(device);
+                    Volatile.Write(ref context, IntPtr.Zero);
+                    if (restoration != null) restoration.RecordReleased(releasedIndex);
+                }
+                nativeCalls.CompleteSafeRelease(lease);
+            }
+            catch (Exception cleanup)
+            {
+                restoration?.MarkCleanupFailed();
+                nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.ContextRelease);
+                throw;
+            }
         }
     }
 }

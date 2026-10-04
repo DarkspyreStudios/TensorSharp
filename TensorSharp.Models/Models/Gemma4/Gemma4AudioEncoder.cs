@@ -951,6 +951,19 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            ModelDisposalOwnership.Add(tensors, _onesForNorm);
+            ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
+            ModelDisposalOwnership.AddRange(tensors, _weights.Values);
+        }
+
+        internal void DisposeOwned()
+        {
+            _hostModel?.ThrowIfUnsafeOwnershipCleanup();
             _onesForNorm?.Dispose();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();

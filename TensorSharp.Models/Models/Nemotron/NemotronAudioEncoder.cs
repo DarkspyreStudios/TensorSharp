@@ -325,6 +325,15 @@ public sealed class NemotronAudioEncoder : IDisposable
     public void Dispose()
     {
         _host?.ThrowIfOwnershipCleanupFailed();
+        DisposeOwned();
+    }
+
+    internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        => ModelDisposalOwnership.AddRange(tensors, _matrices.Values);
+
+    internal void DisposeOwned()
+    {
+        _host?.ThrowIfUnsafeOwnershipCleanup();
         foreach (var value in _matrices.Values) value.Dispose(); _matrices.Clear(); _vectors.Clear(); _shapes.Clear();
     }
 }

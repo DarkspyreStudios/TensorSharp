@@ -416,7 +416,7 @@ namespace TensorSharp.Cuda
         {
             if (dynParams == null || !dynParams.IsValid)
                 return false;
-            return CudaKernelOps.TryFillRopePositions(posQ, posK, dynParams.DevicePtr);
+            return CudaKernelOps.TryFillRopePositions(posQ, posK, dynParams);
         }
 
         /// <summary>

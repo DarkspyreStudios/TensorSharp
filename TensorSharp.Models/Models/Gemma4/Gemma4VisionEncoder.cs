@@ -1080,6 +1080,19 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
+            DisposeOwned();
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            ModelDisposalOwnership.Add(tensors, _onesForNorm);
+            ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
+            ModelDisposalOwnership.AddRange(tensors, _weights.Values);
+        }
+
+        internal void DisposeOwned()
+        {
+            _hostModel?.ThrowIfUnsafeOwnershipCleanup();
             // The fused block binds each weight ZERO-COPY on unified-memory Metal: GGML
             // keeps an MTLBuffer that wraps these exact host pages, cached by host pointer.
             // Freeing the pages without dropping that wrapper leaves a live GPU mapping of

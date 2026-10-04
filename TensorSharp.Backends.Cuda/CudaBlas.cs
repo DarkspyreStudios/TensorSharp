@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using TensorSharp.Cuda.Interop;
 
 namespace TensorSharp.Cuda
@@ -6,244 +8,214 @@ namespace TensorSharp.Cuda
     internal static class CudaBlas
     {
         public static bool TryAddmm(Tensor result, float beta, Tensor src, float alpha, Tensor m1, Tensor m2)
-        {
-            if (!TryGetCudaStorage(result, out CudaStorage resultStorage) ||
-                !TryGetCudaStorage(src, out CudaStorage srcStorage) ||
-                !TryGetCudaStorage(m1, out CudaStorage m1Storage) ||
-                !TryGetCudaStorage(m2, out CudaStorage m2Storage))
-            {
-                return false;
-            }
-
-            if (result.ElementType != DType.Float32 || src.ElementType != DType.Float32 ||
-                m1.ElementType != DType.Float32 || m2.ElementType != DType.Float32)
-            {
-                return false;
-            }
-
-            if (m1.DimensionCount != 2 || m2.DimensionCount != 2 || result.DimensionCount != 2 || src.DimensionCount != 2)
-                return false;
-
-            int rows = checked((int)m1.Sizes[0]);
-            int shared = checked((int)m1.Sizes[1]);
-            int cols = checked((int)m2.Sizes[1]);
-            if (m2.Sizes[0] != shared || result.Sizes[0] != rows || result.Sizes[1] != cols ||
-                src.Sizes[0] != rows || src.Sizes[1] != cols)
-            {
-                return false;
-            }
-
-            if (!IsRowMajorMatrix(m1) || !IsRowMajorMatrix(result))
-                return false;
-
-            if (!TryGetRightOperand(m2, out int transa, out int lda))
-                return false;
-
-            if (beta != 0.0f)
-            {
-                if (ReferenceEquals(src.Storage, result.Storage) && src.StorageOffset == result.StorageOffset)
-                {
-                    resultStorage.EnsureDeviceCurrent();
-                }
-                else if (src.IsContiguous() && result.IsContiguous() && src.ElementCount() == result.ElementCount())
-                {
-                    resultStorage.CopyDeviceFrom(srcStorage);
-                }
-                else
-                {
-                    return false;
-                }
-            }
-
-            resultStorage.EnsureDeviceCurrent();
-            m1Storage.EnsureDeviceCurrent();
-            m2Storage.EnsureDeviceCurrent();
-
-            CudaAllocator allocator = resultStorage.AllocatorImpl;
-            allocator.Context.MakeCurrent();
-            allocator.Blas.SetStream(allocator.Stream.Handle);
-
-            IntPtr aPtr = m2Storage.DevicePtrAtElement(m2.StorageOffset);
-            IntPtr bPtr = m1Storage.DevicePtrAtElement(m1.StorageOffset);
-            IntPtr cPtr = resultStorage.DevicePtrAtElement(result.StorageOffset);
-            int ldb = shared;
-            int ldc = cols;
-
-            CublasApi.cublasSgemm(
-                allocator.Blas.Handle,
-                transa,
-                CublasApi.CUBLAS_OP_N,
-                cols,
-                rows,
-                shared,
-                ref alpha,
-                aPtr,
-                lda,
-                bPtr,
-                ldb,
-                ref beta,
-                cPtr,
-                ldc).ThrowOnCublasError();
-
-            resultStorage.MarkDeviceModified();
-            return true;
-        }
+            => TryAddmmCore(result, beta, src, alpha, m1, m2, false);
 
         public static bool TryAddmmBatch(Tensor result, float beta, Tensor src, float alpha, Tensor m1, Tensor m2)
+            => TryAddmmCore(result, beta, src, alpha, m1, m2, true);
+
+        private static bool TryAddmmCore(Tensor result, float beta, Tensor src, float alpha, Tensor m1, Tensor m2, bool batched)
         {
-            if (!TryGetCudaStorage(result, out CudaStorage resultStorage) ||
-                !TryGetCudaStorage(src, out CudaStorage srcStorage) ||
-                !TryGetCudaStorage(m1, out CudaStorage m1Storage) ||
-                !TryGetCudaStorage(m2, out CudaStorage m2Storage))
+            using var operands = BlasOperands.TryCreate(result, src, m1, m2);
+            if (operands == null) return false;
+            try
             {
-                return false;
-            }
+                var output = operands.Layouts[0];
+                var source = operands.Layouts[1];
+                var left = operands.Layouts[2];
+                var right = operands.Layouts[3];
+                if (operands.Storages.Any(storage => storage.ElementType != DType.Float32)) return false;
+                int dimensions = batched ? 3 : 2;
+                if (operands.Layouts.Any(layout => layout.Sizes.Length != dimensions)) return false;
 
-            if (result.ElementType != DType.Float32 || src.ElementType != DType.Float32 ||
-                m1.ElementType != DType.Float32 || m2.ElementType != DType.Float32)
-            {
-                return false;
-            }
-
-            if (m1.DimensionCount != 3 || m2.DimensionCount != 3 || result.DimensionCount != 3 || src.DimensionCount != 3)
-                return false;
-
-            int batch = checked((int)m1.Sizes[0]);
-            int rows = checked((int)m1.Sizes[1]);
-            int shared = checked((int)m1.Sizes[2]);
-            int cols = checked((int)m2.Sizes[2]);
-
-            if (m2.Sizes[0] != batch || m2.Sizes[1] != shared ||
-                result.Sizes[0] != batch || result.Sizes[1] != rows || result.Sizes[2] != cols ||
-                src.Sizes[0] != batch || src.Sizes[1] != rows || src.Sizes[2] != cols)
-            {
-                return false;
-            }
-
-            if (!IsRowMajorBatchMatrix(m1) || !IsRowMajorBatchMatrix(result))
-                return false;
-
-            if (!TryGetRightOperandBatch(m2, out int transa, out int lda))
-                return false;
-
-            if (beta != 0.0f)
-            {
-                if (ReferenceEquals(src.Storage, result.Storage) && src.StorageOffset == result.StorageOffset)
-                {
-                    resultStorage.EnsureDeviceCurrent();
-                }
-                else if (src.IsContiguous() && result.IsContiguous() && src.ElementCount() == result.ElementCount())
-                {
-                    resultStorage.CopyDeviceFrom(srcStorage);
-                }
-                else
-                {
+                int first = batched ? 1 : 0;
+                int batch = batched ? checked((int)left.Sizes[0]) : 1;
+                int rows = checked((int)left.Sizes[first]);
+                int shared = checked((int)left.Sizes[first + 1]);
+                int cols = checked((int)right.Sizes[first + 1]);
+                if (right.Sizes[first] != shared || output.Sizes[first] != rows || output.Sizes[first + 1] != cols
+                    || source.Sizes[first] != rows || source.Sizes[first + 1] != cols
+                    || batched && (right.Sizes[0] != batch || output.Sizes[0] != batch || source.Sizes[0] != batch))
                     return false;
+                if (!IsRowMajorMatrix(left, batched) || !IsRowMajorMatrix(output, batched)) return false;
+                if (!TryGetRightOperand(right, batched, out int transa, out int lda)) return false;
+
+                CudaStorage resultStorage = operands.Storages[0];
+                CudaStorage srcStorage = operands.Storages[1];
+                if (beta != 0.0f)
+                {
+                    if (ReferenceEquals(srcStorage, resultStorage) && source.Offset == output.Offset)
+                        resultStorage.EnsureDeviceCurrent();
+                    else if (source.Contiguous && output.Contiguous && source.ElementCount == output.ElementCount)
+                        resultStorage.CopyDeviceFrom(srcStorage);
+                    else return false;
+                }
+
+                operands.Check();
+                resultStorage.EnsureDeviceCurrent();
+                operands.Storages[2].EnsureDeviceCurrent();
+                operands.Storages[3].EnsureDeviceCurrent();
+                operands.Check();
+
+                // Preparation can enter graph/storage owners; only pointer access and submission share this short effect.
+                using (var callEffect = operands.Calls.EnterEffect())
+                using (var handleEffect = operands.BlasCalls.EnterEffect())
+                {
+                    operands.Check();
+                    operands.Allocator.Context.BindCurrent(operands.BlasCalls);
+                    IntPtr handle = operands.Blas.Handle;
+                    if (handle == IntPtr.Zero) throw new ObjectDisposedException(nameof(CudaCublasHandle));
+                    operands.BlasCalls.cublasSetStream(handle, operands.Stream.Handle).ThrowOnCublasError();
+                    IntPtr aPtr = operands.Storages[3].DevicePtrAtElement(right.Offset);
+                    IntPtr bPtr = operands.Storages[2].DevicePtrAtElement(left.Offset);
+                    IntPtr cPtr = resultStorage.DevicePtrAtElement(output.Offset);
+                    if (batched)
+                        operands.BlasCalls.cublasSgemmStridedBatched(handle, transa, CublasApi.CUBLAS_OP_N,
+                            cols, rows, shared, ref alpha, aPtr, lda, checked(right.Strides[0]),
+                            bPtr, shared, checked(left.Strides[0]), ref beta, cPtr, cols,
+                            checked(output.Strides[0]), batch).ThrowOnCublasError();
+                    else
+                        operands.BlasCalls.cublasSgemm(handle, transa, CublasApi.CUBLAS_OP_N,
+                            cols, rows, shared, ref alpha, aPtr, lda, bPtr, shared,
+                            ref beta, cPtr, cols).ThrowOnCublasError();
+                }
+                operands.Check();
+                resultStorage.MarkDeviceModified();
+                operands.Check();
+                return true;
+            }
+            catch (Exception original)
+            {
+                operands.Failure = original;
+                throw;
+            }
+        }
+
+        private static bool IsRowMajorMatrix(Layout layout, bool batched)
+        {
+            int first = batched ? 1 : 0;
+            return layout.Strides[first + 1] == 1 && layout.Strides[first] == layout.Sizes[first + 1]
+                && (!batched || layout.Strides[0] == layout.Sizes[1] * layout.Sizes[2]);
+        }
+
+        private static bool TryGetRightOperand(Layout layout, bool batched, out int transa, out int lda)
+        {
+            int first = batched ? 1 : 0;
+            int rows = checked((int)layout.Sizes[first]);
+            int cols = checked((int)layout.Sizes[first + 1]);
+            if (layout.Strides[first + 1] == 1 && layout.Strides[first] == cols)
+            {
+                transa = CublasApi.CUBLAS_OP_N;
+                lda = cols;
+                return true;
+            }
+            if (layout.Strides[first] == 1 && layout.Strides[first + 1] == rows)
+            {
+                transa = CublasApi.CUBLAS_OP_T;
+                lda = rows;
+                return true;
+            }
+            transa = 0;
+            lda = 0;
+            return false;
+        }
+
+        private sealed class Layout
+        {
+            internal readonly long[] Sizes;
+            internal readonly long[] Strides;
+            internal readonly long Offset;
+            internal readonly long ElementCount;
+            internal readonly bool Contiguous;
+
+            internal Layout(Tensor tensor)
+            {
+                Sizes = tensor.Sizes.ToArray();
+                Strides = tensor.Strides.ToArray();
+                Offset = tensor.StorageOffset;
+                ElementCount = tensor.ElementCount();
+                Contiguous = tensor.IsContiguous();
+            }
+        }
+
+        private sealed class BlasOperands : IDisposable
+        {
+            private readonly Tensor[] _tensors;
+            private readonly CudaAllocator[] _allocators;
+            private CudaOperationAdmission _admission;
+            private bool _released;
+            internal readonly CudaStorage[] Storages;
+            internal readonly Layout[] Layouts;
+            internal readonly CudaAllocator Allocator;
+            internal readonly CudaCublasHandle Blas;
+            internal readonly CudaStream Stream;
+            internal readonly CudaNativeCalls Calls;
+            internal readonly CudaNativeCalls BlasCalls;
+            internal Exception Failure;
+
+            private BlasOperands(Tensor[] tensors, CudaStorage[] storages)
+            {
+                _tensors = tensors;
+                Storages = storages;
+                _allocators = storages.Select(storage => storage.AllocatorImpl)
+                    .Distinct<CudaAllocator>(ReferenceEqualityComparer.Instance).ToArray();
+                Allocator = storages[0].AllocatorImpl;
+                Blas = Allocator.Blas;
+                Stream = Allocator.Stream;
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, Allocator.NativeCalls.Api,
+                    _allocators.Select(allocator => allocator.DeviceId).Distinct().ToArray());
+                try
+                {
+                    _admission = CudaOperationAdmission.Enter(this, _allocators);
+                    BlasCalls = Blas.NativeCalls;
+                    Layouts = tensors.Select(tensor => new Layout(tensor)).ToArray();
+                    Check();
+                }
+                catch (Exception original)
+                {
+                    Failure = original;
+                    Dispose();
+                    throw;
                 }
             }
 
-            resultStorage.EnsureDeviceCurrent();
-            m1Storage.EnsureDeviceCurrent();
-            m2Storage.EnsureDeviceCurrent();
-
-            CudaAllocator allocator = resultStorage.AllocatorImpl;
-            allocator.Context.MakeCurrent();
-            allocator.Blas.SetStream(allocator.Stream.Handle);
-
-            int ldb = shared;
-            int ldc = cols;
-            IntPtr aPtr = m2Storage.DevicePtrAtElement(m2.StorageOffset);
-            IntPtr bPtr = m1Storage.DevicePtrAtElement(m1.StorageOffset);
-            IntPtr cPtr = resultStorage.DevicePtrAtElement(result.StorageOffset);
-
-            CublasApi.cublasSgemmStridedBatched(
-                allocator.Blas.Handle,
-                transa,
-                CublasApi.CUBLAS_OP_N,
-                cols,
-                rows,
-                shared,
-                ref alpha,
-                aPtr,
-                lda,
-                checked(m2.Strides[0]),
-                bPtr,
-                ldb,
-                checked(m1.Strides[0]),
-                ref beta,
-                cPtr,
-                ldc,
-                checked(result.Strides[0]),
-                batch).ThrowOnCublasError();
-
-            resultStorage.MarkDeviceModified();
-            return true;
-        }
-
-        private static bool TryGetCudaStorage(Tensor tensor, out CudaStorage storage)
-        {
-            storage = tensor?.Storage as CudaStorage;
-            return storage != null;
-        }
-
-        private static bool IsRowMajorMatrix(Tensor tensor)
-        {
-            return tensor.Strides[1] == 1 && tensor.Strides[0] == tensor.Sizes[1];
-        }
-
-        private static bool IsRowMajorBatchMatrix(Tensor tensor)
-        {
-            return tensor.Strides[2] == 1 &&
-                tensor.Strides[1] == tensor.Sizes[2] &&
-                tensor.Strides[0] == tensor.Sizes[1] * tensor.Sizes[2];
-        }
-
-        private static bool TryGetRightOperand(Tensor tensor, out int transa, out int lda)
-        {
-            int logicalRows = checked((int)tensor.Sizes[0]);
-            int logicalCols = checked((int)tensor.Sizes[1]);
-
-            if (tensor.Strides[1] == 1 && tensor.Strides[0] == logicalCols)
+            internal static BlasOperands TryCreate(Tensor result, Tensor src, Tensor m1, Tensor m2)
             {
-                transa = CublasApi.CUBLAS_OP_N;
-                lda = logicalCols;
-                return true;
+                var tensors = new[] { result, src, m1, m2 };
+                var storages = new CudaStorage[tensors.Length];
+                for (int index = 0; index < tensors.Length; index++)
+                {
+                    storages[index] = tensors[index]?.Storage as CudaStorage;
+                    if (storages[index] == null) return null;
+                }
+                return new BlasOperands(tensors, storages);
             }
 
-            if (tensor.Strides[0] == 1 && tensor.Strides[1] == logicalRows)
+            internal void Check()
             {
-                transa = CublasApi.CUBLAS_OP_T;
-                lda = logicalRows;
-                return true;
+                Calls.ThrowIfQuarantined();
+                foreach (CudaAllocator allocator in _allocators) _admission.ValidateAllocator(allocator);
             }
 
-            transa = 0;
-            lda = 0;
-            return false;
-        }
-
-        private static bool TryGetRightOperandBatch(Tensor tensor, out int transa, out int lda)
-        {
-            int logicalRows = checked((int)tensor.Sizes[1]);
-            int logicalCols = checked((int)tensor.Sizes[2]);
-
-            if (tensor.Strides[2] == 1 && tensor.Strides[1] == logicalCols)
+            public void Dispose()
             {
-                transa = CublasApi.CUBLAS_OP_N;
-                lda = logicalCols;
-                return true;
+                if (_released) return;
+                _released = true;
+                List<Exception> failures = null;
+                try
+                {
+                    using var effect = Calls.EnterEffect();
+                    Calls.CompleteSafeRelease(effect);
+                }
+                catch (NativeRuntimeQuarantinedException refusal) when (Failure != null && Calls.IsRetainedFailure(refusal)) { }
+                catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
+                try { _admission?.Dispose(); }
+                catch (Exception cleanup) { (failures ??= new()).Add(cleanup); }
+                GC.KeepAlive(_tensors);
+                if (failures == null) return;
+                if (Failure != null) failures.Insert(0, Failure);
+                if (failures.Count == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+                throw new AggregateException(failures);
             }
-
-            if (tensor.Strides[1] == 1 && tensor.Strides[2] == logicalRows)
-            {
-                transa = CublasApi.CUBLAS_OP_T;
-                lda = logicalRows;
-                return true;
-            }
-
-            transa = 0;
-            lda = 0;
-            return false;
         }
     }
 }

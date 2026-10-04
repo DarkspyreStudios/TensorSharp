@@ -39,6 +39,39 @@ Backend, modality, feature support, and validation coverage vary by model. See t
 
 The detailed implementation notes and historical benchmark claims have moved to the linked documentation so this page stays useful as a starting point.
 
+## Managed Unsafe-Cleanup Observation
+
+Core exposes `NativeRuntimeQuarantine.Observe()` and exact-exception-identity
+`TryGetFailure` observations for process-scoped unsafe cleanup. Checked CUDA
+context, stream, module, kernel, allocator and storage owners use this authority.
+Allocator retirement checks actual storage reference ownership before cleanup.
+Group and model cleanup share the same ownership census and restoration call.
+Cleanup uncertainty retains actual owners and fences the affected device.
+GGML attaches its actual process, contexts, storages, groups, models and native
+handles to the CUDA dependency authority after real CUDA intent or backend-bearing
+discovery. Participating owners inherit established process CUDA dependence.
+Compile-only discovery does not establish that dependence. Independent CPU,
+Metal and Vulkan operations do not enter CUDA scopes unless the process has
+established CUDA dependence. GGML retains its own poison authority, loaded native
+identity, sticky backend selection and shutdown rules.
+
+GGML physical memory release after potential native use reserves an exclusive
+counted cleanup interval.
+Returning a block to its pool remains nonphysical and barrier-free. Owner
+registration completion uses the same counted admission without requiring other
+native calls to finish. Failed cleanup retains actual owners, exact causes and
+per-block release progress. GGML callback admission keeps its invocation counted
+while suspending only the CUDA effect around borrowed callbacks.
+
+MLX caller integration is not wired into this authority. Remaining raw CUDA
+paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
+certify availability, initialization or safe native cleanup. GGML integration
+has production compilation and source-review evidence, not executed native or
+device qualification. The [managed-only harness](eng/tests/native-quarantine/README.md)
+covers the Core cross-generation admission and failed-owner retention protocol
+without loading native code; it does not qualify GGML callbacks, pool reuse or
+native shutdown.
+
 ## Quick Start
 
 Prefer a prebuilt application? The [Releases page](https://github.com/zhongkaifu/TensorSharp/releases) provides self-contained CLI and Server archives for Windows x64 (CPU/CUDA), Linux x64 (CPU/CUDA), and macOS arm64.

@@ -404,6 +404,7 @@ namespace TensorSharp.Models
             string draftModelPath = null)
             : base(ggufPath, backend, tpDegree, tpGroup)
         {
+            SetOwnedChildRelease(DisposeQwen35CudaChildren);
             try
             {
                 _useMetalGdnInplaceState = ShouldUseMetalGdnInplaceState(
@@ -414,7 +415,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs);
+                RollBackFailedConstruction(loadError, DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs,
+                    collectDerivedOwnership: CollectQwen35DisposalOwnership);
                 throw;
             }
         }
@@ -2010,7 +2012,7 @@ namespace TensorSharp.Models
                 return RunPerOpLayerLoop(hidden, seqLen, startPos);
             }
 
-            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator);
+            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator, this);
             CudaPrefillGraphCache graphs = _cudaPrefillGraphs;
             if (!graphs.IsUsable)
                 return RunPerOpLayerLoop(hidden, seqLen, startPos);
@@ -2032,13 +2034,17 @@ namespace TensorSharp.Models
             int convPhase = firstRec >= 0 && _convStateWriteIdx != null ? _convStateWriteIdx[firstRec] : 0;
             string key = $"{seqLen}|{startPos}|{_ropeDelta}|{kvPtr:x}|{statePtr:x}|{convPhase}";
 
-            if (graphs.TryGetReplayInput(key, out Tensor pinned))
+            if (graphs.TryReserveReplay(key, 0, hidden, out var replay))
             {
-                Ops.Copy(pinned, hidden);
-                hidden.Dispose();
-                graphs.Replay(key);
-                MarkCudaGraphStateModified();
-                return pinned;
+                try
+                {
+                    Ops.Copy(replay.Input, hidden);
+                    replay.ReleaseIncomingHidden();
+                    graphs.Replay(replay);
+                    MarkCudaGraphStateModified();
+                    return replay.TransferResult();
+                }
+                catch (Exception original) { throw replay.CleanupAfterFailure(original); }
             }
 
             if (!graphs.ShouldCapture(key))
@@ -2053,42 +2059,7 @@ namespace TensorSharp.Models
             CudaFusedOps.TryEnsureDeviceResident(posK);
 
             // The captured loop must run on a stable input buffer the graph owns.
-            Tensor pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
-            Ops.Copy(pinnedIn, hidden);
-            hidden.Dispose();
-
-            if (!graphs.BeginCapture(key))
-                return RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
-
-            bool captured = false;
-            try
-            {
-                Tensor result = RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
-                if (ReferenceEquals(result, pinnedIn))
-                    captured = graphs.EndCaptureAndLaunch(key, pinnedIn, new[] { posQ, posK });
-                else
-                    graphs.AbortCapture(key);
-            }
-            catch (CudaGraphCaptureAbortedException ex)
-            {
-                graphs.AbortCapture(key, ex.Message);
-            }
-            catch (TensorSharp.Cuda.Interop.CudaException ex)
-            {
-                graphs.AbortCapture(key, ex.ToString());
-            }
-            catch
-            {
-                graphs.AbortCapture(key);
-                throw;
-            }
-
-            if (!captured)
-            {
-                // Nothing executed during the failed capture; run the loop for real.
-                return RunPerOpLayerLoop(pinnedIn, seqLen, startPos);
-            }
-            return pinnedIn;
+            return RunOwnedCudaGraphCapture(graphs, key, hidden, seqLen, startPos, posQ, posK, null);
         }
 
         /// <summary>
@@ -2104,7 +2075,7 @@ namespace TensorSharp.Models
         /// </summary>
         private Tensor RunCudaDecodeLayerLoop(Tensor hidden, int startPos)
         {
-            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator);
+            _cudaPrefillGraphs ??= new CudaPrefillGraphCache(_allocator, this);
             CudaPrefillGraphCache graphs = _cudaPrefillGraphs;
             if (!graphs.IsUsable)
                 return RunPerOpLayerLoop(hidden, 1, startPos);
@@ -2135,20 +2106,21 @@ namespace TensorSharp.Models
             // the live value from the dyn block on replay.
             int convPhase = firstRec >= 0 && _convStateWriteIdx != null ? _convStateWriteIdx[firstRec] : 0;
 
-            if (graphs.TryGetReplayInput(key, attendLen, out Tensor pinned))
+            if (graphs.TryReserveReplay(key, attendLen, hidden, out var replay))
             {
-                // The graph reads the KV/state buffers in place; re-upload
-                // anything a host-side path dirtied since the last device pass.
-                EnsureDecodeGraphInputsResident();
-                Ops.Copy(pinned, hidden);
-                hidden.Dispose();
-                dyn.Write(attendLen, startPos, convPhase, RopePosition(startPos));
-                graphs.Replay(key);
-                // Mirror the C# bookkeeping the plain loop would have done.
-                AdvanceGdnConvPhases(convDim);
-                MarkCudaGraphStateModified();
-                _cachedRoPEPosStartPos = -1; // device content now diverges from the host cache key
-                return pinned;
+                try
+                {
+                    EnsureDecodeGraphInputsResident();
+                    Ops.Copy(replay.Input, hidden);
+                    replay.ReleaseIncomingHidden();
+                    dyn.Write(attendLen, startPos, convPhase, RopePosition(startPos));
+                    graphs.Replay(replay);
+                    AdvanceGdnConvPhases(convDim);
+                    MarkCudaGraphStateModified();
+                    _cachedRoPEPosStartPos = -1;
+                    return replay.TransferResult();
+                }
+                catch (Exception original) { throw replay.CleanupAfterFailure(original); }
             }
 
             if (!graphs.ShouldCapture(key))
@@ -2162,54 +2134,72 @@ namespace TensorSharp.Models
             CudaFusedOps.TryEnsureDeviceResident(posQ);
             CudaFusedOps.TryEnsureDeviceResident(posK);
 
-            Tensor pinnedIn = new Tensor(_allocator, DType.Float32, hidden.Sizes);
-            Ops.Copy(pinnedIn, hidden);
-            hidden.Dispose();
-
             dyn.Write(attendLen, startPos, convPhase, RopePosition(startPos));
-            if (!graphs.BeginCapture(key))
-                return RunPerOpLayerLoop(pinnedIn, 1, startPos);
+            Tensor result = RunOwnedCudaGraphCapture(graphs, key, hidden, 1, startPos, posQ, posK, dyn);
+            _cachedRoPEPosStartPos = -1;
+            return result;
+        }
 
+
+        private IEnumerable<Tensor> GetCudaGraphKeepAlive(Tensor posQ, Tensor posK)
+        {
+            yield return posQ;
+            yield return posK;
+            for (int layer = 0; layer < Config.NumLayers; layer++)
+            {
+                if (_kvCacheK?[layer] != null) yield return _kvCacheK[layer];
+                if (_kvCacheV?[layer] != null) yield return _kvCacheV[layer];
+                if (_deltaStateTensor?[layer] != null) yield return _deltaStateTensor[layer];
+                if (_cudaGdnConvStateTensor?[layer] != null) yield return _cudaGdnConvStateTensor[layer];
+            }
+        }
+
+        private Tensor RunOwnedCudaGraphCapture(CudaPrefillGraphCache graphs, string key, Tensor hidden,
+            int seqLen, int startPos, Tensor posQ, Tensor posK, CudaDecodeDynParams dyn)
+        {
+            int[] phases = _convStateWriteIdx == null ? null : (int[])_convStateWriteIdx.Clone();
+            var pinned = new Tensor(_allocator, DType.Float32, hidden.Sizes);
+            CudaPrefillGraphCache.CaptureAttempt attempt;
+            try { attempt = graphs.ReserveCapture(key, pinned, GetCudaGraphKeepAlive(posQ, posK), dyn); }
+            catch (Exception original)
+            {
+                if (!graphs.RetainsInput(pinned))
+                    try { pinned.Dispose(); }
+                    catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
             bool captured = false;
             try
             {
-                dyn.EnqueueUpload();
-                dyn.Activate();
-                if (!CudaFusedOps.TryFillRopePositions(posQ, posK, dyn))
-                    throw new CudaGraphCaptureAbortedException("RoPE position fill kernel unavailable.");
-                Tensor result = RunPerOpLayerLoop(pinnedIn, 1, startPos);
-                CudaDecodeDynParams.Deactivate();
-                if (ReferenceEquals(result, pinnedIn))
-                    captured = graphs.EndCaptureAndLaunch(key, pinnedIn, new[] { posQ, posK },
-                        CudaDecodeDynParams.CaptureMaxAttendLen);
-                else
-                    graphs.AbortCapture(key);
+                attempt.AcceptIncoming(hidden);
+                Ops.Copy(attempt.Input, hidden);
+                attempt.ReleaseIncoming();
+                if (graphs.BeginCapture(attempt))
+                {
+                    if (dyn != null)
+                    {
+                        dyn.EnqueueUpload();
+                        dyn.Activate();
+                        if (!CudaFusedOps.TryFillRopePositions(posQ, posK, dyn))
+                            throw new CudaGraphCaptureAbortedException("RoPE position fill kernel unavailable.");
+                    }
+                    Tensor result = RunPerOpLayerLoop(attempt.Input, seqLen, startPos);
+                    attempt.RecordLoopResult(result);
+                    CudaDecodeDynParams.Deactivate();
+                    captured = graphs.EndCaptureAndLaunch(attempt, result,
+                        dyn == null ? 0 : CudaDecodeDynParams.CaptureMaxAttendLen);
+                }
             }
-            catch (CudaGraphCaptureAbortedException ex)
+            catch (Exception original)
             {
-                graphs.AbortCapture(key, ex.Message);
+                bool fallback = graphs.AbortAfterFailure(attempt, original, out Exception preserved);
+                if (!fallback) throw preserved;
             }
-            catch (TensorSharp.Cuda.Interop.CudaException ex)
-            {
-                graphs.AbortCapture(key, ex.ToString());
-            }
-            catch
-            {
-                graphs.AbortCapture(key);
-                throw;
-            }
-            finally
-            {
-                CudaDecodeDynParams.Deactivate();
-            }
-
-            if (!captured)
-            {
-                // Nothing executed during the failed capture; run the loop for real.
-                return RunPerOpLayerLoop(pinnedIn, 1, startPos);
-            }
-            _cachedRoPEPosStartPos = -1;
-            return pinnedIn;
+            finally { CudaDecodeDynParams.Deactivate(); }
+            if (captured) return attempt.TakeSuccessfulResult();
+            Tensor fallbackInput = attempt.TakeFallbackInput();
+            if (phases != null) Array.Copy(phases, _convStateWriteIdx, phases.Length);
+            return RunPerOpLayerLoop(fallbackInput, seqLen, startPos);
         }
 
         /// <summary>Mirrors the per-layer conv ring advance the plain loop's
@@ -6458,6 +6448,47 @@ namespace TensorSharp.Models
             resetNativeVerifyState();
         }
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectQwen35DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectQwen35DisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheK);
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCacheV);
+            ModelDisposalOwnership.AddRange(ownedTensors, _cudaGdnConvStateTensor);
+            ModelDisposalOwnership.AddRange(ownedTensors, _deltaStateTensor);
+            ModelDisposalOwnership.AddRows(ownedTensors, _q35GdnSlotSsmTensor);
+            ModelDisposalOwnership.AddRange(ownedTensors, _mtpGdnConvDevSnap);
+            ModelDisposalOwnership.AddRange(ownedTensors, _mtpGdnDeltaDevSnap);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpKvCacheV);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpDeltaState);
+            ModelDisposalOwnership.AddRows(ownedTensors, _tpConvState);
+            ModelDisposalOwnership.Add(ownedTensors, _gdnGatedOutT, _gdnChunkedQBuf, _gdnChunkedKBuf,
+                _gdnChunkedVBuf, _gdnChunkedZBuf, _gdnChunkedAlphaBuf, _gdnChunkedBetaBuf, _gdnDecodePackedBuf,
+                _moeTokenInput, _moeGateBuf, _moeUpBuf, _moeDownBuf, _moeBatchedResult, _moeBatchedGate,
+                _moeBatchedUp, _moeBatchedDown, _moeBatchedExpertIndices, _moeBatchedRouteWeights,
+                _attnDecodeQBuf, _attnDecodeGBuf, _attnDecodeOutBuf, _attnDecodeQkvBuf, _ffnDecodeGateUpBuf);
+            void AddHolder(Qwen35KvCacheHolder holder)
+            {
+                if (holder == null) return;
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.K);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.V);
+                ModelDisposalOwnership.AddRange(ownedTensors, holder.DeltaState);
+            }
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) AddHolder(holder);
+            if (_retainedFusedHolders != null) foreach (var holder in _retainedFusedHolders.Values) AddHolder(holder);
+            if (_holderPool != null) foreach (var holder in _holderPool) AddHolder(holder);
+            AddHolder(_primaryHolder);
+            foreach (var (embedding, _) in _visionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
+            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
+            _cudaPrefillGraphs?.CollectDisposalOwnership(ownedTensors);
+            CollectDFlashDisposalOwnership(ownedTensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeQwen35Resources, releaseDerivedGraphs: DisposeQwen35Graphs);
@@ -6486,21 +6517,25 @@ namespace TensorSharp.Models
 
             // Cached CUDA prefill graphs own pool blocks + pinned tensors; free
             // them before the tensors/caches they reference are torn down.
-            _cudaPrefillGraphs?.Dispose();
+            _cudaPrefillGraphs?.ReleaseGraphsForRetirement();
+        }
+
+        private void DisposeQwen35CudaChildren(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            _cudaPrefillGraphs?.DisposeOwned(plan, restoration);
             _cudaPrefillGraphs = null;
+            _cudaDecodeDynParams?.Dispose();
+            _cudaDecodeDynParams = null;
         }
 
         private void DisposeQwen35Resources()
         {
-            _cudaDecodeDynParams?.Dispose();
-            _cudaDecodeDynParams = null;
-
             // Free the on-device MoE decode pointer tables (device u64 buffers).
             FreeQwenCudaMoETables();
 
             DisposeDFlash();
 
-            VisionEncoder?.Dispose();
+            VisionEncoder?.DisposeOwned();
             foreach (var (visionEmbeddings, _) in _visionEmbeddingsList)
                 visionEmbeddings?.Dispose();
             _visionEmbeddingsList.Clear();

@@ -1412,6 +1412,7 @@ namespace TensorSharp.Models
 
             // Broadcast embedding to all GPUs.
             Tensor[] hidden = BroadcastTensorToAllRanks(hidden0);
+            RetireTensorParallelBroadcastSource(hidden0, hidden);
 
             for (int layer = 0; layer < Config.NumLayers; layer++)
             {
@@ -2086,7 +2087,8 @@ namespace TensorSharp.Models
             }
 
             Tensor[] routerLogitsPerRank = BroadcastTensorToAllRanks(rank0Logits);
-            rank0Logits.Dispose();
+            if (IsGgmlBackend) RetireTensorParallelBroadcastSource(rank0Logits, routerLogitsPerRank);
+            else rank0Logits.Dispose();
 
             // 2a. Fully on-device fused MoE per rank (device-resident expert shards,
             // no host round-trip). Each rank returns its partial contribution.

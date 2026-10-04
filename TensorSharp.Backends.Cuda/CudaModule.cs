@@ -9,10 +9,15 @@ namespace TensorSharp.Cuda
     {
         private readonly Dictionary<string, IntPtr> functions = new Dictionary<string, IntPtr>(StringComparer.Ordinal);
         private IntPtr module;
+        private readonly CudaContextBinding context;
+        private readonly CudaNativeCalls nativeCalls;
 
-        private CudaModule(IntPtr module)
+        internal CudaContextBinding Context => context;
+
+        private CudaModule(CudaContextBinding context)
         {
-            this.module = module;
+            this.context = context;
+            nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.NativeHandle, context.Api, context.DeviceId);
         }
 
         public static CudaModule LoadFromFile(string path)
@@ -24,7 +29,16 @@ namespace TensorSharp.Cuda
             return LoadFromBytes(bytes);
         }
 
-        public static unsafe CudaModule LoadFromBytes(byte[] ptxBytes)
+        public static CudaModule LoadFromBytes(byte[] ptxBytes)
+        {
+            ArgumentNullException.ThrowIfNull(ptxBytes);
+            return LoadFromBytes(ptxBytes, CudaContextBinding.Discover(CudaNativeApi.Instance));
+        }
+
+        internal static CudaModule LoadFromBytes(byte[] ptxBytes, CudaContext context)
+            => LoadFromBytes(ptxBytes, CudaContextBinding.FromOwner(context));
+
+        private static unsafe CudaModule LoadFromBytes(byte[] ptxBytes, CudaContextBinding context)
         {
             if (ptxBytes == null)
                 throw new ArgumentNullException(nameof(ptxBytes));
@@ -36,18 +50,31 @@ namespace TensorSharp.Cuda
                 Buffer.BlockCopy(ptxBytes, 0, terminated, 0, ptxBytes.Length);
             }
 
-            fixed (byte* ptx = terminated)
+            var owner = new CudaModule(context);
+            using var lease = owner.nativeCalls.EnterEffect();
+            try
             {
-                CudaDriverApi.cuModuleLoadData(out IntPtr module, (IntPtr)ptx).ThrowOnError();
-                return new CudaModule(module);
+                context.BindCurrent(owner.nativeCalls);
+                fixed (byte* ptx = terminated)
+                    owner.nativeCalls.ThrowOnError(owner.nativeCalls.cuModuleLoadData(out owner.module, (IntPtr)ptx));
+                return owner;
+            }
+            catch (Exception original)
+            {
+                try { owner.Release(lease, drain: false); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
             }
         }
 
         public IntPtr GetFunction(string name)
         {
+            ArgumentNullException.ThrowIfNull(name);
+            using var lease = nativeCalls.EnterEffect();
+            context.BindCurrent(nativeCalls);
             if (!functions.TryGetValue(name, out IntPtr function))
             {
-                CudaDriverApi.cuModuleGetFunction(out function, module, name).ThrowOnError();
+                nativeCalls.ThrowOnError(nativeCalls.cuModuleGetFunction(out function, module, name));
                 functions.Add(name, function);
             }
 
@@ -56,12 +83,31 @@ namespace TensorSharp.Cuda
 
         public void Dispose()
         {
-            IntPtr current = module;
-            if (current != IntPtr.Zero)
+            if (module == IntPtr.Zero) return;
+            using var lease = nativeCalls.EnterEffect();
+            if (module == IntPtr.Zero) return;
+            Release(lease, drain: true);
+        }
+
+        private void Release(NativeEffectLease lease, bool drain)
+        {
+            nativeCalls.ValidateSafeRelease(lease);
+            try
             {
-                module = IntPtr.Zero;
+                if (module != IntPtr.Zero)
+                {
+                    context.BindCurrent(nativeCalls);
+                    if (drain) nativeCalls.cuCtxSynchronize();
+                    nativeCalls.cuModuleUnload(module);
+                    module = IntPtr.Zero;
+                }
                 functions.Clear();
-                CudaDriverApi.cuModuleUnload(current);
+                nativeCalls.CompleteSafeRelease(lease);
+            }
+            catch (Exception cleanup)
+            {
+                nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.ContextRelease);
+                throw;
             }
         }
     }

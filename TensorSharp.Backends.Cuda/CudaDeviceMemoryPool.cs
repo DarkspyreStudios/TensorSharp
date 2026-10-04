@@ -137,7 +137,11 @@ namespace TensorSharp.Cuda
         }
 
         public IntPtr Rent(long requestedBytes, out long allocationBytes)
+            => Rent(requestedBytes, out allocationBytes, backingAllocate);
+
+        internal IntPtr Rent(long requestedBytes, out long allocationBytes, Func<long, IntPtr> allocate)
         {
+            ArgumentNullException.ThrowIfNull(allocate);
             allocationBytes = RoundAllocationSize(Math.Max(requestedBytes, 1));
 
             if (enabled && allocationBytes >= LargeBlockThreshold)
@@ -152,7 +156,7 @@ namespace TensorSharp.Cuda
                     }
                 }
 
-                return backingAllocate(allocationBytes);
+                return allocate(allocationBytes);
             }
 
             if (enabled)
@@ -174,7 +178,7 @@ namespace TensorSharp.Cuda
 
             // Backing allocation runs outside the shard lock so a slow driver call
             // never blocks other threads sharing the shard.
-            return backingAllocate(allocationBytes);
+            return allocate(allocationBytes);
         }
 
         public void Return(IntPtr ptr, long allocationBytes)
@@ -393,13 +397,16 @@ namespace TensorSharp.Cuda
         {
             lock (largeSync)
             {
-                foreach (Stack<IntPtr> stack in largePool.Values)
+                foreach (var entry in largePool)
                 {
+                    Stack<IntPtr> stack = entry.Value;
                     while (stack.Count > 0)
                     {
-                        IntPtr ptr = stack.Pop();
+                        IntPtr ptr = stack.Peek();
                         if (ptr != IntPtr.Zero)
                             backingFree(ptr);
+                        stack.Pop();
+                        largeCachedBytes -= entry.Key;
                     }
                 }
                 largePool.Clear();
@@ -410,13 +417,16 @@ namespace TensorSharp.Cuda
             {
                 lock (shard.Sync)
                 {
-                    foreach (Stack<IntPtr> stack in shard.Pool.Values)
+                    foreach (var entry in shard.Pool)
                     {
+                        Stack<IntPtr> stack = entry.Value;
                         while (stack.Count > 0)
                         {
-                            IntPtr ptr = stack.Pop();
+                            IntPtr ptr = stack.Peek();
                             if (ptr != IntPtr.Zero)
                                 backingFree(ptr);
+                            stack.Pop();
+                            shard.CachedBytes -= entry.Key;
                         }
                     }
 

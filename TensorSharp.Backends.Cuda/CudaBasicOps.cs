@@ -37,9 +37,42 @@ namespace TensorSharp.Cuda
         [RegisterOpStorageType("addmm", typeof(CudaStorage))]
         public static Tensor Addmm(Tensor result, float beta, Tensor src, float alpha, Tensor m1, Tensor m2)
         {
-            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, false, src.Sizes);
-            if (CudaBlas.TryAddmm(writeTarget, beta, src, alpha, m1, m2))
-                return writeTarget;
+            Tensor writeTarget = null;
+            bool releaseAttempted = false;
+            try
+            {
+                writeTarget = TensorResultBuilder.GetWriteTarget(result, src, false, src.Sizes);
+                if (CudaBlas.TryAddmm(writeTarget, beta, src, alpha, m1, m2))
+                    return writeTarget;
+                if (result == null)
+                {
+                    releaseAttempted = true;
+                    if (writeTarget.Storage is CudaStorage targetStorage)
+                        targetStorage.AllocatorImpl.NativeCalls.ThrowIfQuarantined();
+                    writeTarget.Dispose();
+                }
+            }
+            catch (Exception original)
+            {
+                if (result == null && writeTarget != null && !releaseAttempted)
+                {
+                    releaseAttempted = true;
+                    try
+                    {
+                        bool healthy = true;
+                        if (writeTarget.Storage is CudaStorage targetStorage)
+                        {
+                            var calls = targetStorage.AllocatorImpl.NativeCalls;
+                            try { calls.ThrowIfQuarantined(); }
+                            catch (NativeRuntimeQuarantinedException refusal) when (calls.IsRetainedFailure(refusal))
+                            { healthy = false; }
+                        }
+                        if (healthy) writeTarget.Dispose();
+                    }
+                    catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                }
+                throw;
+            }
 
             return CudaCpuFallback.InvokeTensor("addmm", result, result, beta, src, alpha, m1, m2);
         }
@@ -47,9 +80,42 @@ namespace TensorSharp.Cuda
         [RegisterOpStorageType("addmmbatch", typeof(CudaStorage))]
         public static Tensor AddmmBatch(Tensor result, float beta, Tensor src, float alpha, Tensor m1, Tensor m2)
         {
-            Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, src, true, src.Sizes);
-            if (CudaBlas.TryAddmmBatch(writeTarget, beta, src, alpha, m1, m2))
-                return writeTarget;
+            Tensor writeTarget = null;
+            bool releaseAttempted = false;
+            try
+            {
+                writeTarget = TensorResultBuilder.GetWriteTarget(result, src, true, src.Sizes);
+                if (CudaBlas.TryAddmmBatch(writeTarget, beta, src, alpha, m1, m2))
+                    return writeTarget;
+                if (result == null)
+                {
+                    releaseAttempted = true;
+                    if (writeTarget.Storage is CudaStorage targetStorage)
+                        targetStorage.AllocatorImpl.NativeCalls.ThrowIfQuarantined();
+                    writeTarget.Dispose();
+                }
+            }
+            catch (Exception original)
+            {
+                if (result == null && writeTarget != null && !releaseAttempted)
+                {
+                    releaseAttempted = true;
+                    try
+                    {
+                        bool healthy = true;
+                        if (writeTarget.Storage is CudaStorage targetStorage)
+                        {
+                            var calls = targetStorage.AllocatorImpl.NativeCalls;
+                            try { calls.ThrowIfQuarantined(); }
+                            catch (NativeRuntimeQuarantinedException refusal) when (calls.IsRetainedFailure(refusal))
+                            { healthy = false; }
+                        }
+                        if (healthy) writeTarget.Dispose();
+                    }
+                    catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                }
+                throw;
+            }
 
             return CudaCpuFallback.InvokeTensor("addmmbatch", result, result, beta, src, alpha, m1, m2);
         }

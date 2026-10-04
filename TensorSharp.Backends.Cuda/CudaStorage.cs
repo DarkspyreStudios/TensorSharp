@@ -1,6 +1,5 @@
 using System;
 using System.Runtime.InteropServices;
-using TensorSharp.Cuda.Interop;
 
 namespace TensorSharp.Cuda
 {
@@ -13,16 +12,95 @@ namespace TensorSharp.Cuda
         private long deviceAllocationBytes;
         private bool hostDirty;
         private bool deviceDirty;
+        private readonly CudaNativeCalls nativeCalls;
+        private readonly CudaGraphCapture.StorageCapturePayload capturePayload;
+        private bool allocationIsRental;
+        internal CudaStorageReservation Reservation { get; }
 
         public CudaStorage(CudaAllocator allocator, DType elementType, long elementCount)
+            : this(allocator, elementType, elementCount, null) { }
+
+        internal CudaStorage(CudaAllocator allocator, DType elementType, long elementCount,
+            CudaStorageReservation reservation)
             : base(allocator, elementType, elementCount)
         {
             AllocatorImpl = allocator ?? throw new ArgumentNullException(nameof(allocator));
+            capturePayload = new CudaGraphCapture.StorageCapturePayload(this);
             if (ByteLength < 0)
                 throw new ArgumentOutOfRangeException(nameof(elementCount));
 
-            AllocatorImpl.Context.MakeCurrent();
-            deviceBuffer = AllocatorImpl.RentDeviceMemory(ByteLength, out deviceAllocationBytes);
+            Reservation = reservation ?? allocator.Census.Reserve();
+            try
+            {
+                allocator.Census.Attach(Reservation, this);
+                nativeCalls = new CudaNativeCalls(this, NativeOwnerRole.Storage,
+                    allocator.NativeCalls.Api, allocator.DeviceId);
+                allocator.Census.StartNative(Reservation);
+                allocator.RentDeviceMemory(this, ByteLength);
+            }
+            catch (Exception original)
+            {
+                try { Destroy(); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
+        }
+
+        internal override object ReferenceMutationGate => AllocatorImpl?.Census.Gate;
+
+        internal override void ValidateReferenceAddition()
+        {
+            AllocatorImpl.Census.ValidateAddition();
+            if (Reservation.Releasing || Reservation.State == CudaStorageReservationState.Released)
+                throw new ObjectDisposedException(nameof(CudaStorage));
+        }
+
+        internal override bool IsRetainedFinalizerFailure(Exception error)
+            => nativeCalls != null && nativeCalls.IsRetainedFailure(error);
+
+        internal IntPtr AllocateDeviceMemory(long allocationBytes)
+        {
+            CudaGraphCapture.CaptureContext capture = CudaGraphCapture.PrepareStorageTransfer(this, capturePayload);
+            if (TryAllocateDeviceMemory(allocationBytes) == 2)
+            {
+                if (CudaGraphCapture.CanTransferStorage(capture, capturePayload))
+                    throw new CudaGraphCaptureAbortedException("Device allocation requires reclamation during graph capture.");
+                // This allocation's lease exits before reclamation. This method does not
+                // release caller-owned outer native frames.
+                AllocatorImpl.ReclaimOutsideEffects();
+                lock (AllocatorImpl.Census.Gate) AllocatorImpl.Census.ValidateAddition();
+                int result = TryAllocateDeviceMemory(allocationBytes);
+                nativeCalls.ThrowOnError(result);
+            }
+            return deviceBuffer;
+        }
+
+        private int TryAllocateDeviceMemory(long allocationBytes)
+        {
+            using var lease = nativeCalls.EnterEffect();
+            AllocatorImpl.Context.BindCurrent(nativeCalls);
+            deviceAllocationBytes = allocationBytes;
+            int result = nativeCalls.cuMemAlloc(out deviceBuffer, new UIntPtr((ulong)allocationBytes));
+            if (result == 2)
+            {
+                if (CudaGraphCapture.CanTransferStorage(capturePayload.Context, capturePayload)) return result;
+                if (deviceBuffer != IntPtr.Zero)
+                {
+                    nativeCalls.cuCtxSynchronize();
+                    nativeCalls.cuMemFree(deviceBuffer);
+                    deviceBuffer = IntPtr.Zero;
+                }
+                deviceAllocationBytes = 0;
+            }
+            else nativeCalls.ThrowOnError(result);
+            return result;
+        }
+
+        internal void AcceptDeviceMemory(IntPtr pointer, long allocationBytes)
+        {
+            deviceBuffer = pointer;
+            deviceAllocationBytes = allocationBytes;
+            allocationIsRental = true;
         }
 
         internal CudaAllocator AllocatorImpl { get; }
@@ -33,42 +111,79 @@ namespace TensorSharp.Cuda
 
         protected override void Destroy()
         {
-            lock (sync)
+            if (Reservation == null || Reservation.State == CudaStorageReservationState.Released) return;
+            CudaGraphCapture.CaptureContext capture = CudaGraphCapture.PrepareStorageTransfer(this, capturePayload);
+            bool graphsPending = AllocatorImpl.Census.BeginRelease(Reservation);
+            if (nativeCalls == null)
             {
-                if (deviceBuffer != IntPtr.Zero)
-                {
-                    // A storage that outlives its context reaches here from the GC
-                    // finalizer thread at process exit, after the primary context was
-                    // released. Releasing the context already freed every allocation
-                    // made against it, so making it current (or returning the buffer
-                    // to a pool whose device memory is gone) would throw
-                    // ObjectDisposedException out of a finalizer and abort the
-                    // process. Just drop the pointer.
-                    if (AllocatorImpl.Context.IsDisposed)
-                    {
-                        deviceBuffer = IntPtr.Zero;
-                        deviceAllocationBytes = 0;
-                    }
-                    else
-                    {
-                        AllocatorImpl.Context.MakeCurrent();
-                        AllocatorImpl.ReturnDeviceMemory(deviceBuffer, deviceAllocationBytes);
-                        deviceBuffer = IntPtr.Zero;
-                        deviceAllocationBytes = 0;
-                    }
-                }
-
-                if (hostBuffer != IntPtr.Zero)
-                {
-                    // If a CUDA graph capture is active, a captured HtoD copy may
-                    // reference this host mirror; donate it to the capture owner
-                    // (freed when the cached graph is evicted) instead of freeing.
-                    CudaGraphCapture.OnHostBufferOrphaned(AllocatorImpl, hostBuffer, out bool donated);
-                    if (!donated)
-                        NativeMemory.AlignedFree(hostBuffer.ToPointer());
-                    hostBuffer = IntPtr.Zero;
-                }
+                AllocatorImpl.Census.Complete(Reservation);
+                return;
             }
+            if (capture != null)
+            {
+                using (var transferLease = nativeCalls.EnterEffect())
+                {
+                    nativeCalls.ValidateSafeRelease(transferLease);
+                    try
+                    {
+                        if (graphsPending)
+                            throw new InvalidOperationException("CUDA storage release cannot transfer pending parent graph ownership.");
+                        if (!CudaGraphCapture.CanTransferStorage(capture, capturePayload))
+                            throw new InvalidOperationException("The prepared storage capture is no longer active.");
+                        capturePayload.Device = deviceBuffer;
+                        capturePayload.Bytes = deviceAllocationBytes;
+                        capturePayload.PartialAllocation = !allocationIsRental;
+                        capturePayload.Host = hostBuffer;
+                        capturePayload.Transferred = true;
+                        deviceBuffer = IntPtr.Zero;
+                        deviceAllocationBytes = 0;
+                        hostBuffer = IntPtr.Zero;
+                        nativeCalls.CompleteSafeRelease(transferLease);
+                    }
+                    catch (Exception cleanup)
+                    {
+                        nativeCalls.PublishFailure(transferLease, cleanup, NativeRuntimeFailureStage.StorageRelease);
+                        throw;
+                    }
+                }
+                AllocatorImpl.Census.Complete(Reservation);
+                AllocatorImpl.ReturnCapturedPayloadToPool(capturePayload);
+                return;
+            }
+            using (var lease = nativeCalls.EnterEffect())
+                lock (sync)
+                {
+                    nativeCalls.ValidateSafeRelease(lease);
+                    try
+                    {
+                        if (graphsPending && (deviceBuffer != IntPtr.Zero || hostBuffer != IntPtr.Zero))
+                            throw new InvalidOperationException("CUDA storage release cannot prove pending parent graph ownership safe.");
+                        if (deviceBuffer != IntPtr.Zero || hostBuffer != IntPtr.Zero)
+                        {
+                            AllocatorImpl.Context.BindCurrent(nativeCalls);
+                            nativeCalls.cuCtxSynchronize();
+                        }
+                        if (deviceBuffer != IntPtr.Zero)
+                        {
+                            AllocatorImpl.ReturnDeviceMemory(deviceBuffer, deviceAllocationBytes);
+                            deviceBuffer = IntPtr.Zero;
+                            deviceAllocationBytes = 0;
+                        }
+                        if (hostBuffer != IntPtr.Zero)
+                        {
+                            CudaGraphCapture.OnHostBufferOrphaned(AllocatorImpl, hostBuffer, out bool donated);
+                            if (!donated) NativeMemory.AlignedFree(hostBuffer.ToPointer());
+                            hostBuffer = IntPtr.Zero;
+                        }
+                        nativeCalls.CompleteSafeRelease(lease);
+                    }
+                    catch (Exception cleanup)
+                    {
+                        nativeCalls.PublishFailure(lease, cleanup, NativeRuntimeFailureStage.StorageRelease);
+                        throw;
+                    }
+                }
+            AllocatorImpl.Census.Complete(Reservation);
         }
 
         /// <summary>Free a host mirror previously donated to a CUDA graph cache
@@ -87,6 +202,8 @@ namespace TensorSharp.Cuda
         public override IntPtr PtrAtElement(long index)
         {
             ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             ValidateElementRange(index, 0);
 
             // Existing TensorSharp model code may mutate through raw pointers. Treat
@@ -100,12 +217,16 @@ namespace TensorSharp.Cuda
         internal IntPtr DevicePtrAtElement(long index)
         {
             ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             ValidateElementRange(index, 0);
             return AddBytes(deviceBuffer, checked(index * ElementType.Size()));
         }
 
         public override void EnsureDeviceCurrent()
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
             ThrowIfDisposed();
             if (ByteLength == 0)
                 return;
@@ -117,12 +238,12 @@ namespace TensorSharp.Cuda
 
                 CudaGraphCapture.OnCapturedHostUpload(AllocatorImpl, ByteLength);
                 long t0 = CudaProfileCounters.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-                AllocatorImpl.Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyHtoDAsync(
+                AllocatorImpl.Context.BindCurrent(nativeCalls);
+                nativeCalls.ThrowOnError(nativeCalls.cuMemcpyHtoDAsync(
                     deviceBuffer,
                     hostBuffer,
                     new UIntPtr((ulong)ByteLength),
-                    AllocatorImpl.Stream.Handle).ThrowOnError();
+                    AllocatorImpl.Stream.Handle));
                 hostDirty = false;
                 deviceDirty = false;
                 if (CudaProfileCounters.Enabled)
@@ -133,12 +254,16 @@ namespace TensorSharp.Cuda
         internal void MarkDeviceModified()
         {
             ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             deviceDirty = true;
             hostDirty = false;
         }
 
         internal void SyncHostFromDevice()
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
             ThrowIfDisposed();
             if (ByteLength == 0)
                 return;
@@ -156,12 +281,12 @@ namespace TensorSharp.Cuda
 
                 long t0 = CudaProfileCounters.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 EnsureHostBuffer();
-                AllocatorImpl.Context.MakeCurrent();
-                CudaDriverApi.cuMemcpyDtoHAsync(
+                AllocatorImpl.Context.BindCurrent(nativeCalls);
+                nativeCalls.ThrowOnError(nativeCalls.cuMemcpyDtoHAsync(
                     hostBuffer,
                     deviceBuffer,
                     new UIntPtr((ulong)ByteLength),
-                    AllocatorImpl.Stream.Handle).ThrowOnError();
+                    AllocatorImpl.Stream.Handle));
                 AllocatorImpl.Stream.Synchronize();
                 deviceDirty = false;
                 hostDirty = false;
@@ -208,7 +333,7 @@ namespace TensorSharp.Cuda
             _peerAccessCache[(deviceB, deviceA)] = false;
         }
 
-        private static bool CanAccessPeer(int srcDevice, int dstDevice)
+        private static bool CanAccessPeer(CudaNativeCalls calls, int srcDevice, int dstDevice)
         {
             if (srcDevice == dstDevice)
                 return true;
@@ -219,12 +344,13 @@ namespace TensorSharp.Cuda
                 try
                 {
                     int fwd = 0, rev = 0;
-                    CudaDriverApi.cuDeviceCanAccessPeer(out fwd, key.Item1, key.Item2);
-                    CudaDriverApi.cuDeviceCanAccessPeer(out rev, key.Item2, key.Item1);
+                    calls.cuDeviceCanAccessPeer(out fwd, key.Item1, key.Item2);
+                    calls.cuDeviceCanAccessPeer(out rev, key.Item2, key.Item1);
                     return fwd == 1 && rev == 1;
                 }
                 catch
                 {
+                    calls.ThrowIfQuarantined();
                     return false; // conservative: stage through host
                 }
             });
@@ -244,17 +370,36 @@ namespace TensorSharp.Cuda
             if (byteCount == 0)
                 return;
 
+            if (TryCopyDeviceFrom(src, destinationByteOffset, sourceByteOffset, byteCount, null))
+                return;
+
+            // A real fallback needs staging. Re-admit both actual owners after this allocation.
+            byte[] stage = new byte[byteCount];
+            TryCopyDeviceFrom(src, destinationByteOffset, sourceByteOffset, byteCount, stage);
+        }
+
+        private bool TryCopyDeviceFrom(CudaStorage src, long destinationByteOffset,
+            long sourceByteOffset, long byteCount, byte[] stage)
+        {
+            using var transfer = new DeviceTransfer(this, src);
+            CudaNativeCalls calls = transfer.Calls;
+            ThrowIfDisposed();
+            src.ThrowIfDisposed();
+            bool sameAllocator = ReferenceEquals(AllocatorImpl, src.AllocatorImpl);
+            bool peer = !sameAllocator && CanAccessPeer(calls, src.DeviceId, DeviceId);
+            if (!sameAllocator && !peer && stage == null)
+                return false;
             src.EnsureDeviceCurrent();
-            AllocatorImpl.Context.MakeCurrent();
+            AllocatorImpl.Context.BindCurrent(calls);
             IntPtr dst = AddBytes(deviceBuffer, destinationByteOffset);
             IntPtr source = AddBytes(src.deviceBuffer, sourceByteOffset);
-            if (ReferenceEquals(AllocatorImpl, src.AllocatorImpl))
+            if (sameAllocator)
             {
-                CudaDriverApi.cuMemcpyDtoDAsync(
+                calls.ThrowOnError(calls.cuMemcpyDtoDAsync(
                     dst,
                     source,
                     new UIntPtr((ulong)byteCount),
-                    AllocatorImpl.Stream.Handle).ThrowOnError();
+                    AllocatorImpl.Stream.Handle));
             }
             else
             {
@@ -267,14 +412,14 @@ namespace TensorSharp.Cuda
                 // each other; otherwise stage explicitly through host memory,
                 // which works on every topology.
                 src.SynchronizeDeviceWork();
-                if (CanAccessPeer(src.AllocatorImpl.DeviceId, AllocatorImpl.DeviceId))
+                if (peer)
                 {
-                    AllocatorImpl.Context.MakeCurrent();
-                    CudaDriverApi.cuMemcpyPeerAsync(
+                    AllocatorImpl.Context.BindCurrent(calls);
+                    calls.ThrowOnError(calls.cuMemcpyPeerAsync(
                         dst, AllocatorImpl.Context.Handle,
                         source, src.AllocatorImpl.Context.Handle,
                         new UIntPtr((ulong)byteCount),
-                        AllocatorImpl.Stream.Handle).ThrowOnError();
+                        AllocatorImpl.Stream.Handle));
                     // The copy runs on OUR stream but reads the SOURCE device's
                     // buffer, and nothing orders the source stream against it:
                     // the caller may dispose the source tensor immediately, its
@@ -289,21 +434,21 @@ namespace TensorSharp.Cuda
                 }
                 else
                 {
-                    byte[] stage = new byte[byteCount];
                     unsafe
                     {
                         fixed (byte* stagePtr = stage)
                         {
-                            src.AllocatorImpl.Context.MakeCurrent();
-                            CudaDriverApi.cuMemcpyDtoH((IntPtr)stagePtr, source, new UIntPtr((ulong)byteCount)).ThrowOnError();
-                            AllocatorImpl.Context.MakeCurrent();
-                            CudaDriverApi.cuMemcpyHtoD(dst, (IntPtr)stagePtr, new UIntPtr((ulong)byteCount)).ThrowOnError();
+                            src.AllocatorImpl.Context.BindCurrent(calls);
+                            calls.ThrowOnError(calls.cuMemcpyDtoH((IntPtr)stagePtr, source, new UIntPtr((ulong)byteCount)));
+                            AllocatorImpl.Context.BindCurrent(calls);
+                            calls.ThrowOnError(calls.cuMemcpyHtoD(dst, (IntPtr)stagePtr, new UIntPtr((ulong)byteCount)));
                         }
                     }
                 }
             }
 
             MarkDeviceModified();
+            return true;
         }
 
         /// <summary>
@@ -334,8 +479,11 @@ namespace TensorSharp.Cuda
             if (srcByteOffset < 0 || destByteOffset < 0 || srcLast > src.ByteLength || dstLast > ByteLength)
                 return false;
 
+            using var transfer = new DeviceTransfer(this, src);
+            ThrowIfDisposed();
+            src.ThrowIfDisposed();
             src.EnsureDeviceCurrent();
-            AllocatorImpl.Context.MakeCurrent();
+            AllocatorImpl.Context.BindCurrent(transfer.Calls);
             IntPtr dst = AddBytes(deviceBuffer, destByteOffset);
             IntPtr source = AddBytes(src.deviceBuffer, srcByteOffset);
             kernels.LaunchCopy2DBytes(
@@ -345,15 +493,55 @@ namespace TensorSharp.Cuda
             return true;
         }
 
+        private sealed class DeviceTransfer : IDisposable
+        {
+            private readonly CudaStorage destination;
+            private readonly CudaStorage source;
+            private readonly NativeEffectLease lease;
+            internal readonly CudaNativeCalls Calls;
+
+            internal DeviceTransfer(CudaStorage destination, CudaStorage source)
+            {
+                destination.ThrowIfDisposed();
+                source.ThrowIfDisposed();
+                this.destination = destination;
+                this.source = source;
+                if (!ReferenceEquals(destination.nativeCalls.Api, source.nativeCalls.Api))
+                    throw new InvalidOperationException("CUDA storage transfer requires one native API owner.");
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.Storage, destination.nativeCalls.Api,
+                    destination.DeviceId, source.DeviceId);
+                lease = Calls.EnterEffect();
+            }
+
+            public void Dispose()
+            {
+                try
+                {
+                    try { Calls.CompleteSafeRelease(lease); }
+                    catch (NativeRuntimeQuarantinedException refusal) when (Calls.IsRetainedFailure(refusal)) { }
+                }
+                finally
+                {
+                    lease.Dispose();
+                    GC.KeepAlive(destination);
+                    GC.KeepAlive(source);
+                }
+            }
+        }
+
         internal void SynchronizeDeviceWork()
         {
             ThrowIfDisposed();
-            AllocatorImpl.Context.MakeCurrent();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
+            AllocatorImpl.Context.BindCurrent(nativeCalls);
             AllocatorImpl.Stream.Synchronize();
         }
 
         public override int[] GetElementsAsInt(long index, int length)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
             SyncHostFromDevice();
             if (ElementType != DType.Int32)
                 throw new NotSupportedException("Element type " + ElementType + " not supported");
@@ -369,6 +557,9 @@ namespace TensorSharp.Cuda
 
         public override void SetElementsAsInt(long index, int[] value)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             if (value == null)
                 throw new ArgumentNullException(nameof(value));
             if (ElementType != DType.Int32)
@@ -386,6 +577,8 @@ namespace TensorSharp.Cuda
 
         public override float GetElementAsFloat(long index)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
             SyncHostFromDevice();
             ValidateElementRange(index, 1);
 
@@ -402,6 +595,8 @@ namespace TensorSharp.Cuda
 
         public override float[] GetElementsAsFloat(long index, int length)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
             SyncHostFromDevice();
             if (ElementType != DType.Float32)
                 throw new NotSupportedException("Element type " + ElementType + " not supported");
@@ -417,6 +612,9 @@ namespace TensorSharp.Cuda
 
         public override void SetElementAsFloat(long index, float value)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             ValidateElementRange(index, 1);
             EnsureHostBuffer();
             switch (ElementType)
@@ -446,6 +644,9 @@ namespace TensorSharp.Cuda
 
         public override void SetElementsAsFloat(long index, float[] value)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             if (value == null)
                 throw new ArgumentNullException(nameof(value));
             if (ElementType != DType.Float32)
@@ -468,6 +669,9 @@ namespace TensorSharp.Cuda
 
         public override void CopyToStorage(long storageIndex, IntPtr src, long byteCount)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
+            ThrowIfDisposed();
             if (src == IntPtr.Zero && byteCount > 0)
                 throw new ArgumentNullException(nameof(src));
 
@@ -480,6 +684,8 @@ namespace TensorSharp.Cuda
 
         public override void CopyFromStorage(IntPtr dst, long storageIndex, long byteCount)
         {
+            ThrowIfDisposed();
+            using var lease = nativeCalls.EnterEffect();
             if (dst == IntPtr.Zero && byteCount > 0)
                 throw new ArgumentNullException(nameof(dst));
 
