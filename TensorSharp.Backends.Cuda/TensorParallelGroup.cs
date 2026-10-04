@@ -18,7 +18,6 @@ namespace TensorSharp.Cuda
         private readonly CudaP2PCommunicator _communicator;
         private readonly CudaNativeCalls _nativeCalls;
         private readonly object _methodGate = new();
-        private int _activeMethods;
         private bool _disposed;
         private bool _retirementRequested;
         private Exception _cleanupFailure;
@@ -105,7 +104,6 @@ namespace TensorSharp.Cuda
                 lock (_methodGate)
                 {
                     ThrowIfRetiring();
-                    _activeMethods++;
                     operation.RecordMethod(this);
                 }
                 return operation;
@@ -117,11 +115,6 @@ namespace TensorSharp.Cuda
                 ExceptionDispatchInfo.Capture(failure).Throw();
                 throw;
             }
-        }
-
-        internal void EndMethod()
-        {
-            lock (_methodGate) _activeMethods--;
         }
 
         internal CudaCollectiveOperation EnterCollective(Tensor[] tensors)
@@ -415,7 +408,6 @@ namespace TensorSharp.Cuda
         private readonly CudaP2PEffectOwner[] _rankEffects;
         private readonly Dictionary<(int Source, int Destination), CudaP2PEffectOwner> _peerEffects = new();
         private TensorParallelGroup _methodOwner;
-        private bool _methodCounted;
         private bool _settled;
         private bool _released;
         private Exception _failure;
@@ -448,7 +440,6 @@ namespace TensorSharp.Cuda
         internal void RecordMethod(TensorParallelGroup owner)
         {
             _methodOwner = owner;
-            _methodCounted = true;
         }
 
         internal void FreezeRanks(Tensor[] tensors)
@@ -659,11 +650,8 @@ namespace TensorSharp.Cuda
             _released = true;
             _admission?.Dispose();
             _admission = null;
-            if (_methodCounted)
-            {
-                _methodCounted = false;
-                _methodOwner.EndMethod();
-            }
+            GC.KeepAlive(_methodOwner);
+            _methodOwner = null;
             GC.KeepAlive(_parent);
         }
     }
