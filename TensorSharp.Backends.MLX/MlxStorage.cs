@@ -47,7 +47,7 @@ namespace TensorSharp.MLX
             if (nativeOwner == null) return null;
             lock (sync)
             {
-                var admission = new ReleaseAdmission(this, nativeOwner.ReserveMlxRelease(this));
+                var admission = new ReleaseAdmission(this);
                 releaseAdmission = admission;
                 return admission;
             }
@@ -101,9 +101,9 @@ namespace TensorSharp.MLX
             }
         }
 
-        private sealed class ReleaseAdmission(MlxStorage owner, NativeMlxReleaseReservation reservation) : IDisposable
+        private sealed class ReleaseAdmission(MlxStorage owner) : IDisposable
         {
-            internal NativeMlxReleaseReservation Reservation { get; } = reservation;
+            internal NativeMlxReleaseReservation Reservation { get; } = owner.nativeOwner.ReserveMlxRelease(owner);
 
             public void Dispose()
             {
