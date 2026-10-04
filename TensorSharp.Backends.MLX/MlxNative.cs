@@ -3469,7 +3469,7 @@ if (kind == 0) {
             if (!array.IsValid)
                 return;
 
-            // A caller retains ownership until the actual free returns successfully.
+            // Release waits for the native status and reports failure to the caller.
             // Reentrant trace calls stay inline on the worker and report native errors.
             if (MlxWorker.Shared.IsOnWorkerThread)
             {
