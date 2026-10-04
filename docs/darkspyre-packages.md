@@ -100,6 +100,11 @@ interop declarations. The existing Roslyn guard tool generates it with `--invent
 rewriting sources. The inventory binds to the exact native ABI and pinned ggml commit. Artifact
 validation requires every listed symbol and refuses missing or uninspected exports. Additional
 raw backend exports are permitted. CPU artifacts do not require CUDA/Vulkan-only upstream APIs.
+Acquisition guards reserve the actual handle owner before the raw call and track its returned
+handle through that same reservation. Release guards invoke the raw free through the exclusive
+`ReleaseNativeHandle` owner. The verifier recognizes these patterns and the single guarded
+distributed callback wrapper. A managed build with native compilation disabled does not verify
+the inventory or native artifacts.
 
 Release output requires all 12 RID/variant pairs: macOS ARM64 Metal; Linux x64 and ARM64 CPU,
 Vulkan and CUDA13; Windows x64 CPU, Vulkan and CUDA13; and Windows ARM64 CPU and Vulkan.

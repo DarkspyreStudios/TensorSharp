@@ -35,9 +35,17 @@ foreach (string file in Directory.EnumerateFiles(Path.Combine(root, "TensorSharp
         {
             string wrapperName = method.Identifier.ValueText[7..];
             TypeDeclarationSyntax type = method.Ancestors().OfType<TypeDeclarationSyntax>().First();
+            MethodDeclarationSyntax[] callers = tree.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(i => i.Expression.ToString() == method.Identifier.ValueText)
+                .Select(i => i.Ancestors().OfType<MethodDeclarationSyntax>().First()).DistinctBy(m => m.Span).ToArray();
             MethodDeclarationSyntax? guarded = type.Members.OfType<MethodDeclarationSyntax>().FirstOrDefault(m => m.Identifier.ValueText == wrapperName);
+            if (guarded is null && callers is [var caller] && caller.Parent?.Span == type.Span)
+                guarded = caller;
+            bool reservationGuard = HasReservationGuard(guarded, method, AcquireFamily(wrapperName));
+            bool releaseGuard = HasReleaseGuard(guarded, method, ReleaseFamily(wrapperName));
             if (!method.Modifiers.Any(SyntaxKind.PrivateKeyword) || guarded?.Body == null ||
-                !guarded.Body.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(i => i.Expression.ToString() == "GgmlNativeLoader.EnterNativeCall"))
+                !(reservationGuard || releaseGuard || guarded.Body.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                    .Any(i => i.Expression.ToString() == "GgmlNativeLoader.EnterNativeCall")))
                 failures.Add($"{Path.GetFileName(file)}:{method.Identifier}: no mandatory native-call guard");
             var shape = method.WithIdentifier(SyntaxFactory.Identifier(wrapperName));
             string? family = AcquireFamily(wrapperName) ?? ReleaseFamily(wrapperName) ?? UseFamily(shape);
@@ -48,13 +56,14 @@ foreach (string file in Directory.EnumerateFiles(Path.Combine(root, "TensorSharp
                 failures.Add($"{Path.GetFileName(file)}:{method.Identifier}: allocation is not retained");
             if (AcquireFamily(wrapperName) != null && BackendParameter(method) != null && !bodyText.Contains("GgmlNativeLoader.PrepareModelBackend", StringComparison.Ordinal))
                 failures.Add($"{Path.GetFileName(file)}:{method.Identifier}: whole-model backend bypasses configured owner");
-            if (ReleaseFamily(wrapperName) != null && (!bodyText.Contains("GgmlNativeLoader.BeginNativeHandleRelease", StringComparison.Ordinal) || !bodyText.Contains("resource.Complete()", StringComparison.Ordinal)))
+            if (ReleaseFamily(wrapperName) != null && !releaseGuard &&
+                (!bodyText.Contains("GgmlNativeLoader.BeginNativeHandleRelease", StringComparison.Ordinal) || !bodyText.Contains("resource.Complete()", StringComparison.Ordinal)))
                 failures.Add($"{Path.GetFileName(file)}:{method.Identifier}: release is not exclusive and completed");
             if (method.ReturnType.ToString() == "IntPtr" && AcquireFamily(wrapperName) == null &&
                 wrapperName is not ("TSGgml_GetLastError" or "TSGgml_GetBackendFailureText" or "TSGgml_GetBuildIdentity"))
                 failures.Add($"{Path.GetFileName(file)}:{method.Identifier}: unclassified returned native handle");
-            foreach (InvocationExpressionSyntax invocation in tree.DescendantNodes().OfType<InvocationExpressionSyntax>().Where(i => i.Expression.ToString() == method.Identifier.ValueText))
-                if (invocation.Ancestors().OfType<MethodDeclarationSyntax>().First().Identifier.ValueText != wrapperName)
+            foreach (MethodDeclarationSyntax actualCaller in callers)
+                if (actualCaller.Span != guarded?.Span)
                     failures.Add($"{Path.GetFileName(file)}:{method.Identifier}: raw import invoked outside its guard");
             continue;
         }
@@ -147,6 +156,36 @@ static bool IsImportAttribute(AttributeSyntax a) =>
 
 static string? BackendParameter(MethodDeclarationSyntax method) => method.ParameterList.Parameters.FirstOrDefault(p =>
     p.Type?.ToString() == "string" && p.Identifier.ValueText is "backend" or "backendName")?.Identifier.Text;
+
+static bool HasReservationGuard(MethodDeclarationSyntax? wrapper, MethodDeclarationSyntax raw, string? family)
+{
+    if (family is null || wrapper?.Body is not { } body) return false;
+    foreach (LocalDeclarationStatementSyntax declaration in body.Statements.OfType<LocalDeclarationStatementSyntax>())
+    {
+        if (!declaration.UsingKeyword.IsKind(SyntaxKind.UsingKeyword) || declaration.Declaration.Variables is not [var variable] ||
+            variable.Initializer?.Value is not InvocationExpressionSyntax reserve ||
+            reserve.Expression.ToString() != "GgmlNativeLoader.ReserveNativeHandle" ||
+            reserve.ArgumentList.Arguments is not [var kind] ||
+            kind.Expression is not LiteralExpressionSyntax literal || literal.Token.ValueText != family)
+            continue;
+        return body.Statements.OfType<ReturnStatementSyntax>().Any(statement =>
+            statement.Expression is InvocationExpressionSyntax track && track.Expression.ToString() == "GgmlNativeLoader.TrackNativeHandle" &&
+            track.ArgumentList.Arguments is [var owner, var acquired] && owner.Expression is IdentifierNameSyntax identifier &&
+            identifier.Identifier.ValueText == variable.Identifier.ValueText &&
+            acquired.Expression is InvocationExpressionSyntax native && native.Expression.ToString() == raw.Identifier.ValueText &&
+            declaration.SpanStart < statement.SpanStart);
+    }
+    return false;
+}
+
+static bool HasReleaseGuard(MethodDeclarationSyntax? wrapper, MethodDeclarationSyntax raw, string? family) =>
+    family is not null && wrapper?.Body is { } body && body.Statements.OfType<ExpressionStatementSyntax>().Any(statement =>
+        statement.Expression is InvocationExpressionSyntax release && release.Expression.ToString() == "GgmlNativeLoader.ReleaseNativeHandle" &&
+        release.ArgumentList.Arguments is [var kind, var handle, var action] &&
+        kind.Expression is LiteralExpressionSyntax literal && literal.Token.ValueText == family &&
+        handle.Expression is IdentifierNameSyntax identifier && identifier.Identifier.ValueText == raw.ParameterList.Parameters[0].Identifier.ValueText &&
+        action.Expression is LambdaExpressionSyntax lambda && lambda.Body is InvocationExpressionSyntax native &&
+        native.Expression.ToString() == raw.Identifier.ValueText);
 
 static string? AcquireFamily(string name) => name switch
 {
