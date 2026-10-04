@@ -24,6 +24,7 @@ namespace TensorSharp
 
         internal virtual object? ReferenceMutationGate => null;
         internal virtual void ValidateReferenceAddition() { }
+        internal virtual IDisposable? AdmitFinalRelease() => null;
         internal virtual bool IsRetainedFinalizerFailure(Exception error) => false;
         internal int ReadReferenceCount() => Volatile.Read(ref refCount);
 
@@ -40,11 +41,27 @@ namespace TensorSharp
             {
                 if (ReadReferenceCount() > 0)
                 {
-                    Destroy();
+                    DestroyWithAdmission(AdmitFinalRelease());
                     Volatile.Write(ref refCount, 0);
                 }
             }
+            catch (NativeMlxCallbackBusyException error) when (error.IsFor(this))
+            {
+                GC.ReRegisterForFinalize(this);
+            }
             catch (Exception error) when (IsRetainedFinalizerFailure(error)) { }
+        }
+
+        private void DestroyWithAdmission(IDisposable? admission)
+        {
+            try { Destroy(); }
+            catch (Exception original)
+            {
+                try { admission?.Dispose(); }
+                catch (Exception cleanup) { throw new AggregateException(original, cleanup); }
+                throw;
+            }
+            admission?.Dispose();
         }
 
         /// <summary>
@@ -113,8 +130,15 @@ namespace TensorSharp
         /// </summary>
         public void Release()
         {
+            int released = 0;
+            Release(ref released);
+        }
+
+        internal void Release(ref int ownerDisposed)
+        {
             object? gate = ReferenceMutationGate;
             bool destroy = false;
+            IDisposable? admission = null;
             if (gate != null) Monitor.Enter(gate);
             try
             {
@@ -124,11 +148,15 @@ namespace TensorSharp
                     int current = ReadReferenceCount();
                     if (current == 0)
                         throw new InvalidOperationException("Cannot release object - object has already been destroyed");
+                    if (current == 1) admission = AdmitFinalRelease();
                     if (Interlocked.CompareExchange(ref refCount, current - 1, current) == current)
                     {
                         destroy = current == 1;
+                        Volatile.Write(ref ownerDisposed, 1);
                         break;
                     }
+                    admission?.Dispose();
+                    admission = null;
                     spin.SpinOnce();
                 }
             }
@@ -137,7 +165,7 @@ namespace TensorSharp
                 if (gate != null) Monitor.Exit(gate);
             }
 
-            if (destroy) Destroy();
+            if (destroy) DestroyWithAdmission(admission);
         }
     }
 }

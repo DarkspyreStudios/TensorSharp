@@ -26,6 +26,7 @@ namespace TensorSharp
         private readonly long elementCount;
 
         private int isDisposed;
+        private readonly object disposalGate = new();
 
 
         /// <summary>
@@ -105,9 +106,10 @@ namespace TensorSharp
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref isDisposed, 1) == 0)
+            lock (disposalGate)
             {
-                storage.Release();
+                if (Volatile.Read(ref isDisposed) == 0)
+                    storage.Release(ref isDisposed);
             }
         }
 

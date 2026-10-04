@@ -83,14 +83,18 @@ native calls to finish. Failed cleanup retains actual owners, exact causes and
 per-block release progress. GGML callback admission keeps its invocation counted
 while suspending only the CUDA effect around borrowed callbacks.
 
-MLX caller integration is not wired into this authority. Remaining raw CUDA
+Core's process slot uses protocol 2, including callback-aware MLX call and
+destructive-release reservations. A process initialized with a different protocol
+must restart; the slot is never migrated or reset. MLX backend caller integration
+is not yet wired into these entries. Storage has an internal final-release
+admission hook. Tensor disposal marks ownership released only after the reference
+decrement succeeds. A refused admission preserves both references; native cleanup
+failure after the decrement does not restore them. Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
 certify availability, initialization or safe native cleanup. GGML integration
 has production compilation and source-review evidence, not executed native or
-device qualification. The [managed-only harness](eng/tests/native-quarantine/README.md)
-covers the Core cross-generation admission and failed-owner retention protocol
-without loading native code; it does not qualify GGML callbacks, pool reuse or
-native shutdown.
+device qualification. Protocol-2 MLX callbacks, checked backend retirement and
+the final-release hook have no executed runtime qualification.
 
 ## Quick Start
 
