@@ -1937,6 +1937,12 @@ namespace TensorSharp.Models
             MatMul(view, 0, w.Ne1, input, inStride, nt, output, outStride);
         }
 
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+        {
+            ModelDisposalOwnership.AddRange(tensors, _tensors);
+            ModelDisposalOwnership.AddRange(tensors, _weightTensors.Values);
+        }
+
         public void Dispose()
         {
             foreach (var t in _tensors)

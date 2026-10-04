@@ -136,7 +136,7 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeMistral3Resources);
+                RollBackFailedConstruction(loadError, DisposeMistral3Resources, collectDerivedOwnership: CollectMistral3DisposalOwnership);
                 throw;
             }
         }
@@ -911,6 +911,22 @@ namespace TensorSharp.Models
         // express. The C# decode path uses GGML-backed matmul/attention and only
         // adds a lightweight C# RoPE kernel.
 
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectMistral3DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectMistral3DisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            ModelDisposalOwnership.Add(tensors, _kvCacheK);
+            ModelDisposalOwnership.Add(tensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheV);
+            foreach (var (embeddings, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(tensors, embeddings);
+            _visionEncoder?.CollectDisposalOwnership(tensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeMistral3Resources);
@@ -918,7 +934,7 @@ namespace TensorSharp.Models
 
         private void DisposeMistral3Resources()
         {
-            _visionEncoder?.Dispose();
+            _visionEncoder?.DisposeOwned();
             foreach (var (embeddings, _) in _pendingVisionEmbeddingsList)
                 embeddings?.Dispose();
             _pendingVisionEmbeddingsList.Clear();

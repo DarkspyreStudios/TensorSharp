@@ -7,7 +7,7 @@
 //
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
-﻿using System;
+using System;
 using System.Threading;
 
 namespace TensorSharp
@@ -22,6 +22,11 @@ namespace TensorSharp
     {
         private int refCount = 1;
 
+        internal virtual object? ReferenceMutationGate => null;
+        internal virtual void ValidateReferenceAddition() { }
+        internal virtual bool IsRetainedFinalizerFailure(Exception error) => false;
+        internal int ReadReferenceCount() => Volatile.Read(ref refCount);
+
         /// <summary>
         /// Construct a new reference counted object. The reference count automatically starts at 1.
         /// </summary>
@@ -31,11 +36,15 @@ namespace TensorSharp
 
         ~RefCounted()
         {
-            if (refCount > 0)
+            try
             {
-                Destroy();
-                refCount = 0;
+                if (ReadReferenceCount() > 0)
+                {
+                    Destroy();
+                    Volatile.Write(ref refCount, 0);
+                }
             }
+            catch (Exception error) when (IsRetainedFinalizerFailure(error)) { }
         }
 
         /// <summary>
@@ -49,7 +58,7 @@ namespace TensorSharp
         /// <returns>true if the object is destroyed; false otherwise.</returns>
         protected bool IsDestroyed()
         {
-            return refCount == 0;
+            return ReadReferenceCount() == 0;
         }
 
         /// <summary>
@@ -65,7 +74,7 @@ namespace TensorSharp
 
         protected int GetCurrentRefCount()
         {
-            return refCount;
+            return ReadReferenceCount();
         }
 
         /// <summary>
@@ -73,25 +82,28 @@ namespace TensorSharp
         /// </summary>
         public void AddRef()
         {
-            int curRefCount;
-            int original;
-            SpinWait spin = new SpinWait();
-            while (true)
+            object? gate = ReferenceMutationGate;
+            if (gate != null) Monitor.Enter(gate);
+            try
             {
-                curRefCount = refCount;
-                if (curRefCount == 0)
+                SpinWait spin = new SpinWait();
+                while (true)
                 {
-                    throw new InvalidOperationException("Cannot AddRef - object has already been destroyed");
-                }
+                    int current = ReadReferenceCount();
+                    if (current == 0)
+                        throw new InvalidOperationException("Cannot AddRef - object has already been destroyed");
+                    if (current == int.MaxValue)
+                        throw new OverflowException("Cannot AddRef - reference count exceeds Int32.MaxValue");
 
-                int desiredRefCount = curRefCount + 1;
-                original = Interlocked.CompareExchange(ref refCount, desiredRefCount, curRefCount);
-                if (original == curRefCount)
-                {
-                    break;
+                    ValidateReferenceAddition();
+                    if (Interlocked.CompareExchange(ref refCount, current + 1, current) == current)
+                        return;
+                    spin.SpinOnce();
                 }
-
-                spin.SpinOnce();
+            }
+            finally
+            {
+                if (gate != null) Monitor.Exit(gate);
             }
         }
 
@@ -101,31 +113,31 @@ namespace TensorSharp
         /// </summary>
         public void Release()
         {
-            int original;
-            int curRefCount;
-            SpinWait spin = new SpinWait();
-            while (true)
+            object? gate = ReferenceMutationGate;
+            bool destroy = false;
+            if (gate != null) Monitor.Enter(gate);
+            try
             {
-                curRefCount = refCount;
-                if (curRefCount == 0)
+                SpinWait spin = new SpinWait();
+                while (true)
                 {
-                    throw new InvalidOperationException("Cannot release object - object has already been destroyed");
+                    int current = ReadReferenceCount();
+                    if (current == 0)
+                        throw new InvalidOperationException("Cannot release object - object has already been destroyed");
+                    if (Interlocked.CompareExchange(ref refCount, current - 1, current) == current)
+                    {
+                        destroy = current == 1;
+                        break;
+                    }
+                    spin.SpinOnce();
                 }
-
-                int desiredRefCount = refCount - 1;
-                original = Interlocked.CompareExchange(ref refCount, desiredRefCount, curRefCount);
-                if (original == curRefCount)
-                {
-                    break;
-                }
-
-                spin.SpinOnce();
+            }
+            finally
+            {
+                if (gate != null) Monitor.Exit(gate);
             }
 
-            if (refCount <= 0)
-            {
-                Destroy();
-            }
+            if (destroy) Destroy();
         }
     }
 }

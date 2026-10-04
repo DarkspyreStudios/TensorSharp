@@ -197,7 +197,8 @@ namespace TensorSharp.Models.WanVideo
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeWanResources);
+                RollBackFailedConstruction(loadError, DisposeWanResources,
+                    collectDerivedOwnership: CollectWanDisposalOwnership);
                 throw;
             }
         }
@@ -326,6 +327,17 @@ namespace TensorSharp.Models.WanVideo
             ThrowIfOwnershipCleanupFailed();
         }
 
+        protected override void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectWanDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectWanDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+            => _pipeline?.CollectDisposalOwnership(ownedTensors);
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeWanResources);
@@ -333,7 +345,7 @@ namespace TensorSharp.Models.WanVideo
 
         private void DisposeWanResources()
         {
-            _pipeline?.Dispose();
+            _pipeline?.DisposeOwned();
             _gguf2?.Dispose();
             _gguf2 = null;
         }

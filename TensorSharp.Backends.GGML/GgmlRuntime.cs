@@ -43,10 +43,10 @@ public enum GgmlRuntimeResourceKind { Context, Tensor, Model }
 public static partial class GgmlNativeLoader
 {
     private const string ProcessOwnerKey = "Darkspyre.TensorSharp.GGML.ProcessOwner";
-    private static readonly object s_processOwnerToken = new();
-    private static readonly Dictionary<long, GgmlRuntimeResourceKind> s_resources = new();
+    private static readonly Dictionary<long, ResourceRecord> s_resources = new();
     private static readonly Dictionary<(string Kind, IntPtr Handle), NativeResource> s_nativeResources = new();
-    private static readonly Dictionary<long, (string Kind, IntPtr Handle)?> s_calls = new();
+    private static readonly Dictionary<long, NativeCallLease> s_calls = new();
+    private static readonly GgmlProcessOwner s_processOwnerToken = new();
     private static long s_nextLease;
     private static GgmlRuntimeState s_runtimeState;
     private static GgmlRuntimePlan? s_plan;
@@ -84,6 +84,7 @@ public static partial class GgmlNativeLoader
         }).ToArray());
         lock (s_gate)
         {
+            CheckProcessDependency();
             if (s_runtimeState is GgmlRuntimeState.Stopping or GgmlRuntimeState.Stopped)
                 throw new InvalidOperationException("A terminal runtime cannot be configured again.");
             GgmlRuntimePlan snapshot = plan with { Candidates = candidates };
@@ -118,6 +119,7 @@ public static partial class GgmlNativeLoader
         Task<GgmlInitializationResult> initialization;
         lock (s_gate)
         {
+            CheckProcessDependency();
             if (s_runtimeState is GgmlRuntimeState.Stopping or GgmlRuntimeState.Stopped)
                 throw new InvalidOperationException("Initialization cannot follow terminal shutdown.");
             if (s_plan == null)
@@ -140,7 +142,15 @@ public static partial class GgmlNativeLoader
             }
             initialization = s_initialization;
         }
-        return cancellationToken.CanBeCanceled ? initialization.WaitAsync(cancellationToken) : initialization;
+        return PublishInitializationAsync(initialization, cancellationToken);
+    }
+
+    private static async Task<GgmlInitializationResult> PublishInitializationAsync(Task<GgmlInitializationResult> initialization, CancellationToken token)
+    {
+        var result = await initialization.WaitAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        CheckProcessDependency();
+        return result;
     }
 
     /// <summary>Retains the runtime for a managed resource. Native imports also acquire mandatory call leases.</summary>
@@ -151,7 +161,8 @@ public static partial class GgmlNativeLoader
         {
             EnsureOperational();
             long id = ++s_nextLease;
-            s_resources.Add(id, kind);
+            CheckCleanupAdmission();
+            s_resources.Add(id, new ResourceRecord(kind));
             return new ResourceLease(id);
         }
     }
@@ -168,50 +179,52 @@ public static partial class GgmlNativeLoader
 
     private static GgmlInitializationResult InitializeOwned(GgmlRuntimePlan plan)
     {
-            lock (s_gate) s_initializationThread = Environment.CurrentManagedThreadId;
-            try
+        lock (s_gate) s_initializationThread = Environment.CurrentManagedThreadId;
+        try
+        {
+            if (plan.Rid != RuntimeIdentifier || plan.TensorSharpBuild != TensorSharpBuild || plan.NativeAbi != NativeAbi)
+                return CompleteInitialization(plan, EmptySelection(), GgmlInitializationState.Unsupported, "The plan does not match this process RID or managed build/ABI.");
+            if (plan.RequestedBackend == GgmlBackendType.Cuda) EstablishCudaDependency();
+            GgmlNativeSelection selection = plan.DefaultNuGetProbing ? InitializeDefault(plan) : SelectCore(plan.Candidates!);
+            return CompleteInitialization(plan, selection, selection.State switch
             {
-                if (plan.Rid != RuntimeIdentifier || plan.TensorSharpBuild != TensorSharpBuild || plan.NativeAbi != NativeAbi)
-                    return CompleteInitialization(plan, EmptySelection(), GgmlInitializationState.Unsupported, "The plan does not match this process RID or managed build/ABI.");
-                GgmlNativeSelection selection = plan.DefaultNuGetProbing ? InitializeDefault(plan) : SelectCore(plan.Candidates!);
-                return CompleteInitialization(plan, selection, selection.State switch
-                {
-                    GgmlNativeSelectionState.Loaded => GgmlInitializationState.Ready,
-                    GgmlNativeSelectionState.PartiallyInitialized => GgmlInitializationState.RequiresProcessRestart,
-                    _ => GgmlInitializationState.Unavailable,
-                }, null);
-            }
-            catch (Exception error) when (error is InvalidOperationException or PlatformNotSupportedException or System.IO.IOException or
-                System.UnauthorizedAccessException or System.Runtime.InteropServices.ExternalException or TypeInitializationException or
-                DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+                GgmlNativeSelectionState.Loaded => GgmlInitializationState.Ready,
+                GgmlNativeSelectionState.PartiallyInitialized => GgmlInitializationState.RequiresProcessRestart,
+                _ => GgmlInitializationState.Unavailable,
+            }, null);
+        }
+        catch (Exception error) when (error is not NativeRuntimeQuarantinedException && (error is InvalidOperationException or PlatformNotSupportedException or System.IO.IOException or
+            System.UnauthorizedAccessException or System.Runtime.InteropServices.ExternalException or TypeInitializationException or
+            DllNotFoundException or EntryPointNotFoundException or BadImageFormatException))
+        {
+            bool retained = s_nativeUseStarted || s_otherProcessOwner;
+            GgmlNativeSelection selection = s_current ?? EmptySelection();
+            return CompleteInitialization(plan, selection, retained ? GgmlInitializationState.RequiresProcessRestart :
+                error is PlatformNotSupportedException ? GgmlInitializationState.Unsupported : GgmlInitializationState.Unavailable, error.Message);
+        }
+        finally
+        {
+            lock (s_gate)
             {
-                bool retained = s_nativeUseStarted || s_otherProcessOwner;
-                GgmlNativeSelection selection = s_current ?? EmptySelection();
-                return CompleteInitialization(plan, selection, retained ? GgmlInitializationState.RequiresProcessRestart :
-                    error is PlatformNotSupportedException ? GgmlInitializationState.Unsupported : GgmlInitializationState.Unavailable, error.Message);
+                s_initializationThread = 0;
+                ReleaseUnusedProcessClaim();
             }
-            finally
-            {
-                lock (s_gate)
-                {
-                    s_initializationThread = 0;
-                    ReleaseUnusedProcessClaim();
-                }
-            }
+        }
     }
 
     private static GgmlInitializationResult CompleteInitialization(GgmlRuntimePlan plan, GgmlNativeSelection selection, GgmlInitializationState state, string? diagnostic)
     {
         lock (s_gate)
         {
-        s_runtimeState = state switch
-        {
-            GgmlInitializationState.Ready => GgmlRuntimeState.Ready,
-            GgmlInitializationState.RequiresProcessRestart => GgmlRuntimeState.Poisoned,
-            _ => GgmlRuntimeState.Unavailable,
-        };
-        s_actualBackend = selection.Backend;
-        return new(plan, state, selection, diagnostic);
+            s_runtimeState = state switch
+            {
+                GgmlInitializationState.Ready => GgmlRuntimeState.Ready,
+                GgmlInitializationState.RequiresProcessRestart => GgmlRuntimeState.Poisoned,
+                _ => GgmlRuntimeState.Unavailable,
+            };
+            s_actualBackend = selection.Backend;
+            CheckProcessDependency();
+            return new(plan, state, selection, diagnostic);
         }
     }
 
@@ -220,6 +233,7 @@ public static partial class GgmlNativeLoader
 
     private static void EnsureOperational()
     {
+        CheckProcessDependency();
         if (s_runtimeState is GgmlRuntimeState.Poisoned or GgmlRuntimeState.Stopping or GgmlRuntimeState.Stopped)
             throw new InvalidOperationException("The native runtime is poisoned, stopping or stopped; a fresh process is required.");
         if (s_runtimeState == GgmlRuntimeState.Initializing && s_initializationThread != Environment.CurrentManagedThreadId)
@@ -234,66 +248,16 @@ public static partial class GgmlNativeLoader
             throw new InvalidOperationException("Initialize the configured candidate plan before native calls or resource creation.");
     }
 
-    internal static NativeCallLease EnterNativeCall(string? kind = null, IntPtr handle = default)
-    {
-        lock (s_gate)
-        {
-            if (!(s_runtimeState == GgmlRuntimeState.Stopping && s_teardownThread == Environment.CurrentManagedThreadId))
-                EnsureOperational();
-            ClaimProcess();
-            (string Kind, IntPtr Handle)? resource = null;
-            if (kind != null && handle != IntPtr.Zero)
-            {
-                var key = (kind, handle);
-                if (!s_nativeResources.TryGetValue(key, out NativeResource? value) || value.Releasing)
-                    throw new InvalidOperationException("The native handle is not owned or is being released.");
-                value.Calls++;
-                resource = key;
-            }
-            long id = ++s_nextLease;
-            s_calls.Add(id, resource);
-            return new(id);
-        }
-    }
-
-    internal readonly struct NativeCallLease(long id) : IDisposable
-    {
-        public void Dispose()
-        {
-            lock (s_gate)
-            {
-                if (s_calls.Remove(id, out var resource) && resource.HasValue)
-                    s_nativeResources[resource.Value].Calls--;
-                ReleaseUnusedProcessClaim();
-            }
-        }
-    }
-
     private sealed class ResourceLease(long id) : IDisposable
     {
         public void Dispose()
         {
             lock (s_gate)
             {
-                s_resources.Remove(id);
+                if (s_resources.TryGetValue(id, out ResourceRecord? record) && record.CleanupFailure == null)
+                    s_resources.Remove(id);
                 ReleaseUnusedProcessClaim();
             }
-        }
-    }
-
-    private sealed class NativeResource { public int Calls; public bool Releasing; }
-
-    internal static IntPtr TrackNativeHandle(string kind, IntPtr handle)
-    {
-        if (handle == IntPtr.Zero) return handle;
-        lock (s_gate)
-        {
-            if (!s_nativeResources.TryAdd((kind, handle), new()))
-            {
-                s_runtimeState = GgmlRuntimeState.Poisoned;
-                throw new InvalidOperationException("Native allocation returned an already-owned handle; a fresh process is required.");
-            }
-            return handle;
         }
     }
 
@@ -303,7 +267,10 @@ public static partial class GgmlNativeLoader
         {
             if (handle != IntPtr.Zero)
             {
-                if (!s_nativeResources.TryGetValue((kind, handle), out NativeResource? resource) || resource.Releasing || resource.Calls != 0)
+                if (!s_nativeResources.TryGetValue((kind, handle), out NativeResource? resource))
+                    throw new InvalidOperationException("A native handle is no longer owned.");
+                if (resource.CleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(resource.CleanupFailure).Throw();
+                if (resource.Releasing || resource.Calls != 0)
                     throw new InvalidOperationException("A native handle cannot be released while in use, already releasing or no longer owned.");
                 resource.Releasing = true;
             }
@@ -313,12 +280,49 @@ public static partial class GgmlNativeLoader
 
     internal readonly struct NativeReleaseLease(string kind, IntPtr handle) : IDisposable
     {
-        public void Complete() { lock (s_gate) s_nativeResources.Remove((kind, handle)); }
+        internal void MarkAttempt()
+        {
+            lock (s_gate)
+                if (s_nativeResources.TryGetValue((kind, handle), out var resource)) resource.State = AcquisitionState.ReleaseAttempted;
+        }
+        internal void RetainFailure(Exception error)
+        {
+            lock (s_gate)
+                if (s_nativeResources.TryGetValue((kind, handle), out var resource) && resource.State == AcquisitionState.ReleaseAttempted)
+                    resource.CleanupFailure ??= error;
+        }
+        public void Complete()
+        {
+            NativeResource? resource;
+            lock (s_gate) s_nativeResources.TryGetValue((kind, handle), out resource);
+            resource?.CompleteRelease();
+            lock (s_gate) s_nativeResources.Remove((kind, handle));
+        }
+        public void MarkReturned()
+        {
+            lock (s_gate)
+                if (s_nativeResources.TryGetValue((kind, handle), out var resource)) resource.ReleaseReturned = true;
+        }
         public void Dispose()
         {
             lock (s_gate)
-                if (s_nativeResources.TryGetValue((kind, handle), out NativeResource? resource)) resource.Releasing = false;
+                if (s_nativeResources.TryGetValue((kind, handle), out NativeResource? resource) && resource.CleanupFailure == null)
+                    resource.Releasing = false;
         }
+    }
+
+    internal static void ReleaseNativeHandle(string kind, IntPtr handle, Action release)
+    {
+        using var resource = BeginNativeHandleRelease(kind, handle);
+        try
+        {
+            using var call = EnterNativeCall();
+            resource.MarkAttempt();
+            release();
+            resource.MarkReturned();
+            resource.Complete();
+        }
+        catch (Exception error) { resource.RetainFailure(error); throw; }
     }
 
     internal static void ValidateRequestedBackend(GgmlBackendType backend)
@@ -381,7 +385,9 @@ public static partial class GgmlNativeLoader
             else throw new DllNotFoundException("No native bridge exists in the package's absolute runtime paths.");
             s_nativeUseStarted = true;
             s_candidateInProcess = true;
-            GgmlNativeBuildIdentity? identity = ReadIdentity(handle);
+            s_processOwnerToken.Library = handle;
+            GgmlNativeBuildIdentity? identity = ReadIdentity(handle, admitted: true);
+            s_processOwnerToken.Identity = identity;
             if (identity == null || identity.NativeAbi != NativeAbi || identity.GgmlCommit != GgmlCommit ||
                 identity.TensorSharpBuild != TensorSharpBuild || identity.Rid != RuntimeIdentifier)
             {
@@ -410,19 +416,25 @@ public static partial class GgmlNativeLoader
             EnsureOperational();
             if (s_resources.Count != 0 || s_nativeResources.Count != 0 || s_calls.Count != 0)
                 throw new InvalidOperationException("Backend recreation cannot invalidate active contexts, tensors, models, native handles or calls.");
-            try { return recreate(); }
-            catch { PoisonAfterBackendFailure(); throw; }
         }
+        using var reservation = ReserveResourceCleanup(s_processOwnerToken);
+        try
+        {
+            bool result = recreate();
+            CheckProcessDependency();
+            reservation.Complete();
+            return result;
+        }
+        catch (NativeRuntimeQuarantinedException) { throw; }
+        catch { PoisonAfterBackendFailure(); throw; }
     }
 
     internal static T WithResourceCleanup<T>(Func<T> cleanup)
     {
-        lock (s_gate)
-        {
-            EnsureOperational();
-            if (s_calls.Count != 0) throw new InvalidOperationException("Resource memory cannot be released while native calls are active.");
-            return cleanup();
-        }
+        using var reservation = ReserveResourceCleanup(s_processOwnerToken);
+        T result = cleanup();
+        reservation.Complete();
+        return result;
     }
 
     internal static void RecordBackendInitialized(GgmlBackendType backend)
@@ -430,6 +442,7 @@ public static partial class GgmlNativeLoader
         lock (s_gate)
         {
             s_actualBackend = backend;
+            CheckProcessDependency();
             if (s_runtimeState != GgmlRuntimeState.Initializing)
             {
                 s_runtimeState = GgmlRuntimeState.Ready;
@@ -491,22 +504,55 @@ public static partial class GgmlNativeLoader
                 return new(false, $"The runtime has active initialization, {s_calls.Count} native calls, {s_resources.Count} managed leases and {s_nativeResources.Count} native handles.");
             if (s_runtimeState == GgmlRuntimeState.Poisoned || s_otherProcessOwner)
                 return new(false, "The runtime is poisoned or belongs to another owner; a fresh process is required.");
-            s_runtimeState = GgmlRuntimeState.Stopping;
-            s_teardownThread = Environment.CurrentManagedThreadId;
-            try
+        }
+        ResourceCleanupReservation? reservation = null;
+        bool teardownEntered = false;
+        try
+        {
+            reservation = ReserveResourceCleanup(s_processOwnerToken);
+            lock (s_gate)
             {
-                if (s_selectedHandle != IntPtr.Zero) GgmlNative.ShutdownCore();
+                if (s_resources.Count != 0 || s_nativeResources.Count != 0)
+                    return new(false, "The runtime acquired resources before shutdown admission.");
+                s_runtimeState = GgmlRuntimeState.Stopping;
+                s_teardownThread = Environment.CurrentManagedThreadId;
+                teardownEntered = true;
+            }
+            if (s_selectedHandle != IntPtr.Zero) GgmlNative.ShutdownCore();
+            if (s_processOwnerToken.CudaDependency is { } dependency)
+            {
+                using var effect = dependency.EnterEffect();
+                effect.CompleteSafeRelease(s_processOwnerToken);
+                s_processOwnerToken.CudaDependency = null;
+            }
+            reservation.Complete();
+            lock (s_gate)
+            {
                 RemoveProcessExitHook();
                 s_shutDown = true;
                 s_runtimeState = GgmlRuntimeState.Stopped;
                 return s_shutdownResult = new(true, null);
             }
-            catch (Exception error) when (error is InvalidOperationException or System.Runtime.InteropServices.ExternalException or TypeInitializationException)
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.Runtime.InteropServices.ExternalException or TypeInitializationException)
+        {
+            lock (s_gate)
             {
+                if (error is NativeRuntimeQuarantinedException)
+                {
+                    s_processOwnerToken.ShutdownFailure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error);
+                    return s_shutdownResult = new(false, error.Message);
+                }
+                if (reservation == null) return new(false, error.Message);
+                s_processOwnerToken.ShutdownFailure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error);
                 s_runtimeState = GgmlRuntimeState.Poisoned;
                 return s_shutdownResult = new(false, error.Message);
             }
-            finally { s_teardownThread = 0; }
+        }
+        finally
+        {
+            if (teardownEntered) { lock (s_gate) s_teardownThread = 0; }
+            reservation?.Dispose();
         }
     }
 }

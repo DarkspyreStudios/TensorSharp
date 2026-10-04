@@ -40,10 +40,13 @@ namespace TensorSharp.GGML
         private readonly GgmlContext _context;
         private readonly RankWorkerPool _workers;
         private readonly bool _ownsContext;
-        private readonly IDisposable _runtimeLease;
+        private readonly GgmlNativeLoader.OwnedResourceLease _runtimeLease;
+        private readonly NativeOwnerRegistration _registration;
+        private volatile Exception _cleanupFailure;
         private readonly object _lifetimeGate = new();
         private int _activeRuns;
         private bool _stopping;
+        private bool _retirementRequested;
         private bool _disposed;
 
         /// <summary>
@@ -64,36 +67,47 @@ namespace TensorSharp.GGML
             _context = context ?? throw new ArgumentNullException(nameof(context));
             _ownsContext = ownsContext;
             context.ThrowIfDisposed();
-            _runtimeLease = GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
+            _registration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Model);
+            _runtimeLease = GgmlNativeLoader.AcquireOwnedLease(GgmlRuntimeResourceKind.Model, this, _registration, context.BackendType);
             try
             {
 
-            Degree = context.Degree;
-            _allocators = new GgmlAllocator[Degree];
-            for (int r = 0; r < Degree; r++)
-                _allocators[r] = new GgmlAllocator(context, r);
-
-            if (Degree > 1)
-            {
-                _workers = ParallelRanks ? new RankWorkerPool(Degree) : null;
-                InstallDispatchHook();
-
-                var names = new List<string>(Degree);
+                Degree = context.Degree;
+                _allocators = new GgmlAllocator[Degree];
                 for (int r = 0; r < Degree; r++)
+                    _allocators[r] = new GgmlAllocator(context, r);
+
+                if (Degree > 1)
                 {
-                    string desc = GgmlNative.GetGpuDeviceDescription(context.BackendType, context.DeviceIds[r]);
-                    names.Add(desc ?? $"device {context.DeviceIds[r]}");
+                    _workers = ParallelRanks ? new RankWorkerPool(Degree) : null;
+                    InstallDispatchHook();
+
+                    var names = new List<string>(Degree);
+                    for (int r = 0; r < Degree; r++)
+                    {
+                        string desc = GgmlNative.GetGpuDeviceDescription(context.BackendType, context.DeviceIds[r]);
+                        names.Add(desc ?? $"device {context.DeviceIds[r]}");
+                    }
+                    Console.WriteLine($"Tensor parallelism (GGML {context.BackendType}): {Degree} GPUs ({string.Join(", ", names)})");
+                    Console.WriteLine($"  AllReduce: {DescribeAllReduce(context.HasDeviceAllReduce)}" +
+                                      $"; rank dispatch: {(_workers != null ? "parallel" : "sequential")}");
                 }
-                Console.WriteLine($"Tensor parallelism (GGML {context.BackendType}): {Degree} GPUs ({string.Join(", ", names)})");
-                Console.WriteLine($"  AllReduce: {DescribeAllReduce(context.HasDeviceAllReduce)}" +
-                                  $"; rank dispatch: {(_workers != null ? "parallel" : "sequential")}");
             }
-            }
-            catch
+            catch (Exception operation)
             {
-                _workers?.Dispose();
-                _runtimeLease.Dispose();
-                if (_ownsContext) context.Dispose();
+                try
+                {
+                    _workers?.Dispose();
+                    if (Degree > 1) OpRegistry.PreInvokeHook = null;
+                    if (_ownsContext) context.Dispose();
+                    _runtimeLease.CompleteRelease(this, _registration);
+                }
+                catch (Exception cleanup)
+                {
+                    _cleanupFailure = cleanup;
+                    _runtimeLease.RetainCleanupFailure(this, cleanup);
+                    throw new AggregateException(operation, cleanup);
+                }
                 throw;
             }
         }
@@ -134,6 +148,7 @@ namespace TensorSharp.GGML
 
         public IAllocator GetAllocator(int rank)
         {
+            ThrowIfUnavailable();
             if ((uint)rank >= (uint)Degree)
                 throw new ArgumentOutOfRangeException(nameof(rank));
             return _allocators[rank];
@@ -149,26 +164,28 @@ namespace TensorSharp.GGML
         {
             lock (_lifetimeGate)
             {
-                if (_disposed || _stopping) throw new ObjectDisposedException(nameof(GgmlTensorParallelGroup));
-                _context.ThrowIfDisposed();
+                ThrowIfUnavailable();
                 _activeRuns++;
             }
             try
             {
-            if (Degree == 1)
-            {
-                body(0);
-                return;
-            }
+                if (Degree == 1)
+                {
+                    body(0);
+                    _registration.ThrowIfQuarantined();
+                    return;
+                }
 
-            if (_workers == null)
-            {
-                for (int r = 0; r < Degree; r++)
-                    RunPinned(r, body);
-                return;
-            }
+                if (_workers == null)
+                {
+                    for (int r = 0; r < Degree; r++)
+                        RunPinned(r, body);
+                    _registration.ThrowIfQuarantined();
+                    return;
+                }
 
-            _workers.Run(body);
+                _workers.Run(body);
+                _registration.ThrowIfQuarantined();
             }
             finally { lock (_lifetimeGate) _activeRuns--; }
         }
@@ -200,6 +217,7 @@ namespace TensorSharp.GGML
         /// </summary>
         public void AllReduce(Tensor[] tensors)
         {
+            ThrowIfUnavailable();
             if (!IsActive) return;
             if (tensors == null || tensors.Length != Degree)
                 throw new ArgumentException($"Expected {Degree} tensors, got {tensors?.Length ?? 0}.");
@@ -251,7 +269,22 @@ namespace TensorSharp.GGML
         }
 
         /// <summary>All GGML work is synchronous per op; nothing is left in flight.</summary>
-        public void Synchronize() => GgmlBasicOps.HostReadBarrier();
+        public void Synchronize()
+        {
+            ThrowIfUnavailable();
+            GgmlBasicOps.HostReadBarrier();
+        }
+
+        private void ThrowIfUnavailable()
+        {
+            lock (_lifetimeGate)
+            {
+                if (_cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
+                if (_disposed || _retirementRequested) throw new ObjectDisposedException(nameof(GgmlTensorParallelGroup));
+                _registration.ThrowIfQuarantined();
+                _context.ThrowIfDisposed();
+            }
+        }
 
         /// <summary>Single-node group: no cross-node rendezvous.</summary>
         public void Barrier() { }
@@ -267,18 +300,37 @@ namespace TensorSharp.GGML
             lock (_lifetimeGate)
             {
                 if (_disposed) return;
+                if (_cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(_cleanupFailure).Throw();
+                _retirementRequested = true;
                 if (_stopping || _activeRuns != 0) throw new InvalidOperationException("A tensor-parallel group cannot be disposed while rank work is active or another teardown is running.");
                 _stopping = true;
             }
+            GgmlNativeLoader.ResourceCleanupReservation reservation = null;
             try
             {
+                _registration.ThrowIfQuarantined();
                 _workers?.Dispose();
-                if (Degree > 1) OpRegistry.PreInvokeHook = null;
+                reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
                 if (_ownsContext) _context.Dispose();
-                _runtimeLease.Dispose();
+                if (Degree > 1) OpRegistry.PreInvokeHook = null;
+                _runtimeLease.CompleteRelease(this, _registration);
                 lock (_lifetimeGate) _disposed = true;
+                reservation.Complete();
             }
-            finally { lock (_lifetimeGate) _stopping = false; }
+            catch (Exception error)
+            {
+                if (reservation != null || GgmlNativeLoader.IsUnsafeCleanupRefusal(error))
+                {
+                    _cleanupFailure = error;
+                    _runtimeLease.RetainCleanupFailure(this, error);
+                }
+                throw;
+            }
+            finally
+            {
+                reservation?.Dispose();
+                lock (_lifetimeGate) _stopping = false;
+            }
         }
 
         // --- Per-op device routing -----------------------------------------

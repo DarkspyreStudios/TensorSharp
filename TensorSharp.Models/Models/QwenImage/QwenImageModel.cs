@@ -129,7 +129,8 @@ namespace TensorSharp.Models.QwenImage
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeQwenImageResources);
+                RollBackFailedConstruction(loadError, DisposeQwenImageResources,
+                    collectDerivedOwnership: CollectQwenImageDisposalOwnership);
                 throw;
             }
         }
@@ -195,6 +196,17 @@ namespace TensorSharp.Models.QwenImage
             ThrowIfOwnershipCleanupFailed();
         }
 
+        protected override void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectQwenImageDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectQwenImageDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+            => _pipeline21?.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeQwenImageResources);
@@ -202,7 +214,7 @@ namespace TensorSharp.Models.QwenImage
 
         private void DisposeQwenImageResources()
         {
-            _pipeline21?.Dispose();
+            _pipeline21?.DisposeOwned();
             _vaeSafetensors?.Dispose();
             _vaeGguf?.Dispose();
             _teGguf?.Dispose();

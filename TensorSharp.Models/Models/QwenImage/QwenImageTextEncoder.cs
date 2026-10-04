@@ -64,7 +64,8 @@ namespace TensorSharp.Models.QwenImage
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, static () => { }, releaseAfterModelCaches: DisposeTextEncoderResources);
+                RollBackFailedConstruction(loadError, static () => { }, releaseAfterModelCaches: DisposeTextEncoderResources,
+                    collectDerivedOwnership: static (_, _) => { });
                 throw;
             }
         }

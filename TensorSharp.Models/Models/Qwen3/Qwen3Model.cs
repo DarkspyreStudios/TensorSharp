@@ -110,7 +110,8 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, DisposeQwen3Resources, releaseDerivedGraphs: DisposeQwen3Graphs);
+                RollBackFailedConstruction(loadError, DisposeQwen3Resources, releaseDerivedGraphs: DisposeQwen3Graphs,
+                    collectDerivedOwnership: CollectQwen3DisposalOwnership);
                 throw;
             }
         }
@@ -1330,6 +1331,27 @@ namespace TensorSharp.Models
             {
                 GgmlBasicOps.Qwen3ResetDecodeCache();
                 CountDecodeGraphReset();
+            }
+        }
+
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors, ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectQwen3DisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectQwen3DisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            ModelDisposalOwnership.Add(tensors, _kvCacheK);
+            ModelDisposalOwnership.Add(tensors, _kvCacheV);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheK);
+            ModelDisposalOwnership.AddRows(tensors, _tpKvCacheV);
+            if (_fusedHolders != null) foreach (var holder in _fusedHolders.Values) CollectHolder(holder);
+            CollectHolder(_primaryHolder);
+            void CollectHolder(Qwen3KvCacheHolder holder)
+            {
+                ModelDisposalOwnership.Add(tensors, holder?.K);
+                ModelDisposalOwnership.Add(tensors, holder?.V);
             }
         }
 

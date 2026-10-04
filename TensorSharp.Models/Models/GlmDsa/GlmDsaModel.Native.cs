@@ -222,6 +222,23 @@ namespace TensorSharp.Models
             }
         }
 
+        protected override void CollectDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectGlmDsaDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectGlmDsaDisposalOwnership(System.Collections.Generic.ICollection<Tensor> ownedTensors,
+            System.Collections.Generic.ICollection<IAllocator> ownedAllocators)
+        {
+            ModelDisposalOwnership.AddRange(ownedTensors, _kvCache);
+            ModelDisposalOwnership.AddRange(ownedTensors, _kPeCache);
+            ModelDisposalOwnership.AddRange(ownedTensors, _indexerCache);
+            ModelDisposalOwnership.Add(ownedTensors, _cachedPosQ, _cachedPosK, _cachedPosIdx);
+            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
+        }
+
         public override void Dispose()
         {
             DisposeBaseResources(DisposeGlmDsaResources, releaseDerivedGraphs: DisposeGlmDsaGraphs);
@@ -241,7 +258,7 @@ namespace TensorSharp.Models
 
         private void DisposeGlmDsaResources()
         {
-            VisionEncoder?.Dispose();
+            VisionEncoder?.DisposeOwned();
             // The per-op path's caches are this model's own tensors; the base
             // class only knows about weights, so they have to be released here
             // or they outlive the allocator that backs them.

@@ -1657,7 +1657,7 @@ internal enum GgmlIndexReductionOp
 
         private static int TSGgml_CanInitializeBackend(int backendType)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.CompileOnly);
             return Native_TSGgml_CanInitializeBackend(backendType);
         }
 
@@ -1667,7 +1667,7 @@ internal enum GgmlIndexReductionOp
 
         private static int TSGgml_IsBackendAvailable(int backendType)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.BackendEffect, knownBackend: (GgmlBackendType)backendType);
             return Native_TSGgml_IsBackendAvailable(backendType);
         }
 
@@ -2220,8 +2220,8 @@ internal enum GgmlIndexReductionOp
         // per-sequence row-index vectors (attention) cross the bus.
         private static IntPtr TSGgml_PagedKvPoolCreate(int numLayers, int numBlocks, int blockSize, int numKvHeads, int headDim)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("paged-kv-pool", Native_TSGgml_PagedKvPoolCreate(numLayers, numBlocks, blockSize, numKvHeads, headDim));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("paged-kv-pool");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_PagedKvPoolCreate(numLayers, numBlocks, blockSize, numKvHeads, headDim));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolCreate")]
@@ -2230,10 +2230,7 @@ internal enum GgmlIndexReductionOp
 
         private static void TSGgml_PagedKvPoolFree(IntPtr handle)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("paged-kv-pool", handle);
-            Native_TSGgml_PagedKvPoolFree(handle);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("paged-kv-pool", handle, () => Native_TSGgml_PagedKvPoolFree(handle));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_PagedKvPoolFree")]
@@ -4124,8 +4121,8 @@ internal enum GgmlIndexReductionOp
 
         internal static IntPtr TSGgml_Qwen4ExpMtpCreate(ref Qwen4ExpMtpConfig config, ref Qwen4ExpAttnArgs attn, ref Qwen4ExpFfnArgs ffn, ref Qwen4ExpHeadArgs head)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("qwen4-mtp", Native_TSGgml_Qwen4ExpMtpCreate(ref config, ref attn, ref ffn, ref head));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("qwen4-mtp");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_Qwen4ExpMtpCreate(ref config, ref attn, ref ffn, ref head));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpMtpCreate")]
@@ -4140,10 +4137,7 @@ internal enum GgmlIndexReductionOp
         private static partial int Native_TSGgml_Qwen4ExpMtpForward(IntPtr handle, IntPtr embedding, IntPtr previous, int count, int position, int ropePosition, IntPtr mrope3, IntPtr hiddenOut, IntPtr logitsOut);
         internal static void TSGgml_Qwen4ExpMtpFree(IntPtr handle)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("qwen4-mtp", handle);
-            Native_TSGgml_Qwen4ExpMtpFree(handle);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("qwen4-mtp", handle, () => Native_TSGgml_Qwen4ExpMtpFree(handle));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpMtpFree")]
@@ -4159,8 +4153,8 @@ internal enum GgmlIndexReductionOp
 
         private static unsafe IntPtr TSGgml_Qwen4ExpStateSnapshotCreate(IntPtr* keys, int* devices, int count, IntPtr attn, IntPtr gdn, IntPtr ple)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("qwen4-snapshot", Native_TSGgml_Qwen4ExpStateSnapshotCreate(keys, devices, count, attn, gdn, ple));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("qwen4-snapshot");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_Qwen4ExpStateSnapshotCreate(keys, devices, count, attn, gdn, ple));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpStateSnapshotCreate")]
@@ -4183,10 +4177,7 @@ internal enum GgmlIndexReductionOp
         private static partial int Native_TSGgml_Qwen4ExpStateSnapshotRestore(IntPtr handle);
         internal static void TSGgml_Qwen4ExpStateSnapshotFree(IntPtr handle)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("qwen4-snapshot", handle);
-            Native_TSGgml_Qwen4ExpStateSnapshotFree(handle);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("qwen4-snapshot", handle, () => Native_TSGgml_Qwen4ExpStateSnapshotFree(handle));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_Qwen4ExpStateSnapshotFree")]
@@ -4442,8 +4433,8 @@ internal enum GgmlIndexReductionOp
 
         private static IntPtr TSGgml_AlignedAlloc(UIntPtr size)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            return GgmlNativeLoader.TrackNativeHandle("aligned-allocation", Native_TSGgml_AlignedAlloc(size));
+            using var reservation = GgmlNativeLoader.ReserveNativeHandle("aligned-allocation");
+            return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_AlignedAlloc(size));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_AlignedAlloc")]
@@ -4452,10 +4443,7 @@ internal enum GgmlIndexReductionOp
 
         private static void TSGgml_AlignedFree(IntPtr ptr)
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
-            using var resource = GgmlNativeLoader.BeginNativeHandleRelease("aligned-allocation", ptr);
-            Native_TSGgml_AlignedFree(ptr);
-            resource.Complete();
+            GgmlNativeLoader.ReleaseNativeHandle("aligned-allocation", ptr, () => Native_TSGgml_AlignedFree(ptr));
         }
 
         [LibraryImport(DllName, EntryPoint = "TSGgml_AlignedFree")]
@@ -4484,7 +4472,7 @@ internal enum GgmlIndexReductionOp
 
         private static IntPtr TSGgml_GetBuildIdentity()
         {
-            using var call = GgmlNativeLoader.EnterNativeCall();
+            using var call = GgmlNativeLoader.EnterNativeCall(mode: GgmlNativeLoader.NativeAdmissionMode.IdentityOnly);
             return Native_TSGgml_GetBuildIdentity();
         }
 
@@ -4963,7 +4951,7 @@ internal enum GgmlIndexReductionOp
                 GgmlNativeLoader.PoisonAfterBackendFailure();
                 throw new InvalidOperationException("The native GGML bridge is out of date. Rebuild `TensorSharp.GGML.Native`.", ex);
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException error) when (error is not NativeRuntimeQuarantinedException)
             {
                 GgmlNativeLoader.PoisonAfterBackendFailure();
                 throw;

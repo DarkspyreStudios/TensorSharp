@@ -130,7 +130,8 @@ namespace TensorSharp.Cuda
 
         internal sealed class UploadJob
         {
-            public IntPtr Dst;
+            public Tensor Backing;
+            public long DestinationOffset;
             public IDsv4WeightSource Src;
             public long SrcOffset;
             public long Bytes;
@@ -138,7 +139,9 @@ namespace TensorSharp.Cuda
 
         private struct DevQW
         {
-            public IntPtr Ptr;
+            public Tensor Backing;
+            public long ByteOffset;
+            public long RawBytes;
             public int Type;
             public int Ne0;
             public int Ne1;
@@ -181,7 +184,6 @@ namespace TensorSharp.Cuda
             // A single block keeps the ~7k weight tensors from each paying an
             // allocation-granularity tax (and keeps upload segments contiguous).
             public Tensor Arena;
-            public IntPtr ArenaBase;
             public long ArenaBytes;
             public long ArenaUsed;
             public Tensor RopeRaw, RopeComp;
@@ -249,6 +251,14 @@ namespace TensorSharp.Cuda
         private readonly bool _syncDebug;
 
         public int NPast { get; private set; }
+        private bool _retiring;
+        private bool _disposed;
+        private Exception _cleanupFailure;
+        private readonly NativeConstructionCleanupHandle _constructionCleanup;
+        private object _retainedParent;
+        private readonly CudaAllocator[] _operationAllocators;
+        private readonly CudaNativeCalls _operationCalls;
+        private readonly List<UploadWorkerResources> _uploadWorkers = new List<UploadWorkerResources>();
         public int ContextSize => _m.NCtx;
 
         /// <summary>Prefill micro-batch the engine chunks by. Speculative prefill
@@ -262,7 +272,16 @@ namespace TensorSharp.Cuda
         /// int.MaxValue every layer, -1 auto (the fewest leading layers that make
         /// the model fit; opt-in only). See Dsv4CudaEngine.HostMoe.cs.</param>
         public Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe = 0)
+            : this(m, nGpu, nCpuMoe, null, null)
         {
+        }
+
+        internal Dsv4CudaEngine(ModelDesc m, int nGpu, int nCpuMoe, Action<Dsv4CudaEngine> reserveOwner,
+            object retainedParent)
+        {
+            if ((reserveOwner == null) != (retainedParent == null))
+                throw new ArgumentException("A reserved Dsv4 engine requires its actual parent lifetime dependency.");
+            _retainedParent = retainedParent;
             _m = m ?? throw new ArgumentNullException(nameof(m));
             if (m.HeadDim != 512)
                 throw new NotSupportedException($"DSV4 CUDA engine requires head_dim 512, got {m.HeadDim}.");
@@ -271,194 +290,221 @@ namespace TensorSharp.Cuda
             if (m.NExpertUsed > 16)
                 throw new NotSupportedException($"DSV4 CUDA engine supports at most 16 experts per token, got {m.NExpertUsed}.");
 
-            _perf = EnvInt("TS_DSV4_PERF", 0);
-            _syncDebug = EnvInt("TS_DSV4_CUDA_SYNCDBG", 0) != 0;
-
-            // The model layer coerces DSV4's backend to Cpu (it only needs a cheap
-            // host allocator), so the CUDA op handlers are not registered for us:
-            // do it here, since this engine drives Ops.RMSNorm / Ops.SiLUMulClamp
-            // on CUDA storage. Idempotent.
-            CudaBackend.Register();
-
-            CudaDriverApi.cuInit(0);
-            CudaDriverApi.cuDeviceGetCount(out int devCount).ThrowOnError();
-            int useDevs = nGpu > 0 ? Math.Min(nGpu, devCount) : devCount;
-            if (useDevs < 1)
-                throw new InvalidOperationException("No CUDA devices available for the DSV4 engine.");
-
-            // A speculative verify writes KV for tokens that may be rejected. The
-            // rejected tail is never restored -- instead every ring the next pass
-            // still reads from is widened by the draft window, so a stale write
-            // can no longer alias a live position (the raw ring already has
-            // NUbatch of headroom; the compressor state rings do not).
-            _maxDraft = m.Dspark != null ? m.Dspark.BlockSize : 0;
-            _ringRaw = Pad(m.NSwa + m.NUbatch, 256);
-            // V4.1 compresses at ratios 1 and 2 rather than 4 and 128, so the
-            // same two row counts stand for a different pair of groups.
-            _compRowsCsa = m.NCtx / (m.V41 ? 2 : CsaRatio) + 1;
-            _compRowsHca = m.NCtx / (m.V41 ? 1 : HcaRatio) + 1;
-
-            // ---- devices ----
-            // Created before the layer split, which needs each device's free
-            // VRAM (cuMemGetInfo wants a current context) to size its share.
-            _devs = new Dev[useDevs];
-            for (int d = 0; d < useDevs; d++)
+            _constructionCleanup = new NativeConstructionCleanupHandle(this, ReleaseResources,
+                () => _disposed, () => _cleanupFailure != null);
+            reserveOwner?.Invoke(this);
+            try
             {
-                var dev = new Dev { Ordinal = d };
-                dev.Alloc = new CudaAllocator(d);
-                dev.MakeCurrent();
-                dev.DK = Dsv4Kernels.Create();
-                CudaDriverApi.cuEventCreate(out IntPtr ev, 0x02 /*CU_EVENT_DISABLE_TIMING*/).ThrowOnError();
-                dev.Event = ev;
-                _devs[d] = dev;
-            }
+                _perf = EnvInt("TS_DSV4_PERF", 0);
+                _syncDebug = EnvInt("TS_DSV4_CUDA_SYNCDBG", 0) != 0;
 
-            // ---- layer placement: contiguous ranges balanced by quantized bytes ----
-            var layerBytes = new long[m.NLayer];
-            var layerExpBytes = new long[m.NLayer];
-            long totalBytes = 0;
-            for (int il = 0; il < m.NLayer; il++)
-            {
-                var L = m.Layers[il];
-                long b = 0;
-                foreach (var qw in EnumerateQuantWeights(L))
-                    b += qw.TotalBytes;
-                layerBytes[il] = b;
-                layerExpBytes[il] = L.GateExps.TotalBytes + L.UpExps.TotalBytes + L.DownExps.TotalBytes;
-                totalBytes += b;
-            }
+                // The model layer coerces DSV4's backend to Cpu (it only needs a cheap
+                // host allocator), so the CUDA op handlers are not registered for us:
+                // do it here, since this engine drives Ops.RMSNorm / Ops.SiLUMulClamp
+                // on CUDA storage. Idempotent.
+                CudaBackend.Register();
 
-            long dsparkBytes = DsparkBytes(m.Dspark);
-            var assignment = new int[m.NLayer];
-            _nCpuMoe = PlaceLayers(m, useDevs, layerBytes, layerExpBytes, dsparkBytes, nCpuMoe, assignment);
-            _hostMatMul = m.HostMatMul;
-            if (_nCpuMoe > 0 && _hostMatMul == null)
-                throw new InvalidOperationException(
-                    "[dsv4-cuda] routed-expert CPU offload is required to fit this model but no host matmul was " +
-                    "supplied (ModelDesc.HostMatMul).");
-            _lastDev = useDevs - 1;
+                int devCount = DiscoverDeviceCount();
+                int useDevs = nGpu > 0 ? Math.Min(nGpu, devCount) : devCount;
+                if (useDevs < 1)
+                    throw new InvalidOperationException("No CUDA devices available for the DSV4 engine.");
 
-            // per-device boundary staging (pinned + events)
-            long xsBytes = (long)m.NUbatch * HC * m.NEmbd * 4;
-            for (int d = 0; d < useDevs; d++)
-            {
-                var dev = _devs[d];
-                dev.MakeCurrent();
-                CudaDriverApi.cuMemHostAlloc(out IntPtr pinnedXs, new UIntPtr((ulong)xsBytes), 0x1 /*PORTABLE*/).ThrowOnError();
-                dev.BoundaryPinned = pinnedXs;
-                CudaDriverApi.cuEventCreate(out IntPtr xr, 0x02).ThrowOnError();
-                CudaDriverApi.cuEventCreate(out IntPtr cd, 0x02).ThrowOnError();
-                dev.XsReadyEv = xr;
-                dev.CopyDoneEv = cd;
-            }
+                // A speculative verify writes KV for tokens that may be rejected. The
+                // rejected tail is never restored -- instead every ring the next pass
+                // still reads from is widened by the draft window, so a stale write
+                // can no longer alias a live position (the raw ring already has
+                // NUbatch of headroom; the compressor state rings do not).
+                _maxDraft = m.Dspark != null ? m.Dspark.BlockSize : 0;
+                _ringRaw = Pad(m.NSwa + m.NUbatch, 256);
+                // V4.1 compresses at ratios 1 and 2 rather than 4 and 128, so the
+                // same two row counts stand for a different pair of groups.
+                _compRowsCsa = m.NCtx / (m.V41 ? 2 : CsaRatio) + 1;
+                _compRowsHca = m.NCtx / (m.V41 ? 1 : HcaRatio) + 1;
 
-            // ---- arena sizing per device (packed quantized weights only) ----
-            // Norms, gates, APE/RoPE tables and the caches are separate allocator
-            // tensors, so they are not counted here.
-            var arenaNeed = new long[useDevs];
-            for (int il = 0; il < m.NLayer; il++)
-            {
-                int d = assignment[il];
-                foreach (var qw in EnumerateQuantWeights(m.Layers[il], skipRoutedExperts: il < _nCpuMoe))
-                    arenaNeed[d] += Align(qw.TotalBytes);
-            }
-            arenaNeed[0] += Align(m.TokEmbd.TotalBytes);
-            arenaNeed[_lastDev] += Align(m.Output.TotalBytes) + dsparkBytes;
-
-            for (int d = 0; d < useDevs; d++)
-            {
-                var dev = _devs[d];
-                dev.ArenaBytes = Math.Max(arenaNeed[d], 256);
-                dev.Arena = AllocT(_devs[d], DType.UInt8, dev.ArenaBytes);
-                dev.ArenaBase = Ptr(dev.Arena);
-                dev.ArenaUsed = 0;
-            }
-
-            // ---- upload weights (parallel across devices) ----
-            _layers = new DevLayer[m.NLayer];
-            _hostMoe = new HostMoeLayer[m.NLayer];
-            for (int il = 0; il < m.NLayer; il++)
-                _layers[il] = new DevLayer { Device = assignment[il], Ratio = m.Layers[il].Ratio };
-
-            var perDevLayers = new List<int>[useDevs];
-            for (int d = 0; d < useDevs; d++)
-                perDevLayers[d] = new List<int>();
-            for (int il = 0; il < m.NLayer; il++)
-                perDevLayers[assignment[il]].Add(il);
-
-            var uploadSw = Stopwatch.StartNew();
-            Parallel.For(0, useDevs, d =>
-            {
-                var dev = _devs[d];
-                dev.MakeCurrent();
-                foreach (int il in perDevLayers[d])
-                    UploadLayer(dev, il);
-                if (d == 0)
-                    _tokEmbdQW = UploadQuant(dev, m.TokEmbd);
-                if (d == _lastDev)
+                // ---- devices ----
+                // Created before the layer split, which needs each device's free
+                // VRAM (cuMemGetInfo wants a current context) to size its share.
+                _devs = new Dev[useDevs];
+                for (int d = 0; d < useDevs; d++)
                 {
-                    _outputQW = UploadQuant(dev, m.Output);
-                    _outputNorm = UploadF32(dev, m.OutputNorm);
-                    _hcHeadFn = UploadF32(dev, m.HcHeadFn);
-                    _hcHeadScale = UploadF32(dev, m.HcHeadScale);
-                    _hcHeadBase = UploadF32(dev, m.HcHeadBase);
+                    var dev = new Dev { Ordinal = d };
+                    _devs[d] = dev;
+                    dev.Alloc = new CudaAllocator(d);
                 }
-                dev.RopeRaw = UploadF32(dev, m.RopeRawTable);
-                dev.RopeComp = UploadF32(dev, m.RopeCompTable);
-            });
+                _operationAllocators = new CudaAllocator[_devs.Length];
+                var ordinals = new int[_devs.Length];
+                for (int d = 0; d < _devs.Length; d++)
+                {
+                    _operationAllocators[d] = _devs[d].Alloc;
+                    ordinals[d] = _devs[d].Alloc.DeviceId;
+                    if (!ReferenceEquals(_devs[d].Alloc.NativeCalls.Api, _devs[0].Alloc.NativeCalls.Api))
+                        throw new InvalidOperationException("DSV4 engine requires one actual native API identity.");
+                }
+                _operationCalls = new CudaNativeCalls(this, NativeOwnerRole.Graph,
+                    _operationAllocators[0].NativeCalls.Api, ordinals);
+                using var constructionAdmission = CudaOperationAdmission.Enter(this, _operationAllocators);
+                foreach (var dev in _devs)
+                {
+                    Dsv4Kernels.Create(dev.Alloc, kernels => dev.DK = kernels, this);
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(
+                        out dev.Event, 0x02 /*CU_EVENT_DISABLE_TIMING*/));
+                }
 
-            // The drafter shares the loader pass: it plans its uploads here so
-            // its (few GiB of) weights stream in with everything else.
-            if (m.Dspark != null)
-                SetupDspark(m.Dspark);
+                // ---- layer placement: contiguous ranges balanced by quantized bytes ----
+                var layerBytes = new long[m.NLayer];
+                var layerExpBytes = new long[m.NLayer];
+                long totalBytes = 0;
+                for (int il = 0; il < m.NLayer; il++)
+                {
+                    var L = m.Layers[il];
+                    long b = 0;
+                    foreach (var qw in EnumerateQuantWeights(L))
+                        b += qw.TotalBytes;
+                    layerBytes[il] = b;
+                    layerExpBytes[il] = L.GateExps.TotalBytes + L.UpExps.TotalBytes + L.DownExps.TotalBytes;
+                    totalBytes += b;
+                }
 
-            // Weights sourced from disk were only *placed* above; move the bytes
-            // now, with the reader concurrency the filesystem actually likes.
-            RunStreamedUploads();
+                long dsparkBytes = DsparkBytes(m.Dspark);
+                var assignment = new int[m.NLayer];
+                _nCpuMoe = PlaceLayers(m, useDevs, layerBytes, layerExpBytes, dsparkBytes, nCpuMoe, assignment);
+                _hostMatMul = m.HostMatMul;
+                if (_nCpuMoe > 0 && _hostMatMul == null)
+                    throw new InvalidOperationException(
+                        "[dsv4-cuda] routed-expert CPU offload is required to fit this model but no host matmul was " +
+                        "supplied (ModelDesc.HostMatMul).");
+                _lastDev = useDevs - 1;
 
-            // ---- scratch + tokens + logits ----
-            for (int d = 0; d < useDevs; d++)
-                AllocateScratch(_devs[d]);
+                // per-device boundary staging (pinned + events)
+                long xsBytes = (long)m.NUbatch * HC * m.NEmbd * 4;
+                for (int d = 0; d < useDevs; d++)
+                {
+                    var dev = _devs[d];
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out dev.BoundaryPinned, new UIntPtr((ulong)xsBytes), 0x1 /*PORTABLE*/));
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.XsReadyEv, 0x02));
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.CopyDoneEv, 0x02));
+                }
 
-            _devs[0].NeedsTokens = true;
-            for (int il = 0; il < Math.Min(m.HashLayerCount, m.NLayer); il++)
-                _devs[assignment[il]].NeedsTokens = true;
-            foreach (var dev in _devs)
-            {
-                if (!dev.NeedsTokens)
-                    continue;
-                dev.MakeCurrent();
-                dev.TokensDev0 = AllocI32(dev, m.NUbatch);
-                dev.TokensDev1 = AllocI32(dev, m.NUbatch);
-                CudaDriverApi.cuEventCreate(out IntPtr te0, 0x02).ThrowOnError();
-                CudaDriverApi.cuEventCreate(out IntPtr te1, 0x02).ThrowOnError();
-                dev.TokEv0 = te0;
-                dev.TokEv1 = te1;
+                // ---- arena sizing per device (packed quantized weights only) ----
+                // Norms, gates, APE/RoPE tables and the caches are separate allocator
+                // tensors, so they are not counted here.
+                var arenaNeed = new long[useDevs];
+                for (int il = 0; il < m.NLayer; il++)
+                {
+                    int d = assignment[il];
+                    foreach (var qw in EnumerateQuantWeights(m.Layers[il], skipRoutedExperts: il < _nCpuMoe))
+                        arenaNeed[d] += Align(qw.TotalBytes);
+                }
+                arenaNeed[0] += Align(m.TokEmbd.TotalBytes);
+                arenaNeed[_lastDev] += Align(m.Output.TotalBytes) + dsparkBytes;
+
+                for (int d = 0; d < useDevs; d++)
+                {
+                    var dev = _devs[d];
+                    dev.ArenaBytes = Math.Max(arenaNeed[d], 256);
+                    dev.Arena = AllocT(_devs[d], DType.UInt8, dev.ArenaBytes);
+                    dev.ArenaUsed = 0;
+                }
+
+                // ---- upload weights (parallel across devices) ----
+                _layers = new DevLayer[m.NLayer];
+                _hostMoe = new HostMoeLayer[m.NLayer];
+                for (int il = 0; il < m.NLayer; il++)
+                    _layers[il] = new DevLayer { Device = assignment[il], Ratio = m.Layers[il].Ratio };
+
+                var perDevLayers = new List<int>[useDevs];
+                for (int d = 0; d < useDevs; d++)
+                    perDevLayers[d] = new List<int>();
+                for (int il = 0; il < m.NLayer; il++)
+                    perDevLayers[assignment[il]].Add(il);
+
+                var uploadSw = Stopwatch.StartNew();
+                Parallel.For(0, useDevs, d =>
+                {
+                    var dev = _devs[d];
+                    dev.MakeCurrent();
+                    foreach (int il in perDevLayers[d])
+                        UploadLayer(dev, il);
+                    if (d == 0)
+                        _tokEmbdQW = UploadQuant(dev, m.TokEmbd);
+                    if (d == _lastDev)
+                    {
+                        _outputQW = UploadQuant(dev, m.Output);
+                        _outputNorm = UploadF32(dev, m.OutputNorm);
+                        _hcHeadFn = UploadF32(dev, m.HcHeadFn);
+                        _hcHeadScale = UploadF32(dev, m.HcHeadScale);
+                        _hcHeadBase = UploadF32(dev, m.HcHeadBase);
+                    }
+                    dev.RopeRaw = UploadF32(dev, m.RopeRawTable);
+                    dev.RopeComp = UploadF32(dev, m.RopeCompTable);
+                });
+
+                // The drafter shares the loader pass: it plans its uploads here so
+                // its (few GiB of) weights stream in with everything else.
+                if (m.Dspark != null)
+                    SetupDspark(m.Dspark);
+
+                // Weights sourced from disk were only *placed* above; move the bytes
+                // now, with the reader concurrency the filesystem actually likes.
+                RunStreamedUploads();
+
+                // ---- scratch + tokens + logits ----
+                for (int d = 0; d < useDevs; d++)
+                    AllocateScratch(_devs[d]);
+
+                _devs[0].NeedsTokens = true;
+                for (int il = 0; il < Math.Min(m.HashLayerCount, m.NLayer); il++)
+                    _devs[assignment[il]].NeedsTokens = true;
+                foreach (var dev in _devs)
+                {
+                    if (!dev.NeedsTokens)
+                        continue;
+                    dev.TokensDev0 = AllocI32(dev, m.NUbatch);
+                    dev.TokensDev1 = AllocI32(dev, m.NUbatch);
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.TokEv0, 0x02));
+                    _operationCalls.ThrowOnError(_operationCalls.cuEventCreate(out dev.TokEv1, 0x02));
+                }
+
+                var last = _devs[_lastDev];
+                last.Logits = AllocF32(last, 1, m.NVocab);
+                if (m.Dspark != null)
+                {
+                    int specRows = m.Dspark.BlockSize + 1;
+                    _specLogits = AllocF32(last, specRows, m.NVocab);
+                }
+
+                // CU_MEMHOSTALLOC_PORTABLE (0x1): the pinned token buffers are copied
+                // from by every device that needs token ids, not just device 0.
+                long logitRows = m.Dspark != null ? m.Dspark.BlockSize + 1 : 1;
+                using (var effect = EnterDeviceEffect(_devs[0]))
+                {
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out _pinnedTokens0, new UIntPtr((ulong)m.NUbatch * 4), 0x1));
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out _pinnedTokens1, new UIntPtr((ulong)m.NUbatch * 4), 0x1));
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1));
+                }
+
+                Reset();
+
+                double gib = totalBytes / (1024.0 * 1024 * 1024);
+                Console.Error.WriteLine(
+                    $"[dsv4-cuda] {gib:F1} GiB of weights resident across {useDevs} GPU(s) " +
+                    $"(layer split {string.Join("/", CountPerDev(assignment, useDevs))}), uploaded in {uploadSw.Elapsed.TotalSeconds:F1}s " +
+                    $"(n_ctx={m.NCtx}, ubatch={m.NUbatch})");
             }
-
-            var last = _devs[_lastDev];
-            last.Logits = AllocF32(last, 1, m.NVocab);
-            if (m.Dspark != null)
+            catch (Exception loadError)
             {
-                int specRows = m.Dspark.BlockSize + 1;
-                _specLogits = AllocF32(last, specRows, m.NVocab);
+                // An actual parent reservation uses its one complete census and private cleanup recipe.
+                if (reserveOwner != null) throw;
+                try { ReleaseResources(); }
+                catch (Exception cleanupError)
+                {
+                    throw new NativeConstructionCleanupException(loadError, cleanupError, _constructionCleanup);
+                }
+                throw;
             }
-
-            _devs[0].MakeCurrent();
-            // CU_MEMHOSTALLOC_PORTABLE (0x1): the pinned token buffers are copied
-            // from by every device that needs token ids, not just device 0.
-            CudaDriverApi.cuMemHostAlloc(out _pinnedTokens0, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
-            CudaDriverApi.cuMemHostAlloc(out _pinnedTokens1, new UIntPtr((ulong)m.NUbatch * 4), 0x1).ThrowOnError();
-            long logitRows = m.Dspark != null ? m.Dspark.BlockSize + 1 : 1;
-            CudaDriverApi.cuMemHostAlloc(out _pinnedLogits, new UIntPtr((ulong)(logitRows * m.NVocab * 4L)), 0x1).ThrowOnError();
-
-            Reset();
-
-            double gib = totalBytes / (1024.0 * 1024 * 1024);
-            Console.Error.WriteLine(
-                $"[dsv4-cuda] {gib:F1} GiB of weights resident across {useDevs} GPU(s) " +
-                $"(layer split {string.Join("/", CountPerDev(assignment, useDevs))}), uploaded in {uploadSw.Elapsed.TotalSeconds:F1}s " +
-                $"(n_ctx={m.NCtx}, ubatch={m.NUbatch})");
         }
 
         /// <summary>
@@ -497,8 +543,9 @@ namespace TensorSharp.Cuda
             var freeBytes = new long[nDev];
             for (int d = 0; d < nDev; d++)
             {
-                _devs[d].MakeCurrent();
-                CudaDriverApi.cuMemGetInfo(out UIntPtr free, out UIntPtr _).ThrowOnError();
+                UIntPtr free;
+                using (var effect = EnterDeviceEffect(_devs[d]))
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemGetInfo(out free, out _));
                 freeBytes[d] = (long)free.ToUInt64();
                 long reserve = reserveMb * 1024 * 1024 + PerDeviceFixedBytes(m);
                 budget[d] = Math.Max(freeBytes[d] - reserve, 0);
@@ -701,25 +748,36 @@ namespace TensorSharp.Cuda
 
         // ---- arena sub-allocation + upload helpers (device context must be current) ----
 
-        private static IntPtr ArenaTake(Dev dev, long bytes)
+        private static long ArenaTake(Dev dev, long bytes)
         {
             long aligned = Align(bytes);
-            if (dev.ArenaUsed + aligned > dev.ArenaBytes)
+            if (bytes <= 0 || aligned <= 0 || dev.ArenaUsed > dev.ArenaBytes - aligned)
                 throw new InvalidOperationException($"[dsv4-cuda] arena overflow on device {dev.Ordinal}");
-            IntPtr p = (IntPtr)((long)dev.ArenaBase + dev.ArenaUsed);
-            dev.ArenaUsed += aligned;
-            return p;
+            long offset = dev.ArenaUsed;
+            dev.ArenaUsed = checked(dev.ArenaUsed + aligned);
+            return offset;
         }
 
-        private static DevQW UploadQuant(Dev dev, in QuantWeightDesc qw)
+        private DevQW UploadQuant(Dev dev, in QuantWeightDesc qw)
         {
             if (!qw.IsValid)
                 return default;
             long bytes = qw.TotalBytes;
-            IntPtr p = ArenaTake(dev, bytes);
+            long offset = ArenaTake(dev, bytes);
+            var resident = new DevQW
+            {
+                Backing = dev.Arena,
+                ByteOffset = offset,
+                RawBytes = bytes,
+                Type = qw.GgmlType,
+                Ne0 = qw.Ne0,
+                Ne1 = qw.Ne1,
+                RowBytes = qw.RowBytes
+            };
             if (qw.HostPtr != IntPtr.Zero)
             {
-                CudaDriverApi.cuMemcpyHtoD(p, qw.HostPtr, new UIntPtr((ulong)bytes)).ThrowOnError();
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedWeightPointer(dev, resident), qw.HostPtr, new UIntPtr((ulong)bytes)));
             }
             else
             {
@@ -731,14 +789,15 @@ namespace TensorSharp.Cuda
                 {
                     dev.UploadPlan.Add(new UploadJob
                     {
-                        Dst = (IntPtr)((long)p + off),
+                        Backing = dev.Arena,
+                        DestinationOffset = checked(offset + off),
                         Src = qw.Source,
                         SrcOffset = qw.SourceOffset + off,
                         Bytes = Math.Min(UploadSegmentBytes, bytes - off),
                     });
                 }
             }
-            return new DevQW { Ptr = p, Type = qw.GgmlType, Ne0 = qw.Ne0, Ne1 = qw.Ne1, RowBytes = qw.RowBytes };
+            return resident;
         }
 
         // Loader tuning. The read side is the bottleneck on network filesystems
@@ -778,35 +837,60 @@ namespace TensorSharp.Cuda
             int perDev = Math.Max(1, LoaderThreads / _devs.Length);
             var errors = new List<Exception>();
             var threads = new List<System.Threading.Thread>(perDev * _devs.Length);
+            Exception startupFailure = null;
 
-            foreach (var devLocal in _devs)
+            try
             {
-                var dev = devLocal;
-                if (dev.UploadJobs.Length == 0)
-                    continue;
-                for (int w = 0; w < perDev; w++)
+                foreach (var devLocal in _devs)
                 {
-                    var t = new System.Threading.Thread(() =>
+                    var dev = devLocal;
+                    if (dev.UploadJobs.Length == 0)
+                        continue;
+                    for (int w = 0; w < perDev; w++)
                     {
-                        try
+                        _uploadWorkers.EnsureCapacity(checked(_uploadWorkers.Count + 1));
+                        var worker = new UploadWorkerResources(this, dev);
+                        _uploadWorkers.Add(worker);
+                        var t = new System.Threading.Thread(() =>
                         {
-                            StreamUploadWorker(dev);
-                        }
-                        catch (Exception ex)
-                        {
-                            lock (errors)
-                                errors.Add(ex);
-                        }
-                    });
-                    t.IsBackground = true;
-                    threads.Add(t);
-                    t.Start();
+                            try
+                            {
+                                StreamUploadWorker(worker);
+                            }
+                            catch (Exception ex)
+                            {
+                                lock (errors)
+                                    errors.Add(ex);
+                            }
+                        });
+                        t.IsBackground = true;
+                        worker.Thread = t;
+                        threads.Add(t);
+                        t.Start();
+                    }
                 }
             }
-            foreach (var t in threads)
-                t.Join();
-            if (errors.Count > 0)
-                throw new AggregateException("[dsv4-cuda] weight streaming failed", errors);
+            catch (Exception startupError)
+            {
+                startupFailure = startupError;
+            }
+            try { WaitForUploadWorkers(); }
+            catch (Exception joinError)
+            {
+                lock (errors) errors.Add(joinError);
+            }
+            Exception[] uploadErrors;
+            lock (errors) uploadErrors = errors.ToArray();
+            if (startupFailure != null)
+            {
+                if (uploadErrors.Length == 0)
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startupFailure).Throw();
+                var combined = new List<Exception>(uploadErrors.Length + 1) { startupFailure };
+                combined.AddRange(uploadErrors);
+                throw new AggregateException("[dsv4-cuda] weight worker startup and completion failed", combined);
+            }
+            if (uploadErrors.Length > 0)
+                throw new AggregateException("[dsv4-cuda] weight streaming failed", uploadErrors);
 
             double gib = total / (1024.0 * 1024 * 1024);
             Console.Error.WriteLine($"[dsv4-cuda] streamed {gib:F1} GiB of weights into VRAM in " +
@@ -821,21 +905,112 @@ namespace TensorSharp.Cuda
             }
         }
 
-        private static void StreamUploadWorker(Dev dev)
+        internal void WaitForUploadWorkers()
         {
-            dev.MakeCurrent();
+            List<Exception> failures = null;
+            foreach (var worker in _uploadWorkers)
+            {
+                var thread = worker.Thread;
+                if (thread == null) continue;
+                if ((thread.ThreadState & System.Threading.ThreadState.Unstarted) != 0) continue;
+                if (ReferenceEquals(thread, System.Threading.Thread.CurrentThread))
+                    throw new InvalidOperationException("An upload worker cannot wait for its own retirement.");
+                try { thread.Join(); }
+                catch (Exception failure) { (failures ??= new List<Exception>()).Add(failure); }
+            }
+            if (failures != null) throw new AggregateException("DSV4 upload workers have not proven completion.", failures);
+            _uploadWorkers.RemoveAll(worker => worker.IsReleased);
+        }
+
+        private sealed class UploadWorkerResources
+        {
+            internal IntPtr DestinationPointer(UploadJob job, long transferredBytes)
+                => new IntPtr(checked(_engine.OwnedPointer(Device, job.Backing).ToInt64()
+                    + job.DestinationOffset + transferredBytes));
+
+            // Unsafe worker cleanup must retain the actual engine and its parent backing owners.
+            private Dsv4CudaEngine _engine;
+            private int _released;
+            internal readonly Dev Device;
+            internal readonly CudaNativeCalls Calls;
+            internal readonly IntPtr[] Buffers = new IntPtr[2];
+            internal readonly IntPtr[] Events = new IntPtr[2];
+            internal readonly bool[] Pending = new bool[2];
+            internal System.Threading.Thread Thread;
+            internal IntPtr Stream;
+            internal bool IsReleased => System.Threading.Volatile.Read(ref _released) != 0;
+
+            internal UploadWorkerResources(Dsv4CudaEngine engine, Dev device)
+            {
+                _engine = engine;
+                Device = device;
+                if (device.Alloc == null || device.Ordinal != device.Alloc.DeviceId)
+                    throw new InvalidOperationException("An upload worker requires its actual known-device allocator.");
+                Calls = new CudaNativeCalls(this, NativeOwnerRole.Worker, device.Alloc.NativeCalls.Api, device.Alloc.DeviceId);
+            }
+
+            internal void Release()
+            {
+                if (IsReleased) return;
+                using var lease = Calls.EnterEffect();
+                Calls.ValidateSafeRelease(lease);
+                try
+                {
+                    bool hasResources = Stream != IntPtr.Zero;
+                    for (int i = 0; i < Buffers.Length; i++)
+                        hasResources |= Buffers[i] != IntPtr.Zero || Events[i] != IntPtr.Zero;
+                    if (hasResources)
+                    {
+                        Device.Alloc.Context.BindCurrent(Calls);
+                        Calls.cuStreamSynchronize(Stream);
+                    }
+                    for (int i = 0; i < Events.Length; i++)
+                    {
+                        if (Events[i] != IntPtr.Zero)
+                        {
+                            Calls.cuEventDestroy(Events[i]);
+                            Events[i] = IntPtr.Zero;
+                        }
+                        if (Buffers[i] != IntPtr.Zero)
+                        {
+                            Calls.cuMemFreeHost(Buffers[i]);
+                            Buffers[i] = IntPtr.Zero;
+                        }
+                    }
+                    if (Stream != IntPtr.Zero)
+                    {
+                        Calls.cuStreamDestroy(Stream);
+                        Stream = IntPtr.Zero;
+                    }
+                    Calls.CompleteSafeRelease(lease);
+                    System.Threading.Volatile.Write(ref _released, 1);
+                    _engine = null;
+                }
+                catch (Exception cleanupFailure)
+                {
+                    Calls.PublishFailure(lease, cleanupFailure, NativeRuntimeFailureStage.WorkerRetirement);
+                    throw;
+                }
+            }
+        }
+
+        private static void StreamUploadWorker(UploadWorkerResources worker)
+        {
+            var dev = worker.Device;
+            var calls = worker.Calls;
             int chunk = LoaderChunkBytes;
-            IntPtr stream = IntPtr.Zero;
-            var bufs = new IntPtr[2];
-            var evs = new IntPtr[2];
-            var pending = new bool[2];
+            Exception original = null;
             try
             {
-                CudaDriverApi.cuStreamCreate(out stream, 0x1 /*NON_BLOCKING*/).ThrowOnError();
-                for (int i = 0; i < 2; i++)
+                using (var lease = calls.EnterEffect())
                 {
-                    CudaDriverApi.cuMemHostAlloc(out bufs[i], new UIntPtr((ulong)chunk), 0x1 /*PORTABLE*/).ThrowOnError();
-                    CudaDriverApi.cuEventCreate(out evs[i], 0x02 /*DISABLE_TIMING*/).ThrowOnError();
+                    dev.Alloc.Context.BindCurrent(calls);
+                    calls.ThrowOnError(calls.cuStreamCreate(out worker.Stream, 0x1 /*NON_BLOCKING*/));
+                    for (int i = 0; i < worker.Buffers.Length; i++)
+                    {
+                        calls.ThrowOnError(calls.cuMemHostAlloc(out worker.Buffers[i], new UIntPtr((ulong)chunk), 0x1 /*PORTABLE*/));
+                        calls.ThrowOnError(calls.cuEventCreate(out worker.Events[i], 0x02 /*DISABLE_TIMING*/));
+                    }
                 }
 
                 var jobs = dev.UploadJobs;
@@ -850,59 +1025,79 @@ namespace TensorSharp.Cuda
                     {
                         long n = Math.Min(chunk, job.Bytes - done);
                         // Reclaim the staging buffer only once its copy retired.
-                        if (pending[slot])
+                        if (worker.Pending[slot])
                         {
                             long tc = LoaderStats ? Stopwatch.GetTimestamp() : 0;
-                            CudaDriverApi.cuEventSynchronize(evs[slot]).ThrowOnError();
+                            using (var lease = calls.EnterEffect())
+                            {
+                                dev.Alloc.Context.BindCurrent(calls);
+                                calls.cuEventSynchronize(worker.Events[slot]);
+                            }
                             if (LoaderStats)
                                 System.Threading.Interlocked.Add(ref _loaderCopyTicks, Stopwatch.GetTimestamp() - tc);
-                            pending[slot] = false;
+                            worker.Pending[slot] = false;
                         }
                         long t0 = LoaderStats ? Stopwatch.GetTimestamp() : 0;
-                        job.Src.Read(job.SrcOffset + done, bufs[slot], n);
+                        job.Src.Read(job.SrcOffset + done, worker.Buffers[slot], n);
                         if (LoaderStats)
                             System.Threading.Interlocked.Add(ref _loaderReadTicks, Stopwatch.GetTimestamp() - t0);
-                        CudaDriverApi.cuMemcpyHtoDAsync((IntPtr)((long)job.Dst + done), bufs[slot],
-                            new UIntPtr((ulong)n), stream).ThrowOnError();
-                        CudaDriverApi.cuEventRecord(evs[slot], stream).ThrowOnError();
-                        pending[slot] = true;
+                        using (var lease = calls.EnterEffect())
+                        {
+                            dev.Alloc.Context.BindCurrent(calls);
+                            if (!ReferenceEquals(job.Backing, dev.Arena) || done < 0 || n <= 0
+                                || done > job.Bytes - n || job.DestinationOffset < 0
+                                || checked(job.DestinationOffset + done) > job.Backing.Storage.ByteLength - n)
+                                throw new InvalidOperationException("Upload destination is outside its actual arena.");
+                            IntPtr destination = worker.DestinationPointer(job, done);
+                            calls.ThrowOnError(calls.cuMemcpyHtoDAsync(destination, worker.Buffers[slot],
+                                new UIntPtr((ulong)n), worker.Stream));
+                            calls.ThrowOnError(calls.cuEventRecord(worker.Events[slot], worker.Stream));
+                            worker.Pending[slot] = true;
+                        }
                         done += n;
                         slot ^= 1;
                     }
                 }
-                CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
             }
-            finally
+            catch (Exception failure)
             {
-                for (int i = 0; i < 2; i++)
-                {
-                    if (evs[i] != IntPtr.Zero) CudaDriverApi.cuEventDestroy(evs[i]);
-                    if (bufs[i] != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(bufs[i]);
-                }
-                if (stream != IntPtr.Zero) CudaDriverApi.cuStreamDestroy(stream);
+                original = failure;
             }
+            try { worker.Release(); }
+            catch (Exception cleanup)
+            {
+                if (original != null) throw new AggregateException(original, cleanup);
+                throw;
+            }
+            if (original != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(original).Throw();
         }
 
         /// <summary>Small dense tensor (norm/gate/table) as an allocator-owned
         /// F32 tensor. Null/empty input yields null, which every consumer treats
         /// as "absent".</summary>
-        private static Tensor UploadF32(Dev dev, float[] data)
+        private Tensor UploadF32(Dev dev, float[] data)
         {
             if (data == null || data.Length == 0)
                 return null;
             Tensor t = AllocF32(dev, data.Length);
             fixed (float* src = data)
-                CudaDriverApi.cuMemcpyHtoD(Ptr(t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedPointer(dev, t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)));
+            }
             return t;
         }
 
-        private static Tensor UploadI32(Dev dev, int[] data)
+        private Tensor UploadI32(Dev dev, int[] data)
         {
             if (data == null || data.Length == 0)
                 return null;
             Tensor t = AllocI32(dev, data.Length);
             fixed (int* src = data)
-                CudaDriverApi.cuMemcpyHtoD(Ptr(t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoD(OwnedPointer(dev, t), (IntPtr)src, new UIntPtr((ulong)data.Length * 4)));
+            }
             return t;
         }
 
@@ -1025,6 +1220,7 @@ namespace TensorSharp.Cuda
         private static Tensor AllocT(Dev dev, DType type, params long[] sizes)
         {
             dev.MakeCurrent();
+            dev.OwnedTensors.EnsureCapacity(checked(dev.OwnedTensors.Count + 1));
             var t = new Tensor(dev.Alloc, type, sizes);
             dev.OwnedTensors.Add(t);
             return t;
@@ -1109,7 +1305,8 @@ namespace TensorSharp.Cuda
                     long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
                     dev.EngramLookup = AllocF32(dev, nt, cols);
                     dev.EngramKv = AllocF32(dev, nt, (long)(HC + 1) * e);
-                    CudaDriverApi.cuMemHostAlloc(out dev.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/).ThrowOnError();
+                    using var effect = EnterDeviceEffect(dev);
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemHostAlloc(out dev.EngramPinned, new UIntPtr((ulong)(nt * cols * 4)), 0x1 /*PORTABLE*/));
                 }
             }
             dev.FfnOut = AllocF32(dev, nt, e);
@@ -1168,22 +1365,23 @@ namespace TensorSharp.Cuda
 
         public void Reset()
         {
+            using var operation = EnterOperation();
             foreach (var dev in _devs)
             {
-                dev.MakeCurrent();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream);
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
             }
             for (int il = 0; il < _m.NLayer; il++)
             {
                 var L = _layers[il];
-                _devs[L.Device].MakeCurrent();
-                Memset0(L.RingK);
-                Memset0(L.CompK);
-                Memset0(L.LidK);
-                Memset0(L.HistKv);
-                Memset0(L.HistScore);
-                Memset0(L.LidHistKv);
-                Memset0(L.LidHistScore);
+                var dev = _devs[L.Device];
+                Memset0(dev, L.RingK);
+                Memset0(dev, L.CompK);
+                Memset0(dev, L.LidK);
+                Memset0(dev, L.HistKv);
+                Memset0(dev, L.HistScore);
+                Memset0(dev, L.LidHistKv);
+                Memset0(dev, L.LidHistScore);
             }
             ResetDspark();
             // Engram lookbacks reach earlier positions, so the hash history has
@@ -1193,13 +1391,16 @@ namespace TensorSharp.Cuda
             NPast = 0;
         }
 
-        private static void Memset0(Tensor t)
+        private void Memset0(Dev dev, Tensor t)
         {
             if (t == null)
                 return;
             long bytes = t.ElementCount() * t.ElementType.Size();
             if (bytes > 0)
-                CudaDriverApi.cuMemsetD8(Ptr(t), 0, new UIntPtr((ulong)bytes)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemsetD8(OwnedPointer(dev, t), 0, new UIntPtr((ulong)bytes)));
+            }
         }
 
         // -------------------------------------------------------------------
@@ -1208,6 +1409,7 @@ namespace TensorSharp.Cuda
 
         public void Forward(int[] tokens, float[] logitsOut)
         {
+            using var operation = EnterOperation();
             if (tokens == null || tokens.Length == 0)
                 throw new ArgumentException("empty token batch", nameof(tokens));
             if (NPast + tokens.Length > _m.NCtx)
@@ -1235,9 +1437,8 @@ namespace TensorSharp.Cuda
         {
             if (!_syncDebug)
                 return;
-            int rc = CudaDriverApi.cuStreamSynchronize(dev.Stream);
-            if (rc != 0)
-                throw new InvalidOperationException($"[dsv4-cuda] CUDA error {rc} after {stage} on device {dev.Ordinal}");
+            using var effect = EnterDeviceEffect(dev);
+            _operationCalls.cuStreamSynchronize(dev.Stream);
         }
 
         // TS_DSV4_PERF>=2: per-stage wall time. Each Stage() call synchronizes
@@ -1262,7 +1463,8 @@ namespace TensorSharp.Cuda
         {
             if (_perf < 2)
                 return;
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
+            using var effect = EnterDeviceEffect(dev);
+            _operationCalls.cuStreamSynchronize(dev.Stream);
             _stageTicks[stage] += Stopwatch.GetTimestamp() - _stageT0;
             _stageT0 = Stopwatch.GetTimestamp();
         }
@@ -1301,11 +1503,13 @@ namespace TensorSharp.Cuda
             if (TraceDir == null || t == null)
                 return;
             System.IO.Directory.CreateDirectory(TraceDir);
-            dev.MakeCurrent();
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
             var host = new float[count];
             fixed (float* h = host)
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)h, Ptr(t), new UIntPtr((ulong)count * 4)).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)h, OwnedPointer(dev, t), new UIntPtr((ulong)count * 4)));
+            }
             var bytes = new byte[count * 4];
             Buffer.BlockCopy(host, 0, bytes, 0, bytes.Length);
             System.IO.File.WriteAllBytes(System.IO.Path.Combine(TraceDir, $"p{_traceP0:D6}_{name}.f32"), bytes);
@@ -1317,12 +1521,13 @@ namespace TensorSharp.Cuda
         {
             if (!StageDebug || t == null)
                 return;
-            IntPtr ptr = Ptr(t);
-            dev.MakeCurrent();
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
             var tmp = new float[n];
             fixed (float* p = tmp)
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)p, ptr, new UIntPtr((ulong)n * 4));
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)p, OwnedPointer(dev, t), new UIntPtr((ulong)n * 4)));
+            }
             Console.Error.WriteLine($"[dbg-cuda] {label}: {string.Join(" ", Array.ConvertAll(tmp, v => v.ToString("G6")))}");
         }
 
@@ -1330,12 +1535,13 @@ namespace TensorSharp.Cuda
         {
             if (!StageDebug || t == null)
                 return;
-            IntPtr ptr = Ptr(t);
-            dev.MakeCurrent();
-            CudaDriverApi.cuStreamSynchronize(dev.Stream);
             var tmp = new ushort[n];
             fixed (ushort* p = tmp)
-                CudaDriverApi.cuMemcpyDtoH((IntPtr)p, ptr, new UIntPtr((ulong)n * 2));
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuStreamSynchronize(dev.Stream);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoH((IntPtr)p, OwnedPointer(dev, t), new UIntPtr((ulong)n * 2)));
+            }
             var vals = new float[n];
             for (int i = 0; i < n; i++)
                 vals[i] = (float)BitConverter.UInt16BitsToHalf(tmp[i]);
@@ -1362,17 +1568,19 @@ namespace TensorSharp.Cuda
             {
                 if (!dev.NeedsTokens)
                     continue;
-                CudaDriverApi.cuEventSynchronize(parity == 0 ? dev.TokEv0 : dev.TokEv1);
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.cuEventSynchronize(parity == 0 ? dev.TokEv0 : dev.TokEv1);
             }
             Marshal.Copy(tokens, tokOff, pinned, nt);
             foreach (var dev in _devs)
             {
                 if (!dev.NeedsTokens)
                     continue;
-                dev.MakeCurrent();
                 Tensor dst = parity == 0 ? dev.TokensDev0 : dev.TokensDev1;
-                CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dst), pinned, new UIntPtr((ulong)nt * 4), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuEventRecord(parity == 0 ? dev.TokEv0 : dev.TokEv1, dev.Stream).ThrowOnError();
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(dev, dst), pinned,
+                    new UIntPtr((ulong)nt * 4), dev.Stream));
+                _operationCalls.ThrowOnError(_operationCalls.cuEventRecord(parity == 0 ? dev.TokEv0 : dev.TokEv1, dev.Stream));
             }
             Tensor TokensOf(Dev dev) => parity == 0 ? dev.TokensDev0 : dev.TokensDev1;
 
@@ -1387,7 +1595,9 @@ namespace TensorSharp.Cuda
             var dev0 = _devs[0];
             dev0.MakeCurrent();
             StageBegin();
-            dev0.DK.Embed(_tokEmbdQW.Ptr, TokensOf(dev0), dev0.Xs, _tokEmbdQW.Type, _tokEmbdQW.RowBytes, nt, e, dev0.Stream);
+            using (var effect = EnterDeviceEffect(dev0))
+                dev0.DK.Embed(OwnedWeightPointer(dev0, _tokEmbdQW), TokensOf(dev0), dev0.Xs,
+                    _tokEmbdQW.Type, _tokEmbdQW.RowBytes, nt, e, dev0.Stream);
             StageEnd(dev0, 0);
             CheckSync(dev0, "embed");
             Dump(dev0, "embed.xs", dev0.Xs);
@@ -1412,15 +1622,20 @@ namespace TensorSharp.Cuda
                     // driver rejects a cross-context record with "invalid
                     // resource handle"); only the WAITS cross contexts, which
                     // is the supported multi-GPU pattern.
-                    src.MakeCurrent();
-                    CudaDriverApi.cuMemcpyDtoHAsync(src.BoundaryPinned, Ptr(src.Xs), copyBytes, src.Stream).ThrowOnError();
-                    CudaDriverApi.cuEventRecord(src.XsReadyEv, src.Stream).ThrowOnError();
-                    dst.MakeCurrent();
-                    CudaDriverApi.cuStreamWaitEvent(dst.Stream, src.XsReadyEv, 0).ThrowOnError();
-                    CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dst.Xs), src.BoundaryPinned, copyBytes, dst.Stream).ThrowOnError();
-                    CudaDriverApi.cuEventRecord(dst.CopyDoneEv, dst.Stream).ThrowOnError();
-                    src.MakeCurrent();
-                    CudaDriverApi.cuStreamWaitEvent(src.Stream, dst.CopyDoneEv, 0).ThrowOnError();
+                    ValidateDeviceOwner(dst);
+                    using (var effect = EnterDeviceEffect(src))
+                    {
+                        IntPtr source = OwnedPointer(src, src.Xs);
+                        IntPtr target = OwnedPointer(dst, dst.Xs);
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync(src.BoundaryPinned, source, copyBytes, src.Stream));
+                        _operationCalls.ThrowOnError(_operationCalls.cuEventRecord(src.XsReadyEv, src.Stream));
+                        dst.Alloc.Context.BindCurrent(_operationCalls);
+                        _operationCalls.ThrowOnError(_operationCalls.cuStreamWaitEvent(dst.Stream, src.XsReadyEv, 0));
+                        _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(target, src.BoundaryPinned, copyBytes, dst.Stream));
+                        _operationCalls.ThrowOnError(_operationCalls.cuEventRecord(dst.CopyDoneEv, dst.Stream));
+                        src.Alloc.Context.BindCurrent(_operationCalls);
+                        _operationCalls.ThrowOnError(_operationCalls.cuStreamWaitEvent(src.Stream, dst.CopyDoneEv, 0));
+                    }
                     curDev = L.Device;
                     StageEnd(dst, 11);
                 }
@@ -1525,7 +1740,8 @@ namespace TensorSharp.Cuda
                 else
                 using (Tensor headX = allLogitsRows ? dev.Xs.CopyRef() : dev.Xs.Narrow(0, nt - 1, 1))
                 {
-                    dev.DK.HcHead(headX, Ptr(_hcHeadFn), Ptr(_hcHeadScale), Ptr(_hcHeadBase), dev.Cur, e,
+                        using var effect = EnterDeviceEffect(dev);
+                    dev.DK.HcHead(headX, OwnedPointer(dev, _hcHeadFn), OwnedPointer(dev, _hcHeadScale), OwnedPointer(dev, _hcHeadBase), dev.Cur, e,
                         m.HcHeadScale.Length, m.HcHeadBase.Length, m.RmsEps, dev.Stream, headRows);
                 }
                 Dump(dev, "head.cur", dev.Cur);
@@ -1534,8 +1750,12 @@ namespace TensorSharp.Cuda
                 StageEnd(dev, 10);
                 Dump(dev, "head.logits", logitsDst, 8);
                 long logitCount = (long)headRows * m.NVocab;
-                CudaDriverApi.cuMemcpyDtoHAsync(_pinnedLogits, Ptr(logitsDst), new UIntPtr((ulong)logitCount * 4UL), dev.Stream).ThrowOnError();
-                CudaDriverApi.cuStreamSynchronize(dev.Stream).ThrowOnError();
+                using (var effect = EnterDeviceEffect(dev))
+                {
+                    _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoHAsync(_pinnedLogits, OwnedPointer(dev, logitsDst),
+                        new UIntPtr((ulong)logitCount * 4UL), dev.Stream));
+                    _operationCalls.cuStreamSynchronize(dev.Stream);
+                }
                 fixed (float* dst = logitsOut)
                     Buffer.MemoryCopy((void*)_pinnedLogits, dst, logitsOut.LongLength * 4L, logitCount * 4L);
             }
@@ -1571,9 +1791,10 @@ namespace TensorSharp.Cuda
 
             dev.DK.HcRms(dev.Xs, dev.Inv, nt, flatDim, m.RmsEps, dev.Stream);
             // mixes = hc_fn (F32 [24, flatDim]) x flat streams
-            MatMulF32(dev, Ptr(fn), dev.Xs, dev.Mixes, flatDim, HcMixDim, nt);
-            dev.DK.HcGatesComb(dev.Mixes, dev.Inv, Ptr(scale), Ptr(baseW), dev.Pre, dev.Post, dev.Comb,
-                nt, m.HcSinkhornIters, m.HcEps, dev.Stream);
+            MatMulF32(dev, fn, dev.Xs, dev.Mixes, flatDim, HcMixDim, nt);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.HcGatesComb(dev.Mixes, dev.Inv, OwnedPointer(dev, scale), OwnedPointer(dev, baseW), dev.Pre, dev.Post, dev.Comb,
+                    nt, m.HcSinkhornIters, m.HcEps, dev.Stream);
 
             if (meanCollapse)
                 dev.DK.HcMean(dev.Xs, dev.Cur, nt, m.NEmbd, m.NEmbd, 0, dev.Stream);
@@ -1581,8 +1802,11 @@ namespace TensorSharp.Cuda
                 dev.DK.HcCollapse(dev.Xs, delayed ?? dev.Pre, dev.Cur, nt, m.NEmbd, dev.Stream);
 
             if (publish != null)
-                CudaDriverApi.cuMemcpyDtoDAsync(Ptr(publish), Ptr(dev.Pre),
-                    new UIntPtr((ulong)((long)nt * HC * 4)), dev.Stream).ThrowOnError();
+            {
+                using var effect = EnterDeviceEffect(dev);
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyDtoDAsync(OwnedPointer(dev, publish), OwnedPointer(dev, dev.Pre),
+                    new UIntPtr((ulong)((long)nt * HC * 4)), dev.Stream));
+            }
         }
 
         // -------------------------------------------------------------------
@@ -1594,7 +1818,7 @@ namespace TensorSharp.Cuda
             var m = _m;
             int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
             bool comp = l.Ratio != 0;
-            IntPtr ropeTab = Ptr(comp ? dev.RopeComp : dev.RopeRaw);
+            Tensor ropeTab = comp ? dev.RopeComp : dev.RopeRaw;
 
             // q = wq_b(rms(wq_a(cur))), kv = wkv(cur)
             bool dbg = StageDebug && il == 0;
@@ -1606,7 +1830,9 @@ namespace TensorSharp.Cuda
             MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
             if (dbg)
                 Dump(dev, "L0.kv_raw", dev.KvRaw);
-            dev.DK.AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK), p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnPrep(dev.Q, dev.KvRaw, OwnedPointer(dev, l.KvNorm), OwnedPointer(dev, ropeTab),
+                    OwnedPointer(dev, l.RingK), p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
             StageEnd(dev, 2);
             if (dbg)
             {
@@ -1621,14 +1847,16 @@ namespace TensorSharp.Cuda
                 int cw = 2 * hd;
                 MatMul(dev, l.CompWkv, dev.Cur, dev.StKv, nt);
                 MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
-                dev.DK.ApeAdd(dev.StScore, Ptr(l.CompApe), p0, CsaRatio, nt, cw, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.ApeAdd(dev.StScore, OwnedPointer(dev, l.CompApe), p0, CsaRatio, nt, cw, dev.Stream);
                 RunCompressor(dev, nt, p0, CsaRatio, 2, hd, 2 * CsaRatio + _maxDraft, cw,
                     dev.StKv, dev.StScore, l.HistKv, l.HistScore, l.CompNorm, l.CompK, dev.RopeComp);
 
                 int lcw = 2 * m.IdxHeadSize;
                 MatMul(dev, l.IdxCompWkv, dev.Cur, dev.LidStKv, nt);
                 MatMul(dev, l.IdxCompWgate, dev.Cur, dev.LidStScore, nt);
-                dev.DK.ApeAdd(dev.LidStScore, Ptr(l.IdxCompApe), p0, CsaRatio, nt, lcw, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.ApeAdd(dev.LidStScore, OwnedPointer(dev, l.IdxCompApe), p0, CsaRatio, nt, lcw, dev.Stream);
                 RunCompressor(dev, nt, p0, CsaRatio, 2, m.IdxHeadSize, 2 * CsaRatio + _maxDraft, lcw,
                     dev.LidStKv, dev.LidStScore, l.LidHistKv, l.LidHistScore, l.IdxCompNorm, l.LidK, dev.RopeComp);
                 StageEnd(dev, 3);
@@ -1641,9 +1869,12 @@ namespace TensorSharp.Cuda
                     MatMul(dev, l.IdxQB, dev.Qr, dev.Iq, nt);
                     MatMul(dev, l.IdxProj, dev.Cur, dev.Iw, nt);
                     float iwScale = 1.0f / MathF.Sqrt((float)m.IdxHeadSize * m.IdxNHead);
-                    dev.DK.IdxPrep(dev.Iq, dev.Iw, Ptr(dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, rot, iwScale, nt, dev.Stream);
-                    dev.DK.IdxScores(dev.Iq, dev.Iw, Ptr(l.LidK), dev.IdxScores, p0, CsaRatio, m.IdxNHead, m.IdxHeadSize,
-                        nt, _compRowsCsa, maxVis, dev.Stream);
+                    using (var effect = EnterDeviceEffect(dev))
+                    {
+                        dev.DK.IdxPrep(dev.Iq, dev.Iw, OwnedPointer(dev, dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, rot, iwScale, nt, dev.Stream);
+                        dev.DK.IdxScores(dev.Iq, dev.Iw, OwnedPointer(dev, l.LidK), dev.IdxScores, p0, CsaRatio, m.IdxNHead, m.IdxHeadSize,
+                            nt, _compRowsCsa, maxVis, dev.Stream);
+                    }
                     dev.DK.TopK(dev.IdxScores, dev.TopkIdx, dev.TopkCnt, p0, CsaRatio, m.IdxTopK, _compRowsCsa, nt, dev.Stream);
                     StageEnd(dev, 4);
                     CheckSync(dev, $"indexer L{il}");
@@ -1658,7 +1889,8 @@ namespace TensorSharp.Cuda
             {
                 MatMul(dev, l.CompWkv, dev.Cur, dev.StKv, nt);
                 MatMul(dev, l.CompWgate, dev.Cur, dev.StScore, nt);
-                dev.DK.ApeAdd(dev.StScore, Ptr(l.CompApe), p0, HcaRatio, nt, hd, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.ApeAdd(dev.StScore, OwnedPointer(dev, l.CompApe), p0, HcaRatio, nt, hd, dev.Stream);
                 RunCompressor(dev, nt, p0, HcaRatio, 1, hd, HcaRatio + _maxDraft, hd,
                     dev.StKv, dev.StScore, l.HistKv, l.HistScore, l.CompNorm, l.CompK, dev.RopeComp);
                 StageEnd(dev, 3);
@@ -1667,8 +1899,10 @@ namespace TensorSharp.Cuda
             }
 
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(l.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
-                p0, m.NSwa, _ringRaw, nh, hd, mode, l.Ratio == 0 ? 1 : l.Ratio, m.IdxTopK, kqScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Attention(dev.Q, OwnedPointer(dev, l.RingK), OwnedPointer(dev, l.CompK), dev.TopkIdx, dev.TopkCnt,
+                    OwnedPointer(dev, l.Sinks), dev.AttnO,
+                    p0, m.NSwa, _ringRaw, nh, hd, mode, l.Ratio == 0 ? 1 : l.Ratio, m.IdxTopK, kqScale, nt, dev.Stream);
             StageEnd(dev, 5);
             if (dbg)
                 Dump(dev, "L0.attn_core", dev.AttnO);
@@ -1676,7 +1910,8 @@ namespace TensorSharp.Cuda
 
             // inverse rope + grouped LoRA out-projection
             int hpg = nh / m.OGroups;
-            dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, rot, hpg, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnFinish(dev.AttnO, OwnedPointer(dev, ropeTab), dev.OGrouped, p0, nh, hd, rot, hpg, nt, dev.Stream);
 
             int groupDim = hpg * hd;
             int oCat = m.OGroups * m.OLoraRank;
@@ -1687,7 +1922,8 @@ namespace TensorSharp.Cuda
             {
                 // Decode: the 8 group matvecs are ~11us each, so folding them
                 // into one grid saves more in launch gaps than it costs.
-                dev.Alloc.Kernels.LaunchMatvecBf16(woA.Ptr, Ptr(dev.OGrouped), Ptr(dev.OGroupedOut),
+                using var effect = EnterDeviceEffect(dev);
+                dev.Alloc.Kernels.LaunchMatvecBf16(OwnedWeightPointer(dev, woA), OwnedPointer(dev, dev.OGrouped), OwnedPointer(dev, dev.OGroupedOut),
                     groupDim, m.OLoraRank, dev.Stream, m.OGroups);
             }
             else
@@ -1695,8 +1931,9 @@ namespace TensorSharp.Cuda
                 for (int g = 0; g < m.OGroups; g++)
                 {
                     var slice = woA;
-                    slice.Ptr = (IntPtr)((long)woA.Ptr + (long)g * m.OLoraRank * woA.RowBytes);
+                    slice.ByteOffset = checked(woA.ByteOffset + (long)g * m.OLoraRank * woA.RowBytes);
                     slice.Ne1 = m.OLoraRank;
+                    slice.RawBytes = checked((long)slice.Ne1 * slice.RowBytes);
                     using Tensor input = Block(dev.OGrouped, (long)g * nt, nt, groupDim);
                     using Tensor output = Block(dev.OGroupedOut, (long)g * nt, nt, m.OLoraRank);
                     MatMul(dev, slice, input, output, nt);
@@ -1725,14 +1962,15 @@ namespace TensorSharp.Cuda
             var m = _m;
             int e = m.NEmbd, nh = m.NHead, hd = m.HeadDim, rot = m.NRot;
             int ratio = l.Ratio;
-            IntPtr ropeTab = Ptr(ratio != 0 ? dev.RopeComp : dev.RopeRaw);
+            Tensor ropeTab = ratio != 0 ? dev.RopeComp : dev.RopeRaw;
 
             MatMul(dev, l.WqA, dev.Cur, dev.Qr, nt);
             RmsNorm(dev, dev.Qr, l.QANorm, nt);
             MatMul(dev, l.WqB, dev.Qr, dev.Q, nt);
             MatMul(dev, l.Wkv, dev.Cur, dev.KvRaw, nt);
-            dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, Ptr(l.KvNorm), ropeTab, Ptr(l.RingK),
-                p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41AttnPrep(dev.Q, dev.KvRaw, OwnedPointer(dev, l.KvNorm), OwnedPointer(dev, ropeTab), OwnedPointer(dev, l.RingK),
+                    p0, _ringRaw, nh, hd, rot, m.RmsEps, nt, dev.Stream);
             Trace(dev, TraceLayer(il, "q"), dev.Q, (long)nt * nh * hd);
             Trace(dev, TraceLayer(il, "raw_k"), dev.KvRaw, (long)nt * hd);
             StageEnd(dev, 2);
@@ -1755,9 +1993,12 @@ namespace TensorSharp.Cuda
             }
 
             DevLayer source = ratio != 0 ? _layers[l.KvSource] : l;
+            Dev sourceDev = DeviceOfLayer(source);
             float kqScale = 1.0f / MathF.Sqrt(hd);
-            dev.DK.Attention(dev.Q, Ptr(l.RingK), Ptr(source.CompK), dev.TopkIdx, dev.TopkCnt, Ptr(l.Sinks), dev.AttnO,
-                p0, m.NSwa, _ringRaw, nh, hd, mode, ratio == 0 ? 1 : ratio, m.IdxTopK, kqScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Attention(dev.Q, OwnedPointer(dev, l.RingK), OwnedPointer(sourceDev, source.CompK),
+                    dev.TopkIdx, dev.TopkCnt, OwnedPointer(dev, l.Sinks), dev.AttnO,
+                    p0, m.NSwa, _ringRaw, nh, hd, mode, ratio == 0 ? 1 : ratio, m.IdxTopK, kqScale, nt, dev.Stream);
             StageEnd(dev, 5);
             CheckSync(dev, $"v41_attn_core L{il}");
 
@@ -1784,8 +2025,9 @@ namespace TensorSharp.Cuda
 
             if (nBlocks > 0)
             {
-                dev.DK.V41Compress(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), Ptr(l.CompNorm),
-                    dev.Latent, firstBoundary, nBlocks, p0, ratio, hd, m.RmsEps, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.V41Compress(dev.StKv, dev.StScore, OwnedPointer(dev, l.HistKv), OwnedPointer(dev, l.HistScore),
+                        OwnedPointer(dev, l.CompNorm), dev.Latent, firstBoundary, nBlocks, p0, ratio, hd, m.RmsEps, dev.Stream);
 
                 using (Tensor latentRows = Rows(dev.Latent, nBlocks))
                 using (Tensor keyRows = Rows(dev.LatentK, nBlocks))
@@ -1794,39 +2036,51 @@ namespace TensorSharp.Cuda
                     RmsNorm(dev, keyRows, l.IndexerKNorm, nBlocks);
                 }
 
-                dev.DK.V41Commit(dev.LatentK, Ptr(dev.RopeComp), Ptr(l.LidK),
-                    firstBoundary, nBlocks, ratio, id, m.NRot, 1, dev.Stream);
-                dev.DK.V41Commit(dev.Latent, Ptr(dev.RopeComp), Ptr(l.CompK),
-                    firstBoundary, nBlocks, ratio, hd, m.NRot, 2, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                {
+                    dev.DK.V41Commit(dev.LatentK, OwnedPointer(dev, dev.RopeComp), OwnedPointer(dev, l.LidK),
+                        firstBoundary, nBlocks, ratio, id, m.NRot, 1, dev.Stream);
+                    dev.DK.V41Commit(dev.Latent, OwnedPointer(dev, dev.RopeComp), OwnedPointer(dev, l.CompK),
+                        firstBoundary, nBlocks, ratio, hd, m.NRot, 2, dev.Stream);
+                }
             }
 
             if (ratio > 1)
-                dev.DK.V41Persist(dev.StKv, dev.StScore, Ptr(l.HistKv), Ptr(l.HistScore), p0, nt, ratio, hd, dev.Stream);
+            {
+                using var effect = EnterDeviceEffect(dev);
+                dev.DK.V41Persist(dev.StKv, dev.StScore, OwnedPointer(dev, l.HistKv), OwnedPointer(dev, l.HistScore),
+                    p0, nt, ratio, hd, dev.Stream);
+            }
         }
 
         private void BuildIndexerV41(Dev dev, DevLayer l, int il, int nt, int p0, int ratio)
         {
             var m = _m;
             DevLayer source = _layers[l.KvSource];
+            Dev sourceDev = DeviceOfLayer(source);
             int rows = dev.IdxScores.Sizes[1] is long c ? (int)c : 0;
 
             MatMul(dev, l.IdxQB, dev.Qr, dev.Iq, nt);
             MatMul(dev, l.IdxProj, dev.Cur, dev.Iw, nt);
             float iwScale = 1.0f / MathF.Sqrt((float)m.IdxHeadSize * m.IdxNHead);
-            dev.DK.V41IdxPrep(dev.Iq, dev.Iw, Ptr(dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, m.NRot,
-                iwScale, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41IdxPrep(dev.Iq, dev.Iw, OwnedPointer(dev, dev.RopeComp), p0, m.IdxNHead, m.IdxHeadSize, m.NRot,
+                    iwScale, nt, dev.Stream);
 
             // Rows this layer may see: visibility, then whatever the candidate
             // layer left standing for the layers after it.
             bool prune = _v41CandActive && il > m.CandidateSource;
             int maxVis = (int)(((long)p0 + nt) / ratio);
-            dev.DK.V41IdxScores(dev.Iq, dev.Iw, Ptr(source.LidK), prune ? Ptr(dev.CandMask) : IntPtr.Zero,
-                dev.IdxScores, p0, ratio, m.IdxNHead, m.IdxHeadSize, rows, maxVis, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41IdxScores(dev.Iq, dev.Iw, OwnedPointer(sourceDev, source.LidK),
+                    prune ? OwnedPointer(dev, dev.CandMask) : IntPtr.Zero,
+                    dev.IdxScores, p0, ratio, m.IdxNHead, m.IdxHeadSize, rows, maxVis, nt, dev.Stream);
 
             if (il == m.CandidateSource)
             {
-                dev.DK.V41Candidate(dev.IdxScores, Ptr(dev.CandMask), p0, ratio, rows,
-                    m.CandidateBlock, m.CandidateTopk, nt, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.V41Candidate(dev.IdxScores, OwnedPointer(dev, dev.CandMask), p0, ratio, rows,
+                        m.CandidateBlock, m.CandidateTopk, nt, dev.Stream);
                 _v41CandActive = true;
             }
 
@@ -1835,14 +2089,15 @@ namespace TensorSharp.Cuda
 
         /// <summary>Inverse RoPE on the rope slice, then the grouped LoRA output
         /// projection. Shared by both architectures.</summary>
-        private void OutProjection(Dev dev, DevLayer l, int nt, int p0, IntPtr ropeTab)
+        private void OutProjection(Dev dev, DevLayer l, int nt, int p0, Tensor ropeTab)
         {
             var m = _m;
             int nh = m.NHead, hd = m.HeadDim;
             int hpg = nh / m.OGroups;
             // p0, not 0: the inverse rotation has to undo the rotation each token
             // was given at its OWN absolute position.
-            dev.DK.AttnFinish(dev.AttnO, ropeTab, dev.OGrouped, p0, nh, hd, m.NRot, hpg, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.AttnFinish(dev.AttnO, OwnedPointer(dev, ropeTab), dev.OGrouped, p0, nh, hd, m.NRot, hpg, nt, dev.Stream);
 
             int groupDim = hpg * hd;
             int oCat = m.OGroups * m.OLoraRank;
@@ -1850,8 +2105,9 @@ namespace TensorSharp.Cuda
             for (int g = 0; g < m.OGroups; g++)
             {
                 var slice = woA;
-                slice.Ptr = (IntPtr)((long)woA.Ptr + (long)g * m.OLoraRank * woA.RowBytes);
+                slice.ByteOffset = checked(woA.ByteOffset + (long)g * m.OLoraRank * woA.RowBytes);
                 slice.Ne1 = m.OLoraRank;
+                slice.RawBytes = checked((long)slice.Ne1 * slice.RowBytes);
                 using Tensor input = Block(dev.OGrouped, (long)g * nt, nt, groupDim);
                 using Tensor output = Block(dev.OGroupedOut, (long)g * nt, nt, m.OLoraRank);
                 MatMul(dev, slice, input, output, nt);
@@ -1871,11 +2127,13 @@ namespace TensorSharp.Cuda
             var m = _m;
             long cols = (long)m.Engram.HashColumns * m.Engram.HeadDim;
             m.Engram.GatherEngramRows(l.EngramIndex, nt, (float*)dev.EngramPinned);
-            CudaDriverApi.cuMemcpyHtoDAsync(Ptr(dev.EngramLookup), dev.EngramPinned,
-                new UIntPtr((ulong)(nt * cols * 4)), dev.Stream).ThrowOnError();
+            using (var effect = EnterDeviceEffect(dev))
+                _operationCalls.ThrowOnError(_operationCalls.cuMemcpyHtoDAsync(OwnedPointer(dev, dev.EngramLookup), dev.EngramPinned,
+                    new UIntPtr((ulong)(nt * cols * 4)), dev.Stream));
             MatMul(dev, l.EngramWkv, dev.EngramLookup, dev.EngramKv, nt);
-            dev.DK.V41EngramGate(dev.Xs, dev.EngramKv, Ptr(l.EngramQ), Ptr(l.EngramK),
-                HC, m.NEmbd, m.RmsEps, nt, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.V41EngramGate(dev.Xs, dev.EngramKv, OwnedPointer(dev, l.EngramQ), OwnedPointer(dev, l.EngramK),
+                    HC, m.NEmbd, m.RmsEps, nt, dev.Stream);
         }
 
         /// <summary>A candidate mask belongs to one ubatch: the rows it names are
@@ -1897,10 +2155,13 @@ namespace TensorSharp.Cuda
             if (firstBoundary >= 0)
             {
                 int nBlocks = (int)(((long)p0 + nt - 1 - firstBoundary) / ratio) + 1;
-                dev.DK.Compress(stKv, stScore, Ptr(histKv), Ptr(histScore), Ptr(normW), Ptr(ropeTab), Ptr(cache),
+                using var effect = EnterDeviceEffect(dev);
+                dev.DK.Compress(stKv, stScore, OwnedPointer(dev, histKv), OwnedPointer(dev, histScore), OwnedPointer(dev, normW),
+                    OwnedPointer(dev, ropeTab), OwnedPointer(dev, cache),
                     firstBoundary, nBlocks, p0, ratio, coff, head, stateSize, _m.NRot, _m.RmsEps, dev.Stream);
             }
-            dev.DK.Persist(stKv, stScore, Ptr(histKv), Ptr(histScore), p0, nt, stateSize, cw, dev.Stream);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.Persist(stKv, stScore, OwnedPointer(dev, histKv), OwnedPointer(dev, histScore), p0, nt, stateSize, cw, dev.Stream);
         }
 
         // -------------------------------------------------------------------
@@ -1915,9 +2176,10 @@ namespace TensorSharp.Cuda
 
             // router logits (gate_inp is F32) + selection/weights
             bool dbg = StageDebug && il == 0;
-            MatMulF32(dev, Ptr(l.GateInp), dev.Cur, dev.RouterLogits, e, nEx, nt);
-            dev.DK.MoeSelect(dev.RouterLogits, Ptr(l.ExpProbsBias), Ptr(l.Tid2Eid), tokensDev, dev.Sel, dev.SelW,
-                nEx, nUsed, m.ExpertWeightsNorm ? 1 : 0, m.ExpertWeightsScale, nt, dev.Stream);
+            MatMulF32(dev, l.GateInp, dev.Cur, dev.RouterLogits, e, nEx, nt);
+            using (var effect = EnterDeviceEffect(dev))
+                dev.DK.MoeSelect(dev.RouterLogits, OwnedPointer(dev, l.ExpProbsBias), OwnedPointer(dev, l.Tid2Eid), tokensDev, dev.Sel, dev.SelW,
+                    nEx, nUsed, m.ExpertWeightsNorm ? 1 : 0, m.ExpertWeightsScale, nt, dev.Stream);
             StageEnd(dev, 7);
             if (dbg)
             {
@@ -1972,11 +2234,13 @@ namespace TensorSharp.Cuda
                 QuantizeQ81(dev, dev.Cur, dev.ActQ8A, e, nt);
             if (nt == 1)
             {
-                dev.DK.MoeGateUpDecode(l.GateExps.Ptr, l.UpExps.Ptr, dev.ActQ8A, dev.Sel,
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.MoeGateUpDecode(OwnedWeightPointer(dev, l.GateExps), OwnedWeightPointer(dev, l.UpExps), dev.ActQ8A, dev.Sel,
                     dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nUsed, dev.Stream);
                 SwigluClamp(dev.ExpGate, dev.ExpUp, (long)nUsed * ff, l.ClampExp);
                 QuantizeQ81(dev, dev.ExpGate, dev.ActQ8B, ff, nUsed);
-                dev.DK.MoeDownDecode(l.DownExps.Ptr, dev.ActQ8B, dev.Sel, dev.ExpDown,
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.DK.MoeDownDecode(OwnedWeightPointer(dev, l.DownExps), dev.ActQ8B, dev.Sel, dev.ExpDown,
                     downType, e, ff, l.DownExps.RowBytes, nUsed, dev.Stream);
                 dev.DK.MoeScatterAdd(dev.ExpDown, null, dev.SelW, dev.ShDown, dev.FfnOut, 1, nUsed, e, dev.Stream);
             }
@@ -1984,7 +2248,8 @@ namespace TensorSharp.Cuda
             {
                 // grouping plan (all on device; Counts zeroed via the fill kernel
                 // so everything stays stream-ordered)
-                dev.Alloc.Kernels.LaunchFillF32(Ptr(dev.Counts), nEx, 0f, dev.Stream);
+                using (var effect = EnterDeviceEffect(dev))
+                    dev.Alloc.Kernels.LaunchFillF32(OwnedPointer(dev, dev.Counts), nEx, 0f, dev.Stream);
                 dev.DK.MoeCount(dev.Sel, dev.Counts, s, dev.Stream);
                 dev.DK.MoeScan(dev.Counts, dev.Offsets, dev.Cursors, nEx, dev.Stream);
                 dev.DK.MoeScatter(dev.Sel, dev.Cursors, dev.RowOfSlot, dev.SlotToken, s, nUsed, dev.Stream);
@@ -1995,21 +2260,25 @@ namespace TensorSharp.Cuda
                 // prefill.
                 if (staged)
                 {
-                    dev.DK.MoeGateUpStaged(l.GateExps.Ptr, l.UpExps.Ptr, dev.SplitQsA, dev.SplitDA,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeGateUpStaged(OwnedWeightPointer(dev, l.GateExps), OwnedWeightPointer(dev, l.UpExps), dev.SplitQsA, dev.SplitDA,
                         dev.Counts, dev.Offsets, dev.SlotToken,
                         dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nEx, dev.Stream);
                     SwigluClamp(dev.ExpGate, dev.ExpUp, (long)s * ff, l.ClampExp);
                     QuantizeQ81Split(dev, dev.ExpGate, dev.SplitQsB, dev.SplitDB, ff, s);
-                    dev.DK.MoeDownStaged(l.DownExps.Ptr, dev.SplitQsB, dev.SplitDB, dev.Counts, dev.Offsets, dev.ExpDown,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeDownStaged(OwnedWeightPointer(dev, l.DownExps), dev.SplitQsB, dev.SplitDB, dev.Counts, dev.Offsets, dev.ExpDown,
                         downType, e, ff, l.DownExps.RowBytes, nEx, dev.Stream);
                 }
                 else
                 {
-                    dev.DK.MoeGateUp(l.GateExps.Ptr, l.UpExps.Ptr, dev.ActQ8A, dev.Counts, dev.Offsets, dev.SlotToken,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeGateUp(OwnedWeightPointer(dev, l.GateExps), OwnedWeightPointer(dev, l.UpExps), dev.ActQ8A, dev.Counts, dev.Offsets, dev.SlotToken,
                         dev.ExpGate, dev.ExpUp, guType, ff, e, l.GateExps.RowBytes, nEx, dev.Stream);
                     SwigluClamp(dev.ExpGate, dev.ExpUp, (long)s * ff, l.ClampExp);
                     QuantizeQ81(dev, dev.ExpGate, dev.ActQ8B, ff, s);
-                    dev.DK.MoeDown(l.DownExps.Ptr, dev.ActQ8B, dev.Counts, dev.Offsets, dev.ExpDown,
+                    using (var effect = EnterDeviceEffect(dev))
+                        dev.DK.MoeDown(OwnedWeightPointer(dev, l.DownExps), dev.ActQ8B, dev.Counts, dev.Offsets, dev.ExpDown,
                         downType, e, ff, l.DownExps.RowBytes, nEx, dev.Stream);
                 }
                 dev.DK.MoeScatterAdd(dev.ExpDown, dev.RowOfSlot, dev.SelW, dev.ShDown, dev.FfnOut, nt, nUsed, e, dev.Stream);
@@ -2062,7 +2331,9 @@ namespace TensorSharp.Cuda
 
         private void QuantizeQ81(Dev dev, Tensor input, Tensor scratch, int inDim, int rows)
         {
-            dev.Alloc.Kernels.LaunchQuantizeQ81Rows(Ptr(input), Ptr(scratch), inDim, rows, dev.Stream, warpCooperative: true);
+            using var effect = EnterDeviceEffect(dev);
+            dev.Alloc.Kernels.LaunchQuantizeQ81Rows(OwnedPointer(dev, input), OwnedPointer(dev, scratch),
+                inDim, rows, dev.Stream, warpCooperative: true);
         }
 
         /// <summary>Dense split q8_1 (contiguous int8 row + separate per-block
@@ -2071,7 +2342,9 @@ namespace TensorSharp.Cuda
         /// vectorizable.</summary>
         private void QuantizeQ81Split(Dev dev, Tensor input, Tensor qs, Tensor d, int inDim, int rows)
         {
-            dev.Alloc.Kernels.LaunchQuantizeQ81SplitRows(Ptr(input), Ptr(qs), Ptr(d), inDim, rows, dev.Stream);
+            using var effect = EnterDeviceEffect(dev);
+            dev.Alloc.Kernels.LaunchQuantizeQ81SplitRows(OwnedPointer(dev, input), OwnedPointer(dev, qs), OwnedPointer(dev, d),
+                inDim, rows, dev.Stream);
         }
 
         /// <summary>
@@ -2091,57 +2364,250 @@ namespace TensorSharp.Cuda
             // blocks at the front of the buffer, not full-width row views.
             using Tensor a = Block(input, 0, rows, w.Ne0);
             using Tensor r = Block(output, 0, rows, w.Ne1);
-            CudaQuantizedOps.AddmmResidentToFloat32(r, a, w.Ptr, w.Type, w.Ne0, w.Ne1);
+            ValidateDeviceOwner(dev);
+            if (!ReferenceEquals(w.Backing, dev.Arena))
+                throw new InvalidOperationException("Resident weight does not belong to the actual device arena.");
+            CudaQuantizedOps.AddmmOwnedResidentToFloat32(r, a, w.Backing, w.ByteOffset, w.RawBytes,
+                w.Type, w.Ne0, w.Ne1, _operationCalls);
         }
 
         /// <summary>Dense F32 weight (MoE router, hyper-connection mixer) held in
-        /// the arena rather than as a tensor: same shared routing, type F32.</summary>
-        private void MatMulF32(Dev dev, IntPtr wF32, Tensor input, Tensor output, int inDim, int outDim, int rows)
+        /// an actual tensor: same shared routing, type F32.</summary>
+        private void MatMulF32(Dev dev, Tensor weight, Tensor input, Tensor output, int inDim, int outDim, int rows)
         {
             using Tensor a = Block(input, 0, rows, inDim);
             using Tensor r = Block(output, 0, rows, outDim);
-            CudaQuantizedOps.AddmmResidentToFloat32(r, a, wF32, TF32, inDim, outDim);
+            ValidateDeviceOwner(dev);
+            CudaQuantizedOps.AddmmOwnedResidentToFloat32(r, a, weight, 0, checked((long)inDim * outDim * sizeof(float)),
+                TF32, inDim, outDim, _operationCalls);
+        }
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors, ICollection<IAllocator> allocators)
+        {
+            if (_devs == null) return;
+            foreach (var dev in _devs)
+            {
+                if (dev == null) continue;
+                if (dev.Alloc != null) allocators.Add(dev.Alloc);
+                foreach (var tensor in dev.OwnedTensors) if (tensor != null) tensors.Add(tensor);
+            }
+        }
+
+        private void ThrowIfRetiring()
+        {
+            if (_cleanupFailure != null)
+                throw new InvalidOperationException("DSV4 CUDA cleanup previously failed; native ownership remains unsafe.", _cleanupFailure);
+            if (_retiring) throw new ObjectDisposedException(nameof(Dsv4CudaEngine));
+        }
+
+        private static int DiscoverDeviceCount()
+        {
+            var discovery = new object();
+            var calls = new CudaNativeCalls(discovery, NativeOwnerRole.NativeHandle, CudaNativeApi.Instance);
+            using var lease = calls.EnterEffect();
+            try
+            {
+                calls.ThrowOnError(calls.cuInit(0));
+                calls.ThrowOnError(calls.cuDeviceGetCount(out int count));
+                return count;
+            }
+            finally { calls.CompleteSafeRelease(lease); }
+        }
+
+        private CudaOperationAdmission EnterOperation()
+        {
+            ThrowIfRetiring();
+            return CudaOperationAdmission.Enter(this, _operationAllocators);
+        }
+
+        private NativeEffectLease EnterDeviceEffect(Dev dev)
+        {
+            ValidateDeviceOwner(dev);
+            var lease = _operationCalls.EnterEffect();
+            try
+            {
+                dev.Alloc.Context.BindCurrent(_operationCalls);
+                return lease;
+            }
+            catch
+            {
+                lease.Dispose();
+                throw;
+            }
+        }
+
+        private void ValidateDeviceOwner(Dev dev)
+        {
+            if (dev == null || Array.IndexOf(_devs, dev) < 0 || dev.Alloc == null
+                || Array.IndexOf(_operationAllocators, dev.Alloc) < 0
+                || !ReferenceEquals(dev.Alloc.NativeCalls.Api, _operationCalls.Api)
+                || !_operationCalls.CoversDevice(dev.Alloc.DeviceId))
+                throw new InvalidOperationException("DSV4 effects require their actual frozen device owner.");
+        }
+
+        private IntPtr OwnedWeightPointer(Dev dev, in DevQW weight)
+        {
+            if (!ReferenceEquals(weight.Backing, dev.Arena) || weight.ByteOffset < 0 || weight.RawBytes <= 0
+                || weight.ByteOffset > dev.Arena.Storage.ByteLength - weight.RawBytes)
+                throw new InvalidOperationException("Resident weight is outside its actual device arena.");
+            return new IntPtr(checked(OwnedPointer(dev, weight.Backing).ToInt64() + weight.ByteOffset));
+        }
+
+        private IntPtr OwnedPointer(Dev dev, Tensor tensor)
+        {
+            ValidateDeviceOwner(dev);
+            if (tensor == null) return IntPtr.Zero;
+            if (tensor.Storage is not CudaStorage storage || !ReferenceEquals(storage.Allocator, dev.Alloc))
+                throw new InvalidOperationException("DSV4 effect tensor requires its actual device allocator.");
+            return Ptr(tensor);
+        }
+
+        private Dev DeviceOfLayer(DevLayer layer)
+        {
+            if (layer == null || Array.IndexOf(_layers, layer) < 0
+                || layer.Device < 0 || layer.Device >= _devs.Length)
+                throw new InvalidOperationException("DSV4 cache source requires an actual engine layer.");
+            Dev dev = _devs[layer.Device];
+            ValidateDeviceOwner(dev);
+            return dev;
         }
 
         public void Dispose()
+            => ReleaseResources();
+
+        internal void FenceRetirement()
         {
-            FreeHostMoeBuffers();
-            foreach (var dev in _devs)
+            if (_cleanupFailure != null) ThrowIfRetiring();
+            _retiring = true;
+        }
+
+        private void ReleaseResources()
+        {
+            if (_disposed) return;
+            if (_cleanupFailure != null) ThrowIfRetiring();
+            _retiring = true;
+            var tensors = new List<Tensor>();
+            var allocators = new List<IAllocator>();
+            CollectDisposalOwnership(tensors, allocators);
+            var plan = CudaRetirementPlan.PrepareModel(this, tensors, allocators);
+            var restoration = plan.CaptureRestoration();
+            WaitForUploadWorkers();
+            try
             {
-                if (dev == null)
-                    continue;
+                plan.Drain(restoration);
+                plan.AllowStorageRelease();
+                DisposeOwned(plan, restoration);
+                plan.Complete();
+                _constructionCleanup.CompleteRelease(this);
+            }
+            catch (Exception failure)
+            {
+                restoration?.MarkCleanupFailed();
+                _cleanupFailure ??= failure;
+                throw;
+            }
+            restoration?.Restore();
+        }
+
+        internal void DisposeOwned(CudaRetirementPlan plan, CudaContextRestoration restoration)
+        {
+            if (_disposed) return;
+            if (_cleanupFailure != null) ThrowIfRetiring();
+            foreach (var dev in _devs ?? Array.Empty<Dev>())
+                if (dev?.Alloc != null && !plan.Owns(dev.Alloc))
+                    throw new InvalidOperationException("DSV4 CUDA cleanup requires its complete actual allocator plan.");
+            foreach (var worker in _uploadWorkers)
+                if (worker.Thread?.IsAlive == true)
+                    throw new InvalidOperationException("DSV4 upload workers must settle before native resource cleanup.");
+            _retiring = true;
+            using (var cleanupLease = plan.EnterModelCleanupEffect())
+            {
                 try
                 {
-                    dev.MakeCurrent();
-                    CudaDriverApi.cuStreamSynchronize(dev.Stream);
-                    // Scratch, caches, small tensors and the weight arena are all
-                    // allocator-owned: returning them to the pool is the only
-                    // teardown needed (the allocator frees the pool on Dispose).
-                    foreach (var t in dev.OwnedTensors)
-                        t.Dispose();
-                    dev.OwnedTensors.Clear();
-                    if (dev.Event != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.Event);
-                    if (dev.TokEv0 != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.TokEv0);
-                    if (dev.TokEv1 != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.TokEv1);
-                    if (dev.XsReadyEv != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.XsReadyEv);
-                    if (dev.CopyDoneEv != IntPtr.Zero)
-                        CudaDriverApi.cuEventDestroy(dev.CopyDoneEv);
-                    if (dev.BoundaryPinned != IntPtr.Zero)
-                        CudaDriverApi.cuMemFreeHost(dev.BoundaryPinned);
-                    dev.DK?.Dispose();
-                    dev.Alloc?.Dispose();
+                    foreach (var worker in _uploadWorkers) worker.Release();
+                    _uploadWorkers.Clear();
+                    foreach (var dev in _devs ?? Array.Empty<Dev>())
+                    {
+                        if (dev?.Alloc == null) continue;
+                        var calls = dev.Alloc.NativeCalls;
+                        dev.Alloc.Context.BindCurrent(calls);
+                        calls.cuStreamSynchronize(dev.Stream);
+                    }
+                    FreeHostMoeBuffers();
+                    foreach (var dev in _devs ?? Array.Empty<Dev>())
+                    {
+                        if (dev?.Alloc == null) continue;
+                        var calls = dev.Alloc.NativeCalls;
+                        dev.Alloc.Context.BindCurrent(calls);
+                        dev.DK?.Dispose();
+                        dev.DK = null;
+                        foreach (var tensor in dev.OwnedTensors) tensor.Dispose();
+                        dev.OwnedTensors.Clear();
+                        ReleaseEvent(ref dev.Event);
+                        ReleaseEvent(ref dev.TokEv0);
+                        ReleaseEvent(ref dev.TokEv1);
+                        ReleaseEvent(ref dev.XsReadyEv);
+                        ReleaseEvent(ref dev.CopyDoneEv);
+                        ReleasePinned(ref dev.BoundaryPinned);
+                        ReleasePinned(ref dev.EngramPinned);
+
+                        void ReleaseEvent(ref IntPtr handle)
+                        {
+                            if (handle == IntPtr.Zero) return;
+                            calls.cuEventDestroy(handle);
+                            handle = IntPtr.Zero;
+                        }
+                        void ReleasePinned(ref IntPtr handle)
+                        {
+                            if (handle == IntPtr.Zero) return;
+                            calls.cuMemFreeHost(handle);
+                            handle = IntPtr.Zero;
+                        }
+                    }
+                    if (_devs != null && _devs.Length > 0 && _devs[0]?.Alloc != null)
+                    {
+                        var calls = _devs[0].Alloc.NativeCalls;
+                        _devs[0].Alloc.Context.BindCurrent(calls);
+                        if (_pinnedTokens0 != IntPtr.Zero)
+                        {
+                            calls.cuMemFreeHost(_pinnedTokens0);
+                            _pinnedTokens0 = IntPtr.Zero;
+                        }
+                        if (_pinnedTokens1 != IntPtr.Zero)
+                        {
+                            calls.cuMemFreeHost(_pinnedTokens1);
+                            _pinnedTokens1 = IntPtr.Zero;
+                        }
+                        if (_pinnedLogits != IntPtr.Zero)
+                        {
+                            calls.cuMemFreeHost(_pinnedLogits);
+                            _pinnedLogits = IntPtr.Zero;
+                        }
+                        if (_ds != null && _ds.PinnedCap != IntPtr.Zero)
+                        {
+                            _ds.Dev.Alloc.Context.BindCurrent(_ds.Dev.Alloc.NativeCalls);
+                            _ds.Dev.Alloc.NativeCalls.cuMemFreeHost(_ds.PinnedCap);
+                            _ds.PinnedCap = IntPtr.Zero;
+                        }
+                    }
                 }
-                catch
+                catch (Exception failure)
                 {
-                    // teardown must not throw
+                    _cleanupFailure ??= failure;
+                    restoration?.MarkCleanupFailed();
+                    plan.PublishModelCleanupFailure(cleanupLease, failure);
+                    throw;
                 }
             }
-            if (_pinnedTokens0 != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(_pinnedTokens0);
-            if (_pinnedTokens1 != IntPtr.Zero) CudaDriverApi.cuMemFreeHost(_pinnedTokens1);
+            foreach (var dev in _devs ?? Array.Empty<Dev>()) dev?.Alloc?.DisposeOwned(plan, restoration);
+            if (_operationCalls != null)
+            {
+                using var lease = _operationCalls.EnterEffect();
+                _operationCalls.CompleteSafeRelease(lease);
+            }
+            _disposed = true;
+            _retainedParent = null;
+            _constructionCleanup.CompleteRelease(this);
         }
     }
 }
