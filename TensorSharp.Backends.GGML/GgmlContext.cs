@@ -90,13 +90,13 @@ namespace TensorSharp.GGML
             }
         }
 
-        internal void ThrowIfDisposed()
+        internal void ThrowIfDisposed(bool releasingStorage = false)
         {
             lock (lifetimeGate)
             {
                 if (disposed || disposing) throw new ObjectDisposedException(nameof(GgmlContext));
                 if (cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
-                if (cleaning) throw new InvalidOperationException("The context is performing resource cleanup.");
+                if (cleaning && !releasingStorage) throw new InvalidOperationException("The context is performing resource cleanup.");
                 registration?.ThrowIfQuarantined();
             }
         }

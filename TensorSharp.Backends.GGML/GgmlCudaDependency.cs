@@ -132,7 +132,14 @@ public static partial class GgmlNativeLoader
             }
             throw;
         }
-        finally { lock (s_gate) s_processOwnerToken.CudaAttachmentInProgress = false; }
+        finally
+        {
+            lock (s_gate)
+            {
+                s_processOwnerToken.CudaAttachmentInProgress = false;
+                Monitor.PulseAll(s_gate);
+            }
+        }
     }
 
     internal static void EnsureEffectiveCudaDependency(NativeOwnerRegistration registration, GgmlBackendType? requestedBackend)
@@ -206,7 +213,7 @@ public static partial class GgmlNativeLoader
 
         internal void CompleteRelease(object actualOwner, NativeOwnerRegistration registration)
         {
-            using var reservation = ReserveResourceCleanup(actualOwner);
+            using var completion = ReserveOwnerCompletion(actualOwner);
             bool attached;
             lock (s_gate)
             {
@@ -221,7 +228,6 @@ public static partial class GgmlNativeLoader
                 effect.CompleteSafeRelease(actualOwner);
             }
             Dispose();
-            reservation.Complete();
         }
 
         public void Dispose()
@@ -261,6 +267,25 @@ public static partial class GgmlNativeLoader
         }
     }
 
+    private static NativeCallLease ReserveOwnerCompletion(object actualOwner)
+    {
+        lock (s_gate)
+        {
+            EnsureOperational();
+            while (s_processOwnerToken.CudaAttachmentInProgress ||
+                (s_cleanup != null && s_cleanup.Thread != Environment.CurrentManagedThreadId))
+            {
+                CheckProcessDependency();
+                Monitor.Wait(s_gate);
+                EnsureOperational();
+            }
+            // Count metadata completion so first CUDA attachment cannot change this owner's scopes.
+            var completion = ReserveCall();
+            completion.RetainOwnerCompletion(actualOwner);
+            return completion;
+        }
+    }
+
     internal sealed class NativeCallLease : IDisposable
     {
         private readonly long _id;
@@ -270,6 +295,7 @@ public static partial class GgmlNativeLoader
         private NativeEffectLease? _effect;
         private ExceptionDispatchInfo? _callbackFailure;
         private NativeResource? _acquisition;
+        private object? _completionOwner;
         internal long Id => _id;
         internal NativeCallLease(long id, string? kind, IntPtr handle)
         {
@@ -284,6 +310,7 @@ public static partial class GgmlNativeLoader
         }
 
         internal void RetainAcquisition(object acquisition) => _acquisition = (NativeResource)acquisition;
+        internal void RetainOwnerCompletion(object actualOwner) => _completionOwner = actualOwner;
 
         internal void ResumeNative()
         {
@@ -331,6 +358,8 @@ public static partial class GgmlNativeLoader
             }
             GC.KeepAlive(_acquisition);
             _acquisition = null;
+            GC.KeepAlive(_completionOwner);
+            _completionOwner = null;
         }
     }
 
@@ -343,6 +372,7 @@ public static partial class GgmlNativeLoader
             bool attach;
             lock (s_gate)
             {
+                CheckCleanupAdmission();
                 _resource = new(kind);
                 _call = ReserveCall();
                 _call.RetainAcquisition(_resource);
@@ -454,7 +484,11 @@ public static partial class GgmlNativeLoader
                     throw new InvalidOperationException("The GGML cleanup reservation must exit on its originating thread.");
                 _disposed = true;
                 if (!_completed) _state.Incomplete = true;
-                if (--_state.Depth == 0) s_cleanup = null;
+                if (--_state.Depth == 0)
+                {
+                    s_cleanup = null;
+                    Monitor.PulseAll(s_gate);
+                }
                 GC.KeepAlive(_caller);
                 _caller = null;
             }

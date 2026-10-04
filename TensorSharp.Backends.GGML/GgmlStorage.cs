@@ -25,10 +25,13 @@ namespace TensorSharp.GGML
         internal override object ReferenceMutationGate => referenceGate;
         internal override bool IsRetainedFinalizerFailure(Exception error) => ReferenceEquals(error, cleanupFailure);
         internal override void ValidateReferenceAddition()
+            => ValidateAlive(releasing: false);
+
+        private void ValidateAlive(bool releasing)
         {
             if (cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
             if (released) throw new ObjectDisposedException(nameof(GgmlStorage));
-            Context.ThrowIfDisposed();
+            Context.ThrowIfDisposed(releasingStorage: releasing);
             registration?.ThrowIfQuarantined();
         }
 
@@ -78,8 +81,7 @@ namespace TensorSharp.GGML
             if (runtimeLease == null && buffer == IntPtr.Zero) return;
             try
             {
-                ValidateReferenceAddition();
-                using var reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
+                ValidateAlive(releasing: true);
                 if (buffer != IntPtr.Zero)
                 {
                     // Note: under async compute, a freshly disposed pool block may be
@@ -96,7 +98,6 @@ namespace TensorSharp.GGML
                 runtimeLease.CompleteRelease(this, registration);
                 buffer = IntPtr.Zero;
                 released = true;
-                reservation.Complete();
             }
             catch (Exception error)
             {
