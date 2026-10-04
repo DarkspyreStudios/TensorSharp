@@ -534,12 +534,17 @@ def read_build_file(path):
     return path.read_text(encoding="utf-8")
 
 
+# A CMake cache name: no colon, equals sign or control character, and no space at either end. Interior spaces
+# occur, for example in the OpenMP probe entry 'OpenMP_COMPILE_RESULT_CXX_Xclang fopenmp'.
+CMAKE_NAME = r"[^:=\s\x00-\x1f\x7f](?:[^:=\x00-\x1f\x7f]*[^:=\s\x00-\x1f\x7f])?"
+
+
 def read_cmake_cache(text):
     settings = {}
     for line in text.splitlines():
         if not line or line.startswith(("#", "//")):
             continue
-        match = re.fullmatch(r"([^:=\s\x00-\x1f\x7f]+):([A-Z]+)=([^\x00]*)", line)
+        match = re.fullmatch(rf"({CMAKE_NAME}):([A-Z]+)=([^\x00]*)", line)
         if not match or match[1] in settings:
             raise ValueError("malformed or duplicate CMake cache entry: " + line)
         settings[match[1]] = match[3]
@@ -551,7 +556,7 @@ def read_cmake_cache(text):
 def read_cmake_settings(text):
     settings = {}
     for line in text.splitlines():
-        match = re.fullmatch(r"([^:=\s\x00-\x1f\x7f]+)=([^\x00]*)", line)
+        match = re.fullmatch(rf"({CMAKE_NAME})=([^\x00]*)", line)
         if not match or match[1] in settings:
             raise ValueError("malformed or duplicate normalized CMake setting: " + line)
         settings[match[1]] = match[2]
@@ -562,7 +567,7 @@ def read_cmake_settings(text):
 
 def validate_release_profile(settings, identity):
     if (not isinstance(settings, dict) or not settings
-            or any(not isinstance(key, str) or not re.fullmatch(r"[^:=\s\x00-\x1f\x7f]+", key)
+            or any(not isinstance(key, str) or not re.fullmatch(CMAKE_NAME, key)
                    or not isinstance(value, str) for key, value in settings.items())):
         raise ValueError("the recorded CMake configuration is malformed")
     rid, variant = identity.get("rid"), identity.get("variant")
