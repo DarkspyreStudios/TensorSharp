@@ -64,6 +64,9 @@ context, stream, module, kernel, allocator and storage owners use this authority
 Allocator retirement checks actual storage reference ownership before cleanup.
 Group and model cleanup share the same ownership census and restoration call.
 Cleanup uncertainty retains actual owners and fences the affected device.
+CUDA allocation reclaims pooled memory only outside current-thread native effects.
+A nested allocation OOM preserves its CUDA error and unwinds without collecting,
+waiting for finalizers or retrying beneath the caller's admitted native frame.
 GGML attaches its actual process, contexts, storages, groups, models and native
 handles to the CUDA dependency authority after real CUDA intent or backend-bearing
 discovery. Participating owners inherit established process CUDA dependence.

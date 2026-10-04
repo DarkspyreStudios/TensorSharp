@@ -65,9 +65,9 @@ namespace TensorSharp.Cuda
             {
                 if (CudaGraphCapture.CanTransferStorage(capture, capturePayload))
                     throw new CudaGraphCaptureAbortedException("Device allocation requires reclamation during graph capture.");
-                // This allocation's lease exits before reclamation. This method does not
-                // release caller-owned outer native frames.
-                AllocatorImpl.ReclaimOutsideEffects();
+                // Finalizers can need the caller's native gates. Nested OOM unwinds
+                // with its allocation error before any collection or retry.
+                if (!AllocatorImpl.TryReclaimOutsideEffects()) nativeCalls.ThrowOnError(2);
                 lock (AllocatorImpl.Census.Gate) AllocatorImpl.Census.ValidateAddition();
                 int result = TryAllocateDeviceMemory(allocationBytes);
                 nativeCalls.ThrowOnError(result);

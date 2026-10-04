@@ -233,6 +233,15 @@ internal static class NativeQuarantineAuthority
         lock (r.State[1]) { ValidateRegistration(r); ThrowFailure(r); }
     }
 
+    internal static bool HasCurrentThreadEffects(NativeOwnerRegistration r)
+    {
+        lock (r.State[1])
+        {
+            ValidateRegistration(r);
+            return Frames(r.State).ContainsKey(Environment.CurrentManagedThreadId);
+        }
+    }
+
     internal static NativeEffectLease Enter(NativeOwnerRegistration r)
     {
         object[] s = r.State;

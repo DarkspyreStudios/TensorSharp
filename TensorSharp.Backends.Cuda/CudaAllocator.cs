@@ -136,14 +136,16 @@ namespace TensorSharp.Cuda
         private static IntPtr RequireStorageAllocation(long allocationBytes)
             => throw new InvalidOperationException("CUDA pool acquisition requires the actual constructing storage owner.");
 
-        internal void ReclaimOutsideEffects()
+        internal bool TryReclaimOutsideEffects()
         {
+            if (nativeCalls.HasCurrentThreadEffects) return false;
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
             using var lease = nativeCalls.EnterEffect();
             Synchronize();
             pool.DrainAndFree();
+            return true;
         }
 
         private void FreeDeviceMemory(IntPtr ptr)

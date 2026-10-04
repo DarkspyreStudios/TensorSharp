@@ -24,6 +24,7 @@ internal sealed class CudaNativeCalls
     }
 
     internal NativeEffectLease EnterEffect() => _registration.EnterEffect();
+    internal bool HasCurrentThreadEffects => NativeQuarantineAuthority.HasCurrentThreadEffects(_registration);
     internal bool CoversDevice(int deviceOrdinal) => _deviceOrdinals.Length == 0
         || Array.IndexOf(_deviceOrdinals, deviceOrdinal) >= 0;
 
