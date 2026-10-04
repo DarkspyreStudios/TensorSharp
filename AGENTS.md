@@ -1,3 +1,12 @@
+## Workflow and builds
+
+Two shared documents hold the rules every Darkspyre repository follows. Read both before the first command:
+
+- `~/.agent-ds/workflow.md`: cutting a worktree off `origin/dev`, committing and pushing your own branch, merging into `dev`, and the Jira and ticket rules.
+- `~/.agent-ds/build-instructions.md`: interim builds from `origin/dev` source, release-candidate builds from NuGet, and test copies with agent-ds `scripts/test-copy.sh`.
+
+They apply to agent-ds, AgentDSPlugins, Inference, TensorSharp and RightSize. Rules in this repository's own documents add to them.
+
 # External dependencies
 
 - Keep ggml upstream sources unchanged. Never add or apply ggml patches, rewrite
