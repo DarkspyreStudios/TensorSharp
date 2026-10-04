@@ -26,6 +26,8 @@ They apply to agent-ds, AgentDSPlugins, Inference, TensorSharp and RightSize. Ru
 
 ## Local development and releases
 
+`Darkspyre.ML.Tokenizers` is the explicit NuGet exception. It remains a package in source mode; changes to that stable fork are consumed through a NuGet version update.
+
 Normal builds and tests use local source from the seven sibling workspace worktrees: agent-ds,
 AgentDSPlugins, Inference, TensorSharp, RightSize, SecureStore and PersistenceStore. No source-root
 flags or per-session local props files are required. Missing source must fail without a package fallback.
