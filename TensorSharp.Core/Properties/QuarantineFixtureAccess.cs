@@ -4,3 +4,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("TensorSharp.Backends.Cuda")]
 [assembly: InternalsVisibleTo("TensorSharp.Models")]
 [assembly: InternalsVisibleTo("TensorSharp.Backends.GGML")]
+[assembly: InternalsVisibleTo("TensorSharp.Backends.MLX")]

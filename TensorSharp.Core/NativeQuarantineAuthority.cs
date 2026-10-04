@@ -33,6 +33,10 @@ internal sealed class NativeOwnerRegistration
     internal void ThrowIfQuarantined() => NativeQuarantineAuthority.Check(this);
     internal NativeEffectLease EnterEffect() => NativeQuarantineAuthority.Enter(this);
     internal void CompleteSafeRelease() => NativeQuarantineAuthority.Complete(this);
+    internal NativeMlxCallbackCallLease EnterMlxCallbackCall(object actualOwner, NativeMlxCallbackCallKind kind)
+        => NativeQuarantineAuthority.EnterMlxCallbackCall(this, actualOwner, kind);
+    internal NativeMlxReleaseReservation ReserveMlxRelease(object actualOwner)
+        => NativeQuarantineAuthority.ReserveMlxRelease(this, actualOwner);
 }
 
 internal sealed class NativeEffectLease : IDisposable
@@ -44,6 +48,7 @@ internal sealed class NativeEffectLease : IDisposable
     internal bool CudaHeld;
     internal bool MlxHeld;
     internal bool Disposed;
+    internal NativeMlxReleaseReservation? MlxReleaseReservation;
 
     internal NativeEffectLease(NativeOwnerRegistration registration, object[] frame)
     {
@@ -57,12 +62,14 @@ internal sealed class NativeEffectLease : IDisposable
 
     internal void ValidateSafeRelease(object actualOwner) => NativeQuarantineAuthority.ValidateSafeRelease(this, actualOwner);
     internal void CompleteSafeRelease(object actualOwner) => NativeQuarantineAuthority.Complete(this, actualOwner);
+    internal void ValidateMlxRelease(object actualOwner, NativeMlxReleaseReservation reservation)
+        => NativeQuarantineAuthority.ValidateMlxRelease(this, actualOwner, reservation);
 
     public void Dispose() => NativeQuarantineAuthority.Exit(this);
 }
 
 // The process slot contains only BCL cells. Local registrations/leases never enter it.
-internal static class NativeQuarantineAuthority
+internal static partial class NativeQuarantineAuthority
 {
     private const string Slot = "Darkspyre.TensorSharp.NativeQuarantine";
     private const string Wildcard = "cuda-primary/*";
@@ -80,12 +87,13 @@ internal static class NativeQuarantineAuthority
             {
                 value = new object[]
                 {
-                    1, new object(), 0L,
+                    2, new object(), 0L,
                     new Dictionary<string, object[]>(StringComparer.Ordinal),
                     new Dictionary<Guid, object[]>(),
                     new Dictionary<Exception, List<Guid>>(ReferenceEqualityComparer.Instance),
                     new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion), new object(),
-                    Guid.NewGuid(), new Dictionary<int, List<object[]>>()
+                    Guid.NewGuid(), new Dictionary<int, List<object[]>>(),
+                    new Dictionary<int, List<object[]>>(), new Dictionary<Guid, object[]>()
                 };
                 AppDomain.CurrentDomain.SetData(Slot, value);
             }
@@ -96,14 +104,15 @@ internal static class NativeQuarantineAuthority
     // Existing-slot validation never takes the initialization monitor beneath metadata.
     private static object[] ValidateShape(object? value)
     {
-        if (value is not object[] s || s.Length != 10 || s[0] is not int p || p != 1
+        if (value is not object[] s || s.Length != 12 || s[0] is not int p || p != 2
             || s[1]?.GetType() != typeof(object) || s[2] is not long revision || revision < 0
             || s[3] is not Dictionary<string, object[]> scopes || !ReferenceEquals(scopes.Comparer, StringComparer.Ordinal)
             || s[4] is not Dictionary<Guid, object[]>
             || s[5] is not Dictionary<Exception, List<Guid>> causes || !ReferenceEquals(causes.Comparer, ReferenceEqualityComparer.Instance)
             || s[6] is not ReaderWriterLockSlim rw || rw.RecursionPolicy != LockRecursionPolicy.SupportsRecursion
             || s[7]?.GetType() != typeof(object) || s[8] is not Guid id || id == Guid.Empty
-            || s[9] is not Dictionary<int, List<object[]>>)
+            || s[9] is not Dictionary<int, List<object[]>>
+            || s[10] is not Dictionary<int, List<object[]>> || s[11] is not Dictionary<Guid, object[]>)
             throw new InvalidOperationException(ProtocolError);
         return s;
     }
@@ -123,13 +132,16 @@ internal static class NativeQuarantineAuthority
                 || !int.TryParse(key.AsSpan(13), NumberStyles.None, CultureInfo.InvariantCulture, out ordinal)
                 || ordinal < 0 || key != "cuda-primary/" + ordinal.ToString(CultureInfo.InvariantCulture)))
                 throw new InvalidOperationException(ProtocolError);
-            if (c == null || c.Length != 9 || c[0] is not Guid scopeId || scopeId == Guid.Empty
+            if (c == null || c.Length != 12 || c[0] is not Guid scopeId || scopeId == Guid.Empty
                 || c[1] is not int kind || kind != (mlx ? 1 : 0) || c[2] is not int device || device != ordinal
                 || c[3] is not Guid || c[4] is not int stage || stage < 0 || stage > 6
                 || c[5] is not long revision || revision < 0 || c[6] is not DateTimeOffset
                 || (c[7] != null && c[7] is not Exception) || c[8]?.GetType() != typeof(object)
                 || (((Guid)c[3] == Guid.Empty) != (revision == 0))
-                || (((Guid)c[3] == Guid.Empty) != (c[7] == null)))
+                || (((Guid)c[3] == Guid.Empty) != (c[7] == null))
+                || c[9] is not int calls || calls < 0 || c[10] is not int thread || thread < 0
+                || ((calls == 0) != (thread == 0)) || c[11] is not ManualResetEventSlim drain
+                || (calls == 0) != drain.IsSet || (!mlx && calls != 0))
                 throw new InvalidOperationException(ProtocolError);
         }
         foreach (var (id, c) in Owners(s))
@@ -155,6 +167,7 @@ internal static class NativeQuarantineAuthority
             if (pair.Key == null || pair.Value == null || pair.Value.Count == 0
                 || pair.Value.Any(id => !Scopes(s).Values.Any(c => (Guid)c[3] == id)))
                 throw new InvalidOperationException(ProtocolError);
+        ValidateMlxCells(s);
     }
 
     internal static NativeOwnerRegistration Register(object owner, NativeOwnerRole role)
@@ -178,7 +191,7 @@ internal static class NativeQuarantineAuthority
         if (!Scopes(s).TryGetValue(key, out object[]? c))
         {
             int ordinal = key == Mlx || key == Wildcard ? -1 : int.Parse(key.AsSpan(13), CultureInfo.InvariantCulture);
-            c = new object[] { Guid.NewGuid(), key == Mlx ? 1 : 0, ordinal, Guid.Empty, 0, 0L, default(DateTimeOffset), null!, new object() };
+            c = new object[] { Guid.NewGuid(), key == Mlx ? 1 : 0, ordinal, Guid.Empty, 0, 0L, default(DateTimeOffset), null!, new object(), 0, 0, new ManualResetEventSlim(true) };
             Scopes(s).Add(key, c);
         }
         return c;
@@ -234,55 +247,83 @@ internal static class NativeQuarantineAuthority
     }
 
     internal static NativeEffectLease Enter(NativeOwnerRegistration r)
+        => Enter(r, null);
+
+    private static NativeEffectLease Enter(NativeOwnerRegistration r, NativeMlxReleaseReservation? release)
     {
-        object[] s = r.State;
-        object[] frame;
-        int thread = Environment.CurrentManagedThreadId;
-        lock (s[1])
+        while (true)
         {
-            ValidateRegistration(r);
-            ThrowFailure(r);
-            var keys = ((HashSet<string>)r.Cell[3]).OrderBy(key => key == Mlx ? int.MaxValue
-                : key == Wildcard ? -1 : (int)Scopes(s)[key][2]).ToArray();
-            if (keys.Length == 0) throw new InvalidOperationException("Native effects require an attached scope.");
-            bool write = keys.Contains(Wildcard);
-            if (!Frames(s).TryGetValue(thread, out List<object[]>? stack))
-                Frames(s).Add(thread, stack = new List<object[]>());
-            if (stack.Count != 0)
+            WaitForMlxAdmission(r, release);
+            object[] s = r.State;
+            object[] frame;
+            int thread = Environment.CurrentManagedThreadId;
+            lock (s[1])
             {
-                var parent = stack[^1];
-                string[] parentKeys = (string[])parent[1];
-                bool parentCudaWrite = (bool)parent[2];
-                if (keys.Any(key => !parentKeys.Contains(key)
-                    && !(parentCudaWrite && IsCuda(key) && key != Wildcard)) || (write && !parentCudaWrite))
-                    throw new InvalidOperationException("Recursive native effects cannot widen scopes or upgrade CUDA gates.");
-            }
-            frame = new object[] { r.Cell[0], keys, write };
-            stack.Add(frame);
-            r.Cell[7] = checked((int)r.Cell[7] + 1);
-        }
-        var lease = new NativeEffectLease(r, frame);
-        try
-        {
-            string[] keys = (string[])frame[1];
-            if (keys.Any(IsCuda))
-            {
-                var rw = (ReaderWriterLockSlim)s[6];
-                if ((bool)frame[2]) rw.EnterWriteLock(); else rw.EnterReadLock();
-                lease.CudaHeld = true;
-                foreach (string key in keys.Where(key => IsCuda(key) && key != Wildcard))
+                ValidateRegistration(r);
+                ThrowFailure(r);
+                if (!CheckMlxAdmission(r, release)) continue;
+                var keys = ((HashSet<string>)r.Cell[3]).OrderBy(key => key == Mlx ? int.MaxValue
+                    : key == Wildcard ? -1 : (int)Scopes(s)[key][2]).ToArray();
+                if (keys.Length == 0) throw new InvalidOperationException("Native effects require an attached scope.");
+                bool write = keys.Contains(Wildcard);
+                if (!Frames(s).TryGetValue(thread, out List<object[]>? stack))
+                    Frames(s).Add(thread, stack = new List<object[]>());
+                if (stack.Count != 0)
                 {
-                    object gate;
-                    lock (s[1]) gate = Scopes(s)[key][8];
-                    Monitor.Enter(gate);
-                    lease.DeviceGates.Add(gate);
+                    var parent = stack[^1];
+                    string[] parentKeys = (string[])parent[1];
+                    bool parentCudaWrite = (bool)parent[2];
+                    if (keys.Any(key => !parentKeys.Contains(key)
+                        && !(parentCudaWrite && IsCuda(key) && key != Wildcard)) || (write && !parentCudaWrite))
+                        throw new InvalidOperationException("Recursive native effects cannot widen scopes or upgrade CUDA gates.");
                 }
+                frame = new object[] { r.Cell[0], keys, write };
+                stack.Add(frame);
+                r.Cell[7] = checked((int)r.Cell[7] + 1);
             }
-            if (keys.Contains(Mlx)) { Monitor.Enter(s[7]); lease.MlxHeld = true; }
-            lock (s[1]) { ValidateRegistration(r); ThrowFailure(r); }
-            return lease;
+            var lease = new NativeEffectLease(r, frame);
+            lease.MlxReleaseReservation = release;
+            try
+            {
+                string[] keys = (string[])frame[1];
+                if (keys.Any(IsCuda))
+                {
+                    var rw = (ReaderWriterLockSlim)s[6];
+                    if ((bool)frame[2]) rw.EnterWriteLock(); else rw.EnterReadLock();
+                    lease.CudaHeld = true;
+                    foreach (string key in keys.Where(key => IsCuda(key) && key != Wildcard))
+                    {
+                        object gate;
+                        lock (s[1]) gate = Scopes(s)[key][8];
+                        Monitor.Enter(gate);
+                        lease.DeviceGates.Add(gate);
+                    }
+                }
+                if (keys.Contains(Mlx))
+                {
+                    if (lease.CudaHeld && !Monitor.TryEnter(s[7]))
+                    {
+                        Exit(lease);
+                        Monitor.Enter(s[7]);
+                        Monitor.Exit(s[7]);
+                        continue;
+                    }
+                    if (!lease.CudaHeld) Monitor.Enter(s[7]);
+                    lease.MlxHeld = true;
+                }
+                bool admitted;
+                lock (s[1])
+                {
+                    ValidateRegistration(r);
+                    ThrowFailure(r);
+                    admitted = CheckMlxAdmission(r, release);
+                    if (admitted && release != null) BeginMlxRelease(release);
+                }
+                if (!admitted) { Exit(lease); continue; }
+                return lease;
+            }
+            catch { if (!lease.Disposed) Exit(lease); throw; }
         }
-        catch { Exit(lease); throw; }
     }
 
     private static void ValidateLease(NativeEffectLease lease)
@@ -306,6 +347,7 @@ internal static class NativeQuarantineAuthority
             if (stack.Count == 0) Frames(s).Remove(lease.ThreadId);
             lease.Registration.Cell[7] = (int)lease.Registration.Cell[7] - 1;
             lease.Disposed = true;
+            if (lease.MlxReleaseReservation != null) EndMlxRelease(lease.MlxReleaseReservation);
         }
         if (lease.MlxHeld) Monitor.Exit(s[7]);
         for (int i = lease.DeviceGates.Count - 1; i >= 0; i--) Monitor.Exit(lease.DeviceGates[i]);
@@ -327,6 +369,8 @@ internal static class NativeQuarantineAuthority
             if (stack.Count(frame => (Guid)frame[0] == (Guid)r.Cell[0]) != 1)
                 throw new InvalidOperationException("Safe release refuses recursive effects on the same owner.");
             ThrowFailure(r);
+            if (((HashSet<string>)r.Cell[3]).Contains(Mlx))
+                CompleteMlxRelease(r, stack[^1]);
             Owners(r.State).Remove((Guid)r.Cell[0]);
         }
     }
@@ -390,38 +434,47 @@ internal static class NativeQuarantineAuthority
         lock (s[1])
         {
             string[] keys = ValidateHeldOwnerGates(lease, owner);
-            object[][] affected = keys.Select(key => Scope(s, key)).ToArray();
-            object[][] proposed = affected.Select(c => (object[])c.Clone()).ToArray();
-            long revision = (long)s[2];
-            foreach (var c in proposed)
-            {
-                if ((Guid)c[3] == Guid.Empty)
-                {
-                    c[3] = Guid.NewGuid(); c[4] = (int)stage;
-                    c[5] = checked(++revision); c[6] = DateTimeOffset.UtcNow; c[7] = error;
-                }
-            }
-            object[] first = proposed.OrderBy(c => (long)c[5]).First();
-            bool allCuda = keys.Contains(Wildcard);
-            foreach (var c in Owners(s).Values)
-            {
-                var otherKeys = (HashSet<string>)c[3];
-                bool hit = ReferenceEquals(c, r.Cell) || otherKeys.Overlaps(keys)
-                    || (allCuda && otherKeys.Any(IsCuda))
-                    || ((bool)c[4] && keys.Any(IsCuda));
-                if (hit && ((WeakReference<object>)c[2]).TryGetTarget(out object? actual))
-                {
-                    c[6] = actual;
-                    if ((Guid)c[5] == Guid.Empty) c[5] = first[3];
-                }
-            }
-            // Retain actual dependent owners before exposing any terminal scope facts.
-            for (int i = 0; i < affected.Length; i++) Array.Copy(proposed[i], 3, affected[i], 3, 5);
-            s[2] = revision;
-            if (!Causes(s).TryGetValue(error, out List<Guid>? ids)) Causes(s).Add(error, ids = new List<Guid>());
-            foreach (var c in affected) if (!ids.Contains((Guid)c[3])) ids.Add((Guid)c[3]);
-            return new NativeRuntimeFailure(first);
+            return PublishHeld(r, keys, error, stage);
         }
+    }
+
+    private static NativeRuntimeFailure PublishHeld(NativeOwnerRegistration r, string[] keys, Exception error, NativeRuntimeFailureStage stage)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        if (stage < NativeRuntimeFailureStage.Synchronization || stage > NativeRuntimeFailureStage.WorkerRetirement)
+            throw new ArgumentOutOfRangeException(nameof(stage));
+        object[] s = r.State;
+        object[][] affected = keys.Select(key => Scope(s, key)).ToArray();
+        object[][] proposed = affected.Select(c => (object[])c.Clone()).ToArray();
+        long revision = (long)s[2];
+        foreach (var c in proposed)
+        {
+            if ((Guid)c[3] == Guid.Empty)
+            {
+                c[3] = Guid.NewGuid(); c[4] = (int)stage;
+                c[5] = checked(++revision); c[6] = DateTimeOffset.UtcNow; c[7] = error;
+            }
+        }
+        object[] first = proposed.OrderBy(c => (long)c[5]).First();
+        bool allCuda = keys.Contains(Wildcard);
+        foreach (var c in Owners(s).Values)
+        {
+            var otherKeys = (HashSet<string>)c[3];
+            bool hit = ReferenceEquals(c, r.Cell) || otherKeys.Overlaps(keys)
+                || (allCuda && otherKeys.Any(IsCuda))
+                || ((bool)c[4] && keys.Any(IsCuda));
+            if (hit && ((WeakReference<object>)c[2]).TryGetTarget(out object? actual))
+            {
+                c[6] = actual;
+                if ((Guid)c[5] == Guid.Empty) c[5] = first[3];
+            }
+        }
+        // Retain actual dependent owners before exposing any terminal scope facts.
+        for (int i = 0; i < affected.Length; i++) Array.Copy(proposed[i], 3, affected[i], 3, 5);
+        s[2] = revision;
+        if (!Causes(s).TryGetValue(error, out List<Guid>? ids)) Causes(s).Add(error, ids = new List<Guid>());
+        foreach (var c in affected) if (!ids.Contains((Guid)c[3])) ids.Add((Guid)c[3]);
+        return new NativeRuntimeFailure(first);
     }
 
     internal static NativeRuntimeQuarantineSnapshot Observe()
