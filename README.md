@@ -85,11 +85,17 @@ while suspending only the CUDA effect around borrowed callbacks.
 
 Core's process slot uses protocol 2, including callback-aware MLX call and
 destructive-release reservations. A process initialized with a different protocol
-must restart; the slot is never migrated or reset. MLX backend caller integration
-is not yet wired into these entries. Storage has an internal final-release
+must restart; the slot is never migrated or reset. MLX storage registers its actual
+owner in the shared runtime scope and uses the internal final-release
 admission hook. Tensor disposal marks ownership released only after the reference
 decrement succeeds. A refused admission preserves both references; native cleanup
-failure after the decrement does not restore them. Remaining raw CUDA
+failure after the decrement does not restore them. A reserved release refuses new
+compiled-call admission until it settles. MLX storage waits for checked array-reference
+release before freeing its host mirror. Failed release retains the actual storage
+through the process authority; safe completion removes its registration. Worker queue
+rejection also records the unreleased owner, and synchronous worker errors retain their
+originating exception stack. Remaining MLX operations, compiled callbacks and all-used-stream
+synchronization are not wired into this authority. Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
 certify availability, initialization or safe native cleanup. GGML integration
 has production compilation and source-review evidence, not executed native or
@@ -99,6 +105,7 @@ the final-release hook have no executed runtime qualification.
 MLX's shared array-reference release helper waits for the native free and checks
 its return status. Worker reentrant calls remain inline. Raw native cleanup sites,
 compiled callbacks and all-used-stream retirement are not covered by this helper.
+Storage release checks the array reference, not GPU execution completion.
 
 ## Quick Start
 

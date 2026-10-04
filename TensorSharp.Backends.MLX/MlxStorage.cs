@@ -11,6 +11,8 @@ namespace TensorSharp.MLX
         private MlxNative.MlxArray deviceArray;
         private bool hostDirty = true;
         private bool deviceDirty;
+        private readonly NativeOwnerRegistration nativeOwner;
+        private ReleaseAdmission releaseAdmission;
 
         public MlxStorage(MlxAllocator allocator, DType elementType, long elementCount)
             : base(allocator, elementType, elementCount)
@@ -18,24 +20,98 @@ namespace TensorSharp.MLX
             AllocatorImpl = allocator ?? throw new ArgumentNullException(nameof(allocator));
             if (ByteLength < 0)
                 throw new ArgumentOutOfRangeException(nameof(elementCount));
+
+            NativeOwnerRegistration registration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Storage);
+            registration.AttachMlxSharedRuntime();
+            nativeOwner = registration;
         }
 
         internal MlxAllocator AllocatorImpl { get; }
 
         public int DeviceId => AllocatorImpl.DeviceId;
 
+        internal override object ReferenceMutationGate => sync;
+        internal override void ValidateReferenceAddition() => nativeOwner.ThrowIfQuarantined();
+        internal override bool IsRetainedFinalizerFailure(Exception error)
+        {
+            if (nativeOwner == null) return false;
+            if (NativeQuarantineAuthority.IsRetainedFailure(nativeOwner, error)) return true;
+            if (error is AggregateException aggregate)
+                foreach (Exception inner in aggregate.InnerExceptions)
+                    if (IsRetainedFinalizerFailure(inner)) return true;
+            return error.InnerException != null && IsRetainedFinalizerFailure(error.InnerException);
+        }
+
+        internal override IDisposable AdmitFinalRelease()
+        {
+            if (nativeOwner == null) return null;
+            lock (sync)
+            {
+                var admission = new ReleaseAdmission(this, nativeOwner.ReserveMlxRelease(this));
+                releaseAdmission = admission;
+                return admission;
+            }
+        }
+
         protected override void Destroy()
         {
-            if (buffer != IntPtr.Zero)
+            if (nativeOwner == null) return;
+            NativeMlxReleaseReservation reservation = releaseAdmission?.Reservation
+                ?? throw new InvalidOperationException("MLX storage release requires its pre-decrement admission.");
+            bool published = false;
+            try
             {
-                NativeMemory.AlignedFree(buffer.ToPointer());
-                buffer = IntPtr.Zero;
+                MlxWorker.Shared.Invoke(() =>
+                {
+                    using NativeEffectLease effect = reservation.EnterEffect();
+                    effect.ValidateMlxRelease(this, reservation);
+                    try
+                    {
+                        // Preserve the host mirror while native release is unproven.
+                        if (deviceArray.IsValid)
+                        {
+                            MlxNative.FreeArray(deviceArray);
+                            deviceArray = default;
+                        }
+                        if (buffer != IntPtr.Zero)
+                        {
+                            NativeMemory.AlignedFree(buffer.ToPointer());
+                            buffer = IntPtr.Zero;
+                        }
+                        effect.CompleteSafeRelease(this);
+                    }
+                    catch (Exception cleanup)
+                    {
+                        effect.PublishFailure(this, cleanup, NativeRuntimeFailureStage.StorageRelease);
+                        published = true;
+                        throw;
+                    }
+                });
             }
-
-            if (deviceArray.IsValid)
+            catch (Exception error) when (!published && !IsRetainedFinalizerFailure(error))
             {
-                MlxNative.FreeArray(deviceArray);
-                deviceArray = default;
+                // Queue rejection also leaves the consumed owner's native graph intact.
+                try
+                {
+                    using NativeEffectLease effect = reservation.EnterEffect();
+                    effect.PublishFailure(this, error, NativeRuntimeFailureStage.StorageRelease);
+                }
+                catch (Exception publication) { throw new AggregateException(error, publication); }
+                throw;
+            }
+        }
+
+        private sealed class ReleaseAdmission(MlxStorage owner, NativeMlxReleaseReservation reservation) : IDisposable
+        {
+            internal NativeMlxReleaseReservation Reservation { get; } = reservation;
+
+            public void Dispose()
+            {
+                lock (owner.sync)
+                {
+                    Reservation.Dispose();
+                    if (ReferenceEquals(owner.releaseAdmission, this)) owner.releaseAdmission = null;
+                }
             }
         }
 
@@ -56,6 +132,7 @@ namespace TensorSharp.MLX
         public override void EnsureHostReadable()
         {
             ThrowIfDestroyed();
+            nativeOwner.ThrowIfQuarantined();
             lock (sync)
             {
                 EnsureHostBufferAllocated();
@@ -81,6 +158,8 @@ namespace TensorSharp.MLX
 
         internal void ReplaceDeviceArray(MlxNative.MlxArray array)
         {
+            ThrowIfDestroyed();
+            nativeOwner.ThrowIfQuarantined();
             if (!array.IsValid)
                 throw new ArgumentException("MLX array is empty.", nameof(array));
             if (ElementCount > int.MaxValue)
@@ -157,6 +236,7 @@ namespace TensorSharp.MLX
         public override void EnsureDeviceCurrent()
         {
             ThrowIfDestroyed();
+            nativeOwner.ThrowIfQuarantined();
             if (ElementCount > int.MaxValue)
                 throw new NotSupportedException("MLX storage arrays larger than Int32.MaxValue elements are not supported yet.");
 
@@ -440,12 +520,16 @@ namespace TensorSharp.MLX
 
         private void ValidateElementRange(long index, long length)
         {
+            ThrowIfDestroyed();
+            nativeOwner.ThrowIfQuarantined();
             if (index < 0 || length < 0 || index + length > ElementCount)
                 throw new ArgumentOutOfRangeException(nameof(index));
         }
 
         private void ValidateByteRange(long storageIndex, long byteCount)
         {
+            ThrowIfDestroyed();
+            nativeOwner.ThrowIfQuarantined();
             if (byteCount < 0)
                 throw new ArgumentOutOfRangeException(nameof(byteCount));
 

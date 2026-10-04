@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace TensorSharp;
@@ -317,6 +318,8 @@ internal static partial class NativeQuarantineAuthority
                     ValidateMlxReservation(lease.Release, false);
                     if ((int)scope[9] != 0) throw new NativeMlxCallbackBusyException(actualOwner);
                 }
+                else if (MlxReleases(s).Values.Any(cell => (int)cell[2] != 2))
+                    throw new NativeMlxCallbackBusyException(actualOwner);
                 else if ((int)scope[9] != 0 && (int)scope[10] != lease.ThreadId)
                     drain = (ManualResetEventSlim)scope[11];
             }
@@ -346,6 +349,8 @@ internal static partial class NativeQuarantineAuthority
                         ValidateMlxReservation(lease.Release, false);
                         if ((int)scope[9] != 0) throw new NativeMlxCallbackBusyException(actualOwner);
                     }
+                    else if (MlxReleases(s).Values.Any(cell => (int)cell[2] != 2))
+                        throw new NativeMlxCallbackBusyException(actualOwner);
                     if (stack.Count != 0 && (int)stack[^1][4] != 1)
                         throw new InvalidOperationException("Nested compiled calls require the parent's managed callback phase.");
                     int calls = checked((int)scope[9] + 1);

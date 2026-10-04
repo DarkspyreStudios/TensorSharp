@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 
 namespace TensorSharp.MLX
@@ -140,7 +141,7 @@ namespace TensorSharp.MLX
             {
                 completed.Wait();
                 if (exception != null)
-                    throw exception;
+                    ExceptionDispatchInfo.Capture(exception).Throw();
                 return result;
             }
         }
