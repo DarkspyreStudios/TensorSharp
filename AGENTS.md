@@ -23,3 +23,15 @@ They apply to agent-ds, AgentDSPlugins, Inference, TensorSharp and RightSize. Ru
   or `artifacts/`; do not force-add them to Git.
 - Store reusable validation tools in `eng/` and required test fixtures in the
   relevant test project, outside the generated evidence directories.
+
+## Local development and releases
+
+Normal builds and tests use local source from the seven sibling workspace worktrees: agent-ds,
+AgentDSPlugins, Inference, TensorSharp, RightSize, SecureStore and PersistenceStore. No source-root
+flags or per-session local props files are required. Missing source must fail without a package fallback.
+Do not build in primary checkouts or create interim NuGet packages. Read `~/.agent-ds/build-instructions.md`.
+
+`DarkspyreDependencyMode=Packages` is explicit release publishing/deployment mode. Debug/Release,
+signing and interim installation do not select it. Test copies retain compatible prebuilt GGML driver
+hardlinks. Signed bundles may copy prebuilt drivers before signing. Native compilation always needs
+an explicit request.
