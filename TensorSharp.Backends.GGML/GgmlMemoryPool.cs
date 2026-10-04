@@ -52,14 +52,18 @@ namespace TensorSharp.GGML
         // handed an mmap pointer to free(), aborting the process with
         // "free(): invalid pointer" / "munmap_chunk(): invalid pointer".
         private readonly Dictionary<IntPtr, PoolBlock> _outstanding = new Dictionary<IntPtr, PoolBlock>();
+        private readonly List<PoolBlock> _pendingRelease = new();
+        private readonly GgmlContext _context;
         private readonly bool _useVirtualAlloc;
         private readonly int _pageSize;
         private readonly int _initialBlockCount;
         private readonly int _maxPooledBlocks;
         private readonly nuint _maxRetainedBlockSize;
 
-        public GgmlMemoryPool(GgmlBackendType backendType)
+        public GgmlMemoryPool(GgmlContext context)
         {
+            _context = context;
+            GgmlBackendType backendType = context.BackendType;
             int systemPageSize = Environment.SystemPageSize;
             _pageSize = IsAppleOS()
                 ? Math.Max(MetalPageSize, systemPageSize)
@@ -84,6 +88,7 @@ namespace TensorSharp.GGML
 
         public IntPtr Allocate(long byteLength)
         {
+            _context.ThrowIfDisposed();
             nuint size = (nuint)byteLength;
             nuint alignedSize = AlignSize(size);
 
@@ -112,6 +117,7 @@ namespace TensorSharp.GGML
                     PoolBlock block = _available[bestIdx];
                     _available.RemoveAt(bestIdx);
                     _outstanding[block.Ptr] = block;
+                    block.State = BlockState.Outstanding;
                     return block.Ptr;
                 }
             }
@@ -120,6 +126,7 @@ namespace TensorSharp.GGML
             lock (_lock)
             {
                 _outstanding[fresh.Ptr] = fresh;
+                fresh.State = BlockState.Outstanding;
             }
             return fresh.Ptr;
         }
@@ -131,7 +138,7 @@ namespace TensorSharp.GGML
             PoolBlock block;
             lock (_lock)
             {
-                if (!_outstanding.Remove(ptr, out block))
+                if (!_outstanding.TryGetValue(ptr, out block))
                 {
                     // Unknown pointer: not handed out by this pool. Freeing it
                     // with a guessed size/allocator can only corrupt the heap,
@@ -144,11 +151,17 @@ namespace TensorSharp.GGML
                     _available.Count < _maxPooledBlocks)
                 {
                     _available.Add(block);
+                    _outstanding.Remove(ptr);
+                    block.State = BlockState.Available;
                     return;
                 }
+                _pendingRelease.Add(block);
+                _outstanding.Remove(ptr);
+                block.State = BlockState.PendingNativeDetach;
             }
-
-            FreeToSystem(block);
+            using var reservation = GgmlNativeLoader.ReserveResourceCleanup(_context);
+            ReleasePending(GgmlNative.InvalidateHostBuffer, hostOnly: false);
+            reservation.Complete();
         }
 
         /// <summary>
@@ -158,20 +171,52 @@ namespace TensorSharp.GGML
         /// </summary>
         public long Trim(Action<IntPtr> beforeFree = null)
         {
-            List<PoolBlock> release;
             lock (_lock)
             {
-                if (_available.Count == 0)
+                if (_available.Count == 0 && _pendingRelease.Count == 0)
                     return 0;
-                release = new List<PoolBlock>(_available);
+                foreach (var block in _available)
+                {
+                    block.State = BlockState.PendingNativeDetach;
+                    _pendingRelease.Add(block);
+                }
                 _available.Clear();
             }
+            return ReleasePending(beforeFree, hostOnly: false);
+        }
+
+        internal long TrimHostOnly()
+        {
+            lock (_lock)
+            {
+                foreach (var block in _available)
+                {
+                    block.State = BlockState.NativeDetached;
+                    _pendingRelease.Add(block);
+                }
+                _available.Clear();
+            }
+            return ReleasePending(null, hostOnly: true);
+        }
+
+        private long ReleasePending(Action<IntPtr> beforeFree, bool hostOnly)
+        {
+            List<PoolBlock> release;
+            lock (_lock) release = new(_pendingRelease);
+            if (!hostOnly && release.Exists(block => block.State == BlockState.PendingNativeDetach))
+                GgmlBasicOps.HostReadBarrier();
             long bytes = 0;
             foreach (PoolBlock block in release)
             {
-                beforeFree?.Invoke(block.Ptr);
-                bytes += (long)block.Size;
+                if (block.State == BlockState.PendingNativeDetach)
+                {
+                    beforeFree?.Invoke(block.Ptr);
+                    block.State = BlockState.NativeDetached;
+                }
                 FreeToSystem(block);
+                block.State = BlockState.HostReleaseReturned;
+                lock (_lock) _pendingRelease.Remove(block);
+                bytes += (long)block.Size;
             }
             return bytes;
         }
@@ -217,11 +262,14 @@ namespace TensorSharp.GGML
             }
         }
 
-        private readonly struct PoolBlock
+        private enum BlockState { Outstanding, Available, PendingNativeDetach, NativeDetached, HostReleaseReturned }
+
+        private sealed class PoolBlock
         {
             public readonly IntPtr Ptr;
             public readonly nuint Size;
             public readonly bool IsVirtual;
+            public BlockState State;
 
             public PoolBlock(IntPtr ptr, nuint size, bool isVirtual)
             {

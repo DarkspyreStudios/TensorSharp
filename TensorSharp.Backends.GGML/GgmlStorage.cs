@@ -16,15 +16,58 @@ namespace TensorSharp.GGML
     public class GgmlStorage : Storage
     {
         private IntPtr buffer;
-        private IDisposable runtimeLease;
+        private GgmlContext.StorageLease runtimeLease;
+        private NativeOwnerRegistration registration;
+        private Exception cleanupFailure;
+        private bool released;
+        private readonly object referenceGate = new();
+
+        internal override object ReferenceMutationGate => referenceGate;
+        internal override bool IsRetainedFinalizerFailure(Exception error) => ReferenceEquals(error, cleanupFailure);
+        internal override void ValidateReferenceAddition()
+        {
+            if (cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
+            if (released) throw new ObjectDisposedException(nameof(GgmlStorage));
+            Context.ThrowIfDisposed();
+            registration?.ThrowIfQuarantined();
+        }
 
         public GgmlStorage(GgmlAllocator allocator, GgmlContext context, DType elementType, long elementCount)
             : base(allocator, elementType, elementCount)
         {
             Context = context ?? throw new ArgumentNullException(nameof(context));
-            runtimeLease = context.AcquireStorageLease();
-            try { buffer = context.MemoryPool.Allocate(ByteLength); }
-            catch { runtimeLease.Dispose(); throw; }
+            registration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Storage);
+            runtimeLease = context.AcquireStorageLease(this, registration);
+            try
+            {
+                buffer = context.MemoryPool.Allocate(ByteLength);
+                registration.ThrowIfQuarantined();
+            }
+            catch (Exception operation)
+            {
+                if (buffer != IntPtr.Zero)
+                {
+                    cleanupFailure = operation;
+                    runtimeLease.RetainCleanupFailure(this, operation);
+                }
+                else
+                {
+                    try
+                    {
+                        using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
+                        runtimeLease.Dispose();
+                        released = true;
+                        GC.SuppressFinalize(this);
+                    }
+                    catch (Exception cleanup)
+                    {
+                        cleanupFailure = new AggregateException(operation, cleanup);
+                        runtimeLease.RetainCleanupFailure(this, cleanupFailure);
+                        throw cleanupFailure;
+                    }
+                }
+                throw;
+            }
         }
 
         public GgmlContext Context { get; }
@@ -33,6 +76,10 @@ namespace TensorSharp.GGML
 
         protected override void Destroy()
         {
+            if (runtimeLease == null && buffer == IntPtr.Zero) return;
+            try
+            {
+            ValidateReferenceAddition();
             if (buffer != IntPtr.Zero)
             {
                 // Note: under async compute, a freshly disposed pool block may be
@@ -45,9 +92,18 @@ namespace TensorSharp.GGML
                 //      TensorComputePrimitives.GetFloatPointer, EnsureHostReadable()
                 //      drains pending work first.
                 Context.MemoryPool.Free(buffer, ByteLength);
-                buffer = IntPtr.Zero;
             }
+            using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
+            buffer = IntPtr.Zero;
             runtimeLease.Dispose();
+            released = true;
+            }
+            catch (Exception error)
+            {
+                cleanupFailure ??= error;
+                runtimeLease?.RetainCleanupFailure(this, error);
+                throw;
+            }
         }
 
         public override string LocationDescription()
@@ -71,14 +127,14 @@ namespace TensorSharp.GGML
         /// </summary>
         public override void EnsureHostReadable()
         {
-            Context.ThrowIfDisposed();
+            ValidateReferenceAddition();
             if (buffer == IntPtr.Zero && ByteLength != 0) throw new ObjectDisposedException(nameof(GgmlStorage));
             GgmlBasicOps.HostReadBarrier();
         }
 
         public override IntPtr PtrAtElement(long index)
         {
-            Context.ThrowIfDisposed();
+            ValidateReferenceAddition();
             if (buffer == IntPtr.Zero && ByteLength != 0) throw new ObjectDisposedException(nameof(GgmlStorage));
             // Block-quantized types (Q8_0 / Q4_0) cannot be addressed at element
             // granularity. Native kernels always pass index = 0 (the buffer base)

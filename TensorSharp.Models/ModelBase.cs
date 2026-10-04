@@ -43,7 +43,8 @@ namespace TensorSharp.Models
         private readonly bool _ownsGgmlContext;
         private readonly ITensorParallelGroup _borrowedTensorParallelGroup;
         private readonly bool _allocatorFromTensorParallelGroup;
-        private readonly IDisposable _ggmlRuntimeLease;
+        private readonly GgmlNativeLoader.OwnedResourceLease _ggmlRuntimeLease;
+        private readonly NativeOwnerRegistration _ggmlRegistration;
         protected readonly IAllocator _allocator;
         protected readonly BackendType _backend;
 
@@ -281,6 +282,19 @@ namespace TensorSharp.Models
 
             try
             {
+                if (backend is BackendType.GgmlCpu or BackendType.GgmlMetal or BackendType.GgmlCuda or BackendType.GgmlVulkan)
+                {
+                    _ggmlRegistration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Model);
+                    var requestedBackend = backend switch
+                    {
+                        BackendType.GgmlCuda => GgmlBackendType.Cuda,
+                        BackendType.GgmlMetal => GgmlBackendType.Metal,
+                        BackendType.GgmlVulkan => GgmlBackendType.Vulkan,
+                        _ => GgmlBackendType.Cpu,
+                    };
+                    _ggmlRuntimeLease = GgmlNativeLoader.AcquireOwnedLease(GgmlRuntimeResourceKind.Model,
+                        this, _ggmlRegistration, requestedBackend);
+                }
                 if (tpGroup != null)
                     _tpGroup = tpGroup;
                 else if (tpDegree > 1 && backend == BackendType.Cuda)
@@ -344,7 +358,6 @@ namespace TensorSharp.Models
                     default:
                         throw new ArgumentException($"Unsupported backend: {backend}");
                 }
-                _ggmlRuntimeLease = _ggmlContext == null ? null : GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model);
                 Console.WriteLine($"Backend: {backend}");
 
                 // Tell the kernels about the whole cluster, not just this process.
@@ -2707,6 +2720,7 @@ namespace TensorSharp.Models
             _ownershipCleanupFailed = true;
             _ownershipCleanupFailure ??= cleanupFailure;
             if (resource != null && !_failedOwnershipResources.Contains(resource)) _failedOwnershipResources.Add(resource);
+            if (cleanupFailure != null) _ggmlRuntimeLease?.RetainCleanupFailure(this, cleanupFailure);
             if (_ggmlContext == null) return;
             // The live GGML owner's process-exit hook retains this generation until safe shutdown.
             lock (FailedGgmlModelOwners)
@@ -2719,6 +2733,7 @@ namespace TensorSharp.Models
                 throw new InvalidOperationException("Model ownership cleanup previously failed; execution and resource mutation are unsafe.", _ownershipCleanupFailure);
             if (_ownershipRetirementStarted)
                 throw new ObjectDisposedException(GetType().Name, "Model retirement has fenced new execution and resource mutation.");
+            _ggmlRegistration?.ThrowIfQuarantined();
         }
 
         private void DisposeBaseResources(bool ownsTensorParallelGroup, Action releaseDerivedResources = null,
@@ -2770,6 +2785,8 @@ namespace TensorSharp.Models
             Action releaseAfterModelCaches, Action releaseDerivedGraphs, CudaRetirementPlan plan,
             CudaContextRestoration restoration)
         {
+            using (var ggmlCleanup = _ggmlRuntimeLease == null ? null : GgmlNativeLoader.ReserveResourceCleanup(this))
+            {
             using (var cleanupLease = plan.EnterModelCleanupEffect())
             {
                 try
@@ -2877,6 +2894,8 @@ namespace TensorSharp.Models
                     throw;
                 }
             }
+            ggmlCleanup?.Complete();
+            }
 
             _releaseOwnedChildren?.Invoke(plan, restoration);
             _releaseOwnedChildren = null;
@@ -2895,6 +2914,11 @@ namespace TensorSharp.Models
                 else if (_allocator is IDisposable allocatorDisposable) allocatorDisposable.Dispose();
             }
             if (_ownsGgmlContext) _ggmlContext.Dispose();
+            if (_ggmlRegistration != null)
+            {
+                using var effect = _ggmlRegistration.EnterEffect();
+                effect.CompleteSafeRelease(this);
+            }
             _ggmlRuntimeLease?.Dispose();
         }
 

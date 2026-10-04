@@ -15,9 +15,13 @@ namespace TensorSharp.GGML
     public sealed class GgmlContext : IDisposable
     {
         private readonly object lifetimeGate = new();
-        private IDisposable runtimeLease;
+        private GgmlNativeLoader.OwnedResourceLease runtimeLease;
+        private NativeOwnerRegistration registration;
+        private Exception cleanupFailure;
         private int activeStorages;
         private bool disposed;
+        private bool cleaning;
+        private bool disposing;
         internal GgmlMemoryPool MemoryPool { get; }
 
         /// <summary>
@@ -31,33 +35,49 @@ namespace TensorSharp.GGML
             lock (lifetimeGate)
             {
                 ThrowIfDisposed();
-                return GgmlNativeLoader.WithResourceCleanup(() =>
-                {
-                    GgmlBasicOps.HostReadBarrier();
-                    return MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
-                });
+                cleaning = true;
+            }
+            GgmlNativeLoader.ResourceCleanupReservation reservation = null;
+            try
+            {
+                reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
+                GgmlBasicOps.HostReadBarrier();
+                long bytes = MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
+                reservation.Complete();
+                return bytes;
+            }
+            catch (Exception error)
+            {
+                if (reservation != null || GgmlNativeLoader.IsUnsafeCleanupRefusal(error)) RetainCleanupFailure(error);
+                throw;
+            }
+            finally
+            {
+                reservation?.Dispose();
+                lock (lifetimeGate) cleaning = false;
             }
         }
 
-        internal IDisposable AcquireStorageLease()
+        internal StorageLease AcquireStorageLease(object storage, NativeOwnerRegistration storageRegistration)
         {
             lock (lifetimeGate)
             {
                 ThrowIfDisposed();
-                IDisposable lease = GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Tensor);
+                var lease = GgmlNativeLoader.AcquireOwnedLease(GgmlRuntimeResourceKind.Tensor, storage, storageRegistration);
                 activeStorages++;
                 return new StorageLease(this, lease);
             }
         }
 
-        private sealed class StorageLease(GgmlContext context, IDisposable lease) : IDisposable
+        internal sealed class StorageLease(GgmlContext context, GgmlNativeLoader.OwnedResourceLease lease) : IDisposable
         {
             private bool released;
+            internal void RetainCleanupFailure(object owner, Exception error) => lease.RetainCleanupFailure(owner, error);
             public void Dispose()
             {
                 lock (context.lifetimeGate)
                 {
-                    if (released) return;
+                    if (released || lease.HasCleanupFailure) return;
                     released = true;
                     context.activeStorages--;
                     lease.Dispose();
@@ -67,7 +87,19 @@ namespace TensorSharp.GGML
 
         internal void ThrowIfDisposed()
         {
-            if (disposed) throw new ObjectDisposedException(nameof(GgmlContext));
+            lock (lifetimeGate)
+            {
+                if (disposed || disposing) throw new ObjectDisposedException(nameof(GgmlContext));
+                if (cleanupFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(cleanupFailure).Throw();
+                if (cleaning) throw new InvalidOperationException("The context is performing resource cleanup.");
+                registration?.ThrowIfQuarantined();
+            }
+        }
+
+        private void RetainCleanupFailure(Exception error)
+        {
+            cleanupFailure ??= error;
+            runtimeLease?.RetainCleanupFailure(this, error);
         }
 
         public void Dispose()
@@ -75,16 +107,31 @@ namespace TensorSharp.GGML
             lock (lifetimeGate)
             {
                 if (disposed) return;
+                ThrowIfDisposed();
                 if (activeStorages != 0) throw new InvalidOperationException("Dispose the context's tensor storages before disposing their context.");
-                GgmlNativeLoader.WithResourceCleanup(() =>
-                {
-                    GgmlBasicOps.HostReadBarrier();
-                    MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
-                    runtimeLease.Dispose();
-                    disposed = true;
-                    return true;
-                });
+                disposing = true;
+            }
+            GgmlNativeLoader.ResourceCleanupReservation reservation = null;
+            try
+            {
+                reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
+                GgmlBasicOps.HostReadBarrier();
+                MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
+                using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
+                runtimeLease.Dispose();
+                lock (lifetimeGate) disposed = true;
+                reservation.Complete();
                 GC.SuppressFinalize(this);
+            }
+            catch (Exception error)
+            {
+                if (reservation != null || GgmlNativeLoader.IsUnsafeCleanupRefusal(error)) RetainCleanupFailure(error);
+                throw;
+            }
+            finally
+            {
+                reservation?.Dispose();
+                lock (lifetimeGate) disposing = false;
             }
         }
 
@@ -93,20 +140,11 @@ namespace TensorSharp.GGML
             // Storages retain their context. Only an unreachable, storage-free context can reach this path.
             try
             {
-                if (MemoryPool != null && runtimeLease != null)
-                {
-                    GgmlNativeLoader.WithResourceCleanup(() =>
-                    {
-                        GgmlBasicOps.HostReadBarrier();
-                        MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
-                        runtimeLease.Dispose();
-                        return true;
-                    });
-                }
+                if (MemoryPool != null && runtimeLease != null) Dispose();
             }
-            catch
+            catch (Exception error)
             {
-                // Retain the lease and memory if synchronization cannot prove teardown safe.
+                RetainCleanupFailure(error);
             }
         }
 
@@ -131,10 +169,11 @@ namespace TensorSharp.GGML
             DeviceIds = (int[])deviceIds.Clone();
             DeviceId = deviceIds[0];
             BackendType = backendType;
-            MemoryPool = new GgmlMemoryPool(backendType);
-            runtimeLease = GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Context);
+            registration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Allocator);
+            runtimeLease = GgmlNativeLoader.AcquireOwnedLease(GgmlRuntimeResourceKind.Context, this, registration, backendType);
             try
             {
+            MemoryPool = new GgmlMemoryPool(this);
             MemoryPool.EnsureInitialBlocks();
             GgmlNative.EnsureAvailable(backendType);
 
@@ -184,12 +223,31 @@ namespace TensorSharp.GGML
                                !string.Equals(disableAsync, "0", StringComparison.Ordinal);
             GgmlNative.SetAsyncCompute(enableAsync);
             }
-            catch
+            catch (Exception operation)
             {
-                MemoryPool.Trim();
-                runtimeLease.Dispose();
-                disposed = true;
-                GC.SuppressFinalize(this);
+                try
+                {
+                    if (MemoryPool != null)
+                    {
+                        if (!GgmlNativeLoader.NativeOwnershipMayExist) MemoryPool.TrimHostOnly();
+                        else
+                        {
+                            using var reservation = GgmlNativeLoader.ReserveResourceCleanup(this);
+                            MemoryPool.Trim(GgmlNative.InvalidateHostBuffer);
+                            reservation.Complete();
+                        }
+                    }
+                    using (var effect = registration.EnterEffect()) effect.CompleteSafeRelease(this);
+                    runtimeLease.Dispose();
+                    disposed = true;
+                    GC.SuppressFinalize(this);
+                }
+                catch (Exception cleanup)
+                {
+                    var failure = new AggregateException(operation, cleanup);
+                    RetainCleanupFailure(failure);
+                    throw failure;
+                }
                 throw;
             }
         }

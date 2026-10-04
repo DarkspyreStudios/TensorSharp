@@ -382,6 +382,7 @@ namespace TensorSharp.GGML
                     IReadOnlyList<GgmlNativeCandidate> untried = candidates.Skip(i + 1).ToArray();
 
                     GgmlNativeBuildIdentity? identity = ReadIdentity(handle);
+                    s_processOwnerToken.Identity = identity;
                     string? identityProblem = CompareIdentity(candidate, identity);
                     if (identityProblem != null)
                     {
@@ -511,8 +512,10 @@ namespace TensorSharp.GGML
             refusal = null;
             try
             {
-                ClaimProcess();
+                using var call = EnterNativeCall(mode: NativeAdmissionMode.IdentityOnly);
                 handle = GgmlLibraryLoader.Load(libraryPath);
+                s_processOwnerToken.Library = handle;
+                s_nativeUseStarted = true;
                 return true;
             }
             catch (BadImageFormatException ex)
@@ -548,8 +551,9 @@ namespace TensorSharp.GGML
             return GgmlNativeRefusalCodes.LoadFailed;
         }
 
-        private static unsafe GgmlNativeBuildIdentity? ReadIdentity(IntPtr handle)
+        private static unsafe GgmlNativeBuildIdentity? ReadIdentity(IntPtr handle, bool admitted = false)
         {
+            using var call = admitted ? null : EnterNativeCall(mode: NativeAdmissionMode.IdentityOnly);
             if (!NativeLibrary.TryGetExport(handle, "TSGgml_GetBuildIdentity", out IntPtr export))
                 return null;
             IntPtr text = ((delegate* unmanaged<IntPtr>)export)();
@@ -591,7 +595,7 @@ namespace TensorSharp.GGML
                 GgmlNative.EnsureAvailable(backend);
                 return null;
             }
-            catch (Exception ex) when (ex is InvalidOperationException or PlatformNotSupportedException)
+            catch (Exception ex) when (ex is not NativeRuntimeQuarantinedException && (ex is InvalidOperationException or PlatformNotSupportedException))
             {
                 return ex.Message;
             }

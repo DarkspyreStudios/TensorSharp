@@ -16,8 +16,8 @@ public static partial class GgmlEmbeddingNative
     public static IntPtr TSGgml_EmbeddingLoad(string path, string backend, int device, int threads)
     {
         backend = GgmlNativeLoader.PrepareModelBackend(backend);
-        using var call = GgmlNativeLoader.EnterNativeCall();
-        return GgmlNativeLoader.TrackNativeHandle("embedding-model", Native_TSGgml_EmbeddingLoad(path, backend, device, threads));
+        using var reservation = GgmlNativeLoader.ReserveNativeHandle("embedding-model");
+        return GgmlNativeLoader.TrackNativeHandle(reservation, Native_TSGgml_EmbeddingLoad(path, backend, device, threads));
     }
 
     [LibraryImport(DllName, StringMarshalling = StringMarshalling.Utf8, EntryPoint = "TSGgml_EmbeddingLoad")]
@@ -26,10 +26,7 @@ public static partial class GgmlEmbeddingNative
 
     public static void TSGgml_EmbeddingFree(IntPtr handle)
     {
-        using var call = GgmlNativeLoader.EnterNativeCall();
-        using var resource = GgmlNativeLoader.BeginNativeHandleRelease("embedding-model", handle);
-        Native_TSGgml_EmbeddingFree(handle);
-        resource.Complete();
+        GgmlNativeLoader.ReleaseNativeHandle("embedding-model", handle, () => Native_TSGgml_EmbeddingFree(handle));
     }
 
     [LibraryImport(DllName, EntryPoint = "TSGgml_EmbeddingFree")]
