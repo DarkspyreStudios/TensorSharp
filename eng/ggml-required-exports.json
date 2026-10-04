@@ -1,6 +1,6 @@
 {
   "schema": "tensorsharp-ggml-required-exports/1",
-  "nativeAbi": "3fbe879e57e21d430fa4f84c46acd798f10c2b0ae0de444c9a80f0ed9a5c6f64",
+  "nativeAbi": "51eb1dd3f4c4c28b7db37744f6240b5b22ea081304e4904c7576d8a695525d99",
   "ggmlCommit": "353b63b439f27ab2cc19dac97ab1681ba6d2d084",
   "exports": [
     "TSGgml_AdamF32",
