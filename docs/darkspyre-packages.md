@@ -70,6 +70,16 @@ The managed GGML project excludes native binaries from its package. `eng/pack-gg
 packages staged bridges into separate per-RID native packages and variant archives. Ordinary source
 builds still build and copy the platform bridge unless `TensorSharpSkipGgmlNative=true` is set.
 
+Consumers build against this repository by source through
+[eng/SourceReferences.targets](../eng/SourceReferences.targets). A consumer that sets `TensorSharpSourceRoot` to a
+checkout imports it, and each managed `Darkspyre.TensorSharp.*` PackageReference becomes a ProjectReference to the
+project that builds that package: the project named for the id without `Darkspyre.`, and `TensorSharp.Core` for
+`Darkspyre.TensorSharp.Tensors`. The references set `TensorSharpSkipGgmlNative`, `TensorSharpSkipMlxNative` and
+`TensorSharpSkipCudaNative`, so a consumer build runs no native development build. A consumer that ships the GGML
+bridge takes it from the release native package `eng/build-ggml-natives.sh` and `eng/pack-ggml-natives.py
+--mac-prerelease` write to `artifacts/ggml-natives/<version>/dist`, which matches the managed build of the same
+commit. Without the property, consumers use the published packages.
+
 `TensorSharpSkipCudaNative=true` disables CUDA compiler discovery, architecture resolution,
 PTX compilation, intermediate PTX copying and committed-PTX updates. The committed PTX content
 still copies through the existing output/publish items. The flag also applies to direct target

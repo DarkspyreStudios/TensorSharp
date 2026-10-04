@@ -5,8 +5,8 @@
     Darkspyre.TensorSharp.* PackageReference then becomes a ProjectReference to the project that builds it: the
     project named for the package id without its "Darkspyre." prefix, and TensorSharp.Core for Darkspyre.TensorSharp.Tensors.
 
-    The references build with TensorSharpSkipGgmlNative and TensorSharpSkipMlxNative, so a consumer build runs no
-    native development build. The GGML natives a consumer ships come from the release native package that
+    The references build with TensorSharpSkipGgmlNative, TensorSharpSkipMlxNative and TensorSharpSkipCudaNative, so a
+    consumer build runs no native development build. The GGML natives a consumer ships come from the release native package that
     eng/build-ggml-natives.sh and eng/pack-ggml-natives.py write under artifacts/ggml-natives/<version>/dist;
     docs/darkspyre-packages.md describes both. The Darkspyre.TensorSharp.Backends.GGML.Native.* PackageReferences are
     left to the consumer.
@@ -29,6 +29,6 @@
     <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Server.Host')->'$(_TensorSharpSourceRoot)TensorSharp.Server.Host/TensorSharp.Server.Host.csproj')" />
     <_TensorSharpSourceProject Include="@(PackageReference->WithMetadataValue('Identity', 'Darkspyre.TensorSharp.Tensors')->'$(_TensorSharpSourceRoot)TensorSharp.Core/TensorSharp.Core.csproj')" />
     <PackageReference Remove="Darkspyre.TensorSharp.AgentHost;Darkspyre.TensorSharp.Backends.Cuda;Darkspyre.TensorSharp.Backends.GGML;Darkspyre.TensorSharp.Backends.MLX;Darkspyre.TensorSharp.Chat;Darkspyre.TensorSharp.Cli;Darkspyre.TensorSharp.Distributed;Darkspyre.TensorSharp.Models;Darkspyre.TensorSharp.Runtime;Darkspyre.TensorSharp.Runtime.Logging;Darkspyre.TensorSharp.Server;Darkspyre.TensorSharp.Server.Host;Darkspyre.TensorSharp.Tensors" />
-    <ProjectReference Include="@(_TensorSharpSourceProject)" AdditionalProperties="TensorSharpSkipGgmlNative=true;TensorSharpSkipMlxNative=true" />
+    <ProjectReference Include="@(_TensorSharpSourceProject)" AdditionalProperties="TensorSharpSkipGgmlNative=true;TensorSharpSkipMlxNative=true;TensorSharpSkipCudaNative=true" />
   </ItemGroup>
 </Project>
