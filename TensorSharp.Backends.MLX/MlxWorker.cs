@@ -165,8 +165,7 @@ namespace TensorSharp.MLX
                     }
                     catch (Exception admission)
                     {
-                        if (error == null || !NativeQuarantineAuthority.TryGetFailure(admission, out _))
-                            error = MlxNative.JoinNativeErrors(error, admission);
+                        error = JoinCleanupError(error, admission);
                         if (effect != null)
                         {
                             try { effect.PublishFailure(this, admission, resources.CleanupFailureStage); }
@@ -192,7 +191,7 @@ namespace TensorSharp.MLX
             catch (NativeRuntimeQuarantinedException refusal)
             {
                 unsafeCleanup = true;
-                if (error == null) error = refusal;
+                error = JoinCleanupError(error, refusal);
             }
             if (!unsafeCleanup)
             {
@@ -213,6 +212,15 @@ namespace TensorSharp.MLX
             }
             if (error != null) ExceptionDispatchInfo.Capture(error).Throw();
             return result;
+        }
+
+        private static Exception JoinCleanupError(Exception original, Exception cleanup)
+        {
+            if (original != null && cleanup is NativeRuntimeQuarantinedException refusal
+                && NativeQuarantineAuthority.TryGetFailure(original, out NativeRuntimeFailure failure)
+                && failure.FailureId == refusal.Failure.FailureId)
+                return original;
+            return MlxNative.JoinNativeErrors(original, cleanup);
         }
 
         private void Run()
