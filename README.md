@@ -116,8 +116,15 @@ return, not GPU completion. Failed evaluation retains the graph and fences the s
 checked vector cleanup preserves original operation and independent cleanup errors. Evaluation
 view and cache-materialization carriers retain their actual acquired references on unsafe cleanup.
 Fused evaluation helpers propagate recorded unsafe errors instead of reporting a healthy fallback.
-All-used-stream synchronization remains unfinished. Other raw temporary-handle and storage
-replacement cleanup still requires checked ownership recovery;
+Storage's native upload, flattened replacement and slice update use preinstalled recovery
+carriers. Admitted handoffs consume the caller's reference explicitly by ref, including failure
+after adoption; admission refusal preserves it. Basic, fused and quantized operations use one
+storage handoff. Native factories used by storage retain outputs before status validation and
+check temporary cleanup before returning an output. Failed cleanup retains actual storage,
+incoming arrays and unreturned replacements; successful fields clear once, with no rollback.
+Array-view creation holds the storage lock across current-data preparation and view acquisition.
+All-used-stream synchronization remains unfinished. Other native factories, raw temporaries,
+caller-level cleanup and replacement paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not

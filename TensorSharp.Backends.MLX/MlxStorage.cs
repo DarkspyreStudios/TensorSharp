@@ -152,11 +152,35 @@ namespace TensorSharp.MLX
             if (!ReferenceEquals(tensor.Storage, this))
                 throw new ArgumentException("Tensor is not backed by this MLX storage.", nameof(tensor));
 
-            EnsureDeviceCurrent();
-            return MlxNative.AsStrided(deviceArray, ToIntArray(tensor.Sizes), ToLongArray(tensor.Strides), tensor.StorageOffset);
+            lock (sync)
+            {
+                EnsureDeviceCurrentCore();
+                return MlxNative.AsStrided(deviceArray, ToIntArray(tensor.Sizes), ToLongArray(tensor.Strides), tensor.StorageOffset);
+            }
         }
 
-        internal void ReplaceDeviceArray(MlxNative.MlxArray array)
+        internal static void SetDeviceResult(Tensor tensor, ref MlxNative.MlxArray output)
+        {
+            MlxStorage storage = (MlxStorage)tensor.Storage;
+            if (tensor.StorageOffset == 0 && storage.ElementCount == tensor.ElementCount())
+                storage.ReplaceDeviceArray(ref output);
+            else
+                storage.UpdateDeviceSlice(tensor, ref output);
+        }
+
+        private sealed class DeviceArrayChange(MlxStorage owner) : MlxNativeResources
+        {
+            // Retain the actual storage graph after its operation delegate unwinds.
+            internal readonly MlxStorage Storage = owner;
+            internal override NativeRuntimeFailureStage CleanupFailureStage => NativeRuntimeFailureStage.StorageRelease;
+            internal MlxNative.MlxArray Incoming;
+            internal MlxNative.MlxArray Temporary;
+            internal MlxNative.MlxArray Replacement;
+            internal bool IncomingTaken;
+            internal bool Prepared;
+        }
+
+        internal void ReplaceDeviceArray(ref MlxNative.MlxArray array)
         {
             ThrowIfDestroyed();
             nativeOwner.ThrowIfQuarantined();
@@ -165,32 +189,30 @@ namespace TensorSharp.MLX
             if (ElementCount > int.MaxValue)
                 throw new NotSupportedException("MLX storage arrays larger than Int32.MaxValue elements are not supported yet.");
 
-            // Phase 4 attempted to skip the reshape when the incoming array
-            // was already row-contiguous (and stored the multi-dim array
-            // directly as the storage's deviceArray). That broke
-            // <see cref="UpdateDeviceSlice"/>, which calls 1D
-            // <c>SliceUpdate</c> on <c>deviceArray</c> — mlx errors out
-            // with "Invalid number of indices or strides for array with
-            // dimension 2" when the deviceArray is multi-dim. Keep the
-            // invariant: <c>deviceArray</c> is always stored as 1D flat,
-            // and reshape on entry. The reshape on a row-contiguous array
-            // is internally a metadata-only no-op in MLX, so the cost is
-            // limited to the mlx_reshape C call itself (~5 µs).
-            MlxNative.MlxArray flat = MlxNative.Reshape(array, new[] { (int)ElementCount });
-            MlxNative.FreeArray(array);
-
+            var resources = new DeviceArrayChange(this) { Incoming = array };
             lock (sync)
             {
-                if (deviceArray.IsValid)
-                    MlxNative.FreeArray(deviceArray);
-
-                deviceArray = flat;
-                hostDirty = false;
-                deviceDirty = true;
+                try
+                {
+                    MlxWorker.Shared.InvokeNative(resources, effect =>
+                    {
+                        ThrowIfDestroyed();
+                        nativeOwner.ThrowIfQuarantined();
+                        resources.IncomingTaken = true;
+                        // Slice updates require the storage array to stay one-dimensional.
+                        resources.Replacement = MlxNative.Reshape(resources.Incoming, new[] { (int)ElementCount });
+                        resources.Prepared = true;
+                        return 0;
+                    }, () => CompleteDeviceArrayChange(resources, fromDevice: true));
+                }
+                finally
+                {
+                    if (resources.IncomingTaken) array = default;
+                }
             }
         }
 
-        internal void UpdateDeviceSlice(Tensor tensor, MlxNative.MlxArray update)
+        internal void UpdateDeviceSlice(Tensor tensor, ref MlxNative.MlxArray update)
         {
             if (tensor == null)
                 throw new ArgumentNullException(nameof(tensor));
@@ -205,59 +227,74 @@ namespace TensorSharp.MLX
             if (tensor.ElementCount() > int.MaxValue)
                 throw new NotSupportedException("MLX slice lengths larger than Int32.MaxValue are not supported yet.");
 
-            EnsureDeviceCurrent();
-            MlxNative.MlxArray flatUpdate = default;
-            MlxNative.MlxArray updatedStorage = default;
-            try
+            var resources = new DeviceArrayChange(this) { Incoming = update };
+            lock (sync)
             {
-                int length = (int)tensor.ElementCount();
-                int start = (int)tensor.StorageOffset;
-                flatUpdate = MlxNative.Reshape(update, new[] { length });
-                updatedStorage = MlxNative.SliceUpdate(deviceArray, flatUpdate, start, start + length);
-
-                lock (sync)
+                try
                 {
-                    if (deviceArray.IsValid)
-                        MlxNative.FreeArray(deviceArray);
-
-                    deviceArray = updatedStorage;
-                    updatedStorage = default;
-                    hostDirty = false;
-                    deviceDirty = true;
+                    MlxWorker.Shared.InvokeNative(resources, effect =>
+                    {
+                        ThrowIfDestroyed();
+                        nativeOwner.ThrowIfQuarantined();
+                        resources.IncomingTaken = true;
+                        EnsureDeviceCurrentCore();
+                        int length = (int)tensor.ElementCount();
+                        int start = (int)tensor.StorageOffset;
+                        resources.Temporary = MlxNative.Reshape(resources.Incoming, new[] { length });
+                        resources.Replacement = MlxNative.SliceUpdate(deviceArray, resources.Temporary, start, checked(start + length));
+                        resources.Prepared = true;
+                        return 0;
+                    }, () => CompleteDeviceArrayChange(resources, fromDevice: true));
                 }
-            }
-            finally
-            {
-                MlxNative.FreeArray(flatUpdate);
-                MlxNative.FreeArray(updatedStorage);
+                finally
+                {
+                    if (resources.IncomingTaken) update = default;
+                }
             }
         }
 
         public override void EnsureDeviceCurrent()
+        {
+            lock (sync) EnsureDeviceCurrentCore();
+        }
+
+        private void EnsureDeviceCurrentCore()
         {
             ThrowIfDestroyed();
             nativeOwner.ThrowIfQuarantined();
             if (ElementCount > int.MaxValue)
                 throw new NotSupportedException("MLX storage arrays larger than Int32.MaxValue elements are not supported yet.");
 
-            lock (sync)
+            if (deviceArray.IsValid && !hostDirty)
+                return;
+
+            var resources = new DeviceArrayChange(this);
+            MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                if (deviceArray.IsValid && !hostDirty)
-                    return;
-
-                if (deviceArray.IsValid)
-                {
-                    MlxNative.FreeArray(deviceArray);
-                    deviceArray = default;
-                }
-
                 if (buffer != IntPtr.Zero)
-                    deviceArray = MlxNative.NewArrayFromHost(buffer, new[] { (int)ElementCount }, ElementType);
+                    resources.Replacement = MlxNative.NewArrayFromHost(buffer, new[] { (int)ElementCount }, ElementType);
                 else
-                    deviceArray = MlxNative.Full(new[] { (int)ElementCount }, 0f, ElementType);
-                hostDirty = false;
-                deviceDirty = false;
+                    resources.Replacement = MlxNative.Full(new[] { (int)ElementCount }, 0f, ElementType);
+                resources.Prepared = true;
+                return 0;
+            }, () => CompleteDeviceArrayChange(resources, fromDevice: false));
+        }
+
+        private void CompleteDeviceArrayChange(DeviceArrayChange resources, bool fromDevice)
+        {
+            MlxNative.FreeArrayReference(ref resources.Temporary);
+            if (resources.IncomingTaken) MlxNative.FreeArrayReference(ref resources.Incoming);
+            if (!resources.Prepared)
+            {
+                MlxNative.FreeArrayReference(ref resources.Replacement);
+                return;
             }
+
+            MlxNative.FreeArrayReference(ref deviceArray);
+            deviceArray = resources.Replacement;
+            resources.Replacement = default;
+            hostDirty = false;
+            deviceDirty = fromDevice;
         }
 
         public override int[] GetElementsAsInt(long index, int length)

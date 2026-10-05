@@ -21,7 +21,7 @@ namespace TensorSharp.MLX
                 try
                 {
                     output = MlxNative.Full(ToIntArray(result.Sizes), value, result.ElementType);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 finally
@@ -56,7 +56,7 @@ namespace TensorSharp.MLX
                     }
 
                     contiguous = MlxNative.Contiguous(copySource);
-                    SetDeviceResult(result, contiguous);
+                    MlxStorage.SetDeviceResult(result, ref contiguous);
                     contiguous = default;
                 }
                 finally
@@ -87,7 +87,7 @@ namespace TensorSharp.MLX
                     m1View = GetView(m1);
                     m2View = GetView(m2);
                     output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -120,7 +120,7 @@ namespace TensorSharp.MLX
                     m1View = GetView(m1);
                     m2View = GetView(m2);
                     output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -179,7 +179,7 @@ namespace TensorSharp.MLX
                 srcView = GetView(src);
                 zero = MlxNative.NewScalar(0.0f);
                 output = MlxNative.Binary(MlxNative.MlxBinaryOp.Maximum, srcView, zero);
-                SetDeviceResult(writeTarget, output);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
                 output = default;
                 return writeTarget;
             }
@@ -213,7 +213,7 @@ namespace TensorSharp.MLX
                     sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, srcView);
                     output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, srcView, sigmoid);
                 }
-                SetDeviceResult(writeTarget, output);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
                 output = default;
                 return writeTarget;
             }
@@ -241,7 +241,7 @@ namespace TensorSharp.MLX
                     output = MlxCompiledOps.GeluTanh(srcView);
                 else
                     output = Gelu(srcView);
-                SetDeviceResult(writeTarget, output);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
                 output = default;
                 return writeTarget;
             }
@@ -311,7 +311,7 @@ namespace TensorSharp.MLX
                         silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gateView, sigmoid);
                         output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, upView);
                     }
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -365,7 +365,7 @@ namespace TensorSharp.MLX
                     silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gate, sigmoid);
                     output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, up);
                 }
-                SetDeviceResult(writeTarget, output);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
                 output = default;
                 return writeTarget;
             }
@@ -404,7 +404,7 @@ namespace TensorSharp.MLX
                     gelu = Gelu(gateView);
                     output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gelu, upView);
                 }
-                SetDeviceResult(writeTarget, output);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
                 output = default;
                 return writeTarget;
             }
@@ -443,7 +443,7 @@ namespace TensorSharp.MLX
                         sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
                         output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xView, sigmoid);
                     }
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -472,7 +472,7 @@ namespace TensorSharp.MLX
                 {
                     srcView = GetView(src);
                     output = MlxNative.SoftmaxLastAxis(srcView);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -606,7 +606,7 @@ namespace TensorSharp.MLX
                         {
                             resultView = GetView(result);
                             combined = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, reshaped, resultView);
-                            SetDeviceResult(writeTarget, combined);
+                            MlxStorage.SetDeviceResult(writeTarget, ref combined);
                             combined = default;
                         }
                         finally
@@ -616,7 +616,7 @@ namespace TensorSharp.MLX
                     }
                     else
                     {
-                        SetDeviceResult(writeTarget, reshaped);
+                        MlxStorage.SetDeviceResult(writeTarget, ref reshaped);
                         reshaped = default;
                     }
                 }
@@ -679,7 +679,7 @@ namespace TensorSharp.MLX
                     maskView);
                 attentionSeqMajor = MlxNative.Transpose(attentionHeadMajor, headMajorAxes);
                 contiguous = MlxNative.Contiguous(attentionSeqMajor);
-                SetDeviceResult(writeTarget, contiguous);
+                MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
                 contiguous = default;
                 return writeTarget;
             }
@@ -724,7 +724,7 @@ namespace TensorSharp.MLX
                     indicesView = GetView(indices);
                     output = MlxNative.TakeAxis(srcView, indicesView, 0);
                     contiguous = MlxNative.Contiguous(output);
-                    SetDeviceResult(writeTarget, contiguous);
+                    MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
                     contiguous = default;
                 }
                 finally
@@ -764,7 +764,7 @@ namespace TensorSharp.MLX
                     srcView = GetView(src);
                     output = MlxNative.RepeatAxis(srcView, repeats, dim);
                     contiguous = MlxNative.Contiguous(output);
-                    SetDeviceResult(writeTarget, contiguous);
+                    MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
                     contiguous = default;
                 }
                 finally
@@ -796,7 +796,7 @@ namespace TensorSharp.MLX
                     alphaView = GetOptionalView(alpha);
                     betaView = GetOptionalView(beta);
                     output = MlxNative.FastLayerNorm(srcView, alphaView, betaView, eps);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -827,7 +827,7 @@ namespace TensorSharp.MLX
                     srcView = GetView(src);
                     alphaView = GetOptionalView(alpha);
                     output = MlxNative.FastRmsNorm(srcView, alphaView, eps);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -904,7 +904,7 @@ namespace TensorSharp.MLX
 
                 maskedScores = MlxNative.Where(futureMask, replacement, scores2d);
                 reshaped = MlxNative.Reshape(maskedScores, ToIntArray(tensor.Sizes));
-                SetDeviceResult(tensor, reshaped);
+                MlxStorage.SetDeviceResult(tensor, ref reshaped);
                 reshaped = default;
             }
             finally
@@ -946,7 +946,7 @@ namespace TensorSharp.MLX
                 {
                     srcView = GetView(src);
                     output = MlxNative.Unary(op, srcView);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -974,7 +974,7 @@ namespace TensorSharp.MLX
                     lhsView = GetView(lhs);
                     rhsView = GetView(rhs);
                     output = MlxNative.Binary(op, lhsView, rhsView);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -1007,7 +1007,7 @@ namespace TensorSharp.MLX
                     output = scalarIsLhs
                         ? MlxNative.Binary(op, scalarArray, tensorView)
                         : MlxNative.Binary(op, tensorView, scalarArray);
-                    SetDeviceResult(writeTarget, output);
+                    MlxStorage.SetDeviceResult(writeTarget, ref output);
                     output = default;
                 }
                 finally
@@ -1143,20 +1143,6 @@ namespace TensorSharp.MLX
         private static long LastDimension(Tensor tensor)
         {
             return tensor.DimensionCount == 0 ? 1 : tensor.Sizes[tensor.DimensionCount - 1];
-        }
-
-        private static void SetDeviceResult(Tensor tensor, MlxNative.MlxArray output)
-        {
-            MlxStorage storage = (MlxStorage)tensor.Storage;
-            if (tensor.StorageOffset == 0 && tensor.Storage.ElementCount == tensor.ElementCount())
-            {
-                storage.ReplaceDeviceArray(output);
-            }
-            else
-            {
-                storage.UpdateDeviceSlice(tensor, output);
-                MlxNative.FreeArray(output);
-            }
         }
 
         private static Tensor FallbackTensor(string opName, params object[] args)

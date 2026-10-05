@@ -9,6 +9,7 @@ namespace TensorSharp.MLX
     internal abstract class MlxNativeResources
     {
         internal bool SafelyReleased;
+        internal virtual NativeRuntimeFailureStage CleanupFailureStage => NativeRuntimeFailureStage.GraphRelease;
     }
 
     public sealed class MlxWorker : IDisposable
@@ -130,7 +131,7 @@ namespace TensorSharp.MLX
                         catch (Exception cleanupError)
                         {
                             error = MlxNative.JoinNativeErrors(error, cleanupError);
-                            try { effect.PublishFailure(this, cleanupError, NativeRuntimeFailureStage.GraphRelease); }
+                            try { effect.PublishFailure(this, cleanupError, resources.CleanupFailureStage); }
                             catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
                         }
                     }

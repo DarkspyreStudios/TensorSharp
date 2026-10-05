@@ -104,7 +104,7 @@ namespace TensorSharp.MLX
                 casted = MlxNative.Astype(argmax, DType.Int32);
                 MlxNative.FreeArray(argmax);
                 argmax = default;
-                SetDeviceResult(result, casted);
+                MlxStorage.SetDeviceResult(result, ref casted);
                 casted = default;
                 return true;
             }
@@ -188,9 +188,9 @@ namespace TensorSharp.MLX
                     topLogits = MlxNative.TakeAxis(logitsView, topIdx1dInt, axis: 1);
                     softmaxed = MlxNative.SoftmaxLastAxis(topLogits);
 
-                    SetDeviceResult(topIndices, topIdx1dInt);
+                    MlxStorage.SetDeviceResult(topIndices, ref topIdx1dInt);
                     topIdx1dInt = default;
-                    SetDeviceResult(routeWeights, softmaxed);
+                    MlxStorage.SetDeviceResult(routeWeights, ref softmaxed);
                     softmaxed = default;
                     return true;
                 }
@@ -248,8 +248,8 @@ namespace TensorSharp.MLX
                     idxI = MlxNative.Astype(idxU, DType.Int32);              // [N, K] int32 (gather_qmm rhs)
                     topLogits = MlxNative.TakeAlongAxis(sv, idxU, axis: 1);  // [N, K] per-row top-K logits
                     w = MlxNative.SoftmaxLastAxis(topLogits);               // [N, K] renormalised weights
-                    SetDeviceResult(topIndices, idxI); idxI = default;
-                    SetDeviceResult(routeWeights, w); w = default;
+                    MlxStorage.SetDeviceResult(topIndices, ref idxI); idxI = default;
+                    MlxStorage.SetDeviceResult(routeWeights, ref w); w = default;
                     return true;
                 }
                 catch { return false; }
@@ -293,7 +293,7 @@ namespace TensorSharp.MLX
                 srcView = GetView(src);
                 scalarArray = MlxNative.NewScalar(scalar);
                 result = MlxCompiledOps.AddScaled(outView, srcView, scalarArray);
-                SetDeviceResult(output, result);
+                MlxStorage.SetDeviceResult(output, ref result);
                 result = default;
                 return true;
             }
@@ -348,7 +348,7 @@ namespace TensorSharp.MLX
                     }
                 });
                 resources.Contiguous = default;
-                SetDeviceResult(tensor, contiguous);
+                MlxStorage.SetDeviceResult(tensor, ref contiguous);
                 contiguous = default;
                 return true;
             }
@@ -396,7 +396,7 @@ namespace TensorSharp.MLX
                     indicesView = GetView(indices);
                     gathered = MlxNative.TakeAxis(srcView, indicesView, 0);
                     contiguous = MlxNative.Contiguous(gathered);
-                    SetDeviceResult(result, contiguous);
+                    MlxStorage.SetDeviceResult(result, ref contiguous);
                     contiguous = default;
                     return true;
                 }
@@ -454,7 +454,7 @@ namespace TensorSharp.MLX
                     indicesView = GetView(indices);
                     weightsView = GetView(weights);
                     scattered = MlxNative.ScatterAddWeightedRows(outputView, rowsView, indicesView, weightsView, seqLen, batchSize, hiddenDim);
-                    SetDeviceResult(output, scattered);
+                    MlxStorage.SetDeviceResult(output, ref scattered);
                     scattered = default;
                     return true;
                 }
@@ -515,9 +515,9 @@ namespace TensorSharp.MLX
                     inputView = GetView(input);
                     weightView = GetView(normWeight);
                     (updated, normed) = MlxNative.AddRmsNorm(residualView, inputView, weightView, eps, rows, hiddenDim);
-                    SetDeviceResult(residual, updated);
+                    MlxStorage.SetDeviceResult(residual, ref updated);
                     updated = default;
-                    SetDeviceResult(normedOut, normed);
+                    MlxStorage.SetDeviceResult(normedOut, ref normed);
                     normed = default;
                     return true;
                 }
@@ -565,7 +565,7 @@ namespace TensorSharp.MLX
                     inputView = GetView(input);
                     weightView = GetView(normWeight);
                     output = MlxNative.RmsNormAdd(residualView, inputView, weightView, eps, rows, hiddenDim);
-                    SetDeviceResult(residual, output);
+                    MlxStorage.SetDeviceResult(residual, ref output);
                     output = default;
                     return true;
                 }
@@ -604,7 +604,7 @@ namespace TensorSharp.MLX
             {
                 gateUpView = GetView(gateUp);
                 output = MlxNative.GeluMulSplit(gateUpView, rows, halfDim);
-                SetDeviceResult(result, output);
+                MlxStorage.SetDeviceResult(result, ref output);
                 output = default;
                 return true;
             }
@@ -673,7 +673,7 @@ namespace TensorSharp.MLX
                 expertsView = GetView(expertIndices);
                 output = MlxNative.SwigluOaiGatherBias(
                     gateView, upView, gateBiasView, upBiasView, expertsView, alpha, limit, rows, dim);
-                SetDeviceResult(result, output);
+                MlxStorage.SetDeviceResult(result, ref output);
                 output = default;
                 return true;
             }
@@ -747,7 +747,7 @@ namespace TensorSharp.MLX
                 result = MlxNative.MoeBiasWeightedSum(
                     downView, biasView, hasBias, expertsView, invOrderView, weightsView,
                     n, expertsPerToken, dim);
-                SetDeviceResult(output, result);
+                MlxStorage.SetDeviceResult(output, ref result);
                 result = default;
                 return true;
             }
@@ -829,7 +829,7 @@ namespace TensorSharp.MLX
                     int[] stops = { heads, startPos + seqLen, headDim };
                     int[] strides = { 1, 1, 1 };
                     updated = MlxNative.SliceUpdateMulti(cacheView, slice, starts, stops, strides);
-                    cacheStorage.ReplaceDeviceArray(updated);
+                    cacheStorage.ReplaceDeviceArray(ref updated);
                     updated = default;
                     return true;
                 }
@@ -928,9 +928,9 @@ namespace TensorSharp.MLX
                         numHeads, numKVHeads, headDim, rotHalf, eps,
                         out q, out k, out v);
 
-                    SetDeviceResult(qOut, q); q = default;
-                    SetDeviceResult(kOut, k); k = default;
-                    SetDeviceResult(vOut, v); v = default;
+                    MlxStorage.SetDeviceResult(qOut, ref q); q = default;
+                    MlxStorage.SetDeviceResult(kOut, ref k); k = default;
+                    MlxStorage.SetDeviceResult(vOut, ref v); v = default;
                     return true;
                 }
                 catch
@@ -980,7 +980,7 @@ namespace TensorSharp.MLX
                 {
                     inputView = GetView(input);
                     output = MlxNative.FlatToHeadFirst(inputView, seqLen, numHeads, headDim, sourceStride, colOffset);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                     return true;
                 }
@@ -1062,7 +1062,7 @@ namespace TensorSharp.MLX
                     cosView = GetView(cosTable);
                     sinView = GetView(sinTable);
                     output = MlxNative.NeoXRoPE(dataView, cosView, sinView, numHeads, seqLen, headDim, rotHalf, headFirst);
-                    SetDeviceResult(data, output);
+                    MlxStorage.SetDeviceResult(data, ref output);
                     output = default;
                     return true;
                 }
@@ -1186,7 +1186,7 @@ namespace TensorSharp.MLX
                             startPos,
                             causal,
                             scale);
-                        SetDeviceResult(result, attention);
+                        MlxStorage.SetDeviceResult(result, ref attention);
                         attention = default;
 
                         MlxNative.FreeArray(kCache);
@@ -1496,7 +1496,7 @@ namespace TensorSharp.MLX
                         numValueHeads,
                         headValueDim,
                         eps);
-                    SetDeviceResult(result, gated);
+                    MlxStorage.SetDeviceResult(result, ref gated);
                     gated = default;
 
                     MlxNative.FreeArray(convState);
@@ -1730,7 +1730,7 @@ namespace TensorSharp.MLX
                                 numValueHeads,
                                 headValueDim,
                                 eps);
-                            SetDeviceResult(result, gated2);
+                            MlxStorage.SetDeviceResult(result, ref gated2);
                             gated2 = default;
 
                             MlxNative.FreeArray(convState);
@@ -1836,7 +1836,7 @@ namespace TensorSharp.MLX
                     zSilu = Silu(z4);
                     gated4 = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, normed, zSilu);
                     gated2 = MlxNative.Reshape(gated4, new[] { seqLen, valueDim });
-                    SetDeviceResult(result, gated2);
+                    MlxStorage.SetDeviceResult(result, ref gated2);
                     gated2 = default;
 
                     MlxNative.FreeArray(convState);
@@ -2216,7 +2216,7 @@ namespace TensorSharp.MLX
                     qView, kView, vView, sinksView,
                     numHeads, numKVHeads, headDim,
                     cacheLen, attendStart, attendEnd, scale);
-                SetDeviceResult(result, output);
+                MlxStorage.SetDeviceResult(result, ref output);
                 output = default;
                 return true;
             }
@@ -2448,7 +2448,7 @@ namespace TensorSharp.MLX
                     output = MlxNative.DecodeAttentionHeadDim512(
                         qView, kView, vView,
                         numHeads, numKVHeads, headDim, cacheLen, attendLen, scale);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                     return true;
                 }
@@ -2532,7 +2532,7 @@ namespace TensorSharp.MLX
                         firstSlot,
                         attendLen,
                         scale);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                     return true;
                 }
@@ -2679,7 +2679,7 @@ namespace TensorSharp.MLX
                         maskStart,
                         causal,
                         scale);
-                    SetDeviceResult(result, attention);
+                    MlxStorage.SetDeviceResult(result, ref attention);
                     attention = default;
                     return true;
                 }
@@ -2740,7 +2740,7 @@ namespace TensorSharp.MLX
                 seqMajor = MlxNative.Transpose(attention, new[] { 0, 2, 1, 3 });
                 contiguous = MlxNative.Contiguous(seqMajor);
                 flat = MlxNative.Reshape(contiguous, new[] { seqLen, numHeads * headDim });
-                SetDeviceResult(result, flat);
+                MlxStorage.SetDeviceResult(result, ref flat);
                 flat = default;
                 return true;
             }
@@ -2910,18 +2910,5 @@ namespace TensorSharp.MLX
             return ((MlxStorage)tensor.Storage).CreateArrayView(tensor);
         }
 
-        private static void SetDeviceResult(Tensor tensor, MlxNative.MlxArray output)
-        {
-            MlxStorage storage = (MlxStorage)tensor.Storage;
-            if (tensor.StorageOffset == 0 && tensor.Storage.ElementCount == tensor.ElementCount())
-            {
-                storage.ReplaceDeviceArray(output);
-            }
-            else
-            {
-                storage.UpdateDeviceSlice(tensor, output);
-                MlxNative.FreeArray(output);
-            }
-        }
     }
 }

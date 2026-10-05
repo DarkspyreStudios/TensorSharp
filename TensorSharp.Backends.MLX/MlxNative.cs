@@ -3385,7 +3385,12 @@ if (kind == 0) {
             if (shape == null || shape.Length == 0)
                 throw new ArgumentException("MLX array shape must be non-empty.", nameof(shape));
 
-            return MlxWorker.Shared.InvokeNative(() => mlx_array_new_data(data, shape, shape.Length, mlxDtype));
+            return AcquireArray(resources =>
+            {
+                ClearCapturedError();
+                resources.Result = mlx_array_new_data(data, shape, shape.Length, mlxDtype);
+                CheckNativeValue(!resources.Result.IsValid, "creating MLX array from host data");
+            });
         }
 
         // Empty deleter for zero-copy MLX arrays whose buffer lifetime is
@@ -3449,20 +3454,43 @@ if (kind == 0) {
             if (shape == null || shape.Length == 0)
                 throw new ArgumentException("MLX array shape must be non-empty.", nameof(shape));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray scalar = mlx_array_new_float32(value);
-                try
-                {
-                    MlxArray result;
-                    Check(mlx_full(out result, shape, (nuint)shape.Length, scalar, ToMlxDtype(dtype), DefaultStream()), "creating MLX full array");
-                    return result;
-                }
-                finally
-                {
-                    _ = mlx_array_free(scalar);
-                }
+                ClearCapturedError();
+                resources.Temporary = mlx_array_new_float32(value);
+                CheckNativeValue(!resources.Temporary.IsValid, "creating MLX full scalar");
+                Check(mlx_full(out resources.Result, shape, (nuint)shape.Length, resources.Temporary, ToMlxDtype(dtype), DefaultStream()), "creating MLX full array");
             });
+        }
+
+        private sealed class ArrayAcquisition : MlxNativeResources
+        {
+            internal MlxArray Result;
+            internal MlxArray Temporary;
+            internal bool Prepared;
+        }
+
+        private static MlxArray AcquireArray(Action<ArrayAcquisition> acquire)
+        {
+            var resources = new ArrayAcquisition();
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
+            {
+                acquire(resources);
+                if (!resources.Result.IsValid)
+                    throw new InvalidOperationException("MLX array creation returned an empty reference.");
+                resources.Prepared = true;
+                return resources.Result;
+            }, () =>
+            {
+                FreeArrayReference(ref resources.Temporary);
+                if (!resources.Prepared) FreeArrayReference(ref resources.Result);
+            });
+        }
+
+        internal static void FreeArrayReference(ref MlxArray array)
+        {
+            FreeArray(array);
+            array = default;
         }
 
         internal static void FreeArray(MlxArray array)
@@ -4187,31 +4215,25 @@ if (kind == 0) {
             if (offset < 0)
                 throw new ArgumentOutOfRangeException(nameof(offset));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_as_strided(out result, array, shape, (nuint)shape.Length, strides, (nuint)strides.Length, (nuint)offset, DefaultStream()), "creating MLX strided view");
-                return result;
+                Check(mlx_as_strided(out resources.Result, array, shape, (nuint)shape.Length, strides, (nuint)strides.Length, (nuint)offset, DefaultStream()), "creating MLX strided view");
             });
         }
 
         internal static MlxArray Reshape(MlxArray array, int[] shape)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_reshape(out result, array, shape, (nuint)shape.Length, DefaultStream()), "reshaping MLX array");
-                return result;
+                Check(mlx_reshape(out resources.Result, array, shape, (nuint)shape.Length, DefaultStream()), "reshaping MLX array");
             });
         }
 
         internal static MlxArray Contiguous(MlxArray array)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_contiguous(out result, array, false, DefaultStream()), "making MLX array contiguous");
-                return result;
+                Check(mlx_contiguous(out resources.Result, array, false, DefaultStream()), "making MLX array contiguous");
             });
         }
 
@@ -7084,14 +7106,12 @@ if (kind == 0) {
             if (start < 0 || stop < start)
                 throw new ArgumentOutOfRangeException(nameof(start));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
                 int[] starts = { start };
                 int[] stops = { stop };
                 int[] strides = { 1 };
-                MlxArray result;
-                Check(mlx_slice_update(out result, input, update, starts, 1, stops, 1, strides, 1, DefaultStream()), "running MLX slice_update");
-                return result;
+                Check(mlx_slice_update(out resources.Result, input, update, starts, 1, stops, 1, strides, 1, DefaultStream()), "running MLX slice_update");
             });
         }
 
@@ -7109,15 +7129,13 @@ if (kind == 0) {
                 || starts.Length == 0 || starts.Length != stops.Length || starts.Length != strides.Length)
                 throw new ArgumentException("MLX slice_update starts/stops/strides must be non-empty arrays of equal length.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_slice_update(out result, input, update,
+                Check(mlx_slice_update(out resources.Result, input, update,
                     starts, (nuint)starts.Length,
                     stops, (nuint)stops.Length,
                     strides, (nuint)strides.Length,
                     DefaultStream()), "running MLX slice_update (multi-dim)");
-                return result;
             });
         }
 

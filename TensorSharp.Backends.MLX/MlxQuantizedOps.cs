@@ -327,7 +327,7 @@ namespace TensorSharp.MLX
                 indicesView = indicesStorage.CreateArrayView(expertIndices);
                 output = MlxNative.Iq2XxsMoeMatmulBatchedFusedGateUpSilu(
                     inputView, gate.Weight, up.Weight, indicesView, K, inDim, outDim);
-                SetDeviceResult(result, output);
+                MlxStorage.SetDeviceResult(result, ref output);
                 output = default;
                 return true;
             }
@@ -411,7 +411,7 @@ namespace TensorSharp.MLX
                         ? MlxNative.Iq2XxsMoeMatmulBatched(inputView, weight.Weight, indicesView, K, inDim, outDim)
                         : MlxNative.Iq2XxsMoeMatmulBatchedRowed(inputView, weight.Weight, indicesView, K, inDim, outDim);
                 }
-                SetDeviceResult(result, output);
+                MlxStorage.SetDeviceResult(result, ref output);
                 output = default;
                 return true;
             }
@@ -544,7 +544,7 @@ namespace TensorSharp.MLX
                 if (ggmlType == (int)GgmlTensorType.IQ4_XS)
                 {
                     output = MlxNative.Iq4XsMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ4_NL)
@@ -561,49 +561,49 @@ namespace TensorSharp.MLX
                     // what matters once `ReleaseHostData` has run and the
                     // CPU fallback is no longer reachable.
                     output = MlxNative.Iq4NlMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_XXS)
                 {
                     output = MlxNative.Iq2XxsMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_S)
                 {
                     output = MlxNative.Iq2SMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_S)
                 {
                     output = MlxNative.Iq3SMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_XXS)
                 {
                     output = MlxNative.Iq3XxsMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q4KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q5KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q6KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                 }
                 else
@@ -625,7 +625,7 @@ namespace TensorSharp.MLX
                             output = MlxNative.Q8Matmul(
                                 inputView, weight.Weight, weight.Scales, weight.Biases,
                                 (int)ne0, (int)ne1, (int)ne0 / 32);
-                            SetDeviceResult(result, output);
+                            MlxStorage.SetDeviceResult(result, ref output);
                             output = default;
                             return true;
                         }
@@ -657,12 +657,12 @@ namespace TensorSharp.MLX
                     if (string.Equals(Environment.GetEnvironmentVariable("TS_MLX_QUANT_MATMUL_CONTIG"), "1", StringComparison.Ordinal))
                     {
                         contiguous = MlxNative.Contiguous(output);
-                        SetDeviceResult(result, contiguous);
+                        MlxStorage.SetDeviceResult(result, ref contiguous);
                         contiguous = default;
                     }
                     else
                     {
-                        SetDeviceResult(result, output);
+                        MlxStorage.SetDeviceResult(result, ref output);
                         output = default;
                     }
                 }
@@ -737,7 +737,7 @@ namespace TensorSharp.MLX
                             fused = MlxNative.Q8RmsNormMatmul(
                                 inputView, normView, weight.Weight, weight.Scales, weight.Biases,
                                 eps, (int)ne0, (int)ne1, (int)ne0 / 32);
-                            SetDeviceResult(result, fused);
+                            MlxStorage.SetDeviceResult(result, ref fused);
                             fused = default;
                             return true;
                         }
@@ -754,12 +754,12 @@ namespace TensorSharp.MLX
                     if (MatmulOutputNeedsContiguous())
                     {
                         contiguous = MlxNative.Contiguous(output);
-                        SetDeviceResult(result, contiguous);
+                        MlxStorage.SetDeviceResult(result, ref contiguous);
                         contiguous = default;
                     }
                     else
                     {
-                        SetDeviceResult(result, output);
+                        MlxStorage.SetDeviceResult(result, ref output);
                         output = default;
                     }
                     return true;
@@ -822,7 +822,7 @@ namespace TensorSharp.MLX
                             fused = MlxNative.Q8AddmmAdd(
                                 inputView, weight.Weight, weight.Scales, weight.Biases,
                                 residualView, (int)ne0, (int)ne1, (int)ne0 / 32);
-                            SetDeviceResult(residual, fused);
+                            MlxStorage.SetDeviceResult(residual, ref fused);
                             fused = default;
                             return true;
                         }
@@ -836,7 +836,7 @@ namespace TensorSharp.MLX
 
                     matmul = RunMatmul(inputView, weight, ggmlType, rows, (int)ne0, (int)ne1);
                     added = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, residualView, matmul);
-                    SetDeviceResult(residual, added);
+                    MlxStorage.SetDeviceResult(residual, ref added);
                     added = default;
                     return true;
                 }
@@ -991,7 +991,7 @@ namespace TensorSharp.MLX
                     if (outputs == null || outputs.Length == 0) return false;
                     output = outputs[0];
                     outputs[0] = default;
-                    SetDeviceResult(residual, output);
+                    MlxStorage.SetDeviceResult(residual, ref output);
                     output = default;
                     return true;
                 }
@@ -1135,7 +1135,7 @@ namespace TensorSharp.MLX
                     output = MlxNative.Q8MatmulGeluMul(
                         inputView, weight.Weight, weight.Scales, weight.Biases,
                         gateView, (int)ne0, (int)ne1, (int)ne0 / 32);
-                    SetDeviceResult(result, output);
+                    MlxStorage.SetDeviceResult(result, ref output);
                     output = default;
                     return true;
                 }
@@ -1180,49 +1180,49 @@ namespace TensorSharp.MLX
                 if (ggmlType == (int)GgmlTensorType.IQ4_XS)
                 {
                     dequantized = MlxNative.Iq4XsGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_XXS)
                 {
                     dequantized = MlxNative.Iq2XxsGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_S)
                 {
                     dequantized = MlxNative.Iq2SGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_S)
                 {
                     dequantized = MlxNative.Iq3SGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_XXS)
                 {
                     dequantized = MlxNative.Iq3XxsGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q4KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q5KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q6KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
-                    SetDeviceResult(result, dequantized);
+                    MlxStorage.SetDeviceResult(result, ref dequantized);
                     dequantized = default;
                 }
                 else
@@ -1241,7 +1241,7 @@ namespace TensorSharp.MLX
                         weight.Mode,
                         DType.Float32);
                     contiguous = MlxNative.Contiguous(dequantized);
-                    SetDeviceResult(result, contiguous);
+                    MlxStorage.SetDeviceResult(result, ref contiguous);
                     contiguous = default;
                 }
                 return true;
@@ -2715,7 +2715,7 @@ namespace TensorSharp.MLX
                     rv = rhsStorage.CreateArrayView(rhsIndices);
                     outArr = MlxNative.GatherQMM(xv, sa.Weight, sa.Scales, sa.Biases, lv, rv,
                         transpose: true, sa.GroupSize, sa.Bits, sa.Mode, sortedIndices);
-                    SetDeviceResult(result, outArr);
+                    MlxStorage.SetDeviceResult(result, ref outArr);
                     outArr = default;
                     return true;
                 }
@@ -2821,20 +2821,6 @@ namespace TensorSharp.MLX
                 MlxNative.FreeArray(weight);
                 MlxNative.FreeArray(scaleArray);
                 MlxNative.FreeArray(biasArray);
-            }
-        }
-
-        private static void SetDeviceResult(Tensor tensor, MlxNative.MlxArray output)
-        {
-            MlxStorage storage = (MlxStorage)tensor.Storage;
-            if (tensor.StorageOffset == 0 && tensor.Storage.ElementCount == tensor.ElementCount())
-            {
-                storage.ReplaceDeviceArray(output);
-            }
-            else
-            {
-                storage.UpdateDeviceSlice(tensor, output);
-                MlxNative.FreeArray(output);
             }
         }
 
