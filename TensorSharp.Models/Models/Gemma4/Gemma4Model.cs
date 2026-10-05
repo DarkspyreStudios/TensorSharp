@@ -3454,7 +3454,7 @@ namespace TensorSharp.Models
                 _moeModelArgs ??= new Gemma4MoELayerDecodeArgs[numLayers];
                 for (int l = 0; l < numLayers; l++)
                     if (!TryBuildMoELayerArgs(l, (IntPtr)hiddenPtr, 0, out _moeModelArgs[l]))
-                    return DeclineBatchedFusedDecode("MoE layer descriptors could not be prepared");
+                        return DeclineBatchedFusedDecode("MoE layer descriptors could not be prepared");
             }
 
             BeforeBatchedDecodeNativeForTest?.Invoke(new WeakReference<Storage>(hidden.Storage));
@@ -3478,37 +3478,37 @@ namespace TensorSharp.Models
                     // throwing, exactly like a probe that reported None.)
                     try
                     {
-                    ok = GgmlBasicOps.Gemma4ModelDecodeBatchedEx(
-                        (IntPtr)hiddenPtr, Config.HiddenSize, numLayers, N,
-                        a.AttnNorm, a.Qkv, a.QNorm, a.KNorm,
-                        a.O, a.PostAttnNorm,
-                        a.FfnNorm, a.Gu, a.Down, a.PostFfnNorm,
-                        kCache, vCache,
-                        a.HeadDim, a.KvHeads, cacheSize, a.IsLocal,
-                        a.RopeBase, a.LayerScalar,
-                        a.QkvType, a.QkvNe0, a.QkvNe1, a.QkvBytes,
-                        a.OType, a.ONe0, a.ONe1, a.OBytes,
-                        a.GuType, a.GuNe0, a.GuNe1, a.GuBytes,
-                        a.DownType, a.DownNe0, a.DownNe1, a.DownBytes,
-                        Config.NumHeads, posSorted,
-                        Config.Eps, _slidingWindow,
-                        freqFactorsPtr, freqFactorsLen,
-                        a.RopeNDims,
-                        _kvCacheDtype.GgmlType(),
-                        a.K, a.KType, a.KNe0, a.KNe1, a.KBytes,
-                        a.V, a.VType, a.VNe0, a.VNe1, a.VBytes,
-                        (IntPtr)lp, vocab,
-                        lmqw.CacheKey, lmqw.GgmlType, lmqw.Ne0, lmqw.Ne1, lmqw.RawBytes,
-                        finalNormPtr, _finalLogitSoftcap,
-                        a.KvSource,
-                        pleDataPtr, batchedPle ? _pleDim : 0,
-                        a.PleGate, a.PleGateType, a.PleGateNe0, a.PleGateNe1, a.PleGateBytes,
-                        a.PleProj, a.PleProjType, a.PleProjNe0, a.PleProjNe1, a.PleProjBytes,
-                        a.PlePostNorm,
-                        pleTableData, pleTableType, pleTableNe0, pleTableNe1, pleTableBytes,
-                        pleIds,
-                        pleProjWData, pleProjWType, pleProjWNe0, pleProjWNe1, pleProjWBytes,
-                        pleProjNormData, perSequenceCacheSizes: perSequenceCacheSizes);
+                        ok = GgmlBasicOps.Gemma4ModelDecodeBatchedEx(
+                            (IntPtr)hiddenPtr, Config.HiddenSize, numLayers, N,
+                            a.AttnNorm, a.Qkv, a.QNorm, a.KNorm,
+                            a.O, a.PostAttnNorm,
+                            a.FfnNorm, a.Gu, a.Down, a.PostFfnNorm,
+                            kCache, vCache,
+                            a.HeadDim, a.KvHeads, cacheSize, a.IsLocal,
+                            a.RopeBase, a.LayerScalar,
+                            a.QkvType, a.QkvNe0, a.QkvNe1, a.QkvBytes,
+                            a.OType, a.ONe0, a.ONe1, a.OBytes,
+                            a.GuType, a.GuNe0, a.GuNe1, a.GuBytes,
+                            a.DownType, a.DownNe0, a.DownNe1, a.DownBytes,
+                            Config.NumHeads, posSorted,
+                            Config.Eps, _slidingWindow,
+                            freqFactorsPtr, freqFactorsLen,
+                            a.RopeNDims,
+                            _kvCacheDtype.GgmlType(),
+                            a.K, a.KType, a.KNe0, a.KNe1, a.KBytes,
+                            a.V, a.VType, a.VNe0, a.VNe1, a.VBytes,
+                            (IntPtr)lp, vocab,
+                            lmqw.CacheKey, lmqw.GgmlType, lmqw.Ne0, lmqw.Ne1, lmqw.RawBytes,
+                            finalNormPtr, _finalLogitSoftcap,
+                            a.KvSource,
+                            pleDataPtr, batchedPle ? _pleDim : 0,
+                            a.PleGate, a.PleGateType, a.PleGateNe0, a.PleGateNe1, a.PleGateBytes,
+                            a.PleProj, a.PleProjType, a.PleProjNe0, a.PleProjNe1, a.PleProjBytes,
+                            a.PlePostNorm,
+                            pleTableData, pleTableType, pleTableNe0, pleTableNe1, pleTableBytes,
+                            pleIds,
+                            pleProjWData, pleProjWType, pleProjWNe0, pleProjWNe1, pleProjWBytes,
+                            pleProjNormData, perSequenceCacheSizes: perSequenceCacheSizes);
                     }
                     catch (EntryPointNotFoundException)
                     {
@@ -4027,24 +4027,58 @@ namespace TensorSharp.Models
             {
                 Hidden = hiddenPtr,
                 AttnNormW = a.AttnNorm[layer],
-                QkvW = a.Qkv[layer], QkvType = a.QkvType[layer], QkvNe0 = a.QkvNe0[layer], QkvNe1 = a.QkvNe1[layer], QkvBytes = a.QkvBytes[layer],
-                KW = a.K[layer], KType = a.KType[layer], KNe0 = a.KNe0[layer], KNe1 = a.KNe1[layer], KBytes = a.KBytes[layer],
-                VW = a.V[layer], VType = a.VType[layer], VNe0 = a.VNe0[layer], VNe1 = a.VNe1[layer], VBytes = a.VBytes[layer],
+                QkvW = a.Qkv[layer],
+                QkvType = a.QkvType[layer],
+                QkvNe0 = a.QkvNe0[layer],
+                QkvNe1 = a.QkvNe1[layer],
+                QkvBytes = a.QkvBytes[layer],
+                KW = a.K[layer],
+                KType = a.KType[layer],
+                KNe0 = a.KNe0[layer],
+                KNe1 = a.KNe1[layer],
+                KBytes = a.KBytes[layer],
+                VW = a.V[layer],
+                VType = a.VType[layer],
+                VNe0 = a.VNe0[layer],
+                VNe1 = a.VNe1[layer],
+                VBytes = a.VBytes[layer],
                 QNormW = a.QNorm[layer],
                 KNormW = isShared ? IntPtr.Zero : a.KNorm[layer],
-                OW = a.O[layer], OType = a.OType[layer], ONe0 = a.ONe0[layer], ONe1 = a.ONe1[layer], OBytes = a.OBytes[layer],
+                OW = a.O[layer],
+                OType = a.OType[layer],
+                ONe0 = a.ONe0[layer],
+                ONe1 = a.ONe1[layer],
+                OBytes = a.OBytes[layer],
                 PostAttnNormW = a.PostAttnNorm[layer],
-                KCache = a.KCache[layer], VCache = a.VCache[layer],
-                FreqFactors = freqPtr, FreqFactorsLen = freqLen,
+                KCache = a.KCache[layer],
+                VCache = a.VCache[layer],
+                FreqFactors = freqPtr,
+                FreqFactorsLen = freqLen,
                 FfnNormW = a.FfnNorm[layer],
-                GuW = a.Gu[layer], GuType = a.GuType[layer], GuNe0 = a.GuNe0[layer], GuNe1 = a.GuNe1[layer], GuBytes = a.GuBytes[layer],
-                DownW = a.Down[layer], DownType = a.DownType[layer], DownNe0 = a.DownNe0[layer], DownNe1 = a.DownNe1[layer], DownBytes = a.DownBytes[layer],
+                GuW = a.Gu[layer],
+                GuType = a.GuType[layer],
+                GuNe0 = a.GuNe0[layer],
+                GuNe1 = a.GuNe1[layer],
+                GuBytes = a.GuBytes[layer],
+                DownW = a.Down[layer],
+                DownType = a.DownType[layer],
+                DownNe0 = a.DownNe0[layer],
+                DownNe1 = a.DownNe1[layer],
+                DownBytes = a.DownBytes[layer],
                 PostFfwNorm1W = (IntPtr)GetFloatPtr(postNorm1W),
                 GateInpW = (IntPtr)GetFloatPtr(routerW),
                 GateInpScale = gateInpScalePtr,
                 PreFfwNorm2W = (IntPtr)GetFloatPtr(preNorm2W),
-                GateUpExps = gateW.Data, GueType = gateW.GgmlType, GueNe0 = gateW.PerExpertNe0, GueNe1 = gateW.PerExpertNe1, GueBytes = gateW.TotalRawBytes,
-                DownExps = downW.Data, DeType = downW.GgmlType, DeNe0 = downW.PerExpertNe0, DeNe1 = downW.PerExpertNe1, DeBytes = downW.TotalRawBytes,
+                GateUpExps = gateW.Data,
+                GueType = gateW.GgmlType,
+                GueNe0 = gateW.PerExpertNe0,
+                GueNe1 = gateW.PerExpertNe1,
+                GueBytes = gateW.TotalRawBytes,
+                DownExps = downW.Data,
+                DeType = downW.GgmlType,
+                DeNe0 = downW.PerExpertNe0,
+                DeNe1 = downW.PerExpertNe1,
+                DeBytes = downW.TotalRawBytes,
                 DownExpsScale = downScalePtr,
                 PostFfwNorm2W = (IntPtr)GetFloatPtr(postNorm2W),
                 PostFfwNormW = a.PostFfnNorm[layer],
@@ -4913,60 +4947,60 @@ namespace TensorSharp.Models
             if (perLayerInput != null &&
                 (_weights.ContainsKey($"{prefix}.inp_gate.weight") || _quantWeights.ContainsKey($"{prefix}.inp_gate.weight")))
             {
-              // GGML fast path: the entire PLE block (inp_gate matmul + GELU┬Àmul +
-              // proj matmul + post_norm + residual add) in one fused graph dispatch.
-              if (!TryFusedPleBlockGgml(result, perLayerInput, prefix))
-              {
-                Tensor gate = null;
-
-                // Phase 6h: fused Q8 matmul + GeluMul kernel. Saves one MLX
-                // op per layer ├ù 42 layers / token on Gemma 4 E4B Q8_0.
-                if (seqLen == 1
-                    && _backend == BackendType.Mlx
-                    && _quantWeights.TryGetValue($"{prefix}.inp_gate.weight", out var inpGateQw)
-                    && perLayerInput.ElementType == DType.Float32
-                    && perLayerInput.IsContiguous()
-                    && perLayerInput.ElementCount() == inpGateQw.Ne1)
+                // GGML fast path: the entire PLE block (inp_gate matmul + GELU┬Àmul +
+                // proj matmul + post_norm + residual add) in one fused graph dispatch.
+                if (!TryFusedPleBlockGgml(result, perLayerInput, prefix))
                 {
-                    var fusedGate = new Tensor(_allocator, DType.Float32, 1, (int)inpGateQw.Ne1);
-                    if (MlxFusedPleGateEnabled
-                        && MlxQuantizedOps.TryFusedQ8MatmulGeluMul(
-                            fusedGate, result, perLayerInput,
-                            inpGateQw.EnsureDeviceCacheKey(), inpGateQw.Data,
-                            inpGateQw.GgmlType, inpGateQw.Ne0, inpGateQw.Ne1, inpGateQw.RawBytes))
-                    {
-                        gate = fusedGate;
-                    }
-                    else
-                    {
-                        fusedGate.Dispose();
-                    }
-                }
+                    Tensor gate = null;
 
-                if (gate == null)
-                {
-                    gate = LinearForward(result, $"{prefix}.inp_gate.weight");
+                    // Phase 6h: fused Q8 matmul + GeluMul kernel. Saves one MLX
+                    // op per layer ├ù 42 layers / token on Gemma 4 E4B Q8_0.
+                    if (seqLen == 1
+                        && _backend == BackendType.Mlx
+                        && _quantWeights.TryGetValue($"{prefix}.inp_gate.weight", out var inpGateQw)
+                        && perLayerInput.ElementType == DType.Float32
+                        && perLayerInput.IsContiguous()
+                        && perLayerInput.ElementCount() == inpGateQw.Ne1)
+                    {
+                        var fusedGate = new Tensor(_allocator, DType.Float32, 1, (int)inpGateQw.Ne1);
+                        if (MlxFusedPleGateEnabled
+                            && MlxQuantizedOps.TryFusedQ8MatmulGeluMul(
+                                fusedGate, result, perLayerInput,
+                                inpGateQw.EnsureDeviceCacheKey(), inpGateQw.Data,
+                                inpGateQw.GgmlType, inpGateQw.Ne0, inpGateQw.Ne1, inpGateQw.RawBytes))
+                        {
+                            gate = fusedGate;
+                        }
+                        else
+                        {
+                            fusedGate.Dispose();
+                        }
+                    }
+
+                    if (gate == null)
+                    {
+                        gate = LinearForward(result, $"{prefix}.inp_gate.weight");
+                        if (gate != null)
+                        {
+                            Ops.GELUMul(gate, gate, perLayerInput);
+                        }
+                    }
+
                     if (gate != null)
                     {
-                        Ops.GELUMul(gate, gate, perLayerInput);
-                    }
-                }
-
-                if (gate != null)
-                {
-                    using var pleProj = LinearForward(gate, $"{prefix}.proj.weight");
-                    gate.Dispose();
-                    if (pleProj != null)
-                    {
-                        string postPleNormKey = $"{prefix}.post_norm.weight";
-                        if (!TryRmsNormAddInPlaceMlx(result, pleProj, postPleNormKey))
+                        using var pleProj = LinearForward(gate, $"{prefix}.proj.weight");
+                        gate.Dispose();
+                        if (pleProj != null)
                         {
-                            using var pleNormed = RMSNormOp(pleProj, postPleNormKey);
-                            Ops.Add(result, result, pleNormed);
+                            string postPleNormKey = $"{prefix}.post_norm.weight";
+                            if (!TryRmsNormAddInPlaceMlx(result, pleProj, postPleNormKey))
+                            {
+                                using var pleNormed = RMSNormOp(pleProj, postPleNormKey);
+                                Ops.Add(result, result, pleNormed);
+                            }
                         }
                     }
                 }
-              }
             }
 
             float scalar = _layerScalars[layer];
@@ -5428,7 +5462,7 @@ namespace TensorSharp.Models
                     seqLen, hiddenDim, nFf, _numExperts, nUsed,
                     selectedExperts, kernelWeights,
                     gateW.Data, gateW.GgmlType, gateW.PerExpertNe0, gateW.PerExpertNe1, gateW.TotalRawBytes,
-                    upData,     upType,        upNe0,              upNe1,              upBytes,
+                    upData, upType, upNe0, upNe1, upBytes,
                     downW.Data, downW.GgmlType, downW.PerExpertNe0, downW.PerExpertNe1, downW.TotalRawBytes,
                     gateBias: null, upBias: null, downBias: null,
                     activation: GgmlBasicOps.MoEActivation.GEGLUSplit,
@@ -5672,7 +5706,7 @@ namespace TensorSharp.Models
                     seqLen, hiddenDim, nFf, _numExperts, nUsed,
                     selectedExperts, kernelWeights,
                     gateW.Data, gateW.GgmlType, gateW.PerExpertNe0, gateW.PerExpertNe1, gateW.TotalRawBytes,
-                    upData,     upType,        upNe0,              upNe1,              upBytes,
+                    upData, upType, upNe0, upNe1, upBytes,
                     downW.Data, downW.GgmlType, downW.PerExpertNe0, downW.PerExpertNe1, downW.TotalRawBytes,
                     gateBias: null, upBias: null, downBias: null,
                     activation: GgmlBasicOps.MoEActivation.GEGLUSplit,
@@ -5985,7 +6019,7 @@ namespace TensorSharp.Models
                 else
                 {
                     _stackedExpertWeights.TryGetValue($"{prefix}.ffn_gate_exps.weight", out _layerStackedGate[l]);
-                    _stackedExpertWeights.TryGetValue($"{prefix}.ffn_up_exps.weight",   out _layerStackedUp[l]);
+                    _stackedExpertWeights.TryGetValue($"{prefix}.ffn_up_exps.weight", out _layerStackedUp[l]);
                 }
                 _stackedExpertWeights.TryGetValue($"{prefix}.ffn_down_exps.weight", out _layerStackedDown[l]);
 
