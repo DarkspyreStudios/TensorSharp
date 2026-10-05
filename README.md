@@ -152,7 +152,15 @@ fast-path attempts receive isolated checked cleanup before another kernel runs; 
 unsafe errors and completed target transfers prohibit fallback. The dense-FFN trace retains
 its intermediates and unreturned result, allocates its output collection before transfer
 readiness and returns only after checked cleanup. These carriers do not own cached weights,
-compiled closures or external host buffers; cache construction and eviction remain unfinished.
+compiled closures or external host buffers; cache publication and eviction remain unfinished.
+Five quantized-weight array factories install actual reference carriers before acquisition.
+They retain partial arrays through evaluation and result construction, free only successful
+references on failure and publish results after checked cleanup. Three staging paths retain
+eight aligned-buffer slots and any unreturned weight in the worker's actual ownership graph.
+Aligned frees clear only buffers whose release returns successfully. A recorded unsafe
+failure prevents cleanup replay and preserves the actual remaining arrays, buffers and result.
+Packing recipes and caller-owned no-copy backing remain unchanged. Construction recovery
+does not establish cache registration, eviction, external-backing lifetime or GPU completion.
 The attention KV cache registers its actual owner in the shared runtime scope. Append,
 materialization, reset and disposal run on the worker. Cache replacement and release use
 the owner's exact destructive reservation before freeing references; Busy preserves the

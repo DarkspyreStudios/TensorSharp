@@ -84,6 +84,51 @@ namespace TensorSharp.MLX
             }
         }
 
+        private sealed class WeightAcquisitionResources<T> : MlxNativeResources where T : class
+        {
+            internal MlxNative.MlxArray Weight;
+            internal MlxNative.MlxArray Scales;
+            internal MlxNative.MlxArray Biases;
+            internal T Result;
+            internal bool Prepared;
+            internal override bool HasNativeResources => Weight.IsValid || Scales.IsValid || Biases.IsValid;
+
+            internal void Release()
+            {
+                if (!Prepared)
+                {
+                    MlxNative.FreeArrayReference(ref Weight);
+                    MlxNative.FreeArrayReference(ref Scales);
+                    MlxNative.FreeArrayReference(ref Biases);
+                }
+                GC.KeepAlive(Result);
+            }
+        }
+
+        private sealed class WeightStagingResources : MlxNativeResources
+        {
+            internal IntPtr Packed;
+            internal IntPtr Scales;
+            internal IntPtr Biases;
+            internal DeviceWeight Result;
+            internal override bool HasNativeResources => Packed != IntPtr.Zero || Scales != IntPtr.Zero || Biases != IntPtr.Zero;
+
+            internal void Release()
+            {
+                FreeBuffer(ref Packed);
+                FreeBuffer(ref Scales);
+                FreeBuffer(ref Biases);
+                GC.KeepAlive(Result);
+            }
+
+            private static unsafe void FreeBuffer(ref IntPtr buffer)
+            {
+                if (buffer == IntPtr.Zero) return;
+                NativeMemory.AlignedFree(buffer.ToPointer());
+                buffer = IntPtr.Zero;
+            }
+        }
+
         private sealed class QuantizedResources(int referenceCount, object borrowedOwner, params Tensor[] tensors) : MlxNativeResources
         {
             internal readonly MlxArrayResources References = new(referenceCount, tensors);
@@ -1658,12 +1703,12 @@ namespace TensorSharp.MLX
             int groupsPerRow = superBlocksPerRow * 16;
             long packedWeightBytes = (long)outDim * inDim * MlxAffineQ6Bits / 8;
             long scaleCount = (long)outDim * groupsPerRow;
-            IntPtr packedWeightsBuffer = IntPtr.Zero;
-            IntPtr scalesBuffer = IntPtr.Zero;
-            IntPtr biasesBuffer = IntPtr.Zero;
-
-            try
+            var resources = new WeightStagingResources();
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref IntPtr packedWeightsBuffer = ref resources.Packed;
+                ref IntPtr scalesBuffer = ref resources.Scales;
+                ref IntPtr biasesBuffer = ref resources.Biases;
                 packedWeightsBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)packedWeightBytes, 64);
                 scalesBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)(scaleCount * sizeof(float)), 64);
                 biasesBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)(scaleCount * sizeof(float)), 64);
@@ -1711,7 +1756,7 @@ namespace TensorSharp.MLX
                     }
                 }
 
-                return CreateDeviceWeightFromHostBuffers(
+                resources.Result = CreateDeviceWeightFromHostBuffers(
                     deviceId,
                     (int)GgmlTensorType.Q6_K,
                     ne0,
@@ -1726,16 +1771,8 @@ namespace TensorSharp.MLX
                     MlxAffineQ6Bits,
                     scaleDType: DType.Float32,
                     biasDType: DType.Float32);
-            }
-            finally
-            {
-                if (packedWeightsBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(packedWeightsBuffer.ToPointer());
-                if (scalesBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(scalesBuffer.ToPointer());
-                if (biasesBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(biasesBuffer.ToPointer());
-            }
+                return resources.Result;
+            }, resources.Release);
         }
 
         private static DeviceWeight CreateQ4KRawWeight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
@@ -1859,9 +1896,10 @@ namespace TensorSharp.MLX
             if (expectedBytes > int.MaxValue)
                 throw new NotSupportedException($"{label} raw MLX array exceeds the current Int32 shape limit: {expectedBytes} bytes.");
 
-            MlxNative.MlxArray rawWeight = default;
-            try
+            var resources = new WeightAcquisitionResources<DeviceWeight>();
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
+                ref MlxNative.MlxArray rawWeight = ref resources.Weight;
                 // Zero-copy wrap of the GGUF mmap region as an MLX uchar
                 // array. Apple Silicon Metal accepts the host pointer via
                 // MTLBuffer's no-copy path (shared memory mode), so we save
@@ -1889,13 +1927,10 @@ namespace TensorSharp.MLX
                         : 5,
                     Mode = mode,
                 };
-                rawWeight = default;
+                resources.Result = entry;
+                resources.Prepared = true;
                 return entry;
-            }
-            finally
-            {
-                MlxNative.FreeArray(rawWeight);
-            }
+            }, resources.Release);
         }
 
         private static unsafe DeviceWeight CreateQ8Weight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
@@ -1912,12 +1947,12 @@ namespace TensorSharp.MLX
 
             long packedWeightBytes = (long)outDim * inDim;
             long scaleCount = (long)outDim * blocksPerRow;
-            IntPtr packedWeightsBuffer = IntPtr.Zero;
-            IntPtr scalesBuffer = IntPtr.Zero;
-            IntPtr biasesBuffer = IntPtr.Zero;
-
-            try
+            var resources = new WeightStagingResources();
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref IntPtr packedWeightsBuffer = ref resources.Packed;
+                ref IntPtr scalesBuffer = ref resources.Scales;
+                ref IntPtr biasesBuffer = ref resources.Biases;
                 packedWeightsBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)packedWeightBytes, 64);
                 scalesBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)(scaleCount * sizeof(ushort)), 64);
                 biasesBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)(scaleCount * sizeof(ushort)), 64);
@@ -1945,7 +1980,7 @@ namespace TensorSharp.MLX
                     }
                 }
 
-                return CreateDeviceWeightFromHostBuffers(
+                resources.Result = CreateDeviceWeightFromHostBuffers(
                     deviceId,
                     (int)GgmlTensorType.Q8_0,
                     ne0,
@@ -1958,16 +1993,8 @@ namespace TensorSharp.MLX
                     new[] { outDim, blocksPerRow },
                     MlxAffineQ8GroupSize,
                     MlxAffineQ8Bits);
-            }
-            finally
-            {
-                if (packedWeightsBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(packedWeightsBuffer.ToPointer());
-                if (scalesBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(scalesBuffer.ToPointer());
-                if (biasesBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(biasesBuffer.ToPointer());
-            }
+                return resources.Result;
+            }, resources.Release);
         }
 
         private static DeviceWeight CreateIq4XsRawWeight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
@@ -1984,9 +2011,10 @@ namespace TensorSharp.MLX
             if (expectedBytes > int.MaxValue)
                 throw new NotSupportedException($"IQ4_XS raw MLX array exceeds the current Int32 shape limit: {expectedBytes} bytes.");
 
-            MlxNative.MlxArray rawWeight = default;
-            try
+            var resources = new WeightAcquisitionResources<DeviceWeight>();
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
+                ref MlxNative.MlxArray rawWeight = ref resources.Weight;
                 // Zero-copy wrap: see CreateRawKWeight for the rationale.
                 rawWeight = MlxNative.NewArrayFromHostNoCopy(hostData, new[] { (int)expectedBytes }, DType.UInt8);
                 var entry = new DeviceWeight
@@ -2003,13 +2031,10 @@ namespace TensorSharp.MLX
                     Bits = 4,
                     Mode = "iq4_xs",
                 };
-                rawWeight = default;
+                resources.Result = entry;
+                resources.Prepared = true;
                 return entry;
-            }
-            finally
-            {
-                MlxNative.FreeArray(rawWeight);
-            }
+            }, resources.Release);
         }
 
         // Wrap an IQ4_NL GGUF row group as a single MLX uchar array (one big
@@ -2032,9 +2057,10 @@ namespace TensorSharp.MLX
             if (expectedBytes > int.MaxValue)
                 throw new NotSupportedException($"IQ4_NL raw MLX array exceeds the current Int32 shape limit: {expectedBytes} bytes.");
 
-            MlxNative.MlxArray rawWeight = default;
-            try
+            var resources = new WeightAcquisitionResources<DeviceWeight>();
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
+                ref MlxNative.MlxArray rawWeight = ref resources.Weight;
                 // Zero-copy wrap: see CreateRawKWeight for the rationale.
                 rawWeight = MlxNative.NewArrayFromHostNoCopy(hostData, new[] { (int)expectedBytes }, DType.UInt8);
                 var entry = new DeviceWeight
@@ -2051,13 +2077,10 @@ namespace TensorSharp.MLX
                     Bits = 4,
                     Mode = "iq4_nl",
                 };
-                rawWeight = default;
+                resources.Result = entry;
+                resources.Prepared = true;
                 return entry;
-            }
-            finally
-            {
-                MlxNative.FreeArray(rawWeight);
-            }
+            }, resources.Release);
         }
 
         private static unsafe DeviceWeight CreateMxfp4Weight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes)
@@ -2074,11 +2097,11 @@ namespace TensorSharp.MLX
 
             long packedWeightBytes = (long)outDim * (inDim / 2);
             long scaleBytes = (long)outDim * blocksPerRow;
-            IntPtr packedWeightsBuffer = IntPtr.Zero;
-            IntPtr scalesBuffer = IntPtr.Zero;
-
-            try
+            var resources = new WeightStagingResources();
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref IntPtr packedWeightsBuffer = ref resources.Packed;
+                ref IntPtr scalesBuffer = ref resources.Scales;
                 packedWeightsBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)packedWeightBytes, 64);
                 scalesBuffer = (IntPtr)NativeMemory.AlignedAlloc((nuint)scaleBytes, 64);
                 if (packedWeightsBuffer == IntPtr.Zero || scalesBuffer == IntPtr.Zero)
@@ -2101,7 +2124,7 @@ namespace TensorSharp.MLX
                     }
                 }
 
-                return CreateDeviceWeightFromHostBuffers(
+                resources.Result = CreateDeviceWeightFromHostBuffers(
                     deviceId,
                     (int)GgmlTensorType.MXFP4,
                     ne0,
@@ -2117,14 +2140,8 @@ namespace TensorSharp.MLX
                     scaleDType: DType.UInt8,
                     hasBias: false,
                     mode: MlxMxfp4Mode);
-            }
-            finally
-            {
-                if (packedWeightsBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(packedWeightsBuffer.ToPointer());
-                if (scalesBuffer != IntPtr.Zero)
-                    NativeMemory.AlignedFree(scalesBuffer.ToPointer());
-            }
+                return resources.Result;
+            }, resources.Release);
         }
 
         private static unsafe void PackQ4Block(byte* source, byte[] destination, long destinationOffset)
@@ -2396,9 +2413,12 @@ namespace TensorSharp.MLX
                 return null;
             }
 
-            StackedAffineWeight result = MlxWorker.Shared.Invoke(() =>
+            var resources = new WeightAcquisitionResources<StackedAffineWeight>();
+            StackedAffineWeight result = MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxNative.MlxArray w = default, s = default, b = default;
+                ref MlxNative.MlxArray w = ref resources.Weight;
+                ref MlxNative.MlxArray s = ref resources.Scales;
+                ref MlxNative.MlxArray b = ref resources.Biases;
                 fixed (byte* pp = packed)
                 fixed (System.Half* sp = scales)
                 fixed (byte* su = scalesU8)
@@ -2413,8 +2433,10 @@ namespace TensorSharp.MLX
                 }
                 MlxNative.Eval(w); MlxNative.Eval(s);
                 if (b.IsValid) MlxNative.Eval(b);
-                return new StackedAffineWeight { Weight = w, Scales = s, Biases = b, GroupSize = groupSize, Bits = bits, Mode = mode };
-            });
+                resources.Result = new StackedAffineWeight { Weight = w, Scales = s, Biases = b, GroupSize = groupSize, Bits = bits, Mode = mode };
+                resources.Prepared = true;
+                return resources.Result;
+            }, resources.Release);
 
             lock (Sync)
             {
@@ -2706,11 +2728,12 @@ namespace TensorSharp.MLX
             bool hasBias = true,
             string mode = MlxAffineMode)
         {
-            MlxNative.MlxArray weight = default;
-            MlxNative.MlxArray scaleArray = default;
-            MlxNative.MlxArray biasArray = default;
-            try
+            var resources = new WeightAcquisitionResources<DeviceWeight>();
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
+                ref MlxNative.MlxArray weight = ref resources.Weight;
+                ref MlxNative.MlxArray scaleArray = ref resources.Scales;
+                ref MlxNative.MlxArray biasArray = ref resources.Biases;
                 weight = MlxNative.NewArrayFromHostUInt32(packedWeights, weightShape);
                 scaleArray = MlxNative.NewArrayFromHost(scales, scaleShape, scaleDType);
                 if (hasBias)
@@ -2733,17 +2756,10 @@ namespace TensorSharp.MLX
                     Bits = bits,
                     Mode = mode,
                 };
-                weight = default;
-                scaleArray = default;
-                biasArray = default;
+                resources.Result = entry;
+                resources.Prepared = true;
                 return entry;
-            }
-            finally
-            {
-                MlxNative.FreeArray(weight);
-                MlxNative.FreeArray(scaleArray);
-                MlxNative.FreeArray(biasArray);
-            }
+            }, resources.Release);
         }
 
         private readonly struct CacheKey : IEquatable<CacheKey>
