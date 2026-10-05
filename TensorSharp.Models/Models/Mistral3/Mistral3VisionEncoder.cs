@@ -29,6 +29,9 @@ namespace TensorSharp.Models
     public class Mistral3VisionEncoder : IDisposable
     {
         private readonly Dictionary<string, Tensor> _weights = new();
+        private Tensor _constructionWeight;
+        private readonly List<Tensor> _displacedWeights = new();
+        private GgufFile _constructionFile;
         private readonly Dictionary<string, QuantizedWeight> _quantWeights = new();
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
@@ -61,10 +64,17 @@ namespace TensorSharp.Models
         public int ImageSize => _imageSize;
 
         public Mistral3VisionEncoder(string mmProjPath, IAllocator allocator)
+            : this(mmProjPath, allocator, null)
+        {
+        }
+
+        internal Mistral3VisionEncoder(string mmProjPath, IAllocator allocator,
+            Action<Mistral3VisionEncoder> retainConstruction)
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
-            var gguf = new GgufFile(mmProjPath);
+            retainConstruction?.Invoke(this);
+            var gguf = _constructionFile = new GgufFile(mmProjPath);
 
             _imageSize = (int)gguf.GetUint32("vision.image_size",
                           (uint)gguf.GetUint32("clip.vision.image_size", 1540));
@@ -92,6 +102,12 @@ namespace TensorSharp.Models
 
             LoadWeights(gguf);
             gguf.Dispose();
+            _constructionFile = null;
+            if (retainConstruction != null)
+            {
+                ValidateLoadedWeights(mmProjPath);
+                return;
+            }
             try
             {
                 ValidateLoadedWeights(mmProjPath);
@@ -249,9 +265,10 @@ namespace TensorSharp.Models
                 if (llamaCppLayout && VisionQkProjection.IsMatch(name))
                     f32 = UnpermuteInterleavedRows(f32, _numHeads, _headDim);
 
-                var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                tensor.SetElementsAsFloat(f32);
-                _weights[name] = tensor;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, tsShape);
+                _constructionWeight.SetElementsAsFloat(f32);
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, name,
+                    ref _constructionWeight, _displacedWeights);
                 count++;
             }
             Console.WriteLine($" done ({count} tensors)");
@@ -656,6 +673,8 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
+            ModelDisposalOwnership.Add(tensors, _constructionWeight);
+            ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
         }
@@ -663,6 +682,10 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionWeight?.Dispose();
+            _constructionWeight = null;
+            foreach (var weight in _displacedWeights) weight.Dispose();
+            _displacedWeights.Clear();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
             _transposedWeights.Clear();
@@ -672,6 +695,8 @@ namespace TensorSharp.Models
             foreach (var qw in _quantWeights.Values)
                 qw.Dispose();
             _quantWeights.Clear();
+            _constructionFile?.Dispose();
+            _constructionFile = null;
         }
     }
 }

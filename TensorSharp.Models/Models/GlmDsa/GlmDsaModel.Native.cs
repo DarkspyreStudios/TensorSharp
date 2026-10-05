@@ -236,7 +236,7 @@ namespace TensorSharp.Models
             ModelDisposalOwnership.AddRange(ownedTensors, _kPeCache);
             ModelDisposalOwnership.AddRange(ownedTensors, _indexerCache);
             ModelDisposalOwnership.Add(ownedTensors, _cachedPosQ, _cachedPosK, _cachedPosIdx);
-            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
+            foreach (var encoder in _ownedVisionEncoders) encoder.CollectDisposalOwnership(ownedTensors);
         }
 
         public override void Dispose()
@@ -258,7 +258,9 @@ namespace TensorSharp.Models
 
         private void DisposeGlmDsaResources()
         {
-            VisionEncoder?.DisposeOwned();
+            foreach (var encoder in _ownedVisionEncoders) encoder.DisposeOwned();
+            _ownedVisionEncoders.Clear();
+            VisionEncoder = null;
             // The per-op path's caches are this model's own tensors; the base
             // class only knows about weights, so they have to be released here
             // or they outlive the allocator that backs them.

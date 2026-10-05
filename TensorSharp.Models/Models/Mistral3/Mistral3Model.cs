@@ -59,6 +59,7 @@ namespace TensorSharp.Models
 
         // Vision support
         private Mistral3VisionEncoder _visionEncoder;
+        private readonly List<Mistral3VisionEncoder> _ownedVisionEncoders = new();
         private List<(Tensor embeddings, int position)> _pendingVisionEmbeddingsList = new();
 
         public Mistral3Model(string ggufPath, BackendType backend, int tpDegree = 1, ITensorParallelGroup tpGroup = null)
@@ -419,8 +420,15 @@ namespace TensorSharp.Models
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
-            _visionEncoder = new Mistral3VisionEncoder(mmProjPath, _allocator);
-            _visionEncoder.SetHostModel(this);
+            _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
+            var encoder = new Mistral3VisionEncoder(mmProjPath, _allocator, RetainVisionConstruction);
+            _visionEncoder = encoder;
+        }
+
+        private void RetainVisionConstruction(Mistral3VisionEncoder encoder)
+        {
+            _ownedVisionEncoders.Add(encoder);
+            encoder.SetHostModel(this);
         }
 
         /// <summary>Text-embedding rows for <paramref name="tokens"/>, for multimodal
@@ -924,7 +932,7 @@ namespace TensorSharp.Models
             ModelDisposalOwnership.AddRows(tensors, _tpKvCacheK);
             ModelDisposalOwnership.AddRows(tensors, _tpKvCacheV);
             foreach (var (embeddings, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(tensors, embeddings);
-            _visionEncoder?.CollectDisposalOwnership(tensors);
+            foreach (var encoder in _ownedVisionEncoders) encoder.CollectDisposalOwnership(tensors);
         }
 
         public override void Dispose()
@@ -934,7 +942,9 @@ namespace TensorSharp.Models
 
         private void DisposeMistral3Resources()
         {
-            _visionEncoder?.DisposeOwned();
+            foreach (var encoder in _ownedVisionEncoders) encoder.DisposeOwned();
+            _ownedVisionEncoders.Clear();
+            _visionEncoder = null;
             foreach (var (embeddings, _) in _pendingVisionEmbeddingsList)
                 embeddings?.Dispose();
             _pendingVisionEmbeddingsList.Clear();

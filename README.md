@@ -72,12 +72,18 @@ Construction recovery uses the text model's existing release-only handle and pre
 the construction error plus any cleanup error. The pipeline preserves operation and
 cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
 Standalone vision construction without a retaining model owner does not gain those guarantees.
-Qwen35 and Qwen4Exp retain every vision child before its constructor acquires resources.
+Qwen35, Qwen4Exp, Mistral3, GlmDsa and Gemma4 retain every vision child before its constructor acquires resources.
 A successful construction publishes the active child; a failure leaves the previous
 active child unchanged. The parent owns partial and replaced children until its coordinated
 retirement collects and releases all of them before the allocator. Replacement does not
 immediately reclaim the previous child's memory. The active reference and retained collection
 clear only after all child releases succeed.
+Mistral3, GlmDsa and Gemma4 retain acquired constructor input files and unpublished weights
+until checked release. One weight-publication helper preserves actual displaced weights
+before replacing a dictionary entry. Qwen35 uses that same helper. Gemma4 includes pending
+and displaced weights in its GGML binding invalidation and preserves its existing CPU
+vision allocator for the direct CUDA language backend. Parent-owned Mistral validation
+failure leaves cleanup to coordinated retirement instead of attempting standalone child release.
 CUDA allocation reclaims pooled memory only outside current-thread native effects.
 A nested allocation OOM preserves its CUDA error and unwinds without collecting,
 waiting for finalizers or retrying beneath the caller's admitted native frame.

@@ -39,6 +39,10 @@ namespace TensorSharp.Models
         }
 
         private readonly Dictionary<string, Tensor> _weights = new();
+        private Tensor _constructionWeight;
+        private readonly List<Tensor> _displacedWeights = new();
+        private GgufFile _constructionGguf;
+        private SafetensorsFile _constructionSafetensors;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
         private readonly bool _useNativeAttention;
@@ -117,7 +121,7 @@ namespace TensorSharp.Models
 
         /// <summary>Attach the model that owns this encoder so the per-block
         /// loop in <see cref="Encode"/> can yield the GPU compute lock between
-        /// blocks. Set once after construction.</summary>
+        /// blocks. Set once before encoding.</summary>
         public void SetHostModel(ModelBase model) => _hostModel = model;
 
         /// <param name="projectorPath">
@@ -127,21 +131,28 @@ namespace TensorSharp.Models
         /// Gemma4VisionEncoder.Safetensors.cs).
         /// </param>
         public Gemma4VisionEncoder(string projectorPath, IAllocator allocator)
+            : this(projectorPath, allocator, null)
+        {
+        }
+
+        internal Gemma4VisionEncoder(string projectorPath, IAllocator allocator,
+            Action<Gemma4VisionEncoder> retainConstruction)
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
+            retainConstruction?.Invoke(this);
 
             GgufFile gguf = null;
             SafetensorsFile safetensors = null;
             TowerSpec spec;
             if (IsSafetensorsProjector(projectorPath))
             {
-                safetensors = new SafetensorsFile(projectorPath);
+                safetensors = _constructionSafetensors = new SafetensorsFile(projectorPath);
                 spec = ReadSafetensorsSpec(safetensors, projectorPath);
             }
             else
             {
-                gguf = new GgufFile(projectorPath);
+                gguf = _constructionGguf = new GgufFile(projectorPath);
                 spec = ReadGgufSpec(gguf);
             }
 
@@ -169,11 +180,13 @@ namespace TensorSharp.Models
             {
                 LoadWeightsFromSafetensors(safetensors);
                 safetensors.Dispose();
+                _constructionSafetensors = null;
             }
             else
             {
                 LoadWeights(gguf);
                 gguf.Dispose();
+                _constructionGguf = null;
             }
         }
 
@@ -234,9 +247,10 @@ namespace TensorSharp.Models
                 for (int i = 0; i < ggufShape.Length; i++)
                     tsShape[i] = ggufShape[ggufShape.Length - 1 - i];
 
-                var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                tensor.SetElementsAsFloat(f32);
-                _weights[info.Name] = tensor;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, tsShape);
+                _constructionWeight.SetElementsAsFloat(f32);
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, info.Name,
+                    ref _constructionWeight, _displacedWeights);
                 count++;
 
                 if (info.Name.Contains("input_min") || info.Name.Contains("input_max") ||
@@ -1085,6 +1099,8 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
+            ModelDisposalOwnership.Add(tensors, _constructionWeight);
+            ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
             ModelDisposalOwnership.Add(tensors, _onesForNorm);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
@@ -1103,6 +1119,10 @@ namespace TensorSharp.Models
             // first tower stayed correct. Invalidate before freeing, the same contract
             // ModelBase.ReleaseGgmlDeviceResidency keeps for the language model's weights.
             ReleaseDeviceBindings();
+            _constructionWeight?.Dispose();
+            _constructionWeight = null;
+            foreach (var weight in _displacedWeights) weight.Dispose();
+            _displacedWeights.Clear();
             _onesForNorm?.Dispose();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
@@ -1111,6 +1131,10 @@ namespace TensorSharp.Models
                 w.Dispose();
             _weights.Clear();
             _ropeCache.Clear();
+            _constructionGguf?.Dispose();
+            _constructionGguf = null;
+            _constructionSafetensors?.Dispose();
+            _constructionSafetensors = null;
         }
 
         /// <summary>
@@ -1122,6 +1146,8 @@ namespace TensorSharp.Models
         {
             if (!_useNativeAttention)
                 return;
+            if (_constructionWeight != null) GgmlBasicOps.InvalidateTensorHostBuffer(_constructionWeight);
+            foreach (var weight in _displacedWeights) GgmlBasicOps.InvalidateTensorHostBuffer(weight);
             foreach (var w in _weights.Values)
             {
                 if (w != null)

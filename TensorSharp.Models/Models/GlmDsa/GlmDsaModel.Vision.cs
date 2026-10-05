@@ -15,6 +15,7 @@
 // NoPE, so image tokens simply occupy sequential cache positions - no MRoPE
 // bookkeeping like the Qwen-VL family needs).
 using System;
+using System.Collections.Generic;
 using TensorSharp;
 using TensorSharp.GGML;
 
@@ -23,6 +24,7 @@ namespace TensorSharp.Models
     public partial class GlmDsaModel
     {
         public GlmNextVisionEncoder VisionEncoder { get; private set; }
+        private readonly List<GlmNextVisionEncoder> _ownedVisionEncoders = new();
 
         public void LoadVisionEncoder(string mmProjPath)
         {
@@ -32,8 +34,15 @@ namespace TensorSharp.Models
                 Console.WriteLine($"Warning: {Config.Architecture} has no vision tower; ignoring mmproj {mmProjPath}.");
                 return;
             }
-            VisionEncoder = new GlmNextVisionEncoder(mmProjPath, _allocator);
-            VisionEncoder.SetHostModel(this);
+            _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
+            var encoder = new GlmNextVisionEncoder(mmProjPath, _allocator, RetainVisionConstruction);
+            VisionEncoder = encoder;
+        }
+
+        private void RetainVisionConstruction(GlmNextVisionEncoder encoder)
+        {
+            _ownedVisionEncoders.Add(encoder);
+            encoder.SetHostModel(this);
         }
 
         /// <summary>

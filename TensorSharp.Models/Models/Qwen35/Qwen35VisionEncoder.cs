@@ -23,7 +23,7 @@ namespace TensorSharp.Models
     {
         private readonly Dictionary<string, Tensor> _weights = new();
         private Tensor _constructionWeight;
-        private Tensor _replacedTemporalPatchWeight;
+        private readonly List<Tensor> _displacedWeights = new();
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, Tensor> _positionEmbeddingCache = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
@@ -144,8 +144,8 @@ namespace TensorSharp.Models
 
                 _constructionWeight = new Tensor(_allocator, DType.Float32, tsShape);
                 _constructionWeight.SetElementsAsFloat(f32);
-                _weights[info.Name] = _constructionWeight;
-                _constructionWeight = null;
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, info.Name,
+                    ref _constructionWeight, _displacedWeights);
                 count++;
             }
             Console.WriteLine($" done ({count} tensors)");
@@ -161,9 +161,8 @@ namespace TensorSharp.Models
             var w1 = _weights["v.patch_embd.weight.1"];
             _constructionWeight = new Tensor(_allocator, DType.Float32, w0.Sizes);
             Ops.Add(_constructionWeight, w0, w1);
-            _weights.TryGetValue("v.patch_embd.combined", out _replacedTemporalPatchWeight);
-            _weights["v.patch_embd.combined"] = _constructionWeight;
-            _constructionWeight = null;
+            ModelDisposalOwnership.PublishConstructionWeight(_weights, "v.patch_embd.combined",
+                ref _constructionWeight, _displacedWeights);
         }
 
         /// <summary>
@@ -1387,7 +1386,8 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
-            ModelDisposalOwnership.Add(tensors, _constructionWeight, _replacedTemporalPatchWeight);
+            ModelDisposalOwnership.Add(tensors, _constructionWeight);
+            ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
             ModelDisposalOwnership.AddRange(tensors, _positionEmbeddingCache.Values);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
@@ -1399,8 +1399,8 @@ namespace TensorSharp.Models
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
             _constructionWeight?.Dispose();
             _constructionWeight = null;
-            _replacedTemporalPatchWeight?.Dispose();
-            _replacedTemporalPatchWeight = null;
+            foreach (var weight in _displacedWeights) weight.Dispose();
+            _displacedWeights.Clear();
             foreach (var w in _positionEmbeddingCache.Values)
                 w.Dispose();
             _positionEmbeddingCache.Clear();

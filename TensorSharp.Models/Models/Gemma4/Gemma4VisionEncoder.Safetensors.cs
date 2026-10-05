@@ -244,9 +244,10 @@ namespace TensorSharp.Models
                 }
 
                 float[] data = st.ReadFloat32(sourceName);
-                var tensor = new Tensor(_allocator, DType.Float32, shape);
-                tensor.SetElementsAsFloat(data);
-                _weights[internalName] = tensor;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, shape);
+                _constructionWeight.SetElementsAsFloat(data);
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, internalName,
+                    ref _constructionWeight, _displacedWeights);
                 count++;
             }
 
@@ -282,9 +283,10 @@ namespace TensorSharp.Models
                             }
                 }
 
-                var patchEmbd = new Tensor(_allocator, DType.Float32, hidden, c, p, p);
-                patchEmbd.SetElementsAsFloat(dst);
-                _weights["v.patch_embd.weight"] = patchEmbd;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, hidden, c, p, p);
+                _constructionWeight.SetElementsAsFloat(dst);
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, "v.patch_embd.weight",
+                    ref _constructionWeight, _displacedWeights);
                 count++;
             }
 

@@ -288,6 +288,7 @@ namespace TensorSharp.Models
         private Gemma4DecodeArrays _decodeArrays;
 
         private Gemma4VisionEncoder _visionEncoder;
+        private readonly List<Gemma4VisionEncoder> _ownedVisionEncoders = new();
         private Gemma4AudioEncoder _audioEncoder;
         private List<(Tensor embeddings, int position)> _pendingVisionEmbeddingsList = new();
         private List<(Tensor embeddings, int position)> _pendingAudioEmbeddingsList = new();
@@ -384,11 +385,16 @@ namespace TensorSharp.Models
             IAllocator visionAllocator = _backend == BackendType.Cuda
                 ? new CpuAllocator(BlasEnum.DotNet)
                 : _allocator;
-            _visionEncoder = new Gemma4VisionEncoder(mmProjPath, visionAllocator);
-            // Give the encoder a reference back to us so its per-block loop
-            // can yield ModelBase.GpuComputeLock between blocks (keeps the
-            // engine worker responsive during long image encodes).
-            _visionEncoder.SetHostModel(this);
+            _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
+            var encoder = new Gemma4VisionEncoder(mmProjPath, visionAllocator, RetainVisionConstruction);
+            _visionEncoder = encoder;
+        }
+
+        private void RetainVisionConstruction(Gemma4VisionEncoder encoder)
+        {
+            _ownedVisionEncoders.Add(encoder);
+            // The per-block loop yields the model's GPU compute lock between image blocks.
+            encoder.SetHostModel(this);
         }
 
         public void LoadAudioEncoder(string mmProjPath)
@@ -8289,7 +8295,7 @@ namespace TensorSharp.Models
             AddHolder(_primaryHolder);
             foreach (var (embedding, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
             foreach (var (embedding, _) in _pendingAudioEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
-            _visionEncoder?.CollectDisposalOwnership(ownedTensors);
+            foreach (var encoder in _ownedVisionEncoders) encoder.CollectDisposalOwnership(ownedTensors);
             _audioEncoder?.CollectDisposalOwnership(ownedTensors);
             _cudaDecodeGraphs?.CollectDisposalOwnership(ownedTensors);
         }
@@ -8360,7 +8366,9 @@ namespace TensorSharp.Models
                 slot.SinTensor?.Dispose();
             }
             _neoXRopeSlotByFreqs.Clear();
-            _visionEncoder?.DisposeOwned();
+            foreach (var encoder in _ownedVisionEncoders) encoder.DisposeOwned();
+            _ownedVisionEncoders.Clear();
+            _visionEncoder = null;
             _audioEncoder?.DisposeOwned();
             foreach (var (emb, _) in _pendingVisionEmbeddingsList)
                 emb?.Dispose();

@@ -40,6 +40,9 @@ namespace TensorSharp.Models
         internal void SetHostModel(ModelBase model) => _hostModel = model;
 
         private readonly Dictionary<string, Tensor> _weights = new();
+        private Tensor _constructionWeight;
+        private readonly List<Tensor> _displacedWeights = new();
+        private GgufFile _constructionFile;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
         private readonly Dictionary<long, int[]> _blockOrderCache = new();
@@ -68,9 +71,16 @@ namespace TensorSharp.Models
         public int SpatialMergeSize => _spatialMergeSize;
 
         public GlmNextVisionEncoder(string mmProjPath, IAllocator allocator)
+            : this(mmProjPath, allocator, null)
+        {
+        }
+
+        internal GlmNextVisionEncoder(string mmProjPath, IAllocator allocator,
+            Action<GlmNextVisionEncoder> retainConstruction)
         {
             _allocator = allocator;
-            var gguf = new GgufFile(mmProjPath);
+            retainConstruction?.Invoke(this);
+            var gguf = _constructionFile = new GgufFile(mmProjPath);
 
             string projector = gguf.GetString("clip.projector_type") ?? "";
             if (projector != "glm5next")
@@ -100,6 +110,7 @@ namespace TensorSharp.Models
             CombinePatchEmbedWeights();
             BuildMergerLinearWeight();
             gguf.Dispose();
+            _constructionFile = null;
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -123,9 +134,10 @@ namespace TensorSharp.Models
                 for (int i = 0; i < info.Shape.Length; i++)
                     tsShape[i] = (long)info.Shape[info.Shape.Length - 1 - i];
 
-                var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                tensor.SetElementsAsFloat(f32);
-                _weights[info.Name] = tensor;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, tsShape);
+                _constructionWeight.SetElementsAsFloat(f32);
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, info.Name,
+                    ref _constructionWeight, _displacedWeights);
                 count++;
             }
             Console.WriteLine($" done ({count} tensors)");
@@ -141,9 +153,10 @@ namespace TensorSharp.Models
 
             var w0 = _weights["v.patch_embd.weight"];
             var w1 = _weights["v.patch_embd.weight.1"];
-            var combined = new Tensor(_allocator, DType.Float32, w0.Sizes);
-            Ops.Add(combined, w0, w1);
-            _weights["v.patch_embd.combined"] = combined;
+            _constructionWeight = new Tensor(_allocator, DType.Float32, w0.Sizes);
+            Ops.Add(_constructionWeight, w0, w1);
+            ModelDisposalOwnership.PublishConstructionWeight(_weights, "v.patch_embd.combined",
+                ref _constructionWeight, _displacedWeights);
         }
 
         /// <summary>
@@ -165,7 +178,8 @@ namespace TensorSharp.Models
             int proj = (int)conv.Sizes[0];
             int inDim = cells * hidden;
 
-            var linear = new Tensor(_allocator, DType.Float32, proj, inDim);
+            _constructionWeight = new Tensor(_allocator, DType.Float32, proj, inDim);
+            Tensor linear = _constructionWeight;
             float* src = TensorComputePrimitives.GetFloatPointer(conv);
             float* dst = TensorComputePrimitives.GetFloatPointer(linear);
             long srcL = (long)src, dstL = (long)dst;
@@ -178,7 +192,8 @@ namespace TensorSharp.Models
                         d[p * hidden + c] = s[(long)c * cells + p];
             });
 
-            _weights["mm.patch_merger.linear"] = linear;
+            ModelDisposalOwnership.PublishConstructionWeight(_weights, "mm.patch_merger.linear",
+                ref _constructionWeight, _displacedWeights);
         }
 
         /// <summary>
@@ -732,6 +747,8 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
+            ModelDisposalOwnership.Add(tensors, _constructionWeight);
+            ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
         }
@@ -739,6 +756,10 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionWeight?.Dispose();
+            _constructionWeight = null;
+            foreach (var weight in _displacedWeights) weight.Dispose();
+            _displacedWeights.Clear();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
             _transposedWeights.Clear();
@@ -747,6 +768,8 @@ namespace TensorSharp.Models
             _weights.Clear();
             _ropeCache.Clear();
             _blockOrderCache.Clear();
+            _constructionFile?.Dispose();
+            _constructionFile = null;
         }
     }
 }
