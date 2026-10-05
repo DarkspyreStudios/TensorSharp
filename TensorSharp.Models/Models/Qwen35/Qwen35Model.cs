@@ -2522,13 +2522,13 @@ namespace TensorSharp.Models
                 return _logitsBuffer;
             }
             {
-            // Per-op path runs the recurrent state on the host, so the fused
-            // decode's device-resident GDN state must be re-seeded next time.
-            // RecurrentBlock may invalidate the host-keyed delta-state device
-            // buffers. Retaining a Metal graph across that transition would
-            // leave it holding freed buffer bindings.
-            PrepareHostPrefillFallback();
-            hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
+                // Per-op path runs the recurrent state on the host, so the fused
+                // decode's device-resident GDN state must be re-seeded next time.
+                // RecurrentBlock may invalidate the host-keyed delta-state device
+                // buffers. Retaining a Metal graph across that transition would
+                // leave it holding freed buffer bindings.
+                PrepareHostPrefillFallback();
+                hidden = RunCudaPrefillLayerLoop(hidden, seqLen, startPos);
             }
 
             // Pick out the last token's hidden state BEFORE the final norm so we can
@@ -4667,9 +4667,9 @@ namespace TensorSharp.Models
                 int[] flatThw = new int[4 * seqLen];
                 for (int t = 0; t < seqLen; t++)
                 {
-                    flatThw[t]            = mropePositions[3 * t + 0]; // T axis
-                    flatThw[seqLen + t]   = mropePositions[3 * t + 1]; // H axis
-                    flatThw[2*seqLen + t] = mropePositions[3 * t + 2]; // W axis
+                    flatThw[t] = mropePositions[3 * t + 0]; // T axis
+                    flatThw[seqLen + t] = mropePositions[3 * t + 1]; // H axis
+                    flatThw[2 * seqLen + t] = mropePositions[3 * t + 2]; // W axis
                     // 4th axis: 0 (no video / fourth section is 0 for Qwen3.5).
                 }
                 using var positionsTensor = CreateIntTensor(flatThw, flatThw.Length);
@@ -4712,7 +4712,7 @@ namespace TensorSharp.Models
                         float s = MathF.Sin(theta);
                         float x0 = buf[baseOff + i];
                         float x1 = buf[baseOff + i + pairs];
-                        buf[baseOff + i]         = x0 * c - x1 * s;
+                        buf[baseOff + i] = x0 * c - x1 * s;
                         buf[baseOff + i + pairs] = x0 * s + x1 * c;
                     }
                 }
@@ -5453,87 +5453,87 @@ namespace TensorSharp.Models
             }
             else
             {
-            // Original token-by-token path (decode and fallback)
-            for (int s = 0; s < seqLen; s++)
-            {
-                float* routeRow = routePtr + (long)s * _numExperts;
-                SelectTopKRouteWeights(routeRow, routeRowsAreLogits, topExperts, routeW);
+                // Original token-by-token path (decode and fallback)
+                for (int s = 0; s < seqLen; s++)
+                {
+                    float* routeRow = routePtr + (long)s * _numExperts;
+                    SelectTopKRouteWeights(routeRow, routeRowsAreLogits, topExperts, routeW);
 
-                Tensor tokenInput;
-                bool disposeTokenInput;
-                if (seqLen == 1)
-                {
-                    tokenInput = input;
-                    disposeTokenInput = false;
-                }
-                else if (prefillRowBuf != null)
-                {
-                    float* srcRow = inputPtr + (long)s * hiddenSize;
-                    float* dstRow = GetFloatPtr(prefillRowBuf);
-                    long bytes = (long)hiddenSize * sizeof(float);
-                    Buffer.MemoryCopy(srcRow, dstRow, bytes, bytes);
-                    InvalidateTensorDeviceCache(prefillRowBuf);
-                    tokenInput = prefillRowBuf;
-                    disposeTokenInput = false;
-                }
-                else
-                {
-                    using var rowView = input.Narrow(0, s, 1);
-                    tokenInput = Ops.NewContiguous(rowView);
-                    disposeTokenInput = true;
-                }
-
-                // For MLX decode (seqLen=1), keep accumulation on device so
-                // the kernels for all 8 active experts queue up without a
-                // host sync between them. The legacy host-side accumulation
-                // is still used for other backends and for fallback.
-                if (mlxDecodeOnDevice && useReusedBuffers)
-                {
-                    RunMoEExpertsReusedMlxOnDevice(output, tokenInput, layer, topExperts, routeW);
-
-                    if (sharedDownAll != null)
+                    Tensor tokenInput;
+                    bool disposeTokenInput;
+                    if (seqLen == 1)
                     {
-                        float gateScalar = 1.0f;
-                        if (sharedGateInpPtr != null && inputPtr != null)
-                        {
-                            // seqLen==1 in this branch, so the input row is
-                            // just inputPtr (no s*hiddenSize offset).
-                            int n = Math.Min(sharedGateInpDim, hiddenSize);
-                            gateScalar = SigmoidScalar(VecDot(inputPtr, sharedGateInpPtr, n));
-                        }
-                        AddScaledTensorMlx(output, sharedDownAll, gateScalar);
+                        tokenInput = input;
+                        disposeTokenInput = false;
                     }
-                }
-                else
-                {
-                    float* outRow = outputPtr + (long)s * hiddenSize;
-
-                    if (useReusedBuffers)
+                    else if (prefillRowBuf != null)
                     {
-                        RunMoEExpertsReused(tokenInput, layer, topExperts, routeW, outRow, hiddenSize);
+                        float* srcRow = inputPtr + (long)s * hiddenSize;
+                        float* dstRow = GetFloatPtr(prefillRowBuf);
+                        long bytes = (long)hiddenSize * sizeof(float);
+                        Buffer.MemoryCopy(srcRow, dstRow, bytes, bytes);
+                        InvalidateTensorDeviceCache(prefillRowBuf);
+                        tokenInput = prefillRowBuf;
+                        disposeTokenInput = false;
                     }
                     else
                     {
-                        RunMoEExpertsAllocating(tokenInput, layer, topExperts, routeW, outRow, hiddenSize);
+                        using var rowView = input.Narrow(0, s, 1);
+                        tokenInput = Ops.NewContiguous(rowView);
+                        disposeTokenInput = true;
                     }
 
-                    if (sharedDownAll != null)
+                    // For MLX decode (seqLen=1), keep accumulation on device so
+                    // the kernels for all 8 active experts queue up without a
+                    // host sync between them. The legacy host-side accumulation
+                    // is still used for other backends and for fallback.
+                    if (mlxDecodeOnDevice && useReusedBuffers)
                     {
-                        float gateScalar = 1.0f;
-                        if (sharedGateInpPtr != null)
-                        {
-                            float* tokenRow = inputPtr + (long)s * hiddenSize;
-                            int n = Math.Min(sharedGateInpDim, hiddenSize);
-                            gateScalar = SigmoidScalar(VecDot(tokenRow, sharedGateInpPtr, n));
-                        }
-                        float* sharedPtr = GetFloatPtr(sharedDownAll) + (long)s * hiddenSize;
-                        VecScaleAdd(outRow, sharedPtr, gateScalar, hiddenSize);
-                    }
-                }
+                        RunMoEExpertsReusedMlxOnDevice(output, tokenInput, layer, topExperts, routeW);
 
-                if (disposeTokenInput)
-                    tokenInput.Dispose();
-            }
+                        if (sharedDownAll != null)
+                        {
+                            float gateScalar = 1.0f;
+                            if (sharedGateInpPtr != null && inputPtr != null)
+                            {
+                                // seqLen==1 in this branch, so the input row is
+                                // just inputPtr (no s*hiddenSize offset).
+                                int n = Math.Min(sharedGateInpDim, hiddenSize);
+                                gateScalar = SigmoidScalar(VecDot(inputPtr, sharedGateInpPtr, n));
+                            }
+                            AddScaledTensorMlx(output, sharedDownAll, gateScalar);
+                        }
+                    }
+                    else
+                    {
+                        float* outRow = outputPtr + (long)s * hiddenSize;
+
+                        if (useReusedBuffers)
+                        {
+                            RunMoEExpertsReused(tokenInput, layer, topExperts, routeW, outRow, hiddenSize);
+                        }
+                        else
+                        {
+                            RunMoEExpertsAllocating(tokenInput, layer, topExperts, routeW, outRow, hiddenSize);
+                        }
+
+                        if (sharedDownAll != null)
+                        {
+                            float gateScalar = 1.0f;
+                            if (sharedGateInpPtr != null)
+                            {
+                                float* tokenRow = inputPtr + (long)s * hiddenSize;
+                                int n = Math.Min(sharedGateInpDim, hiddenSize);
+                                gateScalar = SigmoidScalar(VecDot(tokenRow, sharedGateInpPtr, n));
+                            }
+                            float* sharedPtr = GetFloatPtr(sharedDownAll) + (long)s * hiddenSize;
+                            VecScaleAdd(outRow, sharedPtr, gateScalar, hiddenSize);
+                        }
+                    }
+
+                    if (disposeTokenInput)
+                        tokenInput.Dispose();
+                }
             } // end of token-by-token else
 
             sharedDownAll?.Dispose();
