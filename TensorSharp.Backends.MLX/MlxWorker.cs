@@ -108,6 +108,7 @@ namespace TensorSharp.MLX
                 {
                     MlxNative.SynchronizeAllUsedStreams();
                     stage = NativeRuntimeFailureStage.CacheRelease;
+                    MlxNative.ReleaseCachedKernels();
                     MlxNative.ReleaseDefaultStreams();
                     stage = NativeRuntimeFailureStage.AllocatorRelease;
                     MlxNative.ClearNativeCache();

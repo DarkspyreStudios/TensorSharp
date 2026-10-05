@@ -190,14 +190,21 @@ unwinding, so cleanup does not retry it. Kernel results transfer only after temp
 cleanup succeeds. Failed cleanup retains the actual unreturned kernel and remaining
 allocations. Safe unsupported construction preserves each kernel's disabled flag and
 diagnostic, including the native error as its cause. The genuine native kernel free
-returns void; its actual return releases the wrapper reference, not GPU work. Successful
-cached kernels still have no checked lifetime retirement owner.
+returns void; its actual return releases the wrapper reference, not GPU work.
+One registered owner holds all 59 cached kernel slots. Construction publishes directly to
+those actual fields after checked temporary cleanup. Application carriers retain that parent
+while borrowing its kernels. After all-stream synchronization, cache clearing reserves the
+actual parent and checks each wrapper release under the existing kernel lock. Successful frees
+clear only their fields. A later failure retains the actual remaining kernels and records
+CacheRelease without clearing the allocator. Disabled flags and construction recipes remain
+unchanged; successfully released slots can be recreated. The reusable owner stays registered
+after cache clearing; this release does not establish final worker or generation retirement.
 Kernel disable handlers and eight simdgroup fallback catches propagate recorded unsafe
 failures without starting another kernel attempt.
 Allocator-cache clearing reserves its actual worker through the shared process authority
 before dispatch. Active compiled calls refuse that destructive reservation. The admitted
 native phase synchronizes the real complete MLX stream snapshot before releasing owned
-default-stream wrappers and clearing the allocator cache. TensorSharp's native extension
+kernel and default-stream wrappers and clearing the allocator cache. TensorSharp's native extension
 uses MLX's get_streams and synchronize APIs,
 including CPU and GPU streams from other workers in the same native runtime. It does not
 substitute the calling thread's default stream or a worker queue barrier.
@@ -216,7 +223,7 @@ retains old wrappers; the uncached benchmark mode still acquires a fresh wrapper
 Only successful frees clear owned references. Reusable stream-owner registration remains active
 after cache clearing; wrapper release does not claim native stream or worker retirement.
 Full retirement integration of all-used-stream synchronization remains unfinished.
-Cached-kernel lifetime, raw temporaries,
+Final cached-kernel owner retirement, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
