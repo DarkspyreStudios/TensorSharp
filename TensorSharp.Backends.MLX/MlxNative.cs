@@ -3581,7 +3581,7 @@ if (kind == 0) {
                 var holder = new CompiledClosure(trace);
                 try
                 {
-                    InvokeClosure(holder, NativeMlxCallbackCallKind.CreatePayloadClosure, invocation =>
+                    InvokeClosure(holder, NativeMlxCallbackCallKind.CompileClosure, invocation =>
                     {
                         holder.TraceHandle = GCHandle.Alloc(holder);
                         holder.TracePayload = GCHandle.ToIntPtr(holder.TraceHandle);
@@ -3611,10 +3611,6 @@ if (kind == 0) {
                         string error = TakeCapturedError();
                         if (!holder.Source.IsValid || holder.PayloadReleased || !string.IsNullOrEmpty(error))
                             throw new InvalidOperationException("MLX payload closure creation failed: " + error);
-                    }, null);
-
-                    InvokeClosure(holder, NativeMlxCallbackCallKind.CompileClosure, invocation =>
-                    {
                         CheckClosureStatus(invocation, mlx_compile(out holder.Compiled, holder.Source, shapeless), "compiling MLX closure");
                         if (!holder.Compiled.IsValid)
                             throw new InvalidOperationException("mlx_compile returned an empty closure.");
