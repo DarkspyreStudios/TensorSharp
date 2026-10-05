@@ -100,7 +100,7 @@ reentrant array frees. Synchronous dispatch from a different worker beneath an a
 or compiled callback refuses before queueing. General managed `Invoke` calls do not hold
 a native gate across trace callbacks. Compiled closure creation/application and checked
 reference release use callback-aware leases. Managed tracing suspends the native monitor
-without dropping its counted invocation. Failed cleanup retains the actual closure,
+without dropping its counted invocation. Failed framework cleanup retains the actual closure,
 invocation vectors and array references. Native callbacks record their original errors
 before returning; aggregation occurs after the callback. Each admitted ordinary/compiled
 call installs its generation's error handler under the shared gate.
@@ -108,6 +108,8 @@ Only the native payload destructor releases its exact callback root, except fail
 binding before native adoption. Checked closure-reference release completes registration
 only when that root is actually gone. A later payload destructor does not automatically
 complete a pending registration; deferred payload completion remains unfinished.
+Trace-delegate intermediate arrays that never reach its returned outputs still require
+construction/replacement recovery; invocation retention does not supply that missing ownership.
 Fire-and-forget async evaluation and all-used-stream synchronization are not wired into
 this authority. Other raw temporary-handle cleanup still requires checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
