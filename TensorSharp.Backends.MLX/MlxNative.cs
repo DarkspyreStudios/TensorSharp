@@ -3952,6 +3952,7 @@ if (kind == 0) {
                 invocation.Traces.Add(trace);
                 registered = true;
 
+                invocation.Lease.ValidateNativePhase();
                 int n = checked((int)mlx_vector_array_size(input));
                 trace.Inputs = new MlxArray[n];
                 for (int i = 0; i < n; i++)
@@ -3995,6 +3996,7 @@ if (kind == 0) {
                 {
                     try
                     {
+                        invocation.Lease.ValidateNativePhase();
                         holder.NativeOwner.ThrowIfQuarantined();
                         FreeClosureArrays(trace.Inputs, 0);
                         FreeClosureArrays(trace.Outputs, 0);

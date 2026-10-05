@@ -32,6 +32,7 @@ internal sealed class NativeMlxCallbackCallLease : IDisposable
     }
 
     internal void EnterManagedCallback(NativeMlxCallbackKind kind) => NativeQuarantineAuthority.EnterManagedCallback(this, kind);
+    internal void ValidateNativePhase() => NativeQuarantineAuthority.ValidateMlxNativePhase(this);
     internal void ResumeNative() => NativeQuarantineAuthority.ResumeMlxNative(this);
     internal void NativeReturned() => NativeQuarantineAuthority.MlxNativeReturned(this);
     internal NativeRuntimeFailure PublishFailure(object actualOwner, Exception cleanupError, NativeRuntimeFailureStage stage)
@@ -398,6 +399,11 @@ internal static partial class NativeQuarantineAuthority
             || stack.Count == 0 || !ReferenceEquals(stack[^1], lease.Frame) || (int)lease.Frame[4] != phase
             || Frames(lease.Registration.State).ContainsKey(lease.ThreadId))
             throw new InvalidOperationException("MLX compiled calls require their exact synchronous top frame and phase.");
+    }
+
+    internal static void ValidateMlxNativePhase(NativeMlxCallbackCallLease lease)
+    {
+        lock (lease.Registration.State[1]) ValidateCallback(lease, 0, true);
     }
 
     internal static void EnterManagedCallback(NativeMlxCallbackCallLease lease, NativeMlxCallbackKind kind)
