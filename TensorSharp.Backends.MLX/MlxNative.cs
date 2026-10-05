@@ -25,8 +25,7 @@ namespace TensorSharp.MLX
         private static bool errorHandlerInstalled;
         private static int initializedDevice = -1;
         private static bool cacheLimitConfigured;
-        private static MlxStream cachedDefaultStream;
-        private static int cachedDefaultStreamDevice = -1;
+        private static readonly DeviceStreamRuntime deviceStreams = new();
         private static string lastError = string.Empty;
         // A/B benchmark toggles. Defaults are the optimized paths; set the
         // env var to "1" to fall back to the pre-optimization behavior so
@@ -3311,36 +3310,43 @@ if (kind == 0) {
             if (deviceId < 0)
                 throw new ArgumentOutOfRangeException(nameof(deviceId));
 
-            MlxWorker.Shared.InvokeNative(() =>
+            var resources = new DeviceAcquisitionResources(deviceStreams, deviceId);
+            MlxWorker.Shared.InvokeNative(resources, effect =>
             {
                 lock (initSync)
                 {
                     if (initializedDevice == deviceId)
-                        return;
+                        return 0;
 
                     EnsureErrorHandlerInstalled();
                     ThrowIfUnavailable();
-                    MlxDevice device = mlx_device_new_type(MlxGpu, deviceId);
+                    ClearCapturedError();
+                    resources.Device = mlx_device_new_type(MlxGpu, deviceId);
+                    CheckNativeValue(resources.Device.Ctx == IntPtr.Zero, "creating MLX GPU device");
+                    Check(mlx_device_is_available(out bool available, resources.Device), "checking MLX GPU availability");
+                    if (!available)
+                        throw new PlatformNotSupportedException($"MLX GPU device {deviceId} is not available.");
+
                     try
                     {
-                        Check(mlx_device_is_available(out bool available, device), "checking MLX GPU availability");
-                        if (!available)
-                            throw new PlatformNotSupportedException($"MLX GPU device {deviceId} is not available.");
-
-                        Check(mlx_set_default_device(device), "setting default MLX GPU device");
+                        resources.DeviceSelectionDispatched = true;
+                        Check(mlx_set_default_device(resources.Device), "setting default MLX GPU device");
                         ConfigureCacheLimit();
                         ConfigureWiredLimit();
                         ConfigureMemoryLimit();
-                        initializedDevice = deviceId;
-                        cachedDefaultStreamDevice = -1;
-                        _ = mlx_reset_peak_memory();
+                        Check(mlx_reset_peak_memory(), "resetting MLX peak memory");
+                        resources.DevicePrepared = true;
                     }
-                    finally
+                    catch (Exception original)
                     {
-                        _ = mlx_device_free(device);
+                        Exception error = original;
+                        try { effect.PublishFailure(MlxWorker.Shared, original, NativeRuntimeFailureStage.ContextRelease); }
+                        catch (Exception publication) { error = JoinNativeErrors(error, publication); }
+                        ExceptionDispatchInfo.Capture(error).Throw();
                     }
+                    return 0;
                 }
-            });
+            }, resources.Release);
         }
 
         public static MlxMemorySnapshot GetMemorySnapshot()
@@ -3367,6 +3373,11 @@ if (kind == 0) {
         internal static void ClearNativeCache()
         {
             Check(mlx_clear_cache(), "clearing MLX allocator cache");
+        }
+
+        internal static void ReleaseDefaultStreams()
+        {
+            deviceStreams.ReleaseAfterSynchronization();
         }
 
         internal static MlxArray NewArrayFromHost(IntPtr data, int[] shape, DType dtype)
@@ -6907,29 +6918,115 @@ if (kind == 0) {
 
         private static MlxStream DefaultStream()
         {
-            // The default MLX stream for a given device is a stable handle owned
-            // by MLX itself; recomputing it on every op (which the previous
-            // implementation did) cost a device_new + device_free round trip per
-            // call. Cache it once per device so the hot path is a single read.
             int desiredDevice = initializedDevice >= 0 ? initializedDevice : 0;
-            if (!DisableStreamCache && cachedDefaultStreamDevice == desiredDevice)
-                return cachedDefaultStream;
+            return deviceStreams.AcquireDefault(desiredDevice);
+        }
 
-            MlxDevice device = mlx_device_new_type(MlxGpu, desiredDevice);
-            try
+        private sealed class DeviceStreamRuntime
+        {
+            private readonly NativeOwnerRegistration nativeOwner;
+            private readonly List<DeviceAcquisitionResources> streams = new();
+            private DeviceAcquisitionResources cached;
+
+            internal DeviceStreamRuntime()
             {
-                Check(mlx_get_default_stream(out MlxStream stream, device), "getting MLX default stream");
-                if (!DisableStreamCache)
+                nativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Graph);
+                nativeOwner.AttachMlxSharedRuntime();
+            }
+
+            internal MlxStream AcquireDefault(int deviceId)
+            {
+                nativeOwner.ThrowIfQuarantined();
+                if (!DisableStreamCache && cached != null && cached.DeviceId == deviceId)
+                    return cached.Stream;
+
+                var resources = new DeviceAcquisitionResources(this, deviceId);
+                streams.Add(resources);
+                try
                 {
-                    cachedDefaultStream = stream;
-                    cachedDefaultStreamDevice = desiredDevice;
+                    MlxStream stream = MlxWorker.Shared.InvokeNative(resources, effect =>
+                    {
+                        ClearCapturedError();
+                        resources.Device = mlx_device_new_type(MlxGpu, deviceId);
+                        CheckNativeValue(resources.Device.Ctx == IntPtr.Zero, "creating MLX default-stream device");
+                        Check(mlx_get_default_stream(out resources.Stream, resources.Device), "getting MLX default stream");
+                        CheckNativeValue(resources.Stream.Ctx == IntPtr.Zero, "getting MLX default stream");
+                        resources.StreamPrepared = true;
+                        return resources.Stream;
+                    }, resources.Release);
+                    if (!DisableStreamCache) cached = resources;
+                    return stream;
                 }
-                return stream;
+                finally
+                {
+                    if (!resources.StreamPrepared && resources.Device.Ctx == IntPtr.Zero && resources.Stream.Ctx == IntPtr.Zero)
+                        streams.Remove(resources);
+                }
             }
-            finally
+
+            internal void InvalidateDefault()
             {
-                _ = mlx_device_free(device);
+                cached = null;
             }
+
+            internal void ReleaseAfterSynchronization()
+            {
+                if (streams.Count == 0) return;
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                try
+                {
+                    foreach (DeviceAcquisitionResources resources in streams)
+                        FreeStreamReference(ref resources.Stream);
+                    cached = null;
+                    streams.Clear();
+                }
+                catch (Exception original)
+                {
+                    Exception error = original;
+                    try { effect.PublishFailure(this, original, NativeRuntimeFailureStage.CacheRelease); }
+                    catch (Exception publication) { error = JoinNativeErrors(error, publication); }
+                    ExceptionDispatchInfo.Capture(error).Throw();
+                }
+            }
+        }
+
+        private sealed class DeviceAcquisitionResources(DeviceStreamRuntime owner, int deviceId) : MlxNativeResources
+        {
+            internal readonly int DeviceId = deviceId;
+            internal MlxDevice Device;
+            internal MlxStream Stream;
+            internal bool StreamPrepared;
+            internal bool DevicePrepared;
+            internal bool DeviceSelectionDispatched;
+            internal override NativeRuntimeFailureStage CleanupFailureStage => DeviceSelectionDispatched
+                ? NativeRuntimeFailureStage.ContextRelease : NativeRuntimeFailureStage.GraphRelease;
+
+            internal void Release()
+            {
+                FreeDeviceReference(ref Device);
+                if (!StreamPrepared) FreeStreamReference(ref Stream);
+                if (DevicePrepared)
+                {
+                    initializedDevice = DeviceId;
+                    owner.InvalidateDefault();
+                }
+            }
+        }
+
+        private static void FreeDeviceReference(ref MlxDevice device)
+        {
+            if (device.Ctx == IntPtr.Zero) return;
+            Check(mlx_device_free(device), "freeing MLX device");
+            device = default;
+        }
+
+        private static void FreeStreamReference(ref MlxStream stream)
+        {
+            if (stream.Ctx == IntPtr.Zero) return;
+            Check(mlx_stream_free(stream), "freeing MLX stream");
+            stream = default;
         }
 
         private static MlxFastMetalKernel EnsureIq4XsMatmulKernel()

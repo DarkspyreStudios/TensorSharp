@@ -196,15 +196,25 @@ Kernel disable handlers and eight simdgroup fallback catches propagate recorded 
 failures without starting another kernel attempt.
 Allocator-cache clearing reserves its actual worker through the shared process authority
 before dispatch. Active compiled calls refuse that destructive reservation. The admitted
-native phase synchronizes the real complete MLX stream snapshot before clearing the
-allocator cache. TensorSharp's native extension uses MLX's get_streams and synchronize APIs,
+native phase synchronizes the real complete MLX stream snapshot before releasing owned
+default-stream wrappers and clearing the allocator cache. TensorSharp's native extension
+uses MLX's get_streams and synchronize APIs,
 including CPU and GPU streams from other workers in the same native runtime. It does not
 substitute the calling thread's default stream or a worker queue barrier.
 Synchronization failure prevents cache clearing, records the Synchronization stage and
-retains the actual worker graph. A later clear failure records AllocatorRelease. Both paths
+retains the actual worker graph. Stream-wrapper release failure records CacheRelease and
+retains the actual remaining wrappers. A later clear failure records AllocatorRelease. These paths
 preserve the original native cause and any independent publication error. Binding and native
 cleanup failures propagate; an older library without the all-stream export is not accepted
 as successful cache cleanup. Upstream MLX sources remain unchanged.
+Device initialization retains the actual temporary device before native validation and
+checks its release before publishing initialized-device readiness. Failure after default-device
+selection records unsafe context state and requires process restart; initialization does not retry it.
+Default-stream acquisition retains the actual C wrapper before validation. One registered
+owner keeps cached and uncached wrappers until synchronized checked release. Cache invalidation
+retains old wrappers; the uncached benchmark mode still acquires a fresh wrapper per operation.
+Only successful frees clear owned references. Reusable stream-owner registration remains active
+after cache clearing; wrapper release does not claim native stream or worker retirement.
 Full retirement integration of all-used-stream synchronization remains unfinished.
 Cached-kernel lifetime, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
