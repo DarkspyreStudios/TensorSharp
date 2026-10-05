@@ -71,8 +71,7 @@ acquisition, including an unpublished weight or displaced temporal-patch weight.
 Construction recovery uses the text model's existing release-only handle and preserves
 the construction error plus any cleanup error. The pipeline preserves operation and
 cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
-Other standalone vision constructors
-and family replacement paths do not gain those guarantees from this integration.
+Standalone vision construction without a retaining model owner does not gain those guarantees.
 Qwen35 and Qwen4Exp retain every vision child before its constructor acquires resources.
 A successful construction publishes the active child; a failure leaves the previous
 active child unchanged. The parent owns partial and replaced children until its coordinated
