@@ -22,7 +22,6 @@ namespace TensorSharp.MLX
                 {
                     output = MlxNative.Full(ToIntArray(result.Sizes), value, result.ElementType);
                     MlxStorage.SetDeviceResult(result, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -57,7 +56,6 @@ namespace TensorSharp.MLX
 
                     contiguous = MlxNative.Contiguous(copySource);
                     MlxStorage.SetDeviceResult(result, ref contiguous);
-                    contiguous = default;
                 }
                 finally
                 {
@@ -88,7 +86,6 @@ namespace TensorSharp.MLX
                     m2View = GetView(m2);
                     output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -121,7 +118,6 @@ namespace TensorSharp.MLX
                     m2View = GetView(m2);
                     output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -180,7 +176,6 @@ namespace TensorSharp.MLX
                 zero = MlxNative.NewScalar(0.0f);
                 output = MlxNative.Binary(MlxNative.MlxBinaryOp.Maximum, srcView, zero);
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
-                output = default;
                 return writeTarget;
             }
             finally
@@ -214,7 +209,6 @@ namespace TensorSharp.MLX
                     output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, srcView, sigmoid);
                 }
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
-                output = default;
                 return writeTarget;
             }
             finally
@@ -242,7 +236,6 @@ namespace TensorSharp.MLX
                 else
                     output = Gelu(srcView);
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
-                output = default;
                 return writeTarget;
             }
             finally
@@ -312,7 +305,6 @@ namespace TensorSharp.MLX
                         output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, upView);
                     }
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -366,7 +358,6 @@ namespace TensorSharp.MLX
                     output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, up);
                 }
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
-                output = default;
                 return writeTarget;
             }
             finally
@@ -405,7 +396,6 @@ namespace TensorSharp.MLX
                     output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gelu, upView);
                 }
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
-                output = default;
                 return writeTarget;
             }
             finally
@@ -444,7 +434,6 @@ namespace TensorSharp.MLX
                         output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xView, sigmoid);
                     }
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -473,7 +462,6 @@ namespace TensorSharp.MLX
                     srcView = GetView(src);
                     output = MlxNative.SoftmaxLastAxis(srcView);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -607,7 +595,6 @@ namespace TensorSharp.MLX
                             resultView = GetView(result);
                             combined = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, reshaped, resultView);
                             MlxStorage.SetDeviceResult(writeTarget, ref combined);
-                            combined = default;
                         }
                         finally
                         {
@@ -617,7 +604,6 @@ namespace TensorSharp.MLX
                     else
                     {
                         MlxStorage.SetDeviceResult(writeTarget, ref reshaped);
-                        reshaped = default;
                     }
                 }
                 finally
@@ -680,7 +666,6 @@ namespace TensorSharp.MLX
                 attentionSeqMajor = MlxNative.Transpose(attentionHeadMajor, headMajorAxes);
                 contiguous = MlxNative.Contiguous(attentionSeqMajor);
                 MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
-                contiguous = default;
                 return writeTarget;
             }
             finally
@@ -725,7 +710,6 @@ namespace TensorSharp.MLX
                     output = MlxNative.TakeAxis(srcView, indicesView, 0);
                     contiguous = MlxNative.Contiguous(output);
                     MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
-                    contiguous = default;
                 }
                 finally
                 {
@@ -765,7 +749,6 @@ namespace TensorSharp.MLX
                     output = MlxNative.RepeatAxis(srcView, repeats, dim);
                     contiguous = MlxNative.Contiguous(output);
                     MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
-                    contiguous = default;
                 }
                 finally
                 {
@@ -797,7 +780,6 @@ namespace TensorSharp.MLX
                     betaView = GetOptionalView(beta);
                     output = MlxNative.FastLayerNorm(srcView, alphaView, betaView, eps);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -828,7 +810,6 @@ namespace TensorSharp.MLX
                     alphaView = GetOptionalView(alpha);
                     output = MlxNative.FastRmsNorm(srcView, alphaView, eps);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -905,7 +886,6 @@ namespace TensorSharp.MLX
                 maskedScores = MlxNative.Where(futureMask, replacement, scores2d);
                 reshaped = MlxNative.Reshape(maskedScores, ToIntArray(tensor.Sizes));
                 MlxStorage.SetDeviceResult(tensor, ref reshaped);
-                reshaped = default;
             }
             finally
             {
@@ -947,7 +927,6 @@ namespace TensorSharp.MLX
                     srcView = GetView(src);
                     output = MlxNative.Unary(op, srcView);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -975,7 +954,6 @@ namespace TensorSharp.MLX
                     rhsView = GetView(rhs);
                     output = MlxNative.Binary(op, lhsView, rhsView);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
@@ -1008,7 +986,6 @@ namespace TensorSharp.MLX
                         ? MlxNative.Binary(op, scalarArray, tensorView)
                         : MlxNative.Binary(op, tensorView, scalarArray);
                     MlxStorage.SetDeviceResult(writeTarget, ref output);
-                    output = default;
                 }
                 finally
                 {
