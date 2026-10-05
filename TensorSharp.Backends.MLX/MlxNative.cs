@@ -3679,10 +3679,8 @@ if (kind == 0) {
                 InvokeClosure(holder, NativeMlxCallbackCallKind.ApplyClosure, invocation =>
                 {
                     invocation.BorrowedInputs = inputs;
-                    invocation.Inputs = mlx_vector_array_new();
-                    invocation.Outputs = mlx_vector_array_new();
-                    if (!invocation.Inputs.IsValid || !invocation.Outputs.IsValid)
-                        throw new InvalidOperationException("MLX closure vector creation failed.");
+                    NewClosureVector(ref invocation.Inputs);
+                    NewClosureVector(ref invocation.Outputs);
                     for (int i = 0; i < inputs.Length; i++)
                     {
                         if (!inputs[i].IsValid)
@@ -3691,7 +3689,7 @@ if (kind == 0) {
                     }
                     CheckClosureStatus(invocation, mlx_closure_apply(ref invocation.Outputs, holder.Compiled, invocation.Inputs), "applying compiled MLX closure");
 
-                    int count = checked((int)mlx_vector_array_size(invocation.Outputs));
+                    int count = ClosureVectorSize(invocation.Outputs);
                     invocation.Results = new MlxArray[count];
                     for (int i = 0; i < count; i++)
                         Check(mlx_vector_array_get(out invocation.Results[i], invocation.Outputs, (nuint)i), "extracting closure output");
@@ -3834,6 +3832,28 @@ if (kind == 0) {
             vector = default;
         }
 
+        private static void NewClosureVector(ref MlxVectorArray vector)
+        {
+            ClearCapturedError();
+            vector = mlx_vector_array_new();
+            CheckClosureValue(!vector.IsValid, "creating MLX closure vector");
+        }
+
+        private static int ClosureVectorSize(MlxVectorArray vector)
+        {
+            ClearCapturedError();
+            nuint size = mlx_vector_array_size(vector);
+            CheckClosureValue(false, "reading MLX closure vector size");
+            return checked((int)size);
+        }
+
+        private static void CheckClosureValue(bool invalid, string action)
+        {
+            string error = TakeCapturedError();
+            if (invalid || !string.IsNullOrEmpty(error))
+                throw new InvalidOperationException($"MLX-C failed while {action}: {error}");
+        }
+
         private static void FreeClosureArrays(MlxArray[] arrays, int start)
         {
             if (arrays == null) return;
@@ -3953,7 +3973,7 @@ if (kind == 0) {
                 registered = true;
 
                 invocation.Lease.ValidateNativePhase();
-                int n = checked((int)mlx_vector_array_size(input));
+                int n = ClosureVectorSize(input);
                 trace.Inputs = new MlxArray[n];
                 for (int i = 0; i < n; i++)
                     Check(mlx_vector_array_get(out trace.Inputs[i], input, (nuint)i), "extracting MLX trace input");
@@ -4007,7 +4027,7 @@ if (kind == 0) {
                     }
                 }
             }
-            return trace != null && trace.Error == null && trace.ResumeError == null && trace.CleanupError == null ? 0 : 1;
+            return registered && invocation.Error == null && trace.Error == null && trace.ResumeError == null && trace.CleanupError == null ? 0 : 1;
         }
 
         private static void ClosureDestructor(IntPtr payload)
