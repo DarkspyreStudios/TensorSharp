@@ -97,6 +97,10 @@ Gemma4's parent-owned safetensors reader uses the same pre-acquisition attachmen
 stream remains reachable after parse failure and clears only after successful close.
 Qwen's direct-CUDA transpose cache removes the original weight binding only after its
 checked release returns. A release error preserves that binding and the published replacement.
+Media transpose, temporal patch, position and device RoPE caches retain unpublished tensors
+and views in the child's pending/displaced carrier before initialization or copy. Cache entries
+publish after checked temporary-view release. Gemma4 audio retains its position-projection
+tensors through the same carrier. Failed work remains visible to coordinated child retirement.
 MLX CPU fallback keeps input views, mapped CPU tensors and unreturned results in the
 worker's existing resource carrier before conversion or dispatch. Duplicate arguments
 share the same mapped view, and explicit output tensors retain their caller identity.

@@ -658,9 +658,13 @@ namespace TensorSharp.Models
             if (_transposedWeights.TryGetValue(weightName, out var transposed))
                 return transposed;
 
-            using var weightViewT = _weights[weightName].Transpose();
-            transposed = Ops.NewContiguous(weightViewT);
-            _transposedWeights[weightName] = transposed;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weightViewT = _constructionWeight = _weights[weightName].Transpose();
+            transposed = ModelDisposalOwnership.NewConstructionContiguous(weightViewT,
+                ref _constructionWeight, _displacedWeights);
+            weightViewT.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, weightName,
+                ref _constructionWeight, _displacedWeights);
             return transposed;
         }
 

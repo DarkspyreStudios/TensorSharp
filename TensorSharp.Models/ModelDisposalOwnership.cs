@@ -10,7 +10,26 @@ internal static class ModelDisposalOwnership
         weights.Remove(name);
     }
 
-    internal static void PublishConstructionWeight(Dictionary<string, Tensor> weights, string name,
+    internal static void RetainPendingWeight(ref Tensor incoming, List<Tensor> displaced)
+    {
+        if (incoming == null) return;
+        // Capacity is reserved while the pending tensor is still reachable from its owner.
+        displaced.EnsureCapacity(checked(displaced.Count + 1));
+        displaced.Add(incoming);
+        incoming = null;
+    }
+
+    internal static Tensor NewConstructionContiguous(Tensor source, ref Tensor incoming,
+        List<Tensor> displaced)
+    {
+        RetainPendingWeight(ref incoming, displaced);
+        // NewContiguous cannot expose its destination when Copy throws before returning it.
+        Tensor result = incoming = new Tensor(source.Allocator, source.ElementType, source.Sizes);
+        Ops.Copy(result, source);
+        return result;
+    }
+
+    internal static void PublishConstructionWeight<TKey>(Dictionary<TKey, Tensor> weights, TKey name,
         ref Tensor incoming, List<Tensor> displaced)
     {
         if (weights.TryGetValue(name, out Tensor previous))
@@ -20,6 +39,19 @@ internal static class ModelDisposalOwnership
         }
         weights[name] = incoming;
         incoming = null;
+    }
+
+    internal static void PublishConstructionWeights<TKey>(Dictionary<TKey, (Tensor First, Tensor Second)> weights,
+        TKey name, Tensor first, ref Tensor second, List<Tensor> displaced)
+    {
+        if (weights.TryGetValue(name, out var previous))
+        {
+            displaced.EnsureCapacity(checked(displaced.Count + 2));
+            displaced.Add(previous.First);
+            displaced.Add(previous.Second);
+        }
+        weights[name] = (first, second);
+        second = null;
     }
 
     internal static void Add(ICollection<Tensor> tensors, params Tensor[] values)

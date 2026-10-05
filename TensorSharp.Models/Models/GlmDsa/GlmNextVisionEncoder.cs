@@ -339,10 +339,16 @@ namespace TensorSharp.Models
                 return cached;
 
             int outDim = (int)convWeight.Sizes[0];
-            using var flat = convWeight.View(outDim, patchStride);
-            using var t = flat.Transpose();
-            var result = Ops.NewContiguous(t);
-            _transposedWeights[key] = result;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var flat = _constructionWeight = convWeight.View(outDim, patchStride);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var t = _constructionWeight = flat.Transpose();
+            var result = ModelDisposalOwnership.NewConstructionContiguous(t,
+                ref _constructionWeight, _displacedWeights);
+            t.Dispose();
+            flat.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, key,
+                ref _constructionWeight, _displacedWeights);
             return result;
         }
 
@@ -687,9 +693,13 @@ namespace TensorSharp.Models
                 return transposed;
 
             Tensor weight = _weights[weightName];
-            using var weightViewT = weight.Transpose();
-            transposed = Ops.NewContiguous(weightViewT);
-            _transposedWeights[weightName] = transposed;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weightViewT = _constructionWeight = weight.Transpose();
+            transposed = ModelDisposalOwnership.NewConstructionContiguous(weightViewT,
+                ref _constructionWeight, _displacedWeights);
+            weightViewT.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, weightName,
+                ref _constructionWeight, _displacedWeights);
             return transposed;
         }
 

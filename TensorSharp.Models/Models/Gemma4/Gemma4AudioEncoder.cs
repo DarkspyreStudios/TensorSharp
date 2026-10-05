@@ -727,17 +727,25 @@ namespace TensorSharp.Models
             int relOutDim = (int)relWeight.Sizes[0];
             int inDim = (int)relWeight.Sizes[1];
 
-            using var sinTensor = new Tensor(_allocator, DType.Float32, maxSpan, _hiddenSize);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var sinTensor = _constructionWeight = new Tensor(_allocator, DType.Float32, maxSpan, _hiddenSize);
             sinTensor.SetElementsAsFloat(sinEmb);
 
-            using var sinSlice = sinTensor.Narrow(1, 0, inDim);
-            using var sinContig = Ops.NewContiguous(sinSlice);
-            var result = new Tensor(_allocator, DType.Float32, maxSpan, relOutDim);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var sinSlice = _constructionWeight = sinTensor.Narrow(1, 0, inDim);
+            var sinContig = ModelDisposalOwnership.NewConstructionContiguous(sinSlice,
+                ref _constructionWeight, _displacedWeights);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var result = _constructionWeight = new Tensor(_allocator, DType.Float32, maxSpan, relOutDim);
             Ops.Addmm(result, 0, result, 1f, sinContig, GetOrCreateTransposedWeight(relKey));
 
             float[] projected = new float[maxSpan * relOutDim];
             result.CopyToArray(projected);
             result.Dispose();
+            sinContig.Dispose();
+            sinSlice.Dispose();
+            sinTensor.Dispose();
+            if (ReferenceEquals(_constructionWeight, result)) _constructionWeight = null;
 
             _positionEmbeddingCache[prefix] = projected;
             return projected;
@@ -956,9 +964,13 @@ namespace TensorSharp.Models
             if (_transposedWeights.TryGetValue(weightName, out var transposed))
                 return transposed;
 
-            using var weightViewT = _weights[weightName].Transpose();
-            transposed = Ops.NewContiguous(weightViewT);
-            _transposedWeights[weightName] = transposed;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weightViewT = _constructionWeight = _weights[weightName].Transpose();
+            transposed = ModelDisposalOwnership.NewConstructionContiguous(weightViewT,
+                ref _constructionWeight, _displacedWeights);
+            weightViewT.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, weightName,
+                ref _constructionWeight, _displacedWeights);
             return transposed;
         }
 

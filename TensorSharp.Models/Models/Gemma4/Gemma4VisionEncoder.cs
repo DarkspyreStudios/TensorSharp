@@ -582,10 +582,16 @@ namespace TensorSharp.Models
 
             var convWeight = _weights["v.patch_embd.weight"];
             int outDim = (int)convWeight.Sizes[0];
-            using var weight2D = convWeight.View(outDim, patchStride);
-            using var weightViewT = weight2D.Transpose();
-            var result = Ops.NewContiguous(weightViewT);
-            _transposedWeights[key] = result;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weight2D = _constructionWeight = convWeight.View(outDim, patchStride);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weightViewT = _constructionWeight = weight2D.Transpose();
+            var result = ModelDisposalOwnership.NewConstructionContiguous(weightViewT,
+                ref _constructionWeight, _displacedWeights);
+            weightViewT.Dispose();
+            weight2D.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, key,
+                ref _constructionWeight, _displacedWeights);
             return result;
         }
 
@@ -1039,9 +1045,13 @@ namespace TensorSharp.Models
             if (_transposedWeights.TryGetValue(weightName, out var transposed))
                 return transposed;
 
-            using var weightViewT = _weights[weightName].Transpose();
-            transposed = Ops.NewContiguous(weightViewT);
-            _transposedWeights[weightName] = transposed;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weightViewT = _constructionWeight = _weights[weightName].Transpose();
+            transposed = ModelDisposalOwnership.NewConstructionContiguous(weightViewT,
+                ref _constructionWeight, _displacedWeights);
+            weightViewT.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, weightName,
+                ref _constructionWeight, _displacedWeights);
             return transposed;
         }
 

@@ -523,9 +523,11 @@ namespace TensorSharp.Models
                 Array.Copy(a, (long)o * patchStride, rows, (long)o * 2 * patchStride, patchStride);
                 Array.Copy(b, (long)o * patchStride, rows, (long)o * 2 * patchStride + patchStride, patchStride);
             }
-            var temporal = new Tensor(_allocator, DType.Float32, outDim, 2 * patchStride);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var temporal = _constructionWeight = new Tensor(_allocator, DType.Float32, outDim, 2 * patchStride);
             temporal.SetElementsAsFloat(rows);
-            _weights[key] = temporal;
+            ModelDisposalOwnership.PublishConstructionWeight(_weights, key,
+                ref _constructionWeight, _displacedWeights);
             return temporal;
         }
 
@@ -538,7 +540,8 @@ namespace TensorSharp.Models
             int outDim = (int)convWeight.Sizes[0];
             // Reshape the 4D conv weight [outDim, C, P, P] into a 2D matrix [outDim, patchStride]
             // through a contiguous copy. This is a one-time allocation.
-            Tensor flat = new Tensor(_allocator, DType.Float32, outDim, patchStride);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            Tensor flat = _constructionWeight = new Tensor(_allocator, DType.Float32, outDim, patchStride);
             unsafe
             {
                 float* src = GetFloatPtr(convWeight);
@@ -547,7 +550,8 @@ namespace TensorSharp.Models
                 Buffer.MemoryCopy(src, dst, bytes, bytes);
             }
 
-            _transposedWeights[key] = flat;
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, key,
+                ref _constructionWeight, _displacedWeights);
             return flat;
         }
 
@@ -564,11 +568,15 @@ namespace TensorSharp.Models
             }
             else
             {
-                using var t = weight2D.Transpose();
-                result = Ops.NewContiguous(t);
+                ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+                var t = _constructionWeight = weight2D.Transpose();
+                result = ModelDisposalOwnership.NewConstructionContiguous(t,
+                    ref _constructionWeight, _displacedWeights);
+                t.Dispose();
             }
 
-            _transposedWeights[key] = result;
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, key,
+                ref _constructionWeight, _displacedWeights);
             return result;
         }
 
@@ -900,12 +908,15 @@ namespace TensorSharp.Models
             long key = ((long)numPatches << 32) | (uint)halfDim;
             if (!_ropeDeviceCache.TryGetValue(key, out var tables))
             {
-                var cos = new Tensor(_allocator, DType.Float32, numPatches, halfDim);
-                var sin = new Tensor(_allocator, DType.Float32, numPatches, halfDim);
+                ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+                var cos = _constructionWeight = new Tensor(_allocator, DType.Float32, numPatches, halfDim);
+                ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+                var sin = _constructionWeight = new Tensor(_allocator, DType.Float32, numPatches, halfDim);
                 cos.SetElementsAsFloat(cosTable);
                 sin.SetElementsAsFloat(sinTable);
                 tables = (cos, sin);
-                _ropeDeviceCache[key] = tables;
+                ModelDisposalOwnership.PublishConstructionWeights(_ropeDeviceCache, key, cos,
+                    ref _constructionWeight, _displacedWeights);
             }
 
             return tables;
@@ -1192,7 +1203,8 @@ namespace TensorSharp.Models
             int rows = (int)weight.Sizes[0];
             int cols = (int)weight.Sizes[1];
             float[] src = weight.GetElementsAsFloat(rows * cols);
-            var transposed = new Tensor(_allocator, DType.Float32, cols, rows);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var transposed = _constructionWeight = new Tensor(_allocator, DType.Float32, cols, rows);
             using (var staging = new HostStaging(transposed, true))
             {
                 float* dst = staging.Ptr;
@@ -1222,7 +1234,8 @@ namespace TensorSharp.Models
             if (_cudaDirect && weight.DimensionCount == 2)
             {
                 transposed = HostTranspose2D(weight);
-                _transposedWeights[weightName] = transposed;
+                ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, weightName,
+                    ref _constructionWeight, _displacedWeights);
                 // Release the untransposed original: nothing on this path reads it
                 // again (LinearForwardWithBias takes its output dim from the
                 // transpose, and the GGML fused block paths are gated off). The
@@ -1235,9 +1248,13 @@ namespace TensorSharp.Models
                 return transposed;
             }
 
-            using var weightViewT = weight.Transpose();
-            transposed = Ops.NewContiguous(weightViewT);
-            _transposedWeights[weightName] = transposed;
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            var weightViewT = _constructionWeight = weight.Transpose();
+            transposed = ModelDisposalOwnership.NewConstructionContiguous(weightViewT,
+                ref _constructionWeight, _displacedWeights);
+            weightViewT.Dispose();
+            ModelDisposalOwnership.PublishConstructionWeight(_transposedWeights, weightName,
+                ref _constructionWeight, _displacedWeights);
             return transposed;
         }
 
@@ -1248,87 +1265,90 @@ namespace TensorSharp.Models
                 return cached;
 
             int numPatches = gridH * gridW;
-            cached = new Tensor(_allocator, DType.Float32, numPatches, _hiddenSize);
+            ModelDisposalOwnership.RetainPendingWeight(ref _constructionWeight, _displacedWeights);
+            cached = _constructionWeight = new Tensor(_allocator, DType.Float32, numPatches, _hiddenSize);
             float* posPtr = GetFloatPtr(_weights["v.position_embd.weight"]);
-            using var staging = new HostStaging(cached, _cudaDirect);
-            float* dstPtr = staging.Ptr;
-
-            float stepH = gridH > 1 ? (float)(_gridPerSide - 1) / (gridH - 1) : 0f;
-            float stepW = gridW > 1 ? (float)(_gridPerSide - 1) / (gridW - 1) : 0f;
-            int hiddenSize = _hiddenSize;
-            int gridPerSide = _gridPerSide;
-            int vLen = Vector<float>.Count;
-
-            // Written in block order so the table lines up with the block-ordered
-            // patch-embed rows (see GetOrCreateBlockOrder / PatchEmbed).
-            int[] blockOrder = GetOrCreateBlockOrder(gridH, gridW);
-
-            long posPtrL = (long)posPtr;
-            long dstPtrL = (long)dstPtr;
-
-            fixed (int* orderPtr = blockOrder)
+            using (var staging = new HostStaging(cached, _cudaDirect))
             {
-                long orderPtrL = (long)orderPtr;
-                Parallel.For(0, gridH, brow =>
+                float* dstPtr = staging.Ptr;
+
+                float stepH = gridH > 1 ? (float)(_gridPerSide - 1) / (gridH - 1) : 0f;
+                float stepW = gridW > 1 ? (float)(_gridPerSide - 1) / (gridW - 1) : 0f;
+                int hiddenSize = _hiddenSize;
+                int gridPerSide = _gridPerSide;
+                int vLen = Vector<float>.Count;
+
+                // Written in block order so the table lines up with the block-ordered
+                // patch-embed rows (see GetOrCreateBlockOrder / PatchEmbed).
+                int[] blockOrder = GetOrCreateBlockOrder(gridH, gridW);
+
+                long posPtrL = (long)posPtr;
+                long dstPtrL = (long)dstPtr;
+
+                fixed (int* orderPtr = blockOrder)
                 {
-                    float* pos = (float*)posPtrL;
-                    float* dst = (float*)dstPtrL;
-                    int* order = (int*)orderPtrL;
-
-                    for (int bcol = 0; bcol < gridW; bcol++)
+                    long orderPtrL = (long)orderPtr;
+                    Parallel.For(0, gridH, brow =>
                     {
-                        int destIdx = brow * gridW + bcol;
-                        int rasterIdx = order[destIdx];
-                        int h = rasterIdx / gridW;
-                        int w = rasterIdx - h * gridW;
-                        float y = h * stepH;
-                        float x = w * stepW;
+                        float* pos = (float*)posPtrL;
+                        float* dst = (float*)dstPtrL;
+                        int* order = (int*)orderPtrL;
 
-                        int fy = (int)y;
-                        int fx = (int)x;
-                        int cy = Math.Min(fy + 1, gridPerSide - 1);
-                        int cx = Math.Min(fx + 1, gridPerSide - 1);
-                        float dy = y - fy;
-                        float dx = x - fx;
-
-                        float wt00 = (1 - dy) * (1 - dx);
-                        float wt01 = (1 - dy) * dx;
-                        float wt10 = dy * (1 - dx);
-                        float wt11 = dy * dx;
-
-                        int idx00 = fy * gridPerSide + fx;
-                        int idx01 = fy * gridPerSide + cx;
-                        int idx10 = cy * gridPerSide + fx;
-                        int idx11 = cy * gridPerSide + cx;
-
-                        float* dstRow = dst + (long)destIdx * hiddenSize;
-                        float* p00 = pos + (long)idx00 * hiddenSize;
-                        float* p01 = pos + (long)idx01 * hiddenSize;
-                        float* p10 = pos + (long)idx10 * hiddenSize;
-                        float* p11 = pos + (long)idx11 * hiddenSize;
-
-                        var v00 = new Vector<float>(wt00);
-                        var v01 = new Vector<float>(wt01);
-                        var v10 = new Vector<float>(wt10);
-                        var v11 = new Vector<float>(wt11);
-
-                        int d = 0;
-                        for (; d <= hiddenSize - vLen; d += vLen)
+                        for (int bcol = 0; bcol < gridW; bcol++)
                         {
-                            var a = TensorComputePrimitives.LoadVector(p00 + d);
-                            var b = TensorComputePrimitives.LoadVector(p01 + d);
-                            var c = TensorComputePrimitives.LoadVector(p10 + d);
-                            var e = TensorComputePrimitives.LoadVector(p11 + d);
-                            var r = a * v00 + b * v01 + c * v10 + e * v11;
-                            TensorComputePrimitives.StoreVector(dstRow + d, r);
-                        }
-                        for (; d < hiddenSize; d++)
-                            dstRow[d] = wt00 * p00[d] + wt01 * p01[d] + wt10 * p10[d] + wt11 * p11[d];
-                    }
-                });
-            }
+                            int destIdx = brow * gridW + bcol;
+                            int rasterIdx = order[destIdx];
+                            int h = rasterIdx / gridW;
+                            int w = rasterIdx - h * gridW;
+                            float y = h * stepH;
+                            float x = w * stepW;
 
-            _positionEmbeddingCache[key] = cached;
+                            int fy = (int)y;
+                            int fx = (int)x;
+                            int cy = Math.Min(fy + 1, gridPerSide - 1);
+                            int cx = Math.Min(fx + 1, gridPerSide - 1);
+                            float dy = y - fy;
+                            float dx = x - fx;
+
+                            float wt00 = (1 - dy) * (1 - dx);
+                            float wt01 = (1 - dy) * dx;
+                            float wt10 = dy * (1 - dx);
+                            float wt11 = dy * dx;
+
+                            int idx00 = fy * gridPerSide + fx;
+                            int idx01 = fy * gridPerSide + cx;
+                            int idx10 = cy * gridPerSide + fx;
+                            int idx11 = cy * gridPerSide + cx;
+
+                            float* dstRow = dst + (long)destIdx * hiddenSize;
+                            float* p00 = pos + (long)idx00 * hiddenSize;
+                            float* p01 = pos + (long)idx01 * hiddenSize;
+                            float* p10 = pos + (long)idx10 * hiddenSize;
+                            float* p11 = pos + (long)idx11 * hiddenSize;
+
+                            var v00 = new Vector<float>(wt00);
+                            var v01 = new Vector<float>(wt01);
+                            var v10 = new Vector<float>(wt10);
+                            var v11 = new Vector<float>(wt11);
+
+                            int d = 0;
+                            for (; d <= hiddenSize - vLen; d += vLen)
+                            {
+                                var a = TensorComputePrimitives.LoadVector(p00 + d);
+                                var b = TensorComputePrimitives.LoadVector(p01 + d);
+                                var c = TensorComputePrimitives.LoadVector(p10 + d);
+                                var e = TensorComputePrimitives.LoadVector(p11 + d);
+                                var r = a * v00 + b * v01 + c * v10 + e * v11;
+                                TensorComputePrimitives.StoreVector(dstRow + d, r);
+                            }
+                            for (; d < hiddenSize; d++)
+                                dstRow[d] = wt00 * p00[d] + wt01 * p01[d] + wt10 * p10[d] + wt11 * p11[d];
+                        }
+                    });
+                }
+            }
+            ModelDisposalOwnership.PublishConstructionWeight(_positionEmbeddingCache, key,
+                ref _constructionWeight, _displacedWeights);
             return cached;
         }
 
