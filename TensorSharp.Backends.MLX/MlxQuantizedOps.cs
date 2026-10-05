@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Runtime.ExceptionServices;
 using TensorSharp.Runtime;
 
 namespace TensorSharp.MLX
@@ -45,12 +46,10 @@ namespace TensorSharp.MLX
         private const string MlxMxfp4Mode = "mxfp4";
 
         private static readonly object Sync = new();
-        private static readonly Dictionary<CacheKey, LinkedListNode<DeviceWeight>> Cache = new();
-        // LRU ordering for offloadable (MoE expert) entries only. Pinned entries
-        // sit in `Cache` but never participate in eviction and are never linked
-        // into this list. Front of list = most recently used.
-        private static readonly LinkedList<DeviceWeight> OffloadLru = new();
-        private static long _offloadResidentBytes;
+        private static readonly Lazy<WeightCacheRuntime> WeightCache = new(() => new WeightCacheRuntime());
+        private static WeightCacheRuntime weightCache => WeightCache.Value;
+        // Only offloadable entries join the cache owner's LRU, with the most
+        // recently used entry at the front.
 
         private sealed class DeviceWeight : IDisposable
         {
@@ -75,12 +74,75 @@ namespace TensorSharp.MLX
 
             public void Dispose()
             {
-                MlxNative.FreeArray(Weight);
-                MlxNative.FreeArray(Scales);
-                MlxNative.FreeArray(Biases);
-                Weight = default;
-                Scales = default;
-                Biases = default;
+                MlxNative.FreeArrayReference(ref Weight);
+                MlxNative.FreeArrayReference(ref Scales);
+                MlxNative.FreeArrayReference(ref Biases);
+            }
+        }
+
+        private sealed class WeightCacheRuntime
+        {
+            internal readonly Dictionary<CacheKey, LinkedListNode<DeviceWeight>> Cache = new();
+            internal readonly LinkedList<DeviceWeight> OffloadLru = new();
+            internal long ResidentBytes;
+            internal readonly NativeOwnerRegistration NativeOwner;
+
+            internal WeightCacheRuntime()
+            {
+                NativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Graph);
+                NativeOwner.AttachMlxSharedRuntime();
+            }
+
+            internal bool HasDevice(int deviceId)
+            {
+                foreach (CacheKey key in Cache.Keys)
+                    if (key.DeviceId == deviceId) return true;
+                return false;
+            }
+
+            internal void Release(Func<bool> hasEntries, Action release)
+            {
+                using NativeMlxReleaseReservation reservation = NativeOwner.ReserveMlxRelease(this);
+                MlxWorker.Shared.Invoke(() =>
+                {
+                    using NativeEffectLease effect = reservation.EnterEffect();
+                    effect.ValidateMlxRelease(this, reservation);
+                    lock (Sync)
+                    {
+                        if (!hasEntries()) return;
+                        MlxNative.InstallCurrentErrorHandler();
+                        NativeRuntimeFailureStage stage = NativeRuntimeFailureStage.Synchronization;
+                        try
+                        {
+                            MlxNative.SynchronizeAllUsedStreams();
+                            stage = NativeRuntimeFailureStage.CacheRelease;
+                            release();
+                        }
+                        catch (Exception original)
+                        {
+                            Exception error = original;
+                            try { effect.PublishFailure(this, original, stage); }
+                            catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                            ExceptionDispatchInfo.Capture(error).Throw();
+                        }
+                    }
+                });
+            }
+        }
+
+        private sealed class WeightPublicationResources(WeightCacheRuntime owner) : MlxNativeResources
+        {
+            internal DeviceWeight Entry;
+            internal LinkedListNode<DeviceWeight> Node;
+            internal bool Published;
+            internal override bool HasNativeResources => !Published && Entry != null
+                && (Entry.Weight.IsValid || Entry.Scales.IsValid || Entry.Biases.IsValid);
+
+            internal void Release()
+            {
+                if (!Published && Entry != null)
+                    Entry.Dispose();
+                GC.KeepAlive(owner);
             }
         }
 
@@ -167,6 +229,7 @@ namespace TensorSharp.MLX
                 return MlxWorker.Shared.InvokeWithResources(resources, operation, resources.Release);
             }
             catch (Exception error) when (resources.SafelyReleased && !resources.HasStoredResult
+                && error is not NativeMlxCallbackBusyException
                 && !NativeQuarantineAuthority.TryGetFailure(error, out _))
             {
                 return false;
@@ -525,54 +588,50 @@ namespace TensorSharp.MLX
                 return;
 
             var key = new CacheKey(deviceId, cacheKey);
-            lock (Sync)
+            weightCache.Release(() => weightCache.Cache.ContainsKey(key), () =>
             {
-                if (!Cache.TryGetValue(key, out LinkedListNode<DeviceWeight> node))
-                    return;
-
+                LinkedListNode<DeviceWeight> node = weightCache.Cache[key];
                 EvictNodeLocked(node);
-                Cache.Remove(key);
-            }
+                weightCache.Cache.Remove(key);
+            });
         }
 
         internal static void ClearDeviceCache(int deviceId)
         {
-            lock (Sync)
+            weightCache.Release(() => weightCache.HasDevice(deviceId), () =>
             {
                 List<CacheKey> remove = new();
-                foreach (var kv in Cache)
-                {
-                    if (kv.Key.DeviceId == deviceId)
-                    {
-                        EvictNodeLocked(kv.Value);
-                        remove.Add(kv.Key);
-                    }
-                }
+                foreach (CacheKey key in weightCache.Cache.Keys)
+                    if (key.DeviceId == deviceId) remove.Add(key);
 
                 foreach (CacheKey key in remove)
-                    Cache.Remove(key);
-            }
+                {
+                    EvictNodeLocked(weightCache.Cache[key]);
+                    weightCache.Cache.Remove(key);
+                }
+            });
         }
 
-        /// <summary>
-        /// Frees the MLX arrays for the entry and unlinks it from the LRU list.
-        /// For offloadable entries, also advises the OS that the underlying
-        /// host-backed mmap pages can be reclaimed (matching the
-        /// madvise(MADV_DONTNEED) that the baseline preload path applies via
-        /// QuantizedWeight.ReleaseHostData → AdviseExternalViewCanBePagedOut).
-        /// Caller is responsible for removing the cache dictionary entry.
-        /// Must be called under <see cref="Sync"/>.
-        /// </summary>
         private static void EvictNodeLocked(LinkedListNode<DeviceWeight> node)
         {
             DeviceWeight entry = node.Value;
             bool wasOffloadable = entry.Offloadable && node.List != null;
+            long residentBytes = weightCache.ResidentBytes;
             if (wasOffloadable)
             {
-                _offloadResidentBytes -= entry.RawBytes;
-                OffloadLru.Remove(node);
+                if (!ReferenceEquals(node.List, weightCache.OffloadLru))
+                    throw new InvalidOperationException("MLX weight eviction requires its actual cache-owned LRU node.");
+                residentBytes = checked(residentBytes - entry.RawBytes);
+                if (residentBytes < 0)
+                    throw new InvalidOperationException("MLX weight-cache resident bytes cannot become negative.");
             }
+
             entry.Dispose();
+            if (wasOffloadable)
+            {
+                weightCache.OffloadLru.Remove(node);
+                weightCache.ResidentBytes = residentBytes;
+            }
             if (wasOffloadable && entry.HostData != IntPtr.Zero)
                 MoeExpertOffload.AdvisePagesNotNeeded(entry.HostData, entry.RawBytes);
         }
@@ -1363,80 +1422,101 @@ namespace TensorSharp.MLX
                 throw new ArgumentException("MLX quantized weight cache key cannot be zero.", nameof(cacheKey));
 
             var key = new CacheKey(deviceId, cacheKey);
-            lock (Sync)
+            var resources = new WeightPublicationResources(weightCache);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                if (Cache.TryGetValue(key, out LinkedListNode<DeviceWeight> existing))
+                weightCache.NativeOwner.ThrowIfQuarantined();
+                lock (Sync)
                 {
-                    if (existing.Value.Offloadable && existing.List != null)
+                    if (weightCache.Cache.TryGetValue(key, out LinkedListNode<DeviceWeight> existing))
                     {
-                        // Touch LRU — move to front so this entry isn't the next
-                        // eviction candidate.
-                        OffloadLru.Remove(existing);
-                        OffloadLru.AddFirst(existing);
+                        if (existing.Value.Offloadable && existing.List != null)
+                        {
+                            // Touch LRU — move to front so this entry isn't the next
+                            // eviction candidate.
+                            weightCache.OffloadLru.Remove(existing);
+                            weightCache.OffloadLru.AddFirst(existing);
+                        }
+                        return existing.Value;
                     }
-                    return existing.Value;
-                }
 
-                if (hostData == IntPtr.Zero)
-                    throw new InvalidOperationException("Quantized weight is not preloaded on this MLX device and no host data was provided.");
+                    if (hostData == IntPtr.Zero)
+                        throw new InvalidOperationException("Quantized weight is not preloaded on this MLX device and no host data was provided.");
 
-                bool offloadable = MoeExpertOffload.IsEnabled && MoeExpertOffload.IsOffloadable(cacheKey);
+                    bool offloadable = MoeExpertOffload.IsEnabled && MoeExpertOffload.IsOffloadable(cacheKey);
 
-                // Make room before uploading if this is an offloadable entry
-                // and the LRU is already over budget. Eviction frees the old
-                // MLX arrays via the FIFO-ordered worker, so any kernel still
-                // using them completes before the free executes.
-                if (offloadable && MoeExpertOffload.MaxCacheBytes > 0)
-                {
-                    long limit = MoeExpertOffload.MaxCacheBytes;
-                    while (_offloadResidentBytes + rawBytes > limit && OffloadLru.Last != null)
+                    // Eviction waits for actual streams before releasing cached references.
+                    if (offloadable && MoeExpertOffload.MaxCacheBytes > 0)
                     {
-                        LinkedListNode<DeviceWeight> victim = OffloadLru.Last;
-                        Cache.Remove(victim.Value.Key);
-                        EvictNodeLocked(victim);
+                        long limit = MoeExpertOffload.MaxCacheBytes;
+                        while (checked(weightCache.ResidentBytes + rawBytes) > limit && weightCache.OffloadLru.Last != null)
+                        {
+                            LinkedListNode<DeviceWeight> victim = weightCache.OffloadLru.Last;
+                            weightCache.Release(() => weightCache.Cache.ContainsKey(victim.Value.Key), () =>
+                            {
+                                EvictNodeLocked(victim);
+                                weightCache.Cache.Remove(victim.Value.Key);
+                            });
+                        }
                     }
-                }
 
-                DeviceWeight entry = ggmlType switch
-                {
-                    (int)GgmlTensorType.Q4_0 => CreateQ4Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: false),
-                    (int)GgmlTensorType.Q4_1 => CreateQ4Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: true),
-                    (int)GgmlTensorType.Q4_K => PreferAffineKQuant
-                        ? CreateQ4KWeight(deviceId, hostData, ne0, ne1, rawBytes)
-                        : CreateQ4KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.Q5_0 => CreateQ5Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: false),
-                    (int)GgmlTensorType.Q5_1 => CreateQ5Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: true),
-                    (int)GgmlTensorType.Q5_K => (PreferAffineKQuant || !UseRawQ5KKernel())
-                        ? CreateQ5KWeight(deviceId, hostData, ne0, ne1, rawBytes)
-                        : CreateQ5KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    // Q6_K stays on the raw custom kernel: its natural affine group size is 16, which MLX's
-                    // built-in quantized kernels don't support (only group ∈ {32,64,128}); the affine repack
-                    // would need a lossy regroup. Q6_K is a minority here (token_embd/lm_head, some attn_v)
-                    // and not the per-layer bottleneck, so keeping it raw is both lossless and sufficient.
-                    (int)GgmlTensorType.Q6_K => CreateQ6KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.Q8_0 => CreateQ8Weight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.IQ2_XXS => CreateIq2XxsRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.IQ2_S => CreateIq2SRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.IQ3_S => CreateIq3SRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.IQ3_XXS => CreateIq3XxsRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.IQ4_XS => CreateIq4XsRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.IQ4_NL => CreateIq4NlRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
-                    (int)GgmlTensorType.MXFP4 => CreateMxfp4Weight(deviceId, hostData, ne0, ne1, rawBytes),
-                    _ => throw new NotSupportedException($"MLX quantized preload does not support GGML tensor type {(GgmlTensorType)ggmlType}."),
-                };
-                entry.Key = key;
-                entry.HostData = hostData;
-                entry.Offloadable = offloadable;
+                    resources.Node = new LinkedListNode<DeviceWeight>(null);
+                    weightCache.Cache.EnsureCapacity(checked(weightCache.Cache.Count + 1));
+                    long residentBytes = offloadable ? checked(weightCache.ResidentBytes + rawBytes) : weightCache.ResidentBytes;
+                    resources.Entry = ggmlType switch
+                    {
+                        (int)GgmlTensorType.Q4_0 => CreateQ4Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: false),
+                        (int)GgmlTensorType.Q4_1 => CreateQ4Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: true),
+                        (int)GgmlTensorType.Q4_K => PreferAffineKQuant
+                            ? CreateQ4KWeight(deviceId, hostData, ne0, ne1, rawBytes)
+                            : CreateQ4KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.Q5_0 => CreateQ5Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: false),
+                        (int)GgmlTensorType.Q5_1 => CreateQ5Weight(deviceId, hostData, ne0, ne1, rawBytes, hasExplicitBias: true),
+                        (int)GgmlTensorType.Q5_K => (PreferAffineKQuant || !UseRawQ5KKernel())
+                            ? CreateQ5KWeight(deviceId, hostData, ne0, ne1, rawBytes)
+                            : CreateQ5KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        // Q6_K stays on the raw custom kernel: its natural affine group size is 16, which MLX's
+                        // built-in quantized kernels don't support (only group ∈ {32,64,128}); the affine repack
+                        // would need a lossy regroup. Q6_K is a minority here (token_embd/lm_head, some attn_v)
+                        // and not the per-layer bottleneck, so keeping it raw is both lossless and sufficient.
+                        (int)GgmlTensorType.Q6_K => CreateQ6KRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.Q8_0 => CreateQ8Weight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.IQ2_XXS => CreateIq2XxsRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.IQ2_S => CreateIq2SRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.IQ3_S => CreateIq3SRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.IQ3_XXS => CreateIq3XxsRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.IQ4_XS => CreateIq4XsRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.IQ4_NL => CreateIq4NlRawWeight(deviceId, hostData, ne0, ne1, rawBytes),
+                        (int)GgmlTensorType.MXFP4 => CreateMxfp4Weight(deviceId, hostData, ne0, ne1, rawBytes),
+                        _ => throw new NotSupportedException($"MLX quantized preload does not support GGML tensor type {(GgmlTensorType)ggmlType}."),
+                    };
+                    DeviceWeight entry = resources.Entry;
+                    entry.Key = key;
+                    entry.HostData = hostData;
+                    entry.Offloadable = offloadable;
 
-                LinkedListNode<DeviceWeight> node = new LinkedListNode<DeviceWeight>(entry);
-                if (offloadable)
-                {
-                    OffloadLru.AddFirst(node);
-                    _offloadResidentBytes += rawBytes;
+                    resources.Node.Value = entry;
+                    using NativeEffectLease effect = weightCache.NativeOwner.EnterEffect();
+                    try
+                    {
+                        weightCache.Cache.Add(key, resources.Node);
+                        resources.Published = true;
+                        if (offloadable)
+                        {
+                            weightCache.OffloadLru.AddFirst(resources.Node);
+                            weightCache.ResidentBytes = residentBytes;
+                        }
+                    }
+                    catch (Exception original)
+                    {
+                        Exception error = original;
+                        try { effect.PublishFailure(weightCache, original, NativeRuntimeFailureStage.CacheRelease); }
+                        catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                        ExceptionDispatchInfo.Capture(error).Throw();
+                    }
+                    return entry;
                 }
-                Cache.Add(key, node);
-                return entry;
-            }
+            }, resources.Release);
         }
 
         private static unsafe DeviceWeight CreateQ4Weight(int deviceId, IntPtr hostData, long ne0, long ne1, long rawBytes, bool hasExplicitBias)
@@ -2438,17 +2518,34 @@ namespace TensorSharp.MLX
                 return resources.Result;
             }, resources.Release);
 
-            lock (Sync)
+            var publication = new WeightAcquisitionResources<StackedAffineWeight>
             {
-                if (StackedCache.TryGetValue(key, out var raced))
+                Weight = result.Weight,
+                Scales = result.Scales,
+                Biases = result.Biases,
+                Result = result,
+            };
+            return MlxWorker.Shared.InvokeNative(publication, effect =>
+            {
+                lock (Sync)
                 {
-                    // Lost the race; free ours and return the cached one.
-                    MlxNative.FreeArray(result.Weight); MlxNative.FreeArray(result.Scales); MlxNative.FreeArray(result.Biases);
-                    return raced;
+                    if (StackedCache.TryGetValue(key, out var raced))
+                        return raced;
+                    try
+                    {
+                        StackedCache[key] = result;
+                        publication.Prepared = true;
+                    }
+                    catch (Exception original)
+                    {
+                        Exception error = original;
+                        try { effect.PublishFailure(MlxWorker.Shared, original, NativeRuntimeFailureStage.CacheRelease); }
+                        catch (Exception failure) { error = MlxNative.JoinNativeErrors(error, failure); }
+                        ExceptionDispatchInfo.Capture(error).Throw();
+                    }
+                    return result;
                 }
-                StackedCache[key] = result;
-                return result;
-            }
+            }, publication.Release);
         }
 
         // ============================================================================

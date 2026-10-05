@@ -152,7 +152,7 @@ fast-path attempts receive isolated checked cleanup before another kernel runs; 
 unsafe errors and completed target transfers prohibit fallback. The dense-FFN trace retains
 its intermediates and unreturned result, allocates its output collection before transfer
 readiness and returns only after checked cleanup. These carriers do not own cached weights,
-compiled closures or external host buffers; cache publication and eviction remain unfinished.
+compiled closures or external host buffers.
 Five quantized-weight array factories install actual reference carriers before acquisition.
 They retain partial arrays through evaluation and result construction, free only successful
 references on failure and publish results after checked cleanup. Three staging paths retain
@@ -160,7 +160,23 @@ eight aligned-buffer slots and any unreturned weight in the worker's actual owne
 Aligned frees clear only buffers whose release returns successfully. A recorded unsafe
 failure prevents cleanup replay and preserves the actual remaining arrays, buffers and result.
 Packing recipes and caller-owned no-copy backing remain unchanged. Construction recovery
-does not establish cache registration, eviction, external-backing lifetime or GPU completion.
+does not establish external-backing lifetime or GPU completion.
+One registered parent owns the ordinary weight dictionary, offload LRU and existing byte
+accounting. Lookup and mutation run on the worker before taking the existing cache lock.
+Cold publication reserves the node and dictionary capacity before acquiring a weight.
+The worker carrier retains the unreturned entry. A native ownership effect covers actual
+dictionary/LRU publication; failed publication records CacheRelease and retains the graph.
+The dictionary owns an entry as soon as insertion returns; later failure cannot free it
+as an unpublished weight. Busy cleanup does not trigger quantized fallback.
+Key release, device clearing and LRU eviction reserve the actual cache parent before
+dispatch. Nonempty release waits for the real all-stream snapshot before freeing arrays.
+Each successful free clears its field; dictionary/LRU/accounting changes follow checked
+release. Partial failure retains the remaining entry and records its actual stage.
+Stacked publication runs on the worker before the cache lock. Its real result carrier
+owns a lost-race entry through checked cleanup and retains it on failure.
+Allocator disposal sets its disposed flag only after device and backend cache cleanup
+succeed. These operations do not establish final cache/closure/model/worker retirement,
+queued-reader lifetime, external host-backing lifetime or native runtime qualification.
 The attention KV cache registers its actual owner in the shared runtime scope. Append,
 materialization, reset and disposal run on the worker. Cache replacement and release use
 the owner's exact destructive reservation before freeing references; Busy preserves the

@@ -45,9 +45,9 @@ namespace TensorSharp.MLX
             if (disposed)
                 return;
 
-            disposed = true;
             MlxQuantizedOps.ClearDeviceCache(DeviceId);
             MlxBackend.ClearCache();
+            disposed = true;
         }
     }
 }
