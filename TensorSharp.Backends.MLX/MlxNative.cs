@@ -4427,6 +4427,57 @@ if (kind == 0) {
             });
         }
 
+        private sealed class KernelApplicationResources(int resultCount, int scalarCount, params MlxArray[] borrowedInputs)
+            : MlxNativeResources
+        {
+            internal readonly MlxArray[] Results = new MlxArray[resultCount];
+            internal readonly MlxArray[] Scalars = new MlxArray[scalarCount];
+            internal MlxFastMetalKernel Kernel;
+            internal MlxFastMetalKernelConfig Config;
+            internal MlxVectorArray Inputs;
+            internal MlxVectorArray Outputs;
+            private bool prepared;
+
+            internal void PrepareResults()
+            {
+                foreach (MlxArray result in Results)
+                    if (!result.IsValid)
+                        throw new InvalidOperationException("MLX kernel returned an empty output reference.");
+                prepared = true;
+            }
+
+            internal void Release()
+            {
+                for (int i = 0; i < Scalars.Length; i++)
+                    FreeArrayReference(ref Scalars[i]);
+                FreeArrayVector(ref Inputs);
+                FreeArrayVector(ref Outputs);
+                if (Config.IsValid)
+                {
+                    Check(mlx_fast_metal_kernel_config_free(Config), "freeing MLX kernel config");
+                    Config = default;
+                }
+                if (!prepared)
+                    for (int i = 0; i < Results.Length; i++)
+                        FreeArrayReference(ref Results[i]);
+                GC.KeepAlive(borrowedInputs);
+            }
+        }
+
+        private static void NewKernelConfig(ref MlxFastMetalKernelConfig config)
+        {
+            ClearCapturedError();
+            config = mlx_fast_metal_kernel_config_new();
+            CheckNativeValue(!config.IsValid, "creating MLX kernel config");
+        }
+
+        private static void NewKernelScalar(ref MlxArray scalar, float value)
+        {
+            ClearCapturedError();
+            scalar = mlx_array_new_float32(value);
+            CheckNativeValue(!scalar.IsValid, "creating MLX kernel scalar");
+        }
+
         internal static MlxArray HeadDim256Attention(
             MlxArray qHeads,
             MlxArray kHeads,
@@ -4444,48 +4495,39 @@ if (kind == 0) {
             if (numHeads <= 0 || numKVHeads <= 0 || numHeads % numKVHeads != 0 || qLen <= 0 || kvLen <= 0)
                 throw new ArgumentOutOfRangeException(nameof(qLen), "Invalid MLX attention dimensions.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 1, qHeads, kHeads, vHeads);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureHeadDim256AttentionKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray scaleArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "QLen", qLen);
-                    AddTemplateInt(config, "KvLen", kvLen);
-                    AddTemplateInt(config, "MaskStart", maskStart);
-                    AddTemplateInt(config, "Causal", causal ? 1 : 0);
-                    int[] shape = { qLen, numHeads * 256 };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring MLX headDim256 attention output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, qLen), "configuring MLX headDim256 attention grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring MLX headDim256 attention threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray scaleArray = ref resources.Scalars[0];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureHeadDim256AttentionKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "NumKVHeads", numKVHeads);
+                AddTemplateInt(config, "QLen", qLen);
+                AddTemplateInt(config, "KvLen", kvLen);
+                AddTemplateInt(config, "MaskStart", maskStart);
+                AddTemplateInt(config, "Causal", causal ? 1 : 0);
+                int[] shape = { qLen, numHeads * 256 };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring MLX headDim256 attention output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, qLen), "configuring MLX headDim256 attention grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring MLX headDim256 attention threadgroup");
 
-                    scaleArray = mlx_array_new_float32(scale);
-                    inputs = CreateVectorArray(qHeads, kHeads, vHeads, scaleArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running MLX headDim256 attention");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("MLX headDim256 attention produced no output.");
+                NewKernelScalar(ref scaleArray, scale);
+                NewArrayVector(ref inputs, qHeads, kHeads, vHeads, scaleArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running MLX headDim256 attention");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("MLX headDim256 attention produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading MLX headDim256 attention output");
-                    return result;
-                }
-                finally
-                {
-                    if (scaleArray.IsValid)
-                        _ = mlx_array_free(scaleArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading MLX headDim256 attention output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Decode attention with per-head attention sinks (and optional
@@ -4517,49 +4559,40 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(headDim), "Invalid MLX decode attention with sinks dimensions.");
             }
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 1, qFlat, kCache, vCache, sinks);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureDecodeAttentionWithSinksKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray scaleArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "CacheLen", cacheLen);
-                    AddTemplateInt(config, "MaskStart", attendStart);
-                    AddTemplateInt(config, "AttendLen", attendEnd);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray scaleArray = ref resources.Scalars[0];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureDecodeAttentionWithSinksKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "NumKVHeads", numKVHeads);
+                AddTemplateInt(config, "HeadDim", headDim);
+                AddTemplateInt(config, "CacheLen", cacheLen);
+                AddTemplateInt(config, "MaskStart", attendStart);
+                AddTemplateInt(config, "AttendLen", attendEnd);
 
-                    int[] shape = { 1, numHeads * headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring decode attention with sinks output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, 1), "configuring decode attention with sinks grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring decode attention with sinks threadgroup");
+                int[] shape = { 1, numHeads * headDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring decode attention with sinks output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, 1), "configuring decode attention with sinks grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring decode attention with sinks threadgroup");
 
-                    scaleArray = mlx_array_new_float32(scale);
-                    inputs = CreateVectorArray(qFlat, kCache, vCache, sinks, scaleArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running decode attention with sinks");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("decode attention with sinks kernel produced no output.");
+                NewKernelScalar(ref scaleArray, scale);
+                NewArrayVector(ref inputs, qFlat, kCache, vCache, sinks, scaleArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running decode attention with sinks");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("decode attention with sinks kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading decode attention with sinks output");
-                    return result;
-                }
-                finally
-                {
-                    if (scaleArray.IsValid)
-                        _ = mlx_array_free(scaleArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading decode attention with sinks output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         /// <summary>
@@ -4598,61 +4631,52 @@ if (kind == 0) {
                     "Gemma4 QKV preprocess decode requires HeadDim ≤ 512 power-of-two and RotHalf*2 ≤ HeadDim.");
             }
 
-            MlxArray qResult = default;
-            MlxArray kResult = default;
-            MlxArray vResult = default;
-            MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(3, 1, qkv, qNormW, kNormW, cosTable, sinTable);
+            MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureGemma4QkvPreprocessDecodeKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray epsArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "RotHalf", rotHalf);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray epsArray = ref resources.Scalars[0];
+                ref MlxArray qResult = ref resources.Results[0];
+                ref MlxArray kResult = ref resources.Results[1];
+                ref MlxArray vResult = ref resources.Results[2];
+                kernel = EnsureGemma4QkvPreprocessDecodeKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "NumKVHeads", numKVHeads);
+                AddTemplateInt(config, "HeadDim", headDim);
+                AddTemplateInt(config, "RotHalf", rotHalf);
 
-                    int[] qShape = { 1, numHeads * headDim };
-                    int[] kShape = { numKVHeads, 1, headDim };
-                    int[] vShape = { numKVHeads, 1, headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess q output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess k output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess v output");
+                int[] qShape = { 1, numHeads * headDim };
+                int[] kShape = { numKVHeads, 1, headDim };
+                int[] vShape = { numKVHeads, 1, headDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess q output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess k output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring Gemma4 QKV preprocess v output");
 
-                    int totalRows = numHeads + 2 * numKVHeads;
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, totalRows, 1), "configuring Gemma4 QKV preprocess grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, headDim, 1, 1), "configuring Gemma4 QKV preprocess threadgroup");
+                int totalRows = numHeads + 2 * numKVHeads;
+                Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, totalRows, 1), "configuring Gemma4 QKV preprocess grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, headDim, 1, 1), "configuring Gemma4 QKV preprocess threadgroup");
 
-                    epsArray = mlx_array_new_float32(eps);
-                    inputs = CreateVectorArray(qkv, qNormW, kNormW, cosTable, sinTable, epsArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Gemma4 QKV preprocess decode kernel");
-                    if (mlx_vector_array_size(outputs) < 3)
-                        throw new InvalidOperationException("Gemma4 QKV preprocess decode kernel produced fewer than 3 outputs.");
+                NewKernelScalar(ref epsArray, eps);
+                NewArrayVector(ref inputs, qkv, qNormW, kNormW, cosTable, sinTable, epsArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Gemma4 QKV preprocess decode kernel");
+                if (ArrayVectorSize(outputs) < 3)
+                    throw new InvalidOperationException("Gemma4 QKV preprocess decode kernel produced fewer than 3 outputs.");
 
-                    Check(mlx_vector_array_get(out qResult, outputs, 0), "reading Gemma4 QKV preprocess q output");
-                    Check(mlx_vector_array_get(out kResult, outputs, 1), "reading Gemma4 QKV preprocess k output");
-                    Check(mlx_vector_array_get(out vResult, outputs, 2), "reading Gemma4 QKV preprocess v output");
-                }
-                finally
-                {
-                    if (epsArray.IsValid)
-                        _ = mlx_array_free(epsArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out qResult, outputs, 0), "reading Gemma4 QKV preprocess q output");
+                Check(mlx_vector_array_get(out kResult, outputs, 1), "reading Gemma4 QKV preprocess k output");
+                Check(mlx_vector_array_get(out vResult, outputs, 2), "reading Gemma4 QKV preprocess v output");
+                resources.PrepareResults();
+                return 0;
+            }, resources.Release);
 
-            qOut = qResult;
-            kOut = kResult;
-            vOut = vResult;
+            qOut = resources.Results[0];
+            kOut = resources.Results[1];
+            vOut = resources.Results[2];
         }
 
         internal static MlxArray CircularDecodeAttention(
@@ -4679,49 +4703,40 @@ if (kind == 0) {
             if (firstSlot < 0)
                 firstSlot += cacheLen;
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 1, qFlat, kCache, vCache);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureCircularDecodeAttentionKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray scaleArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "CacheLen", cacheLen);
-                    AddTemplateInt(config, "FirstSlot", firstSlot);
-                    AddTemplateInt(config, "AttendLen", attendLen);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray scaleArray = ref resources.Scalars[0];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureCircularDecodeAttentionKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "NumKVHeads", numKVHeads);
+                AddTemplateInt(config, "HeadDim", headDim);
+                AddTemplateInt(config, "CacheLen", cacheLen);
+                AddTemplateInt(config, "FirstSlot", firstSlot);
+                AddTemplateInt(config, "AttendLen", attendLen);
 
-                    int[] shape = { 1, numHeads * headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring circular decode attention output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, 1), "configuring circular decode attention grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring circular decode attention threadgroup");
+                int[] shape = { 1, numHeads * headDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring circular decode attention output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, numHeads, 1), "configuring circular decode attention grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring circular decode attention threadgroup");
 
-                    scaleArray = mlx_array_new_float32(scale);
-                    inputs = CreateVectorArray(qFlat, kCache, vCache, scaleArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running circular decode attention");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("circular decode attention kernel produced no output.");
+                NewKernelScalar(ref scaleArray, scale);
+                NewArrayVector(ref inputs, qFlat, kCache, vCache, scaleArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running circular decode attention");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("circular decode attention kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading circular decode attention output");
-                    return result;
-                }
-                finally
-                {
-                    if (scaleArray.IsValid)
-                        _ = mlx_array_free(scaleArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading circular decode attention output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray FastRopeDynamic(MlxArray input, int dims, bool traditional, float baseValue, float scale, MlxArray offsets)
@@ -4818,42 +4833,35 @@ if (kind == 0) {
             if (seqLen <= 0 || batchSize <= 0 || hiddenDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(batchSize));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, output, rows, indices, weights);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureScatterAddWeightedRowsKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "SeqLen", seqLen);
-                    AddTemplateInt(config, "BatchSize", batchSize);
-                    AddTemplateInt(config, "HiddenDim", hiddenDim);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureScatterAddWeightedRowsKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "SeqLen", seqLen);
+                AddTemplateInt(config, "BatchSize", batchSize);
+                AddTemplateInt(config, "HiddenDim", hiddenDim);
 
-                    int[] shape = { seqLen, hiddenDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring weighted scatter-add output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, hiddenDim, seqLen, 1), "configuring weighted scatter-add grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring weighted scatter-add threadgroup");
+                int[] shape = { seqLen, hiddenDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring weighted scatter-add output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, hiddenDim, seqLen, 1), "configuring weighted scatter-add grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring weighted scatter-add threadgroup");
 
-                    inputs = CreateVectorArray(output, rows, indices, weights);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running weighted scatter-add");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Weighted scatter-add kernel produced no output.");
+                NewArrayVector(ref inputs, output, rows, indices, weights);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running weighted scatter-add");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Weighted scatter-add kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading weighted scatter-add output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading weighted scatter-add output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray RmsNormAdd(
@@ -4869,44 +4877,35 @@ if (kind == 0) {
             if (rows <= 0 || hiddenDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 1, residual, input, normWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureRmsNormAddKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray epsArray = default;
-                try
-                {
-                    AddTemplateInt(config, "HiddenDim", hiddenDim);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray epsArray = ref resources.Scalars[0];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureRmsNormAddKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "HiddenDim", hiddenDim);
 
-                    int[] shape = { rows, hiddenDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring RMSNorm-add output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, rows, 1), "configuring RMSNorm-add grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring RMSNorm-add threadgroup");
+                int[] shape = { rows, hiddenDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring RMSNorm-add output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, rows, 1), "configuring RMSNorm-add grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring RMSNorm-add threadgroup");
 
-                    epsArray = mlx_array_new_float32(eps);
-                    inputs = CreateVectorArray(residual, input, normWeight, epsArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running RMSNorm-add");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("RMSNorm-add kernel produced no output.");
+                NewKernelScalar(ref epsArray, eps);
+                NewArrayVector(ref inputs, residual, input, normWeight, epsArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running RMSNorm-add");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("RMSNorm-add kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading RMSNorm-add output");
-                    return result;
-                }
-                finally
-                {
-                    if (epsArray.IsValid)
-                        _ = mlx_array_free(epsArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading RMSNorm-add output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Fused (residual += input; normed = RmsNorm(residual, norm_weight)).
@@ -4925,46 +4924,38 @@ if (kind == 0) {
             if (rows <= 0 || hiddenDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(2, 1, residual, input, normWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureAddRmsNormKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray epsArray = default;
-                try
-                {
-                    AddTemplateInt(config, "HiddenDim", hiddenDim);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray epsArray = ref resources.Scalars[0];
+                ref MlxArray updated = ref resources.Results[0];
+                ref MlxArray normed = ref resources.Results[1];
+                kernel = EnsureAddRmsNormKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "HiddenDim", hiddenDim);
 
-                    int[] shape = { rows, hiddenDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring add-rmsnorm residual output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring add-rmsnorm normed output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, rows, 1), "configuring add-rmsnorm grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring add-rmsnorm threadgroup");
+                int[] shape = { rows, hiddenDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring add-rmsnorm residual output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring add-rmsnorm normed output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, rows, 1), "configuring add-rmsnorm grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring add-rmsnorm threadgroup");
 
-                    epsArray = mlx_array_new_float32(eps);
-                    inputs = CreateVectorArray(residual, input, normWeight, epsArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running add-rmsnorm");
-                    if (mlx_vector_array_size(outputs) < 2)
-                        throw new InvalidOperationException("add-rmsnorm kernel produced fewer than 2 outputs.");
+                NewKernelScalar(ref epsArray, eps);
+                NewArrayVector(ref inputs, residual, input, normWeight, epsArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running add-rmsnorm");
+                if (ArrayVectorSize(outputs) < 2)
+                    throw new InvalidOperationException("add-rmsnorm kernel produced fewer than 2 outputs.");
 
-                    Check(mlx_vector_array_get(out MlxArray updated, outputs, 0), "reading add-rmsnorm updated residual");
-                    Check(mlx_vector_array_get(out MlxArray normed, outputs, 1), "reading add-rmsnorm normed");
-                    return (updated, normed);
-                }
-                finally
-                {
-                    if (epsArray.IsValid)
-                        _ = mlx_array_free(epsArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out updated, outputs, 0), "reading add-rmsnorm updated residual");
+                Check(mlx_vector_array_get(out normed, outputs, 1), "reading add-rmsnorm normed");
+                resources.PrepareResults();
+                return (updated, normed);
+            }, resources.Release);
         }
 
         internal static MlxArray GeluMulSplit(MlxArray gateUp, int rows, int halfDim)
@@ -4974,41 +4965,34 @@ if (kind == 0) {
             if (rows <= 0 || halfDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, gateUp);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureGeluMulSplitKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "Rows", rows);
-                    AddTemplateInt(config, "HalfDim", halfDim);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureGeluMulSplitKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "Rows", rows);
+                AddTemplateInt(config, "HalfDim", halfDim);
 
-                    int[] shape = { rows, halfDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring GELU-mul split output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, halfDim, rows, 1), "configuring GELU-mul split grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring GELU-mul split threadgroup");
+                int[] shape = { rows, halfDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring GELU-mul split output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, halfDim, rows, 1), "configuring GELU-mul split grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring GELU-mul split threadgroup");
 
-                    inputs = CreateVectorArray(gateUp);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running GELU-mul split");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("GELU-mul split kernel produced no output.");
+                NewArrayVector(ref inputs, gateUp);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running GELU-mul split");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("GELU-mul split kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading GELU-mul split output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading GELU-mul split output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Fused clamped-SwiGLU (swiglu_oai) + per-expert gate/up bias gather.
@@ -5030,49 +5014,38 @@ if (kind == 0) {
             if (rows <= 0 || dim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 2, gate, up, gateBias, upBias, experts);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureSwigluOaiGatherBiasKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray alphaArray = default;
-                MlxArray limitArray = default;
-                try
-                {
-                    AddTemplateInt(config, "Rows", rows);
-                    AddTemplateInt(config, "Dim", dim);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray alphaArray = ref resources.Scalars[0];
+                ref MlxArray limitArray = ref resources.Scalars[1];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureSwigluOaiGatherBiasKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "Rows", rows);
+                AddTemplateInt(config, "Dim", dim);
 
-                    int[] shape = { rows, dim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring swiglu-oai output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, dim, rows, 1), "configuring swiglu-oai grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring swiglu-oai threadgroup");
+                int[] shape = { rows, dim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring swiglu-oai output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, dim, rows, 1), "configuring swiglu-oai grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring swiglu-oai threadgroup");
 
-                    alphaArray = mlx_array_new_float32(alpha);
-                    limitArray = mlx_array_new_float32(limit);
-                    inputs = CreateVectorArray(gate, up, gateBias, upBias, experts, alphaArray, limitArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running swiglu-oai gather-bias");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("swiglu-oai gather-bias kernel produced no output.");
+                NewKernelScalar(ref alphaArray, alpha);
+                NewKernelScalar(ref limitArray, limit);
+                NewArrayVector(ref inputs, gate, up, gateBias, upBias, experts, alphaArray, limitArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running swiglu-oai gather-bias");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("swiglu-oai gather-bias kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading swiglu-oai output");
-                    return result;
-                }
-                finally
-                {
-                    if (alphaArray.IsValid)
-                        _ = mlx_array_free(alphaArray);
-                    if (limitArray.IsValid)
-                        _ = mlx_array_free(limitArray);
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading swiglu-oai output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Routing-weighted MoE combine + per-expert down-bias gather + unsort.
@@ -5096,43 +5069,36 @@ if (kind == 0) {
             if (n <= 0 || k <= 0 || dim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(n));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, downRows, downBias, expertsSorted, invOrder, routeWeights);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureMoeBiasWeightedSumKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "Rows", n);
-                    AddTemplateInt(config, "K", k);
-                    AddTemplateInt(config, "Dim", dim);
-                    AddTemplateInt(config, "HasBias", hasBias ? 1 : 0);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureMoeBiasWeightedSumKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "Rows", n);
+                AddTemplateInt(config, "K", k);
+                AddTemplateInt(config, "Dim", dim);
+                AddTemplateInt(config, "HasBias", hasBias ? 1 : 0);
 
-                    int[] shape = { n, dim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring MoE bias-weighted-sum output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, dim, n, 1), "configuring MoE bias-weighted-sum grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring MoE bias-weighted-sum threadgroup");
+                int[] shape = { n, dim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring MoE bias-weighted-sum output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, dim, n, 1), "configuring MoE bias-weighted-sum grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring MoE bias-weighted-sum threadgroup");
 
-                    inputs = CreateVectorArray(downRows, downBias, expertsSorted, invOrder, routeWeights);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running MoE bias-weighted-sum");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("MoE bias-weighted-sum kernel produced no output.");
+                NewArrayVector(ref inputs, downRows, downBias, expertsSorted, invOrder, routeWeights);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running MoE bias-weighted-sum");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("MoE bias-weighted-sum kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading MoE bias-weighted-sum output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading MoE bias-weighted-sum output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray FlatToHeadFirst(
@@ -5150,44 +5116,37 @@ if (kind == 0) {
             if (colOffset + numHeads * headDim > sourceStride)
                 throw new ArgumentOutOfRangeException(nameof(colOffset));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureFlatToHeadFirstKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "SeqLen", seqLen);
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "SourceStride", sourceStride);
-                    AddTemplateInt(config, "ColOffset", colOffset);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureFlatToHeadFirstKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "SeqLen", seqLen);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "HeadDim", headDim);
+                AddTemplateInt(config, "SourceStride", sourceStride);
+                AddTemplateInt(config, "ColOffset", colOffset);
 
-                    int[] shape = { numHeads, seqLen, headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring flat-to-head-first output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, seqLen, numHeads), "configuring flat-to-head-first grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring flat-to-head-first threadgroup");
+                int[] shape = { numHeads, seqLen, headDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring flat-to-head-first output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, seqLen, numHeads), "configuring flat-to-head-first grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring flat-to-head-first threadgroup");
 
-                    inputs = CreateVectorArray(input);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running flat-to-head-first");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("flat-to-head-first kernel produced no output.");
+                NewArrayVector(ref inputs, input);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running flat-to-head-first");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("flat-to-head-first kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading flat-to-head-first output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading flat-to-head-first output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray NeoXRoPE(
@@ -5205,46 +5164,39 @@ if (kind == 0) {
             if (numHeads <= 0 || seqLen <= 0 || headDim <= 0 || rotHalf <= 0 || rotHalf * 2 > headDim)
                 throw new ArgumentOutOfRangeException(nameof(headDim));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, cosTable, sinTable);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureNeoXRopeKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "SeqLen", seqLen);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "RotHalf", rotHalf);
-                    AddTemplateInt(config, "HeadFirst", headFirst ? 1 : 0);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureNeoXRopeKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "SeqLen", seqLen);
+                AddTemplateInt(config, "HeadDim", headDim);
+                AddTemplateInt(config, "RotHalf", rotHalf);
+                AddTemplateInt(config, "HeadFirst", headFirst ? 1 : 0);
 
-                    int[] shape = headFirst
-                        ? new[] { numHeads, seqLen, headDim }
-                        : new[] { seqLen, numHeads * headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring NeoX RoPE output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, numHeads, seqLen), "configuring NeoX RoPE grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring NeoX RoPE threadgroup");
+                int[] shape = headFirst
+                    ? new[] { numHeads, seqLen, headDim }
+                    : new[] { seqLen, numHeads * headDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring NeoX RoPE output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, numHeads, seqLen), "configuring NeoX RoPE grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring NeoX RoPE threadgroup");
 
-                    inputs = CreateVectorArray(input, cosTable, sinTable);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running NeoX RoPE");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("NeoX RoPE kernel produced no output.");
+                NewArrayVector(ref inputs, input, cosTable, sinTable);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running NeoX RoPE");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("NeoX RoPE kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading NeoX RoPE output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading NeoX RoPE output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Cache the small set of mode strings ("affine", "mxfp4", "q4_k",
@@ -5354,7 +5306,7 @@ if (kind == 0) {
                     {
                         return Iq4XsMatmul4ColsSimd(input, rawWeight, inDim, outDim);
                     }
-                    catch (Exception)
+                    catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                     {
                         // Fall through to legacy kernel.
                     }
@@ -5364,7 +5316,7 @@ if (kind == 0) {
                 {
                     return Iq4XsMatmul4Cols(input, rawWeight, inDim, outDim);
                 }
-                catch (Exception)
+                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                 }
             }
@@ -5375,7 +5327,7 @@ if (kind == 0) {
                 {
                     return Iq4XsMatmulRows2Cols(input, rawWeight, rows, inDim, outDim);
                 }
-                catch (Exception)
+                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                 }
             }
@@ -5395,41 +5347,34 @@ if (kind == 0) {
                 catch (NotSupportedException) { }
             }
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmulKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), "configuring IQ4_XS matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4XsMatmulKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), "configuring IQ4_XS matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_XS matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_XS matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Per-call IQ4_NL matmul on MLX. Used by MlxQuantizedOps after the
@@ -5456,42 +5401,35 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 32 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_NL matmul requires positive dimensions and input dim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4NlMatmulKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    // BlocksPerRow = inDim / 32 (IQ4_NL: 32 elements per block).
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 32);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_NL matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), "configuring IQ4_NL matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_NL matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4NlMatmulKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                // BlocksPerRow = inDim / 32 (IQ4_NL: 32 elements per block).
+                AddTemplateInt(config, "BlocksPerRow", inDim / 32);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_NL matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), "configuring IQ4_NL matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_NL matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_NL matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_NL matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_NL matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_NL matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_NL matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_NL matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Multi-row IQ4_NL matmul. One threadgroup per `out_col` handles all
@@ -5499,42 +5437,36 @@ if (kind == 0) {
         // must already have validated that 2 <= rows <= Iq4NlBatchedRowsMax.
         private static MlxArray Iq4NlMatmulRows(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4NlMatmulRowsKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "Rows", rows);
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 32);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_NL multi-row matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring IQ4_NL multi-row matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_NL multi-row matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4NlMatmulRowsKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "Rows", rows);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 32);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_NL multi-row matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring IQ4_NL multi-row matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_NL multi-row matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_NL multi-row matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_NL multi-row matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_NL multi-row matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_NL multi-row matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_NL multi-row matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_NL multi-row matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
 
@@ -5551,45 +5483,38 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS simd_sum 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmul4SimdKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS simd 4-column matmul output");
-                    // 128 threads (= 4 simdgroups) per threadgroup; each
-                    // simdgroup owns one of the 4 output cols. Grid in y
-                    // is ceil(OutDim/4) so the dispatch shape matches the
-                    // legacy kernel exactly.
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 128, (outDim + 3) / 4, 1), "configuring IQ4_XS simd 4-column matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 128, 1, 1), "configuring IQ4_XS simd 4-column matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4XsMatmul4SimdKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS simd 4-column matmul output");
+                // 128 threads (= 4 simdgroups) per threadgroup; each
+                // simdgroup owns one of the 4 output cols. Grid in y
+                // is ceil(OutDim/4) so the dispatch shape matches the
+                // legacy kernel exactly.
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 128, (outDim + 3) / 4, 1), "configuring IQ4_XS simd 4-column matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 128, 1, 1), "configuring IQ4_XS simd 4-column matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS simd 4-column matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS simd 4-column matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS simd 4-column matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_XS simd 4-column matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS simd 4-column matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_XS simd 4-column matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray Iq4XsMatmul4Cols(MlxArray input, MlxArray rawWeight, int inDim, int outDim)
@@ -5599,121 +5524,102 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmul4Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS 4-column matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring IQ4_XS 4-column matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS 4-column matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4XsMatmul4Kernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS 4-column matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring IQ4_XS 4-column matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS 4-column matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS 4-column matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS 4-column matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS 4-column matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_XS 4-column matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS 4-column matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_XS 4-column matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray Iq4XsMatmulRows(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmulRowsKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "Rows", rows);
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS batched-row matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring IQ4_XS batched-row matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS batched-row matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4XsMatmulRowsKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "Rows", rows);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS batched-row matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring IQ4_XS batched-row matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS batched-row matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS batched-row matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS batched-row matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS batched-row matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_XS batched-row matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS batched-row matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_XS batched-row matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray Iq4XsMatmulRows2Cols(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4XsMatmulRows2Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    AddTemplateInt(config, "Rows", rows);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS 2-column batched matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 1) / 2, 1), "configuring IQ4_XS 2-column batched matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS 2-column batched matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4XsMatmulRows2Kernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                AddTemplateInt(config, "Rows", rows);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS 2-column batched matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 1) / 2, 1), "configuring IQ4_XS 2-column batched matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS 2-column batched matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS 2-column batched matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS 2-column batched matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS 2-column batched matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_XS 2-column batched matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS 2-column batched matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_XS 2-column batched matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static int Iq4XsBatchedRowsMax()
@@ -5743,40 +5649,33 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, rawWeight, indices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4XsGetRowsKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, inDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS get_rows output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), "configuring IQ4_XS get_rows grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS get_rows threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4XsGetRowsKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, inDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ4_XS get_rows output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), "configuring IQ4_XS get_rows grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ4_XS get_rows threadgroup");
 
-                    inputs = CreateVectorArray(rawWeight, indices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS get_rows");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_XS get_rows produced no output.");
+                NewArrayVector(ref inputs, rawWeight, indices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ4_XS get_rows");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_XS get_rows produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ4_XS get_rows output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ4_XS get_rows output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Minimum batch (input row) count for routing to the
@@ -5815,41 +5714,34 @@ if (kind == 0) {
                 }
             }
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq2XxsMatmulKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ2_XXS matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), "configuring IQ2_XXS matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ2_XXS matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq2XxsMatmulKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ2_XXS matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), "configuring IQ2_XXS matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ2_XXS matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ2_XXS matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ2_XXS matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ2_XXS matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ2_XXS matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ2_XXS matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ2_XXS matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // simdgroup_matrix-accelerated IQ2_XXS matmul. Grid is sized in
@@ -5862,45 +5754,38 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 8 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ2_XXS simdgroup matmul requires positive dimensions and inDim divisible by 8.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq2XxsMatmulSimdgroupKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "InRows", rows);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ2_XXS simdgroup matmul output");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq2XxsMatmulSimdgroupKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "InRows", rows);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ2_XXS simdgroup matmul output");
 
-                    int tilesM = (outDim + 7) / 8;
-                    int tilesB = (rows + 7) / 8;
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 32, tilesM, tilesB), "configuring IQ2_XXS simdgroup matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 32, 1, 1), "configuring IQ2_XXS simdgroup matmul threadgroup");
+                int tilesM = (outDim + 7) / 8;
+                int tilesB = (rows + 7) / 8;
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 32, tilesM, tilesB), "configuring IQ2_XXS simdgroup matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 32, 1, 1), "configuring IQ2_XXS simdgroup matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ2_XXS simdgroup matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ2_XXS simdgroup matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ2_XXS simdgroup matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ2_XXS simdgroup matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ2_XXS simdgroup matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ2_XXS simdgroup matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Batched IQ2_XXS MoE matmul (shared single input row).
@@ -5928,43 +5813,39 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ4_NL MoE batched matmul requires positive dimensions and input dim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, stackedWeight, expertIndices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4NlMoeMatmulBatchedKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 32);
-                    int[] shape = { K, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
-                        "configuring IQ4_NL MoE batched matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
-                        "configuring IQ4_NL MoE batched matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
-                        "configuring IQ4_NL MoE batched matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4NlMoeMatmulBatchedKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 32);
+                int[] shape = { K, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
+                    "configuring IQ4_NL MoE batched matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
+                    "configuring IQ4_NL MoE batched matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
+                    "configuring IQ4_NL MoE batched matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, stackedWeight, expertIndices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
-                        "running IQ4_NL MoE batched matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_NL MoE batched matmul produced no output.");
+                NewArrayVector(ref inputs, input, stackedWeight, expertIndices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
+                    "running IQ4_NL MoE batched matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_NL MoE batched matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0),
-                        "reading IQ4_NL MoE batched matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0),
+                    "reading IQ4_NL MoE batched matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Batched IQ4_NL MoE matmul — per-row (rowed) variant for the
@@ -5985,43 +5866,39 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ4_NL MoE batched (rowed) matmul requires positive dimensions and input dim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, stackedWeight, expertIndices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq4NlMoeMatmulBatchedRowedKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 32);
-                    int[] shape = { K, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
-                        "configuring IQ4_NL MoE batched (rowed) matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
-                        "configuring IQ4_NL MoE batched (rowed) matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
-                        "configuring IQ4_NL MoE batched (rowed) matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq4NlMoeMatmulBatchedRowedKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 32);
+                int[] shape = { K, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
+                    "configuring IQ4_NL MoE batched (rowed) matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
+                    "configuring IQ4_NL MoE batched (rowed) matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
+                    "configuring IQ4_NL MoE batched (rowed) matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, stackedWeight, expertIndices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
-                        "running IQ4_NL MoE batched (rowed) matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ4_NL MoE batched (rowed) matmul produced no output.");
+                NewArrayVector(ref inputs, input, stackedWeight, expertIndices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
+                    "running IQ4_NL MoE batched (rowed) matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ4_NL MoE batched (rowed) matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0),
-                        "reading IQ4_NL MoE batched (rowed) matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0),
+                    "reading IQ4_NL MoE batched (rowed) matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray Iq2XxsMoeMatmulBatched(
@@ -6038,43 +5915,39 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ2_XXS MoE batched matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, stackedWeight, expertIndices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq2XxsMoeMatmulBatchedKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { K, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
-                        "configuring IQ2_XXS MoE batched matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
-                        "configuring IQ2_XXS MoE batched matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
-                        "configuring IQ2_XXS MoE batched matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq2XxsMoeMatmulBatchedKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { K, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
+                    "configuring IQ2_XXS MoE batched matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
+                    "configuring IQ2_XXS MoE batched matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
+                    "configuring IQ2_XXS MoE batched matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, stackedWeight, expertIndices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
-                        "running IQ2_XXS MoE batched matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ2_XXS MoE batched matmul produced no output.");
+                NewArrayVector(ref inputs, input, stackedWeight, expertIndices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
+                    "running IQ2_XXS MoE batched matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ2_XXS MoE batched matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0),
-                        "reading IQ2_XXS MoE batched matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0),
+                    "reading IQ2_XXS MoE batched matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Fused IQ2_XXS MoE gate + up + SiLUMul (shared single input row).
@@ -6105,43 +5978,39 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ2_XXS MoE fused gate+up+silu requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, stackedGate, stackedUp, expertIndices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq2XxsMoeMatmulBatchedFusedGateUpSiluKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { K, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
-                        "configuring IQ2_XXS MoE fused gate+up+silu output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
-                        "configuring IQ2_XXS MoE fused gate+up+silu grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
-                        "configuring IQ2_XXS MoE fused gate+up+silu threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq2XxsMoeMatmulBatchedFusedGateUpSiluKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { K, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
+                    "configuring IQ2_XXS MoE fused gate+up+silu output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
+                    "configuring IQ2_XXS MoE fused gate+up+silu grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
+                    "configuring IQ2_XXS MoE fused gate+up+silu threadgroup");
 
-                    inputs = CreateVectorArray(input, stackedGate, stackedUp, expertIndices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
-                        "running IQ2_XXS MoE fused gate+up+silu");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ2_XXS MoE fused gate+up+silu produced no output.");
+                NewArrayVector(ref inputs, input, stackedGate, stackedUp, expertIndices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
+                    "running IQ2_XXS MoE fused gate+up+silu");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ2_XXS MoE fused gate+up+silu produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0),
-                        "reading IQ2_XXS MoE fused gate+up+silu output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0),
+                    "reading IQ2_XXS MoE fused gate+up+silu output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Batched IQ2_XXS MoE matmul (per-row input).
@@ -6163,43 +6032,39 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ2_XXS MoE batched-rowed matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, stackedWeight, expertIndices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq2XxsMoeMatmulBatchedRowedKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { K, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
-                        "configuring IQ2_XXS MoE batched-rowed matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
-                        "configuring IQ2_XXS MoE batched-rowed matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
-                        "configuring IQ2_XXS MoE batched-rowed matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq2XxsMoeMatmulBatchedRowedKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { K, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)),
+                    "configuring IQ2_XXS MoE batched-rowed matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, K),
+                    "configuring IQ2_XXS MoE batched-rowed matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1),
+                    "configuring IQ2_XXS MoE batched-rowed matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, stackedWeight, expertIndices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
-                        "running IQ2_XXS MoE batched-rowed matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ2_XXS MoE batched-rowed matmul produced no output.");
+                NewArrayVector(ref inputs, input, stackedWeight, expertIndices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()),
+                    "running IQ2_XXS MoE batched-rowed matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ2_XXS MoE batched-rowed matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0),
-                        "reading IQ2_XXS MoE batched-rowed matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0),
+                    "reading IQ2_XXS MoE batched-rowed matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray Iq2XxsGetRows(MlxArray rawWeight, MlxArray indices, int rows, int inDim)
@@ -6209,40 +6074,33 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ2_XXS get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, rawWeight, indices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureIq2XxsGetRowsKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, inDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ2_XXS get_rows output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), "configuring IQ2_XXS get_rows grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ2_XXS get_rows threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureIq2XxsGetRowsKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, inDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring IQ2_XXS get_rows output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), "configuring IQ2_XXS get_rows grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring IQ2_XXS get_rows threadgroup");
 
-                    inputs = CreateVectorArray(rawWeight, indices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ2_XXS get_rows");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("IQ2_XXS get_rows produced no output.");
+                NewArrayVector(ref inputs, rawWeight, indices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running IQ2_XXS get_rows");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("IQ2_XXS get_rows produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading IQ2_XXS get_rows output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading IQ2_XXS get_rows output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray Iq2SMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
@@ -6319,41 +6177,34 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = ensureKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), $"configuring {label} matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = ensureKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), $"configuring {label} matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException($"{label} matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException($"{label} matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), $"reading {label} matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), $"reading {label} matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray IQuantGetRows(
@@ -6369,40 +6220,33 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, rawWeight, indices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = ensureKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, inDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} get_rows output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), $"configuring {label} get_rows grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} get_rows threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = ensureKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, inDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} get_rows output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), $"configuring {label} get_rows grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} get_rows threadgroup");
 
-                    inputs = CreateVectorArray(rawWeight, indices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} get_rows");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException($"{label} get_rows produced no output.");
+                NewArrayVector(ref inputs, rawWeight, indices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} get_rows");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException($"{label} get_rows produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), $"reading {label} get_rows output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), $"reading {label} get_rows output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray Q4KMatmul(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
@@ -6428,7 +6272,7 @@ if (kind == 0) {
                 {
                     return Q5KMatmul4Cols(input, rawWeight, inDim, outDim);
                 }
-                catch (Exception)
+                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                 }
             }
@@ -6454,7 +6298,7 @@ if (kind == 0) {
                 {
                     return Q6KMatmul4Cols(input, rawWeight, inDim, outDim);
                 }
-                catch (Exception)
+                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                 }
             }
@@ -6484,41 +6328,34 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q5_K 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQ5KMatmul4Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q5_K 4-column matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring Q5_K 4-column matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q5_K 4-column matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQ5KMatmul4Kernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q5_K 4-column matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring Q5_K 4-column matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q5_K 4-column matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q5_K 4-column matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q5_K 4-column matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q5_K 4-column matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Q5_K 4-column matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q5_K 4-column matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Q5_K 4-column matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray Q6KMatmul4Cols(MlxArray input, MlxArray rawWeight, int inDim, int outDim)
@@ -6528,41 +6365,34 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q6_K 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQ6KMatmul4Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q6_K 4-column matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring Q6_K 4-column matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q6_K 4-column matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQ6KMatmul4Kernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q6_K 4-column matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, (outDim + 3) / 4, 1), "configuring Q6_K 4-column matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q6_K 4-column matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q6_K 4-column matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q6_K 4-column matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q6_K 4-column matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Q6_K 4-column matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q6_K 4-column matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Q6_K 4-column matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray Q4KGetRows(MlxArray rawWeight, MlxArray indices, int rows, int inDim)
@@ -6612,54 +6442,47 @@ if (kind == 0) {
             bool useT1Kernel = seqLen == 1
                 && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DISABLE_GDN_T1"), "1", StringComparison.Ordinal);
 
-            MlxArray yResult = default;
-            MlxArray stateResult = default;
-            MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(2, 0, q, k, v, g, beta, state);
+            MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = useT1Kernel
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray yResult = ref resources.Results[0];
+                ref MlxArray stateResult = ref resources.Results[1];
+                kernel = useT1Kernel
                     ? EnsureGatedDeltaT1Kernel()
                     : EnsureGatedDeltaKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    // T template is omitted from the T=1 kernel (specialization
-                    // makes it implicit). The general kernel still needs T.
-                    if (!useT1Kernel)
-                        AddTemplateInt(config, "T", seqLen);
-                    AddTemplateInt(config, "Dk", keyDim);
-                    AddTemplateInt(config, "Dv", valueDim);
-                    AddTemplateInt(config, "Hk", numKeyHeads);
-                    AddTemplateInt(config, "Hv", numValueHeads);
-                    int[] yShape = { batch, seqLen, numValueHeads, valueDim };
-                    int[] stateShape = { batch, numValueHeads, valueDim, keyDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, yShape, (nuint)yShape.Length, ToMlxDtype(DType.Float32)), "configuring gated-delta output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, stateShape, (nuint)stateShape.Length, ToMlxDtype(DType.Float32)), "configuring gated-delta state output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 32, valueDim, batch * numValueHeads), "configuring gated-delta grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 32, Math.Min(valueDim, 4), 1), "configuring gated-delta threadgroup");
+                NewKernelConfig(ref config);
+                // T template is omitted from the T=1 kernel (specialization
+                // makes it implicit). The general kernel still needs T.
+                if (!useT1Kernel)
+                    AddTemplateInt(config, "T", seqLen);
+                AddTemplateInt(config, "Dk", keyDim);
+                AddTemplateInt(config, "Dv", valueDim);
+                AddTemplateInt(config, "Hk", numKeyHeads);
+                AddTemplateInt(config, "Hv", numValueHeads);
+                int[] yShape = { batch, seqLen, numValueHeads, valueDim };
+                int[] stateShape = { batch, numValueHeads, valueDim, keyDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, yShape, (nuint)yShape.Length, ToMlxDtype(DType.Float32)), "configuring gated-delta output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, stateShape, (nuint)stateShape.Length, ToMlxDtype(DType.Float32)), "configuring gated-delta state output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 32, valueDim, batch * numValueHeads), "configuring gated-delta grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 32, Math.Min(valueDim, 4), 1), "configuring gated-delta threadgroup");
 
-                    inputs = CreateVectorArray(q, k, v, g, beta, state);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running gated-delta kernel");
-                    if (mlx_vector_array_size(outputs) < 2)
-                        throw new InvalidOperationException("GatedDelta kernel produced fewer than two outputs.");
+                NewArrayVector(ref inputs, q, k, v, g, beta, state);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running gated-delta kernel");
+                if (ArrayVectorSize(outputs) < 2)
+                    throw new InvalidOperationException("GatedDelta kernel produced fewer than two outputs.");
 
-                    Check(mlx_vector_array_get(out yResult, outputs, 0), "reading gated-delta output");
-                    Check(mlx_vector_array_get(out stateResult, outputs, 1), "reading gated-delta next state");
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
-            y = yResult;
-            nextState = stateResult;
+                Check(mlx_vector_array_get(out yResult, outputs, 0), "reading gated-delta output");
+                Check(mlx_vector_array_get(out stateResult, outputs, 1), "reading gated-delta next state");
+                resources.PrepareResults();
+                return 0;
+            }, resources.Release);
+            y = resources.Results[0];
+            nextState = resources.Results[1];
         }
 
         internal static void Qwen35GdnPreprocess(
@@ -6705,85 +6528,78 @@ if (kind == 0) {
                 || convKernel <= 1 || keyDim != numKeyHeads * headKeyDim || valueDim != numValueHeads * headValueDim)
                 throw new ArgumentOutOfRangeException(nameof(seqLen));
 
-            MlxArray qResult = default;
-            MlxArray kResult = default;
-            MlxArray vResult = default;
-            MlxArray gResult = default;
-            MlxArray betaResult = default;
-            MlxArray zSiluResult = default;
-            MlxArray nextConvResult = default;
-            MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(7, 0, qkvRaw, zRaw, betaRaw, alphaRaw, convState, convWeight, dtBias, aLog);
+            MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQwen35GdnPreprocessKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    int tail = convKernel - 1;
-                    AddTemplateInt(config, "T", seqLen);
-                    AddTemplateInt(config, "Tail", tail);
-                    AddTemplateInt(config, "Kernel", convKernel);
-                    AddTemplateInt(config, "QkvDim", qkvDim);
-                    AddTemplateInt(config, "KeyDim", keyDim);
-                    AddTemplateInt(config, "ValueDim", valueDim);
-                    AddTemplateInt(config, "NumKeyHeads", numKeyHeads);
-                    AddTemplateInt(config, "NumValueHeads", numValueHeads);
-                    AddTemplateInt(config, "HeadKeyDim", headKeyDim);
-                    AddTemplateInt(config, "HeadValueDim", headValueDim);
-                    AddTemplateInt(config, "ConvWeightChannelMajor", convWeightChannelMajor ? 1 : 0);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray qResult = ref resources.Results[0];
+                ref MlxArray kResult = ref resources.Results[1];
+                ref MlxArray vResult = ref resources.Results[2];
+                ref MlxArray gResult = ref resources.Results[3];
+                ref MlxArray betaResult = ref resources.Results[4];
+                ref MlxArray zSiluResult = ref resources.Results[5];
+                ref MlxArray nextConvResult = ref resources.Results[6];
+                kernel = EnsureQwen35GdnPreprocessKernel();
+                NewKernelConfig(ref config);
+                int tail = convKernel - 1;
+                AddTemplateInt(config, "T", seqLen);
+                AddTemplateInt(config, "Tail", tail);
+                AddTemplateInt(config, "Kernel", convKernel);
+                AddTemplateInt(config, "QkvDim", qkvDim);
+                AddTemplateInt(config, "KeyDim", keyDim);
+                AddTemplateInt(config, "ValueDim", valueDim);
+                AddTemplateInt(config, "NumKeyHeads", numKeyHeads);
+                AddTemplateInt(config, "NumValueHeads", numValueHeads);
+                AddTemplateInt(config, "HeadKeyDim", headKeyDim);
+                AddTemplateInt(config, "HeadValueDim", headValueDim);
+                AddTemplateInt(config, "ConvWeightChannelMajor", convWeightChannelMajor ? 1 : 0);
 
-                    int[] qShape = { 1, seqLen, numKeyHeads, headKeyDim };
-                    int[] kShape = { 1, seqLen, numKeyHeads, headKeyDim };
-                    int[] vShape = { 1, seqLen, numValueHeads, headValueDim };
-                    int[] gbShape = { 1, seqLen, numValueHeads };
-                    int[] zShape = { 1, seqLen, numValueHeads, headValueDim };
-                    int[] nextConvShape = { 1, tail, qkvDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN q output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN k output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN v output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN g output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN beta output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, zShape, (nuint)zShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN z output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, nextConvShape, (nuint)nextConvShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN next conv output");
+                int[] qShape = { 1, seqLen, numKeyHeads, headKeyDim };
+                int[] kShape = { 1, seqLen, numKeyHeads, headKeyDim };
+                int[] vShape = { 1, seqLen, numValueHeads, headValueDim };
+                int[] gbShape = { 1, seqLen, numValueHeads };
+                int[] zShape = { 1, seqLen, numValueHeads, headValueDim };
+                int[] nextConvShape = { 1, tail, qkvDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN q output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN k output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN v output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN g output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN beta output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, zShape, (nuint)zShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN z output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, nextConvShape, (nuint)nextConvShape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN next conv output");
 
-                    int maxX = Math.Max(qkvDim, valueDim);
-                    int maxY = Math.Max(seqLen, tail);
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, maxX, maxY, 3), "configuring Qwen35 GDN preprocess grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Qwen35 GDN preprocess threadgroup");
+                int maxX = Math.Max(qkvDim, valueDim);
+                int maxY = Math.Max(seqLen, tail);
+                Check(mlx_fast_metal_kernel_config_set_grid(config, maxX, maxY, 3), "configuring Qwen35 GDN preprocess grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Qwen35 GDN preprocess threadgroup");
 
-                    inputs = CreateVectorArray(qkvRaw, zRaw, betaRaw, alphaRaw, convState, convWeight, dtBias, aLog);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Qwen35 GDN preprocess kernel");
-                    if (mlx_vector_array_size(outputs) < 7)
-                        throw new InvalidOperationException("Qwen35 GDN preprocess kernel produced fewer than seven outputs.");
+                NewArrayVector(ref inputs, qkvRaw, zRaw, betaRaw, alphaRaw, convState, convWeight, dtBias, aLog);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Qwen35 GDN preprocess kernel");
+                if (ArrayVectorSize(outputs) < 7)
+                    throw new InvalidOperationException("Qwen35 GDN preprocess kernel produced fewer than seven outputs.");
 
-                    Check(mlx_vector_array_get(out qResult, outputs, 0), "reading Qwen35 GDN q output");
-                    Check(mlx_vector_array_get(out kResult, outputs, 1), "reading Qwen35 GDN k output");
-                    Check(mlx_vector_array_get(out vResult, outputs, 2), "reading Qwen35 GDN v output");
-                    Check(mlx_vector_array_get(out gResult, outputs, 3), "reading Qwen35 GDN g output");
-                    Check(mlx_vector_array_get(out betaResult, outputs, 4), "reading Qwen35 GDN beta output");
-                    Check(mlx_vector_array_get(out zSiluResult, outputs, 5), "reading Qwen35 GDN z output");
-                    Check(mlx_vector_array_get(out nextConvResult, outputs, 6), "reading Qwen35 GDN next conv output");
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out qResult, outputs, 0), "reading Qwen35 GDN q output");
+                Check(mlx_vector_array_get(out kResult, outputs, 1), "reading Qwen35 GDN k output");
+                Check(mlx_vector_array_get(out vResult, outputs, 2), "reading Qwen35 GDN v output");
+                Check(mlx_vector_array_get(out gResult, outputs, 3), "reading Qwen35 GDN g output");
+                Check(mlx_vector_array_get(out betaResult, outputs, 4), "reading Qwen35 GDN beta output");
+                Check(mlx_vector_array_get(out zSiluResult, outputs, 5), "reading Qwen35 GDN z output");
+                Check(mlx_vector_array_get(out nextConvResult, outputs, 6), "reading Qwen35 GDN next conv output");
+                resources.PrepareResults();
+                return 0;
+            }, resources.Release);
 
-            q = qResult;
-            k = kResult;
-            v = vResult;
-            g = gResult;
-            beta = betaResult;
-            zSilu = zSiluResult;
-            nextConv = nextConvResult;
+            q = resources.Results[0];
+            k = resources.Results[1];
+            v = resources.Results[2];
+            g = resources.Results[3];
+            beta = resources.Results[4];
+            zSilu = resources.Results[5];
+            nextConv = resources.Results[6];
         }
 
         internal static void Qwen35GdnPreprocessPacked(
@@ -6827,86 +6643,79 @@ if (kind == 0) {
                 || convKernel <= 1 || keyDim != numKeyHeads * headKeyDim || valueDim != numValueHeads * headValueDim)
                 throw new ArgumentOutOfRangeException(nameof(seqLen));
 
-            MlxArray qResult = default;
-            MlxArray kResult = default;
-            MlxArray vResult = default;
-            MlxArray gResult = default;
-            MlxArray betaResult = default;
-            MlxArray zSiluResult = default;
-            MlxArray nextConvResult = default;
-            MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(7, 0, packedRaw, convState, convWeight, dtBias, aLog);
+            MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQwen35GdnPackedPreprocessKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    int tail = convKernel - 1;
-                    AddTemplateInt(config, "T", seqLen);
-                    AddTemplateInt(config, "Tail", tail);
-                    AddTemplateInt(config, "Kernel", convKernel);
-                    AddTemplateInt(config, "PackedDim", packedDim);
-                    AddTemplateInt(config, "QkvDim", qkvDim);
-                    AddTemplateInt(config, "KeyDim", keyDim);
-                    AddTemplateInt(config, "ValueDim", valueDim);
-                    AddTemplateInt(config, "NumKeyHeads", numKeyHeads);
-                    AddTemplateInt(config, "NumValueHeads", numValueHeads);
-                    AddTemplateInt(config, "HeadKeyDim", headKeyDim);
-                    AddTemplateInt(config, "HeadValueDim", headValueDim);
-                    AddTemplateInt(config, "ConvWeightChannelMajor", convWeightChannelMajor ? 1 : 0);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray qResult = ref resources.Results[0];
+                ref MlxArray kResult = ref resources.Results[1];
+                ref MlxArray vResult = ref resources.Results[2];
+                ref MlxArray gResult = ref resources.Results[3];
+                ref MlxArray betaResult = ref resources.Results[4];
+                ref MlxArray zSiluResult = ref resources.Results[5];
+                ref MlxArray nextConvResult = ref resources.Results[6];
+                kernel = EnsureQwen35GdnPackedPreprocessKernel();
+                NewKernelConfig(ref config);
+                int tail = convKernel - 1;
+                AddTemplateInt(config, "T", seqLen);
+                AddTemplateInt(config, "Tail", tail);
+                AddTemplateInt(config, "Kernel", convKernel);
+                AddTemplateInt(config, "PackedDim", packedDim);
+                AddTemplateInt(config, "QkvDim", qkvDim);
+                AddTemplateInt(config, "KeyDim", keyDim);
+                AddTemplateInt(config, "ValueDim", valueDim);
+                AddTemplateInt(config, "NumKeyHeads", numKeyHeads);
+                AddTemplateInt(config, "NumValueHeads", numValueHeads);
+                AddTemplateInt(config, "HeadKeyDim", headKeyDim);
+                AddTemplateInt(config, "HeadValueDim", headValueDim);
+                AddTemplateInt(config, "ConvWeightChannelMajor", convWeightChannelMajor ? 1 : 0);
 
-                    int[] qShape = { 1, seqLen, numKeyHeads, headKeyDim };
-                    int[] kShape = { 1, seqLen, numKeyHeads, headKeyDim };
-                    int[] vShape = { 1, seqLen, numValueHeads, headValueDim };
-                    int[] gbShape = { 1, seqLen, numValueHeads };
-                    int[] zShape = { 1, seqLen, numValueHeads, headValueDim };
-                    int[] nextConvShape = { 1, tail, qkvDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN q output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN k output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN v output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN g output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN beta output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, zShape, (nuint)zShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN z output");
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, nextConvShape, (nuint)nextConvShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN next conv output");
+                int[] qShape = { 1, seqLen, numKeyHeads, headKeyDim };
+                int[] kShape = { 1, seqLen, numKeyHeads, headKeyDim };
+                int[] vShape = { 1, seqLen, numValueHeads, headValueDim };
+                int[] gbShape = { 1, seqLen, numValueHeads };
+                int[] zShape = { 1, seqLen, numValueHeads, headValueDim };
+                int[] nextConvShape = { 1, tail, qkvDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, qShape, (nuint)qShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN q output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, kShape, (nuint)kShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN k output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, vShape, (nuint)vShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN v output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN g output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, gbShape, (nuint)gbShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN beta output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, zShape, (nuint)zShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN z output");
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, nextConvShape, (nuint)nextConvShape.Length, ToMlxDtype(DType.Float32)), "configuring packed Qwen35 GDN next conv output");
 
-                    int maxX = Math.Max(qkvDim, valueDim);
-                    int maxY = Math.Max(seqLen, tail);
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, maxX, maxY, 3), "configuring packed Qwen35 GDN preprocess grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring packed Qwen35 GDN preprocess threadgroup");
+                int maxX = Math.Max(qkvDim, valueDim);
+                int maxY = Math.Max(seqLen, tail);
+                Check(mlx_fast_metal_kernel_config_set_grid(config, maxX, maxY, 3), "configuring packed Qwen35 GDN preprocess grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring packed Qwen35 GDN preprocess threadgroup");
 
-                    inputs = CreateVectorArray(packedRaw, convState, convWeight, dtBias, aLog);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running packed Qwen35 GDN preprocess kernel");
-                    if (mlx_vector_array_size(outputs) < 7)
-                        throw new InvalidOperationException("Packed Qwen35 GDN preprocess kernel produced fewer than seven outputs.");
+                NewArrayVector(ref inputs, packedRaw, convState, convWeight, dtBias, aLog);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running packed Qwen35 GDN preprocess kernel");
+                if (ArrayVectorSize(outputs) < 7)
+                    throw new InvalidOperationException("Packed Qwen35 GDN preprocess kernel produced fewer than seven outputs.");
 
-                    Check(mlx_vector_array_get(out qResult, outputs, 0), "reading packed Qwen35 GDN q output");
-                    Check(mlx_vector_array_get(out kResult, outputs, 1), "reading packed Qwen35 GDN k output");
-                    Check(mlx_vector_array_get(out vResult, outputs, 2), "reading packed Qwen35 GDN v output");
-                    Check(mlx_vector_array_get(out gResult, outputs, 3), "reading packed Qwen35 GDN g output");
-                    Check(mlx_vector_array_get(out betaResult, outputs, 4), "reading packed Qwen35 GDN beta output");
-                    Check(mlx_vector_array_get(out zSiluResult, outputs, 5), "reading packed Qwen35 GDN z output");
-                    Check(mlx_vector_array_get(out nextConvResult, outputs, 6), "reading packed Qwen35 GDN next conv output");
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out qResult, outputs, 0), "reading packed Qwen35 GDN q output");
+                Check(mlx_vector_array_get(out kResult, outputs, 1), "reading packed Qwen35 GDN k output");
+                Check(mlx_vector_array_get(out vResult, outputs, 2), "reading packed Qwen35 GDN v output");
+                Check(mlx_vector_array_get(out gResult, outputs, 3), "reading packed Qwen35 GDN g output");
+                Check(mlx_vector_array_get(out betaResult, outputs, 4), "reading packed Qwen35 GDN beta output");
+                Check(mlx_vector_array_get(out zSiluResult, outputs, 5), "reading packed Qwen35 GDN z output");
+                Check(mlx_vector_array_get(out nextConvResult, outputs, 6), "reading packed Qwen35 GDN next conv output");
+                resources.PrepareResults();
+                return 0;
+            }, resources.Release);
 
-            q = qResult;
-            k = kResult;
-            v = vResult;
-            g = gResult;
-            beta = betaResult;
-            zSilu = zSiluResult;
-            nextConv = nextConvResult;
+            q = resources.Results[0];
+            k = resources.Results[1];
+            v = resources.Results[2];
+            g = resources.Results[3];
+            beta = resources.Results[4];
+            zSilu = resources.Results[5];
+            nextConv = resources.Results[6];
         }
 
         internal static MlxArray Qwen35GdnPostprocess(
@@ -6925,42 +6734,35 @@ if (kind == 0) {
                 || valueDim != numValueHeads * headValueDim || headValueDim > 256)
                 throw new ArgumentOutOfRangeException(nameof(seqLen));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, y, zSilu, normWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQwen35GdnPostprocessKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "T", seqLen);
-                    AddTemplateInt(config, "ValueDim", valueDim);
-                    AddTemplateInt(config, "NumValueHeads", numValueHeads);
-                    AddTemplateInt(config, "HeadValueDim", headValueDim);
-                    int[] shape = { seqLen, valueDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN postprocess output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, seqLen, numValueHeads), "configuring Qwen35 GDN postprocess grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Qwen35 GDN postprocess threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQwen35GdnPostprocessKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "T", seqLen);
+                AddTemplateInt(config, "ValueDim", valueDim);
+                AddTemplateInt(config, "NumValueHeads", numValueHeads);
+                AddTemplateInt(config, "HeadValueDim", headValueDim);
+                int[] shape = { seqLen, valueDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Qwen35 GDN postprocess output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, seqLen, numValueHeads), "configuring Qwen35 GDN postprocess grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Qwen35 GDN postprocess threadgroup");
 
-                    inputs = CreateVectorArray(y, zSilu, normWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Qwen35 GDN postprocess kernel");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Qwen35 GDN postprocess kernel produced no output.");
+                NewArrayVector(ref inputs, y, zSilu, normWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Qwen35 GDN postprocess kernel");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Qwen35 GDN postprocess kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Qwen35 GDN postprocess output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Qwen35 GDN postprocess output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray KQuantMatmul(
@@ -6977,41 +6779,34 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = ensureKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), $"configuring {label} matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = ensureKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, rows), $"configuring {label} matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException($"{label} matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException($"{label} matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), $"reading {label} matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), $"reading {label} matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxArray KQuantGetRows(
@@ -7027,40 +6822,33 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, rawWeight, indices);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = ensureKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, inDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} get_rows output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), $"configuring {label} get_rows grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} get_rows threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = ensureKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, inDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} get_rows output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, inDim, rows, 1), $"configuring {label} get_rows grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), $"configuring {label} get_rows threadgroup");
 
-                    inputs = CreateVectorArray(rawWeight, indices);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} get_rows");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException($"{label} get_rows produced no output.");
+                NewArrayVector(ref inputs, rawWeight, indices);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} get_rows");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException($"{label} get_rows produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), $"reading {label} get_rows output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid)
-                        _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid)
-                        _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), $"reading {label} get_rows output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         internal static MlxArray SliceUpdate(MlxArray input, MlxArray update, int start, int stop)
@@ -7526,41 +7314,37 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 8 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} simdgroup matmul requires positive dimensions and inDim divisible by 8.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, rawWeight);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = ensureKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "InRows", rows);
-                    AddTemplateInt(config, "BlocksPerRow", inDim / 256);
-                    int[] shape = { rows, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} simdgroup matmul output");
-                    int tilesM = (outDim + 7) / 8;
-                    int tilesB = (rows + 7) / 8;
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 32, tilesM, tilesB), $"configuring {label} simdgroup matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 32, 1, 1), $"configuring {label} simdgroup matmul threadgroup");
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = ensureKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "InRows", rows);
+                AddTemplateInt(config, "BlocksPerRow", inDim / 256);
+                int[] shape = { rows, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), $"configuring {label} simdgroup matmul output");
+                int tilesM = (outDim + 7) / 8;
+                int tilesB = (rows + 7) / 8;
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 32, tilesM, tilesB), $"configuring {label} simdgroup matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 32, 1, 1), $"configuring {label} simdgroup matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, rawWeight);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} simdgroup matmul");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException($"{label} simdgroup matmul produced no output.");
+                NewArrayVector(ref inputs, input, rawWeight);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), $"running {label} simdgroup matmul");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException($"{label} simdgroup matmul produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), $"reading {label} simdgroup matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), $"reading {label} simdgroup matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         // Runs at most once per kernel family: callers only reach this on the
@@ -8432,44 +8216,39 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 || headDim != 512 || cacheLen <= 0 || attendLen <= 0 || attendLen > cacheLen)
                 throw new ArgumentOutOfRangeException(nameof(headDim), "head_dim=512 decode attention requires HeadDim==512 and valid dims.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 1, qFlat, kCache, vCache);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureDecodeAttentionHeadDim512Kernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray scaleArray = default;
-                try
-                {
-                    AddTemplateInt(config, "NumHeads", numHeads);
-                    AddTemplateInt(config, "NumKVHeads", numKVHeads);
-                    AddTemplateInt(config, "HeadDim", headDim);
-                    AddTemplateInt(config, "CacheLen", cacheLen);
-                    AddTemplateInt(config, "AttendLen", attendLen);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray scaleArray = ref resources.Scalars[0];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureDecodeAttentionHeadDim512Kernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "NumHeads", numHeads);
+                AddTemplateInt(config, "NumKVHeads", numKVHeads);
+                AddTemplateInt(config, "HeadDim", headDim);
+                AddTemplateInt(config, "CacheLen", cacheLen);
+                AddTemplateInt(config, "AttendLen", attendLen);
 
-                    int[] shape = { 1, numHeads * headDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring head_dim=512 decode attention output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, numHeads, 1), "configuring head_dim=512 decode attention grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, headDim, 1, 1), "configuring head_dim=512 decode attention threadgroup");
+                int[] shape = { 1, numHeads * headDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring head_dim=512 decode attention output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, headDim, numHeads, 1), "configuring head_dim=512 decode attention grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, headDim, 1, 1), "configuring head_dim=512 decode attention threadgroup");
 
-                    scaleArray = mlx_array_new_float32(scale);
-                    inputs = CreateVectorArray(qFlat, kCache, vCache, scaleArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running head_dim=512 decode attention");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("head_dim=512 decode attention kernel produced no output.");
+                NewKernelScalar(ref scaleArray, scale);
+                NewArrayVector(ref inputs, qFlat, kCache, vCache, scaleArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running head_dim=512 decode attention");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("head_dim=512 decode attention kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading head_dim=512 decode attention output");
-                    return result;
-                }
-                finally
-                {
-                    if (scaleArray.IsValid) _ = mlx_array_free(scaleArray);
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading head_dim=512 decode attention output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxFastMetalKernel EnsureQ8MatmulGeluMulKernel()
@@ -8511,39 +8290,35 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 matmul + GeluMul requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, weight, scales, biases, gate);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQ8MatmulGeluMulKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQ8MatmulGeluMulKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
 
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 matmul+gelumul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 matmul+gelumul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 matmul+gelumul threadgroup");
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 matmul+gelumul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 matmul+gelumul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 matmul+gelumul threadgroup");
 
-                    inputs = CreateVectorArray(input, weight, scales, biases, gate);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 matmul+gelumul kernel");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q8 matmul+gelumul kernel produced no output.");
+                NewArrayVector(ref inputs, input, weight, scales, biases, gate);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 matmul+gelumul kernel");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Q8 matmul+gelumul kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q8 matmul+gelumul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Q8 matmul+gelumul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxFastMetalKernel EnsureQ8MatmulKernel()
@@ -8587,39 +8362,35 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 matmul requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, weight, scales, biases);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQ8MatmulKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQ8MatmulKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
 
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 matmul threadgroup");
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 matmul threadgroup");
 
-                    inputs = CreateVectorArray(input, weight, scales, biases);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 matmul kernel");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q8 matmul kernel produced no output.");
+                NewArrayVector(ref inputs, input, weight, scales, biases);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 matmul kernel");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Q8 matmul kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q8 matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Q8 matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxFastMetalKernel EnsureQ8RmsNormMatmulKernel()
@@ -8662,42 +8433,37 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 RmsNorm+matmul requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 1, input, normWeight, weight, scales, biases);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQ8RmsNormMatmulKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                MlxArray epsArray = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray epsArray = ref resources.Scalars[0];
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQ8RmsNormMatmulKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
 
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 RmsNorm+matmul output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 RmsNorm+matmul grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 RmsNorm+matmul threadgroup");
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 RmsNorm+matmul output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 RmsNorm+matmul grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 RmsNorm+matmul threadgroup");
 
-                    epsArray = mlx_array_new_float32(eps);
-                    inputs = CreateVectorArray(input, normWeight, weight, scales, biases, epsArray);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 RmsNorm+matmul kernel");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q8 RmsNorm+matmul kernel produced no output.");
+                NewKernelScalar(ref epsArray, eps);
+                NewArrayVector(ref inputs, input, normWeight, weight, scales, biases, epsArray);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 RmsNorm+matmul kernel");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Q8 RmsNorm+matmul kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q8 RmsNorm+matmul output");
-                    return result;
-                }
-                finally
-                {
-                    if (epsArray.IsValid) _ = mlx_array_free(epsArray);
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Q8 RmsNorm+matmul output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         /// <summary>
@@ -8719,39 +8485,35 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 addmm+add requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            var resources = new KernelApplicationResources(1, 0, input, weight, scales, biases, residual);
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                MlxFastMetalKernel kernel = EnsureQ8AddmmAddKernel();
-                MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
-                MlxVectorArray inputs = default;
-                MlxVectorArray outputs = default;
-                try
-                {
-                    AddTemplateInt(config, "InDim", inDim);
-                    AddTemplateInt(config, "OutDim", outDim);
-                    AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
+                ref MlxFastMetalKernel kernel = ref resources.Kernel;
+                ref MlxFastMetalKernelConfig config = ref resources.Config;
+                ref MlxVectorArray inputs = ref resources.Inputs;
+                ref MlxVectorArray outputs = ref resources.Outputs;
+                ref MlxArray result = ref resources.Results[0];
+                kernel = EnsureQ8AddmmAddKernel();
+                NewKernelConfig(ref config);
+                AddTemplateInt(config, "InDim", inDim);
+                AddTemplateInt(config, "OutDim", outDim);
+                AddTemplateInt(config, "BlocksPerRow", blocksPerRow);
 
-                    int[] shape = { 1, outDim };
-                    Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 addmm+add output");
-                    Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 addmm+add grid");
-                    Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 addmm+add threadgroup");
+                int[] shape = { 1, outDim };
+                Check(mlx_fast_metal_kernel_config_add_output_arg(config, shape, (nuint)shape.Length, ToMlxDtype(DType.Float32)), "configuring Q8 addmm+add output");
+                Check(mlx_fast_metal_kernel_config_set_grid(config, 256, outDim, 1), "configuring Q8 addmm+add grid");
+                Check(mlx_fast_metal_kernel_config_set_thread_group(config, 256, 1, 1), "configuring Q8 addmm+add threadgroup");
 
-                    inputs = CreateVectorArray(input, weight, scales, biases, residual);
-                    outputs = mlx_vector_array_new();
-                    Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 addmm+add kernel");
-                    if (mlx_vector_array_size(outputs) < 1)
-                        throw new InvalidOperationException("Q8 addmm+add kernel produced no output.");
+                NewArrayVector(ref inputs, input, weight, scales, biases, residual);
+                NewArrayVector(ref outputs);
+                Check(mlx_fast_metal_kernel_apply(ref outputs, kernel, inputs, config, DefaultStream()), "running Q8 addmm+add kernel");
+                if (ArrayVectorSize(outputs) < 1)
+                    throw new InvalidOperationException("Q8 addmm+add kernel produced no output.");
 
-                    Check(mlx_vector_array_get(out MlxArray result, outputs, 0), "reading Q8 addmm+add output");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid) _ = mlx_vector_array_free(inputs);
-                    if (outputs.IsValid) _ = mlx_vector_array_free(outputs);
-                    if (config.IsValid) _ = mlx_fast_metal_kernel_config_free(config);
-                }
-            });
+                Check(mlx_vector_array_get(out result, outputs, 0), "reading Q8 addmm+add output");
+                resources.PrepareResults();
+                return result;
+            }, resources.Release);
         }
 
         private static MlxFastMetalKernel EnsureScatterAddWeightedRowsKernel()
@@ -9018,12 +8780,14 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             }
         }
 
-        private static unsafe MlxVectorArray CreateVectorArray(params MlxArray[] values)
+        private static unsafe void NewArrayVector(ref MlxVectorArray vector, params MlxArray[] values)
         {
+            ClearCapturedError();
             fixed (MlxArray* ptr = values)
             {
-                return mlx_vector_array_new_data((IntPtr)ptr, (nuint)values.Length);
+                vector = mlx_vector_array_new_data((IntPtr)ptr, (nuint)values.Length);
             }
+            CheckNativeValue(!vector.IsValid, "creating MLX kernel input vector");
         }
 
         private static void AddTemplateInt(MlxFastMetalKernelConfig config, string name, int value)

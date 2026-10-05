@@ -174,7 +174,15 @@ and depthwise-convolution helpers retain unreturned outputs and iteration refere
 checked cleanup; a failed accumulator release is not retried during unwinding. Zero-state
 initialization does not advance recurrence. Hidden acquisitions inside native custom kernels
 remain outside these caller carriers.
-All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
+All 44 custom-kernel config-owning application paths retain configs, input/output vectors,
+ten scalar references and sixty extracted output references before validation. The existing
+worker installs each carrier before acquisition. Checked cleanup clears only successful
+releases, preserves original and independent cleanup errors, and retains the actual remaining
+graph when unsafe. Single, tuple and multi-output methods return only after temporary cleanup
+succeeds. IQ4_XS/Q5_K/Q6_K fallback catches propagate recorded unsafe errors. Cached kernel
+construction, string vectors and cached-kernel retirement remain outside these application
+carriers; they do not establish all-used-stream completion or kernel-cache lifetime ownership.
+All-used-stream synchronization remains unfinished. Kernel construction, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
