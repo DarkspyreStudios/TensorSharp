@@ -24,9 +24,9 @@ namespace TensorSharp.MLX
     ///     expert when it is first routed in a matmul call.
     ///   - <see cref="MlxQuantizedOps"/> maintains an LRU over those "offloadable"
     ///     cache entries; when their resident byte total exceeds the configured
-    ///     ceiling, the oldest entries are evicted (their MLX arrays are freed via
-    ///     the FIFO-ordered worker, so any kernel currently using them completes
-    ///     before the free runs).
+    ///     ceiling, the oldest entries are evicted after checked all-stream
+    ///     completion. Active two-weight calls retain separate native array
+    ///     references while the cache releases its references.
     /// Non-expert weights (attention/embedding/lm_head) are NEVER offloaded — they
     /// are small in aggregate, hot on every forward, and remain permanently
     /// device-resident under the existing preload path.

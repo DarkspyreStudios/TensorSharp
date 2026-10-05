@@ -128,6 +128,9 @@ namespace TensorSharp.MLX
 
         // silu(x) = x * sigmoid(x). One fused kernel instead of two-op chain.
         public static MlxNative.MlxArray SiLU(MlxNative.MlxArray x)
+            => MlxWorker.Shared.Invoke(() => RunSiLU(x));
+
+        private static MlxNative.MlxArray RunSiLU(MlxNative.MlxArray x)
         {
             var c = EnsureCompiled(cache.siluClosure, inputs =>
             {
@@ -151,6 +154,9 @@ namespace TensorSharp.MLX
         // Currently produced eagerly via 13 op calls; once compiled, MLX
         // fuses into a single kernel.
         public static MlxNative.MlxArray GeluTanh(MlxNative.MlxArray x)
+            => MlxWorker.Shared.Invoke(() => RunGeluTanh(x));
+
+        private static MlxNative.MlxArray RunGeluTanh(MlxNative.MlxArray x)
         {
             var c = EnsureCompiled(cache.geluTanhClosure, inputs =>
             {
@@ -208,6 +214,9 @@ namespace TensorSharp.MLX
 
         // SwiGLU = silu(gate) * up. The common LLaMA/Qwen FFN activation.
         public static MlxNative.MlxArray SwiGLU(MlxNative.MlxArray gate, MlxNative.MlxArray up)
+            => MlxWorker.Shared.Invoke(() => RunSwiGLU(gate, up));
+
+        private static MlxNative.MlxArray RunSwiGLU(MlxNative.MlxArray gate, MlxNative.MlxArray up)
         {
             var c = EnsureCompiled(cache.swiGluClosure, inputs =>
             {
@@ -232,6 +241,9 @@ namespace TensorSharp.MLX
 
         // GeGLU = gelu(gate) * up. Used by Gemma family MLP and MoE paths.
         public static MlxNative.MlxArray GeGLU(MlxNative.MlxArray gate, MlxNative.MlxArray up)
+            => MlxWorker.Shared.Invoke(() => RunGeGLU(gate, up));
+
+        private static MlxNative.MlxArray RunGeGLU(MlxNative.MlxArray gate, MlxNative.MlxArray up)
         {
             var c = EnsureCompiled(cache.geGluClosure, inputs =>
             {
@@ -255,6 +267,9 @@ namespace TensorSharp.MLX
         // SigmoidMul = x * sigmoid(gate). Variant used by some attention
         // gating paths.
         public static MlxNative.MlxArray SigmoidMul(MlxNative.MlxArray x, MlxNative.MlxArray gate)
+            => MlxWorker.Shared.Invoke(() => RunSigmoidMul(x, gate));
+
+        private static MlxNative.MlxArray RunSigmoidMul(MlxNative.MlxArray x, MlxNative.MlxArray gate)
         {
             var c = EnsureCompiled(cache.sigmoidMulClosure, inputs =>
             {
@@ -284,6 +299,10 @@ namespace TensorSharp.MLX
             MlxNative.MlxArray weight,
             MlxNative.MlxArray scalar,
             float eps)
+            => MlxWorker.Shared.Invoke(() => RunRmsNormScaled(x, weight, scalar, eps));
+
+        private static MlxNative.MlxArray RunRmsNormScaled(
+            MlxNative.MlxArray x, MlxNative.MlxArray weight, MlxNative.MlxArray scalar, float eps)
         {
             var c = EnsureCompiled(cache.rmsNormScaledClosure, inputs =>
             {
@@ -319,6 +338,9 @@ namespace TensorSharp.MLX
         // The scalar is passed as a 0-D MLX array input so the same compiled
         // closure works regardless of its value (no per-call recompile).
         public static MlxNative.MlxArray AddScaled(MlxNative.MlxArray output, MlxNative.MlxArray src, MlxNative.MlxArray scalar)
+            => MlxWorker.Shared.Invoke(() => RunAddScaled(output, src, scalar));
+
+        private static MlxNative.MlxArray RunAddScaled(MlxNative.MlxArray output, MlxNative.MlxArray src, MlxNative.MlxArray scalar)
         {
             var c = EnsureCompiled(cache.addScaledClosure, inputs =>
             {

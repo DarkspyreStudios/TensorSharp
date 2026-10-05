@@ -203,6 +203,13 @@ dispatch failures remain on the real closure/work descriptor and propagate or lo
 freeing the unsafe graph. Deferred callbacks borrow a call lease only on its owning thread.
 This source path does not complete worker shutdown, rejected-queue handling or final parent
 retirement, and it does not qualify native callback/finalizer/concurrency behavior.
+Built-in compiled activations and quantized cache consumers keep lookup and use in one
+worker operation. Other queued cache clearing cannot release their entries between those
+steps. Two-weight MoE and dense-FFN calls retain separate native array references before
+loading the next weight; same-operation LRU eviction can release cache references without
+invalidating those active inputs. The existing acquisition carriers own partial aliases,
+and checked cleanup releases their actual references. This does not establish external
+host-backing lifetime, concurrent storage disposal safety or complete worker retirement.
 Allocator disposal sets its disposed flag only after device and backend cache cleanup
 succeed. These operations do not establish final cache/closure/model/worker retirement,
 queued-reader lifetime, external host-backing lifetime or native runtime qualification.

@@ -3466,6 +3466,17 @@ if (kind == 0) {
             array = default;
         }
 
+        internal static MlxArray RetainArrayReference(MlxArray array)
+        {
+            if (!array.IsValid) return default;
+            return AcquireArray(resources =>
+            {
+                NewArrayVector(ref resources.Vector);
+                Check(mlx_vector_array_append_value(resources.Vector, array), "retaining MLX array in reference vector");
+                Check(mlx_vector_array_get(out resources.Result, resources.Vector, 0), "retaining MLX array reference");
+            });
+        }
+
         internal static void FreeArray(MlxArray array)
         {
             if (!array.IsValid)
