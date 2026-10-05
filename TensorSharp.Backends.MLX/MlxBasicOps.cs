@@ -15,19 +15,13 @@ namespace TensorSharp.MLX
                 return;
             }
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(1, result);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    output = MlxNative.Full(ToIntArray(result.Sizes), value, result.ElementType);
-                    MlxStorage.SetDeviceResult(result, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray output = ref resources.Arrays[0];
+                output = MlxNative.Full(ToIntArray(result.Sizes), value, result.ElementType);
+                MlxStorage.SetDeviceResult(result, ref output);
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("copy", typeof(MlxStorage))]
@@ -39,31 +33,23 @@ namespace TensorSharp.MLX
                 return;
             }
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(3, result, src);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray casted = default;
-                MlxNative.MlxArray contiguous = default;
-                try
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray casted = ref resources.Arrays[1];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[2];
+                srcView = GetView(src);
+                MlxNative.MlxArray copySource = srcView;
+                if (src.ElementType != result.ElementType)
                 {
-                    srcView = GetView(src);
-                    MlxNative.MlxArray copySource = srcView;
-                    if (src.ElementType != result.ElementType)
-                    {
-                        casted = MlxNative.Astype(srcView, result.ElementType);
-                        copySource = casted;
-                    }
+                    casted = MlxNative.Astype(srcView, result.ElementType);
+                    copySource = casted;
+                }
 
-                    contiguous = MlxNative.Contiguous(copySource);
-                    MlxStorage.SetDeviceResult(result, ref contiguous);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(casted);
-                    MlxNative.FreeArray(contiguous);
-                }
-            });
+                contiguous = MlxNative.Contiguous(copySource);
+                MlxStorage.SetDeviceResult(result, ref contiguous);
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("addmm", typeof(MlxStorage))]
@@ -73,28 +59,19 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src, m1, m2))
                 return FallbackTensor("addmm", writeTarget, beta, src, alpha, m1, m2);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(4, writeTarget, src, m1, m2);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray m1View = default;
-                MlxNative.MlxArray m2View = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    srcView = GetView(src);
-                    m1View = GetView(m1);
-                    m2View = GetView(m2);
-                    output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(m1View);
-                    MlxNative.FreeArray(m2View);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray m1View = ref resources.Arrays[1];
+                ref MlxNative.MlxArray m2View = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                srcView = GetView(src);
+                m1View = GetView(m1);
+                m2View = GetView(m2);
+                output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -105,28 +82,19 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src, m1, m2))
                 return FallbackTensor("addmmbatch", writeTarget, beta, src, alpha, m1, m2);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(4, writeTarget, src, m1, m2);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray m1View = default;
-                MlxNative.MlxArray m2View = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    srcView = GetView(src);
-                    m1View = GetView(m1);
-                    m2View = GetView(m2);
-                    output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(m1View);
-                    MlxNative.FreeArray(m2View);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray m1View = ref resources.Arrays[1];
+                ref MlxNative.MlxArray m2View = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                srcView = GetView(src);
+                m1View = GetView(m1);
+                m2View = GetView(m2);
+                output = MlxNative.Addmm(srcView, m1View, m2View, alpha, beta);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -167,23 +135,18 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("relu", writeTarget, src);
 
-            MlxNative.MlxArray srcView = default;
-            MlxNative.MlxArray zero = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new BasicOperationResources(3, writeTarget, src);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray zero = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
                 srcView = GetView(src);
                 zero = MlxNative.NewScalar(0.0f);
                 output = MlxNative.Binary(MlxNative.MlxBinaryOp.Maximum, srcView, zero);
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
                 return writeTarget;
-            }
-            finally
-            {
-                MlxNative.FreeArray(srcView);
-                MlxNative.FreeArray(zero);
-                MlxNative.FreeArray(output);
-            }
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("SiLU", typeof(MlxStorage))]
@@ -193,11 +156,12 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("SiLU", writeTarget, src);
 
-            MlxNative.MlxArray srcView = default;
-            MlxNative.MlxArray sigmoid = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new BasicOperationResources(3, writeTarget, src);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray sigmoid = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
                 srcView = GetView(src);
                 if (!MlxCompiledOps.Disabled)
                 {
@@ -210,13 +174,7 @@ namespace TensorSharp.MLX
                 }
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
                 return writeTarget;
-            }
-            finally
-            {
-                MlxNative.FreeArray(srcView);
-                MlxNative.FreeArray(sigmoid);
-                MlxNative.FreeArray(output);
-            }
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("GELU", typeof(MlxStorage))]
@@ -226,10 +184,11 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("GELU", writeTarget, src);
 
-            MlxNative.MlxArray srcView = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new BasicOperationResources(2, writeTarget, src);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
                 srcView = GetView(src);
                 if (!MlxCompiledOps.Disabled)
                     output = MlxCompiledOps.GeluTanh(srcView);
@@ -237,12 +196,7 @@ namespace TensorSharp.MLX
                     output = Gelu(srcView);
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
                 return writeTarget;
-            }
-            finally
-            {
-                MlxNative.FreeArray(srcView);
-                MlxNative.FreeArray(output);
-            }
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("addt", typeof(MlxStorage))]
@@ -282,39 +236,29 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(gate, up))
                 return FallbackTensor("SiLUMul", writeTarget, gate, up);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(5, writeTarget, gate, up);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray gateView = default;
-                MlxNative.MlxArray upView = default;
-                MlxNative.MlxArray sigmoid = default;
-                MlxNative.MlxArray silu = default;
-                MlxNative.MlxArray output = default;
-                try
+                ref MlxNative.MlxArray gateView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray upView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray sigmoid = ref resources.Arrays[2];
+                ref MlxNative.MlxArray silu = ref resources.Arrays[3];
+                ref MlxNative.MlxArray output = ref resources.Arrays[4];
+                gateView = GetView(gate);
+                upView = GetView(up);
+                if (!MlxCompiledOps.Disabled)
                 {
-                    gateView = GetView(gate);
-                    upView = GetView(up);
-                    if (!MlxCompiledOps.Disabled)
-                    {
-                        // Single fused kernel: silu(gate) * up.
-                        output = MlxCompiledOps.SwiGLU(gateView, upView);
-                    }
-                    else
-                    {
-                        sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
-                        silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gateView, sigmoid);
-                        output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, upView);
-                    }
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
+                    // Single fused kernel: silu(gate) * up.
+                    output = MlxCompiledOps.SwiGLU(gateView, upView);
                 }
-                finally
+                else
                 {
-                    MlxNative.FreeArray(gateView);
-                    MlxNative.FreeArray(upView);
-                    MlxNative.FreeArray(sigmoid);
-                    MlxNative.FreeArray(silu);
-                    MlxNative.FreeArray(output);
+                    sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
+                    silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gateView, sigmoid);
+                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, upView);
                 }
-            });
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -336,14 +280,15 @@ namespace TensorSharp.MLX
             }
 
             int rows = checked((int)gateUp.Sizes[0]);
-            MlxNative.MlxArray gateUpView = default;
-            MlxNative.MlxArray gate = default;
-            MlxNative.MlxArray up = default;
-            MlxNative.MlxArray sigmoid = default;
-            MlxNative.MlxArray silu = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new BasicOperationResources(6, writeTarget, gateUp);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray gateUpView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray gate = ref resources.Arrays[1];
+                ref MlxNative.MlxArray up = ref resources.Arrays[2];
+                ref MlxNative.MlxArray sigmoid = ref resources.Arrays[3];
+                ref MlxNative.MlxArray silu = ref resources.Arrays[4];
+                ref MlxNative.MlxArray output = ref resources.Arrays[5];
                 gateUpView = GetView(gateUp);
                 gate = MlxNative.Slice(gateUpView, new[] { 0, 0 }, new[] { rows, halfDim }, new[] { 1, 1 });
                 up = MlxNative.Slice(gateUpView, new[] { 0, halfDim }, new[] { rows, halfDim * 2 }, new[] { 1, 1 });
@@ -359,16 +304,7 @@ namespace TensorSharp.MLX
                 }
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
                 return writeTarget;
-            }
-            finally
-            {
-                MlxNative.FreeArray(gateUpView);
-                MlxNative.FreeArray(gate);
-                MlxNative.FreeArray(up);
-                MlxNative.FreeArray(sigmoid);
-                MlxNative.FreeArray(silu);
-                MlxNative.FreeArray(output);
-            }
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("GELUMul", typeof(MlxStorage))]
@@ -378,12 +314,13 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(gate, up))
                 return FallbackTensor("GELUMul", writeTarget, gate, up);
 
-            MlxNative.MlxArray gateView = default;
-            MlxNative.MlxArray upView = default;
-            MlxNative.MlxArray gelu = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new BasicOperationResources(4, writeTarget, gate, up);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray gateView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray upView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray gelu = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
                 gateView = GetView(gate);
                 upView = GetView(up);
                 if (!MlxCompiledOps.Disabled)
@@ -397,14 +334,7 @@ namespace TensorSharp.MLX
                 }
                 MlxStorage.SetDeviceResult(writeTarget, ref output);
                 return writeTarget;
-            }
-            finally
-            {
-                MlxNative.FreeArray(gateView);
-                MlxNative.FreeArray(upView);
-                MlxNative.FreeArray(gelu);
-                MlxNative.FreeArray(output);
-            }
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("SigmoidMul", typeof(MlxStorage))]
@@ -414,35 +344,26 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(x, gate))
                 return FallbackTensor("SigmoidMul", writeTarget, x, gate);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(4, writeTarget, x, gate);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray xView = default;
-                MlxNative.MlxArray gateView = default;
-                MlxNative.MlxArray sigmoid = default;
-                MlxNative.MlxArray output = default;
-                try
+                ref MlxNative.MlxArray xView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray gateView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray sigmoid = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                xView = GetView(x);
+                gateView = GetView(gate);
+                if (!MlxCompiledOps.Disabled)
                 {
-                    xView = GetView(x);
-                    gateView = GetView(gate);
-                    if (!MlxCompiledOps.Disabled)
-                    {
-                        output = MlxCompiledOps.SigmoidMul(xView, gateView);
-                    }
-                    else
-                    {
-                        sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
-                        output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xView, sigmoid);
-                    }
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
+                    output = MlxCompiledOps.SigmoidMul(xView, gateView);
                 }
-                finally
+                else
                 {
-                    MlxNative.FreeArray(xView);
-                    MlxNative.FreeArray(gateView);
-                    MlxNative.FreeArray(sigmoid);
-                    MlxNative.FreeArray(output);
+                    sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gateView);
+                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xView, sigmoid);
                 }
-            });
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -453,22 +374,15 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("softmax", writeTarget, src);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(2, writeTarget, src);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    srcView = GetView(src);
-                    output = MlxNative.SoftmaxLastAxis(srcView);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
+                srcView = GetView(src);
+                output = MlxNative.SoftmaxLastAxis(srcView);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -571,51 +485,33 @@ namespace TensorSharp.MLX
             bool traditional = (mode & 2) == 0;
             int rows = (int)rowsLong;
             int features = (int)cols;
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(7, writeTarget, src, positions, result);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray positionsView = default;
-                MlxNative.MlxArray flattened = default;
-                MlxNative.MlxArray roped = default;
-                MlxNative.MlxArray reshaped = default;
-                MlxNative.MlxArray combined = default;
-                try
-                {
-                    srcView = GetView(src);
-                    positionsView = GetView(positions);
-                    flattened = MlxNative.Reshape(srcView, new[] { rows, 1, 1, features });
-                    roped = MlxNative.FastRopeDynamic(flattened, ropeDim, traditional, freqBase, freqScale, positionsView);
-                    reshaped = MlxNative.Reshape(roped, ToIntArray(src.Sizes));
+                ref MlxNative.MlxArray resultView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray positionsView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray flattened = ref resources.Arrays[3];
+                ref MlxNative.MlxArray roped = ref resources.Arrays[4];
+                ref MlxNative.MlxArray reshaped = ref resources.Arrays[5];
+                ref MlxNative.MlxArray combined = ref resources.Arrays[6];
+                srcView = GetView(src);
+                positionsView = GetView(positions);
+                flattened = MlxNative.Reshape(srcView, new[] { rows, 1, 1, features });
+                roped = MlxNative.FastRopeDynamic(flattened, ropeDim, traditional, freqBase, freqScale, positionsView);
+                reshaped = MlxNative.Reshape(roped, ToIntArray(src.Sizes));
 
-                    if (addToResult && result != null)
-                    {
-                        MlxNative.MlxArray resultView = default;
-                        try
-                        {
-                            resultView = GetView(result);
-                            combined = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, reshaped, resultView);
-                            MlxStorage.SetDeviceResult(writeTarget, ref combined);
-                        }
-                        finally
-                        {
-                            MlxNative.FreeArray(resultView);
-                        }
-                    }
-                    else
-                    {
-                        MlxStorage.SetDeviceResult(writeTarget, ref reshaped);
-                    }
-                }
-                finally
+                if (addToResult && result != null)
                 {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(positionsView);
-                    MlxNative.FreeArray(flattened);
-                    MlxNative.FreeArray(roped);
-                    MlxNative.FreeArray(reshaped);
-                    MlxNative.FreeArray(combined);
+                    resultView = GetView(result);
+                    combined = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, reshaped, resultView);
+                    MlxStorage.SetDeviceResult(writeTarget, ref combined);
                 }
-            });
+                else
+                {
+                    MlxStorage.SetDeviceResult(writeTarget, ref reshaped);
+                }
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -635,18 +531,19 @@ namespace TensorSharp.MLX
                 return FallbackTensor("scaled_dot_product_attention", writeTarget, query, key, value, mask, scale);
             }
 
-            MlxNative.MlxArray queryView = default;
-            MlxNative.MlxArray keyView = default;
-            MlxNative.MlxArray valueView = default;
-            MlxNative.MlxArray maskView = default;
-            MlxNative.MlxArray queryHeadMajor = default;
-            MlxNative.MlxArray keyHeadMajor = default;
-            MlxNative.MlxArray valueHeadMajor = default;
-            MlxNative.MlxArray attentionHeadMajor = default;
-            MlxNative.MlxArray attentionSeqMajor = default;
-            MlxNative.MlxArray contiguous = default;
-            try
+            var resources = new BasicOperationResources(10, writeTarget, query, key, value, mask);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray queryView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray keyView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray valueView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray maskView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray queryHeadMajor = ref resources.Arrays[4];
+                ref MlxNative.MlxArray keyHeadMajor = ref resources.Arrays[5];
+                ref MlxNative.MlxArray valueHeadMajor = ref resources.Arrays[6];
+                ref MlxNative.MlxArray attentionHeadMajor = ref resources.Arrays[7];
+                ref MlxNative.MlxArray attentionSeqMajor = ref resources.Arrays[8];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[9];
                 int[] headMajorAxes = { 0, 2, 1, 3 };
                 queryView = GetView(query);
                 keyView = GetView(key);
@@ -667,20 +564,7 @@ namespace TensorSharp.MLX
                 contiguous = MlxNative.Contiguous(attentionSeqMajor);
                 MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
                 return writeTarget;
-            }
-            finally
-            {
-                MlxNative.FreeArray(queryView);
-                MlxNative.FreeArray(keyView);
-                MlxNative.FreeArray(valueView);
-                MlxNative.FreeArray(maskView);
-                MlxNative.FreeArray(queryHeadMajor);
-                MlxNative.FreeArray(keyHeadMajor);
-                MlxNative.FreeArray(valueHeadMajor);
-                MlxNative.FreeArray(attentionHeadMajor);
-                MlxNative.FreeArray(attentionSeqMajor);
-                MlxNative.FreeArray(contiguous);
-            }
+            }, resources.Release);
         }
 
         [RegisterOpStorageType("indexselect", typeof(MlxStorage))]
@@ -697,28 +581,19 @@ namespace TensorSharp.MLX
                 return FallbackTensor("indexselect", writeTarget, src, indices, isAdd);
             }
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(4, writeTarget, src, indices);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray indicesView = default;
-                MlxNative.MlxArray output = default;
-                MlxNative.MlxArray contiguous = default;
-                try
-                {
-                    srcView = GetView(src);
-                    indicesView = GetView(indices);
-                    output = MlxNative.TakeAxis(srcView, indicesView, 0);
-                    contiguous = MlxNative.Contiguous(output);
-                    MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(indicesView);
-                    MlxNative.FreeArray(output);
-                    MlxNative.FreeArray(contiguous);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray indicesView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[3];
+                srcView = GetView(src);
+                indicesView = GetView(indices);
+                output = MlxNative.TakeAxis(srcView, indicesView, 0);
+                contiguous = MlxNative.Contiguous(output);
+                MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -738,25 +613,17 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("repeat_interleave", writeTarget, src, repeats, dim);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(3, writeTarget, src);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray output = default;
-                MlxNative.MlxArray contiguous = default;
-                try
-                {
-                    srcView = GetView(src);
-                    output = MlxNative.RepeatAxis(srcView, repeats, dim);
-                    contiguous = MlxNative.Contiguous(output);
-                    MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(output);
-                    MlxNative.FreeArray(contiguous);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[2];
+                srcView = GetView(src);
+                output = MlxNative.RepeatAxis(srcView, repeats, dim);
+                contiguous = MlxNative.Contiguous(output);
+                MlxStorage.SetDeviceResult(writeTarget, ref contiguous);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -767,28 +634,19 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src) || !AreOptionalFloat32(alpha, beta))
                 return FallbackTensor("layernorm", writeTarget, src, alpha, beta, eps);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(4, writeTarget, src, alpha, beta);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray alphaView = default;
-                MlxNative.MlxArray betaView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    srcView = GetView(src);
-                    alphaView = GetOptionalView(alpha);
-                    betaView = GetOptionalView(beta);
-                    output = MlxNative.FastLayerNorm(srcView, alphaView, betaView, eps);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(alphaView);
-                    MlxNative.FreeArray(betaView);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray alphaView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray betaView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                srcView = GetView(src);
+                alphaView = GetOptionalView(alpha);
+                betaView = GetOptionalView(beta);
+                output = MlxNative.FastLayerNorm(srcView, alphaView, betaView, eps);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -799,25 +657,17 @@ namespace TensorSharp.MLX
             if (beta != null || !CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src) || !AreOptionalFloat32(alpha))
                 return FallbackTensor("rmsnorm", writeTarget, src, alpha, beta, eps);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(3, writeTarget, src, alpha);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray alphaView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    srcView = GetView(src);
-                    alphaView = GetOptionalView(alpha);
-                    output = MlxNative.FastRmsNorm(srcView, alphaView, eps);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(alphaView);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray alphaView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
+                srcView = GetView(src);
+                alphaView = GetOptionalView(alpha);
+                output = MlxNative.FastRmsNorm(srcView, alphaView, eps);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -844,23 +694,24 @@ namespace TensorSharp.MLX
 
             int rows = (int)rowsLong;
             int keyLength = (int)cols;
-            MlxNative.MlxArray tensorView = default;
-            MlxNative.MlxArray scores2d = default;
-            MlxNative.MlxArray rowRange = default;
-            MlxNative.MlxArray row2d = default;
-            MlxNative.MlxArray seqScalar = default;
-            MlxNative.MlxArray rowInSequence = default;
-            MlxNative.MlxArray startScalar = default;
-            MlxNative.MlxArray threshold = default;
-            MlxNative.MlxArray colRange = default;
-            MlxNative.MlxArray col2d = default;
-            MlxNative.MlxArray futureMask = default;
-            MlxNative.MlxArray replacement = default;
-            MlxNative.MlxArray addScalar = default;
-            MlxNative.MlxArray maskedScores = default;
-            MlxNative.MlxArray reshaped = default;
-            try
+            var resources = new BasicOperationResources(15, tensor);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray tensorView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray scores2d = ref resources.Arrays[1];
+                ref MlxNative.MlxArray rowRange = ref resources.Arrays[2];
+                ref MlxNative.MlxArray row2d = ref resources.Arrays[3];
+                ref MlxNative.MlxArray seqScalar = ref resources.Arrays[4];
+                ref MlxNative.MlxArray rowInSequence = ref resources.Arrays[5];
+                ref MlxNative.MlxArray startScalar = ref resources.Arrays[6];
+                ref MlxNative.MlxArray threshold = ref resources.Arrays[7];
+                ref MlxNative.MlxArray colRange = ref resources.Arrays[8];
+                ref MlxNative.MlxArray col2d = ref resources.Arrays[9];
+                ref MlxNative.MlxArray futureMask = ref resources.Arrays[10];
+                ref MlxNative.MlxArray replacement = ref resources.Arrays[11];
+                ref MlxNative.MlxArray addScalar = ref resources.Arrays[12];
+                ref MlxNative.MlxArray maskedScores = ref resources.Arrays[13];
+                ref MlxNative.MlxArray reshaped = ref resources.Arrays[14];
                 tensorView = GetView(tensor);
                 scores2d = MlxNative.Reshape(tensorView, new[] { rows, keyLength });
                 rowRange = MlxNative.Arange(0, rows, 1, DType.Int32);
@@ -886,25 +737,7 @@ namespace TensorSharp.MLX
                 maskedScores = MlxNative.Where(futureMask, replacement, scores2d);
                 reshaped = MlxNative.Reshape(maskedScores, ToIntArray(tensor.Sizes));
                 MlxStorage.SetDeviceResult(tensor, ref reshaped);
-            }
-            finally
-            {
-                MlxNative.FreeArray(tensorView);
-                MlxNative.FreeArray(scores2d);
-                MlxNative.FreeArray(rowRange);
-                MlxNative.FreeArray(row2d);
-                MlxNative.FreeArray(seqScalar);
-                MlxNative.FreeArray(rowInSequence);
-                MlxNative.FreeArray(startScalar);
-                MlxNative.FreeArray(threshold);
-                MlxNative.FreeArray(colRange);
-                MlxNative.FreeArray(col2d);
-                MlxNative.FreeArray(futureMask);
-                MlxNative.FreeArray(replacement);
-                MlxNative.FreeArray(addScalar);
-                MlxNative.FreeArray(maskedScores);
-                MlxNative.FreeArray(reshaped);
-            }
+            }, resources.Release);
         }
 
         private static Tensor Unary(string opName, Tensor result, Tensor src, MlxNative.MlxUnaryOp op)
@@ -913,27 +746,16 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor(opName, writeTarget, src);
 
-            // Batch the entire sub-graph into one worker round-trip:
-            // GetView + Unary + SetDeviceResult + 2 FreeArrays are
-            // five separate queue hand-offs in the naive path. With a
-            // single outer Invoke they all run inline on the worker
-            // thread (IsOnWorkerThread short-circuits the queue).
-            MlxWorker.Shared.Invoke(() =>
+            // The sub-graph stays on the worker; native calls retain separate admission.
+            var resources = new BasicOperationResources(2, writeTarget, src);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    srcView = GetView(src);
-                    output = MlxNative.Unary(op, srcView);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
+                srcView = GetView(src);
+                output = MlxNative.Unary(op, srcView);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -943,25 +765,17 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(lhs, rhs))
                 return FallbackTensor(opName, writeTarget, lhs, rhs);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(3, writeTarget, lhs, rhs);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray lhsView = default;
-                MlxNative.MlxArray rhsView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    lhsView = GetView(lhs);
-                    rhsView = GetView(rhs);
-                    output = MlxNative.Binary(op, lhsView, rhsView);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(lhsView);
-                    MlxNative.FreeArray(rhsView);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray lhsView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray rhsView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
+                lhsView = GetView(lhs);
+                rhsView = GetView(rhs);
+                output = MlxNative.Binary(op, lhsView, rhsView);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
@@ -973,47 +787,40 @@ namespace TensorSharp.MLX
                     ? FallbackTensor(opName, writeTarget, scalar, tensor)
                     : FallbackTensor(opName, writeTarget, tensor, scalar);
 
-            MlxWorker.Shared.Invoke(() =>
+            var resources = new BasicOperationResources(3, writeTarget, tensor);
+            MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray tensorView = default;
-                MlxNative.MlxArray scalarArray = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    tensorView = GetView(tensor);
-                    scalarArray = MlxNative.NewScalar(scalar);
-                    output = scalarIsLhs
-                        ? MlxNative.Binary(op, scalarArray, tensorView)
-                        : MlxNative.Binary(op, tensorView, scalarArray);
-                    MlxStorage.SetDeviceResult(writeTarget, ref output);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(tensorView);
-                    MlxNative.FreeArray(scalarArray);
-                    MlxNative.FreeArray(output);
-                }
-            });
+                ref MlxNative.MlxArray tensorView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray scalarArray = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
+                tensorView = GetView(tensor);
+                scalarArray = MlxNative.NewScalar(scalar);
+                output = scalarIsLhs
+                    ? MlxNative.Binary(op, scalarArray, tensorView)
+                    : MlxNative.Binary(op, tensorView, scalarArray);
+                MlxStorage.SetDeviceResult(writeTarget, ref output);
+            }, resources.Release);
             return writeTarget;
         }
 
         private static MlxNative.MlxArray Gelu(MlxNative.MlxArray input)
         {
-            MlxNative.MlxArray coeffCubic = default;
-            MlxNative.MlxArray coeffInner = default;
-            MlxNative.MlxArray one = default;
-            MlxNative.MlxArray half = default;
-            MlxNative.MlxArray squared = default;
-            MlxNative.MlxArray cubed = default;
-            MlxNative.MlxArray scaledCubic = default;
-            MlxNative.MlxArray inner = default;
-            MlxNative.MlxArray scaledInner = default;
-            MlxNative.MlxArray tanh = default;
-            MlxNative.MlxArray onePlusTanh = default;
-            MlxNative.MlxArray halfInput = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new BasicOperationResources(13);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray coeffCubic = ref resources.Arrays[0];
+                ref MlxNative.MlxArray coeffInner = ref resources.Arrays[1];
+                ref MlxNative.MlxArray one = ref resources.Arrays[2];
+                ref MlxNative.MlxArray half = ref resources.Arrays[3];
+                ref MlxNative.MlxArray squared = ref resources.Arrays[4];
+                ref MlxNative.MlxArray cubed = ref resources.Arrays[5];
+                ref MlxNative.MlxArray scaledCubic = ref resources.Arrays[6];
+                ref MlxNative.MlxArray inner = ref resources.Arrays[7];
+                ref MlxNative.MlxArray scaledInner = ref resources.Arrays[8];
+                ref MlxNative.MlxArray tanh = ref resources.Arrays[9];
+                ref MlxNative.MlxArray onePlusTanh = ref resources.Arrays[10];
+                ref MlxNative.MlxArray halfInput = ref resources.Arrays[11];
+                ref MlxNative.MlxArray output = ref resources.Arrays[12];
                 coeffCubic = MlxNative.NewScalar(0.044715f);
                 coeffInner = MlxNative.NewScalar(0.7978845608f);
                 one = MlxNative.NewScalar(1.0f);
@@ -1028,25 +835,41 @@ namespace TensorSharp.MLX
                 onePlusTanh = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, one, tanh);
                 halfInput = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, half);
                 output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, halfInput, onePlusTanh);
-                MlxNative.MlxArray result = output;
-                output = default;
-                return result;
-            }
-            finally
+                resources.ReturnedIndex = 12;
+                return output;
+            }, resources.Release);
+        }
+
+        private sealed class BasicOperationResources : MlxNativeResources
+        {
+            internal readonly MlxNative.MlxArray[] Arrays;
+            internal int ReturnedIndex = -1;
+            private readonly Storage[] storages;
+
+            internal override bool HasNativeResources
             {
-                MlxNative.FreeArray(coeffCubic);
-                MlxNative.FreeArray(coeffInner);
-                MlxNative.FreeArray(one);
-                MlxNative.FreeArray(half);
-                MlxNative.FreeArray(squared);
-                MlxNative.FreeArray(cubed);
-                MlxNative.FreeArray(scaledCubic);
-                MlxNative.FreeArray(inner);
-                MlxNative.FreeArray(scaledInner);
-                MlxNative.FreeArray(tanh);
-                MlxNative.FreeArray(onePlusTanh);
-                MlxNative.FreeArray(halfInput);
-                MlxNative.FreeArray(output);
+                get
+                {
+                    foreach (MlxNative.MlxArray array in Arrays)
+                        if (array.IsValid) return true;
+                    return false;
+                }
+            }
+
+            internal BasicOperationResources(int referenceCount, params Tensor[] tensors)
+            {
+                Arrays = new MlxNative.MlxArray[referenceCount];
+                storages = new Storage[tensors.Length];
+                for (int i = 0; i < tensors.Length; i++)
+                    storages[i] = tensors[i]?.Storage;
+            }
+
+            internal void Release()
+            {
+                for (int i = 0; i < Arrays.Length; i++)
+                    if (i != ReturnedIndex)
+                        MlxNative.FreeArrayReference(ref Arrays[i]);
+                GC.KeepAlive(storages);
             }
         }
 

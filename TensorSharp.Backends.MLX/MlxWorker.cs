@@ -9,6 +9,7 @@ namespace TensorSharp.MLX
     internal abstract class MlxNativeResources
     {
         internal bool SafelyReleased;
+        internal virtual bool HasNativeResources => true;
         internal virtual NativeRuntimeFailureStage CleanupFailureStage => NativeRuntimeFailureStage.GraphRelease;
     }
 
@@ -114,35 +115,104 @@ namespace TensorSharp.MLX
                     try { result = operation(effect); }
                     catch (Exception original) { error = original; }
 
-                    bool unsafeCleanup = false;
-                    try { nativeOwner.ThrowIfQuarantined(); }
-                    catch (NativeRuntimeQuarantinedException refusal)
-                    {
-                        unsafeCleanup = true;
-                        if (error == null) error = refusal;
-                    }
-                    if (!unsafeCleanup)
-                    {
-                        try
-                        {
-                            cleanup();
-                            resources.SafelyReleased = true;
-                        }
-                        catch (Exception cleanupError)
-                        {
-                            error = MlxNative.JoinNativeErrors(error, cleanupError);
-                            try { effect.PublishFailure(this, cleanupError, resources.CleanupFailureStage); }
-                            catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
-                        }
-                    }
-                    if (error != null) ExceptionDispatchInfo.Capture(error).Throw();
-                    return result;
+                    return CompleteResources(resources, effect, result, error, cleanup);
                 }
                 finally
                 {
                     if (!started || resources.SafelyReleased) nativeResources.Remove(resources);
                 }
             });
+        }
+
+        internal void InvokeWithResources(MlxNativeResources resources, Action operation, Action cleanup)
+        {
+            ArgumentNullException.ThrowIfNull(operation);
+            InvokeWithResources(resources, () =>
+            {
+                operation();
+                return 0;
+            }, cleanup);
+        }
+
+        internal T InvokeWithResources<T>(MlxNativeResources resources, Func<T> operation, Action cleanup)
+        {
+            ArgumentNullException.ThrowIfNull(resources);
+            ArgumentNullException.ThrowIfNull(operation);
+            ArgumentNullException.ThrowIfNull(cleanup);
+            return Invoke(() =>
+            {
+                nativeResources.Add(resources);
+                bool started = false;
+                try
+                {
+                    nativeOwner.ThrowIfQuarantined();
+                    started = true;
+                    Exception error = null;
+                    T result = default;
+                    // Managed graph construction must not hold a native lease across compiled callbacks.
+                    try { result = operation(); }
+                    catch (Exception original) { error = original; }
+
+                    NativeEffectLease effect = null;
+                    try
+                    {
+                        nativeOwner.ThrowIfQuarantined();
+                        if (resources.HasNativeResources)
+                        {
+                            effect = nativeOwner.EnterEffect();
+                            MlxNative.InstallCurrentErrorHandler();
+                        }
+                    }
+                    catch (Exception admission)
+                    {
+                        if (error == null || !NativeQuarantineAuthority.TryGetFailure(admission, out _))
+                            error = MlxNative.JoinNativeErrors(error, admission);
+                        if (effect != null)
+                        {
+                            try { effect.PublishFailure(this, admission, resources.CleanupFailureStage); }
+                            catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                            finally { effect.Dispose(); }
+                        }
+                        ExceptionDispatchInfo.Capture(error).Throw();
+                    }
+                    using (effect)
+                        return CompleteResources(resources, effect, result, error, cleanup);
+                }
+                finally
+                {
+                    if (!started || resources.SafelyReleased) nativeResources.Remove(resources);
+                }
+            });
+        }
+
+        private T CompleteResources<T>(MlxNativeResources resources, NativeEffectLease effect, T result, Exception error, Action cleanup)
+        {
+            bool unsafeCleanup = false;
+            try { nativeOwner.ThrowIfQuarantined(); }
+            catch (NativeRuntimeQuarantinedException refusal)
+            {
+                unsafeCleanup = true;
+                if (error == null) error = refusal;
+            }
+            if (!unsafeCleanup)
+            {
+                try
+                {
+                    cleanup();
+                    resources.SafelyReleased = true;
+                }
+                catch (Exception cleanupError)
+                {
+                    error = MlxNative.JoinNativeErrors(error, cleanupError);
+                    if (effect != null)
+                    {
+                        try { effect.PublishFailure(this, cleanupError, resources.CleanupFailureStage); }
+                        catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                    }
+                }
+            }
+            if (error != null) ExceptionDispatchInfo.Capture(error).Throw();
+            return result;
         }
 
         private void Run()

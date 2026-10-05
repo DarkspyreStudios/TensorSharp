@@ -127,8 +127,16 @@ Ordinary scalar, unary, binary, view, gather, normalization, attention and quant
 factories use the same recovery carrier for native outputs before validation. Concatenation
 also owns its temporary native vector, checks its construction and release, and returns its
 output only after safe vector cleanup. No-copy host buffers remain borrowed.
+Basic operations retain acquired array references and their actual input/target storages in
+preinstalled worker-owned carriers. Graph construction keeps native calls separately admitted
+so compiled callbacks run without an outer ordinary native lease. Checked cleanup clears each
+released reference once and preserves the original operation plus an independent cleanup
+failure. Failed or refused cleanup retains the remaining references and storage graph. Empty
+reference cleanup has no native effect. The eager GELU helper returns its output only after
+all intermediate cleanup succeeds; failed cleanup retains its unreturned output.
 All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
-caller-level cleanup and replacement paths still require checked ownership recovery;
+fused/quantized/compiled-trace caller cleanup, tensor-owned child disposal and replacement
+paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
