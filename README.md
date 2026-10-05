@@ -96,7 +96,7 @@ through the process authority; safe completion removes its registration. Worker 
 rejection also records the unreleased owner, and synchronous worker errors retain their
 originating exception stack. The actual MLX worker registers in the same runtime scope.
 Ordinary synchronous native helpers enter an effect on the executing worker, including
-reentrant array frees. Dispatch from a different worker beneath an active native effect
+reentrant array frees. Synchronous dispatch from a different worker beneath an active native effect
 or compiled callback refuses before queueing. General managed `Invoke` calls do not hold
 a native gate across trace callbacks. Compiled closure calls, fire-and-forget async
 evaluation/closure cleanup and all-used-stream synchronization are not wired into this
