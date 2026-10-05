@@ -201,8 +201,17 @@ before the next queued operation; empty-reference retirement performs no native 
 Healthy same-owner Busy retains the object for a later registration attempt. Callback and
 dispatch failures remain on the real closure/work descriptor and propagate or log without
 freeing the unsafe graph. Deferred callbacks borrow a call lease only on its owning thread.
-This source path does not complete worker shutdown, rejected-queue handling or final parent
-retirement, and it does not qualify native callback/finalizer/concurrency behavior.
+Worker disposal queues one shared retirement action. Its publication fences new external
+calls while accepted reentrant work finishes inline. The action closes the queue after prior
+work drains and checks the actual retained resource collection. Concurrent and repeated
+disposals observe that same completion and error, then join the actual worker thread.
+Shutdown refuses self-join and cross-worker waits beneath native effects or compiled callbacks.
+Quarantine does not prevent a control-only retirement wait or authorize new native effects.
+Payload notifications during pending retirement leave their receipts on the actual holders
+for its final scan. Notifications after completion reject and retain their dispatch failure.
+Remaining native resources fail retirement and stay owned; thread exit does not report their
+safe release. Queue/thread retirement does not clear native caches or complete parent/worker
+registrations, model/allocator coordination or native callback/finalizer/concurrency qualification.
 Built-in compiled activations and quantized cache consumers keep lookup and use in one
 worker operation. Other queued cache clearing cannot release their entries between those
 steps. Two-weight MoE and dense-FFN calls retain separate native array references before

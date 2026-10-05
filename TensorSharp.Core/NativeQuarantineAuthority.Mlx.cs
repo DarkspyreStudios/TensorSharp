@@ -69,10 +69,29 @@ internal static partial class NativeQuarantineAuthority
         lock (registration.State[1])
         {
             ValidateMlxOwner(registration, registration.Owner, false);
-            int thread = Environment.CurrentManagedThreadId;
-            if (Frames(registration.State).ContainsKey(thread) || CallbackFrames(registration.State).ContainsKey(thread))
-                throw new InvalidOperationException("MLX native work cannot cross workers beneath an active native effect or compiled callback.");
+            ValidateMlxWorkerFrameBoundary(registration);
         }
+    }
+
+    internal static void ValidateMlxWorkerRetirementWait(NativeOwnerRegistration registration)
+    {
+        lock (registration.State[1])
+        {
+            // Quarantine refuses native effects, but does not prevent joining an owned thread.
+            ValidateRegistration(registration);
+            if ((int)registration.Cell[1] != (int)NativeOwnerRole.Worker
+                || ((HashSet<string>)registration.Cell[3]).Count != 1
+                || !((HashSet<string>)registration.Cell[3]).Contains(Mlx))
+                throw new InvalidOperationException("MLX retirement waits require the actual worker and its frozen shared-runtime scope.");
+            ValidateMlxWorkerFrameBoundary(registration);
+        }
+    }
+
+    private static void ValidateMlxWorkerFrameBoundary(NativeOwnerRegistration registration)
+    {
+        int thread = Environment.CurrentManagedThreadId;
+        if (Frames(registration.State).ContainsKey(thread) || CallbackFrames(registration.State).ContainsKey(thread))
+            throw new InvalidOperationException("MLX native work cannot cross workers beneath an active native effect or compiled callback.");
     }
 
     private static void ValidateMlxCells(object[] s)

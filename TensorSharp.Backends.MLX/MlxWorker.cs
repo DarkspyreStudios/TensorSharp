@@ -22,7 +22,7 @@ namespace TensorSharp.MLX
         private readonly Thread thread;
         private readonly NativeOwnerRegistration nativeOwner;
         private int workerThreadId;
-        private int disposed;
+        private WorkItem<int> retirement;
 
         public static MlxWorker Shared { get; } = new MlxWorker();
 
@@ -49,8 +49,6 @@ namespace TensorSharp.MLX
         {
             if (func == null)
                 throw new ArgumentNullException(nameof(func));
-            ThrowIfDisposed();
-
             // Re-entrant: we're already on the worker. Run inline, otherwise
             // we'd block waiting for ourselves.
             if (IsOnWorkerThread)
@@ -58,7 +56,11 @@ namespace TensorSharp.MLX
 
             NativeQuarantineAuthority.ValidateMlxWorkerDispatch(nativeOwner);
             var item = new WorkItem<T>(() => CompleteWork(func));
-            queue.Add(item);
+            lock (queue)
+            {
+                ThrowIfDisposed();
+                queue.Add(item);
+            }
             return item.GetResult();
         }
 
@@ -286,8 +288,14 @@ namespace TensorSharp.MLX
         internal void NotifyResourceRetirement(ResourceRetirementWork work)
         {
             // A callback posts metadata retirement without waiting beneath a native frame.
-            ThrowIfDisposed();
-            queue.Add(work);
+            lock (queue)
+            {
+                // The pending retirement already owns the final scan of these holders.
+                if (retirement != null && !retirement.IsCompleted)
+                    return;
+                ThrowIfDisposed();
+                queue.Add(work);
+            }
         }
 
         private T CompleteWork<T>(Func<T> func)
@@ -338,22 +346,77 @@ namespace TensorSharp.MLX
         private void Run()
         {
             Volatile.Write(ref workerThreadId, Thread.CurrentThread.ManagedThreadId);
-            foreach (IWorkItem item in queue.GetConsumingEnumerable())
-                item.Execute();
+            try
+            {
+                foreach (IWorkItem item in queue.GetConsumingEnumerable())
+                    item.Execute();
+            }
+            finally { Volatile.Write(ref workerThreadId, 0); }
         }
 
         private void ThrowIfDisposed()
         {
-            if (Volatile.Read(ref disposed) != 0)
+            if (retirement != null || queue.IsAddingCompleted)
                 throw new ObjectDisposedException(nameof(MlxWorker));
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref disposed, 1) != 0)
-                return;
+            if (IsOnWorkerThread)
+                throw new NativeMlxCallbackBusyException(this);
+            NativeQuarantineAuthority.ValidateMlxWorkerRetirementWait(nativeOwner);
 
-            queue.CompleteAdding();
+            WorkItem<int> pending = Volatile.Read(ref retirement);
+            if (pending == null)
+            {
+                var candidate = new WorkItem<int>(FinishQueueRetirement);
+                lock (queue)
+                {
+                    pending = retirement;
+                    if (pending == null)
+                    {
+                        queue.Add(candidate);
+                        Volatile.Write(ref retirement, candidate);
+                        pending = candidate;
+                    }
+                }
+            }
+
+            Exception error = null;
+            try { pending.GetResult(); }
+            catch (Exception original) { error = original; }
+            try { thread.Join(); }
+            catch (Exception join) { error = MlxNative.JoinNativeErrors(error, join); }
+            if (error != null) ExceptionDispatchInfo.Capture(error).Throw();
+        }
+
+        private int FinishQueueRetirement()
+        {
+            lock (queue) queue.CompleteAdding();
+            try
+            {
+                nativeOwner.ThrowIfQuarantined();
+                for (int i = nativeResources.Count - 1; i >= 0; i--)
+                    RetireResource(nativeResources[i]);
+                if (nativeResources.Count != 0)
+                    throw new InvalidOperationException("MLX worker still owns native resources after accepted work drained.");
+                return 0;
+            }
+            catch (Exception original)
+            {
+                Exception error = original;
+                if (!NativeQuarantineAuthority.TryGetFailure(original, out _))
+                {
+                    try
+                    {
+                        using NativeEffectLease effect = nativeOwner.EnterEffect();
+                        effect.PublishFailure(this, original, NativeRuntimeFailureStage.WorkerRetirement);
+                    }
+                    catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                }
+                ExceptionDispatchInfo.Capture(error).Throw();
+                throw;
+            }
         }
 
         internal interface IWorkItem
@@ -372,6 +435,8 @@ namespace TensorSharp.MLX
             {
                 this.func = func;
             }
+
+            internal bool IsCompleted => completed.IsSet;
 
             public void Execute()
             {
