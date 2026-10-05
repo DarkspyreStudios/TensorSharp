@@ -73,6 +73,12 @@ the construction error plus any cleanup error. The pipeline preserves operation 
 cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
 Other standalone vision constructors
 and family replacement paths do not gain those guarantees from this integration.
+Qwen35 and Qwen4Exp retain every vision child before its constructor acquires resources.
+A successful construction publishes the active child; a failure leaves the previous
+active child unchanged. The parent owns partial and replaced children until its coordinated
+retirement collects and releases all of them before the allocator. Replacement does not
+immediately reclaim the previous child's memory. The active reference and retained collection
+clear only after all child releases succeed.
 CUDA allocation reclaims pooled memory only outside current-thread native effects.
 A nested allocation OOM preserves its CUDA error and unwinds without collecting,
 waiting for finalizers or retrying beneath the caller's admitted native frame.

@@ -1783,7 +1783,7 @@ namespace TensorSharp.Models
             ModelDisposalOwnership.AddRange(ownedTensors, _gdnStateT);
             ModelDisposalOwnership.Add(ownedTensors, _moeScratchGate, _moeScratchUp, _moeScratchDown);
             foreach (var (embedding, _) in _visionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
-            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
+            foreach (var encoder in _ownedVisionEncoders) encoder.CollectDisposalOwnership(ownedTensors);
             void AddHolder(Qwen4ExpKvCacheHolder holder)
             {
                 if (holder == null) return;
@@ -1817,7 +1817,9 @@ namespace TensorSharp.Models
         {
             DisposeMtpHead();
             ReleaseSpecSnapshot();
-            VisionEncoder?.DisposeOwned();
+            foreach (var encoder in _ownedVisionEncoders) encoder.DisposeOwned();
+            _ownedVisionEncoders.Clear();
+            VisionEncoder = null;
             foreach (var (embedding, _) in _visionEmbeddingsList) embedding?.Dispose();
             _visionEmbeddingsList.Clear();
             _moeScratchGate?.Dispose();

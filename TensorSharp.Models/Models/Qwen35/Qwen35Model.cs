@@ -362,6 +362,7 @@ namespace TensorSharp.Models
 
         // Vision encoder
         public Qwen35VisionEncoder VisionEncoder { get; private set; }
+        private readonly List<Qwen35VisionEncoder> _ownedVisionEncoders = new();
         private List<(Tensor embeddings, int position)> _visionEmbeddingsList = new();
 
         // Set QWEN35_DISABLE_FUSED_FFN=1 to disable the fully fused dense FFN graph
@@ -6299,8 +6300,15 @@ namespace TensorSharp.Models
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
-            VisionEncoder = new Qwen35VisionEncoder(mmProjPath, _allocator);
-            VisionEncoder.SetHostModel(this);
+            _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
+            var encoder = new Qwen35VisionEncoder(mmProjPath, _allocator, false, RetainVisionConstruction);
+            VisionEncoder = encoder;
+        }
+
+        private void RetainVisionConstruction(Qwen35VisionEncoder encoder)
+        {
+            _ownedVisionEncoders.Add(encoder);
+            encoder.SetHostModel(this);
         }
 
         public void SetVisionEmbeddings(Tensor visionEmbeddings, int startPosition)
@@ -6484,7 +6492,7 @@ namespace TensorSharp.Models
             if (_holderPool != null) foreach (var holder in _holderPool) AddHolder(holder);
             AddHolder(_primaryHolder);
             foreach (var (embedding, _) in _visionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
-            VisionEncoder?.CollectDisposalOwnership(ownedTensors);
+            foreach (var encoder in _ownedVisionEncoders) encoder.CollectDisposalOwnership(ownedTensors);
             _cudaPrefillGraphs?.CollectDisposalOwnership(ownedTensors);
             CollectDFlashDisposalOwnership(ownedTensors);
         }
@@ -6535,7 +6543,9 @@ namespace TensorSharp.Models
 
             DisposeDFlash();
 
-            VisionEncoder?.DisposeOwned();
+            foreach (var encoder in _ownedVisionEncoders) encoder.DisposeOwned();
+            _ownedVisionEncoders.Clear();
+            VisionEncoder = null;
             foreach (var (visionEmbeddings, _) in _visionEmbeddingsList)
                 visionEmbeddings?.Dispose();
             _visionEmbeddingsList.Clear();

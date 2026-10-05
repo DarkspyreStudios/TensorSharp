@@ -20,6 +20,7 @@ namespace TensorSharp.Models
         // (in this checkpoint) no active deepstack layers - so the proven Qwen3.5
         // encoder runs it as is.
         public Qwen35VisionEncoder VisionEncoder { get; private set; }
+        private readonly List<Qwen35VisionEncoder> _ownedVisionEncoders = new();
 
         // The GDN recurrence, the PLE conv history and the n-gram history cannot be
         // rewound to an earlier position, so a cached prefix is only reusable when
@@ -48,8 +49,15 @@ namespace TensorSharp.Models
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
-            VisionEncoder = new Qwen35VisionEncoder(mmProjPath, _allocator);
-            VisionEncoder.SetHostModel(this);
+            _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
+            var encoder = new Qwen35VisionEncoder(mmProjPath, _allocator, false, RetainVisionConstruction);
+            VisionEncoder = encoder;
+        }
+
+        private void RetainVisionConstruction(Qwen35VisionEncoder encoder)
+        {
+            _ownedVisionEncoders.Add(encoder);
+            encoder.SetHostModel(this);
         }
 
         private readonly List<(Tensor Embeddings, int StartPosition)> _visionEmbeddingsList = new();
