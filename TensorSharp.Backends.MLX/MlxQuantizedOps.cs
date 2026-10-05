@@ -83,6 +83,7 @@ namespace TensorSharp.MLX
         private sealed class WeightCacheRuntime
         {
             internal readonly Dictionary<CacheKey, LinkedListNode<DeviceWeight>> Cache = new();
+            internal readonly Dictionary<CacheKey, StackedAffineWeight> StackedCache = new();
             internal readonly LinkedList<DeviceWeight> OffloadLru = new();
             internal long ResidentBytes;
             internal readonly NativeOwnerRegistration NativeOwner;
@@ -96,6 +97,8 @@ namespace TensorSharp.MLX
             internal bool HasDevice(int deviceId)
             {
                 foreach (CacheKey key in Cache.Keys)
+                    if (key.DeviceId == deviceId) return true;
+                foreach (CacheKey key in StackedCache.Keys)
                     if (key.DeviceId == deviceId) return true;
                 return false;
             }
@@ -588,11 +591,18 @@ namespace TensorSharp.MLX
                 return;
 
             var key = new CacheKey(deviceId, cacheKey);
-            weightCache.Release(() => weightCache.Cache.ContainsKey(key), () =>
+            weightCache.Release(() => weightCache.Cache.ContainsKey(key) || weightCache.StackedCache.ContainsKey(key), () =>
             {
-                LinkedListNode<DeviceWeight> node = weightCache.Cache[key];
-                EvictNodeLocked(node);
-                weightCache.Cache.Remove(key);
+                if (weightCache.Cache.TryGetValue(key, out LinkedListNode<DeviceWeight> node))
+                {
+                    EvictNodeLocked(node);
+                    weightCache.Cache.Remove(key);
+                }
+                if (weightCache.StackedCache.TryGetValue(key, out StackedAffineWeight stacked))
+                {
+                    stacked.Dispose();
+                    weightCache.StackedCache.Remove(key);
+                }
             });
         }
 
@@ -600,14 +610,22 @@ namespace TensorSharp.MLX
         {
             weightCache.Release(() => weightCache.HasDevice(deviceId), () =>
             {
-                List<CacheKey> remove = new();
+                List<CacheKey> remove = new(weightCache.Cache.Count);
+                List<CacheKey> removeStacked = new(weightCache.StackedCache.Count);
                 foreach (CacheKey key in weightCache.Cache.Keys)
                     if (key.DeviceId == deviceId) remove.Add(key);
+                foreach (CacheKey key in weightCache.StackedCache.Keys)
+                    if (key.DeviceId == deviceId) removeStacked.Add(key);
 
                 foreach (CacheKey key in remove)
                 {
                     EvictNodeLocked(weightCache.Cache[key]);
                     weightCache.Cache.Remove(key);
+                }
+                foreach (CacheKey key in removeStacked)
+                {
+                    weightCache.StackedCache[key].Dispose();
+                    weightCache.StackedCache.Remove(key);
                 }
             });
         }
@@ -2320,7 +2338,7 @@ namespace TensorSharp.MLX
         //  e-th [out, in] slice — so it is numerically the same as the per-expert path (verified at
         //  runtime by the caller's self-check).
         // ============================================================================
-        internal sealed class StackedAffineWeight
+        internal sealed class StackedAffineWeight : IDisposable
         {
             public MlxNative.MlxArray Weight;   // [E, out, in_packed_u32]
             public MlxNative.MlxArray Scales;   // [E, out, in/group] f16 (affine) / u8 e8m0 (mxfp4)
@@ -2328,9 +2346,14 @@ namespace TensorSharp.MLX
             public int GroupSize;
             public int Bits;
             public string Mode = MlxAffineMode;
-        }
 
-        private static readonly Dictionary<CacheKey, StackedAffineWeight> StackedCache = new();
+            public void Dispose()
+            {
+                MlxNative.FreeArrayReference(ref Weight);
+                MlxNative.FreeArrayReference(ref Scales);
+                MlxNative.FreeArrayReference(ref Biases);
+            }
+        }
 
         /// <summary>Build (once, cached) the stacked MLX quantized weight [E, out, in] for a layer's
         /// experts, directly from the stacked GGUF tensor bytes. Q4_K -> affine 4-bit/group-32,
@@ -2341,11 +2364,13 @@ namespace TensorSharp.MLX
             float[] perExpertScale = null)
         {
             var key = new CacheKey(deviceId, cacheKey);
-            lock (Sync)
+            StackedAffineWeight cached = MlxWorker.Shared.Invoke(() =>
             {
-                if (StackedCache.TryGetValue(key, out var existing))
-                    return existing;
-            }
+                weightCache.NativeOwner.ThrowIfQuarantined();
+                lock (Sync)
+                    return weightCache.StackedCache.TryGetValue(key, out var existing) ? existing : null;
+            });
+            if (cached != null) return cached;
             if (data == IntPtr.Zero) return null;
 
             int groupSize = 32;
@@ -2494,58 +2519,49 @@ namespace TensorSharp.MLX
             }
 
             var resources = new WeightAcquisitionResources<StackedAffineWeight>();
-            StackedAffineWeight result = MlxWorker.Shared.InvokeNative(resources, effect =>
+            return MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                ref MlxNative.MlxArray w = ref resources.Weight;
-                ref MlxNative.MlxArray s = ref resources.Scales;
-                ref MlxNative.MlxArray b = ref resources.Biases;
-                fixed (byte* pp = packed)
-                fixed (System.Half* sp = scales)
-                fixed (byte* su = scalesU8)
-                fixed (System.Half* bp = biases)
-                {
-                    w = MlxNative.NewArrayFromHostUInt32((IntPtr)pp, new[] { numExperts, outDim, inPackedU32 });
-                    s = scalesU8 != null
-                        ? MlxNative.NewArrayFromHost((IntPtr)su, new[] { numExperts, outDim, groups }, DType.UInt8)
-                        : MlxNative.NewArrayFromHost((IntPtr)sp, new[] { numExperts, outDim, groups }, DType.Float16);
-                    if (biases != null)
-                        b = MlxNative.NewArrayFromHost((IntPtr)bp, new[] { numExperts, outDim, groups }, DType.Float16);
-                }
-                MlxNative.Eval(w); MlxNative.Eval(s);
-                if (b.IsValid) MlxNative.Eval(b);
-                resources.Result = new StackedAffineWeight { Weight = w, Scales = s, Biases = b, GroupSize = groupSize, Bits = bits, Mode = mode };
-                resources.Prepared = true;
-                return resources.Result;
-            }, resources.Release);
-
-            var publication = new WeightAcquisitionResources<StackedAffineWeight>
-            {
-                Weight = result.Weight,
-                Scales = result.Scales,
-                Biases = result.Biases,
-                Result = result,
-            };
-            return MlxWorker.Shared.InvokeNative(publication, effect =>
-            {
+                weightCache.NativeOwner.ThrowIfQuarantined();
                 lock (Sync)
                 {
-                    if (StackedCache.TryGetValue(key, out var raced))
+                    if (weightCache.StackedCache.TryGetValue(key, out var raced))
                         return raced;
+                    weightCache.StackedCache.EnsureCapacity(checked(weightCache.StackedCache.Count + 1));
+
+                    ref MlxNative.MlxArray w = ref resources.Weight;
+                    ref MlxNative.MlxArray s = ref resources.Scales;
+                    ref MlxNative.MlxArray b = ref resources.Biases;
+                    fixed (byte* pp = packed)
+                    fixed (System.Half* sp = scales)
+                    fixed (byte* su = scalesU8)
+                    fixed (System.Half* bp = biases)
+                    {
+                        w = MlxNative.NewArrayFromHostUInt32((IntPtr)pp, new[] { numExperts, outDim, inPackedU32 });
+                        s = scalesU8 != null
+                            ? MlxNative.NewArrayFromHost((IntPtr)su, new[] { numExperts, outDim, groups }, DType.UInt8)
+                            : MlxNative.NewArrayFromHost((IntPtr)sp, new[] { numExperts, outDim, groups }, DType.Float16);
+                        if (biases != null)
+                            b = MlxNative.NewArrayFromHost((IntPtr)bp, new[] { numExperts, outDim, groups }, DType.Float16);
+                    }
+                    MlxNative.Eval(w); MlxNative.Eval(s);
+                    if (b.IsValid) MlxNative.Eval(b);
+                    resources.Result = new StackedAffineWeight { Weight = w, Scales = s, Biases = b, GroupSize = groupSize, Bits = bits, Mode = mode };
+                    using NativeEffectLease publication = weightCache.NativeOwner.EnterEffect();
                     try
                     {
-                        StackedCache[key] = result;
-                        publication.Prepared = true;
+                        weightCache.StackedCache.Add(key, resources.Result);
+                        resources.Prepared = true;
                     }
                     catch (Exception original)
                     {
                         Exception error = original;
-                        try { effect.PublishFailure(MlxWorker.Shared, original, NativeRuntimeFailureStage.CacheRelease); }
+                        try { publication.PublishFailure(weightCache, original, NativeRuntimeFailureStage.CacheRelease); }
                         catch (Exception failure) { error = MlxNative.JoinNativeErrors(error, failure); }
                         ExceptionDispatchInfo.Capture(error).Throw();
                     }
-                    return result;
+                    return resources.Result;
                 }
-            }, publication.Release);
+            }, resources.Release);
         }
 
         // ============================================================================
@@ -2716,7 +2732,8 @@ namespace TensorSharp.MLX
             {
                 return EnsureStackedAffine(deviceId, cacheKey, data, ggmlType, inDim, outDim, numExperts, totalBytes) != null;
             }
-            catch
+            catch (Exception error) when (error is not NativeMlxCallbackBusyException
+                && !NativeQuarantineAuthority.TryGetFailure(error, out _))
             {
                 return false;
             }

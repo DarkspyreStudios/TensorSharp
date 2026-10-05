@@ -161,7 +161,7 @@ Aligned frees clear only buffers whose release returns successfully. A recorded 
 failure prevents cleanup replay and preserves the actual remaining arrays, buffers and result.
 Packing recipes and caller-owned no-copy backing remain unchanged. Construction recovery
 does not establish external-backing lifetime or GPU completion.
-One registered parent owns the ordinary weight dictionary, offload LRU and existing byte
+One registered parent owns the ordinary and stacked weight dictionaries, offload LRU and existing byte
 accounting. Lookup and mutation run on the worker before taking the existing cache lock.
 Cold publication reserves the node and dictionary capacity before acquiring a weight.
 The worker carrier retains the unreturned entry. A native ownership effect covers actual
@@ -172,8 +172,13 @@ Key release, device clearing and LRU eviction reserve the actual cache parent be
 dispatch. Nonempty release waits for the real all-stream snapshot before freeing arrays.
 Each successful free clears its field; dictionary/LRU/accounting changes follow checked
 release. Partial failure retains the remaining entry and records its actual stage.
-Stacked publication runs on the worker before the cache lock. Its real result carrier
-owns a lost-race entry through checked cleanup and retains it on failure.
+Stacked lookup and publication run on the worker before the cache lock. The real construction
+carrier retains all arrays until the existing parent dictionary accepts the result. A second
+lookup before acquisition reuses a concurrent winner without constructing a lost-race entry.
+Publication and construction share one worker call; failed publication retains the actual
+parent and remaining arrays. Per-key and device cleanup release both weight dictionaries
+after the reserved all-stream boundary. Stacked cleanup clears only checked-success fields.
+Stacked preload propagates Busy and retained unsafe failures without reporting fallback.
 Allocator disposal sets its disposed flag only after device and backend cache cleanup
 succeed. These operations do not establish final cache/closure/model/worker retirement,
 queued-reader lifetime, external host-backing lifetime or native runtime qualification.
