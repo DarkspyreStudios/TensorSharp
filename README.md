@@ -93,6 +93,8 @@ Parent-owned GGUF readers attach to the child before opening their files. Split 
 reserve collection capacity and attach each sibling before opening it. Header or shard
 parse failure preserves the actual readers for the child's coordinated release, including
 readers whose constructors never return. Standalone readers still release on construction failure.
+Gemma4's parent-owned safetensors reader uses the same pre-acquisition attachment. Its header
+stream remains reachable after parse failure and clears only after successful close.
 MLX CPU fallback keeps input views, mapped CPU tensors and unreturned results in the
 worker's existing resource carrier before conversion or dispatch. Duplicate arguments
 share the same mapped view, and explicit output tensors retain their caller identity.

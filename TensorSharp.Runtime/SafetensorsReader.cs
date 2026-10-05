@@ -90,11 +90,27 @@ namespace TensorSharp.Runtime
         private MemoryMappedViewAccessor? _mappedView;
         private unsafe byte* _mappedBase;
         private bool _mappedPointerAcquired;
+        private FileStream? _constructionStream;
 
-        public SafetensorsFile(string path)
+        public SafetensorsFile(string path) : this(path, retainConstruction: null) { }
+
+        internal SafetensorsFile(string path, Action<SafetensorsFile>? retainConstruction)
         {
             Path = path;
-            ParseHeader();
+            retainConstruction?.Invoke(this);
+            _constructionStream = File.OpenRead(Path);
+            try
+            {
+                using var bounded = new MetadataReadStream(_constructionStream, 64 * 1024 * 1024);
+                ParseHeader(bounded);
+            }
+            catch
+            {
+                if (retainConstruction == null) Dispose();
+                throw;
+            }
+            _constructionStream.Dispose();
+            _constructionStream = null;
         }
 
         private SafetensorsFile() { Path = string.Empty; }
@@ -108,13 +124,6 @@ namespace TensorSharp.Runtime
             file.ParseHeader(bounded);
             return new(new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(file.Metadata),
                 new System.Collections.ObjectModel.ReadOnlyDictionary<string, SafetensorTensorInfo>(file.Tensors), file.DataOffset, source.Length);
-        }
-
-        private void ParseHeader()
-        {
-            using var fs = File.OpenRead(Path);
-            using var bounded = new MetadataReadStream(fs, 64 * 1024 * 1024);
-            ParseHeader(bounded);
         }
 
         private void ParseHeader(MetadataReadStream fs)
@@ -319,6 +328,8 @@ namespace TensorSharp.Runtime
             _mappedView = null;
             _mappedFile?.Dispose();
             _mappedFile = null;
+            _constructionStream?.Dispose();
+            _constructionStream = null;
         }
     }
 

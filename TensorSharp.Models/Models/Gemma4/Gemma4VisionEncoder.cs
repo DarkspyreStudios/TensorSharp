@@ -147,7 +147,9 @@ namespace TensorSharp.Models
             TowerSpec spec;
             if (IsSafetensorsProjector(projectorPath))
             {
-                safetensors = _constructionSafetensors = new SafetensorsFile(projectorPath);
+                safetensors = _constructionSafetensors = retainConstruction == null
+                    ? new SafetensorsFile(projectorPath)
+                    : new SafetensorsFile(projectorPath, file => _constructionSafetensors = file);
                 spec = ReadSafetensorsSpec(safetensors, projectorPath);
             }
             else
