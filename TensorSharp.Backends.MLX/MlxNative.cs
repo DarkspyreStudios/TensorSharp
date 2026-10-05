@@ -3546,8 +3546,6 @@ if (kind == 0) {
             internal override bool RetireReleasedPayload()
             {
                 if (SafelyReleased) return true;
-                try { NativeOwner.ThrowIfQuarantined(); }
-                catch (NativeRuntimeQuarantinedException) { return false; }
 
                 Exception error;
                 bool ready;
@@ -3566,6 +3564,8 @@ if (kind == 0) {
                 {
                     if (error != null)
                         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+                    try { NativeOwner.ThrowIfQuarantined(); }
+                    catch (NativeRuntimeQuarantinedException) { return false; }
                     if (!ready) return false;
                     // All actual references are already gone; only registration retirement remains.
                     FreeCompiledClosure(this);
