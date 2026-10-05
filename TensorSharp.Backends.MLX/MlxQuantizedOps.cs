@@ -631,6 +631,28 @@ namespace TensorSharp.MLX
             });
         }
 
+        internal static void ReleaseCompiledClosuresAfterSynchronization()
+        {
+            if (!WeightCache.IsValueCreated) return;
+            using NativeMlxReleaseReservation reservation = weightCache.NativeOwner.ReserveMlxRelease(weightCache);
+            MlxWorker.Shared.Invoke(() =>
+            {
+                using (NativeEffectLease validation = reservation.EnterEffect())
+                    validation.ValidateMlxRelease(weightCache, reservation);
+                lock (Sync)
+                {
+                    List<FusedFFNCacheKey> remove = new(weightCache.FusedFFNClosures.Keys);
+                    foreach (FusedFFNCacheKey key in remove)
+                    {
+                        FusedFFNClosureSlot slot = weightCache.FusedFFNClosures[key];
+                        MlxNative.FreeCompiledClosure(slot.Closure);
+                        slot.Closure = null;
+                        weightCache.FusedFFNClosures.Remove(key);
+                    }
+                }
+            });
+        }
+
         private static void EvictNodeLocked(LinkedListNode<DeviceWeight> node)
         {
             DeviceWeight entry = node.Value;

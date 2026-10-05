@@ -184,6 +184,16 @@ its real slot before closure creation, reserves dictionary capacity first and pu
 only after checked construction returns. Publication failure retains the actual graph.
 Unpublished closure cleanup uses its own callback-aware release authority without an outer
 ordinary native effect. Cache lookup, construction and publication share one worker call.
+The seven built-in compiled slots belong to one registered parent and keep their existing
+trace recipes. Their worker carriers retain each closure until slot publication succeeds.
+Backend cache clearing keeps its destructive reservation through all-stream synchronization,
+ends the ordinary effect, then releases built-in and dense-FFN cached closure references
+through each actual closure's callback-aware authority. Cache fields and dictionary entries
+clear only after checked release. Kernel, stream and allocator cleanup follows in a new
+effect under the same worker reservation. A failed phase stops later cleanup.
+Native data can retain a released closure's payload; its actual handle owner remains active
+until the deferred payload is retired. Cache clearing does not establish final registration
+retirement, queued-reader safety or complete worker/model cleanup.
 Allocator disposal sets its disposed flag only after device and backend cache cleanup
 succeed. These operations do not establish final cache/closure/model/worker retirement,
 queued-reader lifetime, external host-backing lifetime or native runtime qualification.

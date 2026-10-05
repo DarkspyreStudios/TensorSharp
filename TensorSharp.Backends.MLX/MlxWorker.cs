@@ -101,14 +101,30 @@ namespace TensorSharp.MLX
             using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
             Invoke(() =>
             {
+                using (NativeEffectLease synchronization = reservation.EnterEffect())
+                {
+                    synchronization.ValidateMlxRelease(this, reservation);
+                    MlxNative.InstallCurrentErrorHandler();
+                    try { MlxNative.SynchronizeAllUsedStreams(); }
+                    catch (Exception original)
+                    {
+                        Exception error = original;
+                        try { synchronization.PublishFailure(this, original, NativeRuntimeFailureStage.Synchronization); }
+                        catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                        ExceptionDispatchInfo.Capture(error).Throw();
+                    }
+                }
+
+                // Keep the reservation, but not an ordinary effect, across payload destructors.
+                MlxCompiledOps.ReleaseAfterSynchronization();
+                MlxQuantizedOps.ReleaseCompiledClosuresAfterSynchronization();
+
                 using NativeEffectLease effect = reservation.EnterEffect();
                 effect.ValidateMlxRelease(this, reservation);
                 MlxNative.InstallCurrentErrorHandler();
-                NativeRuntimeFailureStage stage = NativeRuntimeFailureStage.Synchronization;
+                NativeRuntimeFailureStage stage = NativeRuntimeFailureStage.CacheRelease;
                 try
                 {
-                    MlxNative.SynchronizeAllUsedStreams();
-                    stage = NativeRuntimeFailureStage.CacheRelease;
                     MlxNative.ReleaseCachedKernels();
                     MlxNative.ReleaseDefaultStreams();
                     stage = NativeRuntimeFailureStage.AllocatorRelease;

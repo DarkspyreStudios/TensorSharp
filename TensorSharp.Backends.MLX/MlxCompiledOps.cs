@@ -9,8 +9,8 @@ namespace TensorSharp.MLX
     // used in ollama/x/mlxrunner/mlx/act.go.
     //
     // Each kernel is lazily compiled on first use under a guard so the
-    // initialization is thread-safe. The compiled closure is then reused for
-    // the lifetime of the process — MLX caches per (shape, dtype) tuple
+    // initialization is thread-safe. Cache clearing releases its closure references.
+    // MLX caches per (shape, dtype) tuple
     // internally when the closure is non-shapeless, or specializes once when
     // shapeless. We use shapeless because the FFN tile shapes vary per
     // sequence length during prefill.
@@ -22,36 +22,114 @@ namespace TensorSharp.MLX
         internal static readonly bool Disabled =
             string.Equals(Environment.GetEnvironmentVariable("TS_MLX_DISABLE_COMPILE"), "1", StringComparison.Ordinal);
 
-        private static MlxNative.CompiledClosure siluClosure;
-        private static MlxNative.CompiledClosure geluTanhClosure;
-        private static MlxNative.CompiledClosure swiGluClosure;
-        private static MlxNative.CompiledClosure geGluClosure;
-        private static MlxNative.CompiledClosure sigmoidMulClosure;
-        private static MlxNative.CompiledClosure addScaledClosure;
-        private static MlxNative.CompiledClosure rmsNormScaledClosure;
+        private sealed class ClosureSlot
+        {
+            internal MlxNative.CompiledClosure Closure;
+        }
+
+        private sealed class CompiledKernelCache
+        {
+            internal readonly ClosureSlot siluClosure = new();
+            internal readonly ClosureSlot geluTanhClosure = new();
+            internal readonly ClosureSlot swiGluClosure = new();
+            internal readonly ClosureSlot geGluClosure = new();
+            internal readonly ClosureSlot sigmoidMulClosure = new();
+            internal readonly ClosureSlot addScaledClosure = new();
+            internal readonly ClosureSlot rmsNormScaledClosure = new();
+            internal readonly NativeOwnerRegistration NativeOwner;
+
+            internal CompiledKernelCache()
+            {
+                NativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Graph);
+                NativeOwner.AttachMlxSharedRuntime();
+            }
+
+            internal void ReleaseAfterSynchronization()
+            {
+                using NativeMlxReleaseReservation reservation = NativeOwner.ReserveMlxRelease(this);
+                MlxWorker.Shared.Invoke(() =>
+                {
+                    using (NativeEffectLease validation = reservation.EnterEffect())
+                        validation.ValidateMlxRelease(this, reservation);
+                    lock (initLock)
+                    {
+                        ReleaseSlot(siluClosure);
+                        ReleaseSlot(geluTanhClosure);
+                        ReleaseSlot(swiGluClosure);
+                        ReleaseSlot(geGluClosure);
+                        ReleaseSlot(sigmoidMulClosure);
+                        ReleaseSlot(addScaledClosure);
+                        ReleaseSlot(rmsNormScaledClosure);
+                    }
+                });
+            }
+
+            private static void ReleaseSlot(ClosureSlot slot)
+            {
+                if (slot.Closure == null) return;
+                MlxNative.FreeCompiledClosure(slot.Closure);
+                Volatile.Write(ref slot.Closure, null);
+            }
+        }
+
+        private sealed class ClosurePublicationResources(CompiledKernelCache owner) : MlxNativeResources
+        {
+            internal MlxNative.CompiledClosure Closure;
+            internal bool Published;
+            internal override bool HasNativeResources => !Published && Closure != null && !Closure.SafelyReleased;
+            internal override bool CleanupRequiresOrdinaryEffect => false;
+
+            internal void Release()
+            {
+                if (!Published)
+                    MlxNative.FreeCompiledClosure(Closure);
+                GC.KeepAlive(owner);
+            }
+        }
+
+        private static readonly Lazy<CompiledKernelCache> Cache = new(() => new CompiledKernelCache());
+        private static CompiledKernelCache cache => Cache.Value;
         private static readonly object initLock = new();
 
-        private static MlxNative.CompiledClosure EnsureCompiled(ref MlxNative.CompiledClosure slot, MlxNative.TraceFunc trace)
+        internal static void ReleaseAfterSynchronization()
         {
-            // Double-checked locking: the read after the lock catches the case
-            // where two callers raced into EnsureCompiled.
-            var existing = Volatile.Read(ref slot);
-            if (existing != null) return existing;
+            if (Cache.IsValueCreated)
+                cache.ReleaseAfterSynchronization();
+        }
 
-            lock (initLock)
+        private static MlxNative.CompiledClosure EnsureCompiled(ClosureSlot slot, MlxNative.TraceFunc trace)
+        {
+            var resources = new ClosurePublicationResources(cache);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                existing = Volatile.Read(ref slot);
-                if (existing != null) return existing;
-                var fresh = MlxNative.NewClosure(trace, shapeless: true);
-                Volatile.Write(ref slot, fresh);
-                return fresh;
-            }
+                cache.NativeOwner.ThrowIfQuarantined();
+                lock (initLock)
+                {
+                    var existing = Volatile.Read(ref slot.Closure);
+                    if (existing != null) return existing;
+                    resources.Closure = MlxNative.NewClosure(trace, shapeless: true);
+                    using NativeEffectLease effect = cache.NativeOwner.EnterEffect();
+                    try
+                    {
+                        Volatile.Write(ref slot.Closure, resources.Closure);
+                        resources.Published = true;
+                    }
+                    catch (Exception original)
+                    {
+                        Exception error = original;
+                        try { effect.PublishFailure(cache, original, NativeRuntimeFailureStage.CacheRelease); }
+                        catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+                    }
+                    return resources.Closure;
+                }
+            }, resources.Release);
         }
 
         // silu(x) = x * sigmoid(x). One fused kernel instead of two-op chain.
         public static MlxNative.MlxArray SiLU(MlxNative.MlxArray x)
         {
-            var c = EnsureCompiled(ref siluClosure, inputs =>
+            var c = EnsureCompiled(cache.siluClosure, inputs =>
             {
                 MlxNative.MlxArray inp = inputs[0];
                 var resources = new MlxArrayResources(2, inputs);
@@ -74,7 +152,7 @@ namespace TensorSharp.MLX
         // fuses into a single kernel.
         public static MlxNative.MlxArray GeluTanh(MlxNative.MlxArray x)
         {
-            var c = EnsureCompiled(ref geluTanhClosure, inputs =>
+            var c = EnsureCompiled(cache.geluTanhClosure, inputs =>
             {
                 var resources = new MlxArrayResources(1, inputs);
                 return MlxWorker.Shared.InvokeWithResources(resources, () =>
@@ -131,7 +209,7 @@ namespace TensorSharp.MLX
         // SwiGLU = silu(gate) * up. The common LLaMA/Qwen FFN activation.
         public static MlxNative.MlxArray SwiGLU(MlxNative.MlxArray gate, MlxNative.MlxArray up)
         {
-            var c = EnsureCompiled(ref swiGluClosure, inputs =>
+            var c = EnsureCompiled(cache.swiGluClosure, inputs =>
             {
                 MlxNative.MlxArray g = inputs[0];
                 MlxNative.MlxArray u = inputs[1];
@@ -155,7 +233,7 @@ namespace TensorSharp.MLX
         // GeGLU = gelu(gate) * up. Used by Gemma family MLP and MoE paths.
         public static MlxNative.MlxArray GeGLU(MlxNative.MlxArray gate, MlxNative.MlxArray up)
         {
-            var c = EnsureCompiled(ref geGluClosure, inputs =>
+            var c = EnsureCompiled(cache.geGluClosure, inputs =>
             {
                 MlxNative.MlxArray g = inputs[0];
                 MlxNative.MlxArray u = inputs[1];
@@ -178,7 +256,7 @@ namespace TensorSharp.MLX
         // gating paths.
         public static MlxNative.MlxArray SigmoidMul(MlxNative.MlxArray x, MlxNative.MlxArray gate)
         {
-            var c = EnsureCompiled(ref sigmoidMulClosure, inputs =>
+            var c = EnsureCompiled(cache.sigmoidMulClosure, inputs =>
             {
                 MlxNative.MlxArray xi = inputs[0];
                 MlxNative.MlxArray gi = inputs[1];
@@ -207,7 +285,7 @@ namespace TensorSharp.MLX
             MlxNative.MlxArray scalar,
             float eps)
         {
-            var c = EnsureCompiled(ref rmsNormScaledClosure, inputs =>
+            var c = EnsureCompiled(cache.rmsNormScaledClosure, inputs =>
             {
                 MlxNative.MlxArray xi = inputs[0];
                 MlxNative.MlxArray wi = inputs[1];
@@ -242,7 +320,7 @@ namespace TensorSharp.MLX
         // closure works regardless of its value (no per-call recompile).
         public static MlxNative.MlxArray AddScaled(MlxNative.MlxArray output, MlxNative.MlxArray src, MlxNative.MlxArray scalar)
         {
-            var c = EnsureCompiled(ref addScaledClosure, inputs =>
+            var c = EnsureCompiled(cache.addScaledClosure, inputs =>
             {
                 MlxNative.MlxArray o = inputs[0];
                 MlxNative.MlxArray s = inputs[1];
