@@ -69,8 +69,15 @@ namespace TensorSharp.Models.QwenImage
                     int start = _text.Tokenizer.Encode(template.ToString(), addSpecial: false).Count;
                     int count = image.Width / 32 * (image.Height / 32);
                     if (features[0].Length != count * 4096) throw new InvalidOperationException("Vision embedding shape does not match reference geometry.");
-                    images.Add(new ImageCond { Start = start, Count = count, GridH = image.Height / 16,
-                        GridW = image.Width / 16, Embeds = features[0], DeepStack = features.Skip(1).ToArray() });
+                    images.Add(new ImageCond
+                    {
+                        Start = start,
+                        Count = count,
+                        GridH = image.Height / 16,
+                        GridW = image.Width / 16,
+                        Embeds = features[0],
+                        DeepStack = features.Skip(1).ToArray()
+                    });
                     for (int j = 0; j < count; j++) template.Append("<|image_pad|>");
                     template.Append("<|vision_end|>");
                 }

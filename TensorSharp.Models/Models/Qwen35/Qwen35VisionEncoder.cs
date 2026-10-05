@@ -1253,64 +1253,64 @@ namespace TensorSharp.Models
 
             fixed (int* orderPtr = blockOrder)
             {
-            long orderPtrL = (long)orderPtr;
-            Parallel.For(0, gridH, brow =>
-            {
-                float* pos = (float*)posPtrL;
-                float* dst = (float*)dstPtrL;
-                int* order = (int*)orderPtrL;
-
-                for (int bcol = 0; bcol < gridW; bcol++)
+                long orderPtrL = (long)orderPtr;
+                Parallel.For(0, gridH, brow =>
                 {
-                    int destIdx = brow * gridW + bcol;
-                    int rasterIdx = order[destIdx];
-                    int h = rasterIdx / gridW;
-                    int w = rasterIdx - h * gridW;
-                    float y = h * stepH;
-                    float x = w * stepW;
+                    float* pos = (float*)posPtrL;
+                    float* dst = (float*)dstPtrL;
+                    int* order = (int*)orderPtrL;
 
-                    int fy = (int)y;
-                    int fx = (int)x;
-                    int cy = Math.Min(fy + 1, gridPerSide - 1);
-                    int cx = Math.Min(fx + 1, gridPerSide - 1);
-                    float dy = y - fy;
-                    float dx = x - fx;
-
-                    float wt00 = (1 - dy) * (1 - dx);
-                    float wt01 = (1 - dy) * dx;
-                    float wt10 = dy * (1 - dx);
-                    float wt11 = dy * dx;
-
-                    int idx00 = fy * gridPerSide + fx;
-                    int idx01 = fy * gridPerSide + cx;
-                    int idx10 = cy * gridPerSide + fx;
-                    int idx11 = cy * gridPerSide + cx;
-
-                    float* dstRow = dst + (long)destIdx * hiddenSize;
-                    float* p00 = pos + (long)idx00 * hiddenSize;
-                    float* p01 = pos + (long)idx01 * hiddenSize;
-                    float* p10 = pos + (long)idx10 * hiddenSize;
-                    float* p11 = pos + (long)idx11 * hiddenSize;
-
-                    var v00 = new Vector<float>(wt00);
-                    var v01 = new Vector<float>(wt01);
-                    var v10 = new Vector<float>(wt10);
-                    var v11 = new Vector<float>(wt11);
-
-                    int d = 0;
-                    for (; d <= hiddenSize - vLen; d += vLen)
+                    for (int bcol = 0; bcol < gridW; bcol++)
                     {
-                        var a = TensorComputePrimitives.LoadVector(p00 + d);
-                        var b = TensorComputePrimitives.LoadVector(p01 + d);
-                        var c = TensorComputePrimitives.LoadVector(p10 + d);
-                        var e = TensorComputePrimitives.LoadVector(p11 + d);
-                        var r = a * v00 + b * v01 + c * v10 + e * v11;
-                        TensorComputePrimitives.StoreVector(dstRow + d, r);
+                        int destIdx = brow * gridW + bcol;
+                        int rasterIdx = order[destIdx];
+                        int h = rasterIdx / gridW;
+                        int w = rasterIdx - h * gridW;
+                        float y = h * stepH;
+                        float x = w * stepW;
+
+                        int fy = (int)y;
+                        int fx = (int)x;
+                        int cy = Math.Min(fy + 1, gridPerSide - 1);
+                        int cx = Math.Min(fx + 1, gridPerSide - 1);
+                        float dy = y - fy;
+                        float dx = x - fx;
+
+                        float wt00 = (1 - dy) * (1 - dx);
+                        float wt01 = (1 - dy) * dx;
+                        float wt10 = dy * (1 - dx);
+                        float wt11 = dy * dx;
+
+                        int idx00 = fy * gridPerSide + fx;
+                        int idx01 = fy * gridPerSide + cx;
+                        int idx10 = cy * gridPerSide + fx;
+                        int idx11 = cy * gridPerSide + cx;
+
+                        float* dstRow = dst + (long)destIdx * hiddenSize;
+                        float* p00 = pos + (long)idx00 * hiddenSize;
+                        float* p01 = pos + (long)idx01 * hiddenSize;
+                        float* p10 = pos + (long)idx10 * hiddenSize;
+                        float* p11 = pos + (long)idx11 * hiddenSize;
+
+                        var v00 = new Vector<float>(wt00);
+                        var v01 = new Vector<float>(wt01);
+                        var v10 = new Vector<float>(wt10);
+                        var v11 = new Vector<float>(wt11);
+
+                        int d = 0;
+                        for (; d <= hiddenSize - vLen; d += vLen)
+                        {
+                            var a = TensorComputePrimitives.LoadVector(p00 + d);
+                            var b = TensorComputePrimitives.LoadVector(p01 + d);
+                            var c = TensorComputePrimitives.LoadVector(p10 + d);
+                            var e = TensorComputePrimitives.LoadVector(p11 + d);
+                            var r = a * v00 + b * v01 + c * v10 + e * v11;
+                            TensorComputePrimitives.StoreVector(dstRow + d, r);
+                        }
+                        for (; d < hiddenSize; d++)
+                            dstRow[d] = wt00 * p00[d] + wt01 * p01[d] + wt10 * p10[d] + wt11 * p11[d];
                     }
-                    for (; d < hiddenSize; d++)
-                        dstRow[d] = wt00 * p00[d] + wt01 * p01[d] + wt10 * p10[d] + wt11 * p11[d];
-                }
-            });
+                });
             }
 
             _positionEmbeddingCache[key] = cached;

@@ -438,11 +438,21 @@ namespace TensorSharp.Models.QwenImage
             {
                 var a = new QwenTeTrunkArgs
                 {
-                    X = (IntPtr)xp, Out = (IntPtr)op, CosF = (IntPtr)cp, SinF = (IntPtr)sp,
-                    Layers = (IntPtr)lp, NumLayers = _numLayers,
+                    X = (IntPtr)xp,
+                    Out = (IntPtr)op,
+                    CosF = (IntPtr)cp,
+                    SinF = (IntPtr)sp,
+                    Layers = (IntPtr)lp,
+                    NumLayers = _numLayers,
                     StructBytes = System.Runtime.InteropServices.Marshal.SizeOf<QwenTeTrunkArgs>(),
-                    Hidden = H, Heads = _numHeads, KvHeads = _numKVHeads, HeadDim = hd, Seq = seq,
-                    Eps = Config.Eps, DeepStack = (IntPtr)dp, DeepStackCount = deepCount,
+                    Hidden = H,
+                    Heads = _numHeads,
+                    KvHeads = _numKVHeads,
+                    HeadDim = hd,
+                    Seq = seq,
+                    Eps = Config.Eps,
+                    DeepStack = (IntPtr)dp,
+                    DeepStackCount = deepCount,
                 };
                 ok = GgmlBasicOps.TryQwenTeTrunk(in a);
             }
