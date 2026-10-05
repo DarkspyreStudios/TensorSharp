@@ -47,9 +47,6 @@ namespace TensorSharp.MLX
         private sealed class EvaluationViews : MlxNativeResources
         {
             internal MlxNative.MlxArray View;
-            internal MlxNative.MlxArray Contiguous;
-            internal MlxNative.MlxArray Original;
-            internal bool Prepared;
         }
 
         private static bool TryInvokeWithResources(MlxArrayResources resources, Func<bool> operation)
@@ -1177,42 +1174,192 @@ namespace TensorSharp.MLX
 
         public sealed class GatedDeltaNetCache : IDisposable
         {
+            private readonly NativeOwnerRegistration nativeOwner;
             private MlxNative.MlxArray convState;
             private MlxNative.MlxArray deltaState;
             private MlxNative.MlxArray onesKey;
             private MlxNative.MlxArray onesValue;
             private int keyDim;
             private int valueDim;
+            private bool disposed;
 
-            public void Reset()
+            public GatedDeltaNetCache()
             {
-                MlxNative.FreeArray(convState);
-                MlxNative.FreeArray(deltaState);
-                convState = default;
-                deltaState = default;
+                nativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Graph);
+                nativeOwner.AttachMlxSharedRuntime();
             }
 
-            public bool TryEvaluateState()
+            private sealed class CacheResources : MlxNativeResources
+            {
+                private readonly GatedDeltaNetCache owner;
+                private readonly CacheResources parent;
+                private readonly MlxArrayResources references;
+
+                internal CacheResources(GatedDeltaNetCache owner, int referenceCount, params Tensor[] tensors)
+                {
+                    this.owner = owner;
+                    references = new MlxArrayResources(referenceCount, tensors);
+                }
+
+                internal CacheResources(GatedDeltaNetCache owner, int referenceCount, CacheResources parent)
+                    : this(owner, referenceCount)
+                {
+                    this.parent = parent;
+                }
+
+                internal MlxNative.MlxArray[] Arrays => references.Arrays;
+                internal int ReturnedIndex { set => references.ReturnedIndex = value; }
+                internal bool HasStoredResult;
+                internal override bool HasNativeResources => references.HasNativeResources;
+
+                internal void MarkStoredResult()
+                {
+                    for (CacheResources current = this; current != null; current = current.parent)
+                        current.HasStoredResult = true;
+                }
+
+                internal void Release()
+                {
+                    references.Release();
+                    GC.KeepAlive(owner);
+                    GC.KeepAlive(parent);
+                }
+            }
+
+            private void ThrowIfUnavailable()
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                nativeOwner.ThrowIfQuarantined();
+            }
+
+            private bool TryInvokeWithResources(CacheResources resources, Func<bool> operation)
             {
                 try
                 {
-                    bool evaluated = Materialize(ref convState);
-                    evaluated |= Materialize(ref deltaState);
-                    return evaluated;
+                    return MlxWorker.Shared.InvokeWithResources(resources, () =>
+                    {
+                        ThrowIfUnavailable();
+                        return operation();
+                    }, resources.Release);
                 }
-                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
+                catch (Exception error) when (resources.SafelyReleased && !resources.HasStoredResult
+                    && error is not NativeMlxCallbackBusyException && error is not ObjectDisposedException
+                    && !NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     return false;
                 }
             }
 
-            public void Dispose()
+            private void PublishReleaseFailure(NativeEffectLease effect, Exception error)
             {
-                Reset();
-                MlxNative.FreeArray(onesKey);
-                MlxNative.FreeArray(onesValue);
-                onesKey = default;
-                onesValue = default;
+                try { effect.PublishFailure(this, error, NativeRuntimeFailureStage.GraphRelease); }
+                catch (Exception publication) { throw MlxNative.JoinNativeErrors(error, publication); }
+            }
+
+            public void Reset() => ReleaseState(retire: false);
+
+            public bool TryEvaluateState()
+            {
+                var resources = new CacheResources(this, 2);
+                return TryInvokeWithResources(resources, () =>
+                {
+                    bool evaluated = MaterializeState(convolution: true, resources, 0);
+                    evaluated |= MaterializeState(convolution: false, resources, 1);
+                    return evaluated;
+                });
+            }
+
+            private bool MaterializeState(bool convolution, CacheResources resources, int index)
+            {
+                MlxNative.MlxArray original = convolution ? convState : deltaState;
+                if (!original.IsValid)
+                    return false;
+
+                ref MlxNative.MlxArray replacement = ref resources.Arrays[index];
+                replacement = MlxNative.Contiguous(original);
+                MlxNative.AsyncEval(replacement);
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                try
+                {
+                    if (convolution)
+                    {
+                        MlxNative.FreeArrayReference(ref convState);
+                        convState = replacement;
+                    }
+                    else
+                    {
+                        MlxNative.FreeArrayReference(ref deltaState);
+                        deltaState = replacement;
+                    }
+                    replacement = default;
+                    resources.MarkStoredResult();
+                }
+                catch (Exception error)
+                {
+                    PublishReleaseFailure(effect, error);
+                    throw;
+                }
+                return true;
+            }
+
+            public void Dispose() => ReleaseState(retire: true);
+
+            private void ReleaseState(bool retire)
+            {
+                MlxWorker.Shared.Invoke(() =>
+                {
+                    if (retire && disposed)
+                        return;
+                    ThrowIfUnavailable();
+                    using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                    using NativeEffectLease effect = reservation.EnterEffect();
+                    effect.ValidateMlxRelease(this, reservation);
+                    try
+                    {
+                        MlxNative.FreeArrayReference(ref convState);
+                        MlxNative.FreeArrayReference(ref deltaState);
+                        if (retire)
+                        {
+                            MlxNative.FreeArrayReference(ref onesKey);
+                            MlxNative.FreeArrayReference(ref onesValue);
+                            keyDim = 0;
+                            valueDim = 0;
+                            effect.CompleteSafeRelease(this);
+                            disposed = true;
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        PublishReleaseFailure(effect, error);
+                        throw;
+                    }
+                });
+            }
+
+            private void CommitState(Tensor result, ref MlxNative.MlxArray output,
+                ref MlxNative.MlxArray nextConv, ref MlxNative.MlxArray nextDelta, CacheResources resources)
+            {
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                MlxStorage.SetDeviceResult(result, ref output);
+                resources.MarkStoredResult();
+                try
+                {
+                    MlxNative.FreeArrayReference(ref convState);
+                    MlxNative.FreeArrayReference(ref deltaState);
+                    convState = nextConv;
+                    deltaState = nextDelta;
+                    nextConv = default;
+                    nextDelta = default;
+                }
+                catch (Exception error)
+                {
+                    PublishReleaseFailure(effect, error);
+                    throw;
+                }
             }
 
             public bool TryRunQwen35Packed(
@@ -1278,28 +1425,30 @@ namespace TensorSharp.MLX
                 int numKeyHeads, int numValueHeads, int headKeyDim, int headValueDim,
                 int convKernel, float eps)
             {
-                MlxNative.MlxArray packedView = default;
-                MlxNative.MlxArray convWeightView = default;
-                MlxNative.MlxArray dtBiasView = default;
-                MlxNative.MlxArray aLogView = default;
-                MlxNative.MlxArray normWeightView = default;
-                MlxNative.MlxArray q = default;
-                MlxNative.MlxArray k = default;
-                MlxNative.MlxArray v = default;
-                MlxNative.MlxArray qNorm = default;
-                MlxNative.MlxArray kNorm = default;
-                MlxNative.MlxArray qScaled = default;
-                MlxNative.MlxArray kScaled = default;
-                MlxNative.MlxArray gDecay = default;
-                MlxNative.MlxArray betaSig = default;
-                MlxNative.MlxArray zSilu = default;
-                MlxNative.MlxArray nextConv = default;
-                MlxNative.MlxArray deltaOut = default;
-                MlxNative.MlxArray nextDelta = default;
-                MlxNative.MlxArray gated = default;
-
-                try
+                var resources = new CacheResources(this, 21, result, packedRaw, convWeight, dtBias, aLog, normWeight);
+                return TryInvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray packedView = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray convWeightView = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray dtBiasView = ref resources.Arrays[2];
+                    ref MlxNative.MlxArray aLogView = ref resources.Arrays[3];
+                    ref MlxNative.MlxArray normWeightView = ref resources.Arrays[4];
+                    ref MlxNative.MlxArray q = ref resources.Arrays[5];
+                    ref MlxNative.MlxArray k = ref resources.Arrays[6];
+                    ref MlxNative.MlxArray v = ref resources.Arrays[7];
+                    ref MlxNative.MlxArray qNorm = ref resources.Arrays[8];
+                    ref MlxNative.MlxArray kNorm = ref resources.Arrays[9];
+                    ref MlxNative.MlxArray qScaled = ref resources.Arrays[10];
+                    ref MlxNative.MlxArray kScaled = ref resources.Arrays[11];
+                    ref MlxNative.MlxArray gDecay = ref resources.Arrays[12];
+                    ref MlxNative.MlxArray betaSig = ref resources.Arrays[13];
+                    ref MlxNative.MlxArray zSilu = ref resources.Arrays[14];
+                    ref MlxNative.MlxArray nextConv = ref resources.Arrays[15];
+                    ref MlxNative.MlxArray deltaOut = ref resources.Arrays[16];
+                    ref MlxNative.MlxArray nextDelta = ref resources.Arrays[17];
+                    ref MlxNative.MlxArray gated = ref resources.Arrays[18];
+                    ref MlxNative.MlxArray qScale = ref resources.Arrays[19];
+                    ref MlxNative.MlxArray kScale = ref resources.Arrays[20];
                     bool channelMajor = convWeight.DimensionCount == 2
                         && convWeight.Sizes[0] == qkvDim
                         && convWeight.Sizes[1] == convKernel;
@@ -1310,7 +1459,7 @@ namespace TensorSharp.MLX
                         return false;
 
                     EnsureState(convKernel - 1, qkvDim, numValueHeads, headValueDim, headKeyDim);
-                    EnsureNormWeights(headKeyDim, headValueDim);
+                    EnsureNormWeights(headKeyDim, headValueDim, resources);
 
                     packedView = GetView(packedRaw);
                     convWeightView = GetView(convWeight);
@@ -1351,27 +1500,17 @@ namespace TensorSharp.MLX
                     // chain if compile is disabled.
                     if (!MlxCompiledOps.Disabled)
                     {
-                        MlxNative.MlxArray qScale = default;
-                        MlxNative.MlxArray kScale = default;
-                        try
-                        {
-                            qScale = MlxNative.NewScalar(1.0f / headKeyDim);
-                            kScale = MlxNative.NewScalar(1.0f / MathF.Sqrt(headKeyDim));
-                            qScaled = MlxCompiledOps.RmsNormScaled(q, onesKey, qScale, 1e-6f);
-                            kScaled = MlxCompiledOps.RmsNormScaled(k, onesKey, kScale, 1e-6f);
-                        }
-                        finally
-                        {
-                            MlxNative.FreeArray(qScale);
-                            MlxNative.FreeArray(kScale);
-                        }
+                        qScale = MlxNative.NewScalar(1.0f / headKeyDim);
+                        kScale = MlxNative.NewScalar(1.0f / MathF.Sqrt(headKeyDim));
+                        qScaled = MlxCompiledOps.RmsNormScaled(q, onesKey, qScale, 1e-6f);
+                        kScaled = MlxCompiledOps.RmsNormScaled(k, onesKey, kScale, 1e-6f);
                     }
                     else
                     {
                         qNorm = MlxNative.FastRmsNorm(q, onesKey, 1e-6f);
                         kNorm = MlxNative.FastRmsNorm(k, onesKey, 1e-6f);
-                        qScaled = MulScalar(qNorm, 1.0f / headKeyDim);
-                        kScaled = MulScalar(kNorm, 1.0f / MathF.Sqrt(headKeyDim));
+                        qScaled = MulScalar(qNorm, 1.0f / headKeyDim, resources);
+                        kScaled = MulScalar(kNorm, 1.0f / MathF.Sqrt(headKeyDim), resources);
                     }
 
                     MlxNative.GatedDelta(
@@ -1399,42 +1538,9 @@ namespace TensorSharp.MLX
                         numValueHeads,
                         headValueDim,
                         eps);
-                    MlxStorage.SetDeviceResult(result, ref gated);
-
-                    MlxNative.FreeArray(convState);
-                    MlxNative.FreeArray(deltaState);
-                    convState = nextConv;
-                    deltaState = nextDelta;
-                    nextConv = default;
-                    nextDelta = default;
+                    CommitState(result, ref gated, ref nextConv, ref nextDelta, resources);
                     return true;
-                }
-                catch (Exception)
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(packedView);
-                    MlxNative.FreeArray(convWeightView);
-                    MlxNative.FreeArray(dtBiasView);
-                    MlxNative.FreeArray(aLogView);
-                    MlxNative.FreeArray(normWeightView);
-                    MlxNative.FreeArray(q);
-                    MlxNative.FreeArray(k);
-                    MlxNative.FreeArray(v);
-                    MlxNative.FreeArray(qNorm);
-                    MlxNative.FreeArray(kNorm);
-                    MlxNative.FreeArray(qScaled);
-                    MlxNative.FreeArray(kScaled);
-                    MlxNative.FreeArray(gDecay);
-                    MlxNative.FreeArray(betaSig);
-                    MlxNative.FreeArray(zSilu);
-                    MlxNative.FreeArray(nextConv);
-                    MlxNative.FreeArray(deltaOut);
-                    MlxNative.FreeArray(nextDelta);
-                    MlxNative.FreeArray(gated);
-                }
+                });
             }
 
             public bool TryRunQwen35(
@@ -1509,49 +1615,51 @@ namespace TensorSharp.MLX
                 int numKeyHeads, int numValueHeads, int headKeyDim, int headValueDim,
                 int convKernel, float eps)
             {
-                MlxNative.MlxArray qkvView = default;
-                MlxNative.MlxArray zView = default;
-                MlxNative.MlxArray betaView = default;
-                MlxNative.MlxArray alphaView = default;
-                MlxNative.MlxArray convWeightView = default;
-                MlxNative.MlxArray dtBiasView = default;
-                MlxNative.MlxArray aLogView = default;
-                MlxNative.MlxArray normWeightView = default;
-                MlxNative.MlxArray qkv3 = default;
-                MlxNative.MlxArray concat = default;
-                MlxNative.MlxArray convOut3 = default;
-                MlxNative.MlxArray convOut2 = default;
-                MlxNative.MlxArray convSilu = default;
-                MlxNative.MlxArray nextConv = default;
-                MlxNative.MlxArray qSlice = default;
-                MlxNative.MlxArray kSlice = default;
-                MlxNative.MlxArray vSlice = default;
-                MlxNative.MlxArray q = default;
-                MlxNative.MlxArray k = default;
-                MlxNative.MlxArray v = default;
-                MlxNative.MlxArray qNorm = default;
-                MlxNative.MlxArray kNorm = default;
-                MlxNative.MlxArray qScaled = default;
-                MlxNative.MlxArray kScaled = default;
-                MlxNative.MlxArray alphaPlus = default;
-                MlxNative.MlxArray softplus = default;
-                MlxNative.MlxArray gLinear = default;
-                MlxNative.MlxArray gDecay2 = default;
-                MlxNative.MlxArray gDecay = default;
-                MlxNative.MlxArray betaSig2 = default;
-                MlxNative.MlxArray betaSig = default;
-                MlxNative.MlxArray deltaOut = default;
-                MlxNative.MlxArray nextDelta = default;
-                MlxNative.MlxArray normed = default;
-                MlxNative.MlxArray z4 = default;
-                MlxNative.MlxArray zSilu = default;
-                MlxNative.MlxArray gated4 = default;
-                MlxNative.MlxArray gated2 = default;
-
-                try
+                var resources = new CacheResources(this, 40, result, qkvRaw, zRaw, betaRaw, alphaRaw, convWeight, dtBias, aLog, normWeight);
+                return TryInvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray qkvView = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray zView = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray betaView = ref resources.Arrays[2];
+                    ref MlxNative.MlxArray alphaView = ref resources.Arrays[3];
+                    ref MlxNative.MlxArray convWeightView = ref resources.Arrays[4];
+                    ref MlxNative.MlxArray dtBiasView = ref resources.Arrays[5];
+                    ref MlxNative.MlxArray aLogView = ref resources.Arrays[6];
+                    ref MlxNative.MlxArray normWeightView = ref resources.Arrays[7];
+                    ref MlxNative.MlxArray qkv3 = ref resources.Arrays[8];
+                    ref MlxNative.MlxArray concat = ref resources.Arrays[9];
+                    ref MlxNative.MlxArray convOut3 = ref resources.Arrays[10];
+                    ref MlxNative.MlxArray convOut2 = ref resources.Arrays[11];
+                    ref MlxNative.MlxArray convSilu = ref resources.Arrays[12];
+                    ref MlxNative.MlxArray nextConv = ref resources.Arrays[13];
+                    ref MlxNative.MlxArray qSlice = ref resources.Arrays[14];
+                    ref MlxNative.MlxArray kSlice = ref resources.Arrays[15];
+                    ref MlxNative.MlxArray vSlice = ref resources.Arrays[16];
+                    ref MlxNative.MlxArray q = ref resources.Arrays[17];
+                    ref MlxNative.MlxArray k = ref resources.Arrays[18];
+                    ref MlxNative.MlxArray v = ref resources.Arrays[19];
+                    ref MlxNative.MlxArray qNorm = ref resources.Arrays[20];
+                    ref MlxNative.MlxArray kNorm = ref resources.Arrays[21];
+                    ref MlxNative.MlxArray qScaled = ref resources.Arrays[22];
+                    ref MlxNative.MlxArray kScaled = ref resources.Arrays[23];
+                    ref MlxNative.MlxArray alphaPlus = ref resources.Arrays[24];
+                    ref MlxNative.MlxArray softplus = ref resources.Arrays[25];
+                    ref MlxNative.MlxArray gLinear = ref resources.Arrays[26];
+                    ref MlxNative.MlxArray gDecay2 = ref resources.Arrays[27];
+                    ref MlxNative.MlxArray gDecay = ref resources.Arrays[28];
+                    ref MlxNative.MlxArray betaSig2 = ref resources.Arrays[29];
+                    ref MlxNative.MlxArray betaSig = ref resources.Arrays[30];
+                    ref MlxNative.MlxArray deltaOut = ref resources.Arrays[31];
+                    ref MlxNative.MlxArray nextDelta = ref resources.Arrays[32];
+                    ref MlxNative.MlxArray normed = ref resources.Arrays[33];
+                    ref MlxNative.MlxArray z4 = ref resources.Arrays[34];
+                    ref MlxNative.MlxArray zSilu = ref resources.Arrays[35];
+                    ref MlxNative.MlxArray gated4 = ref resources.Arrays[36];
+                    ref MlxNative.MlxArray gated2 = ref resources.Arrays[37];
+                    ref MlxNative.MlxArray qScale = ref resources.Arrays[38];
+                    ref MlxNative.MlxArray kScale = ref resources.Arrays[39];
                     EnsureState(convKernel - 1, qkvDim, numValueHeads, headValueDim, headKeyDim);
-                    EnsureNormWeights(headKeyDim, headValueDim);
+                    EnsureNormWeights(headKeyDim, headValueDim, resources);
 
                     qkvView = GetView(qkvRaw);
                     zView = GetView(zRaw);
@@ -1562,116 +1670,25 @@ namespace TensorSharp.MLX
                     aLogView = GetView(aLog);
                     normWeightView = GetView(normWeight);
 
-                    if (Qwen35GdnPackedKernelsEnabled && seqLen >= Qwen35GdnPackedMinSeqLen)
+                    if (Qwen35GdnPackedKernelsEnabled && seqLen >= Qwen35GdnPackedMinSeqLen
+                        && TryRunPackedFromViews(result, convWeight, resources,
+                            qkvView, zView, betaView, alphaView, convWeightView, dtBiasView, aLogView, normWeightView,
+                            seqLen, qkvDim, keyDim, valueDim, numKeyHeads, numValueHeads,
+                            headKeyDim, headValueDim, convKernel, eps))
                     {
-                        try
-                        {
-                            bool channelMajor = convWeight.DimensionCount == 2
-                                && convWeight.Sizes[0] == qkvDim
-                                && convWeight.Sizes[1] == convKernel;
-                            bool kernelMajor = convWeight.DimensionCount == 2
-                                && convWeight.Sizes[0] == convKernel
-                                && convWeight.Sizes[1] == qkvDim;
-                            if (!channelMajor && !kernelMajor)
-                                throw new NotSupportedException("Qwen35 MLX GDN conv weight must be [qkvDim, kernel] or [kernel, qkvDim].");
-
-                            MlxNative.Qwen35GdnPreprocess(
-                                qkvView,
-                                zView,
-                                betaView,
-                                alphaView,
-                                convState,
-                                convWeightView,
-                                dtBiasView,
-                                aLogView,
-                                seqLen,
-                                qkvDim,
-                                keyDim,
-                                valueDim,
-                                numKeyHeads,
-                                numValueHeads,
-                                headKeyDim,
-                                headValueDim,
-                                convKernel,
-                                channelMajor,
-                                out q,
-                                out k,
-                                out v,
-                                out gDecay,
-                                out betaSig,
-                                out zSilu,
-                                out nextConv);
-
-                            qNorm = MlxNative.FastRmsNorm(q, onesKey, 1e-6f);
-                            kNorm = MlxNative.FastRmsNorm(k, onesKey, 1e-6f);
-                            qScaled = MulScalar(qNorm, 1.0f / headKeyDim);
-                            kScaled = MulScalar(kNorm, 1.0f / MathF.Sqrt(headKeyDim));
-
-                            MlxNative.GatedDelta(
-                                qScaled,
-                                kScaled,
-                                v,
-                                gDecay,
-                                betaSig,
-                                deltaState,
-                                1,
-                                seqLen,
-                                numKeyHeads,
-                                numValueHeads,
-                                headKeyDim,
-                                headValueDim,
-                                out deltaOut,
-                                out nextDelta);
-
-                            gated2 = MlxNative.Qwen35GdnPostprocess(
-                                deltaOut,
-                                zSilu,
-                                normWeightView,
-                                seqLen,
-                                valueDim,
-                                numValueHeads,
-                                headValueDim,
-                                eps);
-                            MlxStorage.SetDeviceResult(result, ref gated2);
-
-                            MlxNative.FreeArray(convState);
-                            MlxNative.FreeArray(deltaState);
-                            convState = nextConv;
-                            deltaState = nextDelta;
-                            nextConv = default;
-                            nextDelta = default;
-                            return true;
-                        }
-                        catch (Exception)
-                        {
-                            MlxNative.FreeArray(q);
-                            MlxNative.FreeArray(k);
-                            MlxNative.FreeArray(v);
-                            MlxNative.FreeArray(qNorm);
-                            MlxNative.FreeArray(kNorm);
-                            MlxNative.FreeArray(qScaled);
-                            MlxNative.FreeArray(kScaled);
-                            MlxNative.FreeArray(gDecay);
-                            MlxNative.FreeArray(betaSig);
-                            MlxNative.FreeArray(zSilu);
-                            MlxNative.FreeArray(deltaOut);
-                            MlxNative.FreeArray(nextDelta);
-                            MlxNative.FreeArray(gated2);
-                            MlxNative.FreeArray(nextConv);
-                            q = k = v = qNorm = kNorm = qScaled = kScaled = gDecay = betaSig = zSilu = deltaOut = nextDelta = gated2 = nextConv = default;
-                        }
+                        return true;
                     }
 
                     qkv3 = MlxNative.Reshape(qkvView, new[] { 1, seqLen, qkvDim });
                     concat = MlxNative.ConcatenateAxis(convState, qkv3, 1);
-                    convOut3 = RunDepthwiseConv(concat, convWeightView, convWeight, seqLen, qkvDim, convKernel);
+                    convOut3 = RunDepthwiseConv(concat, convWeightView, convWeight, seqLen, qkvDim, convKernel, resources);
                     nextConv = MlxNative.Slice(
                         concat,
                         new[] { 0, seqLen, 0 },
                         new[] { 1, seqLen + convKernel - 1, qkvDim },
                         new[] { 1, 1, 1 });
 
-                    convSilu = Silu(convOut3);
+                    convSilu = Silu(convOut3, resources);
                     convOut2 = MlxNative.Reshape(convSilu, new[] { seqLen, qkvDim });
 
                     qSlice = MlxNative.Slice(convOut2, new[] { 0, 0 }, new[] { seqLen, keyDim }, new[] { 1, 1 });
@@ -1685,31 +1702,21 @@ namespace TensorSharp.MLX
                     // for rationale). Saves 2 kernel launches per GDN layer.
                     if (!MlxCompiledOps.Disabled)
                     {
-                        MlxNative.MlxArray qScale = default;
-                        MlxNative.MlxArray kScale = default;
-                        try
-                        {
-                            qScale = MlxNative.NewScalar(1.0f / headKeyDim);
-                            kScale = MlxNative.NewScalar(1.0f / MathF.Sqrt(headKeyDim));
-                            qScaled = MlxCompiledOps.RmsNormScaled(q, onesKey, qScale, 1e-6f);
-                            kScaled = MlxCompiledOps.RmsNormScaled(k, onesKey, kScale, 1e-6f);
-                        }
-                        finally
-                        {
-                            MlxNative.FreeArray(qScale);
-                            MlxNative.FreeArray(kScale);
-                        }
+                        qScale = MlxNative.NewScalar(1.0f / headKeyDim);
+                        kScale = MlxNative.NewScalar(1.0f / MathF.Sqrt(headKeyDim));
+                        qScaled = MlxCompiledOps.RmsNormScaled(q, onesKey, qScale, 1e-6f);
+                        kScaled = MlxCompiledOps.RmsNormScaled(k, onesKey, kScale, 1e-6f);
                     }
                     else
                     {
                         qNorm = MlxNative.FastRmsNorm(q, onesKey, 1e-6f);
                         kNorm = MlxNative.FastRmsNorm(k, onesKey, 1e-6f);
-                        qScaled = MulScalar(qNorm, 1.0f / headKeyDim);
-                        kScaled = MulScalar(kNorm, 1.0f / MathF.Sqrt(headKeyDim));
+                        qScaled = MulScalar(qNorm, 1.0f / headKeyDim, resources);
+                        kScaled = MulScalar(kNorm, 1.0f / MathF.Sqrt(headKeyDim), resources);
                     }
 
                     alphaPlus = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, alphaView, dtBiasView);
-                    softplus = Softplus(alphaPlus);
+                    softplus = Softplus(alphaPlus, resources);
                     gLinear = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, softplus, aLogView);
                     gDecay2 = MlxNative.Unary(MlxNative.MlxUnaryOp.Exp, gLinear);
                     gDecay = MlxNative.Reshape(gDecay2, new[] { 1, seqLen, numValueHeads });
@@ -1734,100 +1741,174 @@ namespace TensorSharp.MLX
 
                     normed = MlxNative.FastRmsNorm(deltaOut, normWeightView, eps);
                     z4 = MlxNative.Reshape(zView, new[] { 1, seqLen, numValueHeads, headValueDim });
-                    zSilu = Silu(z4);
+                    zSilu = Silu(z4, resources);
                     gated4 = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, normed, zSilu);
                     gated2 = MlxNative.Reshape(gated4, new[] { seqLen, valueDim });
-                    MlxStorage.SetDeviceResult(result, ref gated2);
-
-                    MlxNative.FreeArray(convState);
-                    MlxNative.FreeArray(deltaState);
-                    convState = nextConv;
-                    deltaState = nextDelta;
-                    nextConv = default;
-                    nextDelta = default;
+                    CommitState(result, ref gated2, ref nextConv, ref nextDelta, resources);
                     return true;
-                }
-                catch
+                });
+            }
+
+            private bool TryRunPackedFromViews(
+                Tensor result, Tensor convWeight, CacheResources parent,
+                MlxNative.MlxArray qkvView, MlxNative.MlxArray zView,
+                MlxNative.MlxArray betaView, MlxNative.MlxArray alphaView,
+                MlxNative.MlxArray convWeightView, MlxNative.MlxArray dtBiasView,
+                MlxNative.MlxArray aLogView, MlxNative.MlxArray normWeightView,
+                int seqLen, int qkvDim, int keyDim, int valueDim,
+                int numKeyHeads, int numValueHeads, int headKeyDim, int headValueDim,
+                int convKernel, float eps)
+            {
+                var resources = new CacheResources(this, 14, parent);
+                return TryInvokeWithResources(resources, () =>
                 {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(qkvView);
-                    MlxNative.FreeArray(zView);
-                    MlxNative.FreeArray(betaView);
-                    MlxNative.FreeArray(alphaView);
-                    MlxNative.FreeArray(convWeightView);
-                    MlxNative.FreeArray(dtBiasView);
-                    MlxNative.FreeArray(aLogView);
-                    MlxNative.FreeArray(normWeightView);
-                    MlxNative.FreeArray(qkv3);
-                    MlxNative.FreeArray(concat);
-                    MlxNative.FreeArray(convOut3);
-                    MlxNative.FreeArray(convOut2);
-                    MlxNative.FreeArray(convSilu);
-                    MlxNative.FreeArray(nextConv);
-                    MlxNative.FreeArray(qSlice);
-                    MlxNative.FreeArray(kSlice);
-                    MlxNative.FreeArray(vSlice);
-                    MlxNative.FreeArray(q);
-                    MlxNative.FreeArray(k);
-                    MlxNative.FreeArray(v);
-                    MlxNative.FreeArray(qNorm);
-                    MlxNative.FreeArray(kNorm);
-                    MlxNative.FreeArray(qScaled);
-                    MlxNative.FreeArray(kScaled);
-                    MlxNative.FreeArray(alphaPlus);
-                    MlxNative.FreeArray(softplus);
-                    MlxNative.FreeArray(gLinear);
-                    MlxNative.FreeArray(gDecay2);
-                    MlxNative.FreeArray(gDecay);
-                    MlxNative.FreeArray(betaSig2);
-                    MlxNative.FreeArray(betaSig);
-                    MlxNative.FreeArray(deltaOut);
-                    MlxNative.FreeArray(nextDelta);
-                    MlxNative.FreeArray(normed);
-                    MlxNative.FreeArray(z4);
-                    MlxNative.FreeArray(zSilu);
-                    MlxNative.FreeArray(gated4);
-                    MlxNative.FreeArray(gated2);
-                }
+                    ref MlxNative.MlxArray q = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray k = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray v = ref resources.Arrays[2];
+                    ref MlxNative.MlxArray qNorm = ref resources.Arrays[3];
+                    ref MlxNative.MlxArray kNorm = ref resources.Arrays[4];
+                    ref MlxNative.MlxArray qScaled = ref resources.Arrays[5];
+                    ref MlxNative.MlxArray kScaled = ref resources.Arrays[6];
+                    ref MlxNative.MlxArray gDecay = ref resources.Arrays[7];
+                    ref MlxNative.MlxArray betaSig = ref resources.Arrays[8];
+                    ref MlxNative.MlxArray zSilu = ref resources.Arrays[9];
+                    ref MlxNative.MlxArray deltaOut = ref resources.Arrays[10];
+                    ref MlxNative.MlxArray nextDelta = ref resources.Arrays[11];
+                    ref MlxNative.MlxArray gated2 = ref resources.Arrays[12];
+                    ref MlxNative.MlxArray nextConv = ref resources.Arrays[13];
+                    bool channelMajor = convWeight.DimensionCount == 2
+                        && convWeight.Sizes[0] == qkvDim
+                        && convWeight.Sizes[1] == convKernel;
+                    bool kernelMajor = convWeight.DimensionCount == 2
+                        && convWeight.Sizes[0] == convKernel
+                        && convWeight.Sizes[1] == qkvDim;
+                    if (!channelMajor && !kernelMajor)
+                        throw new NotSupportedException("Qwen35 MLX GDN conv weight must be [qkvDim, kernel] or [kernel, qkvDim].");
+
+                    MlxNative.Qwen35GdnPreprocess(
+                        qkvView,
+                        zView,
+                        betaView,
+                        alphaView,
+                        convState,
+                        convWeightView,
+                        dtBiasView,
+                        aLogView,
+                        seqLen,
+                        qkvDim,
+                        keyDim,
+                        valueDim,
+                        numKeyHeads,
+                        numValueHeads,
+                        headKeyDim,
+                        headValueDim,
+                        convKernel,
+                        channelMajor,
+                        out q,
+                        out k,
+                        out v,
+                        out gDecay,
+                        out betaSig,
+                        out zSilu,
+                        out nextConv);
+
+                    qNorm = MlxNative.FastRmsNorm(q, onesKey, 1e-6f);
+                    kNorm = MlxNative.FastRmsNorm(k, onesKey, 1e-6f);
+                    qScaled = MulScalar(qNorm, 1.0f / headKeyDim, resources);
+                    kScaled = MulScalar(kNorm, 1.0f / MathF.Sqrt(headKeyDim), resources);
+
+                    MlxNative.GatedDelta(
+                        qScaled,
+                        kScaled,
+                        v,
+                        gDecay,
+                        betaSig,
+                        deltaState,
+                        1,
+                        seqLen,
+                        numKeyHeads,
+                        numValueHeads,
+                        headKeyDim,
+                        headValueDim,
+                        out deltaOut,
+                        out nextDelta);
+
+                    gated2 = MlxNative.Qwen35GdnPostprocess(
+                        deltaOut,
+                        zSilu,
+                        normWeightView,
+                        seqLen,
+                        valueDim,
+                        numValueHeads,
+                        headValueDim,
+                        eps);
+                    CommitState(result, ref gated2, ref nextConv, ref nextDelta, resources);
+                    return true;
+                });
             }
 
             private void EnsureState(int convTail, int qkvDim, int numValueHeads, int headValueDim, int headKeyDim)
             {
+                // Initial zero state does not advance the recurrent computation.
                 if (!convState.IsValid)
                     convState = MlxNative.Full(new[] { 1, convTail, qkvDim }, 0.0f, DType.Float32);
                 if (!deltaState.IsValid)
                     deltaState = MlxNative.Full(new[] { 1, numValueHeads, headValueDim, headKeyDim }, 0.0f, DType.Float32);
             }
 
-            private void EnsureNormWeights(int keyDim, int valueDim)
+            private void EnsureNormWeights(int keyDim, int valueDim, CacheResources parent)
             {
-                if (!onesKey.IsValid || this.keyDim != keyDim)
+                var resources = new CacheResources(this, 2, parent);
+                MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
-                    MlxNative.FreeArray(onesKey);
-                    onesKey = MlxNative.Full(new[] { keyDim }, 1.0f, DType.Float32);
-                    this.keyDim = keyDim;
+                    if (!onesKey.IsValid || this.keyDim != keyDim)
+                        ReplaceNormWeight(keys: true, keyDim, resources, 0);
+                    if (!onesValue.IsValid || this.valueDim != valueDim)
+                        ReplaceNormWeight(keys: false, valueDim, resources, 1);
+                }, resources.Release);
+            }
+
+            private void ReplaceNormWeight(bool keys, int dimension, CacheResources resources, int index)
+            {
+                ref MlxNative.MlxArray replacement = ref resources.Arrays[index];
+                replacement = MlxNative.Full(new[] { dimension }, 1.0f, DType.Float32);
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                try
+                {
+                    if (keys)
+                    {
+                        MlxNative.FreeArrayReference(ref onesKey);
+                        onesKey = replacement;
+                        keyDim = dimension;
+                    }
+                    else
+                    {
+                        MlxNative.FreeArrayReference(ref onesValue);
+                        onesValue = replacement;
+                        valueDim = dimension;
+                    }
+                    replacement = default;
                 }
-                if (!onesValue.IsValid || this.valueDim != valueDim)
+                catch (Exception error)
                 {
-                    MlxNative.FreeArray(onesValue);
-                    onesValue = MlxNative.Full(new[] { valueDim }, 1.0f, DType.Float32);
-                    this.valueDim = valueDim;
+                    PublishReleaseFailure(effect, error);
+                    throw;
                 }
             }
 
-            private static MlxNative.MlxArray RunDepthwiseConv(
+            private MlxNative.MlxArray RunDepthwiseConv(
                 MlxNative.MlxArray concat,
                 MlxNative.MlxArray convWeight,
                 Tensor convWeightTensor,
                 int seqLen,
                 int qkvDim,
-                int convKernel)
+                int convKernel,
+                CacheResources parent)
             {
-                MlxNative.MlxArray acc = default;
-                try
+                var resources = new CacheResources(this, 1, parent);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
                     bool channelMajor = convWeightTensor.DimensionCount == 2
                         && convWeightTensor.Sizes[0] == qkvDim
@@ -1840,13 +1921,16 @@ namespace TensorSharp.MLX
 
                     for (int i = 0; i < convKernel; i++)
                     {
-                        MlxNative.MlxArray seg = default;
-                        MlxNative.MlxArray wi = default;
-                        MlxNative.MlxArray wi3 = default;
-                        MlxNative.MlxArray term = default;
-                        MlxNative.MlxArray next = default;
-                        try
+                        var iteration = new CacheResources(this, 6, resources);
+                        MlxWorker.Shared.InvokeWithResources(iteration, () =>
                         {
+                            ref MlxNative.MlxArray acc = ref resources.Arrays[0];
+                            ref MlxNative.MlxArray oldAcc = ref iteration.Arrays[0];
+                            ref MlxNative.MlxArray seg = ref iteration.Arrays[1];
+                            ref MlxNative.MlxArray wi = ref iteration.Arrays[2];
+                            ref MlxNative.MlxArray wi3 = ref iteration.Arrays[3];
+                            ref MlxNative.MlxArray term = ref iteration.Arrays[4];
+                            ref MlxNative.MlxArray next = ref iteration.Arrays[5];
                             seg = MlxNative.Slice(
                                 concat,
                                 new[] { 0, i, 0 },
@@ -1865,109 +1949,65 @@ namespace TensorSharp.MLX
                             else
                             {
                                 next = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, acc, term);
-                                MlxNative.FreeArray(acc);
+                                oldAcc = acc;
                                 acc = next;
                                 next = default;
                             }
-                        }
-                        finally
-                        {
-                            MlxNative.FreeArray(seg);
-                            MlxNative.FreeArray(wi);
-                            MlxNative.FreeArray(wi3);
-                            MlxNative.FreeArray(term);
-                            MlxNative.FreeArray(next);
-                        }
+                        }, iteration.Release);
                     }
 
-                    MlxNative.MlxArray result = acc;
-                    acc = default;
-                    return result;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(acc);
-                }
+                    resources.ReturnedIndex = 0;
+                    return resources.Arrays[0];
+                }, resources.Release);
             }
 
-            private static MlxNative.MlxArray Silu(MlxNative.MlxArray input)
+            private MlxNative.MlxArray Silu(MlxNative.MlxArray input, CacheResources parent)
             {
-                MlxNative.MlxArray sigmoid = default;
-                try
+                var resources = new CacheResources(this, 2, parent);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray sigmoid = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray output = ref resources.Arrays[1];
                     sigmoid = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, input);
-                    return MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, sigmoid);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(sigmoid);
-                }
+                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, sigmoid);
+                    resources.ReturnedIndex = 1;
+                    return output;
+                }, resources.Release);
             }
 
-            private static MlxNative.MlxArray Softplus(MlxNative.MlxArray input)
+            private MlxNative.MlxArray Softplus(MlxNative.MlxArray input, CacheResources parent)
             {
-                MlxNative.MlxArray exp = default;
-                MlxNative.MlxArray one = default;
-                MlxNative.MlxArray plusOne = default;
-                try
+                var resources = new CacheResources(this, 4, parent);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray exp = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray one = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray plusOne = ref resources.Arrays[2];
+                    ref MlxNative.MlxArray output = ref resources.Arrays[3];
                     exp = MlxNative.Unary(MlxNative.MlxUnaryOp.Exp, input);
                     one = MlxNative.NewScalar(1.0f);
                     plusOne = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, exp, one);
-                    return MlxNative.Unary(MlxNative.MlxUnaryOp.Log, plusOne);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(exp);
-                    MlxNative.FreeArray(one);
-                    MlxNative.FreeArray(plusOne);
-                }
+                    output = MlxNative.Unary(MlxNative.MlxUnaryOp.Log, plusOne);
+                    resources.ReturnedIndex = 3;
+                    return output;
+                }, resources.Release);
             }
 
-            private static MlxNative.MlxArray MulScalar(MlxNative.MlxArray input, float value)
+            private MlxNative.MlxArray MulScalar(MlxNative.MlxArray input, float value, CacheResources parent)
             {
-                MlxNative.MlxArray scalar = default;
-                try
+                var resources = new CacheResources(this, 2, parent);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray scalar = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray output = ref resources.Arrays[1];
                     scalar = MlxNative.NewScalar(value);
-                    return MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, scalar);
-                }
-                finally
-                {
-                    MlxNative.FreeArray(scalar);
-                }
+                    output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, scalar);
+                    resources.ReturnedIndex = 1;
+                    return output;
+                }, resources.Release);
             }
         }
 
-        private static bool Materialize(ref MlxNative.MlxArray array)
-        {
-            if (!array.IsValid)
-                return false;
-
-            var resources = new EvaluationViews { Original = array };
-            MlxNative.MlxArray replacement = MlxWorker.Shared.InvokeNative(resources, effect =>
-            {
-                resources.Contiguous = MlxNative.Contiguous(resources.Original);
-                MlxNative.AsyncEval(resources.Contiguous);
-                resources.Prepared = true;
-                return resources.Contiguous;
-            }, () =>
-            {
-                if (resources.Prepared)
-                {
-                    MlxNative.FreeArray(resources.Original);
-                    resources.Original = default;
-                }
-                else
-                {
-                    MlxNative.FreeArray(resources.Contiguous);
-                    resources.Contiguous = default;
-                }
-            });
-            array = replacement;
-            resources.Contiguous = default;
-            return true;
-        }
 
         public static bool TryPrefillAttention(
             Tensor result,

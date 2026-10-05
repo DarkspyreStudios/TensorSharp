@@ -162,7 +162,18 @@ Append retains its view, compact, concatenated and attention references in one c
 completed target or cache transfers prohibit fallback. Disposal completes registration
 only after both references are released, and repeated successful disposal is a no-op.
 Asynchronous materialization checks submission and reference replacement, not GPU completion.
-The recurrent GatedDeltaNet cache still requires checked state ownership and recovery.
+The recurrent GatedDeltaNet cache registers its actual owner and reserves checked state
+replacement, materialization, reset and disposal through the same runtime authority.
+Reset preserves normalization weights; disposal releases them and completes registration
+only after every owned reference is released. Failed cleanup retains the actual cache.
+Packed and eager callers retain their references and compiled-normalization scalars in
+worker-owned carriers. A separate packed-attempt carrier checks cleanup before eager fallback.
+Target commits propagate through parent carriers and prohibit fallback replay. Normalization
+weight replacement prepares its output before releasing the old reference. Scalar, activation
+and depthwise-convolution helpers retain unreturned outputs and iteration references until
+checked cleanup; a failed accumulator release is not retried during unwinding. Zero-state
+initialization does not advance recurrence. Hidden acquisitions inside native custom kernels
+remain outside these caller carriers.
 All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
