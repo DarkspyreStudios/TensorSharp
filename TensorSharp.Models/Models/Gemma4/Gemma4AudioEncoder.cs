@@ -161,8 +161,10 @@ namespace TensorSharp.Models
                     if (!_clampParams.ContainsKey(linearKey))
                         _clampParams[linearKey] = new ClampParams
                         {
-                            InMin = float.MinValue, InMax = float.MaxValue,
-                            OutMin = float.MinValue, OutMax = float.MaxValue,
+                            InMin = float.MinValue,
+                            InMax = float.MaxValue,
+                            OutMin = float.MinValue,
+                            OutMax = float.MaxValue,
                             HasClamp = false
                         };
 

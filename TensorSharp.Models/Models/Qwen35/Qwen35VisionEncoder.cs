@@ -95,26 +95,26 @@ namespace TensorSharp.Models
             {
                 if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);
 
-            _imageSize = (int)gguf.GetUint32("clip.vision.image_size", 768);
-            _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 16);
-            _hiddenSize = (int)gguf.GetUint32("clip.vision.embedding_length", 1152);
-            _intermediateSize = (int)gguf.GetUint32("clip.vision.feed_forward_length", 4304);
-            _numHeads = (int)gguf.GetUint32("clip.vision.attention.head_count", 16);
-            _blockCount = (int)gguf.GetUint32("clip.vision.block_count", 27);
-            _eps = gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
-            _projectionDim = (int)gguf.GetUint32("clip.vision.projection_dim", 4096);
-            _spatialMergeSize = (int)gguf.GetUint32("clip.vision.spatial_merge_size", 2);
-            _ropeTheta = gguf.GetFloat32("clip.vision.rope.freq_base", 10000f);
-            _gridPerSide = _imageSize / _patchSize;
+                _imageSize = (int)gguf.GetUint32("clip.vision.image_size", 768);
+                _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 16);
+                _hiddenSize = (int)gguf.GetUint32("clip.vision.embedding_length", 1152);
+                _intermediateSize = (int)gguf.GetUint32("clip.vision.feed_forward_length", 4304);
+                _numHeads = (int)gguf.GetUint32("clip.vision.attention.head_count", 16);
+                _blockCount = (int)gguf.GetUint32("clip.vision.block_count", 27);
+                _eps = gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-6f);
+                _projectionDim = (int)gguf.GetUint32("clip.vision.projection_dim", 4096);
+                _spatialMergeSize = (int)gguf.GetUint32("clip.vision.spatial_merge_size", 2);
+                _ropeTheta = gguf.GetFloat32("clip.vision.rope.freq_base", 10000f);
+                _gridPerSide = _imageSize / _patchSize;
 
-            Console.WriteLine($"Qwen3.5 Vision encoder: imageSize={_imageSize}, patchSize={_patchSize}, " +
-                $"hidden={_hiddenSize}, intermediate={_intermediateSize}, heads={_numHeads}, " +
-                $"blocks={_blockCount}, projDim={_projectionDim}, mergeSize={_spatialMergeSize}, " +
-                $"gridPerSide={_gridPerSide}, ropeTheta={_ropeTheta}");
+                Console.WriteLine($"Qwen3.5 Vision encoder: imageSize={_imageSize}, patchSize={_patchSize}, " +
+                    $"hidden={_hiddenSize}, intermediate={_intermediateSize}, heads={_numHeads}, " +
+                    $"blocks={_blockCount}, projDim={_projectionDim}, mergeSize={_spatialMergeSize}, " +
+                    $"gridPerSide={_gridPerSide}, ropeTheta={_ropeTheta}");
 
-            _blockPrefixes = new string[_blockCount];
-            for (int i = 0; i < _blockCount; i++)
-                _blockPrefixes[i] = $"v.blk.{i}";
+                _blockPrefixes = new string[_blockCount];
+                for (int i = 0; i < _blockCount; i++)
+                    _blockPrefixes[i] = $"v.blk.{i}";
 
                 LoadWeights(gguf);
                 CombineTemporalPatchWeights();
