@@ -4,6 +4,12 @@ namespace TensorSharp.Models;
 
 internal static class ModelDisposalOwnership
 {
+    internal static void ReleasePublishedWeight(Dictionary<string, Tensor> weights, string name)
+    {
+        weights[name].Dispose();
+        weights.Remove(name);
+    }
+
     internal static void PublishConstructionWeight(Dictionary<string, Tensor> weights, string name,
         ref Tensor incoming, List<Tensor> displaced)
     {

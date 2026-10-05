@@ -1231,8 +1231,7 @@ namespace TensorSharp.Models
                 // is what pushes a 16 GB card into WDDM shared-memory spillover —
                 // where the encoder's ~350 MB of per-block activations run 6x
                 // slower and each successive image degrades further.
-                _weights.Remove(weightName);
-                weight.Dispose();
+                ModelDisposalOwnership.ReleasePublishedWeight(_weights, weightName);
                 return transposed;
             }
 

@@ -95,6 +95,8 @@ parse failure preserves the actual readers for the child's coordinated release, 
 readers whose constructors never return. Standalone readers still release on construction failure.
 Gemma4's parent-owned safetensors reader uses the same pre-acquisition attachment. Its header
 stream remains reachable after parse failure and clears only after successful close.
+Qwen's direct-CUDA transpose cache removes the original weight binding only after its
+checked release returns. A release error preserves that binding and the published replacement.
 MLX CPU fallback keeps input views, mapped CPU tensors and unreturned results in the
 worker's existing resource carrier before conversion or dispatch. Duplicate arguments
 share the same mapped view, and explicit output tensors retain their caller identity.
