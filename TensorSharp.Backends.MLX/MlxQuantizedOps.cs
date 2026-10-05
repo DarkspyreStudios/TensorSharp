@@ -938,7 +938,8 @@ namespace TensorSharp.MLX
             MlxNative.CompiledClosure closure = EnsureFusedFFNClosure(key);
 
             var resources = new QuantizedResources(5, new[] { gateUpDw, downDw },
-                residual, hidden, preNormWeight, postNormWeight) { Closure = closure };
+                residual, hidden, preNormWeight, postNormWeight)
+            { Closure = closure };
             return TryInvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray hiddenView = ref resources.Arrays[0];
