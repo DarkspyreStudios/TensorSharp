@@ -129,8 +129,8 @@ public sealed class Qwen3EmbeddingModel : IEmbeddingModel
         _gate.Wait();
         try
         {
-            if (_disposed) return;
             _disposed = true;
+            // The model owns checked release; the request fence does not prove release succeeded.
             _model.Dispose();
         }
         finally { _gate.Release(); }

@@ -37,6 +37,14 @@ For a pinned download and startup recipe in one file, use
 [`config/embedding-minilm.json`](../config/embedding-minilm.json). The host config
 loader downloads the specified model revision and verifies its SHA-256.
 
+## In-process Qwen3 embeddings
+
+`Qwen3EmbeddingModel` loads Qwen3 embedding GGUF weights through `Qwen3Model`.
+`EmbeddingModelFactory` selects this decoder for the `qwen3` architecture.
+Disposal fences new requests before releasing the model. Repeated disposal delegates
+to the same model owner, which reports checked release or its cleanup failure.
+A failed release never becomes a successful disposal merely because requests are fenced.
+
 ## Host an embedding service
 
 For native GGML execution, build the native library as described in
