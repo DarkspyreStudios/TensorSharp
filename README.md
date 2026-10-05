@@ -98,9 +98,18 @@ originating exception stack. The actual MLX worker registers in the same runtime
 Ordinary synchronous native helpers enter an effect on the executing worker, including
 reentrant array frees. Synchronous dispatch from a different worker beneath an active native effect
 or compiled callback refuses before queueing. General managed `Invoke` calls do not hold
-a native gate across trace callbacks. Compiled closure calls, fire-and-forget async
-evaluation/closure cleanup and all-used-stream synchronization are not wired into this
-authority. Raw temporary-handle cleanup still requires checked ownership recovery;
+a native gate across trace callbacks. Compiled closure creation/application and checked
+reference release use callback-aware leases. Managed tracing suspends the native monitor
+without dropping its counted invocation. Failed cleanup retains the actual closure,
+invocation vectors and array references. Native callbacks record their original errors
+before returning; aggregation occurs after the callback. Each admitted ordinary/compiled
+call installs its generation's error handler under the shared gate.
+Only the native payload destructor releases its exact callback root, except failed import
+binding before native adoption. Checked closure-reference release completes registration
+only when that root is actually gone. A later payload destructor does not automatically
+complete a pending registration; deferred payload completion remains unfinished.
+Fire-and-forget async evaluation and all-used-stream synchronization are not wired into
+this authority. Other raw temporary-handle cleanup still requires checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
@@ -110,8 +119,8 @@ device qualification. Protocol-2 MLX callbacks, checked backend retirement and
 the final-release hook have no executed runtime qualification.
 
 MLX's shared array-reference release helper waits for the native free and checks
-its return status. Worker reentrant calls remain inline. Raw native cleanup sites,
-compiled callbacks and all-used-stream retirement are not covered by this helper.
+its return status. Worker reentrant calls remain inline. Other raw native cleanup sites
+and all-used-stream retirement are not covered by this helper.
 Storage release checks the array reference, not GPU execution completion.
 
 ## Quick Start

@@ -70,6 +70,7 @@ namespace TensorSharp.MLX
             return Invoke(() =>
             {
                 using NativeEffectLease effect = nativeOwner.EnterEffect();
+                MlxNative.InstallCurrentErrorHandler();
                 return func();
             });
         }

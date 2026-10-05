@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.ExceptionServices;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -3497,11 +3498,11 @@ if (kind == 0) {
         //
         // We expose the lifecycle as three static helpers:
         //   - NewClosure(trace, shapeless): allocates the source closure
-        //     and the compiled closure, and returns a handle bundling both
-        //     plus the GC-rooted trace delegate.
+        //     and the compiled closure, then releases the source reference.
         //   - ApplyClosure(handle, inputs): invokes the compiled closure
         //     and returns the output arrays.
-        //   - FreeCompiledClosure(handle): releases everything.
+        //   - FreeCompiledClosure(handle): checks release of owned closure references.
+        //     MLX releases the payload root only after its last native copy retires.
         //
         // The trace callback runs synchronously from within mlx_compile /
         // mlx_closure_apply, which we always invoke from the worker thread.
@@ -3520,9 +3521,49 @@ if (kind == 0) {
 
         internal sealed class CompiledClosure
         {
+            internal readonly NativeOwnerRegistration NativeOwner;
+            internal readonly List<ClosureInvocation> Invocations = new();
+            internal readonly object PayloadSync = new();
+            internal TraceFunc Trace;
+            internal MlxClosure Source;
             internal MlxClosure Compiled;
             internal GCHandle TraceHandle;
+            internal IntPtr TracePayload;
+            internal ClosureInvocation CurrentInvocation;
+            internal Exception PayloadError;
+            internal Exception PayloadResumeError;
+            internal bool PayloadReleased;
             internal bool Disposed;
+            internal bool SafelyReleased;
+
+            internal CompiledClosure(TraceFunc trace)
+            {
+                Trace = trace;
+                NativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.NativeHandle);
+                NativeOwner.AttachMlxSharedRuntime();
+            }
+        }
+
+        internal sealed class ClosureInvocation
+        {
+            internal NativeMlxCallbackCallLease Lease;
+            internal readonly List<ClosureTrace> Traces = new();
+            internal MlxVectorArray Inputs;
+            internal MlxVectorArray Outputs;
+            internal MlxArray[] BorrowedInputs;
+            internal MlxArray[] Results;
+            internal Exception Error;
+            internal Exception CleanupError;
+            internal bool Unsafe;
+        }
+
+        internal sealed class ClosureTrace
+        {
+            internal MlxArray[] Inputs;
+            internal MlxArray[] Outputs;
+            internal Exception Error;
+            internal Exception ResumeError;
+            internal Exception CleanupError;
         }
 
         // Trace function: takes a vector of input MlxArrays (handles owned by
@@ -3537,105 +3578,342 @@ if (kind == 0) {
 
             return MlxWorker.Shared.Invoke(() =>
             {
-                var holder = new CompiledClosure
-                {
-                    TraceHandle = GCHandle.Alloc(trace),
-                };
-
-                MlxClosure src = mlx_closure_new_func_payload(
-                    ClosureCallbackPtr,
-                    GCHandle.ToIntPtr(holder.TraceHandle),
-                    ClosureDestructorPtr);
-
+                var holder = new CompiledClosure(trace);
                 try
                 {
-                    if (!src.IsValid)
-                        throw new InvalidOperationException("mlx_closure_new_func_payload returned null.");
+                    InvokeClosure(holder, NativeMlxCallbackCallKind.CreatePayloadClosure, invocation =>
+                    {
+                        holder.TraceHandle = GCHandle.Alloc(holder);
+                        holder.TracePayload = GCHandle.ToIntPtr(holder.TraceHandle);
+                        ClearCapturedError();
+                        try
+                        {
+                            holder.Source = mlx_closure_new_func_payload(
+                                ClosureCallbackPtr, holder.TracePayload, ClosureDestructorPtr);
+                        }
+                        catch (Exception binding) when (binding is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+                        {
+                            // Binding failed before the native function can acquire this payload.
+                            try
+                            {
+                                holder.TraceHandle.Free();
+                                holder.TraceHandle = default;
+                                holder.TracePayload = IntPtr.Zero;
+                                holder.PayloadReleased = true;
+                            }
+                            catch (Exception cleanup)
+                            {
+                                holder.PayloadError = cleanup;
+                                throw new AggregateException(binding, cleanup);
+                            }
+                            throw;
+                        }
+                        string error = TakeCapturedError();
+                        if (!holder.Source.IsValid || holder.PayloadReleased || !string.IsNullOrEmpty(error))
+                            throw new InvalidOperationException("MLX payload closure creation failed: " + error);
+                    }, null);
 
-                    Check(mlx_compile(out holder.Compiled, src, shapeless), "compiling MLX closure");
+                    InvokeClosure(holder, NativeMlxCallbackCallKind.CompileClosure, invocation =>
+                    {
+                        CheckClosureStatus(invocation, mlx_compile(out holder.Compiled, holder.Source, shapeless), "compiling MLX closure");
+                        if (!holder.Compiled.IsValid)
+                            throw new InvalidOperationException("mlx_compile returned an empty closure.");
+                    }, invocation => FreeSourceClosure(holder));
+                    return holder;
                 }
-                finally
+                catch (Exception original)
                 {
-                    // Per MLX C-API docs, the source closure is copied by
-                    // mlx_compile; we always free our reference. The payload's
-                    // GCHandle survives via mlx's internal closure copy until
-                    // we call free on the compiled closure (which fires our
-                    // destructor).
-                    if (src.IsValid)
-                        _ = mlx_closure_free(src);
+                    bool canCleanup = true;
+                    try { holder.NativeOwner.ThrowIfQuarantined(); }
+                    catch (NativeRuntimeQuarantinedException) { canCleanup = false; }
+                    if (canCleanup)
+                    {
+                        try { FreeCompiledClosure(holder); }
+                        catch (Exception cleanup)
+                        {
+                            if (!NativeQuarantineAuthority.TryGetFailure(cleanup, out _)
+                                && (holder.Source.IsValid || holder.Compiled.IsValid || holder.TraceHandle.IsAllocated))
+                            {
+                                try
+                                {
+                                    using NativeEffectLease effect = holder.NativeOwner.EnterEffect();
+                                    effect.PublishFailure(holder, cleanup, NativeRuntimeFailureStage.GraphRelease);
+                                }
+                                catch (Exception publication) { cleanup = JoinClosureErrors(cleanup, publication); }
+                            }
+                            throw JoinClosureErrors(original, cleanup);
+                        }
+                    }
+                    ExceptionDispatchInfo.Capture(original).Throw();
+                    throw;
                 }
-
-                return holder;
             });
         }
 
         internal static MlxArray ApplyClosure1(CompiledClosure holder, MlxArray input)
         {
-            MlxArray[] outputs = ApplyClosure(holder, new[] { input });
+            MlxArray[] outputs = ApplyClosure(holder, new[] { input }, firstOnly: true);
             if (outputs.Length == 0) return default;
-            // Caller takes ownership of outputs[0]; free any extras.
-            for (int i = 1; i < outputs.Length; i++)
-                FreeArray(outputs[i]);
             return outputs[0];
         }
 
         internal static MlxArray ApplyClosure2(CompiledClosure holder, MlxArray a, MlxArray b)
         {
-            MlxArray[] outputs = ApplyClosure(holder, new[] { a, b });
+            MlxArray[] outputs = ApplyClosure(holder, new[] { a, b }, firstOnly: true);
             if (outputs.Length == 0) return default;
-            for (int i = 1; i < outputs.Length; i++)
-                FreeArray(outputs[i]);
             return outputs[0];
         }
 
         internal static MlxArray[] ApplyClosure(CompiledClosure holder, MlxArray[] inputs)
+            => ApplyClosure(holder, inputs, firstOnly: false);
+
+        private static MlxArray[] ApplyClosure(CompiledClosure holder, MlxArray[] inputs, bool firstOnly)
         {
             if (holder == null) throw new ArgumentNullException(nameof(holder));
-            if (holder.Disposed) throw new ObjectDisposedException(nameof(CompiledClosure));
+            if (inputs == null) throw new ArgumentNullException(nameof(inputs));
 
             return MlxWorker.Shared.Invoke(() =>
             {
-                MlxVectorArray inVec = mlx_vector_array_new();
-                MlxVectorArray outVec = mlx_vector_array_new();
-                try
+                if (holder.Disposed) throw new ObjectDisposedException(nameof(CompiledClosure));
+                MlxArray[] results = Array.Empty<MlxArray>();
+                InvokeClosure(holder, NativeMlxCallbackCallKind.ApplyClosure, invocation =>
                 {
+                    invocation.BorrowedInputs = inputs;
+                    invocation.Inputs = mlx_vector_array_new();
+                    invocation.Outputs = mlx_vector_array_new();
+                    if (!invocation.Inputs.IsValid || !invocation.Outputs.IsValid)
+                        throw new InvalidOperationException("MLX closure vector creation failed.");
                     for (int i = 0; i < inputs.Length; i++)
                     {
                         if (!inputs[i].IsValid)
                             throw new ArgumentException($"Closure input {i} is invalid.");
-                        Check(mlx_vector_array_append_value(inVec, inputs[i]), "appending closure input");
+                        Check(mlx_vector_array_append_value(invocation.Inputs, inputs[i]), "appending closure input");
                     }
-                    Check(mlx_closure_apply(ref outVec, holder.Compiled, inVec), "applying compiled MLX closure");
+                    CheckClosureStatus(invocation, mlx_closure_apply(ref invocation.Outputs, holder.Compiled, invocation.Inputs), "applying compiled MLX closure");
 
-                    int count = (int)mlx_vector_array_size(outVec);
-                    var results = new MlxArray[count];
+                    int count = checked((int)mlx_vector_array_size(invocation.Outputs));
+                    invocation.Results = new MlxArray[count];
                     for (int i = 0; i < count; i++)
-                        Check(mlx_vector_array_get(out results[i], outVec, (nuint)i), "extracting closure output");
-                    return results;
+                        Check(mlx_vector_array_get(out invocation.Results[i], invocation.Outputs, (nuint)i), "extracting closure output");
+                    results = invocation.Results;
+                }, invocation =>
+                {
+                    if (invocation.Error != null)
+                        FreeClosureArrays(invocation.Results, 0);
+                    else if (firstOnly)
+                        FreeClosureArrays(invocation.Results, 1);
+                    FreeClosureVector(ref invocation.Inputs);
+                    FreeClosureVector(ref invocation.Outputs);
+                });
+                return results;
+            });
+        }
+
+        private static Exception JoinClosureErrors(Exception current, Exception next)
+        {
+            if (current == null) return next;
+            if (ContainsClosureError(current, next)) return current;
+            return new AggregateException(current, next);
+        }
+
+        private static bool ContainsClosureError(Exception current, Exception next)
+        {
+            if (ReferenceEquals(current, next)) return true;
+            if (current is AggregateException aggregate)
+            {
+                foreach (Exception inner in aggregate.InnerExceptions)
+                    if (ContainsClosureError(inner, next)) return true;
+            }
+            return false;
+        }
+
+        private static void CheckClosureStatus(ClosureInvocation invocation, int status, string action)
+        {
+            CollectClosureErrors(invocation);
+            try { Check(status, action); }
+            catch when (invocation.Error != null)
+            {
+                ExceptionDispatchInfo.Capture(invocation.Error).Throw();
+                throw;
+            }
+            if (invocation.Error != null)
+                ExceptionDispatchInfo.Capture(invocation.Error).Throw();
+        }
+
+        private static void CollectClosureErrors(ClosureInvocation invocation)
+        {
+            foreach (ClosureTrace trace in invocation.Traces)
+            {
+                if (trace.Error != null) invocation.Error = JoinClosureErrors(invocation.Error, trace.Error);
+                if (trace.ResumeError != null) invocation.Error = JoinClosureErrors(invocation.Error, trace.ResumeError);
+                if (trace.CleanupError != null)
+                {
+                    invocation.Error = JoinClosureErrors(invocation.Error, trace.CleanupError);
+                    invocation.CleanupError = JoinClosureErrors(invocation.CleanupError, trace.CleanupError);
+                }
+            }
+        }
+
+        private static void InvokeClosure(CompiledClosure holder, NativeMlxCallbackCallKind kind,
+            Action<ClosureInvocation> action, Action<ClosureInvocation> cleanup)
+        {
+            var invocation = new ClosureInvocation();
+            holder.Invocations.Add(invocation);
+            NativeMlxCallbackCallLease lease;
+            try { lease = holder.NativeOwner.EnterMlxCallbackCall(holder, kind); }
+            catch
+            {
+                holder.Invocations.Remove(invocation);
+                throw;
+            }
+            using (lease)
+            {
+                invocation.Lease = lease;
+                ClosureInvocation parent = holder.CurrentInvocation;
+                holder.CurrentInvocation = invocation;
+                try
+                {
+                    try
+                    {
+                        InstallCurrentErrorHandler();
+                        action(invocation);
+                    }
+                    catch (Exception error) { invocation.Error = JoinClosureErrors(invocation.Error, error); }
+                    CollectClosureErrors(invocation);
+                    try { holder.NativeOwner.ThrowIfQuarantined(); }
+                    catch (NativeRuntimeQuarantinedException error)
+                    {
+                        invocation.Unsafe = true;
+                        if (invocation.Error == null) invocation.Error = error;
+                    }
+                    if (!invocation.Unsafe && invocation.CleanupError == null && cleanup != null)
+                    {
+                        try { cleanup(invocation); }
+                        catch (Exception error)
+                        {
+                            invocation.CleanupError = error;
+                            invocation.Error = JoinClosureErrors(invocation.Error, error);
+                        }
+                    }
+                    if (holder.PayloadError != null)
+                    {
+                        invocation.CleanupError = JoinClosureErrors(invocation.CleanupError, holder.PayloadError);
+                        invocation.Error = JoinClosureErrors(invocation.Error, holder.PayloadError);
+                    }
+                    if (holder.PayloadResumeError != null)
+                        invocation.Error = JoinClosureErrors(invocation.Error, holder.PayloadResumeError);
                 }
                 finally
                 {
-                    _ = mlx_vector_array_free(inVec);
-                    _ = mlx_vector_array_free(outVec);
+                    lease.NativeReturned();
+                    holder.CurrentInvocation = parent;
                 }
-            });
+                if (invocation.CleanupError != null)
+                {
+                    invocation.Unsafe = true;
+                    lease.PublishFailure(holder, invocation.CleanupError, NativeRuntimeFailureStage.GraphRelease);
+                }
+                if (!invocation.Unsafe)
+                    holder.Invocations.Remove(invocation);
+                if (invocation.Error != null)
+                    ExceptionDispatchInfo.Capture(invocation.Error).Throw();
+            }
+        }
+
+        private static void FreeSourceClosure(CompiledClosure holder)
+        {
+            if (!holder.Source.IsValid) return;
+            Check(mlx_closure_free(holder.Source), "freeing MLX source closure");
+            holder.Source = default;
+        }
+
+        private static void FreeClosureVector(ref MlxVectorArray vector)
+        {
+            if (!vector.IsValid) return;
+            Check(mlx_vector_array_free(vector), "freeing MLX closure vector");
+            vector = default;
+        }
+
+        private static void FreeClosureArrays(MlxArray[] arrays, int start)
+        {
+            if (arrays == null) return;
+            for (int i = start; i < arrays.Length; i++)
+            {
+                if (!arrays[i].IsValid) continue;
+                Check(mlx_array_free(arrays[i]), "freeing MLX closure array reference");
+                arrays[i] = default;
+            }
         }
 
         internal static void FreeCompiledClosure(CompiledClosure holder)
         {
-            if (holder == null || holder.Disposed) return;
-            holder.Disposed = true;
-
-            // Freeing the compiled closure fires our destructor, which frees
-            // the payload GCHandle.
-            MlxWorker.Shared.Dispatch(() =>
+            if (holder == null) return;
+            MlxWorker.Shared.Invoke(() =>
             {
-                if (holder.Compiled.IsValid)
-                    _ = mlx_closure_free(holder.Compiled);
-                // Destructor handles GCHandle.Free(); guard against MLX not
-                // firing it (e.g. if compile failed) by checking handle.
-                if (holder.TraceHandle.IsAllocated)
-                    holder.TraceHandle.Free();
+                if (holder.SafelyReleased) return;
+                holder.NativeOwner.ThrowIfQuarantined();
+                var invocation = new ClosureInvocation();
+                holder.Invocations.Add(invocation);
+                NativeMlxReleaseReservation reservation;
+                try { reservation = holder.NativeOwner.ReserveMlxRelease(holder); }
+                catch
+                {
+                    holder.Invocations.Remove(invocation);
+                    throw;
+                }
+                using (reservation)
+                {
+                    NativeMlxCallbackCallLease lease;
+                    try { lease = reservation.EnterCallbackRelease(); }
+                    catch
+                    {
+                        holder.Invocations.Remove(invocation);
+                        throw;
+                    }
+                    using (lease)
+                    {
+                        invocation.Lease = lease;
+                        holder.CurrentInvocation = invocation;
+                        try
+                        {
+                            if (holder.Source.IsValid || holder.Compiled.IsValid)
+                                InstallCurrentErrorHandler();
+                            holder.Disposed = true;
+                            FreeSourceClosure(holder);
+                            if (holder.Compiled.IsValid)
+                            {
+                                Check(mlx_closure_free(holder.Compiled), "freeing MLX compiled closure");
+                                holder.Compiled = default;
+                            }
+                            if (holder.PayloadError != null)
+                                ExceptionDispatchInfo.Capture(holder.PayloadError).Throw();
+                            if (holder.PayloadResumeError != null)
+                                ExceptionDispatchInfo.Capture(holder.PayloadResumeError).Throw();
+                        }
+                        catch (Exception error)
+                        {
+                            invocation.Error = error;
+                            invocation.CleanupError = error;
+                            invocation.Unsafe = true;
+                        }
+                        finally
+                        {
+                            lease.NativeReturned();
+                            holder.CurrentInvocation = null;
+                        }
+                        if (invocation.Error != null)
+                        {
+                            lease.PublishFailure(holder, invocation.Error, NativeRuntimeFailureStage.GraphRelease);
+                            ExceptionDispatchInfo.Capture(invocation.Error).Throw();
+                        }
+                        holder.Invocations.Remove(invocation);
+                        if (holder.PayloadReleased || !holder.TraceHandle.IsAllocated)
+                        {
+                            lease.CompleteSafeRelease(holder, reservation);
+                            holder.SafelyReleased = true;
+                        }
+                    }
+                }
             });
         }
 
@@ -3655,90 +3933,124 @@ if (kind == 0) {
         //   ref drops as expected.
         private static unsafe int ClosureCallback(MlxVectorArray* result, MlxVectorArray input, IntPtr payload)
         {
-            MlxArray[] inputs = null;
-            MlxArray[] outputs = null;
+            CompiledClosure holder = null;
+            ClosureInvocation invocation = null;
+            ClosureTrace trace = null;
             try
             {
-                if (result == null || payload == IntPtr.Zero) return 1;
+                if (result == null || payload == IntPtr.Zero)
+                    throw new InvalidOperationException("MLX trace callback has no result or payload.");
                 var handle = GCHandle.FromIntPtr(payload);
-                var trace = handle.Target as TraceFunc;
-                if (trace == null) return 1;
+                holder = handle.Target as CompiledClosure;
+                if (holder == null || holder.TracePayload != payload || holder.PayloadReleased)
+                    throw new InvalidOperationException("MLX trace callback has no live payload owner.");
+                invocation = holder.CurrentInvocation;
+                if (invocation == null)
+                    throw new InvalidOperationException("MLX trace callback has no admitted invocation.");
+                trace = new ClosureTrace();
+                invocation.Traces.Add(trace);
 
-                int n = (int)mlx_vector_array_size(input);
-                inputs = new MlxArray[n];
+                int n = checked((int)mlx_vector_array_size(input));
+                trace.Inputs = new MlxArray[n];
                 for (int i = 0; i < n; i++)
+                    Check(mlx_vector_array_get(out trace.Inputs[i], input, (nuint)i), "extracting MLX trace input");
+
+                invocation.Lease.EnterManagedCallback(NativeMlxCallbackKind.Trace);
+                try { trace.Outputs = holder.Trace(trace.Inputs) ?? Array.Empty<MlxArray>(); }
+                catch (Exception error) { trace.Error = error; }
+                finally
                 {
-                    if (mlx_vector_array_get(out inputs[i], input, (nuint)i) != 0)
-                        return 1;
+                    try { invocation.Lease.ResumeNative(); }
+                    catch (Exception error) { trace.ResumeError = error; }
                 }
-
-                outputs = trace(inputs);
-                if (outputs == null) outputs = Array.Empty<MlxArray>();
-
-                // MlxArray is layout-compatible with the C struct
-                // mlx_array { void* ctx; } so an MlxArray[] is a packed array
-                // of pointers and we can pass it directly via fixed.
-                int rc;
-                unsafe
+                if (trace.Error == null && trace.ResumeError == null)
                 {
-                    if (outputs.Length == 0)
+                    if (trace.Outputs.Length == 0)
                     {
-                        rc = mlx_vector_array_set_data(ref *result, IntPtr.Zero, 0);
+                        Check(mlx_vector_array_set_data(ref *result, IntPtr.Zero, 0), "publishing MLX trace output");
                     }
                     else
                     {
-                        fixed (MlxArray* p = outputs)
+                        fixed (MlxArray* p = trace.Outputs)
                         {
-                            rc = mlx_vector_array_set_data(ref *result, (IntPtr)p, (nuint)outputs.Length);
+                            Check(mlx_vector_array_set_data(ref *result, (IntPtr)p, (nuint)trace.Outputs.Length), "publishing MLX trace output");
                         }
                     }
                 }
-                return rc;
             }
-            catch
+            catch (Exception error)
             {
-                // Returning non-zero signals an error to MLX; ClosureCallback
-                // is reached during compile so MLX will surface this via the
-                // error handler.
-                return 1;
+                if (trace != null)
+                    trace.Error = error;
+                else if (invocation != null)
+                    invocation.Error = error;
+                else if (holder != null)
+                    holder.PayloadError = error;
             }
             finally
             {
-                // Release the per-call refs we acquired via vector_array_get
-                // and the per-output refs the trace function handed back
-                // (set_data took its own ref).
-                if (inputs != null)
+                if (invocation != null && trace != null)
                 {
-                    for (int i = 0; i < inputs.Length; i++)
-                        if (inputs[i].IsValid)
-                            _ = mlx_array_free(inputs[i]);
-                }
-                if (outputs != null)
-                {
-                    for (int i = 0; i < outputs.Length; i++)
-                        if (outputs[i].IsValid)
-                            _ = mlx_array_free(outputs[i]);
+                    try
+                    {
+                        holder.NativeOwner.ThrowIfQuarantined();
+                        FreeClosureArrays(trace.Inputs, 0);
+                        FreeClosureArrays(trace.Outputs, 0);
+                    }
+                    catch (Exception error)
+                    {
+                        trace.CleanupError = error;
+                    }
                 }
             }
+            return trace != null && trace.Error == null && trace.ResumeError == null && trace.CleanupError == null ? 0 : 1;
         }
 
         private static void ClosureDestructor(IntPtr payload)
         {
-            // MLX guarantees the destructor runs exactly once when the
-            // compiled closure is freed. We free the GCHandle here; the
-            // matching CompiledClosure.Disposed=true is set by our
-            // FreeCompiledClosure caller (or it will be set after this fires
-            // — either way GCHandle is freed exactly once because we guard
-            // with IsAllocated on the manual path).
+            CompiledClosure holder = null;
+            NativeMlxCallbackCallLease lease = null;
+            bool suspended = false;
             try
             {
-                if (payload == IntPtr.Zero) return;
+                if (payload == IntPtr.Zero)
+                    throw new InvalidOperationException("MLX payload destructor has no payload.");
                 var handle = GCHandle.FromIntPtr(payload);
-                if (handle.IsAllocated)
-                    handle.Free();
+                holder = handle.Target as CompiledClosure;
+                if (holder == null)
+                    throw new InvalidOperationException("MLX payload destructor has no owner.");
+                lease = holder.CurrentInvocation?.Lease;
+                if (lease != null)
+                {
+                    lease.EnterManagedCallback(NativeMlxCallbackKind.PayloadDestructor);
+                    suspended = true;
+                }
+                holder.NativeOwner.ThrowIfQuarantined();
+                lock (holder.PayloadSync)
+                {
+                    if (holder.PayloadReleased || holder.TracePayload != payload || !holder.TraceHandle.IsAllocated)
+                        throw new InvalidOperationException("MLX payload destructor does not match its live root.");
+                    holder.TraceHandle.Free();
+                    holder.TraceHandle = default;
+                    holder.PayloadReleased = true;
+                    holder.Trace = null;
+                }
             }
-            catch
+            catch (Exception error)
             {
+                if (holder != null)
+                    holder.PayloadError = error;
+            }
+            finally
+            {
+                if (suspended)
+                {
+                    try { lease.ResumeNative(); }
+                    catch (Exception error)
+                    {
+                        holder.PayloadResumeError = error;
+                    }
+                }
             }
         }
 
@@ -8923,6 +9235,15 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (errorHandlerInstalled)
                     return;
 
+                mlx_set_error_handler(ErrorHandler, IntPtr.Zero, IntPtr.Zero);
+                errorHandlerInstalled = true;
+            }
+        }
+
+        internal static void InstallCurrentErrorHandler()
+        {
+            lock (initSync)
+            {
                 mlx_set_error_handler(ErrorHandler, IntPtr.Zero, IntPtr.Zero);
                 errorHandlerInstalled = true;
             }
