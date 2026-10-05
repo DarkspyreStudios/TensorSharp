@@ -194,6 +194,15 @@ effect under the same worker reservation. A failed phase stops later cleanup.
 Native data can retain a released closure's payload; its actual handle owner remains active
 until the deferred payload is retired. Cache clearing does not establish final registration
 retirement, queued-reader safety or complete worker/model cleanup.
+The actual compiled closure remains in the worker's existing resource collection until its
+registration is safely released. A preallocated callback notification posts retirement
+without waiting beneath a native frame. The worker checks actual reference/payload receipts
+before the next queued operation; empty-reference retirement performs no native free replay.
+Healthy same-owner Busy retains the object for a later registration attempt. Callback and
+dispatch failures remain on the real closure/work descriptor and propagate or log without
+freeing the unsafe graph. Deferred callbacks borrow a call lease only on its owning thread.
+This source path does not complete worker shutdown, rejected-queue handling or final parent
+retirement, and it does not qualify native callback/finalizer/concurrency behavior.
 Allocator disposal sets its disposed flag only after device and backend cache cleanup
 succeed. These operations do not establish final cache/closure/model/worker retirement,
 queued-reader lifetime, external host-backing lifetime or native runtime qualification.

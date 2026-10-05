@@ -11,6 +11,7 @@ namespace TensorSharp.MLX
         internal bool SafelyReleased;
         internal virtual bool HasNativeResources => true;
         internal virtual bool CleanupRequiresOrdinaryEffect => true;
+        internal virtual bool RetireReleasedPayload() => false;
         internal virtual NativeRuntimeFailureStage CleanupFailureStage => NativeRuntimeFailureStage.GraphRelease;
     }
 
@@ -56,7 +57,7 @@ namespace TensorSharp.MLX
                 return func();
 
             NativeQuarantineAuthority.ValidateMlxWorkerDispatch(nativeOwner);
-            var item = new WorkItem<T>(func);
+            var item = new WorkItem<T>(() => CompleteWork(func));
             queue.Add(item);
             return item.GetResult();
         }
@@ -268,6 +269,72 @@ namespace TensorSharp.MLX
             return MlxNative.JoinNativeErrors(original, cleanup);
         }
 
+        internal void PrepareResourceRetention()
+        {
+            if (!IsOnWorkerThread)
+                throw new InvalidOperationException("MLX resource retention belongs to its actual worker.");
+            nativeResources.EnsureCapacity(checked(nativeResources.Count + 1));
+        }
+
+        internal void RetainResource(MlxNativeResources resources)
+        {
+            if (!IsOnWorkerThread)
+                throw new InvalidOperationException("MLX resource retention belongs to its actual worker.");
+            nativeResources.Add(resources);
+        }
+
+        internal void NotifyResourceRetirement(ResourceRetirementWork work)
+        {
+            // A callback posts metadata retirement without waiting beneath a native frame.
+            ThrowIfDisposed();
+            queue.Add(work);
+        }
+
+        private T CompleteWork<T>(Func<T> func)
+        {
+            // Settle prior receipts before this operation can acquire an unreturned result.
+            for (int i = nativeResources.Count - 1; i >= 0; i--)
+                RetireResource(nativeResources[i]);
+            return func();
+        }
+
+        private void RetireResource(MlxNativeResources resources)
+        {
+            try
+            {
+                if (resources.RetireReleasedPayload())
+                    nativeResources.Remove(resources);
+            }
+            catch (NativeMlxCallbackBusyException busy) when (busy.IsFor(resources))
+            {
+                // Registration retirement has not begun; retain its actual owner.
+            }
+        }
+
+        internal sealed class ResourceRetirementWork(MlxWorker worker, MlxNativeResources resources) : IWorkItem
+        {
+            internal Exception DispatchError;
+            internal Exception LoggingError;
+
+            public void Execute()
+            {
+                try { worker.RetireResource(resources); }
+                catch (Exception error) { LogFailure(error); }
+            }
+
+            internal void RecordDispatchFailure(Exception error)
+            {
+                Volatile.Write(ref DispatchError, error);
+                LogFailure(error);
+            }
+
+            private void LogFailure(Exception error)
+            {
+                try { Console.Error.WriteLine("[mlx] Deferred payload retirement failed: " + error); }
+                catch (Exception logging) { Volatile.Write(ref LoggingError, logging); }
+            }
+        }
+
         private void Run()
         {
             Volatile.Write(ref workerThreadId, Thread.CurrentThread.ManagedThreadId);
@@ -289,7 +356,7 @@ namespace TensorSharp.MLX
             queue.CompleteAdding();
         }
 
-        private interface IWorkItem
+        internal interface IWorkItem
         {
             void Execute();
         }

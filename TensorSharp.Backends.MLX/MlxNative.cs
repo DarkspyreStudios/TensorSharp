@@ -3518,11 +3518,12 @@ if (kind == 0) {
         private static readonly unsafe IntPtr ClosureCallbackPtr = Marshal.GetFunctionPointerForDelegate(ClosureCallbackDelegate);
         private static readonly IntPtr ClosureDestructorPtr = Marshal.GetFunctionPointerForDelegate(ClosureDestructorDelegate);
 
-        internal sealed class CompiledClosure
+        internal sealed class CompiledClosure : MlxNativeResources
         {
             internal readonly NativeOwnerRegistration NativeOwner;
             internal readonly List<ClosureInvocation> Invocations = new();
             internal readonly object PayloadSync = new();
+            internal readonly MlxWorker.ResourceRetirementWork RetirementWork;
             internal TraceFunc Trace;
             internal MlxClosure Source;
             internal MlxClosure Compiled;
@@ -3533,13 +3534,62 @@ if (kind == 0) {
             internal Exception PayloadResumeError;
             internal bool PayloadReleased;
             internal bool Disposed;
-            internal bool SafelyReleased;
 
             internal CompiledClosure(TraceFunc trace)
             {
                 Trace = trace;
+                RetirementWork = new MlxWorker.ResourceRetirementWork(MlxWorker.Shared, this);
                 NativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.NativeHandle);
                 NativeOwner.AttachMlxSharedRuntime();
+            }
+
+            internal override bool RetireReleasedPayload()
+            {
+                if (SafelyReleased) return true;
+                try { NativeOwner.ThrowIfQuarantined(); }
+                catch (NativeRuntimeQuarantinedException) { return false; }
+
+                Exception error;
+                bool ready;
+                lock (PayloadSync)
+                {
+                    error = PayloadError;
+                    if (PayloadResumeError != null) error = JoinNativeErrors(error, PayloadResumeError);
+                    Exception dispatch = System.Threading.Volatile.Read(ref RetirementWork.DispatchError);
+                    if (dispatch != null) error = JoinNativeErrors(error, dispatch);
+                    Exception logging = System.Threading.Volatile.Read(ref RetirementWork.LoggingError);
+                    if (logging != null) error = JoinNativeErrors(error, logging);
+                    ready = Disposed && !Source.IsValid && !Compiled.IsValid && !TraceHandle.IsAllocated
+                        && CurrentInvocation == null;
+                }
+                try
+                {
+                    if (error != null)
+                        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+                    if (!ready) return false;
+                    // All actual references are already gone; only registration retirement remains.
+                    FreeCompiledClosure(this);
+                    return SafelyReleased;
+                }
+                catch (NativeMlxCallbackBusyException)
+                {
+                    throw;
+                }
+                catch (Exception original)
+                {
+                    error = original;
+                    if (!NativeQuarantineAuthority.TryGetFailure(original, out _))
+                    {
+                        try
+                        {
+                            using NativeEffectLease effect = NativeOwner.EnterEffect();
+                            effect.PublishFailure(this, original, NativeRuntimeFailureStage.GraphRelease);
+                        }
+                        catch (Exception publication) { error = JoinNativeErrors(error, publication); }
+                    }
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
+                    throw;
+                }
             }
         }
 
@@ -3577,7 +3627,9 @@ if (kind == 0) {
 
             return MlxWorker.Shared.Invoke(() =>
             {
+                MlxWorker.Shared.PrepareResourceRetention();
                 var holder = new CompiledClosure(trace);
+                MlxWorker.Shared.RetainResource(holder);
                 try
                 {
                     InvokeClosure(holder, NativeMlxCallbackCallKind.CompileClosure, invocation =>
@@ -3922,7 +3974,10 @@ if (kind == 0) {
                             ExceptionDispatchInfo.Capture(invocation.Error).Throw();
                         }
                         holder.Invocations.Remove(invocation);
-                        if (holder.PayloadReleased || !holder.TraceHandle.IsAllocated)
+                        bool payloadReleased;
+                        lock (holder.PayloadSync)
+                            payloadReleased = holder.PayloadReleased || !holder.TraceHandle.IsAllocated;
+                        if (payloadReleased)
                         {
                             lease.CompleteSafeRelease(holder, reservation);
                             holder.SafelyReleased = true;
@@ -4038,7 +4093,9 @@ if (kind == 0) {
                 holder = handle.Target as CompiledClosure;
                 if (holder == null)
                     throw new InvalidOperationException("MLX payload destructor has no owner.");
-                lease = holder.CurrentInvocation?.Lease;
+                lease = System.Threading.Volatile.Read(ref holder.CurrentInvocation)?.Lease;
+                if (lease != null && lease.ThreadId != Environment.CurrentManagedThreadId)
+                    lease = null;
                 if (lease != null)
                 {
                     lease.EnterManagedCallback(NativeMlxCallbackKind.PayloadDestructor);
@@ -4058,7 +4115,7 @@ if (kind == 0) {
             catch (Exception error)
             {
                 if (holder != null)
-                    holder.PayloadError = error;
+                    lock (holder.PayloadSync) holder.PayloadError = error;
             }
             finally
             {
@@ -4067,8 +4124,13 @@ if (kind == 0) {
                     try { lease.ResumeNative(); }
                     catch (Exception error)
                     {
-                        holder.PayloadResumeError = error;
+                        lock (holder.PayloadSync) holder.PayloadResumeError = error;
                     }
+                }
+                if (holder != null && lease == null)
+                {
+                    try { MlxWorker.Shared.NotifyResourceRetirement(holder.RetirementWork); }
+                    catch (Exception dispatch) { holder.RetirementWork.RecordDispatchFailure(dispatch); }
                 }
             }
         }
