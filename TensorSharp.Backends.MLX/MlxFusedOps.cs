@@ -52,6 +52,19 @@ namespace TensorSharp.MLX
             internal bool Prepared;
         }
 
+        private static bool TryInvokeWithResources(MlxArrayResources resources, Func<bool> operation)
+        {
+            try
+            {
+                return MlxWorker.Shared.InvokeWithResources(resources, operation, resources.Release);
+            }
+            catch (Exception error) when (resources.SafelyReleased && !resources.HasStoredResult
+                && !NativeQuarantineAuthority.TryGetFailure(error, out _))
+            {
+                return false;
+            }
+        }
+
         private static bool TryEvaluate(Tensor tensor, bool asynchronous)
         {
             if (tensor == null || tensor.Storage is not MlxStorage)
@@ -92,31 +105,21 @@ namespace TensorSharp.MLX
                 return false;
             if (logits.DimensionCount < 1) return false;
 
-            MlxNative.MlxArray logitsView = default;
-            MlxNative.MlxArray argmax = default;
-            MlxNative.MlxArray casted = default;
-            try
+            var resources = new MlxArrayResources(3, result, logits);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray logitsView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray argmax = ref resources.Arrays[1];
+                ref MlxNative.MlxArray casted = ref resources.Arrays[2];
                 logitsView = GetView(logits);
                 argmax = MlxNative.ArgMaxAxis(logitsView, logits.DimensionCount - 1, keepDims: false);
                 // mlx_argmax returns uint32; recast to int32 to match the
                 // C# result tensor dtype.
                 casted = MlxNative.Astype(argmax, DType.Int32);
-                MlxNative.FreeArray(argmax);
-                argmax = default;
                 MlxStorage.SetDeviceResult(result, ref casted);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(logitsView);
-                MlxNative.FreeArray(argmax);
-                MlxNative.FreeArray(casted);
-            }
+            });
         }
 
         // Device-side MoE router top-K + (normalized) softmax. Writes
@@ -154,58 +157,43 @@ namespace TensorSharp.MLX
             if (K <= 0 || K >= numExperts) return false;
             if (routeWeights.Sizes[1] != K) return false;
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(8, routerLogits, topIndices, routeWeights);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray logitsView = default;
-                MlxNative.MlxArray neg = default;
-                MlxNative.MlxArray partIdx = default;
-                MlxNative.MlxArray topIdx2d = default;
-                MlxNative.MlxArray topIdx1d = default;
-                MlxNative.MlxArray topIdx1dInt = default;
-                MlxNative.MlxArray topLogits = default;
-                MlxNative.MlxArray softmaxed = default;
-                try
-                {
-                    logitsView = GetView(routerLogits);
-                    // Negate so argpartition's "k smallest" gives top-K largest.
-                    neg = MlxNative.Unary(MlxNative.MlxUnaryOp.Neg, logitsView);
-                    // [1, numExperts] uint32 — first K positions are top-K largest.
-                    partIdx = MlxNative.ArgPartitionAxis(neg, K - 1, axis: 1);
-                    // Slice first K → [1, K]
-                    topIdx2d = MlxNative.Slice(
-                        partIdx,
-                        starts: new[] { 0, 0 },
-                        stops: new[] { 1, K },
-                        strides: new[] { 1, 1 });
-                    // Reshape to [K] for the batched MoE kernel.
-                    topIdx1d = MlxNative.Reshape(topIdx2d, new[] { K });
-                    // Cast uint32 → int32 (the batched kernel expects int32 indices).
-                    topIdx1dInt = MlxNative.Astype(topIdx1d, DType.Int32);
-                    // Gather the top-K logits and softmax them (normalized within
-                    // the K selected experts — matches the Qwen3.5 _normTopKProb
-                    // host-side semantics).
-                    topLogits = MlxNative.TakeAxis(logitsView, topIdx1dInt, axis: 1);
-                    softmaxed = MlxNative.SoftmaxLastAxis(topLogits);
+                ref MlxNative.MlxArray logitsView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray neg = ref resources.Arrays[1];
+                ref MlxNative.MlxArray partIdx = ref resources.Arrays[2];
+                ref MlxNative.MlxArray topIdx2d = ref resources.Arrays[3];
+                ref MlxNative.MlxArray topIdx1d = ref resources.Arrays[4];
+                ref MlxNative.MlxArray topIdx1dInt = ref resources.Arrays[5];
+                ref MlxNative.MlxArray topLogits = ref resources.Arrays[6];
+                ref MlxNative.MlxArray softmaxed = ref resources.Arrays[7];
+                logitsView = GetView(routerLogits);
+                // Negate so argpartition's "k smallest" gives top-K largest.
+                neg = MlxNative.Unary(MlxNative.MlxUnaryOp.Neg, logitsView);
+                // [1, numExperts] uint32 — first K positions are top-K largest.
+                partIdx = MlxNative.ArgPartitionAxis(neg, K - 1, axis: 1);
+                // Slice first K → [1, K]
+                topIdx2d = MlxNative.Slice(
+                    partIdx,
+                    starts: new[] { 0, 0 },
+                    stops: new[] { 1, K },
+                    strides: new[] { 1, 1 });
+                // Reshape to [K] for the batched MoE kernel.
+                topIdx1d = MlxNative.Reshape(topIdx2d, new[] { K });
+                // Cast uint32 → int32 (the batched kernel expects int32 indices).
+                topIdx1dInt = MlxNative.Astype(topIdx1d, DType.Int32);
+                // Gather the top-K logits and softmax them (normalized within
+                // the K selected experts — matches the Qwen3.5 _normTopKProb
+                // host-side semantics).
+                topLogits = MlxNative.TakeAxis(logitsView, topIdx1dInt, axis: 1);
+                softmaxed = MlxNative.SoftmaxLastAxis(topLogits);
 
-                    MlxStorage.SetDeviceResult(topIndices, ref topIdx1dInt);
-                    MlxStorage.SetDeviceResult(routeWeights, ref softmaxed);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(logitsView);
-                    MlxNative.FreeArray(neg);
-                    MlxNative.FreeArray(partIdx);
-                    MlxNative.FreeArray(topIdx2d);
-                    MlxNative.FreeArray(topIdx1d);
-                    MlxNative.FreeArray(topIdx1dInt);
-                    MlxNative.FreeArray(topLogits);
-                    MlxNative.FreeArray(softmaxed);
-                }
+                MlxStorage.SetDeviceResult(topIndices, ref topIdx1dInt);
+                resources.HasStoredResult = true;
+                MlxStorage.SetDeviceResult(routeWeights, ref softmaxed);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -232,30 +220,28 @@ namespace TensorSharp.MLX
             if (K <= 0 || K >= E) return false;
             if (topIndices.Sizes[0] != N || routeWeights.Sizes[0] != N || routeWeights.Sizes[1] != K) return false;
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(7, scores, topIndices, routeWeights);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray sv = default, neg = default, part = default, idxU = default,
-                    idxI = default, topLogits = default, w = default;
-                try
-                {
-                    sv = GetView(scores);                                    // [N, E]
-                    neg = MlxNative.Unary(MlxNative.MlxUnaryOp.Neg, sv);     // argpartition gives k-SMALLEST
-                    part = MlxNative.ArgPartitionAxis(neg, K - 1, axis: 1);  // [N, E] uint32 (first K = top-K largest)
-                    idxU = MlxNative.Slice(part, new[] { 0, 0 }, new[] { N, K }, new[] { 1, 1 });  // [N, K] uint32
-                    idxI = MlxNative.Astype(idxU, DType.Int32);              // [N, K] int32 (gather_qmm rhs)
-                    topLogits = MlxNative.TakeAlongAxis(sv, idxU, axis: 1);  // [N, K] per-row top-K logits
-                    w = MlxNative.SoftmaxLastAxis(topLogits);               // [N, K] renormalised weights
-                    MlxStorage.SetDeviceResult(topIndices, ref idxI);
-                    MlxStorage.SetDeviceResult(routeWeights, ref w);
-                    return true;
-                }
-                catch { return false; }
-                finally
-                {
-                    MlxNative.FreeArray(sv); MlxNative.FreeArray(neg); MlxNative.FreeArray(part);
-                    MlxNative.FreeArray(idxU); MlxNative.FreeArray(idxI);
-                    MlxNative.FreeArray(topLogits); MlxNative.FreeArray(w);
-                }
+                ref MlxNative.MlxArray sv = ref resources.Arrays[0];
+                ref MlxNative.MlxArray neg = ref resources.Arrays[1];
+                ref MlxNative.MlxArray part = ref resources.Arrays[2];
+                ref MlxNative.MlxArray idxU = ref resources.Arrays[3];
+                ref MlxNative.MlxArray idxI = ref resources.Arrays[4];
+                ref MlxNative.MlxArray topLogits = ref resources.Arrays[5];
+                ref MlxNative.MlxArray w = ref resources.Arrays[6];
+                sv = GetView(scores);                                    // [N, E]
+                neg = MlxNative.Unary(MlxNative.MlxUnaryOp.Neg, sv);     // argpartition gives k-SMALLEST
+                part = MlxNative.ArgPartitionAxis(neg, K - 1, axis: 1);  // [N, E] uint32 (first K = top-K largest)
+                idxU = MlxNative.Slice(part, new[] { 0, 0 }, new[] { N, K }, new[] { 1, 1 });  // [N, K] uint32
+                idxI = MlxNative.Astype(idxU, DType.Int32);              // [N, K] int32 (gather_qmm rhs)
+                topLogits = MlxNative.TakeAlongAxis(sv, idxU, axis: 1);  // [N, K] per-row top-K logits
+                w = MlxNative.SoftmaxLastAxis(topLogits);               // [N, K] renormalised weights
+                MlxStorage.SetDeviceResult(topIndices, ref idxI);
+                resources.HasStoredResult = true;
+                MlxStorage.SetDeviceResult(routeWeights, ref w);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -280,30 +266,21 @@ namespace TensorSharp.MLX
 
         private static bool RunAddScaledInPlace(Tensor output, Tensor src, float scalar)
         {
-            MlxNative.MlxArray outView = default;
-            MlxNative.MlxArray srcView = default;
-            MlxNative.MlxArray scalarArray = default;
-            MlxNative.MlxArray result = default;
-            try
+            var resources = new MlxArrayResources(4, output, src);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray outView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray scalarArray = ref resources.Arrays[2];
+                ref MlxNative.MlxArray result = ref resources.Arrays[3];
                 outView = GetView(output);
                 srcView = GetView(src);
                 scalarArray = MlxNative.NewScalar(scalar);
                 result = MlxCompiledOps.AddScaled(outView, srcView, scalarArray);
                 MlxStorage.SetDeviceResult(output, ref result);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(outView);
-                MlxNative.FreeArray(srcView);
-                MlxNative.FreeArray(scalarArray);
-                MlxNative.FreeArray(result);
-            }
+            });
         }
 
         // Native submission is checked before return; GPU execution remains asynchronous.
@@ -321,48 +298,18 @@ namespace TensorSharp.MLX
                 return false;
             }
 
-            var resources = new EvaluationViews();
-            MlxNative.MlxArray contiguous = default;
-            bool retainedFailure = false;
-            try
+            var resources = new MlxArrayResources(2, tensor);
+            return TryInvokeWithResources(resources, () =>
             {
-                contiguous = MlxWorker.Shared.InvokeNative(resources, effect =>
-                {
-                    resources.View = GetView(tensor);
-                    resources.Contiguous = MlxNative.Contiguous(resources.View);
-                    MlxNative.Eval(resources.Contiguous);
-                    resources.Prepared = true;
-                    return resources.Contiguous;
-                }, () =>
-                {
-                    MlxNative.FreeArray(resources.View);
-                    resources.View = default;
-                    if (!resources.Prepared)
-                    {
-                        MlxNative.FreeArray(resources.Contiguous);
-                        resources.Contiguous = default;
-                    }
-                });
-                resources.Contiguous = default;
+                ref MlxNative.MlxArray view = ref resources.Arrays[0];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[1];
+                view = GetView(tensor);
+                contiguous = MlxNative.Contiguous(view);
+                MlxNative.Eval(contiguous);
                 MlxStorage.SetDeviceResult(tensor, ref contiguous);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch (Exception error) when (NativeQuarantineAuthority.TryGetFailure(error, out _))
-            {
-                retainedFailure = true;
-                throw;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (!retainedFailure)
-                {
-                    MlxNative.FreeArray(contiguous);
-                }
-            }
+            });
         }
 
         public static bool TryGatherRows(Tensor result, Tensor src, Tensor indices)
@@ -379,32 +326,20 @@ namespace TensorSharp.MLX
                 return false;
             }
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(4, result, src, indices);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray indicesView = default;
-                MlxNative.MlxArray gathered = default;
-                MlxNative.MlxArray contiguous = default;
-                try
-                {
-                    srcView = GetView(src);
-                    indicesView = GetView(indices);
-                    gathered = MlxNative.TakeAxis(srcView, indicesView, 0);
-                    contiguous = MlxNative.Contiguous(gathered);
-                    MlxStorage.SetDeviceResult(result, ref contiguous);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(indicesView);
-                    MlxNative.FreeArray(gathered);
-                    MlxNative.FreeArray(contiguous);
-                }
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray indicesView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray gathered = ref resources.Arrays[2];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[3];
+                srcView = GetView(src);
+                indicesView = GetView(indices);
+                gathered = MlxNative.TakeAxis(srcView, indicesView, 0);
+                contiguous = MlxNative.Contiguous(gathered);
+                MlxStorage.SetDeviceResult(result, ref contiguous);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -434,35 +369,22 @@ namespace TensorSharp.MLX
             if (batchSize <= 0)
                 return true;
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(5, output, rows, indices, weights);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray outputView = default;
-                MlxNative.MlxArray rowsView = default;
-                MlxNative.MlxArray indicesView = default;
-                MlxNative.MlxArray weightsView = default;
-                MlxNative.MlxArray scattered = default;
-                try
-                {
-                    outputView = GetView(output);
-                    rowsView = GetView(rows);
-                    indicesView = GetView(indices);
-                    weightsView = GetView(weights);
-                    scattered = MlxNative.ScatterAddWeightedRows(outputView, rowsView, indicesView, weightsView, seqLen, batchSize, hiddenDim);
-                    MlxStorage.SetDeviceResult(output, ref scattered);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(outputView);
-                    MlxNative.FreeArray(rowsView);
-                    MlxNative.FreeArray(indicesView);
-                    MlxNative.FreeArray(weightsView);
-                    MlxNative.FreeArray(scattered);
-                }
+                ref MlxNative.MlxArray outputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray rowsView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray indicesView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray weightsView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray scattered = ref resources.Arrays[4];
+                outputView = GetView(output);
+                rowsView = GetView(rows);
+                indicesView = GetView(indices);
+                weightsView = GetView(weights);
+                scattered = MlxNative.ScatterAddWeightedRows(outputView, rowsView, indicesView, weightsView, seqLen, batchSize, hiddenDim);
+                MlxStorage.SetDeviceResult(output, ref scattered);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -495,35 +417,23 @@ namespace TensorSharp.MLX
 
             int rows = checked((int)residual.Sizes[0]);
             int hiddenDim = checked((int)residual.Sizes[1]);
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(5, residual, input, normWeight, normedOut);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray residualView = default;
-                MlxNative.MlxArray inputView = default;
-                MlxNative.MlxArray weightView = default;
-                MlxNative.MlxArray updated = default;
-                MlxNative.MlxArray normed = default;
-                try
-                {
-                    residualView = GetView(residual);
-                    inputView = GetView(input);
-                    weightView = GetView(normWeight);
-                    (updated, normed) = MlxNative.AddRmsNorm(residualView, inputView, weightView, eps, rows, hiddenDim);
-                    MlxStorage.SetDeviceResult(residual, ref updated);
-                    MlxStorage.SetDeviceResult(normedOut, ref normed);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(residualView);
-                    MlxNative.FreeArray(inputView);
-                    MlxNative.FreeArray(weightView);
-                    MlxNative.FreeArray(updated);
-                    MlxNative.FreeArray(normed);
-                }
+                ref MlxNative.MlxArray residualView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray weightView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray updated = ref resources.Arrays[3];
+                ref MlxNative.MlxArray normed = ref resources.Arrays[4];
+                residualView = GetView(residual);
+                inputView = GetView(input);
+                weightView = GetView(normWeight);
+                (updated, normed) = MlxNative.AddRmsNorm(residualView, inputView, weightView, eps, rows, hiddenDim);
+                MlxStorage.SetDeviceResult(residual, ref updated);
+                resources.HasStoredResult = true;
+                MlxStorage.SetDeviceResult(normedOut, ref normed);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -544,32 +454,20 @@ namespace TensorSharp.MLX
 
             int rows = checked((int)residual.Sizes[0]);
             int hiddenDim = checked((int)residual.Sizes[1]);
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(4, residual, input, normWeight);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray residualView = default;
-                MlxNative.MlxArray inputView = default;
-                MlxNative.MlxArray weightView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    residualView = GetView(residual);
-                    inputView = GetView(input);
-                    weightView = GetView(normWeight);
-                    output = MlxNative.RmsNormAdd(residualView, inputView, weightView, eps, rows, hiddenDim);
-                    MlxStorage.SetDeviceResult(residual, ref output);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(residualView);
-                    MlxNative.FreeArray(inputView);
-                    MlxNative.FreeArray(weightView);
-                    MlxNative.FreeArray(output);
-                }
+                ref MlxNative.MlxArray residualView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray weightView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                residualView = GetView(residual);
+                inputView = GetView(input);
+                weightView = GetView(normWeight);
+                output = MlxNative.RmsNormAdd(residualView, inputView, weightView, eps, rows, hiddenDim);
+                MlxStorage.SetDeviceResult(residual, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -588,24 +486,17 @@ namespace TensorSharp.MLX
             }
 
             int rows = checked((int)gateUp.Sizes[0]);
-            MlxNative.MlxArray gateUpView = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new MlxArrayResources(2, result, gateUp);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray gateUpView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
                 gateUpView = GetView(gateUp);
                 output = MlxNative.GeluMulSplit(gateUpView, rows, halfDim);
                 MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(gateUpView);
-                MlxNative.FreeArray(output);
-            }
+            });
         }
 
         /// <summary>
@@ -647,14 +538,15 @@ namespace TensorSharp.MLX
 
             int rows = checked((int)gate.Sizes[0]);
             int dim = checked((int)gate.Sizes[1]);
-            MlxNative.MlxArray gateView = default;
-            MlxNative.MlxArray upView = default;
-            MlxNative.MlxArray gateBiasView = default;
-            MlxNative.MlxArray upBiasView = default;
-            MlxNative.MlxArray expertsView = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new MlxArrayResources(6, result, gate, up, gateBias, upBias, expertIndices);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray gateView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray upView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray gateBiasView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray upBiasView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray expertsView = ref resources.Arrays[4];
+                ref MlxNative.MlxArray output = ref resources.Arrays[5];
                 gateView = GetView(gate);
                 upView = GetView(up);
                 gateBiasView = GetView(gateBias);
@@ -663,21 +555,9 @@ namespace TensorSharp.MLX
                 output = MlxNative.SwigluOaiGatherBias(
                     gateView, upView, gateBiasView, upBiasView, expertsView, alpha, limit, rows, dim);
                 MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(gateView);
-                MlxNative.FreeArray(upView);
-                MlxNative.FreeArray(gateBiasView);
-                MlxNative.FreeArray(upBiasView);
-                MlxNative.FreeArray(expertsView);
-                MlxNative.FreeArray(output);
-            }
+            });
         }
 
         /// <summary>
@@ -717,14 +597,15 @@ namespace TensorSharp.MLX
 
             int n = checked((int)output.Sizes[0]);
             int dim = checked((int)output.Sizes[1]);
-            MlxNative.MlxArray downView = default;
-            MlxNative.MlxArray biasView = default;
-            MlxNative.MlxArray expertsView = default;
-            MlxNative.MlxArray invOrderView = default;
-            MlxNative.MlxArray weightsView = default;
-            MlxNative.MlxArray result = default;
-            try
+            var resources = new MlxArrayResources(6, output, downRows, downBias, expertsSorted, invOrder, routeWeights);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray downView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray biasView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray expertsView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray invOrderView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray weightsView = ref resources.Arrays[4];
+                ref MlxNative.MlxArray result = ref resources.Arrays[5];
                 downView = GetView(downRows);
                 // The kernel signature always binds a down_bias buffer; without
                 // a bias the rows array doubles as an (unread) placeholder.
@@ -736,21 +617,9 @@ namespace TensorSharp.MLX
                     downView, biasView, hasBias, expertsView, invOrderView, weightsView,
                     n, expertsPerToken, dim);
                 MlxStorage.SetDeviceResult(output, ref result);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(downView);
-                MlxNative.FreeArray(biasView);
-                MlxNative.FreeArray(expertsView);
-                MlxNative.FreeArray(invOrderView);
-                MlxNative.FreeArray(weightsView);
-                MlxNative.FreeArray(result);
-            }
+            });
         }
 
         /// <summary>
@@ -796,40 +665,28 @@ namespace TensorSharp.MLX
             int heads = (int)cache.Sizes[0];
             int headDim = (int)cache.Sizes[2];
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(4, cache, src);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray cacheView = default;
-                MlxNative.MlxArray srcView = default;
-                MlxNative.MlxArray casted = default;
-                MlxNative.MlxArray updated = default;
-                try
+                ref MlxNative.MlxArray cacheView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray srcView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray casted = ref resources.Arrays[2];
+                ref MlxNative.MlxArray updated = ref resources.Arrays[3];
+                cacheView = GetView(cache);
+                srcView = GetView(src);
+                MlxNative.MlxArray slice = srcView;
+                if (src.ElementType != cache.ElementType)
                 {
-                    cacheView = GetView(cache);
-                    srcView = GetView(src);
-                    MlxNative.MlxArray slice = srcView;
-                    if (src.ElementType != cache.ElementType)
-                    {
-                        casted = MlxNative.Astype(srcView, cache.ElementType);
-                        slice = casted;
-                    }
-                    int[] starts = { 0, startPos, 0 };
-                    int[] stops = { heads, startPos + seqLen, headDim };
-                    int[] strides = { 1, 1, 1 };
-                    updated = MlxNative.SliceUpdateMulti(cacheView, slice, starts, stops, strides);
-                    cacheStorage.ReplaceDeviceArray(ref updated);
-                    return true;
+                    casted = MlxNative.Astype(srcView, cache.ElementType);
+                    slice = casted;
                 }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(cacheView);
-                    MlxNative.FreeArray(srcView);
-                    MlxNative.FreeArray(casted);
-                    MlxNative.FreeArray(updated);
-                }
+                int[] starts = { 0, startPos, 0 };
+                int[] stops = { heads, startPos + seqLen, headDim };
+                int[] strides = { 1, 1, 1 };
+                updated = MlxNative.SliceUpdateMulti(cacheView, slice, starts, stops, strides);
+                cacheStorage.ReplaceDeviceArray(ref updated);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -891,49 +748,35 @@ namespace TensorSharp.MLX
             if (kOut.ElementCount() != (long)numKVHeads * headDim) return false;
             if (vOut.ElementCount() != (long)numKVHeads * headDim) return false;
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(8, qOut, kOut, vOut, qkv, qNormWeight, kNormWeight, cosTable, sinTable);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray qkvView = default;
-                MlxNative.MlxArray qNormView = default;
-                MlxNative.MlxArray kNormView = default;
-                MlxNative.MlxArray cosView = default;
-                MlxNative.MlxArray sinView = default;
-                MlxNative.MlxArray q = default;
-                MlxNative.MlxArray k = default;
-                MlxNative.MlxArray v = default;
-                try
-                {
-                    qkvView = GetView(qkv);
-                    qNormView = GetView(qNormWeight);
-                    kNormView = GetView(kNormWeight);
-                    cosView = GetView(cosTable);
-                    sinView = GetView(sinTable);
+                ref MlxNative.MlxArray qkvView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray qNormView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray kNormView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray cosView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray sinView = ref resources.Arrays[4];
+                ref MlxNative.MlxArray q = ref resources.Arrays[5];
+                ref MlxNative.MlxArray k = ref resources.Arrays[6];
+                ref MlxNative.MlxArray v = ref resources.Arrays[7];
+                qkvView = GetView(qkv);
+                qNormView = GetView(qNormWeight);
+                kNormView = GetView(kNormWeight);
+                cosView = GetView(cosTable);
+                sinView = GetView(sinTable);
 
-                    MlxNative.Gemma4QkvPreprocessDecode(
-                        qkvView, qNormView, kNormView, cosView, sinView,
-                        numHeads, numKVHeads, headDim, rotHalf, eps,
-                        out q, out k, out v);
+                MlxNative.Gemma4QkvPreprocessDecode(
+                    qkvView, qNormView, kNormView, cosView, sinView,
+                    numHeads, numKVHeads, headDim, rotHalf, eps,
+                    out q, out k, out v);
 
-                    MlxStorage.SetDeviceResult(qOut, ref q);
-                    MlxStorage.SetDeviceResult(kOut, ref k);
-                    MlxStorage.SetDeviceResult(vOut, ref v);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(qkvView);
-                    MlxNative.FreeArray(qNormView);
-                    MlxNative.FreeArray(kNormView);
-                    MlxNative.FreeArray(cosView);
-                    MlxNative.FreeArray(sinView);
-                    MlxNative.FreeArray(q);
-                    MlxNative.FreeArray(k);
-                    MlxNative.FreeArray(v);
-                }
+                MlxStorage.SetDeviceResult(qOut, ref q);
+                resources.HasStoredResult = true;
+                MlxStorage.SetDeviceResult(kOut, ref k);
+                resources.HasStoredResult = true;
+                MlxStorage.SetDeviceResult(vOut, ref v);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -958,26 +801,16 @@ namespace TensorSharp.MLX
             }
 
             int sourceStride = checked((int)input.Sizes[1]);
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(2, result, input);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray inputView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    inputView = GetView(input);
-                    output = MlxNative.FlatToHeadFirst(inputView, seqLen, numHeads, headDim, sourceStride, colOffset);
-                    MlxStorage.SetDeviceResult(result, ref output);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(inputView);
-                    MlxNative.FreeArray(output);
-                }
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
+                inputView = GetView(input);
+                output = MlxNative.FlatToHeadFirst(inputView, seqLen, numHeads, headDim, sourceStride, colOffset);
+                MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -1035,32 +868,20 @@ namespace TensorSharp.MLX
         private static bool TryNeoXRoPEInPlace(Tensor data, Tensor cosTable, Tensor sinTable,
             int numHeads, int seqLen, int headDim, int rotHalf, bool headFirst)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(4, data, cosTable, sinTable);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray dataView = default;
-                MlxNative.MlxArray cosView = default;
-                MlxNative.MlxArray sinView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    dataView = GetView(data);
-                    cosView = GetView(cosTable);
-                    sinView = GetView(sinTable);
-                    output = MlxNative.NeoXRoPE(dataView, cosView, sinView, numHeads, seqLen, headDim, rotHalf, headFirst);
-                    MlxStorage.SetDeviceResult(data, ref output);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(dataView);
-                    MlxNative.FreeArray(cosView);
-                    MlxNative.FreeArray(sinView);
-                    MlxNative.FreeArray(output);
-                }
+                ref MlxNative.MlxArray dataView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray cosView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray sinView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                dataView = GetView(data);
+                cosView = GetView(cosTable);
+                sinView = GetView(sinTable);
+                output = MlxNative.NeoXRoPE(dataView, cosView, sinView, numHeads, seqLen, headDim, rotHalf, headFirst);
+                MlxStorage.SetDeviceResult(data, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -2180,13 +2001,14 @@ namespace TensorSharp.MLX
                 : 0;
             int attendEnd = kvLen;
 
-            MlxNative.MlxArray qView = default;
-            MlxNative.MlxArray kView = default;
-            MlxNative.MlxArray vView = default;
-            MlxNative.MlxArray sinksView = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new MlxArrayResources(5, result, qFlat, kCache, vCache, sinks);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray qView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray kView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray vView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray sinksView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray output = ref resources.Arrays[4];
                 qView = GetView(qFlat);
                 kView = GetView(kCache);
                 vView = GetView(vCache);
@@ -2197,20 +2019,9 @@ namespace TensorSharp.MLX
                     numHeads, numKVHeads, headDim,
                     cacheLen, attendStart, attendEnd, scale);
                 MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(qView);
-                MlxNative.FreeArray(kView);
-                MlxNative.FreeArray(vView);
-                MlxNative.FreeArray(sinksView);
-                MlxNative.FreeArray(output);
-            }
+            });
         }
 
         /// <summary>
@@ -2413,34 +2224,22 @@ namespace TensorSharp.MLX
                 return false;
             }
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(4, result, qFlat, kCache, vCache);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray qView = default;
-                MlxNative.MlxArray kView = default;
-                MlxNative.MlxArray vView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    qView = GetView(qFlat);
-                    kView = GetView(kCache);
-                    vView = GetView(vCache);
-                    output = MlxNative.DecodeAttentionHeadDim512(
-                        qView, kView, vView,
-                        numHeads, numKVHeads, headDim, cacheLen, attendLen, scale);
-                    MlxStorage.SetDeviceResult(result, ref output);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(qView);
-                    MlxNative.FreeArray(kView);
-                    MlxNative.FreeArray(vView);
-                    MlxNative.FreeArray(output);
-                }
+                ref MlxNative.MlxArray qView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray kView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray vView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                qView = GetView(qFlat);
+                kView = GetView(kCache);
+                vView = GetView(vCache);
+                output = MlxNative.DecodeAttentionHeadDim512(
+                    qView, kView, vView,
+                    numHeads, numKVHeads, headDim, cacheLen, attendLen, scale);
+                MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -2488,42 +2287,30 @@ namespace TensorSharp.MLX
                 return false;
             }
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new MlxArrayResources(4, result, qFlat, kCache, vCache);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray qView = default;
-                MlxNative.MlxArray kView = default;
-                MlxNative.MlxArray vView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    qView = GetView(qFlat);
-                    kView = GetView(kCache);
-                    vView = GetView(vCache);
-                    output = MlxNative.CircularDecodeAttention(
-                        qView,
-                        kView,
-                        vView,
-                        numHeads,
-                        numKVHeads,
-                        headDim,
-                        cacheLen,
-                        firstSlot,
-                        attendLen,
-                        scale);
-                    MlxStorage.SetDeviceResult(result, ref output);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(qView);
-                    MlxNative.FreeArray(kView);
-                    MlxNative.FreeArray(vView);
-                    MlxNative.FreeArray(output);
-                }
+                ref MlxNative.MlxArray qView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray kView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray vView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                qView = GetView(qFlat);
+                kView = GetView(kCache);
+                vView = GetView(vCache);
+                output = MlxNative.CircularDecodeAttention(
+                    qView,
+                    kView,
+                    vView,
+                    numHeads,
+                    numKVHeads,
+                    headDim,
+                    cacheLen,
+                    firstSlot,
+                    attendLen,
+                    scale);
+                MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -2584,36 +2371,36 @@ namespace TensorSharp.MLX
             int numHeads, int numKVHeads, int seqLen, int kvLen, int headDim, string maskMode, float scale,
             int bandQStart = 0, int bandKvStart = 0, int bandWindow = 0)
         {
-            MlxNative.MlxArray qView = default;
-            MlxNative.MlxArray kView = default;
-            MlxNative.MlxArray vView = default;
-            MlxNative.MlxArray qCompact = default;
-            MlxNative.MlxArray kCompact = default;
-            MlxNative.MlxArray vCompact = default;
-            MlxNative.MlxArray q4 = default;
-            MlxNative.MlxArray k4 = default;
-            MlxNative.MlxArray v4 = default;
-            MlxNative.MlxArray kF32 = default;
-            MlxNative.MlxArray vF32 = default;
-            MlxNative.MlxArray attention = default;
-            MlxNative.MlxArray seqMajor = default;
-            MlxNative.MlxArray contiguous = default;
-            MlxNative.MlxArray flat = default;
-            MlxNative.MlxArray bandQPos = default;
-            MlxNative.MlxArray bandQCol = default;
-            MlxNative.MlxArray bandKPos = default;
-            MlxNative.MlxArray bandKRow = default;
-            MlxNative.MlxArray bandFuture = default;
-            MlxNative.MlxArray bandNegInf = default;
-            MlxNative.MlxArray bandZero = default;
-            MlxNative.MlxArray bandCausal = default;
-            MlxNative.MlxArray bandDiff = default;
-            MlxNative.MlxArray bandWinLim = default;
-            MlxNative.MlxArray bandOow = default;
-            MlxNative.MlxArray bandMask = default;
-
-            try
+            var resources = new MlxArrayResources(27, result, qHeads, kHeads, vHeads);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray qView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray kView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray vView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray qCompact = ref resources.Arrays[3];
+                ref MlxNative.MlxArray kCompact = ref resources.Arrays[4];
+                ref MlxNative.MlxArray vCompact = ref resources.Arrays[5];
+                ref MlxNative.MlxArray q4 = ref resources.Arrays[6];
+                ref MlxNative.MlxArray k4 = ref resources.Arrays[7];
+                ref MlxNative.MlxArray v4 = ref resources.Arrays[8];
+                ref MlxNative.MlxArray kF32 = ref resources.Arrays[9];
+                ref MlxNative.MlxArray vF32 = ref resources.Arrays[10];
+                ref MlxNative.MlxArray attention = ref resources.Arrays[11];
+                ref MlxNative.MlxArray seqMajor = ref resources.Arrays[12];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[13];
+                ref MlxNative.MlxArray flat = ref resources.Arrays[14];
+                ref MlxNative.MlxArray bandQPos = ref resources.Arrays[15];
+                ref MlxNative.MlxArray bandQCol = ref resources.Arrays[16];
+                ref MlxNative.MlxArray bandKPos = ref resources.Arrays[17];
+                ref MlxNative.MlxArray bandKRow = ref resources.Arrays[18];
+                ref MlxNative.MlxArray bandFuture = ref resources.Arrays[19];
+                ref MlxNative.MlxArray bandNegInf = ref resources.Arrays[20];
+                ref MlxNative.MlxArray bandZero = ref resources.Arrays[21];
+                ref MlxNative.MlxArray bandCausal = ref resources.Arrays[22];
+                ref MlxNative.MlxArray bandDiff = ref resources.Arrays[23];
+                ref MlxNative.MlxArray bandWinLim = ref resources.Arrays[24];
+                ref MlxNative.MlxArray bandOow = ref resources.Arrays[25];
+                ref MlxNative.MlxArray bandMask = ref resources.Arrays[26];
                 qView = GetView(qHeads);
                 kView = GetView(kHeads);
                 vView = GetView(vHeads);
@@ -2657,6 +2444,7 @@ namespace TensorSharp.MLX
                         causal,
                         scale);
                     MlxStorage.SetDeviceResult(result, ref attention);
+                    resources.HasStoredResult = true;
                     return true;
                 }
 
@@ -2717,42 +2505,9 @@ namespace TensorSharp.MLX
                 contiguous = MlxNative.Contiguous(seqMajor);
                 flat = MlxNative.Reshape(contiguous, new[] { seqLen, numHeads * headDim });
                 MlxStorage.SetDeviceResult(result, ref flat);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(qView);
-                MlxNative.FreeArray(kView);
-                MlxNative.FreeArray(vView);
-                MlxNative.FreeArray(qCompact);
-                MlxNative.FreeArray(kCompact);
-                MlxNative.FreeArray(vCompact);
-                MlxNative.FreeArray(q4);
-                MlxNative.FreeArray(k4);
-                MlxNative.FreeArray(v4);
-                MlxNative.FreeArray(kF32);
-                MlxNative.FreeArray(vF32);
-                MlxNative.FreeArray(attention);
-                MlxNative.FreeArray(seqMajor);
-                MlxNative.FreeArray(contiguous);
-                MlxNative.FreeArray(flat);
-                MlxNative.FreeArray(bandQPos);
-                MlxNative.FreeArray(bandQCol);
-                MlxNative.FreeArray(bandKPos);
-                MlxNative.FreeArray(bandKRow);
-                MlxNative.FreeArray(bandFuture);
-                MlxNative.FreeArray(bandNegInf);
-                MlxNative.FreeArray(bandZero);
-                MlxNative.FreeArray(bandCausal);
-                MlxNative.FreeArray(bandDiff);
-                MlxNative.FreeArray(bandWinLim);
-                MlxNative.FreeArray(bandOow);
-                MlxNative.FreeArray(bandMask);
-            }
+            });
         }
 
         private static bool TryRunChunkedVectorPrefillAttention(
@@ -2784,33 +2539,30 @@ namespace TensorSharp.MLX
                 return false;
             }
 
-            try
+            bool hasStoredBlock = false;
+            for (int offset = 0; offset < seqLen; offset += blockSize)
             {
-                for (int offset = 0; offset < seqLen; offset += blockSize)
+                int blockLen = Math.Min(blockSize, seqLen - offset);
+                int prefixLen = offset + blockLen;
+
+                using Tensor outBlock = result.Narrow(0, offset, blockLen);
+                using Tensor qBlock = qHeads.Narrow(1, offset, blockLen);
+                using Tensor kPrefix = kHeads.Narrow(1, 0, prefixLen);
+                using Tensor vPrefix = vHeads.Narrow(1, 0, prefixLen);
+
+                if (!TryRunHeadFirstAttention(outBlock, qBlock, kPrefix, vPrefix,
+                    numHeads, numKVHeads, blockLen, prefixLen, headDim,
+                    blockLen == 1 ? string.Empty : "causal",
+                    scale))
                 {
-                    int blockLen = Math.Min(blockSize, seqLen - offset);
-                    int prefixLen = offset + blockLen;
-
-                    using Tensor outBlock = result.Narrow(0, offset, blockLen);
-                    using Tensor qBlock = qHeads.Narrow(1, offset, blockLen);
-                    using Tensor kPrefix = kHeads.Narrow(1, 0, prefixLen);
-                    using Tensor vPrefix = vHeads.Narrow(1, 0, prefixLen);
-
-                    if (!TryRunHeadFirstAttention(outBlock, qBlock, kPrefix, vPrefix,
-                        numHeads, numKVHeads, blockLen, prefixLen, headDim,
-                        blockLen == 1 ? string.Empty : "causal",
-                        scale))
-                    {
-                        return false;
-                    }
+                    if (hasStoredBlock)
+                        throw new InvalidOperationException("MLX prefill cannot fall back after committing an attention block.");
+                    return false;
                 }
+                hasStoredBlock = true;
+            }
 
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
+            return true;
         }
 
         private static bool CanUseFastAttention(int numHeads, int numKVHeads, int seqLen, int kvLen, int headDim)

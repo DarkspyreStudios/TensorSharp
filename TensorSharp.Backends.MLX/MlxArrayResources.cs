@@ -6,6 +6,7 @@ namespace TensorSharp.MLX
     {
         internal readonly MlxNative.MlxArray[] Arrays;
         internal int ReturnedIndex = -1;
+        internal bool HasStoredResult;
         private readonly Storage[] storages;
         private readonly MlxNative.MlxArray[] borrowedInputs = Array.Empty<MlxNative.MlxArray>();
 
