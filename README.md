@@ -192,6 +192,8 @@ allocations. Safe unsupported construction preserves each kernel's disabled flag
 diagnostic, including the native error as its cause. The genuine native kernel free
 returns void; its actual return releases the wrapper reference, not GPU work. Successful
 cached kernels still have no checked lifetime retirement owner.
+Kernel disable handlers and eight simdgroup fallback catches propagate recorded unsafe
+failures without starting another kernel attempt.
 All-used-stream synchronization remains unfinished. Cached-kernel lifetime, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;

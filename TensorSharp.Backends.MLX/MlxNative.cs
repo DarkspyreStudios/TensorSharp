@@ -5344,7 +5344,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Iq4XsMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
 
             var resources = new KernelApplicationResources(1, 0, input, rawWeight);
@@ -5706,7 +5706,7 @@ if (kind == 0) {
                 {
                     return Iq2XxsMatmulSimdgroup(input, rawWeight, rows, inDim, outDim);
                 }
-                catch (NotSupportedException)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     // Kernel compilation failed (e.g. older MSL toolchain
                     // without simdgroup_matrix). Fall back to the
@@ -6108,7 +6108,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Iq2SMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
             return IQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureIq2SMatmulKernel, "IQ2_S");
         }
@@ -6128,7 +6128,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Iq3SMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
             return IQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureIq3SMatmulKernel, "IQ3_S");
         }
@@ -6148,7 +6148,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Iq3XxsMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
             return IQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureIq3XxsMatmulKernel, "IQ3_XXS");
         }
@@ -6254,7 +6254,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Q4KMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
             return KQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureQ4KMatmulKernel, "Q4_K");
         }
@@ -6280,7 +6280,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Q5KMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
             return KQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureQ5KMatmulKernel, "Q5_K");
         }
@@ -6306,7 +6306,7 @@ if (kind == 0) {
             if (rows >= Iq2XxsMatmulSimdgroupMinRows && !Iq2XxsMatmulSimdgroupDisabled)
             {
                 try { return Q6KMatmulSimdgroup(input, rawWeight, rows, inDim, outDim); }
-                catch (NotSupportedException) { }
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { }
             }
             return KQuantMatmul(input, rawWeight, rows, inDim, outDim, EnsureQ6KMatmulKernel, "Q6_K");
         }
@@ -6949,7 +6949,7 @@ if (kind == 0) {
                         Iq4XsMatmulSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4XsMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_XS matmul kernel.", error);
@@ -6977,7 +6977,7 @@ if (kind == 0) {
                         Iq4NlMatmulSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4NlMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_NL matmul kernel.", error);
@@ -7005,7 +7005,7 @@ if (kind == 0) {
                         Iq4NlMatmulRowsSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4NlMatmulRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_NL multi-row matmul kernel.", error);
@@ -7033,7 +7033,7 @@ if (kind == 0) {
                         Iq4NlMoeMatmulBatchedSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4NlMoeMatmulBatchedKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_NL batched-MoE matmul kernel.", error);
@@ -7061,7 +7061,7 @@ if (kind == 0) {
                         Iq4NlMoeMatmulBatchedRowedSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4NlMoeMatmulBatchedRowedKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_NL batched-MoE (rowed) matmul kernel.", error);
@@ -7089,7 +7089,7 @@ if (kind == 0) {
                         Iq4XsMatmul4Source,
                         Iq4XsHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4XsMatmul4KernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_XS 4-column matmul kernel.", error);
@@ -7117,7 +7117,7 @@ if (kind == 0) {
                         Iq4XsMatmul4SimdSource,
                         Iq4XsHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4XsMatmul4SimdKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_XS simd_sum 4-column matmul kernel.", error);
@@ -7145,7 +7145,7 @@ if (kind == 0) {
                         Iq4XsMatmulRowsSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4XsMatmulRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_XS batched-row matmul kernel.", error);
@@ -7173,7 +7173,7 @@ if (kind == 0) {
                         Iq4XsMatmulRows2Source,
                         Iq4XsHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4XsMatmulRows2KernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_XS 2-column batched matmul kernel.", error);
@@ -7201,7 +7201,7 @@ if (kind == 0) {
                         Iq4XsGetRowsSource,
                         Iq4NlLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq4XsGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ4_XS get_rows kernel.", error);
@@ -7229,7 +7229,7 @@ if (kind == 0) {
                         Iq2XxsMatmulSource,
                         Iq2XxsLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2XxsMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_XXS matmul kernel.", error);
@@ -7427,7 +7427,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         BuildIQuantMatmulSimdgroupSource(dequantFunc, blockBytes),
                         SimdgroupMatrixHeader + quantHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     disabledFlag = true;
                     WarnSimdgroupKernelUnavailable(label);
@@ -7455,7 +7455,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2XxsMatmulSimdgroupSource,
                         SimdgroupMatrixHeader + Iq2XxsLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2XxsMatmulSimdgroupKernelDisabled = true;
                     WarnSimdgroupKernelUnavailable("IQ2_XXS");
@@ -7527,7 +7527,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2XxsMoeMatmulBatchedSource,
                         Iq2XxsLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2XxsMoeMatmulBatchedKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE batched matmul kernel.", error);
@@ -7554,7 +7554,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2XxsMoeMatmulBatchedFusedGateUpSiluSource,
                         Iq2XxsLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2XxsMoeMatmulBatchedFusedGateUpSiluKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE fused gate+up+silu kernel.", error);
@@ -7581,7 +7581,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2XxsMoeMatmulBatchedRowedSource,
                         Iq2XxsLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2XxsMoeMatmulBatchedRowedKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE batched-rowed matmul kernel.", error);
@@ -7608,7 +7608,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2XxsGetRowsSource,
                         Iq2XxsLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2XxsGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_XXS get_rows kernel.", error);
@@ -7638,7 +7638,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2SMatmulSource,
                         Iq2SIq3SLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2SMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_S matmul kernel.", error);
@@ -7666,7 +7666,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq2SGetRowsSource,
                         Iq2SIq3SLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq2SGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ2_S get_rows kernel.", error);
@@ -7694,7 +7694,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq3SMatmulSource,
                         Iq2SIq3SLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq3SMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ3_S matmul kernel.", error);
@@ -7722,7 +7722,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq3SGetRowsSource,
                         Iq2SIq3SLookupHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq3SGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ3_S get_rows kernel.", error);
@@ -7750,7 +7750,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq3XxsMatmulSource,
                         Iq3XxsHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq3XxsMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ3_XXS matmul kernel.", error);
@@ -7778,7 +7778,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Iq3XxsGetRowsSource,
                         Iq3XxsHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     iq3XxsGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX IQ3_XXS get_rows kernel.", error);
@@ -7806,7 +7806,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q4KMatmulSource,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q4KMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q4_K matmul kernel.", error);
@@ -7834,7 +7834,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q4KGetRowsSource,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q4KGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q4_K get_rows kernel.", error);
@@ -7862,7 +7862,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q5KMatmulSource,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q5KMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q5_K matmul kernel.", error);
@@ -7890,7 +7890,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q5KMatmul4Source,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q5KMatmul4KernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q5_K 4-column matmul kernel.", error);
@@ -7918,7 +7918,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q5KGetRowsSource,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q5KGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q5_K get_rows kernel.", error);
@@ -7946,7 +7946,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q6KMatmulSource,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q6KMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q6_K matmul kernel.", error);
@@ -7974,7 +7974,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q6KMatmul4Source,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q6KMatmul4KernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q6_K 4-column matmul kernel.", error);
@@ -8002,7 +8002,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q6KGetRowsSource,
                         KQuantHelpersHeader);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q6KGetRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q6_K get_rows kernel.", error);
@@ -8030,7 +8030,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         GatedDeltaSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     gatedDeltaKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX gated-delta kernel.", error);
@@ -8058,7 +8058,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         GatedDeltaT1Source,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     gatedDeltaT1KernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX gated-delta T=1 kernel.", error);
@@ -8086,7 +8086,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Qwen35GdnPreprocessSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     qwen35GdnPreprocessKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Qwen35 GDN preprocess kernel.", error);
@@ -8114,7 +8114,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Qwen35GdnPackedPreprocessSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     qwen35GdnPackedPreprocessKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX packed Qwen35 GDN preprocess kernel.", error);
@@ -8142,7 +8142,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Qwen35GdnPostprocessSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     qwen35GdnPostprocessKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Qwen35 GDN postprocess kernel.", error);
@@ -8170,7 +8170,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         HeadDim256AttentionSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     headDim256AttentionKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX headDim256 attention kernel.", error);
@@ -8198,7 +8198,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         CircularDecodeAttentionSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     circularDecodeAttentionKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX circular decode attention kernel.", error);
@@ -8226,7 +8226,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         DecodeAttentionWithSinksSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     decodeAttentionWithSinksKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX decode attention with sinks kernel.", error);
@@ -8254,7 +8254,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Gemma4QkvPreprocessDecodeSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     gemma4QkvPreprocessDecodeKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Gemma4 QKV preprocess decode kernel.", error);
@@ -8282,7 +8282,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q8AddmmAddSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q8AddmmAddKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q8 addmm+add kernel.", error);
@@ -8310,7 +8310,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         DecodeAttentionHeadDim512Source,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     decodeAttentionHeadDim512KernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX head_dim=512 decode attention kernel.", error);
@@ -8395,7 +8395,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q8MatmulGeluMulSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q8MatmulGeluMulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q8 matmul + GeluMul kernel.", error);
@@ -8468,7 +8468,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q8MatmulSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q8MatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q8 matmul kernel.", error);
@@ -8543,7 +8543,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         Q8RmsNormMatmulSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     q8RmsNormMatmulKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX Q8 RmsNorm+matmul kernel.", error);
@@ -8669,7 +8669,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         ScatterAddWeightedRowsSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     scatterAddWeightedRowsKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX weighted scatter-add rows kernel.", error);
@@ -8697,7 +8697,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         RmsNormAddSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     rmsNormAddKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX RMSNorm-add kernel.", error);
@@ -8725,7 +8725,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         AddRmsNormSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     addRmsNormKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX add-rmsnorm kernel.", error);
@@ -8753,7 +8753,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         GeluMulSplitSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     geluMulSplitKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX GELU-mul split kernel.", error);
@@ -8781,7 +8781,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         SwigluOaiGatherBiasSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     swigluOaiGatherBiasKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX swiglu-oai gather-bias kernel.", error);
@@ -8809,7 +8809,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         MoeBiasWeightedSumSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     moeBiasWeightedSumKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX MoE bias-weighted-sum kernel.", error);
@@ -8837,7 +8837,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         FlatToHeadFirstSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     flatToHeadFirstKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX flat-to-head-first kernel.", error);
@@ -8865,7 +8865,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                         NeoXRopeSource,
                         string.Empty);
                 }
-                catch (NotSupportedException error)
+                catch (NotSupportedException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     neoXRopeKernelDisabled = true;
                     throw new NotSupportedException("Unable to initialize MLX NeoX RoPE kernel.", error);
