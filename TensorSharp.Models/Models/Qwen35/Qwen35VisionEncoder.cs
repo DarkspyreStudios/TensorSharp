@@ -24,6 +24,7 @@ namespace TensorSharp.Models
         private readonly Dictionary<string, Tensor> _weights = new();
         private Tensor _constructionWeight;
         private readonly List<Tensor> _displacedWeights = new();
+        private GgufFile _constructionFile;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, Tensor> _positionEmbeddingCache = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
@@ -89,8 +90,10 @@ namespace TensorSharp.Models
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
             // The model's cleanup recipe must see this child even if construction never returns.
             retainConstruction?.Invoke(this);
-            using var gguf = new GgufFile(mmProjPath);
-            if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);
+            var gguf = _constructionFile = new GgufFile(mmProjPath);
+            try
+            {
+                if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);
 
             _imageSize = (int)gguf.GetUint32("clip.vision.image_size", 768);
             _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 16);
@@ -113,8 +116,20 @@ namespace TensorSharp.Models
             for (int i = 0; i < _blockCount; i++)
                 _blockPrefixes[i] = $"v.blk.{i}";
 
-            LoadWeights(gguf);
-            CombineTemporalPatchWeights();
+                LoadWeights(gguf);
+                CombineTemporalPatchWeights();
+            }
+            catch
+            {
+                if (retainConstruction == null)
+                {
+                    gguf.Dispose();
+                    _constructionFile = null;
+                }
+                throw;
+            }
+            gguf.Dispose();
+            _constructionFile = null;
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -1418,6 +1433,8 @@ namespace TensorSharp.Models
             _ropeDeviceCache.Clear();
             _ropeCache.Clear();
             _blockOrderCache.Clear();
+            _constructionFile?.Dispose();
+            _constructionFile = null;
         }
     }
 }

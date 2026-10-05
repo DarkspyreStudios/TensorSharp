@@ -78,12 +78,17 @@ active child unchanged. The parent owns partial and replaced children until its 
 retirement collects and releases all of them before the allocator. Replacement does not
 immediately reclaim the previous child's memory. The active reference and retained collection
 clear only after all child releases succeed.
-Mistral3, GlmDsa and Gemma4 retain acquired constructor input files and unpublished weights
+Qwen35, Mistral3, GlmDsa and Gemma4 retain acquired constructor input files and unpublished weights
 until checked release. One weight-publication helper preserves actual displaced weights
 before replacing a dictionary entry. Qwen35 uses that same helper. Gemma4 includes pending
 and displaced weights in its GGML binding invalidation and preserves its existing CPU
 vision allocator for the direct CUDA language backend. Parent-owned Mistral validation
 failure leaves cleanup to coordinated retirement instead of attempting standalone child release.
+Gemma4 audio children use the same pre-acquisition parent retention and weight-publication
+recipe. Failed audio replacement preserves the previous active child. Qwen35 leaves an
+acquired projector file with its retaining parent when construction fails; standalone
+construction keeps its local file disposal. Audio and vision construction do not acquire
+disposal authority over their borrowed allocators.
 CUDA allocation reclaims pooled memory only outside current-thread native effects.
 A nested allocation OOM preserves its CUDA error and unwinds without collecting,
 waiting for finalizers or retrying beneath the caller's admitted native frame.

@@ -290,6 +290,7 @@ namespace TensorSharp.Models
         private Gemma4VisionEncoder _visionEncoder;
         private readonly List<Gemma4VisionEncoder> _ownedVisionEncoders = new();
         private Gemma4AudioEncoder _audioEncoder;
+        private readonly List<Gemma4AudioEncoder> _ownedAudioEncoders = new();
         private List<(Tensor embeddings, int position)> _pendingVisionEmbeddingsList = new();
         private List<(Tensor embeddings, int position)> _pendingAudioEmbeddingsList = new();
 
@@ -400,8 +401,15 @@ namespace TensorSharp.Models
         public void LoadAudioEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
-            _audioEncoder = new Gemma4AudioEncoder(mmProjPath, _allocator);
-            _audioEncoder.SetHostModel(this);
+            _ownedAudioEncoders.EnsureCapacity(checked(_ownedAudioEncoders.Count + 1));
+            var encoder = new Gemma4AudioEncoder(mmProjPath, _allocator, RetainAudioConstruction);
+            _audioEncoder = encoder;
+        }
+
+        private void RetainAudioConstruction(Gemma4AudioEncoder encoder)
+        {
+            _ownedAudioEncoders.Add(encoder);
+            encoder.SetHostModel(this);
         }
 
         public void SetAudioEmbeddings(Tensor embeddings, int insertPosition)
@@ -8330,7 +8338,7 @@ namespace TensorSharp.Models
             foreach (var (embedding, _) in _pendingVisionEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
             foreach (var (embedding, _) in _pendingAudioEmbeddingsList) ModelDisposalOwnership.Add(ownedTensors, embedding);
             foreach (var encoder in _ownedVisionEncoders) encoder.CollectDisposalOwnership(ownedTensors);
-            _audioEncoder?.CollectDisposalOwnership(ownedTensors);
+            foreach (var encoder in _ownedAudioEncoders) encoder.CollectDisposalOwnership(ownedTensors);
             _cudaDecodeGraphs?.CollectDisposalOwnership(ownedTensors);
         }
 
@@ -8403,7 +8411,9 @@ namespace TensorSharp.Models
             foreach (var encoder in _ownedVisionEncoders) encoder.DisposeOwned();
             _ownedVisionEncoders.Clear();
             _visionEncoder = null;
-            _audioEncoder?.DisposeOwned();
+            foreach (var encoder in _ownedAudioEncoders) encoder.DisposeOwned();
+            _ownedAudioEncoders.Clear();
+            _audioEncoder = null;
             foreach (var (emb, _) in _pendingVisionEmbeddingsList)
                 emb?.Dispose();
             _pendingVisionEmbeddingsList.Clear();

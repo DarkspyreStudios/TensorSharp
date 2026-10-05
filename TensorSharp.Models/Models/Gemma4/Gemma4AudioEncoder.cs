@@ -22,6 +22,9 @@ namespace TensorSharp.Models
         public void SetHostModel(ModelBase model) => _hostModel = model;
 
         private readonly Dictionary<string, Tensor> _weights = new();
+        private Tensor _constructionWeight;
+        private readonly List<Tensor> _displacedWeights = new();
+        private GgufFile _constructionFile;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
 
@@ -67,9 +70,16 @@ namespace TensorSharp.Models
         public bool IsEncoderFree => _isEncoderFree;
 
         public Gemma4AudioEncoder(string mmProjPath, IAllocator allocator)
+            : this(mmProjPath, allocator, null)
+        {
+        }
+
+        internal Gemma4AudioEncoder(string mmProjPath, IAllocator allocator,
+            Action<Gemma4AudioEncoder> retainConstruction)
         {
             _allocator = allocator;
-            var gguf = new GgufFile(mmProjPath);
+            retainConstruction?.Invoke(this);
+            var gguf = _constructionFile = new GgufFile(mmProjPath);
 
             _projectorType = gguf.GetString("clip.audio.projector_type", "gemma4a") ?? "gemma4a";
             _isEncoderFree = string.Equals(_projectorType, "gemma4ua", StringComparison.Ordinal);
@@ -102,6 +112,7 @@ namespace TensorSharp.Models
 
             LoadWeights(gguf);
             gguf.Dispose();
+            _constructionFile = null;
 
             _useOllamaNames = _weights.ContainsKey("a.blk.0.ln1.weight");
             _causalMask = BuildCausalValidMask();
@@ -137,9 +148,10 @@ namespace TensorSharp.Models
                 for (int i = 0; i < ggufShape.Length; i++)
                     tsShape[i] = ggufShape[ggufShape.Length - 1 - i];
 
-                var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                tensor.SetElementsAsFloat(f32);
-                _weights[info.Name] = tensor;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, tsShape);
+                _constructionWeight.SetElementsAsFloat(f32);
+                ModelDisposalOwnership.PublishConstructionWeight(_weights, info.Name,
+                    ref _constructionWeight, _displacedWeights);
                 count++;
 
                 if (info.Name.Contains("input_min") || info.Name.Contains("input_max") ||
@@ -956,6 +968,8 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
+            ModelDisposalOwnership.Add(tensors, _constructionWeight);
+            ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
             ModelDisposalOwnership.Add(tensors, _onesForNorm);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
@@ -964,6 +978,10 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionWeight?.Dispose();
+            _constructionWeight = null;
+            foreach (var weight in _displacedWeights) weight.Dispose();
+            _displacedWeights.Clear();
             _onesForNorm?.Dispose();
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
@@ -972,6 +990,8 @@ namespace TensorSharp.Models
             foreach (var w in _weights.Values)
                 w.Dispose();
             _weights.Clear();
+            _constructionFile?.Dispose();
+            _constructionFile = null;
         }
     }
 }
