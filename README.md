@@ -64,6 +64,15 @@ context, stream, module, kernel, allocator and storage owners use this authority
 Allocator retirement checks actual storage reference ownership before cleanup.
 Group and model cleanup share the same ownership census and restoration call.
 Cleanup uncertainty retains actual owners and fences the affected device.
+The Qwen-Image-2.1 conditioner joins its vision tensors to the text model's actual
+disposal census. The text model releases that child before its allocator, through
+the same coordinated cleanup. A failed vision constructor remains attached before
+acquisition, including an unpublished weight or displaced temporal-patch weight.
+Construction recovery uses the text model's existing release-only handle and preserves
+the construction error plus any cleanup error. The pipeline preserves operation and
+cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
+Other standalone vision constructors
+and family replacement paths do not gain those guarantees from this integration.
 CUDA allocation reclaims pooled memory only outside current-thread native effects.
 A nested allocation OOM preserves its CUDA error and unwinds without collecting,
 waiting for finalizers or retrying beneath the caller's admitted native frame.

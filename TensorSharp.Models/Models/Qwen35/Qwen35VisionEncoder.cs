@@ -22,6 +22,8 @@ namespace TensorSharp.Models
     public partial class Qwen35VisionEncoder : IDisposable
     {
         private readonly Dictionary<string, Tensor> _weights = new();
+        private Tensor _constructionWeight;
+        private Tensor _replacedTemporalPatchWeight;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, Tensor> _positionEmbeddingCache = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
@@ -74,11 +76,19 @@ namespace TensorSharp.Models
         public int TemporalPatchSize => _weights.ContainsKey("v.patch_embd.weight.1") ? 2 : 1;
 
         public Qwen35VisionEncoder(string mmProjPath, IAllocator allocator, bool qwenImage21 = false)
+            : this(mmProjPath, allocator, qwenImage21, null)
+        {
+        }
+
+        internal Qwen35VisionEncoder(string mmProjPath, IAllocator allocator, bool qwenImage21,
+            Action<Qwen35VisionEncoder> retainConstruction)
         {
             _qwenImage21 = qwenImage21;
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
+            // The model's cleanup recipe must see this child even if construction never returns.
+            retainConstruction?.Invoke(this);
             using var gguf = new GgufFile(mmProjPath);
             if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);
 
@@ -132,9 +142,10 @@ namespace TensorSharp.Models
                 for (int i = 0; i < ggufShape.Length; i++)
                     tsShape[i] = ggufShape[ggufShape.Length - 1 - i];
 
-                var tensor = new Tensor(_allocator, DType.Float32, tsShape);
-                tensor.SetElementsAsFloat(f32);
-                _weights[info.Name] = tensor;
+                _constructionWeight = new Tensor(_allocator, DType.Float32, tsShape);
+                _constructionWeight.SetElementsAsFloat(f32);
+                _weights[info.Name] = _constructionWeight;
+                _constructionWeight = null;
                 count++;
             }
             Console.WriteLine($" done ({count} tensors)");
@@ -148,9 +159,11 @@ namespace TensorSharp.Models
 
             var w0 = _weights["v.patch_embd.weight"];
             var w1 = _weights["v.patch_embd.weight.1"];
-            var combined = new Tensor(_allocator, DType.Float32, w0.Sizes);
-            Ops.Add(combined, w0, w1);
-            _weights["v.patch_embd.combined"] = combined;
+            _constructionWeight = new Tensor(_allocator, DType.Float32, w0.Sizes);
+            Ops.Add(_constructionWeight, w0, w1);
+            _weights.TryGetValue("v.patch_embd.combined", out _replacedTemporalPatchWeight);
+            _weights["v.patch_embd.combined"] = _constructionWeight;
+            _constructionWeight = null;
         }
 
         /// <summary>
@@ -1374,6 +1387,7 @@ namespace TensorSharp.Models
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
         {
+            ModelDisposalOwnership.Add(tensors, _constructionWeight, _replacedTemporalPatchWeight);
             ModelDisposalOwnership.AddRange(tensors, _positionEmbeddingCache.Values);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
@@ -1383,6 +1397,10 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionWeight?.Dispose();
+            _constructionWeight = null;
+            _replacedTemporalPatchWeight?.Dispose();
+            _replacedTemporalPatchWeight = null;
             foreach (var w in _positionEmbeddingCache.Values)
                 w.Dispose();
             _positionEmbeddingCache.Clear();

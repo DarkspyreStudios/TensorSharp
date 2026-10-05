@@ -18,6 +18,7 @@
 // fast quantized matmul / ggml primitives.
 // ============================================================================
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using TensorSharp.Core;
 using TensorSharp.Runtime;
@@ -42,6 +43,7 @@ namespace TensorSharp.Models.QwenImage
         private static readonly string TraceDirectory = Environment.GetEnvironmentVariable("TS_QWEN_TE_TRACE_DIR");
         private static readonly int TraceLayer = int.TryParse(Environment.GetEnvironmentVariable("TS_QWEN_TE_TRACE_LAYER"), out int layer) ? layer : 0;
         internal IAllocator ConditionerAllocator => _allocator;
+        private QwenImage21Conditioner _conditioner;
 
         public int HiddenSize => Config.HiddenSize;
 
@@ -64,11 +66,32 @@ namespace TensorSharp.Models.QwenImage
             }
             catch (Exception loadError)
             {
-                RollBackFailedConstruction(loadError, static () => { }, releaseAfterModelCaches: DisposeTextEncoderResources,
-                    collectDerivedOwnership: static (_, _) => { });
+                RollBackConditionerConstruction(loadError);
                 throw;
             }
         }
+
+        internal void AttachConditioner(QwenImage21Conditioner conditioner)
+        {
+            ThrowIfOwnershipCleanupFailed();
+            _conditioner = conditioner;
+        }
+
+        internal void RollBackConditionerConstruction(Exception loadError)
+            => RollBackFailedConstruction(loadError, static () => { },
+                releaseAfterModelCaches: DisposeTextEncoderResources,
+                collectDerivedOwnership: CollectConditionerDisposalOwnership);
+
+        protected override void CollectDisposalOwnership(ICollection<Tensor> ownedTensors,
+            ICollection<IAllocator> ownedAllocators)
+        {
+            base.CollectDisposalOwnership(ownedTensors, ownedAllocators);
+            CollectConditionerDisposalOwnership(ownedTensors, ownedAllocators);
+        }
+
+        private void CollectConditionerDisposalOwnership(ICollection<Tensor> tensors,
+            ICollection<IAllocator> allocators)
+            => _conditioner?.CollectDisposalOwnership(tensors);
 
         // M-RoPE 3D positions [3*seq] = (t[seq], h[seq], w[seq]); for text-only all three equal.
         private int[] _mropePos;
@@ -509,6 +532,7 @@ namespace TensorSharp.Models.QwenImage
 
         private void DisposeTextEncoderResources()
         {
+            _conditioner?.DisposeOwnedVision();
             foreach (var p in _fusedAllocs) System.Runtime.InteropServices.Marshal.FreeHGlobal(p);
             _fusedAllocs.Clear();
             _fusedLayers = null;

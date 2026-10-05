@@ -46,6 +46,7 @@ namespace TensorSharp.Models.QwenImage
             }
             Console.WriteLine($"Qwen-Image-2.1: {width}x{height}, {steps} steps, CFG {cfg}, seed {p.Seed}, {inputs.Length} reference(s)");
 
+            Exception operationFailure = null;
             try
             {
                 var refs = new RgbImage[inputs.Length];
@@ -70,12 +71,19 @@ namespace TensorSharp.Models.QwenImage
                 int[] positiveSlots, negativeSlots = null;
                 // Encoder residency ends before the DiT starts. This also bounds
                 // GPU memory on discrete devices; no encoder is needed during denoising.
-                using (var conditioner = new QwenImage21Conditioner(_model.TePath, _model.MmprojPath, _model.Backend))
+                var conditioner = new QwenImage21Conditioner(_model.TePath, _model.MmprojPath, _model.Backend);
+                try
                 {
                     (positive, positiveLength, positiveSlots) = conditioner.EncodePrompt(prompt, refs);
                     if (cfg > 1f)
                         (negative, negativeLength, negativeSlots) = conditioner.EncodePrompt(p.NegativePrompt ?? "", refs);
                 }
+                catch (Exception failure)
+                {
+                    conditioner.DisposeAfterFailure(failure);
+                    throw;
+                }
+                conditioner.Dispose();
                 Phase("text and vision encode");
                 GgmlBasicOps.ReleaseReuseComputeBuffers();
                 GgmlBasicOps.ClearHostBufferCache();
@@ -148,10 +156,26 @@ namespace TensorSharp.Models.QwenImage
                 Console.WriteLine($"  [qwen21-timing] total: {total.Elapsed.TotalSeconds:F3}s");
                 return output;
             }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
+                throw;
+            }
             finally
             {
-                GgmlBasicOps.ReleaseReuseComputeBuffers();
-                GgmlBasicOps.ClearHostBufferCache();
+                // A failed construction's handle retains buffers needed by its unfinished cleanup.
+                if (operationFailure is not NativeConstructionCleanupException)
+                {
+                    try
+                    {
+                        GgmlBasicOps.ReleaseReuseComputeBuffers();
+                        GgmlBasicOps.ClearHostBufferCache();
+                    }
+                    catch (Exception cleanup) when (operationFailure != null)
+                    {
+                        throw new AggregateException(operationFailure, cleanup);
+                    }
+                }
             }
         }
 

@@ -19,13 +19,23 @@ namespace TensorSharp.Models.QwenImage
         public QwenImage21Conditioner(string textGguf, string visionGguf, BackendType backend)
         {
             _text = new QwenImageTextEncoder(textGguf, backend);
-            if (_text.HiddenSize != 4096)
-                throw new ArgumentException("Qwen-Image-2.1 requires a Qwen3-VL-8B encoder with 4096 hidden channels.");
-            _visionPath = visionGguf;
+            try
+            {
+                _text.AttachConditioner(this);
+                if (_text.HiddenSize != 4096)
+                    throw new ArgumentException("Qwen-Image-2.1 requires a Qwen3-VL-8B encoder with 4096 hidden channels.");
+                _visionPath = visionGguf;
+            }
+            catch (Exception loadError)
+            {
+                _text.RollBackConditionerConstruction(loadError);
+                throw;
+            }
         }
 
         public (float[] Embeddings, int SequenceLength, int[] ImageSlots) EncodePrompt(string prompt, RgbImage[] refs = null)
         {
+            _text.ThrowIfOwnershipCleanupFailed();
             int drop = _text.Tokenizer.Encode(SystemPrompt, addSpecial: false).Count;
             var template = new StringBuilder(SystemPrompt).Append("<|im_start|>user\n");
             var images = new List<ImageCond>();
@@ -33,7 +43,7 @@ namespace TensorSharp.Models.QwenImage
             {
                 if (string.IsNullOrWhiteSpace(_visionPath))
                     throw new InvalidOperationException("Qwen-Image-2.1 editing requires a Qwen3-VL-8B vision projector.");
-                _vision ??= new Qwen35VisionEncoder(_visionPath, _text.ConditionerAllocator, qwenImage21: true);
+                EnsureVisionEncoder();
                 foreach (var image in refs)
                 {
                     if (image.Width % 32 != 0 || image.Height % 32 != 0)
@@ -79,9 +89,42 @@ namespace TensorSharp.Models.QwenImage
 
         public void Dispose()
         {
-            _vision?.Dispose();
             _text.Dispose();
             _imageCache.Clear();
+        }
+
+        internal void DisposeAfterFailure(Exception operationError)
+        {
+            // The original exception already returns this model's release-only authority.
+            if (_text.OwnsConstructionCleanupFailure(operationError)) return;
+            try { Dispose(); }
+            catch (Exception cleanup) { throw new AggregateException(operationError, cleanup); }
+        }
+
+        private void EnsureVisionEncoder()
+        {
+            if (_vision != null) return;
+            try
+            {
+                _ = new Qwen35VisionEncoder(_visionPath, _text.ConditionerAllocator, true,
+                    RetainVisionConstruction);
+            }
+            catch (Exception loadError)
+            {
+                _text.RollBackConditionerConstruction(loadError);
+                throw;
+            }
+        }
+
+        private void RetainVisionConstruction(Qwen35VisionEncoder vision) => _vision = vision;
+
+        internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+            => _vision?.CollectDisposalOwnership(tensors);
+
+        internal void DisposeOwnedVision()
+        {
+            _vision?.DisposeOwned();
+            _vision = null;
         }
     }
 }
