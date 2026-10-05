@@ -3425,27 +3425,39 @@ if (kind == 0) {
 
             int mlxDtype = ToMlxDtype(dtype);
             IntPtr dtorPtr = Marshal.GetFunctionPointerForDelegate<NoCopyDeleter>(NoOpDeleter);
-            return MlxWorker.Shared.InvokeNative(() =>
-                mlx_array_new_data_managed(data, shape, shape.Length, mlxDtype, dtorPtr));
+            return AcquireArray(resources =>
+            {
+                ClearCapturedError();
+                resources.Result = mlx_array_new_data_managed(data, shape, shape.Length, mlxDtype, dtorPtr);
+                CheckNativeValue(!resources.Result.IsValid, "wrapping MLX host data");
+            });
         }
 
         internal static MlxArray NewScalar(float value)
         {
-            return MlxWorker.Shared.InvokeNative(() => mlx_array_new_float32(value));
+            return AcquireArray(resources =>
+            {
+                ClearCapturedError();
+                resources.Result = mlx_array_new_float32(value);
+                CheckNativeValue(!resources.Result.IsValid, "creating MLX float scalar");
+            });
         }
 
         internal static MlxArray NewScalar(int value)
         {
-            return MlxWorker.Shared.InvokeNative(() => mlx_array_new_int(value));
+            return AcquireArray(resources =>
+            {
+                ClearCapturedError();
+                resources.Result = mlx_array_new_int(value);
+                CheckNativeValue(!resources.Result.IsValid, "creating MLX integer scalar");
+            });
         }
 
         internal static MlxArray Arange(double start, double stop, double step, DType dtype)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_arange(out result, start, stop, step, ToMlxDtype(dtype), DefaultStream()), "creating MLX arange");
-                return result;
+                Check(mlx_arange(out resources.Result, start, stop, step, ToMlxDtype(dtype), DefaultStream()), "creating MLX arange");
             });
         }
 
@@ -3467,6 +3479,7 @@ if (kind == 0) {
         {
             internal MlxArray Result;
             internal MlxArray Temporary;
+            internal MlxVectorArray Vector;
             internal bool Prepared;
         }
 
@@ -3482,6 +3495,7 @@ if (kind == 0) {
                 return resources.Result;
             }, () =>
             {
+                FreeArrayVector(ref resources.Vector);
                 FreeArrayReference(ref resources.Temporary);
                 if (!resources.Prepared) FreeArrayReference(ref resources.Result);
             });
@@ -3507,11 +3521,9 @@ if (kind == 0) {
             if (!array.IsValid)
                 throw new ArgumentException("MLX astype input must be a valid array.", nameof(array));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_astype(out result, array, ToMlxDtype(dtype), DefaultStream()), "casting MLX array");
-                return result;
+                Check(mlx_astype(out resources.Result, array, ToMlxDtype(dtype), DefaultStream()), "casting MLX array");
             });
         }
 
@@ -4244,87 +4256,75 @@ if (kind == 0) {
             if (axes == null || axes.Length == 0)
                 throw new ArgumentException("MLX transpose axes must be non-empty.", nameof(axes));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_transpose_axes(out result, array, axes, (nuint)axes.Length, DefaultStream()), "transposing MLX array");
-                return result;
+                Check(mlx_transpose_axes(out resources.Result, array, axes, (nuint)axes.Length, DefaultStream()), "transposing MLX array");
             });
         }
 
         internal static MlxArray Unary(MlxUnaryOp op, MlxArray input)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
                 int rc = op switch
                 {
-                    MlxUnaryOp.Abs => mlx_abs(out result, input, DefaultStream()),
-                    MlxUnaryOp.Neg => mlx_negative(out result, input, DefaultStream()),
-                    MlxUnaryOp.Sqrt => mlx_sqrt(out result, input, DefaultStream()),
-                    MlxUnaryOp.Rsqrt => mlx_rsqrt(out result, input, DefaultStream()),
-                    MlxUnaryOp.Exp => mlx_exp(out result, input, DefaultStream()),
-                    MlxUnaryOp.Log => mlx_log(out result, input, DefaultStream()),
-                    MlxUnaryOp.Log1p => mlx_log1p(out result, input, DefaultStream()),
-                    MlxUnaryOp.Floor => mlx_floor(out result, input, DefaultStream()),
-                    MlxUnaryOp.Ceil => mlx_ceil(out result, input, DefaultStream()),
-                    MlxUnaryOp.Sin => mlx_sin(out result, input, DefaultStream()),
-                    MlxUnaryOp.Cos => mlx_cos(out result, input, DefaultStream()),
-                    MlxUnaryOp.Tanh => mlx_tanh(out result, input, DefaultStream()),
-                    MlxUnaryOp.Sigmoid => mlx_sigmoid(out result, input, DefaultStream()),
+                    MlxUnaryOp.Abs => mlx_abs(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Neg => mlx_negative(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Sqrt => mlx_sqrt(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Rsqrt => mlx_rsqrt(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Exp => mlx_exp(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Log => mlx_log(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Log1p => mlx_log1p(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Floor => mlx_floor(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Ceil => mlx_ceil(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Sin => mlx_sin(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Cos => mlx_cos(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Tanh => mlx_tanh(out resources.Result, input, DefaultStream()),
+                    MlxUnaryOp.Sigmoid => mlx_sigmoid(out resources.Result, input, DefaultStream()),
                     _ => throw new NotSupportedException($"Unsupported MLX unary op {op}."),
                 };
                 Check(rc, $"running MLX unary op {op}");
-                return result;
             });
         }
 
         internal static MlxArray Binary(MlxBinaryOp op, MlxArray lhs, MlxArray rhs)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
                 int rc = op switch
                 {
-                    MlxBinaryOp.Add => mlx_add(out result, lhs, rhs, DefaultStream()),
-                    MlxBinaryOp.Sub => mlx_subtract(out result, lhs, rhs, DefaultStream()),
-                    MlxBinaryOp.Mul => mlx_multiply(out result, lhs, rhs, DefaultStream()),
-                    MlxBinaryOp.Div => mlx_divide(out result, lhs, rhs, DefaultStream()),
-                    MlxBinaryOp.Maximum => mlx_maximum(out result, lhs, rhs, DefaultStream()),
+                    MlxBinaryOp.Add => mlx_add(out resources.Result, lhs, rhs, DefaultStream()),
+                    MlxBinaryOp.Sub => mlx_subtract(out resources.Result, lhs, rhs, DefaultStream()),
+                    MlxBinaryOp.Mul => mlx_multiply(out resources.Result, lhs, rhs, DefaultStream()),
+                    MlxBinaryOp.Div => mlx_divide(out resources.Result, lhs, rhs, DefaultStream()),
+                    MlxBinaryOp.Maximum => mlx_maximum(out resources.Result, lhs, rhs, DefaultStream()),
                     _ => throw new NotSupportedException($"Unsupported MLX binary op {op}."),
                 };
                 Check(rc, $"running MLX binary op {op}");
-                return result;
             });
         }
 
         internal static MlxArray Remainder(MlxArray lhs, MlxArray rhs)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_remainder(out result, lhs, rhs, DefaultStream()), "running MLX remainder");
-                return result;
+                Check(mlx_remainder(out resources.Result, lhs, rhs, DefaultStream()), "running MLX remainder");
             });
         }
 
         internal static MlxArray Greater(MlxArray lhs, MlxArray rhs)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_greater(out result, lhs, rhs, DefaultStream()), "running MLX greater");
-                return result;
+                Check(mlx_greater(out resources.Result, lhs, rhs, DefaultStream()), "running MLX greater");
             });
         }
 
         internal static MlxArray Where(MlxArray condition, MlxArray whenTrue, MlxArray whenFalse)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_where(out result, condition, whenTrue, whenFalse, DefaultStream()), "running MLX where");
-                return result;
+                Check(mlx_where(out resources.Result, condition, whenTrue, whenFalse, DefaultStream()), "running MLX where");
             });
         }
 
@@ -4345,11 +4345,9 @@ if (kind == 0) {
             IntPtr modePtr = mode != null ? Marshal.StringToCoTaskMemAnsi(mode) : IntPtr.Zero;
             try
             {
-                return MlxWorker.Shared.InvokeNative(() =>
+                return AcquireArray(resources =>
                 {
-                    MlxArray result;
-                    Check(mlx_gather_qmm(out result, x, w, scales, biases, lhsIndices, rhsIndices, transpose, MlxOptionalInt.Some(groupSize), MlxOptionalInt.Some(bits), modePtr, sortedIndices, DefaultStream()), "running MLX gather_qmm");
-                    return result;
+                    Check(mlx_gather_qmm(out resources.Result, x, w, scales, biases, lhsIndices, rhsIndices, transpose, MlxOptionalInt.Some(groupSize), MlxOptionalInt.Some(bits), modePtr, sortedIndices, DefaultStream()), "running MLX gather_qmm");
                 });
             }
             finally
@@ -4360,21 +4358,17 @@ if (kind == 0) {
 
         internal static MlxArray Addmm(MlxArray src, MlxArray m1, MlxArray m2, float alpha, float beta)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_addmm(out result, src, m1, m2, alpha, beta, DefaultStream()), "running MLX addmm");
-                return result;
+                Check(mlx_addmm(out resources.Result, src, m1, m2, alpha, beta, DefaultStream()), "running MLX addmm");
             });
         }
 
         internal static MlxArray SoftmaxLastAxis(MlxArray input)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_softmax_axis(out result, input, -1, true, DefaultStream()), "running MLX softmax");
-                return result;
+                Check(mlx_softmax_axis(out resources.Result, input, -1, true, DefaultStream()), "running MLX softmax");
             });
         }
 
@@ -4385,31 +4379,25 @@ if (kind == 0) {
             if (repeats < 1)
                 throw new ArgumentOutOfRangeException(nameof(repeats));
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_repeat_axis(out result, input, repeats, axis, DefaultStream()), "running MLX repeat");
-                return result;
+                Check(mlx_repeat_axis(out resources.Result, input, repeats, axis, DefaultStream()), "running MLX repeat");
             });
         }
 
         internal static MlxArray FastLayerNorm(MlxArray input, MlxArray weight, MlxArray bias, float eps)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_fast_layer_norm(out result, input, weight, bias, eps, DefaultStream()), "running MLX layer norm");
-                return result;
+                Check(mlx_fast_layer_norm(out resources.Result, input, weight, bias, eps, DefaultStream()), "running MLX layer norm");
             });
         }
 
         internal static MlxArray FastRmsNorm(MlxArray input, MlxArray weight, float eps)
         {
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_fast_rms_norm(out result, input, weight, eps, DefaultStream()), "running MLX RMS norm");
-                return result;
+                Check(mlx_fast_rms_norm(out resources.Result, input, weight, eps, DefaultStream()), "running MLX RMS norm");
             });
         }
 
@@ -4419,11 +4407,9 @@ if (kind == 0) {
                 throw new ArgumentException("MLX attention inputs must be valid arrays.");
 
             IntPtr maskModePtr = GetModePtr(maskMode ?? string.Empty);
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_fast_scaled_dot_product_attention(out result, query, key, value, scale, maskModePtr, mask, default, DefaultStream()), "running MLX scaled dot product attention");
-                return result;
+                Check(mlx_fast_scaled_dot_product_attention(out resources.Result, query, key, value, scale, maskModePtr, mask, default, DefaultStream()), "running MLX scaled dot product attention");
             });
         }
 
@@ -4432,20 +4418,12 @@ if (kind == 0) {
             if (!first.IsValid || !second.IsValid)
                 throw new ArgumentException("MLX concatenate inputs must be valid arrays.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxVectorArray inputs = CreateVectorArray(first, second);
-                try
-                {
-                    MlxArray result;
-                    Check(mlx_concatenate_axis(out result, inputs, axis, DefaultStream()), "concatenating MLX arrays");
-                    return result;
-                }
-                finally
-                {
-                    if (inputs.IsValid)
-                        _ = mlx_vector_array_free(inputs);
-                }
+                NewArrayVector(ref resources.Vector);
+                Check(mlx_vector_array_append_value(resources.Vector, first), "building MLX concatenate vector");
+                Check(mlx_vector_array_append_value(resources.Vector, second), "building MLX concatenate vector");
+                Check(mlx_concatenate_axis(out resources.Result, resources.Vector, axis, DefaultStream()), "concatenating MLX arrays");
             });
         }
 
@@ -4753,11 +4731,10 @@ if (kind == 0) {
             if (dims <= 0 || (dims & 1) != 0)
                 throw new ArgumentOutOfRangeException(nameof(dims), "RoPE dimensions must be a positive even number.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
                 Check(mlx_fast_rope_dynamic(
-                    out result,
+                    out resources.Result,
                     input,
                     dims,
                     traditional,
@@ -4766,7 +4743,6 @@ if (kind == 0) {
                     offsets,
                     default,
                     DefaultStream()), "running MLX RoPE");
-                return result;
             });
         }
 
@@ -4775,11 +4751,9 @@ if (kind == 0) {
             if (!input.IsValid || !indices.IsValid)
                 throw new ArgumentException("MLX take inputs must be valid arrays.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_take_axis(out result, input, indices, axis, DefaultStream()), "running MLX take_axis");
-                return result;
+                Check(mlx_take_axis(out resources.Result, input, indices, axis, DefaultStream()), "running MLX take_axis");
             });
         }
 
@@ -4792,11 +4766,9 @@ if (kind == 0) {
             if (!input.IsValid || !indices.IsValid)
                 throw new ArgumentException("MLX take_along_axis inputs must be valid arrays.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_take_along_axis(out result, input, indices, axis, DefaultStream()), "running MLX take_along_axis");
-                return result;
+                Check(mlx_take_along_axis(out resources.Result, input, indices, axis, DefaultStream()), "running MLX take_along_axis");
             });
         }
 
@@ -4809,11 +4781,9 @@ if (kind == 0) {
             if (!input.IsValid)
                 throw new ArgumentException("MLX argmax input must be a valid array.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_argmax_axis(out result, input, axis, keepDims, DefaultStream()), "running MLX argmax_axis");
-                return result;
+                Check(mlx_argmax_axis(out resources.Result, input, axis, keepDims, DefaultStream()), "running MLX argmax_axis");
             });
         }
 
@@ -4828,11 +4798,9 @@ if (kind == 0) {
             if (!input.IsValid)
                 throw new ArgumentException("MLX argpartition input must be a valid array.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_argpartition_axis(out result, input, kth, axis, DefaultStream()), "running MLX argpartition_axis");
-                return result;
+                Check(mlx_argpartition_axis(out resources.Result, input, kth, axis, DefaultStream()), "running MLX argpartition_axis");
             });
         }
 
@@ -5310,11 +5278,10 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(bits));
 
             IntPtr modePtr = GetModePtr(mode);
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
                 Check(mlx_quantized_matmul(
-                    out result,
+                    out resources.Result,
                     input,
                     weight,
                     scales,
@@ -5324,7 +5291,6 @@ if (kind == 0) {
                     MlxOptionalInt.Some(bits),
                     modePtr,
                     DefaultStream()), "running MLX quantized matmul");
-                return result;
             });
         }
 
@@ -5338,11 +5304,10 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(bits));
 
             IntPtr modePtr = GetModePtr(mode);
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
                 Check(mlx_dequantize(
-                    out result,
+                    out resources.Result,
                     weight,
                     scales,
                     biases,
@@ -5352,7 +5317,6 @@ if (kind == 0) {
                     default,
                     MlxOptionalDType.Some(ToMlxDtype(dtype)),
                     DefaultStream()), "running MLX dequantize");
-                return result;
             });
         }
 
@@ -7146,11 +7110,9 @@ if (kind == 0) {
             if (starts == null || stops == null || strides == null || starts.Length == 0 || starts.Length != stops.Length || starts.Length != strides.Length)
                 throw new ArgumentException("MLX slice starts, stops, and strides must be non-empty arrays with the same length.");
 
-            return MlxWorker.Shared.InvokeNative(() =>
+            return AcquireArray(resources =>
             {
-                MlxArray result;
-                Check(mlx_slice(out result, input, starts, (nuint)starts.Length, stops, (nuint)stops.Length, strides, (nuint)strides.Length, DefaultStream()), "running MLX slice");
-                return result;
+                Check(mlx_slice(out resources.Result, input, starts, (nuint)starts.Length, stops, (nuint)stops.Length, strides, (nuint)strides.Length, DefaultStream()), "running MLX slice");
             });
         }
 

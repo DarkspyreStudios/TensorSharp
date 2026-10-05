@@ -123,7 +123,11 @@ storage handoff. Native factories used by storage retain outputs before status v
 check temporary cleanup before returning an output. Failed cleanup retains actual storage,
 incoming arrays and unreturned replacements; successful fields clear once, with no rollback.
 Array-view creation holds the storage lock across current-data preparation and view acquisition.
-All-used-stream synchronization remains unfinished. Other native factories, raw temporaries,
+Ordinary scalar, unary, binary, view, gather, normalization, attention and quantized-array
+factories use the same recovery carrier for native outputs before validation. Concatenation
+also owns its temporary native vector, checks its construction and release, and returns its
+output only after safe vector cleanup. No-copy host buffers remain borrowed.
+All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
 caller-level cleanup and replacement paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
