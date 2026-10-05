@@ -400,6 +400,14 @@ namespace TensorSharp.MLX
                     RetireResource(nativeResources[i]);
                 if (nativeResources.Count != 0)
                     throw new InvalidOperationException("MLX worker still owns native resources after accepted work drained.");
+
+                MlxCompiledOps.RetireReleasedOwner();
+                MlxQuantizedOps.RetireReleasedOwner();
+                MlxNative.RetireReleasedOwners();
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                effect.CompleteSafeRelease(this);
                 return 0;
             }
             catch (Exception original)

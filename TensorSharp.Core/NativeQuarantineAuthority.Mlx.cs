@@ -78,7 +78,13 @@ internal static partial class NativeQuarantineAuthority
         lock (registration.State[1])
         {
             // Quarantine refuses native effects, but does not prevent joining an owned thread.
-            ValidateRegistration(registration);
+            if (!ReferenceEquals(ValidateShape(AppDomain.CurrentDomain.GetData(Slot)), registration.State))
+                throw new InvalidOperationException(ProtocolError);
+            ValidateCells(registration.State);
+            // An absent entry is the actual safe-release receipt, not native admission.
+            if (Owners(registration.State).TryGetValue((Guid)registration.Cell[0], out object[]? current)
+                && !ReferenceEquals(current, registration.Cell))
+                throw new InvalidOperationException(ProtocolError);
             if ((int)registration.Cell[1] != (int)NativeOwnerRole.Worker
                 || ((HashSet<string>)registration.Cell[3]).Count != 1
                 || !((HashSet<string>)registration.Cell[3]).Contains(Mlx))

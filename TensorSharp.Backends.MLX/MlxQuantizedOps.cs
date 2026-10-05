@@ -132,6 +132,20 @@ namespace TensorSharp.MLX
                     }
                 });
             }
+
+            internal void RetireReleasedOwner()
+            {
+                using NativeMlxReleaseReservation reservation = NativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                lock (Sync)
+                {
+                    if (Cache.Count != 0 || StackedCache.Count != 0 || FusedFFNClosures.Count != 0
+                        || OffloadLru.Count != 0 || ResidentBytes != 0)
+                        throw new InvalidOperationException("MLX weight cache still owns entries at worker retirement.");
+                    effect.CompleteSafeRelease(this);
+                }
+            }
         }
 
         private sealed class WeightPublicationResources(WeightCacheRuntime owner) : MlxNativeResources
@@ -694,6 +708,12 @@ namespace TensorSharp.MLX
                     }
                 }
             });
+        }
+
+        internal static void RetireReleasedOwner()
+        {
+            if (WeightCache.IsValueCreated)
+                weightCache.RetireReleasedOwner();
         }
 
         private static void EvictNodeLocked(LinkedListNode<DeviceWeight> node)

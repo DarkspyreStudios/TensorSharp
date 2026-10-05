@@ -210,8 +210,14 @@ Quarantine does not prevent a control-only retirement wait or authorize new nati
 Payload notifications during pending retirement leave their receipts on the actual holders
 for its final scan. Notifications after completion reject and retain their dispatch failure.
 Remaining native resources fail retirement and stay owned; thread exit does not report their
-safe release. Queue/thread retirement does not clear native caches or complete parent/worker
-registrations, model/allocator coordination or native callback/finalizer/concurrency qualification.
+safe release. After that scan, retirement checks the actual seven compiled slots, ordinary
+and stacked weight dictionaries, FFN closures, LRU/resident bytes, 59 kernel slots and stream
+collection. Only empty owners complete their registrations through exact destructive
+reservations. The worker completes its own registration last. Partial failure stops later
+registration retirement; repeated disposal observes the original action without replay.
+Queue/thread retirement does not clear native caches or coordinate live model/allocator
+leases. It does not establish all-stream completion or native callback/finalizer/concurrency
+qualification. Ordinary cache clearing leaves its reusable parent registrations active.
 Built-in compiled activations and quantized cache consumers keep lookup and use in one
 worker operation. Other queued cache clearing cannot release their entries between those
 steps. Two-weight MoE and dense-FFN calls retain separate native array references before

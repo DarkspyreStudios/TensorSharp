@@ -3327,6 +3327,12 @@ if (kind == 0) {
             kernelCache.ReleaseAfterSynchronization();
         }
 
+        internal static void RetireReleasedOwners()
+        {
+            kernelCache.RetireReleasedOwner();
+            deviceStreams.RetireReleasedOwner();
+        }
+
         internal static MlxArray NewArrayFromHost(IntPtr data, int[] shape, DType dtype)
         {
             return NewArrayFromHost(data, shape, ToMlxDtype(dtype));
@@ -6991,6 +6997,16 @@ if (kind == 0) {
                 cached = null;
             }
 
+            internal void RetireReleasedOwner()
+            {
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                if (streams.Count != 0 || cached != null)
+                    throw new InvalidOperationException("MLX stream cache still owns references at worker retirement.");
+                effect.CompleteSafeRelease(this);
+            }
+
             internal void ReleaseAfterSynchronization()
             {
                 if (streams.Count == 0) return;
@@ -7118,6 +7134,48 @@ if (kind == 0) {
             {
                 nativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Graph);
                 nativeOwner.AttachMlxSharedRuntime();
+            }
+
+            internal void RetireReleasedOwner()
+            {
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                lock (fastKernelSync)
+                {
+                    if (iq4XsMatmulKernel.IsValid || iq4XsMatmulSimdgroupKernel.IsValid
+                        || iq4XsMatmul4Kernel.IsValid || iq4XsMatmul4SimdKernel.IsValid
+                        || iq4XsMatmulRowsKernel.IsValid || iq4XsMatmulRows2Kernel.IsValid
+                        || iq4XsGetRowsKernel.IsValid || iq4NlMatmulKernel.IsValid
+                        || iq4NlMatmulRowsKernel.IsValid || iq4NlMoeMatmulBatchedKernel.IsValid
+                        || iq4NlMoeMatmulBatchedRowedKernel.IsValid || iq2XxsMatmulKernel.IsValid
+                        || iq2XxsMatmulSimdgroupKernel.IsValid || iq2XxsMoeMatmulBatchedKernel.IsValid
+                        || iq2XxsMoeMatmulBatchedFusedGateUpSiluKernel.IsValid || iq2XxsMoeMatmulBatchedRowedKernel.IsValid
+                        || iq2XxsGetRowsKernel.IsValid || iq2SMatmulKernel.IsValid
+                        || iq2SMatmulSimdgroupKernel.IsValid || iq2SGetRowsKernel.IsValid
+                        || iq3SMatmulKernel.IsValid || iq3SMatmulSimdgroupKernel.IsValid
+                        || iq3SGetRowsKernel.IsValid || iq3XxsMatmulKernel.IsValid
+                        || iq3XxsMatmulSimdgroupKernel.IsValid || iq3XxsGetRowsKernel.IsValid
+                        || q4KMatmulKernel.IsValid || q4KMatmulSimdgroupKernel.IsValid
+                        || q4KGetRowsKernel.IsValid || q5KMatmulKernel.IsValid
+                        || q5KMatmulSimdgroupKernel.IsValid || q5KMatmul4Kernel.IsValid
+                        || q5KGetRowsKernel.IsValid || q6KMatmulKernel.IsValid
+                        || q6KMatmulSimdgroupKernel.IsValid || q6KMatmul4Kernel.IsValid
+                        || q6KGetRowsKernel.IsValid || gatedDeltaKernel.IsValid
+                        || gatedDeltaT1Kernel.IsValid || qwen35GdnPreprocessKernel.IsValid
+                        || qwen35GdnPackedPreprocessKernel.IsValid || qwen35GdnPostprocessKernel.IsValid
+                        || headDim256AttentionKernel.IsValid || scatterAddWeightedRowsKernel.IsValid
+                        || rmsNormAddKernel.IsValid || addRmsNormKernel.IsValid
+                        || geluMulSplitKernel.IsValid || flatToHeadFirstKernel.IsValid
+                        || neoXRopeKernel.IsValid || circularDecodeAttentionKernel.IsValid
+                        || decodeAttentionWithSinksKernel.IsValid || gemma4QkvPreprocessDecodeKernel.IsValid
+                        || q8AddmmAddKernel.IsValid || q8RmsNormMatmulKernel.IsValid
+                        || q8MatmulKernel.IsValid || decodeAttentionHeadDim512Kernel.IsValid
+                        || q8MatmulGeluMulKernel.IsValid || swigluOaiGatherBiasKernel.IsValid
+                        || moeBiasWeightedSumKernel.IsValid)
+                        throw new InvalidOperationException("MLX kernel cache still owns native references at worker retirement.");
+                    effect.CompleteSafeRelease(this);
+                }
             }
 
             internal void ReleaseAfterSynchronization()

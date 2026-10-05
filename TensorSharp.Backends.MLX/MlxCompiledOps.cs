@@ -64,6 +64,22 @@ namespace TensorSharp.MLX
                 });
             }
 
+            internal void RetireReleasedOwner()
+            {
+                using NativeMlxReleaseReservation reservation = NativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                lock (initLock)
+                {
+                    if (siluClosure.Closure != null || geluTanhClosure.Closure != null
+                        || swiGluClosure.Closure != null || geGluClosure.Closure != null
+                        || sigmoidMulClosure.Closure != null || addScaledClosure.Closure != null
+                        || rmsNormScaledClosure.Closure != null)
+                        throw new InvalidOperationException("MLX compiled cache still owns closure references at worker retirement.");
+                    effect.CompleteSafeRelease(this);
+                }
+            }
+
             private static void ReleaseSlot(ClosureSlot slot)
             {
                 if (slot.Closure == null) return;
@@ -95,6 +111,12 @@ namespace TensorSharp.MLX
         {
             if (Cache.IsValueCreated)
                 cache.ReleaseAfterSynchronization();
+        }
+
+        internal static void RetireReleasedOwner()
+        {
+            if (Cache.IsValueCreated)
+                cache.RetireReleasedOwner();
         }
 
         private static MlxNative.CompiledClosure EnsureCompiled(ClosureSlot slot, MlxNative.TraceFunc trace)
