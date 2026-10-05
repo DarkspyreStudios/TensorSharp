@@ -152,7 +152,9 @@ namespace TensorSharp.Models
             }
             else
             {
-                gguf = _constructionGguf = new GgufFile(projectorPath);
+                gguf = _constructionGguf = retainConstruction == null
+                    ? new GgufFile(projectorPath)
+                    : new GgufFile(projectorPath, file => _constructionGguf = file);
                 spec = ReadGgufSpec(gguf);
             }
 

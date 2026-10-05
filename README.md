@@ -89,6 +89,10 @@ recipe. Failed audio replacement preserves the previous active child. Qwen35 lea
 acquired projector file with its retaining parent when construction fails; standalone
 construction keeps its local file disposal. Audio and vision construction do not acquire
 disposal authority over their borrowed allocators.
+Parent-owned GGUF readers attach to the child before opening their files. Split readers
+reserve collection capacity and attach each sibling before opening it. Header or shard
+parse failure preserves the actual readers for the child's coordinated release, including
+readers whose constructors never return. Standalone readers still release on construction failure.
 MLX CPU fallback keeps input views, mapped CPU tensors and unreturned results in the
 worker's existing resource carrier before conversion or dispatch. Duplicate arguments
 share the same mapped view, and explicit output tensors retain their caller identity.

@@ -74,7 +74,9 @@ namespace TensorSharp.Models
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = new GgufFile(mmProjPath);
+            var gguf = _constructionFile = retainConstruction == null
+                ? new GgufFile(mmProjPath)
+                : new GgufFile(mmProjPath, file => _constructionFile = file);
 
             _imageSize = (int)gguf.GetUint32("vision.image_size",
                           (uint)gguf.GetUint32("clip.vision.image_size", 1540));

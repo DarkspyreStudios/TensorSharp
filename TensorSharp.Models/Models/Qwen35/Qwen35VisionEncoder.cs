@@ -90,7 +90,9 @@ namespace TensorSharp.Models
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
             // The model's cleanup recipe must see this child even if construction never returns.
             retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = new GgufFile(mmProjPath);
+            var gguf = _constructionFile = retainConstruction == null
+                ? new GgufFile(mmProjPath)
+                : new GgufFile(mmProjPath, file => _constructionFile = file);
             try
             {
                 if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);

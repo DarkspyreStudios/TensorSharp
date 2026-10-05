@@ -96,7 +96,10 @@ namespace TensorSharp.Runtime
         /// </summary>
         private readonly Dictionary<string, GgufFile> _tensorOwner = new(StringComparer.Ordinal);
 
-        public GgufFile(string path) : this(path, isShard: false) { }
+        public GgufFile(string path) : this(path, isShard: false, retainConstruction: null) { }
+
+        internal GgufFile(string path, Action<GgufFile> retainConstruction)
+            : this(path, isShard: false, retainConstruction ?? throw new ArgumentNullException(nameof(retainConstruction))) { }
 
         private GgufFile() { _path = string.Empty; _stream = null!; }
 
@@ -124,11 +127,13 @@ namespace TensorSharp.Runtime
         /// checkpoint measured ~240 ms and ~215 MB of allocation for nothing, and
         /// left every tensor attributed to the last shard opened.</para>
         /// </summary>
-        public static GgufFile OpenWithoutSiblingShards(string path) => new GgufFile(path, isShard: true);
+        public static GgufFile OpenWithoutSiblingShards(string path) => new GgufFile(path, isShard: true, retainConstruction: null);
 
-        private GgufFile(string path, bool isShard)
+        private GgufFile(string path, bool isShard, Action<GgufFile>? retainConstruction)
         {
             _path = path;
+            // The retaining owner releases this reader even when construction never returns.
+            retainConstruction?.Invoke(this);
             _stream = File.OpenRead(path);
             try
             {
@@ -138,10 +143,8 @@ namespace TensorSharp.Runtime
             }
             catch
             {
-                // in case of exceptions, the constructor doesn't complete and Dispose won't be called, so we need to clean up here
-                // We need to call Dispose() and not just close the stream, since the shards may have been opened and need to be disposed as well.
-                Dispose();
-                // rethrow the original exception to preserve the stack trace
+                // Standalone construction owns rollback; retained construction leaves the graph with its owner.
+                if (retainConstruction == null) Dispose();
                 throw;
             }
         }
@@ -211,8 +214,8 @@ namespace TensorSharp.Runtime
                         $"{_path} is shard {selfNo} of {splitCount}, but {Path.GetFileName(shardPath)} is missing. " +
                         "Every shard of a split GGUF must sit in the same directory.", shardPath);
 
-                var shard = new GgufFile(shardPath, isShard: true);
-                _shards.Add(shard);
+                _shards.EnsureCapacity(checked(_shards.Count + 1));
+                var shard = new GgufFile(shardPath, isShard: true, retainConstruction: _shards.Add);
                 if (shard.GetUint32("split.count", 1) != splitCount || shard.GetUint32("split.no", (uint)(i - 1)) != i - 1)
                     throw new InvalidDataException("GGUF sibling shard metadata is inconsistent.");
                 foreach (var kv in shard.Tensors)

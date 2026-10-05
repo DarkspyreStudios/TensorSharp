@@ -80,7 +80,9 @@ namespace TensorSharp.Models
         {
             _allocator = allocator;
             retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = new GgufFile(mmProjPath);
+            var gguf = _constructionFile = retainConstruction == null
+                ? new GgufFile(mmProjPath)
+                : new GgufFile(mmProjPath, file => _constructionFile = file);
 
             string projector = gguf.GetString("clip.projector_type") ?? "";
             if (projector != "glm5next")
