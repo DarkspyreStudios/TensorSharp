@@ -43,6 +43,7 @@ namespace TensorSharp.Models
         private Tensor _constructionWeight;
         private readonly List<Tensor> _displacedWeights = new();
         private GgufFile _constructionFile;
+        private readonly MediaConstructionCleanup _constructionCleanup;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
         private readonly Dictionary<long, int[]> _blockOrderCache = new();
@@ -79,40 +80,50 @@ namespace TensorSharp.Models
             Action<GlmNextVisionEncoder> retainConstruction)
         {
             _allocator = allocator;
-            retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = retainConstruction == null
-                ? new GgufFile(mmProjPath)
-                : new GgufFile(mmProjPath, file => _constructionFile = file);
+            _constructionCleanup = new MediaConstructionCleanup(this, allocator,
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
+            bool closingFile = false;
+            try
+            {
+                retainConstruction?.Invoke(this);
+                var gguf = _constructionFile = new GgufFile(mmProjPath, file => _constructionFile = file);
 
-            string projector = gguf.GetString("clip.projector_type") ?? "";
-            if (projector != "glm5next")
-                Console.WriteLine($"Warning: mmproj projector_type is '{projector}', expected 'glm5next'.");
+                string projector = gguf.GetString("clip.projector_type") ?? "";
+                if (projector != "glm5next")
+                    Console.WriteLine($"Warning: mmproj projector_type is '{projector}', expected 'glm5next'.");
 
-            _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 14);
-            _hiddenSize = (int)gguf.GetUint32("clip.vision.embedding_length", 1024);
-            _intermediateSize = (int)gguf.GetUint32("clip.vision.feed_forward_length", 4096);
-            _numHeads = (int)gguf.GetUint32("clip.vision.attention.head_count", 16);
-            _blockCount = (int)gguf.GetUint32("clip.vision.block_count", 24);
-            _eps = gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-5f);
-            _projectionDim = (int)gguf.GetUint32("clip.vision.projection_dim", 4096);
-            _spatialMergeSize = (int)gguf.GetUint32("clip.vision.spatial_merge_size", 2);
-            _ropeTheta = gguf.GetFloat32("clip.vision.rope.freq_base", 10000f);
-            _swigluLimit = gguf.GetFloat32("clip.vision.swiglu_limit", 10f);
+                _patchSize = (int)gguf.GetUint32("clip.vision.patch_size", 14);
+                _hiddenSize = (int)gguf.GetUint32("clip.vision.embedding_length", 1024);
+                _intermediateSize = (int)gguf.GetUint32("clip.vision.feed_forward_length", 4096);
+                _numHeads = (int)gguf.GetUint32("clip.vision.attention.head_count", 16);
+                _blockCount = (int)gguf.GetUint32("clip.vision.block_count", 24);
+                _eps = gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-5f);
+                _projectionDim = (int)gguf.GetUint32("clip.vision.projection_dim", 4096);
+                _spatialMergeSize = (int)gguf.GetUint32("clip.vision.spatial_merge_size", 2);
+                _ropeTheta = gguf.GetFloat32("clip.vision.rope.freq_base", 10000f);
+                _swigluLimit = gguf.GetFloat32("clip.vision.swiglu_limit", 10f);
 
-            Console.WriteLine($"GLM-5.3 vision encoder: patchSize={_patchSize}, hidden={_hiddenSize}, " +
-                $"intermediate={_intermediateSize}, heads={_numHeads}, blocks={_blockCount}, " +
-                $"projDim={_projectionDim}, mergeSize={_spatialMergeSize}, ropeTheta={_ropeTheta}, " +
-                $"swigluLimit={_swigluLimit}, eps={_eps}");
+                Console.WriteLine($"GLM-5.3 vision encoder: patchSize={_patchSize}, hidden={_hiddenSize}, " +
+                    $"intermediate={_intermediateSize}, heads={_numHeads}, blocks={_blockCount}, " +
+                    $"projDim={_projectionDim}, mergeSize={_spatialMergeSize}, ropeTheta={_ropeTheta}, " +
+                    $"swigluLimit={_swigluLimit}, eps={_eps}");
 
-            _blockPrefixes = new string[_blockCount];
-            for (int i = 0; i < _blockCount; i++)
-                _blockPrefixes[i] = $"v.blk.{i}";
+                _blockPrefixes = new string[_blockCount];
+                for (int i = 0; i < _blockCount; i++)
+                    _blockPrefixes[i] = $"v.blk.{i}";
 
-            LoadWeights(gguf);
-            CombinePatchEmbedWeights();
-            BuildMergerLinearWeight();
-            gguf.Dispose();
-            _constructionFile = null;
+                LoadWeights(gguf);
+                CombinePatchEmbedWeights();
+                BuildMergerLinearWeight();
+                closingFile = true;
+                ReleaseConstructionFile();
+            }
+            catch (Exception loadError)
+            {
+                if (retainConstruction == null)
+                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
+                throw;
+            }
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -754,10 +765,13 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            _constructionCleanup.Cleanup.Dispose();
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+            => _constructionCleanup.CollectDisposalOwnership(tensors);
+
+        private void CollectOwnedTensors(ICollection<Tensor> tensors)
         {
             ModelDisposalOwnership.Add(tensors, _constructionWeight);
             ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
@@ -768,6 +782,11 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionCleanup.ReleaseOwned();
+        }
+
+        private void ReleaseOwnedResources()
+        {
             _constructionWeight?.Dispose();
             _constructionWeight = null;
             foreach (var weight in _displacedWeights) weight.Dispose();
@@ -780,6 +799,10 @@ namespace TensorSharp.Models
             _weights.Clear();
             _ropeCache.Clear();
             _blockOrderCache.Clear();
+        }
+
+        private void ReleaseConstructionFile()
+        {
             _constructionFile?.Dispose();
             _constructionFile = null;
         }

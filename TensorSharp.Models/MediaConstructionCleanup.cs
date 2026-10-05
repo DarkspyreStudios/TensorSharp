@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.ExceptionServices;
 using TensorSharp.Cuda;
 using TensorSharp.GGML;
@@ -17,6 +18,7 @@ internal sealed class MediaConstructionCleanup
     private bool _resourcesReleased;
     private bool _released;
     private Exception _unsafeFailure;
+    private Tensor[] _ownedTensors = Array.Empty<Tensor>();
 
     internal MediaConstructionCleanup(object owner, IAllocator allocator,
         Action<ICollection<Tensor>> collect, Action releaseResources, Action releaseFiles)
@@ -31,6 +33,26 @@ internal sealed class MediaConstructionCleanup
     }
 
     internal NativeConstructionCleanupHandle Cleanup { get; }
+
+    internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+    {
+        foreach (Tensor tensor in SnapshotOwnership()) tensors.Add(tensor);
+    }
+
+    private Tensor[] SnapshotOwnership()
+    {
+        var tensors = new List<Tensor>();
+        _collect(tensors);
+        return _ownedTensors = tensors.Distinct<Tensor>(ReferenceEqualityComparer.Instance).ToArray();
+    }
+
+    private bool IsHealthyBusy(Exception failure)
+    {
+        if (failure is not NativeMlxCallbackBusyException busy) return false;
+        foreach (Tensor tensor in _ownedTensors)
+            if (tensor.GetLiveOwnedStorageForDisposal() is { } storage && busy.IsFor(storage)) return true;
+        return false;
+    }
 
     internal void RollBackConstruction(Exception original, bool fileCloseFailed = false)
     {
@@ -55,8 +77,7 @@ internal sealed class MediaConstructionCleanup
         if (!_resourcesReleased)
         {
             // Collect and deduplicate through the existing plan before entering any native effect.
-            var tensors = new List<Tensor>();
-            _collect(tensors);
+            Tensor[] tensors = SnapshotOwnership();
             var plan = CudaRetirementPlan.PrepareModel(_owner, tensors, Array.Empty<IAllocator>());
             restoration = plan.CaptureRestoration();
             bool drainCompleted = false;
@@ -65,7 +86,7 @@ internal sealed class MediaConstructionCleanup
             {
                 plan.Drain(restoration);
                 drainCompleted = true;
-                bool detachGgml = _ggml && tensors.Count != 0 && GgmlNativeLoader.NativeOwnershipMayExist;
+                bool detachGgml = _ggml && tensors.Length != 0 && GgmlNativeLoader.NativeOwnershipMayExist;
                 using (var ggmlCleanup = !detachGgml ? null : GgmlNativeLoader.ReserveResourceCleanup(_owner))
                 {
                     using (var effect = plan.EnterModelCleanupEffect())
@@ -78,7 +99,7 @@ internal sealed class MediaConstructionCleanup
                         }
                         catch (Exception failure)
                         {
-                            plan.PublishModelCleanupFailure(effect, failure);
+                            if (!IsHealthyBusy(failure)) plan.PublishModelCleanupFailure(effect, failure);
                             throw;
                         }
                     }
@@ -89,11 +110,17 @@ internal sealed class MediaConstructionCleanup
             }
             catch (Exception failure)
             {
-                if (!drainCompleted || resourceBodyEntered || failure is NativeRuntimeQuarantinedException
-                    || (_ggml && GgmlNativeLoader.IsUnsafeCleanupRefusal(failure)))
+                if (!IsHealthyBusy(failure) && (!drainCompleted || resourceBodyEntered
+                    || failure is NativeRuntimeQuarantinedException
+                    || (_ggml && GgmlNativeLoader.IsUnsafeCleanupRefusal(failure))))
                 {
                     restoration?.MarkCleanupFailed();
                     _unsafeFailure = failure;
+                }
+                else
+                {
+                    try { restoration?.Restore(); }
+                    catch (Exception restoreError) { throw new AggregateException(failure, restoreError); }
                 }
                 throw;
             }
@@ -125,7 +152,7 @@ internal sealed class MediaConstructionCleanup
             try { _releaseResources(); }
             catch (Exception failure)
             {
-                _unsafeFailure = failure;
+                if (!IsHealthyBusy(failure)) _unsafeFailure = failure;
                 throw;
             }
             _resourcesReleased = true;
@@ -136,6 +163,7 @@ internal sealed class MediaConstructionCleanup
     private void ReleaseFiles()
     {
         _releaseFiles();
+        _ownedTensors = Array.Empty<Tensor>();
         _released = true;
         Cleanup.CompleteRelease(_owner);
     }

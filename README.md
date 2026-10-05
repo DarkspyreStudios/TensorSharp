@@ -71,13 +71,17 @@ acquisition, including an unpublished weight or displaced temporal-patch weight.
 Construction recovery uses the text model's existing release-only handle and preserves
 the construction error plus any cleanup error. The pipeline preserves operation and
 cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
-Standalone Qwen35-compatible vision construction reserves its own release-only cleanup handle
-before file or tensor acquisition. Failed construction releases the child's actual tensors and
+Standalone Qwen35-compatible, Mistral3, GlmNext and Gemma4 vision and Gemma4 audio encoders
+reserve a release-only cleanup handle before file or tensor acquisition.
+Failed construction releases the child's actual tensors and
 reader without owning or fencing the borrowed allocator. CUDA completion uses the actual tensor
 storages; GGML release uses its checked barrier and resource reservation. Cleanup failure preserves
 both errors and the handle, and uncertain resource release prevents automatic replay. A file-only
-cleanup refusal retains the file recipe without repeating proven tensor release. Other standalone
-media constructors do not gain these guarantees.
+cleanup refusal retains the file recipe without repeating proven tensor release. Gemma4 vision
+retains either its GGUF or safetensors reader and invalidates GGML bindings before freeing tensors.
+The recipe snapshots actual tensor identities before native effects. A typed MLX busy refusal
+against a still-owned storage keeps recovery available for explicit release instead of declaring
+an uncertain native release. Healthy refusal restores borrowed CUDA context after effects exit.
 Qwen35, Qwen4Exp, Mistral3, GlmDsa and Gemma4 retain every vision child before its constructor acquires resources.
 A successful construction publishes the active child; a failure leaves the previous
 active child unchanged. The parent owns partial and replaced children until its coordinated

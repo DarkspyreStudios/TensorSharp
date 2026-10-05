@@ -43,6 +43,7 @@ namespace TensorSharp.Models
         private readonly List<Tensor> _displacedWeights = new();
         private GgufFile _constructionGguf;
         private SafetensorsFile _constructionSafetensors;
+        private readonly MediaConstructionCleanup _constructionCleanup;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
         private readonly bool _useNativeAttention;
@@ -140,57 +141,64 @@ namespace TensorSharp.Models
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
-            retainConstruction?.Invoke(this);
-
-            GgufFile gguf = null;
-            SafetensorsFile safetensors = null;
-            TowerSpec spec;
-            if (IsSafetensorsProjector(projectorPath))
+            _constructionCleanup = new MediaConstructionCleanup(this, allocator,
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFiles);
+            bool closingFile = false;
+            try
             {
-                safetensors = _constructionSafetensors = retainConstruction == null
-                    ? new SafetensorsFile(projectorPath)
-                    : new SafetensorsFile(projectorPath, file => _constructionSafetensors = file);
-                spec = ReadSafetensorsSpec(safetensors, projectorPath);
+                retainConstruction?.Invoke(this);
+
+                GgufFile gguf = null;
+                SafetensorsFile safetensors = null;
+                TowerSpec spec;
+                if (IsSafetensorsProjector(projectorPath))
+                {
+                    safetensors = _constructionSafetensors = new SafetensorsFile(projectorPath,
+                        file => _constructionSafetensors = file);
+                    spec = ReadSafetensorsSpec(safetensors, projectorPath);
+                }
+                else
+                {
+                    gguf = _constructionGguf = new GgufFile(projectorPath, file => _constructionGguf = file);
+                    spec = ReadGgufSpec(gguf);
+                }
+
+                _hiddenSize = spec.HiddenSize;
+                _intermediateSize = spec.IntermediateSize;
+                _numHeads = spec.NumHeads;
+                _blockCount = spec.BlockCount;
+                _eps = spec.Eps;
+                _projectionDim = spec.ProjectionDim;
+                _patchSize = spec.PatchSize;
+                _nMerge = spec.NMerge;
+                _ropeTheta = spec.RopeTheta;
+                _projectorType = spec.ProjectorType;
+                _isUnified = string.Equals(_projectorType, "gemma4uv", StringComparison.Ordinal);
+                _imageMean = spec.ImageMean;
+                _imageStd = spec.ImageStd;
+
+                Console.WriteLine($"Vision encoder: type={_projectorType}, hidden={_hiddenSize}, " +
+                    $"intermediate={_intermediateSize}, heads={_numHeads}, blocks={_blockCount}, " +
+                    $"projDim={_projectionDim}, patch={_patchSize}, nMerge={_nMerge}" +
+                    (_isUnified ? $", unifiedPatch={_patchSize * _nMerge}" : string.Empty) +
+                    (safetensors != null ? ", source=safetensors" : string.Empty));
+
+                if (safetensors != null)
+                {
+                    LoadWeightsFromSafetensors(safetensors);
+                }
+                else
+                {
+                    LoadWeights(gguf);
+                }
+                closingFile = true;
+                ReleaseConstructionFiles();
             }
-            else
+            catch (Exception loadError)
             {
-                gguf = _constructionGguf = retainConstruction == null
-                    ? new GgufFile(projectorPath)
-                    : new GgufFile(projectorPath, file => _constructionGguf = file);
-                spec = ReadGgufSpec(gguf);
-            }
-
-            _hiddenSize = spec.HiddenSize;
-            _intermediateSize = spec.IntermediateSize;
-            _numHeads = spec.NumHeads;
-            _blockCount = spec.BlockCount;
-            _eps = spec.Eps;
-            _projectionDim = spec.ProjectionDim;
-            _patchSize = spec.PatchSize;
-            _nMerge = spec.NMerge;
-            _ropeTheta = spec.RopeTheta;
-            _projectorType = spec.ProjectorType;
-            _isUnified = string.Equals(_projectorType, "gemma4uv", StringComparison.Ordinal);
-            _imageMean = spec.ImageMean;
-            _imageStd = spec.ImageStd;
-
-            Console.WriteLine($"Vision encoder: type={_projectorType}, hidden={_hiddenSize}, " +
-                $"intermediate={_intermediateSize}, heads={_numHeads}, blocks={_blockCount}, " +
-                $"projDim={_projectionDim}, patch={_patchSize}, nMerge={_nMerge}" +
-                (_isUnified ? $", unifiedPatch={_patchSize * _nMerge}" : string.Empty) +
-                (safetensors != null ? ", source=safetensors" : string.Empty));
-
-            if (safetensors != null)
-            {
-                LoadWeightsFromSafetensors(safetensors);
-                safetensors.Dispose();
-                _constructionSafetensors = null;
-            }
-            else
-            {
-                LoadWeights(gguf);
-                gguf.Dispose();
-                _constructionGguf = null;
+                if (retainConstruction == null)
+                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
+                throw;
             }
         }
 
@@ -1110,10 +1118,13 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            _constructionCleanup.Cleanup.Dispose();
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+            => _constructionCleanup.CollectDisposalOwnership(tensors);
+
+        private void CollectOwnedTensors(ICollection<Tensor> tensors)
         {
             ModelDisposalOwnership.Add(tensors, _constructionWeight);
             ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
@@ -1125,6 +1136,11 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionCleanup.ReleaseOwned();
+        }
+
+        private void ReleaseOwnedResources()
+        {
             // The fused block binds each weight ZERO-COPY on unified-memory Metal: GGML
             // keeps an MTLBuffer that wraps these exact host pages, cached by host pointer.
             // Freeing the pages without dropping that wrapper leaves a live GPU mapping of
@@ -1140,6 +1156,7 @@ namespace TensorSharp.Models
             foreach (var weight in _displacedWeights) weight.Dispose();
             _displacedWeights.Clear();
             _onesForNorm?.Dispose();
+            _onesForNorm = null;
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
             _transposedWeights.Clear();
@@ -1147,6 +1164,10 @@ namespace TensorSharp.Models
                 w.Dispose();
             _weights.Clear();
             _ropeCache.Clear();
+        }
+
+        private void ReleaseConstructionFiles()
+        {
             _constructionGguf?.Dispose();
             _constructionGguf = null;
             _constructionSafetensors?.Dispose();

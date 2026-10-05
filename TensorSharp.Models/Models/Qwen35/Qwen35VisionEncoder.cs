@@ -90,7 +90,7 @@ namespace TensorSharp.Models
             _useNativeAttention = allocator is GgmlAllocator;
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
             _constructionCleanup = new MediaConstructionCleanup(this, allocator,
-                CollectDisposalOwnership, ReleaseOwnedResources, ReleaseConstructionFile);
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
             try
             {
                 // Retain the actual child and reader before either constructor can fail to return.
@@ -1425,6 +1425,9 @@ namespace TensorSharp.Models
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+            => _constructionCleanup.CollectDisposalOwnership(tensors);
+
+        private void CollectOwnedTensors(ICollection<Tensor> tensors)
         {
             ModelDisposalOwnership.Add(tensors, _constructionWeight);
             ModelDisposalOwnership.AddRange(tensors, _displacedWeights);

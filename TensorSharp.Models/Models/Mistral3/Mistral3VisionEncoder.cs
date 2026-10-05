@@ -32,6 +32,7 @@ namespace TensorSharp.Models
         private Tensor _constructionWeight;
         private readonly List<Tensor> _displacedWeights = new();
         private GgufFile _constructionFile;
+        private readonly MediaConstructionCleanup _constructionCleanup;
         private readonly Dictionary<string, QuantizedWeight> _quantWeights = new();
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
@@ -73,50 +74,48 @@ namespace TensorSharp.Models
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
-            retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = retainConstruction == null
-                ? new GgufFile(mmProjPath)
-                : new GgufFile(mmProjPath, file => _constructionFile = file);
-
-            _imageSize = (int)gguf.GetUint32("vision.image_size",
-                          (uint)gguf.GetUint32("clip.vision.image_size", 1540));
-            _patchSize = (int)gguf.GetUint32("vision.patch_size",
-                          (uint)gguf.GetUint32("clip.vision.patch_size", 14));
-            _hiddenSize = (int)gguf.GetUint32("vision.embedding_length",
-                           (uint)gguf.GetUint32("clip.vision.embedding_length", 1024));
-            _numHeads = (int)gguf.GetUint32("vision.attention.head_count",
-                         (uint)gguf.GetUint32("clip.vision.attention.head_count", 16));
-            _headDim = (int)gguf.GetUint32("vision.attention.key_length",
-                        (uint)(_hiddenSize / _numHeads));
-            _blockCount = (int)gguf.GetUint32("vision.block_count",
-                           (uint)gguf.GetUint32("clip.vision.block_count", 24));
-            _eps = gguf.GetFloat32("vision.attention.layer_norm_epsilon",
-                   gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-5f));
-            _visionRopeBase = gguf.GetFloat32("vision.rope.freq_base", 10000.0f);
-            _spatialMergeSize = (int)gguf.GetUint32("spatial_merge_size",
-                                 (uint)gguf.GetUint32("clip.vision.spatial_merge_size", 2));
-            _textEps = gguf.GetFloat32("text_config.rms_norm_eps", 1e-5f);
-            FfnActivation = ResolveFfnActivation(gguf);
-
-            Console.WriteLine($"Mistral3 Vision: imageSize={_imageSize}, patchSize={_patchSize}, " +
-                $"hidden={_hiddenSize}, heads={_numHeads}, headDim={_headDim}, " +
-                $"blocks={_blockCount}, ropeBase={_visionRopeBase}, mergeSize={_spatialMergeSize}, ffn={FfnActivation}");
-
-            LoadWeights(gguf);
-            gguf.Dispose();
-            _constructionFile = null;
-            if (retainConstruction != null)
-            {
-                ValidateLoadedWeights(mmProjPath);
-                return;
-            }
+            _constructionCleanup = new MediaConstructionCleanup(this, allocator,
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
+            bool closingFile = false;
             try
             {
+                retainConstruction?.Invoke(this);
+                var gguf = _constructionFile = new GgufFile(mmProjPath, file => _constructionFile = file);
+
+                _imageSize = (int)gguf.GetUint32("vision.image_size",
+                              (uint)gguf.GetUint32("clip.vision.image_size", 1540));
+                _patchSize = (int)gguf.GetUint32("vision.patch_size",
+                              (uint)gguf.GetUint32("clip.vision.patch_size", 14));
+                _hiddenSize = (int)gguf.GetUint32("vision.embedding_length",
+                               (uint)gguf.GetUint32("clip.vision.embedding_length", 1024));
+                _numHeads = (int)gguf.GetUint32("vision.attention.head_count",
+                             (uint)gguf.GetUint32("clip.vision.attention.head_count", 16));
+                _headDim = (int)gguf.GetUint32("vision.attention.key_length",
+                            (uint)(_hiddenSize / _numHeads));
+                _blockCount = (int)gguf.GetUint32("vision.block_count",
+                               (uint)gguf.GetUint32("clip.vision.block_count", 24));
+                _eps = gguf.GetFloat32("vision.attention.layer_norm_epsilon",
+                       gguf.GetFloat32("clip.vision.attention.layer_norm_epsilon", 1e-5f));
+                _visionRopeBase = gguf.GetFloat32("vision.rope.freq_base", 10000.0f);
+                _spatialMergeSize = (int)gguf.GetUint32("spatial_merge_size",
+                                     (uint)gguf.GetUint32("clip.vision.spatial_merge_size", 2));
+                _textEps = gguf.GetFloat32("text_config.rms_norm_eps", 1e-5f);
+                FfnActivation = ResolveFfnActivation(gguf);
+
+                Console.WriteLine($"Mistral3 Vision: imageSize={_imageSize}, patchSize={_patchSize}, " +
+                    $"hidden={_hiddenSize}, heads={_numHeads}, headDim={_headDim}, " +
+                    $"blocks={_blockCount}, ropeBase={_visionRopeBase}, mergeSize={_spatialMergeSize}, ffn={FfnActivation}");
+
+                LoadWeights(gguf);
+                closingFile = true;
+                ReleaseConstructionFile();
+                closingFile = false;
                 ValidateLoadedWeights(mmProjPath);
             }
-            catch
+            catch (Exception loadError)
             {
-                Dispose();
+                if (retainConstruction == null)
+                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
                 throw;
             }
         }
@@ -674,10 +673,13 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            _constructionCleanup.Cleanup.Dispose();
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+            => _constructionCleanup.CollectDisposalOwnership(tensors);
+
+        private void CollectOwnedTensors(ICollection<Tensor> tensors)
         {
             ModelDisposalOwnership.Add(tensors, _constructionWeight);
             ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
@@ -688,6 +690,11 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionCleanup.ReleaseOwned();
+        }
+
+        private void ReleaseOwnedResources()
+        {
             _constructionWeight?.Dispose();
             _constructionWeight = null;
             foreach (var weight in _displacedWeights) weight.Dispose();
@@ -701,6 +708,10 @@ namespace TensorSharp.Models
             foreach (var qw in _quantWeights.Values)
                 qw.Dispose();
             _quantWeights.Clear();
+        }
+
+        private void ReleaseConstructionFile()
+        {
             _constructionFile?.Dispose();
             _constructionFile = null;
         }

@@ -25,6 +25,7 @@ namespace TensorSharp.Models
         private Tensor _constructionWeight;
         private readonly List<Tensor> _displacedWeights = new();
         private GgufFile _constructionFile;
+        private readonly MediaConstructionCleanup _constructionCleanup;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly IAllocator _allocator;
 
@@ -78,49 +79,60 @@ namespace TensorSharp.Models
             Action<Gemma4AudioEncoder> retainConstruction)
         {
             _allocator = allocator;
-            retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = retainConstruction == null
-                ? new GgufFile(mmProjPath)
-                : new GgufFile(mmProjPath, file => _constructionFile = file);
+            _constructionCleanup = new MediaConstructionCleanup(this, allocator,
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
+            bool closingFile = false;
+            try
+            {
+                retainConstruction?.Invoke(this);
+                var gguf = _constructionFile = new GgufFile(mmProjPath, file => _constructionFile = file);
 
-            _projectorType = gguf.GetString("clip.audio.projector_type", "gemma4a") ?? "gemma4a";
-            _isEncoderFree = string.Equals(_projectorType, "gemma4ua", StringComparison.Ordinal);
+                _projectorType = gguf.GetString("clip.audio.projector_type", "gemma4a") ?? "gemma4a";
+                _isEncoderFree = string.Equals(_projectorType, "gemma4ua", StringComparison.Ordinal);
 
-            _hiddenSize = (int)gguf.GetUint32("clip.audio.embedding_length",
-                (uint)gguf.GetUint32("gemma4.audio.embedding_length", 1024));
-            _numHeads = (int)gguf.GetUint32("clip.audio.attention.head_count",
-                (uint)gguf.GetUint32("gemma4.audio.attention.head_count", 8));
-            // Encoder-free "gemma4ua" mmproj files (e.g. gemma-4-12b) have no
-            // conformer, so head_count / block_count / feed_forward_length are
-            // written as 0. These models go through EncodeRawWaveform and never
-            // touch the conformer attention path, so _headDim is unused — guard
-            // the division to avoid a DivideByZeroException at load time.
-            // Conformer mmproj files always report head_count > 0.
-            _headDim = _numHeads > 0 ? _hiddenSize / _numHeads : 0;
-            _ffnSize = (int)gguf.GetUint32("clip.audio.feed_forward_length",
-                (uint)gguf.GetUint32("gemma4.audio.feed_forward_length", 4096));
-            _numLayers = (int)gguf.GetUint32("clip.audio.block_count",
-                (uint)gguf.GetUint32("gemma4.audio.block_count", 12));
-            _melBins = (int)gguf.GetUint32("clip.audio.num_mel_bins", 128);
-            _eps = gguf.GetFloat32("clip.audio.attention.layer_norm_epsilon",
-                gguf.GetFloat32("gemma4.audio.attention.layer_norm_epsilon", 1e-6f));
-            _projectionDim = (int)gguf.GetUint32("clip.audio.projection_dim", 2560);
-            _contextSize = _chunkSize + _maxPast + _maxFuture;
+                _hiddenSize = (int)gguf.GetUint32("clip.audio.embedding_length",
+                    (uint)gguf.GetUint32("gemma4.audio.embedding_length", 1024));
+                _numHeads = (int)gguf.GetUint32("clip.audio.attention.head_count",
+                    (uint)gguf.GetUint32("gemma4.audio.attention.head_count", 8));
+                // Encoder-free "gemma4ua" mmproj files (e.g. gemma-4-12b) have no
+                // conformer, so head_count / block_count / feed_forward_length are
+                // written as 0. These models go through EncodeRawWaveform and never
+                // touch the conformer attention path, so _headDim is unused — guard
+                // the division to avoid a DivideByZeroException at load time.
+                // Conformer mmproj files always report head_count > 0.
+                _headDim = _numHeads > 0 ? _hiddenSize / _numHeads : 0;
+                _ffnSize = (int)gguf.GetUint32("clip.audio.feed_forward_length",
+                    (uint)gguf.GetUint32("gemma4.audio.feed_forward_length", 4096));
+                _numLayers = (int)gguf.GetUint32("clip.audio.block_count",
+                    (uint)gguf.GetUint32("gemma4.audio.block_count", 12));
+                _melBins = (int)gguf.GetUint32("clip.audio.num_mel_bins", 128);
+                _eps = gguf.GetFloat32("clip.audio.attention.layer_norm_epsilon",
+                    gguf.GetFloat32("gemma4.audio.attention.layer_norm_epsilon", 1e-6f));
+                _projectionDim = (int)gguf.GetUint32("clip.audio.projection_dim", 2560);
+                _contextSize = _chunkSize + _maxPast + _maxFuture;
 
-            Console.WriteLine($"Audio encoder: hidden={_hiddenSize}, heads={_numHeads}, headDim={_headDim}, " +
-                $"ffn={_ffnSize}, layers={_numLayers}, melBins={_melBins}, eps={_eps}");
-            Console.WriteLine($"  chunk={_chunkSize}, maxPast={_maxPast}, maxFuture={_maxFuture}, context={_contextSize}");
-            Console.WriteLine($"  projDim={_projectionDim}");
+                Console.WriteLine($"Audio encoder: hidden={_hiddenSize}, heads={_numHeads}, headDim={_headDim}, " +
+                    $"ffn={_ffnSize}, layers={_numLayers}, melBins={_melBins}, eps={_eps}");
+                Console.WriteLine($"  chunk={_chunkSize}, maxPast={_maxPast}, maxFuture={_maxFuture}, context={_contextSize}");
+                Console.WriteLine($"  projDim={_projectionDim}");
 
-            LoadWeights(gguf);
-            gguf.Dispose();
-            _constructionFile = null;
+                LoadWeights(gguf);
+                closingFile = true;
+                ReleaseConstructionFile();
+                closingFile = false;
 
-            _useOllamaNames = _weights.ContainsKey("a.blk.0.ln1.weight");
-            _causalMask = BuildCausalValidMask();
-            Console.WriteLine($"  GGUF naming: {(_useOllamaNames ? "Ollama" : "mmproj/Unsloth")}");
-            Console.WriteLine($"  projector_type: {_projectorType}" +
-                (_isEncoderFree ? " (encoder-free / raw-waveform)" : " (conformer)"));
+                _useOllamaNames = _weights.ContainsKey("a.blk.0.ln1.weight");
+                _causalMask = BuildCausalValidMask();
+                Console.WriteLine($"  GGUF naming: {(_useOllamaNames ? "Ollama" : "mmproj/Unsloth")}");
+                Console.WriteLine($"  projector_type: {_projectorType}" +
+                    (_isEncoderFree ? " (encoder-free / raw-waveform)" : " (conformer)"));
+            }
+            catch (Exception loadError)
+            {
+                if (retainConstruction == null)
+                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
+                throw;
+            }
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -979,10 +991,13 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            _constructionCleanup.Cleanup.Dispose();
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
+            => _constructionCleanup.CollectDisposalOwnership(tensors);
+
+        private void CollectOwnedTensors(ICollection<Tensor> tensors)
         {
             ModelDisposalOwnership.Add(tensors, _constructionWeight);
             ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
@@ -994,11 +1009,17 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionCleanup.ReleaseOwned();
+        }
+
+        private void ReleaseOwnedResources()
+        {
             _constructionWeight?.Dispose();
             _constructionWeight = null;
             foreach (var weight in _displacedWeights) weight.Dispose();
             _displacedWeights.Clear();
             _onesForNorm?.Dispose();
+            _onesForNorm = null;
             foreach (var w in _transposedWeights.Values)
                 w.Dispose();
             _transposedWeights.Clear();
@@ -1006,6 +1027,10 @@ namespace TensorSharp.Models
             foreach (var w in _weights.Values)
                 w.Dispose();
             _weights.Clear();
+        }
+
+        private void ReleaseConstructionFile()
+        {
             _constructionFile?.Dispose();
             _constructionFile = null;
         }
