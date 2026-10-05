@@ -6940,16 +6940,19 @@ if (kind == 0) {
                 if (iq4XsMatmulKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_XS matmul kernel was disabled after initialization failed.");
 
-                iq4XsMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmulSource,
-                    Iq4NlLookupHeader);
-                if (!iq4XsMatmulKernel.IsValid)
+                try
+                {
+                    iq4XsMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4xs_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4XsMatmulSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4XsMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS matmul kernel.", error);
                 }
 
                 return iq4XsMatmulKernel;
@@ -6965,16 +6968,19 @@ if (kind == 0) {
                 if (iq4NlMatmulKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_NL matmul kernel was disabled after initialization failed.");
 
-                iq4NlMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4nl_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4NlMatmulSource,
-                    Iq4NlLookupHeader);
-                if (!iq4NlMatmulKernel.IsValid)
+                try
+                {
+                    iq4NlMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4nl_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4NlMatmulSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4NlMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL matmul kernel.", error);
                 }
 
                 return iq4NlMatmulKernel;
@@ -6990,16 +6996,19 @@ if (kind == 0) {
                 if (iq4NlMatmulRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_NL multi-row matmul kernel was disabled after initialization failed.");
 
-                iq4NlMatmulRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4nl_matmul_rows",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4NlMatmulRowsSource,
-                    Iq4NlLookupHeader);
-                if (!iq4NlMatmulRowsKernel.IsValid)
+                try
+                {
+                    iq4NlMatmulRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4nl_matmul_rows",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4NlMatmulRowsSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4NlMatmulRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL multi-row matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL multi-row matmul kernel.", error);
                 }
 
                 return iq4NlMatmulRowsKernel;
@@ -7015,16 +7024,19 @@ if (kind == 0) {
                 if (iq4NlMoeMatmulBatchedKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_NL batched-MoE matmul kernel was disabled after initialization failed.");
 
-                iq4NlMoeMatmulBatchedKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4nl_moe_matmul_batched",
-                    new[] { "x", "w", "expert_indices" },
-                    new[] { "y" },
-                    Iq4NlMoeMatmulBatchedSource,
-                    Iq4NlLookupHeader);
-                if (!iq4NlMoeMatmulBatchedKernel.IsValid)
+                try
+                {
+                    iq4NlMoeMatmulBatchedKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4nl_moe_matmul_batched",
+                        new[] { "x", "w", "expert_indices" },
+                        new[] { "y" },
+                        Iq4NlMoeMatmulBatchedSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4NlMoeMatmulBatchedKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL batched-MoE matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL batched-MoE matmul kernel.", error);
                 }
 
                 return iq4NlMoeMatmulBatchedKernel;
@@ -7040,16 +7052,19 @@ if (kind == 0) {
                 if (iq4NlMoeMatmulBatchedRowedKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_NL batched-MoE (rowed) matmul kernel was disabled after initialization failed.");
 
-                iq4NlMoeMatmulBatchedRowedKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4nl_moe_matmul_batched_rowed",
-                    new[] { "x", "w", "expert_indices" },
-                    new[] { "y" },
-                    Iq4NlMoeMatmulBatchedRowedSource,
-                    Iq4NlLookupHeader);
-                if (!iq4NlMoeMatmulBatchedRowedKernel.IsValid)
+                try
+                {
+                    iq4NlMoeMatmulBatchedRowedKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4nl_moe_matmul_batched_rowed",
+                        new[] { "x", "w", "expert_indices" },
+                        new[] { "y" },
+                        Iq4NlMoeMatmulBatchedRowedSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4NlMoeMatmulBatchedRowedKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL batched-MoE (rowed) matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_NL batched-MoE (rowed) matmul kernel.", error);
                 }
 
                 return iq4NlMoeMatmulBatchedRowedKernel;
@@ -7065,16 +7080,19 @@ if (kind == 0) {
                 if (iq4XsMatmul4KernelDisabled)
                     throw new NotSupportedException("MLX IQ4_XS 4-column matmul kernel was disabled after initialization failed.");
 
-                iq4XsMatmul4Kernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul4",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmul4Source,
-                    Iq4XsHelpersHeader);
-                if (!iq4XsMatmul4Kernel.IsValid)
+                try
+                {
+                    iq4XsMatmul4Kernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4xs_matmul4",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4XsMatmul4Source,
+                        Iq4XsHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4XsMatmul4KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS 4-column matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS 4-column matmul kernel.", error);
                 }
 
                 return iq4XsMatmul4Kernel;
@@ -7090,16 +7108,19 @@ if (kind == 0) {
                 if (iq4XsMatmul4SimdKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_XS simd_sum 4-column matmul kernel was disabled after initialization failed.");
 
-                iq4XsMatmul4SimdKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul4_simd",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmul4SimdSource,
-                    Iq4XsHelpersHeader);
-                if (!iq4XsMatmul4SimdKernel.IsValid)
+                try
+                {
+                    iq4XsMatmul4SimdKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4xs_matmul4_simd",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4XsMatmul4SimdSource,
+                        Iq4XsHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4XsMatmul4SimdKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS simd_sum 4-column matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS simd_sum 4-column matmul kernel.", error);
                 }
 
                 return iq4XsMatmul4SimdKernel;
@@ -7115,16 +7136,19 @@ if (kind == 0) {
                 if (iq4XsMatmulRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_XS batched-row matmul kernel was disabled after initialization failed.");
 
-                iq4XsMatmulRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul_rows",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmulRowsSource,
-                    Iq4NlLookupHeader);
-                if (!iq4XsMatmulRowsKernel.IsValid)
+                try
+                {
+                    iq4XsMatmulRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4xs_matmul_rows",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4XsMatmulRowsSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4XsMatmulRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS batched-row matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS batched-row matmul kernel.", error);
                 }
 
                 return iq4XsMatmulRowsKernel;
@@ -7140,16 +7164,19 @@ if (kind == 0) {
                 if (iq4XsMatmulRows2KernelDisabled)
                     throw new NotSupportedException("MLX IQ4_XS 2-column batched matmul kernel was disabled after initialization failed.");
 
-                iq4XsMatmulRows2Kernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_matmul_rows2",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq4XsMatmulRows2Source,
-                    Iq4XsHelpersHeader);
-                if (!iq4XsMatmulRows2Kernel.IsValid)
+                try
+                {
+                    iq4XsMatmulRows2Kernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4xs_matmul_rows2",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq4XsMatmulRows2Source,
+                        Iq4XsHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4XsMatmulRows2KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS 2-column batched matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS 2-column batched matmul kernel.", error);
                 }
 
                 return iq4XsMatmulRows2Kernel;
@@ -7165,16 +7192,19 @@ if (kind == 0) {
                 if (iq4XsGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ4_XS get_rows kernel was disabled after initialization failed.");
 
-                iq4XsGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq4xs_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Iq4XsGetRowsSource,
-                    Iq4NlLookupHeader);
-                if (!iq4XsGetRowsKernel.IsValid)
+                try
+                {
+                    iq4XsGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq4xs_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Iq4XsGetRowsSource,
+                        Iq4NlLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq4XsGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ4_XS get_rows kernel.", error);
                 }
 
                 return iq4XsGetRowsKernel;
@@ -7190,16 +7220,19 @@ if (kind == 0) {
                 if (iq2XxsMatmulKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_XXS matmul kernel was disabled after initialization failed.");
 
-                iq2XxsMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2xxs_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq2XxsMatmulSource,
-                    Iq2XxsLookupHeader);
-                if (!iq2XxsMatmulKernel.IsValid)
+                try
+                {
+                    iq2XxsMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2xxs_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq2XxsMatmulSource,
+                        Iq2XxsLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2XxsMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS matmul kernel.", error);
                 }
 
                 return iq2XxsMatmulKernel;
@@ -7385,17 +7418,20 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (disabledFlag)
                     throw new NotSupportedException($"MLX {label} simdgroup matmul kernel was disabled after initialization failed.");
 
-                slot = CreateFastMetalKernel(
-                    kernelName,
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    BuildIQuantMatmulSimdgroupSource(dequantFunc, blockBytes),
-                    SimdgroupMatrixHeader + quantHeader);
-                if (!slot.IsValid)
+                try
+                {
+                    slot = CreateFastMetalKernel(
+                        kernelName,
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        BuildIQuantMatmulSimdgroupSource(dequantFunc, blockBytes),
+                        SimdgroupMatrixHeader + quantHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     disabledFlag = true;
                     WarnSimdgroupKernelUnavailable(label);
-                    throw new NotSupportedException($"Unable to initialize MLX {label} simdgroup matmul kernel.");
+                    throw new NotSupportedException($"Unable to initialize MLX {label} simdgroup matmul kernel.", error);
                 }
                 return slot;
             }
@@ -7410,17 +7446,20 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2XxsMatmulSimdgroupKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_XXS simdgroup_matrix matmul kernel was disabled after initialization failed.");
 
-                iq2XxsMatmulSimdgroupKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2xxs_matmul_sg",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq2XxsMatmulSimdgroupSource,
-                    SimdgroupMatrixHeader + Iq2XxsLookupHeader);
-                if (!iq2XxsMatmulSimdgroupKernel.IsValid)
+                try
+                {
+                    iq2XxsMatmulSimdgroupKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2xxs_matmul_sg",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq2XxsMatmulSimdgroupSource,
+                        SimdgroupMatrixHeader + Iq2XxsLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2XxsMatmulSimdgroupKernelDisabled = true;
                     WarnSimdgroupKernelUnavailable("IQ2_XXS");
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS simdgroup_matrix matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS simdgroup_matrix matmul kernel.", error);
                 }
                 return iq2XxsMatmulSimdgroupKernel;
             }
@@ -7479,16 +7518,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2XxsMoeMatmulBatchedKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_XXS MoE batched matmul kernel was disabled after initialization failed.");
 
-                iq2XxsMoeMatmulBatchedKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2xxs_moe_matmul_batched",
-                    new[] { "x", "w", "expert_indices" },
-                    new[] { "y" },
-                    Iq2XxsMoeMatmulBatchedSource,
-                    Iq2XxsLookupHeader);
-                if (!iq2XxsMoeMatmulBatchedKernel.IsValid)
+                try
+                {
+                    iq2XxsMoeMatmulBatchedKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2xxs_moe_matmul_batched",
+                        new[] { "x", "w", "expert_indices" },
+                        new[] { "y" },
+                        Iq2XxsMoeMatmulBatchedSource,
+                        Iq2XxsLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2XxsMoeMatmulBatchedKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE batched matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE batched matmul kernel.", error);
                 }
                 return iq2XxsMoeMatmulBatchedKernel;
             }
@@ -7503,16 +7545,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2XxsMoeMatmulBatchedFusedGateUpSiluKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_XXS MoE fused gate+up+silu kernel was disabled after initialization failed.");
 
-                iq2XxsMoeMatmulBatchedFusedGateUpSiluKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2xxs_moe_matmul_batched_fused_gateup_silu",
-                    new[] { "x", "w_gate", "w_up", "expert_indices" },
-                    new[] { "y" },
-                    Iq2XxsMoeMatmulBatchedFusedGateUpSiluSource,
-                    Iq2XxsLookupHeader);
-                if (!iq2XxsMoeMatmulBatchedFusedGateUpSiluKernel.IsValid)
+                try
+                {
+                    iq2XxsMoeMatmulBatchedFusedGateUpSiluKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2xxs_moe_matmul_batched_fused_gateup_silu",
+                        new[] { "x", "w_gate", "w_up", "expert_indices" },
+                        new[] { "y" },
+                        Iq2XxsMoeMatmulBatchedFusedGateUpSiluSource,
+                        Iq2XxsLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2XxsMoeMatmulBatchedFusedGateUpSiluKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE fused gate+up+silu kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE fused gate+up+silu kernel.", error);
                 }
                 return iq2XxsMoeMatmulBatchedFusedGateUpSiluKernel;
             }
@@ -7527,16 +7572,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2XxsMoeMatmulBatchedRowedKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_XXS MoE batched-rowed matmul kernel was disabled after initialization failed.");
 
-                iq2XxsMoeMatmulBatchedRowedKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2xxs_moe_matmul_batched_rowed",
-                    new[] { "x", "w", "expert_indices" },
-                    new[] { "y" },
-                    Iq2XxsMoeMatmulBatchedRowedSource,
-                    Iq2XxsLookupHeader);
-                if (!iq2XxsMoeMatmulBatchedRowedKernel.IsValid)
+                try
+                {
+                    iq2XxsMoeMatmulBatchedRowedKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2xxs_moe_matmul_batched_rowed",
+                        new[] { "x", "w", "expert_indices" },
+                        new[] { "y" },
+                        Iq2XxsMoeMatmulBatchedRowedSource,
+                        Iq2XxsLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2XxsMoeMatmulBatchedRowedKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE batched-rowed matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS MoE batched-rowed matmul kernel.", error);
                 }
                 return iq2XxsMoeMatmulBatchedRowedKernel;
             }
@@ -7551,16 +7599,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2XxsGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_XXS get_rows kernel was disabled after initialization failed.");
 
-                iq2XxsGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2xxs_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Iq2XxsGetRowsSource,
-                    Iq2XxsLookupHeader);
-                if (!iq2XxsGetRowsKernel.IsValid)
+                try
+                {
+                    iq2XxsGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2xxs_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Iq2XxsGetRowsSource,
+                        Iq2XxsLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2XxsGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_XXS get_rows kernel.", error);
                 }
 
                 return iq2XxsGetRowsKernel;
@@ -7578,16 +7629,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2SMatmulKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_S matmul kernel was disabled after initialization failed.");
 
-                iq2SMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2s_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq2SMatmulSource,
-                    Iq2SIq3SLookupHeader);
-                if (!iq2SMatmulKernel.IsValid)
+                try
+                {
+                    iq2SMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2s_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq2SMatmulSource,
+                        Iq2SIq3SLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2SMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_S matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_S matmul kernel.", error);
                 }
 
                 return iq2SMatmulKernel;
@@ -7603,16 +7657,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq2SGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ2_S get_rows kernel was disabled after initialization failed.");
 
-                iq2SGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq2s_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Iq2SGetRowsSource,
-                    Iq2SIq3SLookupHeader);
-                if (!iq2SGetRowsKernel.IsValid)
+                try
+                {
+                    iq2SGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq2s_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Iq2SGetRowsSource,
+                        Iq2SIq3SLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq2SGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ2_S get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ2_S get_rows kernel.", error);
                 }
 
                 return iq2SGetRowsKernel;
@@ -7628,16 +7685,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq3SMatmulKernelDisabled)
                     throw new NotSupportedException("MLX IQ3_S matmul kernel was disabled after initialization failed.");
 
-                iq3SMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq3s_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq3SMatmulSource,
-                    Iq2SIq3SLookupHeader);
-                if (!iq3SMatmulKernel.IsValid)
+                try
+                {
+                    iq3SMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq3s_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq3SMatmulSource,
+                        Iq2SIq3SLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq3SMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ3_S matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ3_S matmul kernel.", error);
                 }
 
                 return iq3SMatmulKernel;
@@ -7653,16 +7713,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq3SGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ3_S get_rows kernel was disabled after initialization failed.");
 
-                iq3SGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq3s_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Iq3SGetRowsSource,
-                    Iq2SIq3SLookupHeader);
-                if (!iq3SGetRowsKernel.IsValid)
+                try
+                {
+                    iq3SGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq3s_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Iq3SGetRowsSource,
+                        Iq2SIq3SLookupHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq3SGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ3_S get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ3_S get_rows kernel.", error);
                 }
 
                 return iq3SGetRowsKernel;
@@ -7678,16 +7741,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq3XxsMatmulKernelDisabled)
                     throw new NotSupportedException("MLX IQ3_XXS matmul kernel was disabled after initialization failed.");
 
-                iq3XxsMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq3xxs_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Iq3XxsMatmulSource,
-                    Iq3XxsHelpersHeader);
-                if (!iq3XxsMatmulKernel.IsValid)
+                try
+                {
+                    iq3XxsMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq3xxs_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Iq3XxsMatmulSource,
+                        Iq3XxsHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq3XxsMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ3_XXS matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ3_XXS matmul kernel.", error);
                 }
 
                 return iq3XxsMatmulKernel;
@@ -7703,16 +7769,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (iq3XxsGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX IQ3_XXS get_rows kernel was disabled after initialization failed.");
 
-                iq3XxsGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_iq3xxs_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Iq3XxsGetRowsSource,
-                    Iq3XxsHelpersHeader);
-                if (!iq3XxsGetRowsKernel.IsValid)
+                try
+                {
+                    iq3XxsGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_iq3xxs_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Iq3XxsGetRowsSource,
+                        Iq3XxsHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     iq3XxsGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX IQ3_XXS get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX IQ3_XXS get_rows kernel.", error);
                 }
 
                 return iq3XxsGetRowsKernel;
@@ -7728,16 +7797,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q4KMatmulKernelDisabled)
                     throw new NotSupportedException("MLX Q4_K matmul kernel was disabled after initialization failed.");
 
-                q4KMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q4k_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q4KMatmulSource,
-                    KQuantHelpersHeader);
-                if (!q4KMatmulKernel.IsValid)
+                try
+                {
+                    q4KMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_q4k_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Q4KMatmulSource,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q4KMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q4_K matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q4_K matmul kernel.", error);
                 }
 
                 return q4KMatmulKernel;
@@ -7753,16 +7825,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q4KGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX Q4_K get_rows kernel was disabled after initialization failed.");
 
-                q4KGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_q4k_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Q4KGetRowsSource,
-                    KQuantHelpersHeader);
-                if (!q4KGetRowsKernel.IsValid)
+                try
+                {
+                    q4KGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_q4k_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Q4KGetRowsSource,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q4KGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q4_K get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q4_K get_rows kernel.", error);
                 }
 
                 return q4KGetRowsKernel;
@@ -7778,16 +7853,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q5KMatmulKernelDisabled)
                     throw new NotSupportedException("MLX Q5_K matmul kernel was disabled after initialization failed.");
 
-                q5KMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q5k_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q5KMatmulSource,
-                    KQuantHelpersHeader);
-                if (!q5KMatmulKernel.IsValid)
+                try
+                {
+                    q5KMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_q5k_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Q5KMatmulSource,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q5KMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q5_K matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q5_K matmul kernel.", error);
                 }
 
                 return q5KMatmulKernel;
@@ -7803,16 +7881,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q5KMatmul4KernelDisabled)
                     throw new NotSupportedException("MLX Q5_K 4-column matmul kernel was disabled after initialization failed.");
 
-                q5KMatmul4Kernel = CreateFastMetalKernel(
-                    "tensorsharp_q5k_matmul4",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q5KMatmul4Source,
-                    KQuantHelpersHeader);
-                if (!q5KMatmul4Kernel.IsValid)
+                try
+                {
+                    q5KMatmul4Kernel = CreateFastMetalKernel(
+                        "tensorsharp_q5k_matmul4",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Q5KMatmul4Source,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q5KMatmul4KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q5_K 4-column matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q5_K 4-column matmul kernel.", error);
                 }
 
                 return q5KMatmul4Kernel;
@@ -7828,16 +7909,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q5KGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX Q5_K get_rows kernel was disabled after initialization failed.");
 
-                q5KGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_q5k_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Q5KGetRowsSource,
-                    KQuantHelpersHeader);
-                if (!q5KGetRowsKernel.IsValid)
+                try
+                {
+                    q5KGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_q5k_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Q5KGetRowsSource,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q5KGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q5_K get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q5_K get_rows kernel.", error);
                 }
 
                 return q5KGetRowsKernel;
@@ -7853,16 +7937,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q6KMatmulKernelDisabled)
                     throw new NotSupportedException("MLX Q6_K matmul kernel was disabled after initialization failed.");
 
-                q6KMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q6k_matmul",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q6KMatmulSource,
-                    KQuantHelpersHeader);
-                if (!q6KMatmulKernel.IsValid)
+                try
+                {
+                    q6KMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_q6k_matmul",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Q6KMatmulSource,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q6KMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q6_K matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q6_K matmul kernel.", error);
                 }
 
                 return q6KMatmulKernel;
@@ -7878,16 +7965,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q6KMatmul4KernelDisabled)
                     throw new NotSupportedException("MLX Q6_K 4-column matmul kernel was disabled after initialization failed.");
 
-                q6KMatmul4Kernel = CreateFastMetalKernel(
-                    "tensorsharp_q6k_matmul4",
-                    new[] { "x", "w" },
-                    new[] { "y" },
-                    Q6KMatmul4Source,
-                    KQuantHelpersHeader);
-                if (!q6KMatmul4Kernel.IsValid)
+                try
+                {
+                    q6KMatmul4Kernel = CreateFastMetalKernel(
+                        "tensorsharp_q6k_matmul4",
+                        new[] { "x", "w" },
+                        new[] { "y" },
+                        Q6KMatmul4Source,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q6KMatmul4KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q6_K 4-column matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q6_K 4-column matmul kernel.", error);
                 }
 
                 return q6KMatmul4Kernel;
@@ -7903,16 +7993,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q6KGetRowsKernelDisabled)
                     throw new NotSupportedException("MLX Q6_K get_rows kernel was disabled after initialization failed.");
 
-                q6KGetRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_q6k_get_rows",
-                    new[] { "w", "indices" },
-                    new[] { "y" },
-                    Q6KGetRowsSource,
-                    KQuantHelpersHeader);
-                if (!q6KGetRowsKernel.IsValid)
+                try
+                {
+                    q6KGetRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_q6k_get_rows",
+                        new[] { "w", "indices" },
+                        new[] { "y" },
+                        Q6KGetRowsSource,
+                        KQuantHelpersHeader);
+                }
+                catch (NotSupportedException error)
                 {
                     q6KGetRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q6_K get_rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q6_K get_rows kernel.", error);
                 }
 
                 return q6KGetRowsKernel;
@@ -7928,16 +8021,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (gatedDeltaKernelDisabled)
                     throw new NotSupportedException("MLX gated-delta kernel was disabled after initialization failed.");
 
-                gatedDeltaKernel = CreateFastMetalKernel(
-                    "tensorsharp_gated_delta_step",
-                    new[] { "q", "k", "v", "g", "beta", "state_in" },
-                    new[] { "y", "state_out" },
-                    GatedDeltaSource,
-                    string.Empty);
-                if (!gatedDeltaKernel.IsValid)
+                try
+                {
+                    gatedDeltaKernel = CreateFastMetalKernel(
+                        "tensorsharp_gated_delta_step",
+                        new[] { "q", "k", "v", "g", "beta", "state_in" },
+                        new[] { "y", "state_out" },
+                        GatedDeltaSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     gatedDeltaKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX gated-delta kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX gated-delta kernel.", error);
                 }
 
                 return gatedDeltaKernel;
@@ -7953,16 +8049,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (gatedDeltaT1KernelDisabled)
                     throw new NotSupportedException("MLX gated-delta T=1 kernel was disabled after initialization failed.");
 
-                gatedDeltaT1Kernel = CreateFastMetalKernel(
-                    "tensorsharp_gated_delta_step_t1",
-                    new[] { "q", "k", "v", "g", "beta", "state_in" },
-                    new[] { "y", "state_out" },
-                    GatedDeltaT1Source,
-                    string.Empty);
-                if (!gatedDeltaT1Kernel.IsValid)
+                try
+                {
+                    gatedDeltaT1Kernel = CreateFastMetalKernel(
+                        "tensorsharp_gated_delta_step_t1",
+                        new[] { "q", "k", "v", "g", "beta", "state_in" },
+                        new[] { "y", "state_out" },
+                        GatedDeltaT1Source,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     gatedDeltaT1KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX gated-delta T=1 kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX gated-delta T=1 kernel.", error);
                 }
 
                 return gatedDeltaT1Kernel;
@@ -7978,16 +8077,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (qwen35GdnPreprocessKernelDisabled)
                     throw new NotSupportedException("MLX Qwen35 GDN preprocess kernel was disabled after initialization failed.");
 
-                qwen35GdnPreprocessKernel = CreateFastMetalKernel(
-                    "tensorsharp_qwen35_gdn_preprocess",
-                    new[] { "qkv_raw", "z_raw", "beta_raw", "alpha_raw", "conv_state", "conv_weight", "dt_bias", "a_log" },
-                    new[] { "q_out", "k_out", "v_out", "g_out", "beta_out", "z_silu", "next_conv" },
-                    Qwen35GdnPreprocessSource,
-                    string.Empty);
-                if (!qwen35GdnPreprocessKernel.IsValid)
+                try
+                {
+                    qwen35GdnPreprocessKernel = CreateFastMetalKernel(
+                        "tensorsharp_qwen35_gdn_preprocess",
+                        new[] { "qkv_raw", "z_raw", "beta_raw", "alpha_raw", "conv_state", "conv_weight", "dt_bias", "a_log" },
+                        new[] { "q_out", "k_out", "v_out", "g_out", "beta_out", "z_silu", "next_conv" },
+                        Qwen35GdnPreprocessSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     qwen35GdnPreprocessKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Qwen35 GDN preprocess kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Qwen35 GDN preprocess kernel.", error);
                 }
 
                 return qwen35GdnPreprocessKernel;
@@ -8003,16 +8105,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (qwen35GdnPackedPreprocessKernelDisabled)
                     throw new NotSupportedException("MLX packed Qwen35 GDN preprocess kernel was disabled after initialization failed.");
 
-                qwen35GdnPackedPreprocessKernel = CreateFastMetalKernel(
-                    "tensorsharp_qwen35_gdn_packed_preprocess",
-                    new[] { "packed_raw", "conv_state", "conv_weight", "dt_bias", "a_log" },
-                    new[] { "q_out", "k_out", "v_out", "g_out", "beta_out", "z_silu", "next_conv" },
-                    Qwen35GdnPackedPreprocessSource,
-                    string.Empty);
-                if (!qwen35GdnPackedPreprocessKernel.IsValid)
+                try
+                {
+                    qwen35GdnPackedPreprocessKernel = CreateFastMetalKernel(
+                        "tensorsharp_qwen35_gdn_packed_preprocess",
+                        new[] { "packed_raw", "conv_state", "conv_weight", "dt_bias", "a_log" },
+                        new[] { "q_out", "k_out", "v_out", "g_out", "beta_out", "z_silu", "next_conv" },
+                        Qwen35GdnPackedPreprocessSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     qwen35GdnPackedPreprocessKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX packed Qwen35 GDN preprocess kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX packed Qwen35 GDN preprocess kernel.", error);
                 }
 
                 return qwen35GdnPackedPreprocessKernel;
@@ -8028,16 +8133,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (qwen35GdnPostprocessKernelDisabled)
                     throw new NotSupportedException("MLX Qwen35 GDN postprocess kernel was disabled after initialization failed.");
 
-                qwen35GdnPostprocessKernel = CreateFastMetalKernel(
-                    "tensorsharp_qwen35_gdn_postprocess",
-                    new[] { "y_in", "z_silu", "norm_weight" },
-                    new[] { "y_out" },
-                    Qwen35GdnPostprocessSource,
-                    string.Empty);
-                if (!qwen35GdnPostprocessKernel.IsValid)
+                try
+                {
+                    qwen35GdnPostprocessKernel = CreateFastMetalKernel(
+                        "tensorsharp_qwen35_gdn_postprocess",
+                        new[] { "y_in", "z_silu", "norm_weight" },
+                        new[] { "y_out" },
+                        Qwen35GdnPostprocessSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     qwen35GdnPostprocessKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Qwen35 GDN postprocess kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Qwen35 GDN postprocess kernel.", error);
                 }
 
                 return qwen35GdnPostprocessKernel;
@@ -8053,16 +8161,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (headDim256AttentionKernelDisabled)
                     throw new NotSupportedException("MLX headDim256 attention kernel was disabled after initialization failed.");
 
-                headDim256AttentionKernel = CreateFastMetalKernel(
-                    "tensorsharp_head_dim_256_attention",
-                    new[] { "q", "k", "v", "scale_value" },
-                    new[] { "y" },
-                    HeadDim256AttentionSource,
-                    string.Empty);
-                if (!headDim256AttentionKernel.IsValid)
+                try
+                {
+                    headDim256AttentionKernel = CreateFastMetalKernel(
+                        "tensorsharp_head_dim_256_attention",
+                        new[] { "q", "k", "v", "scale_value" },
+                        new[] { "y" },
+                        HeadDim256AttentionSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     headDim256AttentionKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX headDim256 attention kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX headDim256 attention kernel.", error);
                 }
 
                 return headDim256AttentionKernel;
@@ -8078,16 +8189,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (circularDecodeAttentionKernelDisabled)
                     throw new NotSupportedException("MLX circular decode attention kernel was disabled after initialization failed.");
 
-                circularDecodeAttentionKernel = CreateFastMetalKernel(
-                    "tensorsharp_circular_decode_attention",
-                    new[] { "q", "k_cache", "v_cache", "scale_value" },
-                    new[] { "y" },
-                    CircularDecodeAttentionSource,
-                    string.Empty);
-                if (!circularDecodeAttentionKernel.IsValid)
+                try
+                {
+                    circularDecodeAttentionKernel = CreateFastMetalKernel(
+                        "tensorsharp_circular_decode_attention",
+                        new[] { "q", "k_cache", "v_cache", "scale_value" },
+                        new[] { "y" },
+                        CircularDecodeAttentionSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     circularDecodeAttentionKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX circular decode attention kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX circular decode attention kernel.", error);
                 }
 
                 return circularDecodeAttentionKernel;
@@ -8103,16 +8217,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (decodeAttentionWithSinksKernelDisabled)
                     throw new NotSupportedException("MLX decode attention with sinks kernel was disabled after initialization failed.");
 
-                decodeAttentionWithSinksKernel = CreateFastMetalKernel(
-                    "tensorsharp_decode_attention_with_sinks",
-                    new[] { "q", "k_cache", "v_cache", "sinks", "scale_value" },
-                    new[] { "y" },
-                    DecodeAttentionWithSinksSource,
-                    string.Empty);
-                if (!decodeAttentionWithSinksKernel.IsValid)
+                try
+                {
+                    decodeAttentionWithSinksKernel = CreateFastMetalKernel(
+                        "tensorsharp_decode_attention_with_sinks",
+                        new[] { "q", "k_cache", "v_cache", "sinks", "scale_value" },
+                        new[] { "y" },
+                        DecodeAttentionWithSinksSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     decodeAttentionWithSinksKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX decode attention with sinks kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX decode attention with sinks kernel.", error);
                 }
 
                 return decodeAttentionWithSinksKernel;
@@ -8128,16 +8245,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (gemma4QkvPreprocessDecodeKernelDisabled)
                     throw new NotSupportedException("MLX Gemma4 QKV preprocess decode kernel was disabled after initialization failed.");
 
-                gemma4QkvPreprocessDecodeKernel = CreateFastMetalKernel(
-                    "tensorsharp_gemma4_qkv_preprocess_decode",
-                    new[] { "qkv", "q_norm_w", "k_norm_w", "cos_table", "sin_table", "eps_value" },
-                    new[] { "q_out", "k_out", "v_out" },
-                    Gemma4QkvPreprocessDecodeSource,
-                    string.Empty);
-                if (!gemma4QkvPreprocessDecodeKernel.IsValid)
+                try
+                {
+                    gemma4QkvPreprocessDecodeKernel = CreateFastMetalKernel(
+                        "tensorsharp_gemma4_qkv_preprocess_decode",
+                        new[] { "qkv", "q_norm_w", "k_norm_w", "cos_table", "sin_table", "eps_value" },
+                        new[] { "q_out", "k_out", "v_out" },
+                        Gemma4QkvPreprocessDecodeSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     gemma4QkvPreprocessDecodeKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Gemma4 QKV preprocess decode kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Gemma4 QKV preprocess decode kernel.", error);
                 }
 
                 return gemma4QkvPreprocessDecodeKernel;
@@ -8153,16 +8273,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q8AddmmAddKernelDisabled)
                     throw new NotSupportedException("MLX Q8 addmm+add kernel was disabled after initialization failed.");
 
-                q8AddmmAddKernel = CreateFastMetalKernel(
-                    "tensorsharp_q8_addmm_add",
-                    new[] { "x", "w", "scales", "biases", "residual" },
-                    new[] { "y" },
-                    Q8AddmmAddSource,
-                    string.Empty);
-                if (!q8AddmmAddKernel.IsValid)
+                try
+                {
+                    q8AddmmAddKernel = CreateFastMetalKernel(
+                        "tensorsharp_q8_addmm_add",
+                        new[] { "x", "w", "scales", "biases", "residual" },
+                        new[] { "y" },
+                        Q8AddmmAddSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     q8AddmmAddKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q8 addmm+add kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q8 addmm+add kernel.", error);
                 }
 
                 return q8AddmmAddKernel;
@@ -8178,16 +8301,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (decodeAttentionHeadDim512KernelDisabled)
                     throw new NotSupportedException("MLX head_dim=512 decode attention kernel was disabled after initialization failed.");
 
-                decodeAttentionHeadDim512Kernel = CreateFastMetalKernel(
-                    "tensorsharp_decode_attention_head_dim_512",
-                    new[] { "q", "k_cache", "v_cache", "scale_value" },
-                    new[] { "y" },
-                    DecodeAttentionHeadDim512Source,
-                    string.Empty);
-                if (!decodeAttentionHeadDim512Kernel.IsValid)
+                try
+                {
+                    decodeAttentionHeadDim512Kernel = CreateFastMetalKernel(
+                        "tensorsharp_decode_attention_head_dim_512",
+                        new[] { "q", "k_cache", "v_cache", "scale_value" },
+                        new[] { "y" },
+                        DecodeAttentionHeadDim512Source,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     decodeAttentionHeadDim512KernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX head_dim=512 decode attention kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX head_dim=512 decode attention kernel.", error);
                 }
 
                 return decodeAttentionHeadDim512Kernel;
@@ -8260,16 +8386,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q8MatmulGeluMulKernelDisabled)
                     throw new NotSupportedException("MLX Q8 matmul + GeluMul kernel was disabled after initialization failed.");
 
-                q8MatmulGeluMulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q8_matmul_gelumul",
-                    new[] { "x", "w", "scales", "biases", "gate" },
-                    new[] { "y" },
-                    Q8MatmulGeluMulSource,
-                    string.Empty);
-                if (!q8MatmulGeluMulKernel.IsValid)
+                try
+                {
+                    q8MatmulGeluMulKernel = CreateFastMetalKernel(
+                        "tensorsharp_q8_matmul_gelumul",
+                        new[] { "x", "w", "scales", "biases", "gate" },
+                        new[] { "y" },
+                        Q8MatmulGeluMulSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     q8MatmulGeluMulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q8 matmul + GeluMul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q8 matmul + GeluMul kernel.", error);
                 }
 
                 return q8MatmulGeluMulKernel;
@@ -8330,16 +8459,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q8MatmulKernelDisabled)
                     throw new NotSupportedException("MLX Q8 matmul kernel was disabled after initialization failed.");
 
-                q8MatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q8_matmul",
-                    new[] { "x", "w", "scales", "biases" },
-                    new[] { "y" },
-                    Q8MatmulSource,
-                    string.Empty);
-                if (!q8MatmulKernel.IsValid)
+                try
+                {
+                    q8MatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_q8_matmul",
+                        new[] { "x", "w", "scales", "biases" },
+                        new[] { "y" },
+                        Q8MatmulSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     q8MatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q8 matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q8 matmul kernel.", error);
                 }
 
                 return q8MatmulKernel;
@@ -8402,16 +8534,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (q8RmsNormMatmulKernelDisabled)
                     throw new NotSupportedException("MLX Q8 RmsNorm+matmul kernel was disabled after initialization failed.");
 
-                q8RmsNormMatmulKernel = CreateFastMetalKernel(
-                    "tensorsharp_q8_rmsnorm_matmul",
-                    new[] { "x", "norm_w", "w", "scales", "biases", "eps_value" },
-                    new[] { "y" },
-                    Q8RmsNormMatmulSource,
-                    string.Empty);
-                if (!q8RmsNormMatmulKernel.IsValid)
+                try
+                {
+                    q8RmsNormMatmulKernel = CreateFastMetalKernel(
+                        "tensorsharp_q8_rmsnorm_matmul",
+                        new[] { "x", "norm_w", "w", "scales", "biases", "eps_value" },
+                        new[] { "y" },
+                        Q8RmsNormMatmulSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     q8RmsNormMatmulKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX Q8 RmsNorm+matmul kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX Q8 RmsNorm+matmul kernel.", error);
                 }
 
                 return q8RmsNormMatmulKernel;
@@ -8525,16 +8660,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (scatterAddWeightedRowsKernelDisabled)
                     throw new NotSupportedException("MLX weighted scatter-add rows kernel was disabled after initialization failed.");
 
-                scatterAddWeightedRowsKernel = CreateFastMetalKernel(
-                    "tensorsharp_scatter_add_weighted_rows",
-                    new[] { "in_y", "rows", "indices", "weights" },
-                    new[] { "out_y" },
-                    ScatterAddWeightedRowsSource,
-                    string.Empty);
-                if (!scatterAddWeightedRowsKernel.IsValid)
+                try
+                {
+                    scatterAddWeightedRowsKernel = CreateFastMetalKernel(
+                        "tensorsharp_scatter_add_weighted_rows",
+                        new[] { "in_y", "rows", "indices", "weights" },
+                        new[] { "out_y" },
+                        ScatterAddWeightedRowsSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     scatterAddWeightedRowsKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX weighted scatter-add rows kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX weighted scatter-add rows kernel.", error);
                 }
 
                 return scatterAddWeightedRowsKernel;
@@ -8550,16 +8688,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (rmsNormAddKernelDisabled)
                     throw new NotSupportedException("MLX RMSNorm-add kernel was disabled after initialization failed.");
 
-                rmsNormAddKernel = CreateFastMetalKernel(
-                    "tensorsharp_rmsnorm_add",
-                    new[] { "residual", "input", "norm_weight", "eps_value" },
-                    new[] { "out_y" },
-                    RmsNormAddSource,
-                    string.Empty);
-                if (!rmsNormAddKernel.IsValid)
+                try
+                {
+                    rmsNormAddKernel = CreateFastMetalKernel(
+                        "tensorsharp_rmsnorm_add",
+                        new[] { "residual", "input", "norm_weight", "eps_value" },
+                        new[] { "out_y" },
+                        RmsNormAddSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     rmsNormAddKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX RMSNorm-add kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX RMSNorm-add kernel.", error);
                 }
 
                 return rmsNormAddKernel;
@@ -8575,16 +8716,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (addRmsNormKernelDisabled)
                     throw new NotSupportedException("MLX add-rmsnorm kernel was disabled after initialization failed.");
 
-                addRmsNormKernel = CreateFastMetalKernel(
-                    "tensorsharp_add_rmsnorm",
-                    new[] { "residual", "input", "norm_weight", "eps_value" },
-                    new[] { "updated_residual", "normed_out" },
-                    AddRmsNormSource,
-                    string.Empty);
-                if (!addRmsNormKernel.IsValid)
+                try
+                {
+                    addRmsNormKernel = CreateFastMetalKernel(
+                        "tensorsharp_add_rmsnorm",
+                        new[] { "residual", "input", "norm_weight", "eps_value" },
+                        new[] { "updated_residual", "normed_out" },
+                        AddRmsNormSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     addRmsNormKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX add-rmsnorm kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX add-rmsnorm kernel.", error);
                 }
 
                 return addRmsNormKernel;
@@ -8600,16 +8744,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (geluMulSplitKernelDisabled)
                     throw new NotSupportedException("MLX GELU-mul split kernel was disabled after initialization failed.");
 
-                geluMulSplitKernel = CreateFastMetalKernel(
-                    "tensorsharp_gelu_mul_split",
-                    new[] { "gate_up" },
-                    new[] { "out_y" },
-                    GeluMulSplitSource,
-                    string.Empty);
-                if (!geluMulSplitKernel.IsValid)
+                try
+                {
+                    geluMulSplitKernel = CreateFastMetalKernel(
+                        "tensorsharp_gelu_mul_split",
+                        new[] { "gate_up" },
+                        new[] { "out_y" },
+                        GeluMulSplitSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     geluMulSplitKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX GELU-mul split kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX GELU-mul split kernel.", error);
                 }
 
                 return geluMulSplitKernel;
@@ -8625,16 +8772,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (swigluOaiGatherBiasKernelDisabled)
                     throw new NotSupportedException("MLX swiglu-oai gather-bias kernel was disabled after initialization failed.");
 
-                swigluOaiGatherBiasKernel = CreateFastMetalKernel(
-                    "tensorsharp_swiglu_oai_gather_bias",
-                    new[] { "gate_in", "up_in", "gate_bias", "up_bias", "experts", "alpha_v", "limit_v" },
-                    new[] { "out_y" },
-                    SwigluOaiGatherBiasSource,
-                    string.Empty);
-                if (!swigluOaiGatherBiasKernel.IsValid)
+                try
+                {
+                    swigluOaiGatherBiasKernel = CreateFastMetalKernel(
+                        "tensorsharp_swiglu_oai_gather_bias",
+                        new[] { "gate_in", "up_in", "gate_bias", "up_bias", "experts", "alpha_v", "limit_v" },
+                        new[] { "out_y" },
+                        SwigluOaiGatherBiasSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     swigluOaiGatherBiasKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX swiglu-oai gather-bias kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX swiglu-oai gather-bias kernel.", error);
                 }
 
                 return swigluOaiGatherBiasKernel;
@@ -8650,16 +8800,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (moeBiasWeightedSumKernelDisabled)
                     throw new NotSupportedException("MLX MoE bias-weighted-sum kernel was disabled after initialization failed.");
 
-                moeBiasWeightedSumKernel = CreateFastMetalKernel(
-                    "tensorsharp_moe_bias_weighted_sum",
-                    new[] { "down_rows", "down_bias", "experts_sorted", "inv_order", "route_weights" },
-                    new[] { "out_y" },
-                    MoeBiasWeightedSumSource,
-                    string.Empty);
-                if (!moeBiasWeightedSumKernel.IsValid)
+                try
+                {
+                    moeBiasWeightedSumKernel = CreateFastMetalKernel(
+                        "tensorsharp_moe_bias_weighted_sum",
+                        new[] { "down_rows", "down_bias", "experts_sorted", "inv_order", "route_weights" },
+                        new[] { "out_y" },
+                        MoeBiasWeightedSumSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     moeBiasWeightedSumKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX MoE bias-weighted-sum kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX MoE bias-weighted-sum kernel.", error);
                 }
 
                 return moeBiasWeightedSumKernel;
@@ -8675,16 +8828,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (flatToHeadFirstKernelDisabled)
                     throw new NotSupportedException("MLX flat-to-head-first kernel was disabled after initialization failed.");
 
-                flatToHeadFirstKernel = CreateFastMetalKernel(
-                    "tensorsharp_flat_to_head_first",
-                    new[] { "input" },
-                    new[] { "out_y" },
-                    FlatToHeadFirstSource,
-                    string.Empty);
-                if (!flatToHeadFirstKernel.IsValid)
+                try
+                {
+                    flatToHeadFirstKernel = CreateFastMetalKernel(
+                        "tensorsharp_flat_to_head_first",
+                        new[] { "input" },
+                        new[] { "out_y" },
+                        FlatToHeadFirstSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     flatToHeadFirstKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX flat-to-head-first kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX flat-to-head-first kernel.", error);
                 }
 
                 return flatToHeadFirstKernel;
@@ -8700,16 +8856,19 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 if (neoXRopeKernelDisabled)
                     throw new NotSupportedException("MLX NeoX RoPE kernel was disabled after initialization failed.");
 
-                neoXRopeKernel = CreateFastMetalKernel(
-                    "tensorsharp_neox_rope",
-                    new[] { "input", "cos_table", "sin_table" },
-                    new[] { "out_y" },
-                    NeoXRopeSource,
-                    string.Empty);
-                if (!neoXRopeKernel.IsValid)
+                try
+                {
+                    neoXRopeKernel = CreateFastMetalKernel(
+                        "tensorsharp_neox_rope",
+                        new[] { "input", "cos_table", "sin_table" },
+                        new[] { "out_y" },
+                        NeoXRopeSource,
+                        string.Empty);
+                }
+                catch (NotSupportedException error)
                 {
                     neoXRopeKernelDisabled = true;
-                    throw new NotSupportedException("Unable to initialize MLX NeoX RoPE kernel.");
+                    throw new NotSupportedException("Unable to initialize MLX NeoX RoPE kernel.", error);
                 }
 
                 return neoXRopeKernel;
@@ -8718,65 +8877,95 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
 
         private static MlxFastMetalKernel CreateFastMetalKernel(string name, string[] inputs, string[] outputs, string source, string header)
         {
-            IntPtr namePtr = IntPtr.Zero;
-            IntPtr sourcePtr = IntPtr.Zero;
-            IntPtr headerPtr = IntPtr.Zero;
-            MlxVectorString inputVector = default;
-            MlxVectorString outputVector = default;
-            try
+            var resources = new KernelConstructionResources(name, inputs, outputs, source, header);
+            return MlxWorker.Shared.InvokeNative(resources, resources.Create, resources.Release);
+        }
+
+        private sealed class KernelConstructionResources(string name, string[] inputs, string[] outputs, string source, string header)
+            : MlxNativeResources
+        {
+            private MlxFastMetalKernel kernel;
+            private MlxVectorString inputNames;
+            private MlxVectorString outputNames;
+            private IntPtr namePtr;
+            private IntPtr sourcePtr;
+            private IntPtr headerPtr;
+            private IntPtr valuePtr;
+            private bool prepared;
+
+            internal MlxFastMetalKernel Create(NativeEffectLease effect)
             {
-                inputVector = CreateStringVector(inputs);
-                outputVector = CreateStringVector(outputs);
+                CreateStringVector(ref inputNames, inputs, effect);
+                CreateStringVector(ref outputNames, outputs, effect);
                 namePtr = Marshal.StringToHGlobalAnsi(name);
                 sourcePtr = Marshal.StringToHGlobalAnsi(source);
                 headerPtr = Marshal.StringToHGlobalAnsi(header ?? string.Empty);
-                return mlx_fast_metal_kernel_new(
-                    namePtr,
-                    inputVector,
-                    outputVector,
-                    sourcePtr,
-                    headerPtr,
-                    true,
-                    false);
+                ClearCapturedError();
+                kernel = mlx_fast_metal_kernel_new(namePtr, inputNames, outputNames, sourcePtr, headerPtr, true, false);
+                try
+                {
+                    CheckNativeValue(!kernel.IsValid, "creating MLX metal kernel");
+                }
+                catch (InvalidOperationException error)
+                {
+                    throw new NotSupportedException($"Unable to initialize MLX metal kernel {name}.", error);
+                }
+                prepared = true;
+                return kernel;
             }
-            finally
-            {
-                if (inputVector.IsValid)
-                    _ = mlx_vector_string_free(inputVector);
-                if (outputVector.IsValid)
-                    _ = mlx_vector_string_free(outputVector);
-                Marshal.FreeHGlobal(namePtr);
-                Marshal.FreeHGlobal(sourcePtr);
-                Marshal.FreeHGlobal(headerPtr);
-            }
-        }
 
-        private static MlxVectorString CreateStringVector(string[] values)
-        {
-            MlxVectorString vector = mlx_vector_string_new();
-            try
+            private void CreateStringVector(ref MlxVectorString vector, string[] values, NativeEffectLease effect)
             {
+                ClearCapturedError();
+                vector = mlx_vector_string_new();
+                CheckNativeValue(!vector.IsValid, "creating MLX string vector");
                 foreach (string value in values)
                 {
-                    IntPtr valuePtr = Marshal.StringToHGlobalAnsi(value);
+                    valuePtr = Marshal.StringToHGlobalAnsi(value);
+                    Check(mlx_vector_string_append_value(vector, valuePtr), "building MLX string vector");
                     try
                     {
-                        Check(mlx_vector_string_append_value(vector, valuePtr), "building MLX string vector");
+                        FreePointer(ref valuePtr);
                     }
-                    finally
+                    catch (Exception original)
                     {
-                        Marshal.FreeHGlobal(valuePtr);
+                        Exception error = original;
+                        try { effect.PublishFailure(MlxWorker.Shared, original, NativeRuntimeFailureStage.GraphRelease); }
+                        catch (Exception publication) { error = JoinNativeErrors(error, publication); }
+                        ExceptionDispatchInfo.Capture(error).Throw();
                     }
                 }
-
-                MlxVectorString result = vector;
-                vector = default;
-                return result;
             }
-            finally
+
+            internal void Release()
             {
-                if (vector.IsValid)
-                    _ = mlx_vector_string_free(vector);
+                FreePointer(ref valuePtr);
+                FreeStringVector(ref inputNames);
+                FreeStringVector(ref outputNames);
+                FreePointer(ref namePtr);
+                FreePointer(ref sourcePtr);
+                FreePointer(ref headerPtr);
+                if (!prepared && kernel.IsValid)
+                {
+                    ClearCapturedError();
+                    mlx_fast_metal_kernel_free(kernel);
+                    CheckNativeValue(false, "freeing unreturned MLX metal kernel");
+                    kernel = default;
+                }
+            }
+
+            private static void FreeStringVector(ref MlxVectorString vector)
+            {
+                if (!vector.IsValid) return;
+                Check(mlx_vector_string_free(vector), "freeing MLX kernel string vector");
+                vector = default;
+            }
+
+            private static void FreePointer(ref IntPtr pointer)
+            {
+                if (pointer == IntPtr.Zero) return;
+                Marshal.FreeHGlobal(pointer);
+                pointer = IntPtr.Zero;
             }
         }
 
@@ -9624,6 +9813,10 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             IntPtr header,
             [MarshalAs(UnmanagedType.I1)] bool ensureRowContiguous,
             [MarshalAs(UnmanagedType.I1)] bool atomicOutputs);
+
+        [LibraryImport(LibraryName, EntryPoint = "mlx_fast_metal_kernel_free")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial void mlx_fast_metal_kernel_free(MlxFastMetalKernel kernel);
 
         [LibraryImport(LibraryName, EntryPoint = "mlx_fast_metal_kernel_apply")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]

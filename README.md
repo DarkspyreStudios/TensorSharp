@@ -144,8 +144,8 @@ cleanup succeeds, no target transfer completes and no recorded unsafe failure ex
 Multi-output handoffs record each successful target transfer; a later failure propagates
 without rollback or fallback replay. Tensor materialization retains its view and contiguous
 result through evaluation and storage adoption. Chunked prefill propagates operation errors
-and refuses fallback after committing an attention block. Custom-kernel references that
-fail before reaching the caller remain outside these caller carriers.
+and refuses fallback after committing an attention block. Custom-kernel construction
+references use a separate worker carrier.
 Quantized operation callers retain acquired references, returned closure outputs and actual
 borrowed weight/cache-entry objects through the same worker ownership collection. Three Q8
 fast-path attempts receive isolated checked cleanup before another kernel runs; recorded
@@ -172,17 +172,27 @@ Target commits propagate through parent carriers and prohibit fallback replay. N
 weight replacement prepares its output before releasing the old reference. Scalar, activation
 and depthwise-convolution helpers retain unreturned outputs and iteration references until
 checked cleanup; a failed accumulator release is not retried during unwinding. Zero-state
-initialization does not advance recurrence. Hidden acquisitions inside native custom kernels
-remain outside these caller carriers.
+initialization does not advance recurrence. Custom-kernel construction uses a separate
+worker carrier.
 All 44 custom-kernel config-owning application paths retain configs, input/output vectors,
 ten scalar references and sixty extracted output references before validation. The existing
 worker installs each carrier before acquisition. Checked cleanup clears only successful
 releases, preserves original and independent cleanup errors, and retains the actual remaining
 graph when unsafe. Single, tuple and multi-output methods return only after temporary cleanup
-succeeds. IQ4_XS/Q5_K/Q6_K fallback catches propagate recorded unsafe errors. Cached kernel
-construction, string vectors and cached-kernel retirement remain outside these application
-carriers; they do not establish all-used-stream completion or kernel-cache lifetime ownership.
-All-used-stream synchronization remains unfinished. Kernel construction, raw temporaries,
+succeeds. IQ4_XS/Q5_K/Q6_K fallback catches propagate recorded unsafe errors. These application
+carriers borrow cached kernels; they do not establish all-used-stream completion or
+kernel-cache lifetime ownership.
+All 53 cached-kernel construction sites use one checked factory. Its worker-installed
+carrier retains input/output string vectors, unmanaged string buffers and the actual
+kernel before validation. Appended strings are copied by the native vector before their
+buffers are released. An early buffer-release failure records unsafe ownership before
+unwinding, so cleanup does not retry it. Kernel results transfer only after temporary
+cleanup succeeds. Failed cleanup retains the actual unreturned kernel and remaining
+allocations. Safe unsupported construction preserves each kernel's disabled flag and
+diagnostic, including the native error as its cause. The genuine native kernel free
+returns void; its actual return releases the wrapper reference, not GPU work. Successful
+cached kernels still have no checked lifetime retirement owner.
+All-used-stream synchronization remains unfinished. Cached-kernel lifetime, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
