@@ -3356,16 +3356,17 @@ if (kind == 0) {
 
         public static void ClearCache()
         {
-            try
-            {
-                MlxWorker.Shared.InvokeNative(() => _ = mlx_clear_cache());
-            }
-            catch (DllNotFoundException)
-            {
-            }
-            catch (EntryPointNotFoundException)
-            {
-            }
+            MlxWorker.Shared.ClearNativeCache();
+        }
+
+        internal static void SynchronizeAllUsedStreams()
+        {
+            Check(tensorsharp_mlx_synchronize_all_streams(), "synchronizing all MLX streams");
+        }
+
+        internal static void ClearNativeCache()
+        {
+            Check(mlx_clear_cache(), "clearing MLX allocator cache");
         }
 
         internal static MlxArray NewArrayFromHost(IntPtr data, int[] shape, DType dtype)
@@ -9482,6 +9483,10 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
         [LibraryImport(LibraryName, EntryPoint = "mlx_clear_cache")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
         private static partial int mlx_clear_cache();
+
+        [LibraryImport(LibraryName, EntryPoint = "tensorsharp_mlx_synchronize_all_streams")]
+        [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]
+        private static partial int tensorsharp_mlx_synchronize_all_streams();
 
         [LibraryImport(LibraryName, EntryPoint = "mlx_get_active_memory")]
         [UnmanagedCallConv(CallConvs = new[] { typeof(CallConvCdecl) })]

@@ -194,7 +194,19 @@ returns void; its actual return releases the wrapper reference, not GPU work. Su
 cached kernels still have no checked lifetime retirement owner.
 Kernel disable handlers and eight simdgroup fallback catches propagate recorded unsafe
 failures without starting another kernel attempt.
-All-used-stream synchronization remains unfinished. Cached-kernel lifetime, raw temporaries,
+Allocator-cache clearing reserves its actual worker through the shared process authority
+before dispatch. Active compiled calls refuse that destructive reservation. The admitted
+native phase synchronizes the real complete MLX stream snapshot before clearing the
+allocator cache. TensorSharp's native extension uses MLX's get_streams and synchronize APIs,
+including CPU and GPU streams from other workers in the same native runtime. It does not
+substitute the calling thread's default stream or a worker queue barrier.
+Synchronization failure prevents cache clearing, records the Synchronization stage and
+retains the actual worker graph. A later clear failure records AllocatorRelease. Both paths
+preserve the original native cause and any independent publication error. Binding and native
+cleanup failures propagate; an older library without the all-stream export is not accepted
+as successful cache cleanup. Upstream MLX sources remain unchanged.
+Full retirement integration of all-used-stream synchronization remains unfinished.
+Cached-kernel lifetime, raw temporaries,
 other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.

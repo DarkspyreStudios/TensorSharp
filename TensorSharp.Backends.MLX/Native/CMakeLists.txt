@@ -50,6 +50,9 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(mlx-c)
 
+target_sources(mlxc PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/TensorSharpMlxStreams.cpp")
+
 install(
   TARGETS mlxc
   LIBRARY DESTINATION .

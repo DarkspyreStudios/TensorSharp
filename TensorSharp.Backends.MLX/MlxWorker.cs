@@ -95,6 +95,31 @@ namespace TensorSharp.MLX
             });
         }
 
+        internal void ClearNativeCache()
+        {
+            using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+            Invoke(() =>
+            {
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                MlxNative.InstallCurrentErrorHandler();
+                NativeRuntimeFailureStage stage = NativeRuntimeFailureStage.Synchronization;
+                try
+                {
+                    MlxNative.SynchronizeAllUsedStreams();
+                    stage = NativeRuntimeFailureStage.AllocatorRelease;
+                    MlxNative.ClearNativeCache();
+                }
+                catch (Exception original)
+                {
+                    Exception error = original;
+                    try { effect.PublishFailure(this, original, stage); }
+                    catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                    ExceptionDispatchInfo.Capture(error).Throw();
+                }
+            });
+        }
+
         internal T InvokeNative<T>(MlxNativeResources resources, Func<NativeEffectLease, T> operation, Action cleanup)
         {
             ArgumentNullException.ThrowIfNull(resources);
