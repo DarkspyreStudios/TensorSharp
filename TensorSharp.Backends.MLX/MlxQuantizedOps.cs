@@ -84,6 +84,64 @@ namespace TensorSharp.MLX
             }
         }
 
+        private sealed class QuantizedResources(int referenceCount, object borrowedOwner, params Tensor[] tensors) : MlxNativeResources
+        {
+            internal readonly MlxArrayResources References = new(referenceCount, tensors);
+            internal MlxNative.MlxArray[] Arrays => References.Arrays;
+            internal MlxNative.MlxArray[] Outputs = Array.Empty<MlxNative.MlxArray>();
+            internal MlxNative.CompiledClosure Closure;
+            internal bool HasStoredResult;
+
+            internal override bool HasNativeResources
+            {
+                get
+                {
+                    if (References.HasNativeResources) return true;
+                    if (Outputs == null) return false;
+                    foreach (MlxNative.MlxArray output in Outputs)
+                        if (output.IsValid) return true;
+                    return false;
+                }
+            }
+
+            internal void Release()
+            {
+                References.Release();
+                if (Outputs != null)
+                    for (int i = 0; i < Outputs.Length; i++)
+                        MlxNative.FreeArrayReference(ref Outputs[i]);
+                GC.KeepAlive(borrowedOwner);
+                GC.KeepAlive(Closure);
+            }
+        }
+
+        private static bool TryInvokeWithResources(QuantizedResources resources, Func<bool> operation)
+        {
+            try
+            {
+                return MlxWorker.Shared.InvokeWithResources(resources, operation, resources.Release);
+            }
+            catch (Exception error) when (resources.SafelyReleased && !resources.HasStoredResult
+                && !NativeQuarantineAuthority.TryGetFailure(error, out _))
+            {
+                return false;
+            }
+        }
+
+        private static bool TryFusedResult(QuantizedResources parent, Tensor target, Func<MlxNative.MlxArray> operation)
+        {
+            var resources = new QuantizedResources(1, parent);
+            return TryInvokeWithResources(resources, () =>
+            {
+                ref MlxNative.MlxArray output = ref resources.Arrays[0];
+                output = operation();
+                MlxStorage.SetDeviceResult(target, ref output);
+                resources.HasStoredResult = true;
+                parent.HasStoredResult = true;
+                return true;
+            });
+        }
+
         // Formats that MLX should keep compressed while loading. Only the subset in
         // CanPreloadQuantizedType has a native MLX matmul representation today; the
         // remaining formats stay as GGUF file-backed views and use the row-dequant
@@ -318,28 +376,20 @@ namespace TensorSharp.MLX
                 numExperts * perExpertNe1,
                 upTotalRawBytes);
 
-            MlxNative.MlxArray inputView = default;
-            MlxNative.MlxArray indicesView = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new QuantizedResources(3, new[] { gate, up }, result, input, expertIndices);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray indicesView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
                 inputView = inputStorage.CreateArrayView(input);
                 indicesView = indicesStorage.CreateArrayView(expertIndices);
                 output = MlxNative.Iq2XxsMoeMatmulBatchedFusedGateUpSilu(
                     inputView, gate.Weight, up.Weight, indicesView, K, inDim, outDim);
                 MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(inputView);
-                MlxNative.FreeArray(indicesView);
-                MlxNative.FreeArray(output);
-            }
+            });
         }
 
         public static bool TryMoeMatmulBatched(
@@ -391,11 +441,12 @@ namespace TensorSharp.MLX
                 numExperts * perExpertNe1,
                 totalRawBytes);
 
-            MlxNative.MlxArray inputView = default;
-            MlxNative.MlxArray indicesView = default;
-            MlxNative.MlxArray output = default;
-            try
+            var resources = new QuantizedResources(3, weight, result, input, expertIndices);
+            return TryInvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray indicesView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
                 inputView = inputStorage.CreateArrayView(input);
                 indicesView = indicesStorage.CreateArrayView(expertIndices);
                 if (ggmlType == (int)GgmlTensorType.IQ4_NL)
@@ -411,18 +462,9 @@ namespace TensorSharp.MLX
                         : MlxNative.Iq2XxsMoeMatmulBatchedRowed(inputView, weight.Weight, indicesView, K, inDim, outDim);
                 }
                 MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
                 return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(inputView);
-                MlxNative.FreeArray(indicesView);
-                MlxNative.FreeArray(output);
-            }
+            });
         }
 
         public static void ReleaseQuantizedWeight(MlxAllocator allocator, IntPtr cacheKey)
@@ -533,16 +575,18 @@ namespace TensorSharp.MLX
             Tensor result, Tensor input, DeviceWeight weight, int ggmlType,
             long ne0, long ne1, MlxStorage inputStorage, int rows)
         {
-            MlxNative.MlxArray inputView = default;
-            MlxNative.MlxArray output = default;
-            MlxNative.MlxArray contiguous = default;
-            try
+            var resources = new QuantizedResources(3, weight, result, input);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray output = ref resources.Arrays[1];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[2];
                 inputView = inputStorage.CreateArrayView(input);
                 if (ggmlType == (int)GgmlTensorType.IQ4_XS)
                 {
                     output = MlxNative.Iq4XsMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ4_NL)
                 {
@@ -559,41 +603,49 @@ namespace TensorSharp.MLX
                     // CPU fallback is no longer reachable.
                     output = MlxNative.Iq4NlMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_XXS)
                 {
                     output = MlxNative.Iq2XxsMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_S)
                 {
                     output = MlxNative.Iq2SMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_S)
                 {
                     output = MlxNative.Iq3SMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_XXS)
                 {
                     output = MlxNative.Iq3XxsMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q4KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q5KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 {
                     output = MlxNative.Q6KMatmul(inputView, weight.Weight, rows, (int)ne0, (int)ne1);
                     MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
                 }
                 else
                 {
@@ -609,20 +661,10 @@ namespace TensorSharp.MLX
                         && weight.Biases.IsValid
                         && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_MATMUL"), "0", StringComparison.Ordinal))
                     {
-                        try
-                        {
-                            output = MlxNative.Q8Matmul(
-                                inputView, weight.Weight, weight.Scales, weight.Biases,
-                                (int)ne0, (int)ne1, (int)ne0 / 32);
-                            MlxStorage.SetDeviceResult(result, ref output);
+                        if (TryFusedResult(resources, result, () => MlxNative.Q8Matmul(
+                                resources.Arrays[0], weight.Weight, weight.Scales, weight.Biases,
+                                (int)ne0, (int)ne1, (int)ne0 / 32)))
                             return true;
-                        }
-                        catch
-                        {
-                            MlxNative.FreeArray(output);
-                            output = default;
-                            // Fall through to MLX's built-in path.
-                        }
                     }
 
                     output = MlxNative.QuantizedMatmul(
@@ -646,20 +688,16 @@ namespace TensorSharp.MLX
                     {
                         contiguous = MlxNative.Contiguous(output);
                         MlxStorage.SetDeviceResult(result, ref contiguous);
+                        resources.HasStoredResult = true;
                     }
                     else
                     {
                         MlxStorage.SetDeviceResult(result, ref output);
+                        resources.HasStoredResult = true;
                     }
                 }
                 return true;
-            }
-            finally
-            {
-                MlxNative.FreeArray(inputView);
-                MlxNative.FreeArray(output);
-                MlxNative.FreeArray(contiguous);
-            }
+            }, resources.Release);
         }
 
         public static bool TryRmsNormAddmmQuantizedToFloat32(
@@ -694,69 +732,49 @@ namespace TensorSharp.MLX
             // of pure C#-↔-worker synchronization overhead. With the wrapper
             // the sub-calls run inline (IsOnWorkerThread short-circuits the
             // queue), collapsing to a single hand-off.
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new QuantizedResources(5, weight, result, input, normWeight);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray inputView = default;
-                MlxNative.MlxArray normView = default;
-                MlxNative.MlxArray normed = default;
-                MlxNative.MlxArray output = default;
-                MlxNative.MlxArray contiguous = default;
-                MlxNative.MlxArray fused = default;
-                try
-                {
-                    inputView = inputStorage.CreateArrayView(input);
-                    normView = normStorage.CreateArrayView(normWeight);
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray normView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray normed = ref resources.Arrays[2];
+                ref MlxNative.MlxArray output = ref resources.Arrays[3];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[4];
+                inputView = inputStorage.CreateArrayView(input);
+                normView = normStorage.CreateArrayView(normWeight);
 
-                    // Phase 6 fast path: Q8_0 path (Gemma 4 / Q8_0 GGUFs)
-                    // gets a single custom Metal kernel that does
-                    // RMSNorm(input) + matmul together using simdgroup
-                    // intrinsics. Saves one Metal dispatch per layer ×
-                    // ~84 norm+matmul calls / token (QKV proj + gate_up).
-                    if (rows == 1
-                        && ggmlType == (int)GgmlTensorType.Q8_0
-                        && (int)ne0 % 32 == 0
-                        && weight.Biases.IsValid
-                        && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_RMSNORM_MATMUL"), "0", StringComparison.Ordinal))
-                    {
-                        try
-                        {
-                            fused = MlxNative.Q8RmsNormMatmul(
-                                inputView, normView, weight.Weight, weight.Scales, weight.Biases,
-                                eps, (int)ne0, (int)ne1, (int)ne0 / 32);
-                            MlxStorage.SetDeviceResult(result, ref fused);
-                            return true;
-                        }
-                        catch
-                        {
-                            MlxNative.FreeArray(fused);
-                            fused = default;
-                            // Fall through to legacy path.
-                        }
-                    }
-
-                    normed = MlxNative.FastRmsNorm(inputView, normView, eps);
-                    output = RunMatmul(normed, weight, ggmlType, rows, (int)ne0, (int)ne1);
-                    if (MatmulOutputNeedsContiguous())
-                    {
-                        contiguous = MlxNative.Contiguous(output);
-                        MlxStorage.SetDeviceResult(result, ref contiguous);
-                    }
-                    else
-                    {
-                        MlxStorage.SetDeviceResult(result, ref output);
-                    }
-                    return true;
-                }
-                finally
+                // Phase 6 fast path: Q8_0 path (Gemma 4 / Q8_0 GGUFs)
+                // gets a single custom Metal kernel that does
+                // RMSNorm(input) + matmul together using simdgroup
+                // intrinsics. Saves one Metal dispatch per layer ×
+                // ~84 norm+matmul calls / token (QKV proj + gate_up).
+                if (rows == 1
+                    && ggmlType == (int)GgmlTensorType.Q8_0
+                    && (int)ne0 % 32 == 0
+                    && weight.Biases.IsValid
+                    && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_RMSNORM_MATMUL"), "0", StringComparison.Ordinal))
                 {
-                    MlxNative.FreeArray(inputView);
-                    MlxNative.FreeArray(normView);
-                    MlxNative.FreeArray(normed);
-                    MlxNative.FreeArray(output);
-                    MlxNative.FreeArray(contiguous);
-                    MlxNative.FreeArray(fused);
+                    if (TryFusedResult(resources, result, () => MlxNative.Q8RmsNormMatmul(
+                            resources.Arrays[0], resources.Arrays[1], weight.Weight, weight.Scales, weight.Biases,
+                            eps, (int)ne0, (int)ne1, (int)ne0 / 32)))
+                        return true;
                 }
-            });
+
+                normed = MlxNative.FastRmsNorm(inputView, normView, eps);
+                output = RunMatmul(normed, weight, ggmlType, rows, (int)ne0, (int)ne1);
+                if (MatmulOutputNeedsContiguous())
+                {
+                    contiguous = MlxNative.Contiguous(output);
+                    MlxStorage.SetDeviceResult(result, ref contiguous);
+                    resources.HasStoredResult = true;
+                }
+                else
+                {
+                    MlxStorage.SetDeviceResult(result, ref output);
+                    resources.HasStoredResult = true;
+                }
+                return true;
+            }, resources.Release);
         }
 
         public static bool TryAddmmQuantizedAddToFloat32(
@@ -777,59 +795,39 @@ namespace TensorSharp.MLX
             DeviceWeight weight = EnsureWeight(residualStorage.DeviceId, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
             // Batch matmul + residual add in a single worker call so the
             // ~5 internal MLX calls collapse to one queue round-trip.
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new QuantizedResources(4, weight, residual, input);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray inputView = default;
-                MlxNative.MlxArray residualView = default;
-                MlxNative.MlxArray matmul = default;
-                MlxNative.MlxArray added = default;
-                MlxNative.MlxArray fused = default;
-                try
-                {
-                    inputView = inputStorage.CreateArrayView(input);
-                    residualView = residualStorage.CreateArrayView(residual);
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray residualView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray matmul = ref resources.Arrays[2];
+                ref MlxNative.MlxArray added = ref resources.Arrays[3];
+                inputView = inputStorage.CreateArrayView(input);
+                residualView = residualStorage.CreateArrayView(residual);
 
-                    // Phase 6 fast path: Q8_0 (the Gemma 4 / Q8_0 GGUF
-                    // path) gets a single custom Metal kernel that does
-                    // matmul + residual add together. Saves one Metal
-                    // dispatch per layer × 42 layers / token. Falls back
-                    // to the legacy 2-op path on any unsupported shape.
-                    if (rows == 1
-                        && ggmlType == (int)GgmlTensorType.Q8_0
-                        && (int)ne0 % 32 == 0
-                        && weight.Biases.IsValid
-                        && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_ADDMM_ADD"), "0", StringComparison.Ordinal))
-                    {
-                        try
-                        {
-                            fused = MlxNative.Q8AddmmAdd(
-                                inputView, weight.Weight, weight.Scales, weight.Biases,
-                                residualView, (int)ne0, (int)ne1, (int)ne0 / 32);
-                            MlxStorage.SetDeviceResult(residual, ref fused);
-                            return true;
-                        }
-                        catch
-                        {
-                            MlxNative.FreeArray(fused);
-                            fused = default;
-                            // Fall through to legacy path.
-                        }
-                    }
-
-                    matmul = RunMatmul(inputView, weight, ggmlType, rows, (int)ne0, (int)ne1);
-                    added = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, residualView, matmul);
-                    MlxStorage.SetDeviceResult(residual, ref added);
-                    return true;
-                }
-                finally
+                // Phase 6 fast path: Q8_0 (the Gemma 4 / Q8_0 GGUF
+                // path) gets a single custom Metal kernel that does
+                // matmul + residual add together. Saves one Metal
+                // dispatch per layer × 42 layers / token. Falls back
+                // to the legacy 2-op path on any unsupported shape.
+                if (rows == 1
+                    && ggmlType == (int)GgmlTensorType.Q8_0
+                    && (int)ne0 % 32 == 0
+                    && weight.Biases.IsValid
+                    && !string.Equals(Environment.GetEnvironmentVariable("TS_MLX_FUSED_Q8_ADDMM_ADD"), "0", StringComparison.Ordinal))
                 {
-                    MlxNative.FreeArray(inputView);
-                    MlxNative.FreeArray(residualView);
-                    MlxNative.FreeArray(matmul);
-                    MlxNative.FreeArray(added);
-                    MlxNative.FreeArray(fused);
+                    if (TryFusedResult(resources, residual, () => MlxNative.Q8AddmmAdd(
+                            resources.Arrays[0], weight.Weight, weight.Scales, weight.Biases,
+                            resources.Arrays[1], (int)ne0, (int)ne1, (int)ne0 / 32)))
+                        return true;
                 }
-            });
+
+                matmul = RunMatmul(inputView, weight, ggmlType, rows, (int)ne0, (int)ne1);
+                added = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, residualView, matmul);
+                MlxStorage.SetDeviceResult(residual, ref added);
+                resources.HasStoredResult = true;
+                return true;
+            }, resources.Release);
         }
 
         // Lazily-compiled closure for the Gemma 4 dense decode FFN (and any
@@ -939,67 +937,40 @@ namespace TensorSharp.MLX
             var key = new FusedFFNCacheKey(gateUpType, halfDim, gateUpDw.GroupSize, gateUpDw.Bits, gateUpDw.Mode, eps);
             MlxNative.CompiledClosure closure = EnsureFusedFFNClosure(key);
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new QuantizedResources(5, new[] { gateUpDw, downDw },
+                residual, hidden, preNormWeight, postNormWeight) { Closure = closure };
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray hiddenView = default;
-                MlxNative.MlxArray preNormView = default;
-                MlxNative.MlxArray postNormView = default;
-                MlxNative.MlxArray residualView = default;
-                MlxNative.MlxArray output = default;
-                MlxNative.MlxArray[] outputs = null;
-                bool retainedFailure = false;
-                try
-                {
-                    hiddenView = hiddenStorage.CreateArrayView(hidden);
-                    preNormView = preNormStorage.CreateArrayView(preNormWeight);
-                    postNormView = postNormStorage.CreateArrayView(postNormWeight);
-                    residualView = residualStorage.CreateArrayView(residual);
+                ref MlxNative.MlxArray hiddenView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray preNormView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray postNormView = ref resources.Arrays[2];
+                ref MlxNative.MlxArray residualView = ref resources.Arrays[3];
+                ref MlxNative.MlxArray output = ref resources.Arrays[4];
+                hiddenView = hiddenStorage.CreateArrayView(hidden);
+                preNormView = preNormStorage.CreateArrayView(preNormWeight);
+                postNormView = postNormStorage.CreateArrayView(postNormWeight);
+                residualView = residualStorage.CreateArrayView(residual);
 
-                    outputs = MlxNative.ApplyClosure(closure, new[]
-                    {
-                        hiddenView,
-                        preNormView,
-                        gateUpDw.Weight,
-                        gateUpDw.Scales,
-                        gateUpDw.Biases,
-                        downDw.Weight,
-                        downDw.Scales,
-                        downDw.Biases,
-                        postNormView,
-                        residualView,
-                    });
+                resources.Outputs = MlxNative.ApplyClosure(closure, new[]
+                {
+                    hiddenView,
+                    preNormView,
+                    gateUpDw.Weight,
+                    gateUpDw.Scales,
+                    gateUpDw.Biases,
+                    downDw.Weight,
+                    downDw.Scales,
+                    downDw.Biases,
+                    postNormView,
+                    residualView,
+                });
 
-                    if (outputs == null || outputs.Length == 0) return false;
-                    output = outputs[0];
-                    outputs[0] = default;
-                    MlxStorage.SetDeviceResult(residual, ref output);
-                    return true;
-                }
-                catch (Exception error) when (NativeQuarantineAuthority.TryGetFailure(error, out _))
-                {
-                    retainedFailure = true;
-                    throw;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    if (!retainedFailure)
-                    {
-                        MlxNative.FreeArray(hiddenView);
-                        MlxNative.FreeArray(preNormView);
-                        MlxNative.FreeArray(postNormView);
-                        MlxNative.FreeArray(residualView);
-                        MlxNative.FreeArray(output);
-                        if (outputs != null)
-                        {
-                            for (int i = 0; i < outputs.Length; i++)
-                                MlxNative.FreeArray(outputs[i]);
-                        }
-                    }
-                }
+                if (resources.Outputs == null || resources.Outputs.Length == 0) return false;
+                output = resources.Outputs[0];
+                resources.Outputs[0] = default;
+                MlxStorage.SetDeviceResult(residual, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -1035,13 +1006,15 @@ namespace TensorSharp.MLX
                 MlxNative.MlxArray postNormW = inputs[8];
                 MlxNative.MlxArray residual = inputs[9];
 
-                MlxNative.MlxArray normedPre = default;
-                MlxNative.MlxArray gateUp = default;
-                MlxNative.MlxArray activated = default;
-                MlxNative.MlxArray downOut = default;
-                MlxNative.MlxArray normedPost = default;
-                try
+                var resources = new MlxArrayResources(6, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray normedPre = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray gateUp = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray activated = ref resources.Arrays[2];
+                    ref MlxNative.MlxArray downOut = ref resources.Arrays[3];
+                    ref MlxNative.MlxArray normedPost = ref resources.Arrays[4];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[5];
                     normedPre = MlxNative.FastRmsNorm(hidden, preNormW, eps);
                     gateUp = MlxNative.QuantizedMatmul(
                         normedPre, gateUpW, gateUpS, gateUpB,
@@ -1051,18 +1024,12 @@ namespace TensorSharp.MLX
                         activated, downW, downS, downB,
                         transpose: true, groupSize, bits, mode);
                     normedPost = MlxNative.FastRmsNorm(downOut, postNormW, eps);
-                    MlxNative.MlxArray result = MlxNative.Binary(
+                    result = MlxNative.Binary(
                         MlxNative.MlxBinaryOp.Add, residual, normedPost);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(normedPre);
-                    MlxNative.FreeArray(gateUp);
-                    MlxNative.FreeArray(activated);
-                    MlxNative.FreeArray(downOut);
-                    MlxNative.FreeArray(normedPost);
-                }
+                    MlxNative.MlxArray[] outputs = { result };
+                    resources.ReturnedIndex = 5;
+                    return outputs;
+                }, resources.Release);
             }, shapeless: true);
 
             lock (s_FusedFFNClosures)
@@ -1103,31 +1070,20 @@ namespace TensorSharp.MLX
             DeviceWeight weight = EnsureWeight(resultStorage.DeviceId, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
             if (!weight.Biases.IsValid) return false;
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new QuantizedResources(3, weight, result, input, gate);
+            return TryInvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray inputView = default;
-                MlxNative.MlxArray gateView = default;
-                MlxNative.MlxArray output = default;
-                try
-                {
-                    inputView = inputStorage.CreateArrayView(input);
-                    gateView = gateStorage.CreateArrayView(gate);
-                    output = MlxNative.Q8MatmulGeluMul(
-                        inputView, weight.Weight, weight.Scales, weight.Biases,
-                        gateView, (int)ne0, (int)ne1, (int)ne0 / 32);
-                    MlxStorage.SetDeviceResult(result, ref output);
-                    return true;
-                }
-                catch
-                {
-                    return false;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(inputView);
-                    MlxNative.FreeArray(gateView);
-                    MlxNative.FreeArray(output);
-                }
+                ref MlxNative.MlxArray inputView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray gateView = ref resources.Arrays[1];
+                ref MlxNative.MlxArray output = ref resources.Arrays[2];
+                inputView = inputStorage.CreateArrayView(input);
+                gateView = gateStorage.CreateArrayView(gate);
+                output = MlxNative.Q8MatmulGeluMul(
+                    inputView, weight.Weight, weight.Scales, weight.Biases,
+                    gateView, (int)ne0, (int)ne1, (int)ne0 / 32);
+                MlxStorage.SetDeviceResult(result, ref output);
+                resources.HasStoredResult = true;
+                return true;
             });
         }
 
@@ -1147,54 +1103,63 @@ namespace TensorSharp.MLX
                 return false;
 
             DeviceWeight weight = EnsureWeight(resultStorage.DeviceId, cacheKey, hostData, ggmlType, ne0, ne1, rawBytes);
-            MlxNative.MlxArray indicesView = default;
-            MlxNative.MlxArray selectedWeight = default;
-            MlxNative.MlxArray selectedScales = default;
-            MlxNative.MlxArray selectedBiases = default;
-            MlxNative.MlxArray dequantized = default;
-            MlxNative.MlxArray contiguous = default;
-            try
+            var resources = new QuantizedResources(6, weight, result, indices);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray indicesView = ref resources.Arrays[0];
+                ref MlxNative.MlxArray selectedWeight = ref resources.Arrays[1];
+                ref MlxNative.MlxArray selectedScales = ref resources.Arrays[2];
+                ref MlxNative.MlxArray selectedBiases = ref resources.Arrays[3];
+                ref MlxNative.MlxArray dequantized = ref resources.Arrays[4];
+                ref MlxNative.MlxArray contiguous = ref resources.Arrays[5];
                 indicesView = indicesStorage.CreateArrayView(indices);
                 if (ggmlType == (int)GgmlTensorType.IQ4_XS)
                 {
                     dequantized = MlxNative.Iq4XsGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_XXS)
                 {
                     dequantized = MlxNative.Iq2XxsGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ2_S)
                 {
                     dequantized = MlxNative.Iq2SGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_S)
                 {
                     dequantized = MlxNative.Iq3SGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.IQ3_XXS)
                 {
                     dequantized = MlxNative.Iq3XxsGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q4_K && string.Equals(weight.Mode, "q4_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q4KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q5_K && string.Equals(weight.Mode, "q5_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q5KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else if (ggmlType == (int)GgmlTensorType.Q6_K && string.Equals(weight.Mode, "q6_k", StringComparison.Ordinal))
                 {
                     dequantized = MlxNative.Q6KGetRows(weight.Weight, indicesView, (int)indices.Sizes[0], (int)ne0);
                     MlxStorage.SetDeviceResult(result, ref dequantized);
+                    resources.HasStoredResult = true;
                 }
                 else
                 {
@@ -1213,18 +1178,10 @@ namespace TensorSharp.MLX
                         DType.Float32);
                     contiguous = MlxNative.Contiguous(dequantized);
                     MlxStorage.SetDeviceResult(result, ref contiguous);
+                    resources.HasStoredResult = true;
                 }
                 return true;
-            }
-            finally
-            {
-                MlxNative.FreeArray(indicesView);
-                MlxNative.FreeArray(selectedWeight);
-                MlxNative.FreeArray(selectedScales);
-                MlxNative.FreeArray(selectedBiases);
-                MlxNative.FreeArray(dequantized);
-                MlxNative.FreeArray(contiguous);
-            }
+            }, resources.Release);
         }
 
         private static bool TryValidateMatmul(
@@ -2674,28 +2631,23 @@ namespace TensorSharp.MLX
                 resultStorage.DeviceId, cacheKey, data, ggmlType, (int)inDim, (int)outDim, numExperts, totalBytes, perExpertScale);
             if (sa == null) return false;
 
-            return MlxWorker.Shared.Invoke(() =>
+            var resources = new QuantizedResources(4, sa, result, input, lhsIndices, rhsIndices);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
-                MlxNative.MlxArray xv = default, lv = default, rv = default, outArr = default;
-                try
-                {
-                    xv = inputStorage.CreateArrayView(input);
-                    if (lhsStorage != null)
-                        lv = lhsStorage.CreateArrayView(lhsIndices);
-                    rv = rhsStorage.CreateArrayView(rhsIndices);
-                    outArr = MlxNative.GatherQMM(xv, sa.Weight, sa.Scales, sa.Biases, lv, rv,
-                        transpose: true, sa.GroupSize, sa.Bits, sa.Mode, sortedIndices);
-                    MlxStorage.SetDeviceResult(result, ref outArr);
-                    return true;
-                }
-                finally
-                {
-                    MlxNative.FreeArray(xv);
-                    MlxNative.FreeArray(lv);
-                    MlxNative.FreeArray(rv);
-                    MlxNative.FreeArray(outArr);
-                }
-            });
+                ref MlxNative.MlxArray xv = ref resources.Arrays[0];
+                ref MlxNative.MlxArray lv = ref resources.Arrays[1];
+                ref MlxNative.MlxArray rv = ref resources.Arrays[2];
+                ref MlxNative.MlxArray outArr = ref resources.Arrays[3];
+                xv = inputStorage.CreateArrayView(input);
+                if (lhsStorage != null)
+                    lv = lhsStorage.CreateArrayView(lhsIndices);
+                rv = rhsStorage.CreateArrayView(rhsIndices);
+                outArr = MlxNative.GatherQMM(xv, sa.Weight, sa.Scales, sa.Biases, lv, rv,
+                    transpose: true, sa.GroupSize, sa.Bits, sa.Mode, sortedIndices);
+                MlxStorage.SetDeviceResult(result, ref outArr);
+                resources.HasStoredResult = true;
+                return true;
+            }, resources.Release);
         }
 
         private static unsafe DeviceWeight CreateDeviceWeight(

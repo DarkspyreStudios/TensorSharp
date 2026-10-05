@@ -146,8 +146,15 @@ without rollback or fallback replay. Tensor materialization retains its view and
 result through evaluation and storage adoption. Chunked prefill propagates operation errors
 and refuses fallback after committing an attention block. Custom-kernel references that
 fail before reaching the caller remain outside these caller carriers.
+Quantized operation callers retain acquired references, returned closure outputs and actual
+borrowed weight/cache-entry objects through the same worker ownership collection. Three Q8
+fast-path attempts receive isolated checked cleanup before another kernel runs; recorded
+unsafe errors and completed target transfers prohibit fallback. The dense-FFN trace retains
+its intermediates and unreturned result, allocates its output collection before transfer
+readiness and returns only after checked cleanup. These carriers do not own cached weights,
+compiled closures or external host buffers; cache construction and eviction remain unfinished.
 All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
-stateful fused/quantized/other trace caller cleanup, tensor-owned child disposal and replacement
+stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
