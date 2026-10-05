@@ -89,6 +89,12 @@ recipe. Failed audio replacement preserves the previous active child. Qwen35 lea
 acquired projector file with its retaining parent when construction fails; standalone
 construction keeps its local file disposal. Audio and vision construction do not acquire
 disposal authority over their borrowed allocators.
+MLX CPU fallback keeps input views, mapped CPU tensors and unreturned results in the
+worker's existing resource carrier before conversion or dispatch. Duplicate arguments
+share the same mapped view, and explicit output tensors retain their caller identity.
+The worker completes temporary cleanup before transferring a new result. Failed cleanup
+preserves the actual carrier and the operation error together with independent cleanup
+errors. The fallback does not hold an ordinary native effect across managed callbacks.
 CUDA allocation reclaims pooled memory only outside current-thread native effects.
 A nested allocation OOM preserves its CUDA error and unwinds without collecting,
 waiting for finalizers or retrying beneath the caller's admitted native frame.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
 using TensorSharp.Cpu;
 using TensorSharp.Core;
 
@@ -39,71 +40,84 @@ namespace TensorSharp.MLX
 
         public static object Invoke(string opName, MlxFallbackReturnKind returnKind, int[] modifiedTensorIndexes, object[] args)
         {
+            var resources = new FallbackResources(args);
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
+            {
+                resources.CaptureArguments();
+                object result = InvokeCore(opName, returnKind, modifiedTensorIndexes, resources);
+                resources.OperationSucceeded = true;
+                return result;
+            }, resources.Release);
+        }
+
+        private static object InvokeCore(string opName, MlxFallbackReturnKind returnKind,
+            int[] modifiedTensorIndexes, FallbackResources resources)
+        {
+            object[] args = resources.OperationArgs;
             if (string.Equals(opName, "SiLUMulSplit", StringComparison.Ordinal))
             {
                 WarnFallback(opName, "an unfused two-op decomposition (slower than the fused kernel)");
-                return SiLUMulSplit((Tensor)args[0], (Tensor)args[1], (int)args[2]);
+                Tensor result = SiLUMulSplit((Tensor)args[0], (Tensor)args[1], (int)args[2], resources);
+                return args[0] is Tensor ? resources.OriginalArgs[0] : result;
             }
 
             if (string.Equals(opName, "scaled_dot_product_attention", StringComparison.Ordinal))
             {
                 WarnFallback(opName, "element-by-element CPU attention (orders of magnitude slower)");
-                return ScaledDotProductAttention((Tensor)args[0], (Tensor)args[1], (Tensor)args[2], (Tensor)args[3], (Tensor)args[4], (float)args[5]);
+                Tensor result = ScaledDotProductAttention((Tensor)args[0], (Tensor)args[1], (Tensor)args[2],
+                    (Tensor)args[3], (Tensor)args[4], (float)args[5], resources);
+                return args[0] is Tensor ? resources.OriginalArgs[0] : result;
             }
 
             WarnFallback(opName, "an element-by-element CPU fallback with a GPU-to-host round-trip (orders of magnitude slower)");
 
-            object returnValue = InvokeCpu(opName, args, out Dictionary<Tensor, Tensor> mappedTensors);
-            try
+            object returnValue = InvokeCpu(opName, resources);
+            foreach (int modifiedTensorIndex in modifiedTensorIndexes)
             {
-                foreach (int modifiedTensorIndex in modifiedTensorIndexes)
+                if (modifiedTensorIndex >= 0 &&
+                    modifiedTensorIndex < args.Length &&
+                    args[modifiedTensorIndex] is Tensor modifiedTensor &&
+                    resources.MappedTensors.TryGetValue(modifiedTensor, out Tensor cpuTensor))
                 {
-                    if (modifiedTensorIndex >= 0 &&
-                        modifiedTensorIndex < args.Length &&
-                        args[modifiedTensorIndex] is Tensor modifiedTensor &&
-                        mappedTensors.TryGetValue(modifiedTensor, out Tensor cpuTensor))
-                    {
-                        CopyLogical(modifiedTensor, cpuTensor);
-                    }
+                    CopyLogical(modifiedTensor, cpuTensor);
                 }
+            }
 
-                if (returnKind == MlxFallbackReturnKind.Raw)
-                    return returnValue;
+            if (returnKind == MlxFallbackReturnKind.Raw)
+                return returnValue;
 
-                if (returnKind == MlxFallbackReturnKind.Void)
-                    return null;
-
-                if (args.Length > 0 && args[0] is Tensor explicitResult)
-                    return explicitResult;
-
-                if (returnValue is Tensor cpuReturn)
-                {
-                    Tensor mlxReturn = CreateMlxLike(cpuReturn, args);
-                    CopyLogical(mlxReturn, cpuReturn);
-                    return mlxReturn;
-                }
-
+            if (returnKind == MlxFallbackReturnKind.Void)
                 return null;
-            }
-            finally
+
+            if (args.Length > 0 && args[0] is Tensor)
+                return resources.OriginalArgs[0];
+
+            if (returnValue is Tensor cpuReturn)
             {
-                DisposeMapped(mappedTensors, returnValue as Tensor);
+                resources.PendingResult = CreateMlxLike(cpuReturn, args);
+                CopyLogical(resources.PendingResult, cpuReturn);
+                return resources.PendingResult;
             }
+
+            return null;
         }
 
-        private static object InvokeCpu(string opName, object[] args, out Dictionary<Tensor, Tensor> mappedTensors)
+        private static object InvokeCpu(string opName, FallbackResources resources)
         {
-            mappedTensors = new Dictionary<Tensor, Tensor>(ReferenceEqualityComparer.Instance);
-            object[] cpuArgs = new object[args.Length];
+            object[] args = resources.OperationArgs;
+            object[] cpuArgs = resources.CpuArgs;
 
             for (int i = 0; i < args.Length; i++)
             {
                 if (args[i] is Tensor tensor)
                 {
-                    if (!mappedTensors.TryGetValue(tensor, out Tensor cpuTensor))
+                    if (!resources.MappedTensors.TryGetValue(tensor, out Tensor cpuTensor))
                     {
-                        cpuTensor = ToCpuTensor(tensor);
-                        mappedTensors.Add(tensor, cpuTensor);
+                        resources.PendingCpu = new Tensor(CpuAllocator, tensor.ElementType, tensor.Sizes);
+                        CopyLogical(resources.PendingCpu, tensor);
+                        resources.MappedTensors.Add(tensor, resources.PendingCpu);
+                        cpuTensor = resources.PendingCpu;
+                        resources.PendingCpu = null;
                     }
 
                     cpuArgs[i] = cpuTensor;
@@ -114,14 +128,9 @@ namespace TensorSharp.MLX
                 }
             }
 
-            return OpRegistry.Invoke(opName, cpuArgs);
-        }
-
-        private static Tensor ToCpuTensor(Tensor source)
-        {
-            Tensor cpu = new(CpuAllocator, source.ElementType, source.Sizes);
-            CopyLogical(cpu, source);
-            return cpu;
+            object result = OpRegistry.Invoke(opName, cpuArgs);
+            resources.CpuReturn = result as Tensor;
+            return result;
         }
 
         private static Tensor CreateMlxLike(Tensor source, object[] originalArgs)
@@ -198,7 +207,7 @@ namespace TensorSharp.MLX
             destination.Storage.CopyToStorage(destinationOffset, (IntPtr)tmp, byteCount);
         }
 
-        private static Tensor SiLUMulSplit(Tensor result, Tensor gateUp, int halfDim)
+        private static Tensor SiLUMulSplit(Tensor result, Tensor gateUp, int halfDim, FallbackResources resources)
         {
             if (gateUp == null)
                 throw new ArgumentNullException(nameof(gateUp));
@@ -206,14 +215,16 @@ namespace TensorSharp.MLX
                 throw new ArgumentException("SiLUMulSplit expects a [tokens, 2*halfDim] tensor.", nameof(gateUp));
 
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, gateUp.Allocator, DType.Float32, false, gateUp.Sizes[0], halfDim);
-            using Tensor gate = gateUp.Narrow(1, 0, halfDim);
-            using Tensor up = gateUp.Narrow(1, halfDim, halfDim);
+            if (result == null) resources.PendingResult = writeTarget;
+            Tensor gate = resources.GateView = gateUp.Narrow(1, 0, halfDim);
+            Tensor up = resources.UpView = gateUp.Narrow(1, halfDim, halfDim);
             Ops.Copy(writeTarget, gate);
             Ops.SiLUMul(writeTarget, writeTarget, up);
             return writeTarget;
         }
 
-        private static Tensor ScaledDotProductAttention(Tensor result, Tensor query, Tensor key, Tensor value, Tensor mask, float scale)
+        private static Tensor ScaledDotProductAttention(Tensor result, Tensor query, Tensor key, Tensor value, Tensor mask,
+            float scale, FallbackResources resources)
         {
             if (query == null)
                 throw new ArgumentNullException(nameof(query));
@@ -239,6 +250,7 @@ namespace TensorSharp.MLX
             long headDim = query.Sizes[3];
             long valueDim = value.Sizes[3];
             Tensor writeTarget = TensorResultBuilder.GetWriteTarget(result, query.Allocator, DType.Float32, false, batch, heads, queryLen, valueDim);
+            if (result == null) resources.PendingResult = writeTarget;
 
             if (keyLen > int.MaxValue)
                 throw new NotSupportedException("MLX fallback attention does not support key lengths above Int32.MaxValue.");
@@ -302,17 +314,111 @@ namespace TensorSharp.MLX
             };
         }
 
-        private static void DisposeMapped(Dictionary<Tensor, Tensor> mappedTensors, Tensor returnedTensor)
+        private sealed class FallbackResources : MlxNativeResources
         {
-            var disposed = new HashSet<Tensor>(ReferenceEqualityComparer.Instance);
-            foreach (Tensor tensor in mappedTensors.Values)
+            internal readonly object[] OriginalArgs;
+            internal readonly object[] OperationArgs;
+            internal readonly object[] CpuArgs;
+            private readonly Tensor[] inputViews;
+            internal readonly Dictionary<Tensor, Tensor> MappedTensors;
+            private readonly Dictionary<Tensor, bool> releaseReceipts;
+            internal Tensor PendingCpu;
+            internal Tensor CpuReturn;
+            internal Tensor PendingResult;
+            internal Tensor GateView;
+            internal Tensor UpView;
+            internal bool OperationSucceeded;
+
+            internal FallbackResources(object[] args)
             {
-                if (disposed.Add(tensor))
-                    tensor.Dispose();
+                OriginalArgs = (object[])args.Clone();
+                OperationArgs = new object[args.Length];
+                CpuArgs = new object[args.Length];
+                inputViews = new Tensor[args.Length];
+                MappedTensors = new Dictionary<Tensor, Tensor>(args.Length, ReferenceEqualityComparer.Instance);
+                releaseReceipts = new Dictionary<Tensor, bool>(checked(args.Length * 2 + 5), ReferenceEqualityComparer.Instance);
             }
 
-            if (returnedTensor != null && disposed.Add(returnedTensor))
-                returnedTensor.Dispose();
+            internal override bool CleanupRequiresOrdinaryEffect => false;
+            internal override NativeRuntimeFailureStage CleanupFailureStage => NativeRuntimeFailureStage.StorageRelease;
+            internal override bool HasNativeResources
+            {
+                get
+                {
+                    if (PendingCpu != null || CpuReturn != null || PendingResult != null || GateView != null
+                        || UpView != null || MappedTensors.Count != 0) return true;
+                    foreach (Tensor view in inputViews)
+                        if (view != null) return true;
+                    return false;
+                }
+            }
+
+            internal void CaptureArguments()
+            {
+                for (int i = 0; i < OriginalArgs.Length; i++)
+                {
+                    if (OriginalArgs[i] is not Tensor tensor)
+                    {
+                        OperationArgs[i] = OriginalArgs[i];
+                        continue;
+                    }
+                    bool reused = false;
+                    for (int prior = 0; prior < i; prior++)
+                        if (ReferenceEquals(OriginalArgs[prior], tensor))
+                        {
+                            OperationArgs[i] = OperationArgs[prior];
+                            reused = true;
+                            break;
+                        }
+                    if (reused) continue;
+                    if (tensor.GetLiveOwnedStorageForDisposal() == null)
+                        throw new ObjectDisposedException(nameof(Tensor));
+                    inputViews[i] = tensor.CopyRef();
+                    OperationArgs[i] = inputViews[i];
+                }
+            }
+
+            internal void Release()
+            {
+                Exception failure = null;
+                ReleaseTensor(ref PendingCpu, ref failure);
+                bool mappedReleased = true;
+                foreach (Tensor mapped in MappedTensors.Values)
+                {
+                    Tensor owned = mapped;
+                    ReleaseTensor(ref owned, ref failure);
+                    mappedReleased &= owned == null;
+                }
+                if (mappedReleased) MappedTensors.Clear();
+                ReleaseTensor(ref CpuReturn, ref failure);
+                ReleaseTensor(ref GateView, ref failure);
+                ReleaseTensor(ref UpView, ref failure);
+                for (int i = 0; i < inputViews.Length; i++) ReleaseTensor(ref inputViews[i], ref failure);
+                if (!OperationSucceeded) ReleaseTensor(ref PendingResult, ref failure);
+                Array.Clear(OperationArgs);
+                Array.Clear(CpuArgs);
+                if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
+                // Only checked temporary release transfers the result held by the worker's return value.
+                PendingResult = null;
+            }
+
+            private void ReleaseTensor(ref Tensor tensor, ref Exception failure)
+            {
+                if (tensor == null) return;
+                if (releaseReceipts.TryGetValue(tensor, out bool released))
+                {
+                    if (released) tensor = null;
+                    return;
+                }
+                releaseReceipts.Add(tensor, false);
+                try
+                {
+                    tensor.Dispose();
+                    releaseReceipts[tensor] = true;
+                    tensor = null;
+                }
+                catch (Exception error) { failure = MlxNative.JoinNativeErrors(failure, error); }
+            }
         }
     }
 }
