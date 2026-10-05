@@ -121,9 +121,11 @@ owner in the shared runtime scope and uses the internal final-release
 admission hook. Tensor disposal marks ownership released only after the reference
 decrement succeeds. A refused admission preserves both references; native cleanup
 failure after the decrement does not restore them. A reserved release refuses new
-compiled-call admission until it settles. MLX storage waits for checked array-reference
-release before freeing its host mirror. Failed release retains the actual storage
-through the process authority; safe completion removes its registration. Worker queue
+compiled-call admission until it settles. MLX storage waits for all used streams under
+its exact reservation before checked array-reference release and host-mirror release.
+Failed synchronization leaves both references intact and reports the synchronization stage.
+Failed release retains the actual storage through the process authority; safe completion
+removes its registration. Worker queue
 rejection also records the unreleased owner, and synchronous worker errors retain their
 originating exception stack. The actual MLX worker registers in the same runtime scope.
 Ordinary synchronous native helpers enter an effect on the executing worker, including

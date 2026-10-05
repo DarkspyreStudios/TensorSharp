@@ -79,14 +79,16 @@ namespace TensorSharp.MLX
                 {
                     using NativeEffectLease effect = reservation.EnterEffect();
                     effect.ValidateMlxRelease(this, reservation);
+                    NativeRuntimeFailureStage stage = NativeRuntimeFailureStage.StorageRelease;
                     try
                     {
                         // Preserve the host mirror while native release is unproven.
-                        if (deviceArray.IsValid)
-                        {
-                            MlxNative.FreeArray(deviceArray);
-                            deviceArray = default;
-                        }
+                        ReleaseDeviceArray(ref deviceArray, ref stage,
+                            static () =>
+                            {
+                                MlxNative.InstallCurrentErrorHandler();
+                                MlxNative.SynchronizeAllUsedStreams();
+                            }, MlxNative.FreeArray);
                         if (buffer != IntPtr.Zero)
                         {
                             NativeMemory.AlignedFree(buffer.ToPointer());
@@ -96,7 +98,7 @@ namespace TensorSharp.MLX
                     }
                     catch (Exception cleanup)
                     {
-                        effect.PublishFailure(this, cleanup, NativeRuntimeFailureStage.StorageRelease);
+                        effect.PublishFailure(this, cleanup, stage);
                         published = true;
                         throw;
                     }
@@ -113,6 +115,17 @@ namespace TensorSharp.MLX
                 catch (Exception publication) { throw new AggregateException(error, publication); }
                 throw;
             }
+        }
+
+        internal static void ReleaseDeviceArray(ref MlxNative.MlxArray array, ref NativeRuntimeFailureStage stage,
+            Action synchronize, Action<MlxNative.MlxArray> release)
+        {
+            if (!array.IsValid) return;
+            stage = NativeRuntimeFailureStage.Synchronization;
+            synchronize();
+            stage = NativeRuntimeFailureStage.StorageRelease;
+            release(array);
+            array = default;
         }
 
         private sealed class ReleaseAdmission(MlxStorage owner) : IDisposable

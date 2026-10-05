@@ -25,6 +25,7 @@
   <ItemGroup>
     <ProjectReference Include="..\TensorSharp.Core\TensorSharp.Core.csproj" />
     <ProjectReference Include="..\TensorSharp.Runtime\TensorSharp.Runtime.csproj" />
+    <InternalsVisibleTo Include="InferenceWeb.Tests" />
   </ItemGroup>
   <Target Name="BuildMlxNative"
           BeforeTargets="BeforeBuild"
