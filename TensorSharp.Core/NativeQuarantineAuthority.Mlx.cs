@@ -63,6 +63,17 @@ internal static partial class NativeQuarantineAuthority
     private static Dictionary<int, List<object[]>> CallbackFrames(object[] s) => (Dictionary<int, List<object[]>>)s[10];
     private static Dictionary<Guid, object[]> MlxReleases(object[] s) => (Dictionary<Guid, object[]>)s[11];
 
+    internal static void ValidateMlxWorkerDispatch(NativeOwnerRegistration registration)
+    {
+        lock (registration.State[1])
+        {
+            ValidateMlxOwner(registration, registration.Owner, false);
+            int thread = Environment.CurrentManagedThreadId;
+            if (Frames(registration.State).ContainsKey(thread) || CallbackFrames(registration.State).ContainsKey(thread))
+                throw new InvalidOperationException("MLX native work cannot cross workers beneath an active native effect or compiled callback.");
+        }
+    }
+
     private static void ValidateMlxCells(object[] s)
     {
         int count = 0;

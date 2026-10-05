@@ -3274,7 +3274,7 @@ if (kind == 0) {
             try
             {
                 InstallResolver();
-                return MlxWorker.Shared.Invoke(() =>
+                return MlxWorker.Shared.InvokeNative(() =>
                 {
                     EnsureErrorHandlerInstalled();
                     if (mlx_metal_is_available(out bool metalAvailable) != 0 || !metalAvailable)
@@ -3310,7 +3310,7 @@ if (kind == 0) {
             if (deviceId < 0)
                 throw new ArgumentOutOfRangeException(nameof(deviceId));
 
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 lock (initSync)
                 {
@@ -3344,7 +3344,7 @@ if (kind == 0) {
 
         public static MlxMemorySnapshot GetMemorySnapshot()
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 ulong active = QueryMemory(mlx_get_active_memory);
                 ulong cache = QueryMemory(mlx_get_cache_memory);
@@ -3357,7 +3357,7 @@ if (kind == 0) {
         {
             try
             {
-                MlxWorker.Shared.Invoke(() => _ = mlx_clear_cache());
+                MlxWorker.Shared.InvokeNative(() => _ = mlx_clear_cache());
             }
             catch (DllNotFoundException)
             {
@@ -3384,7 +3384,7 @@ if (kind == 0) {
             if (shape == null || shape.Length == 0)
                 throw new ArgumentException("MLX array shape must be non-empty.", nameof(shape));
 
-            return MlxWorker.Shared.Invoke(() => mlx_array_new_data(data, shape, shape.Length, mlxDtype));
+            return MlxWorker.Shared.InvokeNative(() => mlx_array_new_data(data, shape, shape.Length, mlxDtype));
         }
 
         // Empty deleter for zero-copy MLX arrays whose buffer lifetime is
@@ -3419,23 +3419,23 @@ if (kind == 0) {
 
             int mlxDtype = ToMlxDtype(dtype);
             IntPtr dtorPtr = Marshal.GetFunctionPointerForDelegate<NoCopyDeleter>(NoOpDeleter);
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
                 mlx_array_new_data_managed(data, shape, shape.Length, mlxDtype, dtorPtr));
         }
 
         internal static MlxArray NewScalar(float value)
         {
-            return MlxWorker.Shared.Invoke(() => mlx_array_new_float32(value));
+            return MlxWorker.Shared.InvokeNative(() => mlx_array_new_float32(value));
         }
 
         internal static MlxArray NewScalar(int value)
         {
-            return MlxWorker.Shared.Invoke(() => mlx_array_new_int(value));
+            return MlxWorker.Shared.InvokeNative(() => mlx_array_new_int(value));
         }
 
         internal static MlxArray Arange(double start, double stop, double step, DType dtype)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_arange(out result, start, stop, step, ToMlxDtype(dtype), DefaultStream()), "creating MLX arange");
@@ -3448,7 +3448,7 @@ if (kind == 0) {
             if (shape == null || shape.Length == 0)
                 throw new ArgumentException("MLX array shape must be non-empty.", nameof(shape));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray scalar = mlx_array_new_float32(value);
                 try
@@ -3469,14 +3469,8 @@ if (kind == 0) {
             if (!array.IsValid)
                 return;
 
-            // Release waits for the native status and reports failure to the caller.
-            // Reentrant trace calls stay inline on the worker and report native errors.
-            if (MlxWorker.Shared.IsOnWorkerThread)
-            {
-                Check(mlx_array_free(array), "freeing MLX array");
-                return;
-            }
-            MlxWorker.Shared.Invoke(() => Check(mlx_array_free(array), "freeing MLX array"));
+            // Admission and native status both settle before returning, including reentrant calls.
+            MlxWorker.Shared.InvokeNative(() => Check(mlx_array_free(array), "freeing MLX array"));
         }
 
         internal static MlxArray Astype(MlxArray array, DType dtype)
@@ -3484,7 +3478,7 @@ if (kind == 0) {
             if (!array.IsValid)
                 throw new ArgumentException("MLX astype input must be a valid array.", nameof(array));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_astype(out result, array, ToMlxDtype(dtype), DefaultStream()), "casting MLX array");
@@ -3761,7 +3755,7 @@ if (kind == 0) {
             if (arrays == null || arrays.Length == 0)
                 return;
 
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxVectorArray vector = mlx_vector_array_new();
                 try
@@ -3841,7 +3835,7 @@ if (kind == 0) {
             if (byteCount < 0)
                 throw new ArgumentOutOfRangeException(nameof(byteCount));
 
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxVectorArray vector = mlx_vector_array_new();
                 try
@@ -3883,7 +3877,7 @@ if (kind == 0) {
             if (offset < 0)
                 throw new ArgumentOutOfRangeException(nameof(offset));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_as_strided(out result, array, shape, (nuint)shape.Length, strides, (nuint)strides.Length, (nuint)offset, DefaultStream()), "creating MLX strided view");
@@ -3893,7 +3887,7 @@ if (kind == 0) {
 
         internal static MlxArray Reshape(MlxArray array, int[] shape)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_reshape(out result, array, shape, (nuint)shape.Length, DefaultStream()), "reshaping MLX array");
@@ -3903,7 +3897,7 @@ if (kind == 0) {
 
         internal static MlxArray Contiguous(MlxArray array)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_contiguous(out result, array, false, DefaultStream()), "making MLX array contiguous");
@@ -3918,7 +3912,7 @@ if (kind == 0) {
             if (axes == null || axes.Length == 0)
                 throw new ArgumentException("MLX transpose axes must be non-empty.", nameof(axes));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_transpose_axes(out result, array, axes, (nuint)axes.Length, DefaultStream()), "transposing MLX array");
@@ -3928,7 +3922,7 @@ if (kind == 0) {
 
         internal static MlxArray Unary(MlxUnaryOp op, MlxArray input)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 int rc = op switch
@@ -3955,7 +3949,7 @@ if (kind == 0) {
 
         internal static MlxArray Binary(MlxBinaryOp op, MlxArray lhs, MlxArray rhs)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 int rc = op switch
@@ -3974,7 +3968,7 @@ if (kind == 0) {
 
         internal static MlxArray Remainder(MlxArray lhs, MlxArray rhs)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_remainder(out result, lhs, rhs, DefaultStream()), "running MLX remainder");
@@ -3984,7 +3978,7 @@ if (kind == 0) {
 
         internal static MlxArray Greater(MlxArray lhs, MlxArray rhs)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_greater(out result, lhs, rhs, DefaultStream()), "running MLX greater");
@@ -3994,7 +3988,7 @@ if (kind == 0) {
 
         internal static MlxArray Where(MlxArray condition, MlxArray whenTrue, MlxArray whenFalse)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_where(out result, condition, whenTrue, whenFalse, DefaultStream()), "running MLX where");
@@ -4019,7 +4013,7 @@ if (kind == 0) {
             IntPtr modePtr = mode != null ? Marshal.StringToCoTaskMemAnsi(mode) : IntPtr.Zero;
             try
             {
-                return MlxWorker.Shared.Invoke(() =>
+                return MlxWorker.Shared.InvokeNative(() =>
                 {
                     MlxArray result;
                     Check(mlx_gather_qmm(out result, x, w, scales, biases, lhsIndices, rhsIndices, transpose, MlxOptionalInt.Some(groupSize), MlxOptionalInt.Some(bits), modePtr, sortedIndices, DefaultStream()), "running MLX gather_qmm");
@@ -4034,7 +4028,7 @@ if (kind == 0) {
 
         internal static MlxArray Addmm(MlxArray src, MlxArray m1, MlxArray m2, float alpha, float beta)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_addmm(out result, src, m1, m2, alpha, beta, DefaultStream()), "running MLX addmm");
@@ -4044,7 +4038,7 @@ if (kind == 0) {
 
         internal static MlxArray SoftmaxLastAxis(MlxArray input)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_softmax_axis(out result, input, -1, true, DefaultStream()), "running MLX softmax");
@@ -4059,7 +4053,7 @@ if (kind == 0) {
             if (repeats < 1)
                 throw new ArgumentOutOfRangeException(nameof(repeats));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_repeat_axis(out result, input, repeats, axis, DefaultStream()), "running MLX repeat");
@@ -4069,7 +4063,7 @@ if (kind == 0) {
 
         internal static MlxArray FastLayerNorm(MlxArray input, MlxArray weight, MlxArray bias, float eps)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_fast_layer_norm(out result, input, weight, bias, eps, DefaultStream()), "running MLX layer norm");
@@ -4079,7 +4073,7 @@ if (kind == 0) {
 
         internal static MlxArray FastRmsNorm(MlxArray input, MlxArray weight, float eps)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_fast_rms_norm(out result, input, weight, eps, DefaultStream()), "running MLX RMS norm");
@@ -4093,7 +4087,7 @@ if (kind == 0) {
                 throw new ArgumentException("MLX attention inputs must be valid arrays.");
 
             IntPtr maskModePtr = GetModePtr(maskMode ?? string.Empty);
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_fast_scaled_dot_product_attention(out result, query, key, value, scale, maskModePtr, mask, default, DefaultStream()), "running MLX scaled dot product attention");
@@ -4106,7 +4100,7 @@ if (kind == 0) {
             if (!first.IsValid || !second.IsValid)
                 throw new ArgumentException("MLX concatenate inputs must be valid arrays.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxVectorArray inputs = CreateVectorArray(first, second);
                 try
@@ -4140,7 +4134,7 @@ if (kind == 0) {
             if (numHeads <= 0 || numKVHeads <= 0 || numHeads % numKVHeads != 0 || qLen <= 0 || kvLen <= 0)
                 throw new ArgumentOutOfRangeException(nameof(qLen), "Invalid MLX attention dimensions.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureHeadDim256AttentionKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4213,7 +4207,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(headDim), "Invalid MLX decode attention with sinks dimensions.");
             }
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureDecodeAttentionWithSinksKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4297,7 +4291,7 @@ if (kind == 0) {
             MlxArray qResult = default;
             MlxArray kResult = default;
             MlxArray vResult = default;
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureGemma4QkvPreprocessDecodeKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4375,7 +4369,7 @@ if (kind == 0) {
             if (firstSlot < 0)
                 firstSlot += cacheLen;
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureCircularDecodeAttentionKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4427,7 +4421,7 @@ if (kind == 0) {
             if (dims <= 0 || (dims & 1) != 0)
                 throw new ArgumentOutOfRangeException(nameof(dims), "RoPE dimensions must be a positive even number.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_fast_rope_dynamic(
@@ -4449,7 +4443,7 @@ if (kind == 0) {
             if (!input.IsValid || !indices.IsValid)
                 throw new ArgumentException("MLX take inputs must be valid arrays.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_take_axis(out result, input, indices, axis, DefaultStream()), "running MLX take_axis");
@@ -4466,7 +4460,7 @@ if (kind == 0) {
             if (!input.IsValid || !indices.IsValid)
                 throw new ArgumentException("MLX take_along_axis inputs must be valid arrays.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_take_along_axis(out result, input, indices, axis, DefaultStream()), "running MLX take_along_axis");
@@ -4483,7 +4477,7 @@ if (kind == 0) {
             if (!input.IsValid)
                 throw new ArgumentException("MLX argmax input must be a valid array.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_argmax_axis(out result, input, axis, keepDims, DefaultStream()), "running MLX argmax_axis");
@@ -4502,7 +4496,7 @@ if (kind == 0) {
             if (!input.IsValid)
                 throw new ArgumentException("MLX argpartition input must be a valid array.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_argpartition_axis(out result, input, kth, axis, DefaultStream()), "running MLX argpartition_axis");
@@ -4524,7 +4518,7 @@ if (kind == 0) {
             if (seqLen <= 0 || batchSize <= 0 || hiddenDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(batchSize));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureScatterAddWeightedRowsKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4575,7 +4569,7 @@ if (kind == 0) {
             if (rows <= 0 || hiddenDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureRmsNormAddKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4631,7 +4625,7 @@ if (kind == 0) {
             if (rows <= 0 || hiddenDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureAddRmsNormKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4680,7 +4674,7 @@ if (kind == 0) {
             if (rows <= 0 || halfDim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureGeluMulSplitKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4736,7 +4730,7 @@ if (kind == 0) {
             if (rows <= 0 || dim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(rows));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureSwigluOaiGatherBiasKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4802,7 +4796,7 @@ if (kind == 0) {
             if (n <= 0 || k <= 0 || dim <= 0)
                 throw new ArgumentOutOfRangeException(nameof(n));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureMoeBiasWeightedSumKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4856,7 +4850,7 @@ if (kind == 0) {
             if (colOffset + numHeads * headDim > sourceStride)
                 throw new ArgumentOutOfRangeException(nameof(colOffset));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureFlatToHeadFirstKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4911,7 +4905,7 @@ if (kind == 0) {
             if (numHeads <= 0 || seqLen <= 0 || headDim <= 0 || rotHalf <= 0 || rotHalf * 2 > headDim)
                 throw new ArgumentOutOfRangeException(nameof(headDim));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureNeoXRopeKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -4984,7 +4978,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(bits));
 
             IntPtr modePtr = GetModePtr(mode);
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_quantized_matmul(
@@ -5012,7 +5006,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(bits));
 
             IntPtr modePtr = GetModePtr(mode);
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_dequantize(
@@ -5105,7 +5099,7 @@ if (kind == 0) {
                 catch (NotSupportedException) { }
             }
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4XsMatmulKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5166,7 +5160,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 32 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_NL matmul requires positive dimensions and input dim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4NlMatmulKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5209,7 +5203,7 @@ if (kind == 0) {
         // must already have validated that 2 <= rows <= Iq4NlBatchedRowsMax.
         private static MlxArray Iq4NlMatmulRows(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4NlMatmulRowsKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5261,7 +5255,7 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS simd_sum 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4XsMatmul4SimdKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5309,7 +5303,7 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4XsMatmul4Kernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5348,7 +5342,7 @@ if (kind == 0) {
 
         private static MlxArray Iq4XsMatmulRows(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4XsMatmulRowsKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5388,7 +5382,7 @@ if (kind == 0) {
 
         private static MlxArray Iq4XsMatmulRows2Cols(MlxArray input, MlxArray rawWeight, int rows, int inDim, int outDim)
         {
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4XsMatmulRows2Kernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5453,7 +5447,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ4_XS get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4XsGetRowsKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5525,7 +5519,7 @@ if (kind == 0) {
                 }
             }
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq2XxsMatmulKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5572,7 +5566,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 8 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ2_XXS simdgroup matmul requires positive dimensions and inDim divisible by 8.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq2XxsMatmulSimdgroupKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5638,7 +5632,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ4_NL MoE batched matmul requires positive dimensions and input dim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4NlMoeMatmulBatchedKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5695,7 +5689,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ4_NL MoE batched (rowed) matmul requires positive dimensions and input dim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq4NlMoeMatmulBatchedRowedKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5748,7 +5742,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ2_XXS MoE batched matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq2XxsMoeMatmulBatchedKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5815,7 +5809,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ2_XXS MoE fused gate+up+silu requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq2XxsMoeMatmulBatchedFusedGateUpSiluKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5873,7 +5867,7 @@ if (kind == 0) {
                 throw new ArgumentOutOfRangeException(nameof(inDim),
                     "IQ2_XXS MoE batched-rowed matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq2XxsMoeMatmulBatchedRowedKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -5919,7 +5913,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "IQ2_XXS get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureIq2XxsGetRowsKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6029,7 +6023,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = ensureKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6079,7 +6073,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = ensureKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6194,7 +6188,7 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q5_K 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQ5KMatmul4Kernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6238,7 +6232,7 @@ if (kind == 0) {
             if (inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q6_K 4-column matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQ6KMatmul4Kernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6324,7 +6318,7 @@ if (kind == 0) {
 
             MlxArray yResult = default;
             MlxArray stateResult = default;
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = useT1Kernel
                     ? EnsureGatedDeltaT1Kernel()
@@ -6422,7 +6416,7 @@ if (kind == 0) {
             MlxArray betaResult = default;
             MlxArray zSiluResult = default;
             MlxArray nextConvResult = default;
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQwen35GdnPreprocessKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6544,7 +6538,7 @@ if (kind == 0) {
             MlxArray betaResult = default;
             MlxArray zSiluResult = default;
             MlxArray nextConvResult = default;
-            MlxWorker.Shared.Invoke(() =>
+            MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQwen35GdnPackedPreprocessKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6635,7 +6629,7 @@ if (kind == 0) {
                 || valueDim != numValueHeads * headValueDim || headValueDim > 256)
                 throw new ArgumentOutOfRangeException(nameof(seqLen));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQwen35GdnPostprocessKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6687,7 +6681,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} matmul requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = ensureKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6737,7 +6731,7 @@ if (kind == 0) {
             if (rows <= 0 || inDim <= 0 || inDim % 256 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} get_rows requires positive dimensions and input dim aligned to 256.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = ensureKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -6780,7 +6774,7 @@ if (kind == 0) {
             if (start < 0 || stop < start)
                 throw new ArgumentOutOfRangeException(nameof(start));
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 int[] starts = { start };
                 int[] stops = { stop };
@@ -6805,7 +6799,7 @@ if (kind == 0) {
                 || starts.Length == 0 || starts.Length != stops.Length || starts.Length != strides.Length)
                 throw new ArgumentException("MLX slice_update starts/stops/strides must be non-empty arrays of equal length.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_slice_update(out result, input, update,
@@ -6824,7 +6818,7 @@ if (kind == 0) {
             if (starts == null || stops == null || strides == null || starts.Length == 0 || starts.Length != stops.Length || starts.Length != strides.Length)
                 throw new ArgumentException("MLX slice starts, stops, and strides must be non-empty arrays with the same length.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxArray result;
                 Check(mlx_slice(out result, input, starts, (nuint)starts.Length, stops, (nuint)stops.Length, strides, (nuint)strides.Length, DefaultStream()), "running MLX slice");
@@ -7242,7 +7236,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (rows <= 0 || inDim <= 0 || outDim <= 0 || inDim % 8 != 0)
                 throw new ArgumentOutOfRangeException(nameof(inDim), $"{label} simdgroup matmul requires positive dimensions and inDim divisible by 8.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = ensureKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -8148,7 +8142,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
                 || headDim != 512 || cacheLen <= 0 || attendLen <= 0 || attendLen > cacheLen)
                 throw new ArgumentOutOfRangeException(nameof(headDim), "head_dim=512 decode attention requires HeadDim==512 and valid dims.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureDecodeAttentionHeadDim512Kernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -8227,7 +8221,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 matmul + GeluMul requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQ8MatmulGeluMulKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -8303,7 +8297,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 matmul requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQ8MatmulKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -8378,7 +8372,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 RmsNorm+matmul requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQ8RmsNormMatmulKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();
@@ -8435,7 +8429,7 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             if (inDim <= 0 || outDim <= 0 || inDim % 32 != 0 || blocksPerRow != inDim / 32)
                 throw new ArgumentOutOfRangeException(nameof(inDim), "Q8 addmm+add requires inDim aligned to 32.");
 
-            return MlxWorker.Shared.Invoke(() =>
+            return MlxWorker.Shared.InvokeNative(() =>
             {
                 MlxFastMetalKernel kernel = EnsureQ8AddmmAddKernel();
                 MlxFastMetalKernelConfig config = mlx_fast_metal_kernel_config_new();

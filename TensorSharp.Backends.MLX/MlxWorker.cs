@@ -9,6 +9,7 @@ namespace TensorSharp.MLX
     {
         private readonly BlockingCollection<IWorkItem> queue = new();
         private readonly Thread thread;
+        private readonly NativeOwnerRegistration nativeOwner;
         private int workerThreadId;
         private int disposed;
 
@@ -16,6 +17,8 @@ namespace TensorSharp.MLX
 
         private MlxWorker()
         {
+            nativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Worker);
+            nativeOwner.AttachMlxSharedRuntime();
             thread = new Thread(Run)
             {
                 IsBackground = true,
@@ -42,6 +45,7 @@ namespace TensorSharp.MLX
             if (IsOnWorkerThread)
                 return func();
 
+            NativeQuarantineAuthority.ValidateMlxWorkerDispatch(nativeOwner);
             var item = new WorkItem<T>(func);
             queue.Add(item);
             return item.GetResult();
@@ -58,13 +62,31 @@ namespace TensorSharp.MLX
             });
         }
 
-        // Fire-and-forget: enqueue work without waiting for completion or a
-        // result. The worker is FIFO so ordering is preserved against any later
-        // Invoke calls. Exceptions thrown by `action` are swallowed — only use
-        // this for side-effect-only ops that never raise a meaningful error
-        // (e.g. mlx_array_free, mlx_async_eval). Skipping the signal/wait round
-        // trip is worth ~1-2 microseconds per call, which adds up over the
-        // 10^5-10^6 MLX ops issued per benchmark run.
+        internal T InvokeNative<T>(Func<T> func)
+        {
+            if (func == null)
+                throw new ArgumentNullException(nameof(func));
+
+            return Invoke(() =>
+            {
+                using NativeEffectLease effect = nativeOwner.EnterEffect();
+                return func();
+            });
+        }
+
+        internal void InvokeNative(Action action)
+        {
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+            InvokeNative(() =>
+            {
+                action();
+                return 0;
+            });
+        }
+
+        // Fire-and-forget scheduling does not report admission or action errors.
+        // Native operations that require a result use InvokeNative.
         public void Dispatch(Action action)
         {
             if (action == null)

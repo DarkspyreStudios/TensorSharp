@@ -94,8 +94,15 @@ compiled-call admission until it settles. MLX storage waits for checked array-re
 release before freeing its host mirror. Failed release retains the actual storage
 through the process authority; safe completion removes its registration. Worker queue
 rejection also records the unreleased owner, and synchronous worker errors retain their
-originating exception stack. Remaining MLX operations, compiled callbacks and all-used-stream
-synchronization are not wired into this authority. Remaining raw CUDA
+originating exception stack. The actual MLX worker registers in the same runtime scope.
+Ordinary synchronous native helpers enter an effect on the executing worker, including
+reentrant array frees. Dispatch from a different worker beneath an active native effect
+or compiled callback refuses before queueing. General managed `Invoke` calls do not hold
+a native gate across trace callbacks. Compiled closure calls, fire-and-forget async
+evaluation/closure cleanup and all-used-stream synchronization are not wired into this
+authority. Raw temporary-handle cleanup still requires checked ownership recovery;
+worker admission does not prove successful GPU synchronization or worker retirement.
+Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
 certify availability, initialization or safe native cleanup. GGML integration
 has production compilation and source-review evidence, not executed native or
