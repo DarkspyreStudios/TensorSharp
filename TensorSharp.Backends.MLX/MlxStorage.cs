@@ -30,7 +30,14 @@ namespace TensorSharp.MLX
 
         public int DeviceId => AllocatorImpl.DeviceId;
 
-        internal override object ReferenceMutationGate => sync;
+        internal override object ReferenceMutationGate
+        {
+            get
+            {
+                ValidateReferenceMutationBoundary();
+                return sync;
+            }
+        }
         internal override void ValidateReferenceAddition() => nativeOwner.ThrowIfQuarantined();
         internal override bool IsRetainedFinalizerFailure(Exception error)
         {
@@ -45,12 +52,19 @@ namespace TensorSharp.MLX
         internal override IDisposable AdmitFinalRelease()
         {
             if (nativeOwner == null) return null;
+            ValidateReferenceMutationBoundary();
             lock (sync)
             {
                 var admission = new ReleaseAdmission(this);
                 releaseAdmission = admission;
                 return admission;
             }
+        }
+
+        private void ValidateReferenceMutationBoundary()
+        {
+            if (!MlxWorker.Shared.IsOnWorkerThread)
+                NativeQuarantineAuthority.ValidateMlxWorkerDispatch(nativeOwner);
         }
 
         protected override void Destroy()
@@ -120,29 +134,50 @@ namespace TensorSharp.MLX
             return $"MLX:{DeviceId}";
         }
 
+        private T InvokeStorage<T>(Func<T> operation)
+        {
+            // Dispatch before taking the same gate used by final-reference admission.
+            return MlxWorker.Shared.Invoke(() =>
+            {
+                lock (sync)
+                {
+                    ThrowIfDestroyed();
+                    nativeOwner.ThrowIfQuarantined();
+                    return operation();
+                }
+            });
+        }
+
+        private void InvokeStorage(Action operation)
+            => InvokeStorage(() =>
+            {
+                operation();
+                return 0;
+            });
+
         public override IntPtr PtrAtElement(long index)
         {
-            ThrowIfDestroyed();
-            ValidateElementRange(index, 0);
-            EnsureHostReadable();
-            hostDirty = true;
-            return AddBytes(buffer, checked(index * ElementType.Size()));
+            return InvokeStorage(() =>
+            {
+                ValidateElementRange(index, 0);
+                EnsureHostReadableCore();
+                hostDirty = true;
+                return AddBytes(buffer, checked(index * ElementType.Size()));
+            });
         }
 
         public override void EnsureHostReadable()
-        {
-            ThrowIfDestroyed();
-            nativeOwner.ThrowIfQuarantined();
-            lock (sync)
-            {
-                EnsureHostBufferAllocated();
-                if (!deviceDirty || !deviceArray.IsValid || ByteLength == 0)
-                    return;
+            => InvokeStorage(EnsureHostReadableCore);
 
-                MlxNative.CopyArrayToHost(deviceArray, ElementType, buffer, ByteLength);
-                deviceDirty = false;
-                hostDirty = false;
-            }
+        private void EnsureHostReadableCore()
+        {
+            EnsureHostBufferAllocated();
+            if (!deviceDirty || !deviceArray.IsValid || ByteLength == 0)
+                return;
+
+            MlxNative.CopyArrayToHost(deviceArray, ElementType, buffer, ByteLength);
+            deviceDirty = false;
+            hostDirty = false;
         }
 
         internal MlxNative.MlxArray CreateArrayView(Tensor tensor)
@@ -152,20 +187,32 @@ namespace TensorSharp.MLX
             if (!ReferenceEquals(tensor.Storage, this))
                 throw new ArgumentException("Tensor is not backed by this MLX storage.", nameof(tensor));
 
-            lock (sync)
+            return InvokeStorage(() =>
             {
+                if (!ReferenceEquals(tensor.GetLiveOwnedStorageForDisposal(), this))
+                    throw new ObjectDisposedException(nameof(Tensor));
                 EnsureDeviceCurrentCore();
                 return MlxNative.AsStrided(deviceArray, ToIntArray(tensor.Sizes), ToLongArray(tensor.Strides), tensor.StorageOffset);
-            }
+            });
         }
 
         internal static void SetDeviceResult(Tensor tensor, ref MlxNative.MlxArray output)
         {
             MlxStorage storage = (MlxStorage)tensor.Storage;
-            if (tensor.StorageOffset == 0 && storage.ElementCount == tensor.ElementCount())
-                storage.ReplaceDeviceArray(ref output);
-            else
-                storage.UpdateDeviceSlice(tensor, ref output);
+            MlxNative.MlxArray incoming = output;
+            try
+            {
+                storage.InvokeStorage(() =>
+                {
+                    if (!ReferenceEquals(tensor.GetLiveOwnedStorageForDisposal(), storage))
+                        throw new ObjectDisposedException(nameof(Tensor));
+                    if (tensor.StorageOffset == 0 && storage.ElementCount == tensor.ElementCount())
+                        storage.ReplaceDeviceArray(ref incoming);
+                    else
+                        storage.UpdateDeviceSlice(tensor, ref incoming);
+                });
+            }
+            finally { output = incoming; }
         }
 
         private sealed class DeviceArrayChange(MlxStorage owner) : MlxNativeResources
@@ -190,9 +237,9 @@ namespace TensorSharp.MLX
                 throw new NotSupportedException("MLX storage arrays larger than Int32.MaxValue elements are not supported yet.");
 
             var resources = new DeviceArrayChange(this) { Incoming = array };
-            lock (sync)
+            try
             {
-                try
+                InvokeStorage(() =>
                 {
                     MlxWorker.Shared.InvokeNative(resources, effect =>
                     {
@@ -204,11 +251,11 @@ namespace TensorSharp.MLX
                         resources.Prepared = true;
                         return 0;
                     }, () => CompleteDeviceArrayChange(resources, fromDevice: true));
-                }
-                finally
-                {
-                    if (resources.IncomingTaken) array = default;
-                }
+                });
+            }
+            finally
+            {
+                if (resources.IncomingTaken) array = default;
             }
         }
 
@@ -228,10 +275,12 @@ namespace TensorSharp.MLX
                 throw new NotSupportedException("MLX slice lengths larger than Int32.MaxValue are not supported yet.");
 
             var resources = new DeviceArrayChange(this) { Incoming = update };
-            lock (sync)
+            try
             {
-                try
+                InvokeStorage(() =>
                 {
+                    if (!ReferenceEquals(tensor.GetLiveOwnedStorageForDisposal(), this))
+                        throw new ObjectDisposedException(nameof(Tensor));
                     MlxWorker.Shared.InvokeNative(resources, effect =>
                     {
                         ThrowIfDestroyed();
@@ -245,18 +294,16 @@ namespace TensorSharp.MLX
                         resources.Prepared = true;
                         return 0;
                     }, () => CompleteDeviceArrayChange(resources, fromDevice: true));
-                }
-                finally
-                {
-                    if (resources.IncomingTaken) update = default;
-                }
+                });
+            }
+            finally
+            {
+                if (resources.IncomingTaken) update = default;
             }
         }
 
         public override void EnsureDeviceCurrent()
-        {
-            lock (sync) EnsureDeviceCurrentCore();
-        }
+            => InvokeStorage(EnsureDeviceCurrentCore);
 
         private void EnsureDeviceCurrentCore()
         {
@@ -304,11 +351,14 @@ namespace TensorSharp.MLX
                 throw new NotSupportedException("Element type " + ElementType + " not supported");
 
             int[] result = new int[length];
-            EnsureHostReadable();
-            int* src = (int*)AddBytes(buffer, checked(index * ElementType.Size()));
-            for (int i = 0; i < length; i++)
-                result[i] = src[i];
-            return result;
+            return InvokeStorage(() =>
+            {
+                EnsureHostReadableCore();
+                int* src = (int*)AddBytes(buffer, checked(index * ElementType.Size()));
+                for (int i = 0; i < length; i++)
+                    result[i] = src[i];
+                return result;
+            });
         }
 
         public override void SetElementsAsInt(long index, int[] value)
@@ -319,24 +369,32 @@ namespace TensorSharp.MLX
             if (ElementType != DType.Int32)
                 throw new NotSupportedException("Element type " + ElementType + " not supported");
 
-            int* dst = (int*)PtrAtElement(index);
-            for (int i = 0; i < value.Length; i++)
-                dst[i] = value[i];
+            InvokeStorage(() =>
+            {
+                EnsureHostReadableCore();
+                hostDirty = true;
+                int* dst = (int*)AddBytes(buffer, checked(index * ElementType.Size()));
+                for (int i = 0; i < value.Length; i++)
+                    dst[i] = value[i];
+            });
         }
 
         public override float GetElementAsFloat(long index)
         {
             ValidateElementRange(index, 1);
-            EnsureHostReadable();
-            return ElementType switch
+            return InvokeStorage(() =>
             {
-                DType.Float32 => ((float*)buffer)[index],
-                DType.Float64 => (float)((double*)buffer)[index],
-                DType.Float16 => (float)((half*)buffer)[index],
-                DType.Int32 => ((int*)buffer)[index],
-                DType.UInt8 => ((byte*)buffer)[index],
-                _ => throw new NotSupportedException("Element type " + ElementType + " not supported"),
-            };
+                EnsureHostReadableCore();
+                return ElementType switch
+                {
+                    DType.Float32 => ((float*)buffer)[index],
+                    DType.Float64 => (float)((double*)buffer)[index],
+                    DType.Float16 => (float)((half*)buffer)[index],
+                    DType.Int32 => ((int*)buffer)[index],
+                    DType.UInt8 => ((byte*)buffer)[index],
+                    _ => throw new NotSupportedException("Element type " + ElementType + " not supported"),
+                };
+            });
         }
 
         /// <summary>
@@ -358,73 +416,79 @@ namespace TensorSharp.MLX
             if (length == 0)
                 return result;
 
-            EnsureHostReadable();
-            IntPtr src = AddBytes(buffer, checked(index * ElementType.Size()));
-            switch (ElementType)
+            return InvokeStorage(() =>
             {
-                case DType.Float32:
-                    new ReadOnlySpan<float>((float*)src, length).CopyTo(result);
-                    break;
-                case DType.Float64:
-                    {
-                        double* typed = (double*)src;
-                        for (int i = 0; i < length; i++)
-                            result[i] = (float)typed[i];
+                EnsureHostReadableCore();
+                IntPtr src = AddBytes(buffer, checked(index * ElementType.Size()));
+                switch (ElementType)
+                {
+                    case DType.Float32:
+                        new ReadOnlySpan<float>((float*)src, length).CopyTo(result);
                         break;
-                    }
-                case DType.Float16:
-                    {
-                        half* typed = (half*)src;
-                        for (int i = 0; i < length; i++)
-                            result[i] = typed[i];
-                        break;
-                    }
-                case DType.Int32:
-                    {
-                        int* typed = (int*)src;
-                        for (int i = 0; i < length; i++)
-                            result[i] = typed[i];
-                        break;
-                    }
-                case DType.UInt8:
-                    {
-                        byte* typed = (byte*)src;
-                        for (int i = 0; i < length; i++)
-                            result[i] = typed[i];
-                        break;
-                    }
-                default:
-                    throw new NotSupportedException("Element type " + ElementType + " not supported");
-            }
+                    case DType.Float64:
+                        {
+                            double* typed = (double*)src;
+                            for (int i = 0; i < length; i++)
+                                result[i] = (float)typed[i];
+                            break;
+                        }
+                    case DType.Float16:
+                        {
+                            half* typed = (half*)src;
+                            for (int i = 0; i < length; i++)
+                                result[i] = typed[i];
+                            break;
+                        }
+                    case DType.Int32:
+                        {
+                            int* typed = (int*)src;
+                            for (int i = 0; i < length; i++)
+                                result[i] = typed[i];
+                            break;
+                        }
+                    case DType.UInt8:
+                        {
+                            byte* typed = (byte*)src;
+                            for (int i = 0; i < length; i++)
+                                result[i] = typed[i];
+                            break;
+                        }
+                    default:
+                        throw new NotSupportedException("Element type " + ElementType + " not supported");
+                }
 
-            return result;
+                return result;
+            });
         }
 
         public override void SetElementAsFloat(long index, float value)
         {
             ValidateElementRange(index, 1);
-            EnsureHostReadable();
-            switch (ElementType)
+            InvokeStorage(() =>
             {
-                case DType.Float32:
-                    ((float*)buffer)[index] = value;
-                    break;
-                case DType.Float64:
-                    ((double*)buffer)[index] = value;
-                    break;
-                case DType.Float16:
-                    ((half*)buffer)[index] = value;
-                    break;
-                case DType.Int32:
-                    ((int*)buffer)[index] = (int)value;
-                    break;
-                case DType.UInt8:
-                    ((byte*)buffer)[index] = (byte)value;
-                    break;
-                default:
-                    throw new NotSupportedException("Element type " + ElementType + " not supported");
-            }
-            hostDirty = true;
+                EnsureHostReadableCore();
+                switch (ElementType)
+                {
+                    case DType.Float32:
+                        ((float*)buffer)[index] = value;
+                        break;
+                    case DType.Float64:
+                        ((double*)buffer)[index] = value;
+                        break;
+                    case DType.Float16:
+                        ((half*)buffer)[index] = value;
+                        break;
+                    case DType.Int32:
+                        ((int*)buffer)[index] = (int)value;
+                        break;
+                    case DType.UInt8:
+                        ((byte*)buffer)[index] = (byte)value;
+                        break;
+                    default:
+                        throw new NotSupportedException("Element type " + ElementType + " not supported");
+                }
+                hostDirty = true;
+            });
         }
 
         /// <summary>
@@ -449,47 +513,50 @@ namespace TensorSharp.MLX
             if (length == 0)
                 return;
 
-            EnsureHostReadable();
-            IntPtr dst = AddBytes(buffer, checked(index * ElementType.Size()));
-            switch (ElementType)
+            InvokeStorage(() =>
             {
-                case DType.Float32:
-                    value.AsSpan().CopyTo(new Span<float>((float*)dst, length));
-                    break;
-                case DType.Float64:
-                    {
-                        double* typed = (double*)dst;
-                        for (int i = 0; i < length; i++)
-                            typed[i] = value[i];
+                EnsureHostReadableCore();
+                IntPtr dst = AddBytes(buffer, checked(index * ElementType.Size()));
+                switch (ElementType)
+                {
+                    case DType.Float32:
+                        value.AsSpan().CopyTo(new Span<float>((float*)dst, length));
                         break;
-                    }
-                case DType.Float16:
-                    {
-                        half* typed = (half*)dst;
-                        for (int i = 0; i < length; i++)
-                            typed[i] = value[i];
-                        break;
-                    }
-                case DType.Int32:
-                    {
-                        int* typed = (int*)dst;
-                        for (int i = 0; i < length; i++)
-                            typed[i] = (int)value[i];
-                        break;
-                    }
-                case DType.UInt8:
-                    {
-                        byte* typed = (byte*)dst;
-                        for (int i = 0; i < length; i++)
-                            typed[i] = (byte)value[i];
-                        break;
-                    }
-                default:
-                    // Thrown before hostDirty is raised, as in the per-element path.
-                    throw new NotSupportedException("Element type " + ElementType + " not supported");
-            }
+                    case DType.Float64:
+                        {
+                            double* typed = (double*)dst;
+                            for (int i = 0; i < length; i++)
+                                typed[i] = value[i];
+                            break;
+                        }
+                    case DType.Float16:
+                        {
+                            half* typed = (half*)dst;
+                            for (int i = 0; i < length; i++)
+                                typed[i] = value[i];
+                            break;
+                        }
+                    case DType.Int32:
+                        {
+                            int* typed = (int*)dst;
+                            for (int i = 0; i < length; i++)
+                                typed[i] = (int)value[i];
+                            break;
+                        }
+                    case DType.UInt8:
+                        {
+                            byte* typed = (byte*)dst;
+                            for (int i = 0; i < length; i++)
+                                typed[i] = (byte)value[i];
+                            break;
+                        }
+                    default:
+                        // Thrown before hostDirty is raised, as in the per-element path.
+                        throw new NotSupportedException("Element type " + ElementType + " not supported");
+                }
 
-            hostDirty = true;
+                hostDirty = true;
+            });
         }
 
         public override void SetElementsAsHalf(long index, half[] value)
@@ -500,10 +567,15 @@ namespace TensorSharp.MLX
             if (ElementType != DType.Float16)
                 throw new NotSupportedException("Element type " + ElementType + " not supported");
 
-            half* dst = (half*)PtrAtElement(index);
-            for (int i = 0; i < value.Length; i++)
-                dst[i] = value[i];
-            hostDirty = true;
+            InvokeStorage(() =>
+            {
+                EnsureHostReadableCore();
+                hostDirty = true;
+                half* dst = (half*)AddBytes(buffer, checked(index * ElementType.Size()));
+                for (int i = 0; i < value.Length; i++)
+                    dst[i] = value[i];
+                hostDirty = true;
+            });
         }
 
         public override void CopyToStorage(long storageIndex, IntPtr src, long byteCount)
@@ -511,9 +583,12 @@ namespace TensorSharp.MLX
             if (src == IntPtr.Zero && byteCount > 0)
                 throw new ArgumentNullException(nameof(src));
             ValidateByteRange(storageIndex, byteCount);
-            EnsureHostReadable();
-            Buffer.MemoryCopy(src.ToPointer(), AddBytes(buffer, checked(storageIndex * ElementType.Size())).ToPointer(), byteCount, byteCount);
-            hostDirty = true;
+            InvokeStorage(() =>
+            {
+                EnsureHostReadableCore();
+                Buffer.MemoryCopy(src.ToPointer(), AddBytes(buffer, checked(storageIndex * ElementType.Size())).ToPointer(), byteCount, byteCount);
+                hostDirty = true;
+            });
         }
 
         public override void CopyFromStorage(IntPtr dst, long storageIndex, long byteCount)
@@ -521,8 +596,11 @@ namespace TensorSharp.MLX
             if (dst == IntPtr.Zero && byteCount > 0)
                 throw new ArgumentNullException(nameof(dst));
             ValidateByteRange(storageIndex, byteCount);
-            EnsureHostReadable();
-            Buffer.MemoryCopy(AddBytes(buffer, checked(storageIndex * ElementType.Size())).ToPointer(), dst.ToPointer(), byteCount, byteCount);
+            InvokeStorage(() =>
+            {
+                EnsureHostReadableCore();
+                Buffer.MemoryCopy(AddBytes(buffer, checked(storageIndex * ElementType.Size())).ToPointer(), dst.ToPointer(), byteCount, byteCount);
+            });
         }
 
         private static int[] ToIntArray(ReadOnlySpan<long> values)

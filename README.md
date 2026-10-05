@@ -126,7 +126,15 @@ after adoption; admission refusal preserves it. Basic, fused and quantized opera
 storage handoff. Native factories used by storage retain outputs before status validation and
 check temporary cleanup before returning an output. Failed cleanup retains actual storage,
 incoming arrays and unreturned replacements; successful fields clear once, with no rollback.
-Array-view creation holds the storage lock across current-data preparation and view acquisition.
+Storage operations dispatch to the worker before taking their existing reference-mutation
+gate. They recheck the actual storage under that gate and keep host copies, dirty-state
+updates, array-view acquisition and result adoption inside it. Reference mutations from
+another thread refuse beneath a native effect or compiled callback before waiting on the
+storage gate. View acquisition and result adoption also check the actual tensor's live
+ownership. Ref handoff preserves the caller's array when admission refuses and consumes it
+only after the actual change carrier takes it. Raw returned pointers still require the caller
+to keep their tensor alive; this path does not establish external no-copy backing lifetime
+or qualify native concurrency/finalizer behavior.
 Ordinary scalar, unary, binary, view, gather, normalization, attention and quantized-array
 factories use the same recovery carrier for native outputs before validation. Concatenation
 also owns its temporary native vector, checks its construction and release, and returns its
