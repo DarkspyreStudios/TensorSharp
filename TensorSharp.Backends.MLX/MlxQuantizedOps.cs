@@ -966,6 +966,7 @@ namespace TensorSharp.MLX
                 MlxNative.MlxArray residualView = default;
                 MlxNative.MlxArray output = default;
                 MlxNative.MlxArray[] outputs = null;
+                bool retainedFailure = false;
                 try
                 {
                     hiddenView = hiddenStorage.CreateArrayView(hidden);
@@ -994,21 +995,29 @@ namespace TensorSharp.MLX
                     output = default;
                     return true;
                 }
+                catch (Exception error) when (NativeQuarantineAuthority.TryGetFailure(error, out _))
+                {
+                    retainedFailure = true;
+                    throw;
+                }
                 catch
                 {
                     return false;
                 }
                 finally
                 {
-                    MlxNative.FreeArray(hiddenView);
-                    MlxNative.FreeArray(preNormView);
-                    MlxNative.FreeArray(postNormView);
-                    MlxNative.FreeArray(residualView);
-                    MlxNative.FreeArray(output);
-                    if (outputs != null)
+                    if (!retainedFailure)
                     {
-                        for (int i = 0; i < outputs.Length; i++)
-                            MlxNative.FreeArray(outputs[i]);
+                        MlxNative.FreeArray(hiddenView);
+                        MlxNative.FreeArray(preNormView);
+                        MlxNative.FreeArray(postNormView);
+                        MlxNative.FreeArray(residualView);
+                        MlxNative.FreeArray(output);
+                        if (outputs != null)
+                        {
+                            for (int i = 0; i < outputs.Length; i++)
+                                MlxNative.FreeArray(outputs[i]);
+                        }
                     }
                 }
             });

@@ -3936,6 +3936,7 @@ if (kind == 0) {
             CompiledClosure holder = null;
             ClosureInvocation invocation = null;
             ClosureTrace trace = null;
+            bool registered = false;
             try
             {
                 if (result == null || payload == IntPtr.Zero)
@@ -3949,6 +3950,7 @@ if (kind == 0) {
                     throw new InvalidOperationException("MLX trace callback has no admitted invocation.");
                 trace = new ClosureTrace();
                 invocation.Traces.Add(trace);
+                registered = true;
 
                 int n = checked((int)mlx_vector_array_size(input));
                 trace.Inputs = new MlxArray[n];
@@ -3980,7 +3982,7 @@ if (kind == 0) {
             }
             catch (Exception error)
             {
-                if (trace != null)
+                if (registered)
                     trace.Error = error;
                 else if (invocation != null)
                     invocation.Error = error;
@@ -3989,7 +3991,7 @@ if (kind == 0) {
             }
             finally
             {
-                if (invocation != null && trace != null)
+                if (invocation != null && registered)
                 {
                     try
                     {
