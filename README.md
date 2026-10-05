@@ -71,7 +71,13 @@ acquisition, including an unpublished weight or displaced temporal-patch weight.
 Construction recovery uses the text model's existing release-only handle and preserves
 the construction error plus any cleanup error. The pipeline preserves operation and
 cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
-Standalone vision construction without a retaining model owner does not gain those guarantees.
+Standalone Qwen35-compatible vision construction reserves its own release-only cleanup handle
+before file or tensor acquisition. Failed construction releases the child's actual tensors and
+reader without owning or fencing the borrowed allocator. CUDA completion uses the actual tensor
+storages; GGML release uses its checked barrier and resource reservation. Cleanup failure preserves
+both errors and the handle, and uncertain resource release prevents automatic replay. A file-only
+cleanup refusal retains the file recipe without repeating proven tensor release. Other standalone
+media constructors do not gain these guarantees.
 Qwen35, Qwen4Exp, Mistral3, GlmDsa and Gemma4 retain every vision child before its constructor acquires resources.
 A successful construction publishes the active child; a failure leaves the previous
 active child unchanged. The parent owns partial and replaced children until its coordinated
@@ -87,8 +93,8 @@ failure leaves cleanup to coordinated retirement instead of attempting standalon
 Gemma4 audio children use the same pre-acquisition parent retention and weight-publication
 recipe. Failed audio replacement preserves the previous active child. Qwen35 leaves an
 acquired projector file with its retaining parent when construction fails; standalone
-construction keeps its local file disposal. Audio and vision construction do not acquire
-disposal authority over their borrowed allocators.
+construction uses the same owned file in its release-only recovery. Audio and vision construction
+do not acquire disposal authority over their borrowed allocators.
 QwenImage21 retains lazy vision children in its owned collection before constructor work.
 Its ready vision field publishes only after construction returns. Checked text-owned cleanup
 collects every retained vision child and clears the collection only after their release succeeds.

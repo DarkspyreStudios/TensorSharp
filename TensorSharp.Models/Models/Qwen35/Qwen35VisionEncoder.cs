@@ -25,6 +25,7 @@ namespace TensorSharp.Models
         private Tensor _constructionWeight;
         private readonly List<Tensor> _displacedWeights = new();
         private GgufFile _constructionFile;
+        private readonly MediaConstructionCleanup _constructionCleanup;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, Tensor> _positionEmbeddingCache = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
@@ -88,13 +89,13 @@ namespace TensorSharp.Models
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
-            // The model's cleanup recipe must see this child even if construction never returns.
-            retainConstruction?.Invoke(this);
-            var gguf = _constructionFile = retainConstruction == null
-                ? new GgufFile(mmProjPath)
-                : new GgufFile(mmProjPath, file => _constructionFile = file);
+            _constructionCleanup = new MediaConstructionCleanup(this, allocator,
+                CollectDisposalOwnership, ReleaseOwnedResources, ReleaseConstructionFile);
             try
             {
+                // Retain the actual child and reader before either constructor can fail to return.
+                retainConstruction?.Invoke(this);
+                var gguf = _constructionFile = new GgufFile(mmProjPath, file => _constructionFile = file);
                 if (qwenImage21) QwenImage.QwenImage21CompanionValidation.ValidateVision(gguf);
 
                 _imageSize = (int)gguf.GetUint32("clip.vision.image_size", 768);
@@ -121,17 +122,20 @@ namespace TensorSharp.Models
                 LoadWeights(gguf);
                 CombineTemporalPatchWeights();
             }
-            catch
+            catch (Exception loadError)
             {
                 if (retainConstruction == null)
-                {
-                    gguf.Dispose();
-                    _constructionFile = null;
-                }
+                    _constructionCleanup.RollBackConstruction(loadError);
                 throw;
             }
-            gguf.Dispose();
-            _constructionFile = null;
+            try { ReleaseConstructionFile(); }
+            catch (Exception closeError)
+            {
+                // Release weights without automatically repeating the reader's failed close.
+                if (retainConstruction == null)
+                    _constructionCleanup.RollBackConstruction(closeError, fileCloseFailed: true);
+                throw;
+            }
         }
 
         private void LoadWeights(GgufFile gguf)
@@ -1417,7 +1421,7 @@ namespace TensorSharp.Models
         public void Dispose()
         {
             _hostModel?.ThrowIfOwnershipCleanupFailed();
-            DisposeOwned();
+            _constructionCleanup.Cleanup.Dispose();
         }
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
@@ -1433,6 +1437,11 @@ namespace TensorSharp.Models
         internal void DisposeOwned()
         {
             _hostModel?.ThrowIfUnsafeOwnershipCleanup();
+            _constructionCleanup.ReleaseOwned();
+        }
+
+        private void ReleaseOwnedResources()
+        {
             _constructionWeight?.Dispose();
             _constructionWeight = null;
             foreach (var weight in _displacedWeights) weight.Dispose();
@@ -1454,6 +1463,10 @@ namespace TensorSharp.Models
             _ropeDeviceCache.Clear();
             _ropeCache.Clear();
             _blockOrderCache.Clear();
+        }
+
+        private void ReleaseConstructionFile()
+        {
             _constructionFile?.Dispose();
             _constructionFile = null;
         }
