@@ -14,6 +14,7 @@ namespace TensorSharp.Models.QwenImage
         private readonly QwenImageTextEncoder _text;
         private readonly string _visionPath;
         private Qwen35VisionEncoder _vision;
+        private readonly List<Qwen35VisionEncoder> _ownedVisionEncoders = new();
         private readonly Dictionary<RgbImage, float[][]> _imageCache = new();
 
         public QwenImage21Conditioner(string textGguf, string visionGguf, BackendType backend)
@@ -113,8 +114,10 @@ namespace TensorSharp.Models.QwenImage
             if (_vision != null) return;
             try
             {
-                _ = new Qwen35VisionEncoder(_visionPath, _text.ConditionerAllocator, true,
+                _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
+                var vision = new Qwen35VisionEncoder(_visionPath, _text.ConditionerAllocator, true,
                     RetainVisionConstruction);
+                _vision = vision;
             }
             catch (Exception loadError)
             {
@@ -123,14 +126,17 @@ namespace TensorSharp.Models.QwenImage
             }
         }
 
-        private void RetainVisionConstruction(Qwen35VisionEncoder vision) => _vision = vision;
+        private void RetainVisionConstruction(Qwen35VisionEncoder vision) => _ownedVisionEncoders.Add(vision);
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
-            => _vision?.CollectDisposalOwnership(tensors);
+        {
+            foreach (var vision in _ownedVisionEncoders) vision.CollectDisposalOwnership(tensors);
+        }
 
         internal void DisposeOwnedVision()
         {
-            _vision?.DisposeOwned();
+            foreach (var vision in _ownedVisionEncoders) vision.DisposeOwned();
+            _ownedVisionEncoders.Clear();
             _vision = null;
         }
     }

@@ -89,6 +89,9 @@ recipe. Failed audio replacement preserves the previous active child. Qwen35 lea
 acquired projector file with its retaining parent when construction fails; standalone
 construction keeps its local file disposal. Audio and vision construction do not acquire
 disposal authority over their borrowed allocators.
+QwenImage21 retains lazy vision children in its owned collection before constructor work.
+Its ready vision field publishes only after construction returns. Checked text-owned cleanup
+collects every retained vision child and clears the collection only after their release succeeds.
 Parent-owned GGUF readers attach to the child before opening their files. Split readers
 reserve collection capacity and attach each sibling before opening it. Header or shard
 parse failure preserves the actual readers for the child's coordinated release, including
