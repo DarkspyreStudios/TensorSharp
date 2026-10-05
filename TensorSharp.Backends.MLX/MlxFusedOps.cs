@@ -42,24 +42,39 @@ namespace TensorSharp.MLX
         }
 
         public static bool TryEvaluate(Tensor tensor)
+            => TryEvaluate(tensor, asynchronous: false);
+
+        private sealed class EvaluationViews : MlxNativeResources
+        {
+            internal MlxNative.MlxArray View;
+            internal MlxNative.MlxArray Contiguous;
+            internal MlxNative.MlxArray Original;
+            internal bool Prepared;
+        }
+
+        private static bool TryEvaluate(Tensor tensor, bool asynchronous)
         {
             if (tensor == null || tensor.Storage is not MlxStorage)
                 return false;
 
-            MlxNative.MlxArray view = default;
+            var resources = new EvaluationViews();
             try
             {
-                view = GetView(tensor);
-                MlxNative.Eval(view);
-                return true;
+                return MlxWorker.Shared.InvokeNative(resources, effect =>
+                {
+                    resources.View = GetView(tensor);
+                    if (asynchronous) MlxNative.AsyncEval(resources.View);
+                    else MlxNative.Eval(resources.View);
+                    return true;
+                }, () =>
+                {
+                    MlxNative.FreeArray(resources.View);
+                    resources.View = default;
+                });
             }
-            catch
+            catch (Exception error) when (resources.SafelyReleased && !NativeQuarantineAuthority.TryGetFailure(error, out _))
             {
                 return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(view);
             }
         }
 
@@ -295,32 +310,9 @@ namespace TensorSharp.MLX
             }
         }
 
-        // Async variant: schedules graph execution on Metal and returns
-        // immediately. The next host read drains the queue. Use this at
-        // layer boundaries so Metal command-buffer issue overlaps with
-        // completion of earlier layers — mirrors ollama mlxrunner's
-        // mlx.AsyncEval at each forward step.
+        // Native submission is checked before return; GPU execution remains asynchronous.
         public static bool TryAsyncEvaluate(Tensor tensor)
-        {
-            if (tensor == null || tensor.Storage is not MlxStorage)
-                return false;
-
-            MlxNative.MlxArray view = default;
-            try
-            {
-                view = GetView(tensor);
-                MlxNative.AsyncEval(view);
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                MlxNative.FreeArray(view);
-            }
-        }
+            => TryEvaluate(tensor, asynchronous: true);
 
         public static bool TryMaterialize(Tensor tensor)
         {
@@ -333,16 +325,37 @@ namespace TensorSharp.MLX
                 return false;
             }
 
-            MlxNative.MlxArray view = default;
+            var resources = new EvaluationViews();
             MlxNative.MlxArray contiguous = default;
+            bool retainedFailure = false;
             try
             {
-                view = GetView(tensor);
-                contiguous = MlxNative.Contiguous(view);
-                MlxNative.Eval(contiguous);
+                contiguous = MlxWorker.Shared.InvokeNative(resources, effect =>
+                {
+                    resources.View = GetView(tensor);
+                    resources.Contiguous = MlxNative.Contiguous(resources.View);
+                    MlxNative.Eval(resources.Contiguous);
+                    resources.Prepared = true;
+                    return resources.Contiguous;
+                }, () =>
+                {
+                    MlxNative.FreeArray(resources.View);
+                    resources.View = default;
+                    if (!resources.Prepared)
+                    {
+                        MlxNative.FreeArray(resources.Contiguous);
+                        resources.Contiguous = default;
+                    }
+                });
+                resources.Contiguous = default;
                 SetDeviceResult(tensor, contiguous);
                 contiguous = default;
                 return true;
+            }
+            catch (Exception error) when (NativeQuarantineAuthority.TryGetFailure(error, out _))
+            {
+                retainedFailure = true;
+                throw;
             }
             catch
             {
@@ -350,8 +363,10 @@ namespace TensorSharp.MLX
             }
             finally
             {
-                MlxNative.FreeArray(view);
-                MlxNative.FreeArray(contiguous);
+                if (!retainedFailure)
+                {
+                    MlxNative.FreeArray(contiguous);
+                }
             }
         }
 
@@ -1081,7 +1096,7 @@ namespace TensorSharp.MLX
                     evaluated |= Materialize(ref vCache);
                     return evaluated;
                 }
-                catch
+                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     return false;
                 }
@@ -1282,7 +1297,7 @@ namespace TensorSharp.MLX
                     evaluated |= Materialize(ref deltaState);
                     return evaluated;
                 }
-                catch
+                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     return false;
                 }
@@ -2029,27 +2044,29 @@ namespace TensorSharp.MLX
             if (!array.IsValid)
                 return false;
 
-            MlxNative.MlxArray contiguous = default;
-            try
+            var resources = new EvaluationViews { Original = array };
+            MlxNative.MlxArray replacement = MlxWorker.Shared.InvokeNative(resources, effect =>
             {
-                contiguous = MlxNative.Contiguous(array);
-                // AsyncEval bounds the graph depth (so we don't accumulate a
-                // 60-layer attention chain by the end of the forward pass)
-                // without blocking the host. The next op that depends on this
-                // array — typically the next layer's attention or the host
-                // sampler read — will drain implicitly. The previous code
-                // used sync Eval here, costing ~1 ms × 7-8 cache evals per
-                // decode token (one every MlxEvalEveryNLayers).
-                MlxNative.AsyncEval(contiguous);
-                MlxNative.FreeArray(array);
-                array = contiguous;
-                contiguous = default;
-                return true;
-            }
-            finally
+                resources.Contiguous = MlxNative.Contiguous(resources.Original);
+                MlxNative.AsyncEval(resources.Contiguous);
+                resources.Prepared = true;
+                return resources.Contiguous;
+            }, () =>
             {
-                MlxNative.FreeArray(contiguous);
-            }
+                if (resources.Prepared)
+                {
+                    MlxNative.FreeArray(resources.Original);
+                    resources.Original = default;
+                }
+                else
+                {
+                    MlxNative.FreeArray(resources.Contiguous);
+                    resources.Contiguous = default;
+                }
+            });
+            array = replacement;
+            resources.Contiguous = default;
+            return true;
         }
 
         public static bool TryPrefillAttention(

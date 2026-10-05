@@ -110,8 +110,14 @@ only when that root is actually gone. A later payload destructor does not automa
 complete a pending registration; deferred payload completion remains unfinished.
 Trace-delegate intermediate arrays that never reach its returned outputs still require
 construction/replacement recovery; invocation retention does not supply that missing ownership.
-Fire-and-forget async evaluation and all-used-stream synchronization are not wired into
-this authority. Other raw temporary-handle cleanup still requires checked ownership recovery;
+Graph evaluation, asynchronous submission and host-copy evaluation retain their actual vector
+resources through the worker before native acquisition. Submission waits for checked native
+return, not GPU completion. Failed evaluation retains the graph and fences the shared runtime;
+checked vector cleanup preserves original operation and independent cleanup errors. Evaluation
+view and cache-materialization carriers retain their actual acquired references on unsafe cleanup.
+Fused evaluation helpers propagate recorded unsafe errors instead of reporting a healthy fallback.
+All-used-stream synchronization remains unfinished. Other raw temporary-handle and storage
+replacement cleanup still requires checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not

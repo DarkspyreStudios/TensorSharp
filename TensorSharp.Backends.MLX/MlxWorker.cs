@@ -1,13 +1,20 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 
 namespace TensorSharp.MLX
 {
+    internal abstract class MlxNativeResources
+    {
+        internal bool SafelyReleased;
+    }
+
     public sealed class MlxWorker : IDisposable
     {
         private readonly BlockingCollection<IWorkItem> queue = new();
+        private readonly List<MlxNativeResources> nativeResources = new();
         private readonly Thread thread;
         private readonly NativeOwnerRegistration nativeOwner;
         private int workerThreadId;
@@ -27,7 +34,7 @@ namespace TensorSharp.MLX
             thread.Start();
         }
 
-        // Returns true when called from inside an Invoke/Dispatch on the worker
+        // Returns true when called from inside an Invoke on the worker
         // thread itself — i.e. from a re-entrant context like an mlx_compile
         // trace callback. In that case, nesting another Invoke would deadlock
         // (worker thread is busy running us). Callers can detect this and run
@@ -86,24 +93,55 @@ namespace TensorSharp.MLX
             });
         }
 
-        // Fire-and-forget scheduling does not report admission or action errors.
-        // Native operations that require a result use InvokeNative.
-        public void Dispatch(Action action)
+        internal T InvokeNative<T>(MlxNativeResources resources, Func<NativeEffectLease, T> operation, Action cleanup)
         {
-            if (action == null)
-                throw new ArgumentNullException(nameof(action));
-            ThrowIfDisposed();
-
-            // Re-entrant: run inline to preserve ordering with the synchronous
-            // ops surrounding us on the worker thread.
-            if (IsOnWorkerThread)
+            ArgumentNullException.ThrowIfNull(resources);
+            ArgumentNullException.ThrowIfNull(operation);
+            ArgumentNullException.ThrowIfNull(cleanup);
+            return Invoke(() =>
             {
-                try { action(); }
-                catch { /* fire-and-forget swallows errors */ }
-                return;
-            }
+                // Install the actual resource carrier before its first native acquisition.
+                nativeResources.Add(resources);
+                bool started = false;
+                try
+                {
+                    using NativeEffectLease effect = nativeOwner.EnterEffect();
+                    MlxNative.InstallCurrentErrorHandler();
+                    started = true;
+                    Exception error = null;
+                    T result = default;
+                    try { result = operation(effect); }
+                    catch (Exception original) { error = original; }
 
-            queue.Add(new FireAndForgetItem(action));
+                    bool unsafeCleanup = false;
+                    try { nativeOwner.ThrowIfQuarantined(); }
+                    catch (NativeRuntimeQuarantinedException refusal)
+                    {
+                        unsafeCleanup = true;
+                        if (error == null) error = refusal;
+                    }
+                    if (!unsafeCleanup)
+                    {
+                        try
+                        {
+                            cleanup();
+                            resources.SafelyReleased = true;
+                        }
+                        catch (Exception cleanupError)
+                        {
+                            error = MlxNative.JoinNativeErrors(error, cleanupError);
+                            try { effect.PublishFailure(this, cleanupError, NativeRuntimeFailureStage.GraphRelease); }
+                            catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                        }
+                    }
+                    if (error != null) ExceptionDispatchInfo.Capture(error).Throw();
+                    return result;
+                }
+                finally
+                {
+                    if (!started || resources.SafelyReleased) nativeResources.Remove(resources);
+                }
+            });
         }
 
         private void Run()
@@ -169,28 +207,5 @@ namespace TensorSharp.MLX
             }
         }
 
-        private sealed class FireAndForgetItem : IWorkItem
-        {
-            private readonly Action action;
-
-            public FireAndForgetItem(Action action)
-            {
-                this.action = action;
-            }
-
-            public void Execute()
-            {
-                try
-                {
-                    action();
-                }
-                catch
-                {
-                    // Errors from fire-and-forget ops are intentionally
-                    // swallowed; callers must not rely on this path for
-                    // anything that can raise.
-                }
-            }
-        }
     }
 }

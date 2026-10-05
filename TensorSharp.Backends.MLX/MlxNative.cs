@@ -3635,9 +3635,9 @@ if (kind == 0) {
                                     using NativeEffectLease effect = holder.NativeOwner.EnterEffect();
                                     effect.PublishFailure(holder, cleanup, NativeRuntimeFailureStage.GraphRelease);
                                 }
-                                catch (Exception publication) { cleanup = JoinClosureErrors(cleanup, publication); }
+                                catch (Exception publication) { cleanup = JoinNativeErrors(cleanup, publication); }
                             }
-                            throw JoinClosureErrors(original, cleanup);
+                            throw JoinNativeErrors(original, cleanup);
                         }
                     }
                     ExceptionDispatchInfo.Capture(original).Throw();
@@ -3675,8 +3675,8 @@ if (kind == 0) {
                 InvokeClosure(holder, NativeMlxCallbackCallKind.ApplyClosure, invocation =>
                 {
                     invocation.BorrowedInputs = inputs;
-                    NewClosureVector(ref invocation.Inputs);
-                    NewClosureVector(ref invocation.Outputs);
+                    NewArrayVector(ref invocation.Inputs);
+                    NewArrayVector(ref invocation.Outputs);
                     for (int i = 0; i < inputs.Length; i++)
                     {
                         if (!inputs[i].IsValid)
@@ -3685,7 +3685,7 @@ if (kind == 0) {
                     }
                     CheckClosureStatus(invocation, mlx_closure_apply(ref invocation.Outputs, holder.Compiled, invocation.Inputs), "applying compiled MLX closure");
 
-                    int count = ClosureVectorSize(invocation.Outputs);
+                    int count = ArrayVectorSize(invocation.Outputs);
                     invocation.Results = new MlxArray[count];
                     for (int i = 0; i < count; i++)
                         Check(mlx_vector_array_get(out invocation.Results[i], invocation.Outputs, (nuint)i), "extracting closure output");
@@ -3696,27 +3696,27 @@ if (kind == 0) {
                         FreeClosureArrays(invocation.Results, 0);
                     else if (firstOnly)
                         FreeClosureArrays(invocation.Results, 1);
-                    FreeClosureVector(ref invocation.Inputs);
-                    FreeClosureVector(ref invocation.Outputs);
+                    FreeArrayVector(ref invocation.Inputs);
+                    FreeArrayVector(ref invocation.Outputs);
                 });
                 return results;
             });
         }
 
-        private static Exception JoinClosureErrors(Exception current, Exception next)
+        internal static Exception JoinNativeErrors(Exception current, Exception next)
         {
             if (current == null) return next;
-            if (ContainsClosureError(current, next)) return current;
+            if (ContainsNativeError(current, next)) return current;
             return new AggregateException(current, next);
         }
 
-        private static bool ContainsClosureError(Exception current, Exception next)
+        private static bool ContainsNativeError(Exception current, Exception next)
         {
             if (ReferenceEquals(current, next)) return true;
             if (current is AggregateException aggregate)
             {
                 foreach (Exception inner in aggregate.InnerExceptions)
-                    if (ContainsClosureError(inner, next)) return true;
+                    if (ContainsNativeError(inner, next)) return true;
             }
             return false;
         }
@@ -3738,12 +3738,12 @@ if (kind == 0) {
         {
             foreach (ClosureTrace trace in invocation.Traces)
             {
-                if (trace.Error != null) invocation.Error = JoinClosureErrors(invocation.Error, trace.Error);
-                if (trace.ResumeError != null) invocation.Error = JoinClosureErrors(invocation.Error, trace.ResumeError);
+                if (trace.Error != null) invocation.Error = JoinNativeErrors(invocation.Error, trace.Error);
+                if (trace.ResumeError != null) invocation.Error = JoinNativeErrors(invocation.Error, trace.ResumeError);
                 if (trace.CleanupError != null)
                 {
-                    invocation.Error = JoinClosureErrors(invocation.Error, trace.CleanupError);
-                    invocation.CleanupError = JoinClosureErrors(invocation.CleanupError, trace.CleanupError);
+                    invocation.Error = JoinNativeErrors(invocation.Error, trace.CleanupError);
+                    invocation.CleanupError = JoinNativeErrors(invocation.CleanupError, trace.CleanupError);
                 }
             }
         }
@@ -3772,7 +3772,7 @@ if (kind == 0) {
                         InstallCurrentErrorHandler();
                         action(invocation);
                     }
-                    catch (Exception error) { invocation.Error = JoinClosureErrors(invocation.Error, error); }
+                    catch (Exception error) { invocation.Error = JoinNativeErrors(invocation.Error, error); }
                     CollectClosureErrors(invocation);
                     try { holder.NativeOwner.ThrowIfQuarantined(); }
                     catch (NativeRuntimeQuarantinedException error)
@@ -3786,16 +3786,16 @@ if (kind == 0) {
                         catch (Exception error)
                         {
                             invocation.CleanupError = error;
-                            invocation.Error = JoinClosureErrors(invocation.Error, error);
+                            invocation.Error = JoinNativeErrors(invocation.Error, error);
                         }
                     }
                     if (holder.PayloadError != null)
                     {
-                        invocation.CleanupError = JoinClosureErrors(invocation.CleanupError, holder.PayloadError);
-                        invocation.Error = JoinClosureErrors(invocation.Error, holder.PayloadError);
+                        invocation.CleanupError = JoinNativeErrors(invocation.CleanupError, holder.PayloadError);
+                        invocation.Error = JoinNativeErrors(invocation.Error, holder.PayloadError);
                     }
                     if (holder.PayloadResumeError != null)
-                        invocation.Error = JoinClosureErrors(invocation.Error, holder.PayloadResumeError);
+                        invocation.Error = JoinNativeErrors(invocation.Error, holder.PayloadResumeError);
                 }
                 finally
                 {
@@ -3821,29 +3821,29 @@ if (kind == 0) {
             holder.Source = default;
         }
 
-        private static void FreeClosureVector(ref MlxVectorArray vector)
+        private static void FreeArrayVector(ref MlxVectorArray vector)
         {
             if (!vector.IsValid) return;
-            Check(mlx_vector_array_free(vector), "freeing MLX closure vector");
+            Check(mlx_vector_array_free(vector), "freeing MLX array vector");
             vector = default;
         }
 
-        private static void NewClosureVector(ref MlxVectorArray vector)
+        private static void NewArrayVector(ref MlxVectorArray vector)
         {
             ClearCapturedError();
             vector = mlx_vector_array_new();
-            CheckClosureValue(!vector.IsValid, "creating MLX closure vector");
+            CheckNativeValue(!vector.IsValid, "creating MLX array vector");
         }
 
-        private static int ClosureVectorSize(MlxVectorArray vector)
+        private static int ArrayVectorSize(MlxVectorArray vector)
         {
             ClearCapturedError();
             nuint size = mlx_vector_array_size(vector);
-            CheckClosureValue(false, "reading MLX closure vector size");
+            CheckNativeValue(false, "reading MLX array vector size");
             return checked((int)size);
         }
 
-        private static void CheckClosureValue(bool invalid, string action)
+        private static void CheckNativeValue(bool invalid, string action)
         {
             string error = TakeCapturedError();
             if (invalid || !string.IsNullOrEmpty(error))
@@ -3969,7 +3969,7 @@ if (kind == 0) {
                 registered = true;
 
                 invocation.Lease.ValidateNativePhase();
-                int n = ClosureVectorSize(input);
+                int n = ArrayVectorSize(input);
                 trace.Inputs = new MlxArray[n];
                 for (int i = 0; i < n; i++)
                     Check(mlx_vector_array_get(out trace.Inputs[i], input, (nuint)i), "extracting MLX trace input");
@@ -4087,34 +4087,11 @@ if (kind == 0) {
             if (arrays == null || arrays.Length == 0)
                 return;
 
-            MlxWorker.Shared.InvokeNative(() =>
-            {
-                MlxVectorArray vector = mlx_vector_array_new();
-                try
-                {
-                    int count = 0;
-                    for (int i = 0; i < arrays.Length; i++)
-                    {
-                        if (arrays[i].IsValid)
-                        {
-                            Check(mlx_vector_array_append_value(vector, arrays[i]), "building MLX eval vector");
-                            count++;
-                        }
-                    }
-                    if (count > 0)
-                        Check(mlx_eval(vector), "evaluating MLX graph");
-                }
-                finally
-                {
-                    _ = mlx_vector_array_free(vector);
-                }
-            });
+            EvaluateArrays(arrays, asynchronous: false);
         }
 
-        // AsyncEval schedules graph execution on Metal without waiting for
-        // completion. The next host read (CopyArrayToHost) calls mlx_eval which
-        // drains the queue. Use this at layer boundaries during prefill/decode
-        // so command-buffer issue overlaps with completion of earlier layers.
+        // Wait for checked native submission, not for GPU completion. A later
+        // dependent evaluation/read completes that graph, not every used stream.
         internal static void AsyncEval(MlxArray array)
         {
             if (!array.IsValid)
@@ -4128,34 +4105,47 @@ if (kind == 0) {
             if (arrays == null || arrays.Length == 0)
                 return;
 
-            // We Dispatch (fire-and-forget) because AsyncEval itself returns
-            // immediately on the MLX side once the graph has been enqueued;
-            // there is nothing for the caller to wait on. The next Invoke from
-            // this thread (e.g. a host copy) will serialize correctly via the
-            // worker's FIFO queue.
-            MlxWorker.Shared.Dispatch(() =>
+            EvaluateArrays(arrays, asynchronous: true);
+        }
+
+        private sealed class EvaluationResources(MlxArray[] inputs) : MlxNativeResources
+        {
+            internal readonly MlxArray[] Inputs = inputs;
+            internal MlxVectorArray Vector;
+        }
+
+        private static void EvaluateArrays(MlxArray[] arrays, bool asynchronous, Action afterEvaluation = null)
+        {
+            var resources = new EvaluationResources(arrays);
+            MlxWorker worker = MlxWorker.Shared;
+            worker.InvokeNative(resources, effect =>
             {
-                MlxVectorArray vector = mlx_vector_array_new();
-                try
+                NewArrayVector(ref resources.Vector);
+                int count = 0;
+                for (int i = 0; i < resources.Inputs.Length; i++)
                 {
-                    int count = 0;
-                    for (int i = 0; i < arrays.Length; i++)
+                    if (!resources.Inputs[i].IsValid) continue;
+                    Check(mlx_vector_array_append_value(resources.Vector, resources.Inputs[i]), "building MLX eval vector");
+                    count++;
+                }
+                if (count > 0)
+                {
+                    try
                     {
-                        if (arrays[i].IsValid)
-                        {
-                            if (mlx_vector_array_append_value(vector, arrays[i]) != 0)
-                                return;
-                            count++;
-                        }
+                        Check(asynchronous ? mlx_async_eval(resources.Vector) : mlx_eval(resources.Vector),
+                            asynchronous ? "submitting MLX graph" : "evaluating MLX graph");
                     }
-                    if (count > 0)
-                        _ = mlx_async_eval(vector);
+                    catch (Exception original) when (original is not DllNotFoundException and not EntryPointNotFoundException and not BadImageFormatException)
+                    {
+                        // A failed evaluation may leave native work using this actual graph.
+                        try { effect.PublishFailure(worker, original, NativeRuntimeFailureStage.Synchronization); }
+                        catch (Exception publication) { throw JoinNativeErrors(original, publication); }
+                        throw;
+                    }
                 }
-                finally
-                {
-                    _ = mlx_vector_array_free(vector);
-                }
-            });
+                afterEvaluation?.Invoke();
+                return 0;
+            }, () => FreeArrayVector(ref resources.Vector));
         }
 
         internal static void CopyArrayToHost(MlxArray array, DType dtype, IntPtr destination, long byteCount)
@@ -4167,35 +4157,23 @@ if (kind == 0) {
             if (byteCount < 0)
                 throw new ArgumentOutOfRangeException(nameof(byteCount));
 
-            MlxWorker.Shared.InvokeNative(() =>
+            EvaluateArrays(new[] { array }, asynchronous: false, () =>
             {
-                MlxVectorArray vector = mlx_vector_array_new();
-                try
+                ClearCapturedError();
+                IntPtr source = dtype switch
                 {
-                    Check(mlx_vector_array_append_value(vector, array), "building MLX eval vector");
-                    Check(mlx_eval(vector), "evaluating MLX array before host copy");
+                    DType.Float32 => mlx_array_data_float32(array),
+                    DType.Float64 => mlx_array_data_float64(array),
+                    DType.Float16 => mlx_array_data_float16(array),
+                    DType.Int32 => mlx_array_data_int32(array),
+                    DType.UInt8 => mlx_array_data_uint8(array),
+                    _ => throw new NotSupportedException($"MLX host copy does not support {dtype}."),
+                };
+                CheckNativeValue(source == IntPtr.Zero && byteCount > 0, "reading MLX array data");
 
-                    IntPtr source = dtype switch
-                    {
-                        DType.Float32 => mlx_array_data_float32(array),
-                        DType.Float64 => mlx_array_data_float64(array),
-                        DType.Float16 => mlx_array_data_float16(array),
-                        DType.Int32 => mlx_array_data_int32(array),
-                        DType.UInt8 => mlx_array_data_uint8(array),
-                        _ => throw new NotSupportedException($"MLX host copy does not support {dtype}."),
-                    };
-
-                    if (source == IntPtr.Zero && byteCount > 0)
-                        throw new InvalidOperationException("MLX returned a null data pointer.");
-
-                    unsafe
-                    {
-                        Buffer.MemoryCopy(source.ToPointer(), destination.ToPointer(), byteCount, byteCount);
-                    }
-                }
-                finally
+                unsafe
                 {
-                    _ = mlx_vector_array_free(vector);
+                    Buffer.MemoryCopy(source.ToPointer(), destination.ToPointer(), byteCount, byteCount);
                 }
             });
         }
