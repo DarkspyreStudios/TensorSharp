@@ -138,8 +138,16 @@ released reference once and preserves the original operation plus an independent
 failure. Failed or refused cleanup retains the remaining references and storage graph. Empty
 reference cleanup has no native effect. The eager GELU helper returns its output only after
 all intermediate cleanup succeeds; failed cleanup retains its unreturned output.
+Stateless fused operations use the same array carrier for acquired references and actual
+input/target storages. Their Try paths return false after an operation error only when
+cleanup succeeds, no target transfer completes and no recorded unsafe failure exists.
+Multi-output handoffs record each successful target transfer; a later failure propagates
+without rollback or fallback replay. Tensor materialization retains its view and contiguous
+result through evaluation and storage adoption. Chunked prefill propagates operation errors
+and refuses fallback after committing an attention block. Custom-kernel references that
+fail before reaching the caller remain outside these caller carriers.
 All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
-fused/quantized/other trace caller cleanup, tensor-owned child disposal and replacement
+stateful fused/quantized/other trace caller cleanup, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
