@@ -887,33 +887,147 @@ namespace TensorSharp.MLX
 
         public sealed class AttentionKvCache : IDisposable
         {
+            private readonly NativeOwnerRegistration nativeOwner;
             private MlxNative.MlxArray kCache;
             private MlxNative.MlxArray vCache;
             private int length;
+            private bool disposed;
 
-            public int Length => length;
+            public AttentionKvCache()
+            {
+                nativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Graph);
+                nativeOwner.AttachMlxSharedRuntime();
+            }
 
-            public bool TryEvaluateState()
+            private sealed class CacheResources : MlxNativeResources
+            {
+                private readonly AttentionKvCache owner;
+                private readonly MlxArrayResources references;
+
+                internal CacheResources(AttentionKvCache owner, int referenceCount, params Tensor[] tensors)
+                {
+                    this.owner = owner;
+                    references = new MlxArrayResources(referenceCount, tensors);
+                }
+
+                internal MlxNative.MlxArray[] Arrays => references.Arrays;
+                internal bool HasStoredResult;
+                internal override bool HasNativeResources => references.HasNativeResources;
+
+                internal void Release()
+                {
+                    references.Release();
+                    GC.KeepAlive(owner);
+                }
+            }
+
+            private void ThrowIfUnavailable()
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                nativeOwner.ThrowIfQuarantined();
+            }
+
+            private bool TryInvokeWithResources(CacheResources resources, Func<bool> operation)
             {
                 try
                 {
-                    bool evaluated = Materialize(ref kCache);
-                    evaluated |= Materialize(ref vCache);
-                    return evaluated;
+                    return MlxWorker.Shared.InvokeWithResources(resources, () =>
+                    {
+                        ThrowIfUnavailable();
+                        return operation();
+                    }, resources.Release);
                 }
-                catch (Exception error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
+                catch (Exception error) when (resources.SafelyReleased && !resources.HasStoredResult
+                    && error is not NativeMlxCallbackBusyException && error is not ObjectDisposedException
+                    && !NativeQuarantineAuthority.TryGetFailure(error, out _))
                 {
                     return false;
                 }
             }
 
-            public void Reset()
+            private void PublishReleaseFailure(NativeEffectLease effect, Exception error)
             {
-                MlxNative.FreeArray(kCache);
-                MlxNative.FreeArray(vCache);
-                kCache = default;
-                vCache = default;
-                length = 0;
+                try { effect.PublishFailure(this, error, NativeRuntimeFailureStage.GraphRelease); }
+                catch (Exception publication) { throw MlxNative.JoinNativeErrors(error, publication); }
+            }
+
+            public int Length => length;
+
+            public bool TryEvaluateState()
+            {
+                var resources = new CacheResources(this, 2);
+                return TryInvokeWithResources(resources, () =>
+                {
+                    bool evaluated = MaterializeState(keys: true, resources, 0);
+                    evaluated |= MaterializeState(keys: false, resources, 1);
+                    return evaluated;
+                });
+            }
+
+            private bool MaterializeState(bool keys, CacheResources resources, int index)
+            {
+                MlxNative.MlxArray original = keys ? kCache : vCache;
+                if (!original.IsValid)
+                    return false;
+
+                ref MlxNative.MlxArray replacement = ref resources.Arrays[index];
+                replacement = MlxNative.Contiguous(original);
+                MlxNative.AsyncEval(replacement);
+                using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                using NativeEffectLease effect = reservation.EnterEffect();
+                effect.ValidateMlxRelease(this, reservation);
+                try
+                {
+                    if (keys)
+                    {
+                        MlxNative.FreeArrayReference(ref kCache);
+                        kCache = replacement;
+                    }
+                    else
+                    {
+                        MlxNative.FreeArrayReference(ref vCache);
+                        vCache = replacement;
+                    }
+                    replacement = default;
+                    resources.HasStoredResult = true;
+                }
+                catch (Exception error)
+                {
+                    PublishReleaseFailure(effect, error);
+                    throw;
+                }
+                return true;
+            }
+
+            public void Reset() => ReleaseState(retire: false);
+
+            private void ReleaseState(bool retire)
+            {
+                MlxWorker.Shared.Invoke(() =>
+                {
+                    if (retire && disposed)
+                        return;
+                    ThrowIfUnavailable();
+                    using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                    using NativeEffectLease effect = reservation.EnterEffect();
+                    effect.ValidateMlxRelease(this, reservation);
+                    try
+                    {
+                        MlxNative.FreeArrayReference(ref kCache);
+                        MlxNative.FreeArrayReference(ref vCache);
+                        length = 0;
+                        if (retire)
+                        {
+                            effect.CompleteSafeRelease(this);
+                            disposed = true;
+                        }
+                    }
+                    catch (Exception error)
+                    {
+                        PublishReleaseFailure(effect, error);
+                        throw;
+                    }
+                });
             }
 
             public bool TryAttentionHeadDim256(
@@ -962,39 +1076,46 @@ namespace TensorSharp.MLX
                     return false;
                 }
 
-                return MlxWorker.Shared.Invoke(() =>
+                var resources = new CacheResources(this, 11, result, qHeads, kHeads, vHeads);
+                return TryInvokeWithResources(resources, () =>
                 {
-                    MlxNative.MlxArray qView = default;
-                    MlxNative.MlxArray qCompact = default;
-                    MlxNative.MlxArray nextK = default;
-                    MlxNative.MlxArray nextV = default;
-                    MlxNative.MlxArray attention = default;
+                    if (startPos != length)
+                        return false;
+
+                    ref MlxNative.MlxArray qView = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray qCompact = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray nextK = ref resources.Arrays[2];
+                    ref MlxNative.MlxArray nextV = ref resources.Arrays[3];
+                    ref MlxNative.MlxArray attention = ref resources.Arrays[4];
+                    qView = GetView(qHeads);
+                    qCompact = qHeads.IsContiguous() ? qView : MlxNative.Contiguous(qView);
+                    if (qHeads.IsContiguous())
+                        qView = default;
+
+                    if (!TryBuildUpdatedCache(kHeads, vHeads, resources))
+                        return false;
+
+                    int nextLength = length + seqLen;
+                    attention = MlxNative.HeadDim256Attention(
+                        qCompact,
+                        nextK,
+                        nextV,
+                        numHeads,
+                        numKVHeads,
+                        seqLen,
+                        nextLength,
+                        startPos,
+                        causal,
+                        scale);
+                    using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
+                    using NativeEffectLease effect = reservation.EnterEffect();
+                    effect.ValidateMlxRelease(this, reservation);
+                    MlxStorage.SetDeviceResult(result, ref attention);
+                    resources.HasStoredResult = true;
                     try
                     {
-                        qView = GetView(qHeads);
-                        qCompact = qHeads.IsContiguous() ? qView : MlxNative.Contiguous(qView);
-                        if (qHeads.IsContiguous())
-                            qView = default;
-
-                        if (!TryBuildUpdatedCache(kHeads, vHeads, out nextK, out nextV))
-                            return false;
-
-                        int nextLength = length + seqLen;
-                        attention = MlxNative.HeadDim256Attention(
-                            qCompact,
-                            nextK,
-                            nextV,
-                            numHeads,
-                            numKVHeads,
-                            seqLen,
-                            nextLength,
-                            startPos,
-                            causal,
-                            scale);
-                        MlxStorage.SetDeviceResult(result, ref attention);
-
-                        MlxNative.FreeArray(kCache);
-                        MlxNative.FreeArray(vCache);
+                        MlxNative.FreeArrayReference(ref kCache);
+                        MlxNative.FreeArrayReference(ref vCache);
                         kCache = nextK;
                         vCache = nextV;
                         nextK = default;
@@ -1002,78 +1123,56 @@ namespace TensorSharp.MLX
                         length = nextLength;
                         return true;
                     }
-                    catch (Exception)
+                    catch (Exception error)
                     {
-                        return false;
-                    }
-                    finally
-                    {
-                        MlxNative.FreeArray(qView);
-                        MlxNative.FreeArray(qCompact);
-                        MlxNative.FreeArray(nextK);
-                        MlxNative.FreeArray(nextV);
-                        MlxNative.FreeArray(attention);
+                        PublishReleaseFailure(effect, error);
+                        throw;
                     }
                 });
             }
 
             private bool TryBuildUpdatedCache(Tensor kHeads, Tensor vHeads,
-                out MlxNative.MlxArray nextK, out MlxNative.MlxArray nextV)
+                CacheResources resources)
             {
-                nextK = default;
-                nextV = default;
-                MlxNative.MlxArray kView = default;
-                MlxNative.MlxArray vView = default;
-                MlxNative.MlxArray kCompact = default;
-                MlxNative.MlxArray vCompact = default;
-                MlxNative.MlxArray concatK = default;
-                MlxNative.MlxArray concatV = default;
-                try
+                ref MlxNative.MlxArray nextK = ref resources.Arrays[2];
+                ref MlxNative.MlxArray nextV = ref resources.Arrays[3];
+                ref MlxNative.MlxArray kView = ref resources.Arrays[5];
+                ref MlxNative.MlxArray vView = ref resources.Arrays[6];
+                ref MlxNative.MlxArray kCompact = ref resources.Arrays[7];
+                ref MlxNative.MlxArray vCompact = ref resources.Arrays[8];
+                ref MlxNative.MlxArray concatK = ref resources.Arrays[9];
+                ref MlxNative.MlxArray concatV = ref resources.Arrays[10];
+                kView = GetView(kHeads);
+                vView = GetView(vHeads);
+                kCompact = kHeads.IsContiguous() ? kView : MlxNative.Contiguous(kView);
+                vCompact = vHeads.IsContiguous() ? vView : MlxNative.Contiguous(vView);
+                if (kHeads.IsContiguous())
+                    kView = default;
+                if (vHeads.IsContiguous())
+                    vView = default;
+
+                if (length == 0)
                 {
-                    kView = GetView(kHeads);
-                    vView = GetView(vHeads);
-                    kCompact = kHeads.IsContiguous() ? kView : MlxNative.Contiguous(kView);
-                    vCompact = vHeads.IsContiguous() ? vView : MlxNative.Contiguous(vView);
-                    if (kHeads.IsContiguous())
-                        kView = default;
-                    if (vHeads.IsContiguous())
-                        vView = default;
-
-                    if (length == 0)
-                    {
-                        nextK = kCompact;
-                        nextV = vCompact;
-                        kCompact = default;
-                        vCompact = default;
-                        return true;
-                    }
-
-                    if (!kCache.IsValid || !vCache.IsValid)
-                        return false;
-
-                    concatK = MlxNative.ConcatenateAxis(kCache, kCompact, 1);
-                    concatV = MlxNative.ConcatenateAxis(vCache, vCompact, 1);
-                    nextK = concatK;
-                    nextV = concatV;
-                    concatK = default;
-                    concatV = default;
+                    nextK = kCompact;
+                    nextV = vCompact;
+                    kCompact = default;
+                    vCompact = default;
                     return true;
                 }
-                finally
-                {
-                    MlxNative.FreeArray(kView);
-                    MlxNative.FreeArray(vView);
-                    MlxNative.FreeArray(kCompact);
-                    MlxNative.FreeArray(vCompact);
-                    MlxNative.FreeArray(concatK);
-                    MlxNative.FreeArray(concatV);
-                }
+
+                if (!kCache.IsValid || !vCache.IsValid)
+                    return false;
+
+                concatK = MlxNative.ConcatenateAxis(kCache, kCompact, 1);
+                concatV = MlxNative.ConcatenateAxis(vCache, vCompact, 1);
+                nextK = concatK;
+                nextV = concatV;
+                concatK = default;
+                concatV = default;
+                return true;
             }
 
-            public void Dispose()
-            {
-                Reset();
-            }
+            public void Dispose() => ReleaseState(retire: true);
         }
 
         public sealed class GatedDeltaNetCache : IDisposable

@@ -153,8 +153,18 @@ unsafe errors and completed target transfers prohibit fallback. The dense-FFN tr
 its intermediates and unreturned result, allocates its output collection before transfer
 readiness and returns only after checked cleanup. These carriers do not own cached weights,
 compiled closures or external host buffers; cache construction and eviction remain unfinished.
+The attention KV cache registers its actual owner in the shared runtime scope. Append,
+materialization, reset and disposal run on the worker. Cache replacement and release use
+the owner's exact destructive reservation before freeing references; Busy preserves the
+existing cache. Checked release clears each successful field once. Failed release retains
+the actual cache and remaining temporary references, and propagates the original error.
+Append retains its view, compact, concatenated and attention references in one carrier;
+completed target or cache transfers prohibit fallback. Disposal completes registration
+only after both references are released, and repeated successful disposal is a no-op.
+Asynchronous materialization checks submission and reference replacement, not GPU completion.
+The recurrent GatedDeltaNet cache still requires checked state ownership and recovery.
 All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
-stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
+other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA
