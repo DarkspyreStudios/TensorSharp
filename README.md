@@ -161,8 +161,9 @@ check temporary cleanup before returning an output. Failed cleanup retains actua
 incoming arrays and unreturned replacements; successful fields clear once, with no rollback.
 Storage operations dispatch to the worker before taking their existing reference-mutation
 gate. They recheck the actual storage under that gate and keep host copies, dirty-state
-updates, array-view acquisition and result adoption inside it. Reference mutations from
-another thread refuse beneath a native effect or compiled callback before waiting on the
+updates, array-view acquisition and result adoption inside it. Host element and byte ranges
+reject overflowing ends before raw pointer access. Reference mutations from another thread
+refuse beneath a native effect or compiled callback before waiting on the
 storage gate. View acquisition and result adoption also check the actual tensor's live
 ownership. Ref handoff preserves the caller's array when admission refuses and consumes it
 only after the actual change carrier takes it. Raw returned pointers still require the caller

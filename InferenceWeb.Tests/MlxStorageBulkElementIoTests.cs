@@ -18,6 +18,18 @@ namespace InferenceWeb.Tests;
 /// </summary>
 public class MlxStorageBulkElementIoTests
 {
+    [Theory]
+    [InlineData(long.MaxValue, 1, 8, "index")]
+    [InlineData(8, long.MaxValue, 16, "storageIndex")]
+    public void MlxHostRangesRejectOverflowingEnd(long offset, long length, long capacity, string parameterName)
+    {
+        ArgumentOutOfRangeException failure = Assert.Throws<ArgumentOutOfRangeException>(
+            () => MlxStorage.ValidateHostRange(offset, length, capacity, parameterName));
+
+        Assert.Equal(parameterName, failure.ParamName);
+        MlxStorage.ValidateHostRange(capacity, 0, capacity, parameterName);
+    }
+
     [MlxFact]
     public void MlxBulkFloat32Io_MatchesPerElementPath()
     {

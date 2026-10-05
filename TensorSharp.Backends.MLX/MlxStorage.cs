@@ -650,8 +650,7 @@ namespace TensorSharp.MLX
         {
             ThrowIfDestroyed();
             nativeOwner.ThrowIfQuarantined();
-            if (index < 0 || length < 0 || index + length > ElementCount)
-                throw new ArgumentOutOfRangeException(nameof(index));
+            ValidateHostRange(index, length, ElementCount, nameof(index));
         }
 
         private void ValidateByteRange(long storageIndex, long byteCount)
@@ -662,8 +661,13 @@ namespace TensorSharp.MLX
                 throw new ArgumentOutOfRangeException(nameof(byteCount));
 
             long byteOffset = checked(storageIndex * ElementType.Size());
-            if (byteOffset < 0 || byteOffset + byteCount > ByteLength)
-                throw new ArgumentOutOfRangeException(nameof(storageIndex));
+            ValidateHostRange(byteOffset, byteCount, ByteLength, nameof(storageIndex));
+        }
+
+        internal static void ValidateHostRange(long offset, long length, long capacity, string parameterName)
+        {
+            if (offset < 0 || length < 0 || offset > capacity || length > capacity - offset)
+                throw new ArgumentOutOfRangeException(parameterName);
         }
 
         private static IntPtr AddBytes(IntPtr ptr, long bytes)
