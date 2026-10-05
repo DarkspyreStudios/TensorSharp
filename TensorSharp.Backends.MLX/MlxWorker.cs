@@ -10,6 +10,7 @@ namespace TensorSharp.MLX
     {
         internal bool SafelyReleased;
         internal virtual bool HasNativeResources => true;
+        internal virtual bool CleanupRequiresOrdinaryEffect => true;
         internal virtual NativeRuntimeFailureStage CleanupFailureStage => NativeRuntimeFailureStage.GraphRelease;
     }
 
@@ -185,7 +186,7 @@ namespace TensorSharp.MLX
                     try
                     {
                         nativeOwner.ThrowIfQuarantined();
-                        if (resources.HasNativeResources)
+                        if (resources.HasNativeResources && resources.CleanupRequiresOrdinaryEffect)
                         {
                             effect = nativeOwner.EnterEffect();
                             MlxNative.InstallCurrentErrorHandler();

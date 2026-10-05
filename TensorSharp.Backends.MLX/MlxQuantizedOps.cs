@@ -84,6 +84,7 @@ namespace TensorSharp.MLX
         {
             internal readonly Dictionary<CacheKey, LinkedListNode<DeviceWeight>> Cache = new();
             internal readonly Dictionary<CacheKey, StackedAffineWeight> StackedCache = new();
+            internal readonly Dictionary<FusedFFNCacheKey, FusedFFNClosureSlot> FusedFFNClosures = new();
             internal readonly LinkedList<DeviceWeight> OffloadLru = new();
             internal long ResidentBytes;
             internal readonly NativeOwnerRegistration NativeOwner;
@@ -961,11 +962,20 @@ namespace TensorSharp.MLX
         // different intermediate size or quant params would just compile
         // its own slot. shapeless=true so MLX specializes per shape
         // internally.
-        private sealed class FusedFFNClosureSlot
+        private sealed class FusedFFNClosureSlot(WeightCacheRuntime owner) : MlxNativeResources
         {
             public MlxNative.CompiledClosure Closure;
+            internal bool Published;
+            internal override bool HasNativeResources => !Published && Closure != null && !Closure.SafelyReleased;
+            internal override bool CleanupRequiresOrdinaryEffect => false;
+
+            internal void Release()
+            {
+                if (!Published)
+                    MlxNative.FreeCompiledClosure(Closure);
+                GC.KeepAlive(owner);
+            }
         }
-        private static readonly Dictionary<FusedFFNCacheKey, FusedFFNClosureSlot> s_FusedFFNClosures = new();
 
         private readonly struct FusedFFNCacheKey : IEquatable<FusedFFNCacheKey>
         {
@@ -1099,74 +1109,80 @@ namespace TensorSharp.MLX
 
         private static MlxNative.CompiledClosure EnsureFusedFFNClosure(FusedFFNCacheKey key)
         {
-            lock (s_FusedFFNClosures)
-            {
-                if (s_FusedFFNClosures.TryGetValue(key, out var existing) && existing.Closure != null)
-                    return existing.Closure;
-            }
-
-            // Capture key fields as locals so the closure body uses them as
-            // compile-time constants rather than going through hash lookups.
+            // Capture shape constants without holding a native effect across tracing.
             int halfDim = key.HalfDim;
             int groupSize = key.GroupSize;
             int bits = key.Bits;
             string mode = key.Mode;
             float eps = BitConverter.Int32BitsToSingle(key.EpsBits);
 
-            var closure = MlxNative.NewClosure(inputs =>
+            var slot = new FusedFFNClosureSlot(weightCache);
+            return MlxWorker.Shared.InvokeWithResources(slot, () =>
             {
-                // Apply-time arg layout: hidden, pre_norm_w,
-                // gate_up_{weight,scales,biases}, down_{...},
-                // post_norm_w, residual.
-                MlxNative.MlxArray hidden = inputs[0];
-                MlxNative.MlxArray preNormW = inputs[1];
-                MlxNative.MlxArray gateUpW = inputs[2];
-                MlxNative.MlxArray gateUpS = inputs[3];
-                MlxNative.MlxArray gateUpB = inputs[4];
-                MlxNative.MlxArray downW = inputs[5];
-                MlxNative.MlxArray downS = inputs[6];
-                MlxNative.MlxArray downB = inputs[7];
-                MlxNative.MlxArray postNormW = inputs[8];
-                MlxNative.MlxArray residual = inputs[9];
-
-                var resources = new MlxArrayResources(6, inputs);
-                return MlxWorker.Shared.InvokeWithResources(resources, () =>
+                weightCache.NativeOwner.ThrowIfQuarantined();
+                lock (Sync)
                 {
-                    ref MlxNative.MlxArray normedPre = ref resources.Arrays[0];
-                    ref MlxNative.MlxArray gateUp = ref resources.Arrays[1];
-                    ref MlxNative.MlxArray activated = ref resources.Arrays[2];
-                    ref MlxNative.MlxArray downOut = ref resources.Arrays[3];
-                    ref MlxNative.MlxArray normedPost = ref resources.Arrays[4];
-                    ref MlxNative.MlxArray result = ref resources.Arrays[5];
-                    normedPre = MlxNative.FastRmsNorm(hidden, preNormW, eps);
-                    gateUp = MlxNative.QuantizedMatmul(
-                        normedPre, gateUpW, gateUpS, gateUpB,
-                        transpose: true, groupSize, bits, mode);
-                    activated = MlxNative.GeluMulSplit(gateUp, rows: 1, halfDim: halfDim);
-                    downOut = MlxNative.QuantizedMatmul(
-                        activated, downW, downS, downB,
-                        transpose: true, groupSize, bits, mode);
-                    normedPost = MlxNative.FastRmsNorm(downOut, postNormW, eps);
-                    result = MlxNative.Binary(
-                        MlxNative.MlxBinaryOp.Add, residual, normedPost);
-                    MlxNative.MlxArray[] outputs = { result };
-                    resources.ReturnedIndex = 5;
-                    return outputs;
-                }, resources.Release);
-            }, shapeless: true);
+                    if (weightCache.FusedFFNClosures.TryGetValue(key, out var existing) && existing.Closure != null)
+                        return existing.Closure;
+                    weightCache.FusedFFNClosures.EnsureCapacity(checked(weightCache.FusedFFNClosures.Count + 1));
 
-            lock (s_FusedFFNClosures)
-            {
-                if (s_FusedFFNClosures.TryGetValue(key, out var existing) && existing.Closure != null)
-                {
-                    // Someone else compiled the same closure while we were
-                    // tracing. Free ours and use theirs.
-                    MlxNative.FreeCompiledClosure(closure);
-                    return existing.Closure;
+                    slot.Closure = MlxNative.NewClosure(inputs =>
+                    {
+                        // Apply-time arg layout: hidden, pre_norm_w,
+                        // gate_up_{weight,scales,biases}, down_{...},
+                        // post_norm_w, residual.
+                        MlxNative.MlxArray hidden = inputs[0];
+                        MlxNative.MlxArray preNormW = inputs[1];
+                        MlxNative.MlxArray gateUpW = inputs[2];
+                        MlxNative.MlxArray gateUpS = inputs[3];
+                        MlxNative.MlxArray gateUpB = inputs[4];
+                        MlxNative.MlxArray downW = inputs[5];
+                        MlxNative.MlxArray downS = inputs[6];
+                        MlxNative.MlxArray downB = inputs[7];
+                        MlxNative.MlxArray postNormW = inputs[8];
+                        MlxNative.MlxArray residual = inputs[9];
+
+                        var resources = new MlxArrayResources(6, inputs);
+                        return MlxWorker.Shared.InvokeWithResources(resources, () =>
+                        {
+                            ref MlxNative.MlxArray normedPre = ref resources.Arrays[0];
+                            ref MlxNative.MlxArray gateUp = ref resources.Arrays[1];
+                            ref MlxNative.MlxArray activated = ref resources.Arrays[2];
+                            ref MlxNative.MlxArray downOut = ref resources.Arrays[3];
+                            ref MlxNative.MlxArray normedPost = ref resources.Arrays[4];
+                            ref MlxNative.MlxArray result = ref resources.Arrays[5];
+                            normedPre = MlxNative.FastRmsNorm(hidden, preNormW, eps);
+                            gateUp = MlxNative.QuantizedMatmul(
+                                normedPre, gateUpW, gateUpS, gateUpB,
+                                transpose: true, groupSize, bits, mode);
+                            activated = MlxNative.GeluMulSplit(gateUp, rows: 1, halfDim: halfDim);
+                            downOut = MlxNative.QuantizedMatmul(
+                                activated, downW, downS, downB,
+                                transpose: true, groupSize, bits, mode);
+                            normedPost = MlxNative.FastRmsNorm(downOut, postNormW, eps);
+                            result = MlxNative.Binary(
+                                MlxNative.MlxBinaryOp.Add, residual, normedPost);
+                            MlxNative.MlxArray[] outputs = { result };
+                            resources.ReturnedIndex = 5;
+                            return outputs;
+                        }, resources.Release);
+                    }, shapeless: true);
+                    using NativeEffectLease effect = weightCache.NativeOwner.EnterEffect();
+                    try
+                    {
+                        weightCache.FusedFFNClosures.Add(key, slot);
+                        slot.Published = true;
+                    }
+                    catch (Exception original)
+                    {
+                        Exception error = original;
+                        try { effect.PublishFailure(weightCache, original, NativeRuntimeFailureStage.CacheRelease); }
+                        catch (Exception publication) { error = MlxNative.JoinNativeErrors(error, publication); }
+                        ExceptionDispatchInfo.Capture(error).Throw();
+                    }
+                    return slot.Closure;
                 }
-                s_FusedFFNClosures[key] = new FusedFFNClosureSlot { Closure = closure };
-                return closure;
-            }
+            }, slot.Release);
         }
 
         /// <summary>

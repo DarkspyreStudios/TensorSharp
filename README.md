@@ -179,6 +179,11 @@ Publication and construction share one worker call; failed publication retains t
 parent and remaining arrays. Per-key and device cleanup release both weight dictionaries
 after the reserved all-stream boundary. Stacked cleanup clears only checked-success fields.
 Stacked preload propagates Busy and retained unsafe failures without reporting fallback.
+The registered parent also owns the actual dense-FFN closure dictionary. The worker retains
+its real slot before closure creation, reserves dictionary capacity first and publishes
+only after checked construction returns. Publication failure retains the actual graph.
+Unpublished closure cleanup uses its own callback-aware release authority without an outer
+ordinary native effect. Cache lookup, construction and publication share one worker call.
 Allocator disposal sets its disposed flag only after device and backend cache cleanup
 succeed. These operations do not establish final cache/closure/model/worker retirement,
 queued-reader lifetime, external host-backing lifetime or native runtime qualification.
