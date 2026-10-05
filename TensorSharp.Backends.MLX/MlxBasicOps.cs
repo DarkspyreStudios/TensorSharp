@@ -15,7 +15,7 @@ namespace TensorSharp.MLX
                 return;
             }
 
-            var resources = new BasicOperationResources(1, result);
+            var resources = new MlxArrayResources(1, result);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray output = ref resources.Arrays[0];
@@ -33,7 +33,7 @@ namespace TensorSharp.MLX
                 return;
             }
 
-            var resources = new BasicOperationResources(3, result, src);
+            var resources = new MlxArrayResources(3, result, src);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -59,7 +59,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src, m1, m2))
                 return FallbackTensor("addmm", writeTarget, beta, src, alpha, m1, m2);
 
-            var resources = new BasicOperationResources(4, writeTarget, src, m1, m2);
+            var resources = new MlxArrayResources(4, writeTarget, src, m1, m2);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -82,7 +82,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src, m1, m2))
                 return FallbackTensor("addmmbatch", writeTarget, beta, src, alpha, m1, m2);
 
-            var resources = new BasicOperationResources(4, writeTarget, src, m1, m2);
+            var resources = new MlxArrayResources(4, writeTarget, src, m1, m2);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -135,7 +135,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("relu", writeTarget, src);
 
-            var resources = new BasicOperationResources(3, writeTarget, src);
+            var resources = new MlxArrayResources(3, writeTarget, src);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -156,7 +156,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("SiLU", writeTarget, src);
 
-            var resources = new BasicOperationResources(3, writeTarget, src);
+            var resources = new MlxArrayResources(3, writeTarget, src);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -184,7 +184,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("GELU", writeTarget, src);
 
-            var resources = new BasicOperationResources(2, writeTarget, src);
+            var resources = new MlxArrayResources(2, writeTarget, src);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -236,7 +236,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(gate, up))
                 return FallbackTensor("SiLUMul", writeTarget, gate, up);
 
-            var resources = new BasicOperationResources(5, writeTarget, gate, up);
+            var resources = new MlxArrayResources(5, writeTarget, gate, up);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray gateView = ref resources.Arrays[0];
@@ -280,7 +280,7 @@ namespace TensorSharp.MLX
             }
 
             int rows = checked((int)gateUp.Sizes[0]);
-            var resources = new BasicOperationResources(6, writeTarget, gateUp);
+            var resources = new MlxArrayResources(6, writeTarget, gateUp);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray gateUpView = ref resources.Arrays[0];
@@ -314,7 +314,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(gate, up))
                 return FallbackTensor("GELUMul", writeTarget, gate, up);
 
-            var resources = new BasicOperationResources(4, writeTarget, gate, up);
+            var resources = new MlxArrayResources(4, writeTarget, gate, up);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray gateView = ref resources.Arrays[0];
@@ -344,7 +344,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(x, gate))
                 return FallbackTensor("SigmoidMul", writeTarget, x, gate);
 
-            var resources = new BasicOperationResources(4, writeTarget, x, gate);
+            var resources = new MlxArrayResources(4, writeTarget, x, gate);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray xView = ref resources.Arrays[0];
@@ -374,7 +374,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("softmax", writeTarget, src);
 
-            var resources = new BasicOperationResources(2, writeTarget, src);
+            var resources = new MlxArrayResources(2, writeTarget, src);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -485,7 +485,7 @@ namespace TensorSharp.MLX
             bool traditional = (mode & 2) == 0;
             int rows = (int)rowsLong;
             int features = (int)cols;
-            var resources = new BasicOperationResources(7, writeTarget, src, positions, result);
+            var resources = new MlxArrayResources(7, writeTarget, src, positions, result);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray resultView = ref resources.Arrays[0];
@@ -531,7 +531,7 @@ namespace TensorSharp.MLX
                 return FallbackTensor("scaled_dot_product_attention", writeTarget, query, key, value, mask, scale);
             }
 
-            var resources = new BasicOperationResources(10, writeTarget, query, key, value, mask);
+            var resources = new MlxArrayResources(10, writeTarget, query, key, value, mask);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray queryView = ref resources.Arrays[0];
@@ -581,7 +581,7 @@ namespace TensorSharp.MLX
                 return FallbackTensor("indexselect", writeTarget, src, indices, isAdd);
             }
 
-            var resources = new BasicOperationResources(4, writeTarget, src, indices);
+            var resources = new MlxArrayResources(4, writeTarget, src, indices);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -613,7 +613,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src))
                 return FallbackTensor("repeat_interleave", writeTarget, src, repeats, dim);
 
-            var resources = new BasicOperationResources(3, writeTarget, src);
+            var resources = new MlxArrayResources(3, writeTarget, src);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -634,7 +634,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src) || !AreOptionalFloat32(alpha, beta))
                 return FallbackTensor("layernorm", writeTarget, src, alpha, beta, eps);
 
-            var resources = new BasicOperationResources(4, writeTarget, src, alpha, beta);
+            var resources = new MlxArrayResources(4, writeTarget, src, alpha, beta);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -657,7 +657,7 @@ namespace TensorSharp.MLX
             if (beta != null || !CanUseNativeWriteTarget(writeTarget) || !AreFloat32(src) || !AreOptionalFloat32(alpha))
                 return FallbackTensor("rmsnorm", writeTarget, src, alpha, beta, eps);
 
-            var resources = new BasicOperationResources(3, writeTarget, src, alpha);
+            var resources = new MlxArrayResources(3, writeTarget, src, alpha);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -694,7 +694,7 @@ namespace TensorSharp.MLX
 
             int rows = (int)rowsLong;
             int keyLength = (int)cols;
-            var resources = new BasicOperationResources(15, tensor);
+            var resources = new MlxArrayResources(15, tensor);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray tensorView = ref resources.Arrays[0];
@@ -747,7 +747,7 @@ namespace TensorSharp.MLX
                 return FallbackTensor(opName, writeTarget, src);
 
             // The sub-graph stays on the worker; native calls retain separate admission.
-            var resources = new BasicOperationResources(2, writeTarget, src);
+            var resources = new MlxArrayResources(2, writeTarget, src);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray srcView = ref resources.Arrays[0];
@@ -765,7 +765,7 @@ namespace TensorSharp.MLX
             if (!CanUseNativeWriteTarget(writeTarget) || !AreFloat32(lhs, rhs))
                 return FallbackTensor(opName, writeTarget, lhs, rhs);
 
-            var resources = new BasicOperationResources(3, writeTarget, lhs, rhs);
+            var resources = new MlxArrayResources(3, writeTarget, lhs, rhs);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray lhsView = ref resources.Arrays[0];
@@ -787,7 +787,7 @@ namespace TensorSharp.MLX
                     ? FallbackTensor(opName, writeTarget, scalar, tensor)
                     : FallbackTensor(opName, writeTarget, tensor, scalar);
 
-            var resources = new BasicOperationResources(3, writeTarget, tensor);
+            var resources = new MlxArrayResources(3, writeTarget, tensor);
             MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray tensorView = ref resources.Arrays[0];
@@ -805,7 +805,7 @@ namespace TensorSharp.MLX
 
         private static MlxNative.MlxArray Gelu(MlxNative.MlxArray input)
         {
-            var resources = new BasicOperationResources(13);
+            var resources = new MlxArrayResources(13);
             return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
                 ref MlxNative.MlxArray coeffCubic = ref resources.Arrays[0];
@@ -838,39 +838,6 @@ namespace TensorSharp.MLX
                 resources.ReturnedIndex = 12;
                 return output;
             }, resources.Release);
-        }
-
-        private sealed class BasicOperationResources : MlxNativeResources
-        {
-            internal readonly MlxNative.MlxArray[] Arrays;
-            internal int ReturnedIndex = -1;
-            private readonly Storage[] storages;
-
-            internal override bool HasNativeResources
-            {
-                get
-                {
-                    foreach (MlxNative.MlxArray array in Arrays)
-                        if (array.IsValid) return true;
-                    return false;
-                }
-            }
-
-            internal BasicOperationResources(int referenceCount, params Tensor[] tensors)
-            {
-                Arrays = new MlxNative.MlxArray[referenceCount];
-                storages = new Storage[tensors.Length];
-                for (int i = 0; i < tensors.Length; i++)
-                    storages[i] = tensors[i]?.Storage;
-            }
-
-            internal void Release()
-            {
-                for (int i = 0; i < Arrays.Length; i++)
-                    if (i != ReturnedIndex)
-                        MlxNative.FreeArrayReference(ref Arrays[i]);
-                GC.KeepAlive(storages);
-            }
         }
 
         private static bool CanUseNativeCopy(Tensor result, Tensor src)

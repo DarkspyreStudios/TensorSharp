@@ -108,8 +108,12 @@ Only the native payload destructor releases its exact callback root, except fail
 binding before native adoption. Checked closure-reference release completes registration
 only when that root is actually gone. A later payload destructor does not automatically
 complete a pending registration; deferred payload completion remains unfinished.
-Trace-delegate intermediate arrays that never reach its returned outputs still require
-construction/replacement recovery; invocation retention does not supply that missing ownership.
+The seven built-in activation traces and GELU helper retain their acquired intermediates and
+unreturned outputs through the same worker-owned array carrier as basic operations. Callback
+inputs remain borrowed from their existing invocation owner. Outputs transfer only after
+checked intermediate cleanup succeeds, including allocation of the returned output collection.
+Other trace delegates still require construction/replacement recovery; invocation retention
+does not supply their missing intermediate ownership.
 Graph evaluation, asynchronous submission and host-copy evaluation retain their actual vector
 resources through the worker before native acquisition. Submission waits for checked native
 return, not GPU completion. Failed evaluation retains the graph and fences the shared runtime;
@@ -135,7 +139,7 @@ failure. Failed or refused cleanup retains the remaining references and storage 
 reference cleanup has no native effect. The eager GELU helper returns its output only after
 all intermediate cleanup succeeds; failed cleanup retains its unreturned output.
 All-used-stream synchronization remains unfinished. Custom-kernel factories, raw temporaries,
-fused/quantized/compiled-trace caller cleanup, tensor-owned child disposal and replacement
+fused/quantized/other trace caller cleanup, tensor-owned child disposal and replacement
 paths still require checked ownership recovery;
 worker admission does not prove successful GPU synchronization or worker retirement.
 Remaining raw CUDA

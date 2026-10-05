@@ -54,16 +54,17 @@ namespace TensorSharp.MLX
             var c = EnsureCompiled(ref siluClosure, inputs =>
             {
                 MlxNative.MlxArray inp = inputs[0];
-                MlxNative.MlxArray sig = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, inp);
-                try
+                var resources = new MlxArrayResources(2, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
-                    MlxNative.MlxArray result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, inp, sig);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(sig);
-                }
+                    ref MlxNative.MlxArray sig = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[1];
+                    sig = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, inp);
+                    result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, inp, sig);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 1;
+                    return outputs;
+                }, resources.Release);
             });
             return MlxNative.ApplyClosure1(c, x);
         }
@@ -73,7 +74,18 @@ namespace TensorSharp.MLX
         // fuses into a single kernel.
         public static MlxNative.MlxArray GeluTanh(MlxNative.MlxArray x)
         {
-            var c = EnsureCompiled(ref geluTanhClosure, inputs => new[] { GeluTanhTrace(inputs[0]) });
+            var c = EnsureCompiled(ref geluTanhClosure, inputs =>
+            {
+                var resources = new MlxArrayResources(1, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
+                {
+                    ref MlxNative.MlxArray result = ref resources.Arrays[0];
+                    result = GeluTanhTrace(inputs[0]);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 0;
+                    return outputs;
+                }, resources.Release);
+            });
             return MlxNative.ApplyClosure1(c, x);
         }
 
@@ -81,20 +93,22 @@ namespace TensorSharp.MLX
         {
             // Allocate scalars inside the trace so they participate in the
             // compiled graph. The MLX compiler folds them as constants.
-            MlxNative.MlxArray coeffCubic = default;
-            MlxNative.MlxArray coeffInner = default;
-            MlxNative.MlxArray one = default;
-            MlxNative.MlxArray half = default;
-            MlxNative.MlxArray squared = default;
-            MlxNative.MlxArray cubed = default;
-            MlxNative.MlxArray scaledCubic = default;
-            MlxNative.MlxArray inner = default;
-            MlxNative.MlxArray scaledInner = default;
-            MlxNative.MlxArray tanh = default;
-            MlxNative.MlxArray onePlusTanh = default;
-            MlxNative.MlxArray halfInput = default;
-            try
+            var resources = new MlxArrayResources(13, new[] { input });
+            return MlxWorker.Shared.InvokeWithResources(resources, () =>
             {
+                ref MlxNative.MlxArray coeffCubic = ref resources.Arrays[0];
+                ref MlxNative.MlxArray coeffInner = ref resources.Arrays[1];
+                ref MlxNative.MlxArray one = ref resources.Arrays[2];
+                ref MlxNative.MlxArray half = ref resources.Arrays[3];
+                ref MlxNative.MlxArray squared = ref resources.Arrays[4];
+                ref MlxNative.MlxArray cubed = ref resources.Arrays[5];
+                ref MlxNative.MlxArray scaledCubic = ref resources.Arrays[6];
+                ref MlxNative.MlxArray inner = ref resources.Arrays[7];
+                ref MlxNative.MlxArray scaledInner = ref resources.Arrays[8];
+                ref MlxNative.MlxArray tanh = ref resources.Arrays[9];
+                ref MlxNative.MlxArray onePlusTanh = ref resources.Arrays[10];
+                ref MlxNative.MlxArray halfInput = ref resources.Arrays[11];
+                ref MlxNative.MlxArray output = ref resources.Arrays[12];
                 coeffCubic = MlxNative.NewScalar(0.044715f);
                 coeffInner = MlxNative.NewScalar(0.7978845608f);
                 one = MlxNative.NewScalar(1.0f);
@@ -108,23 +122,10 @@ namespace TensorSharp.MLX
                 tanh = MlxNative.Unary(MlxNative.MlxUnaryOp.Tanh, scaledInner);
                 onePlusTanh = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, one, tanh);
                 halfInput = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, input, half);
-                return MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, halfInput, onePlusTanh);
-            }
-            finally
-            {
-                MlxNative.FreeArray(coeffCubic);
-                MlxNative.FreeArray(coeffInner);
-                MlxNative.FreeArray(one);
-                MlxNative.FreeArray(half);
-                MlxNative.FreeArray(squared);
-                MlxNative.FreeArray(cubed);
-                MlxNative.FreeArray(scaledCubic);
-                MlxNative.FreeArray(inner);
-                MlxNative.FreeArray(scaledInner);
-                MlxNative.FreeArray(tanh);
-                MlxNative.FreeArray(onePlusTanh);
-                MlxNative.FreeArray(halfInput);
-            }
+                output = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, halfInput, onePlusTanh);
+                resources.ReturnedIndex = 12;
+                return output;
+            }, resources.Release);
         }
 
         // SwiGLU = silu(gate) * up. The common LLaMA/Qwen FFN activation.
@@ -134,19 +135,19 @@ namespace TensorSharp.MLX
             {
                 MlxNative.MlxArray g = inputs[0];
                 MlxNative.MlxArray u = inputs[1];
-                MlxNative.MlxArray sig = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, g);
-                MlxNative.MlxArray silu = default;
-                try
+                var resources = new MlxArrayResources(3, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
+                    ref MlxNative.MlxArray sig = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray silu = ref resources.Arrays[1];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[2];
+                    sig = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, g);
                     silu = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, g, sig);
-                    MlxNative.MlxArray result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, u);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(sig);
-                    MlxNative.FreeArray(silu);
-                }
+                    result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, silu, u);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 2;
+                    return outputs;
+                }, resources.Release);
             });
             return MlxNative.ApplyClosure2(c, gate, up);
         }
@@ -158,16 +159,17 @@ namespace TensorSharp.MLX
             {
                 MlxNative.MlxArray g = inputs[0];
                 MlxNative.MlxArray u = inputs[1];
-                MlxNative.MlxArray gelu = GeluTanhTrace(g);
-                try
+                var resources = new MlxArrayResources(2, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
-                    MlxNative.MlxArray result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gelu, u);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(gelu);
-                }
+                    ref MlxNative.MlxArray gelu = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[1];
+                    gelu = GeluTanhTrace(g);
+                    result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, gelu, u);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 1;
+                    return outputs;
+                }, resources.Release);
             });
             return MlxNative.ApplyClosure2(c, gate, up);
         }
@@ -180,16 +182,17 @@ namespace TensorSharp.MLX
             {
                 MlxNative.MlxArray xi = inputs[0];
                 MlxNative.MlxArray gi = inputs[1];
-                MlxNative.MlxArray sig = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gi);
-                try
+                var resources = new MlxArrayResources(2, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
-                    MlxNative.MlxArray result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xi, sig);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(sig);
-                }
+                    ref MlxNative.MlxArray sig = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[1];
+                    sig = MlxNative.Unary(MlxNative.MlxUnaryOp.Sigmoid, gi);
+                    result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, xi, sig);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 1;
+                    return outputs;
+                }, resources.Release);
             });
             return MlxNative.ApplyClosure2(c, x, gate);
         }
@@ -213,16 +216,17 @@ namespace TensorSharp.MLX
                 // the Qwen35 GDN call site (1e-6f) and traces once shapelessly,
                 // hard-coding it here is fine — the compiled graph specializes
                 // to this eps value.
-                MlxNative.MlxArray normed = MlxNative.FastRmsNorm(xi, wi, 1e-6f);
-                try
+                var resources = new MlxArrayResources(2, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
-                    MlxNative.MlxArray result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, normed, si);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(normed);
-                }
+                    ref MlxNative.MlxArray normed = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[1];
+                    normed = MlxNative.FastRmsNorm(xi, wi, 1e-6f);
+                    result = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, normed, si);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 1;
+                    return outputs;
+                }, resources.Release);
             });
             // Note: eps is captured by the closure trace; if a different eps
             // is ever needed, add it as a 4th input or compile a separate slot.
@@ -243,16 +247,17 @@ namespace TensorSharp.MLX
                 MlxNative.MlxArray o = inputs[0];
                 MlxNative.MlxArray s = inputs[1];
                 MlxNative.MlxArray k = inputs[2];
-                MlxNative.MlxArray scaled = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, s, k);
-                try
+                var resources = new MlxArrayResources(2, inputs);
+                return MlxWorker.Shared.InvokeWithResources(resources, () =>
                 {
-                    MlxNative.MlxArray result = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, o, scaled);
-                    return new[] { result };
-                }
-                finally
-                {
-                    MlxNative.FreeArray(scaled);
-                }
+                    ref MlxNative.MlxArray scaled = ref resources.Arrays[0];
+                    ref MlxNative.MlxArray result = ref resources.Arrays[1];
+                    scaled = MlxNative.Binary(MlxNative.MlxBinaryOp.Mul, s, k);
+                    result = MlxNative.Binary(MlxNative.MlxBinaryOp.Add, o, scaled);
+                    MlxNative.MlxArray[] outputs = new[] { result };
+                    resources.ReturnedIndex = 1;
+                    return outputs;
+                }, resources.Release);
             });
             return MlxNative.ApplyClosure(c, new[] { output, src, scalar })[0];
         }
