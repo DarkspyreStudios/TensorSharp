@@ -66,6 +66,8 @@ Group and model cleanup share the same ownership census and restoration call.
 The model census includes tensor-parallel replicas only when their lazy cache exists.
 Models without replicas retain the same construction rollback and retirement path.
 Cleanup uncertainty retains actual owners and fences the affected device.
+Qwen35 tensor-parallel fusion and cache synchronization preserve failures recorded by that
+same authority. Their fallback and missing-weight catches handle only unrecorded failures.
 The Qwen-Image-2.1 conditioner joins its vision tensors to the text model's actual
 disposal census. The text model releases that child before its allocator, through
 the same coordinated cleanup. A failed vision constructor remains attached before

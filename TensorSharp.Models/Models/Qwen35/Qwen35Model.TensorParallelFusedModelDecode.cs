@@ -376,7 +376,7 @@ namespace TensorSharp.Models
                 DropTpFusedDecodeGraphs();
                 bool built;
                 try { built = TryBuildTpFdLayerDescs(); }
-                catch (KeyNotFoundException e) { built = TpFdBail($"missing weight {e.Message}"); }
+                catch (KeyNotFoundException e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _)) { built = TpFdBail($"missing weight {e.Message}"); }
                 if (!built)
                 {
                     // Latched for the process: report it if TryBuildTpFdLayerDescs
@@ -445,7 +445,7 @@ namespace TensorSharp.Models
                         GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
-            catch (InvalidOperationException e)
+            catch (InvalidOperationException e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
             {
                 _tpFdFailed = true;
                 if (!_tpFdLogged)
@@ -535,7 +535,7 @@ namespace TensorSharp.Models
             if (ptr == IntPtr.Zero) return;
             long bytes = t.ElementCount() * sizeof(float);
             try { GgmlBasicOps.SyncHostBuffer(ptr, bytes); }
-            catch (InvalidOperationException) { /* never went device-resident */ }
+            catch (InvalidOperationException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { /* never went device-resident */ }
         }
 
         /// <summary>
@@ -617,7 +617,7 @@ namespace TensorSharp.Models
                 bool built;
                 string buildErr = null;
                 try { built = TryBuildTpFdLayerDescs(); }
-                catch (KeyNotFoundException e) { built = false; buildErr = $"missing weight {e.Message}"; }
+                catch (KeyNotFoundException e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _)) { built = false; buildErr = $"missing weight {e.Message}"; }
                 if (!built)
                 {
                     _tpPfFailed = true;
@@ -723,7 +723,7 @@ namespace TensorSharp.Models
                             GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                     }
                 }
-                catch (InvalidOperationException e)
+                catch (InvalidOperationException e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
                 {
                     _tpPfFailed = true;
                     if (!_tpPfLogged)

@@ -85,7 +85,8 @@ namespace TensorSharp.Models
                 else
                     GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
-            catch (Exception ex) when (ex is InvalidOperationException || ex is NotSupportedException || ex is ArgumentException)
+            catch (Exception ex) when ((ex is InvalidOperationException or NotSupportedException or ArgumentException)
+                && !NativeQuarantineAuthority.TryGetFailure(ex, out _))
             {
                 return false;
             }
@@ -152,7 +153,8 @@ namespace TensorSharp.Models
                 else
                     GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
-            catch (Exception ex) when (ex is InvalidOperationException || ex is NotSupportedException || ex is ArgumentException)
+            catch (Exception ex) when ((ex is InvalidOperationException or NotSupportedException or ArgumentException)
+                && !NativeQuarantineAuthority.TryGetFailure(ex, out _))
             {
                 return false;
             }
@@ -202,7 +204,7 @@ namespace TensorSharp.Models
             if (ptr == IntPtr.Zero) return;
             long bytes = t.ElementCount() * t.ElementType.Size();
             try { GgmlBasicOps.SyncHostBuffer(ptr, bytes); }
-            catch (InvalidOperationException) { /* never went device-resident */ }
+            catch (InvalidOperationException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _)) { /* never went device-resident */ }
         }
 
         /// <summary>Disable with TS_QWEN35_TP_FUSED=0.</summary>
@@ -366,7 +368,7 @@ namespace TensorSharp.Models
                 else
                     GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
             {
                 return false;
             }
