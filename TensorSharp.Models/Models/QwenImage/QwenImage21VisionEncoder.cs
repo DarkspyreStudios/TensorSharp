@@ -66,7 +66,7 @@ namespace TensorSharp.Models
             }
         }
 
-        private Tensor ProjectDeepStack(Tensor hidden, int layer, int patches)
+        private void ProjectDeepStack(Tensor hidden, int layer, int patches, List<Tensor> deepStack)
         {
             int unit = _spatialMergeSize * _spatialMergeSize;
             string prefix = $"v.deepstack.{layer}";
@@ -74,7 +74,7 @@ namespace TensorSharp.Models
             using var normalized = LayerNormOp(merged, prefix + ".norm.weight", prefix + ".norm.bias");
             using var fc1 = LinearForwardWithBias(normalized, prefix + ".fc1.weight", prefix + ".fc1.bias");
             ApplyVisionGelu(fc1);
-            return LinearForwardWithBias(fc1, prefix + ".fc2.weight", prefix + ".fc2.bias");
+            deepStack.Add(LinearForwardWithBias(fc1, prefix + ".fc2.weight", prefix + ".fc2.bias"));
         }
         private void ApplyVisionGelu(Tensor tensor)
         {

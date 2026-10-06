@@ -117,8 +117,10 @@ Its ready vision field publishes only after construction returns. Checked text-o
 collects every retained vision child and clears the collection only after their release succeeds.
 DeepStack result batches attach to the vision child before generation. The final projection
 attaches before synchronization or temporary-view release. Readback returns managed features
-only after the existing checked media recipe releases the batch. Failed release keeps remaining
-results in the child's disposal census and preserves the readback or generation error alongside
+only after the existing checked media recipe releases the batch. Each block projector attaches its
+output before releasing its temporary tensors, so a temporary release failure cannot orphan that output.
+Failed release keeps remaining results in the child's disposal census and preserves the readback or
+generation error alongside
 the cleanup error. A release-only failure carries its actual error without fabricating an operation
 failure. The conditioner exposes its existing recovery handle and does not automatically retry
 the failed batch. Successful batch release leaves the vision encoder reusable.

@@ -293,7 +293,7 @@ namespace TensorSharp.Models
                         blockOrdered = EncoderBlock(blockOrdered, i, numPatches, headDim, halfDim,
                             ropeCache.CosTable, ropeCache.SinTable);
                     if (deepStack != null && _weights.ContainsKey($"v.deepstack.{i}.norm.weight"))
-                        deepStack.Add(ProjectDeepStack(blockOrdered, i, numPatches));
+                        ProjectDeepStack(blockOrdered, i, numPatches, deepStack);
                     Trace($"block{i}", blockOrdered);
                     // Flush MLX's lazy graph at every block boundary. Without this
                     // the [numHeads, numPatches, numPatches] attention-scores
