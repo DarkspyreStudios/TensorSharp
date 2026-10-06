@@ -297,9 +297,13 @@ and stacked weight dictionaries, FFN closures, LRU/resident bytes, 59 kernel slo
 collection. Only empty owners complete their registrations through exact destructive
 reservations. The worker completes its own registration last. Partial failure stops later
 registration retirement; repeated disposal observes the original action without replay.
-Queue/thread retirement does not clear native caches or coordinate live model/allocator
-leases. It does not establish all-stream completion or native callback/finalizer/concurrency
-qualification. Ordinary cache clearing leaves its reusable parent registrations active.
+Terminal worker retirement drains accepted work and clears checked native caches before
+retiring their empty parent owners. It uses all-used-stream synchronization when the native
+error handler was installed. `MlxBackend.Shutdown` retires only an existing shared worker;
+it does not create a worker or load a missing native library for an unused runtime.
+The caller coordinates live model/allocator/probe leases before terminal retirement.
+Ordinary cache clearing leaves its reusable parent registrations active. Managed queue tests
+do not establish live native callback/finalizer/concurrency qualification.
 Built-in compiled activations and quantized cache consumers keep lookup and use in one
 worker operation. Other queued cache clearing cannot release their entries between those
 steps. Two-weight MoE and dense-FFN calls retain separate native array references before

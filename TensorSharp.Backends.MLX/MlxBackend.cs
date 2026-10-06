@@ -43,5 +43,15 @@ namespace TensorSharp.MLX
         {
             MlxNative.ClearCache();
         }
+
+        /// <summary>Drains and retires the existing shared worker after checked native cache release.</summary>
+        /// <remarks>
+        /// The caller must drain model, allocator and probe lifetimes first. This is terminal for this generation;
+        /// ordinary model switching uses ClearCache and leaves the worker reusable. An unused worker is not created.
+        /// </remarks>
+        public static void Shutdown()
+        {
+            MlxWorker.RetireShared();
+        }
     }
 }

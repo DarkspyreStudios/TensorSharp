@@ -21,13 +21,38 @@ namespace TensorSharp.MLX
         private readonly List<MlxNativeResources> nativeResources = new();
         private readonly Thread thread;
         private readonly NativeOwnerRegistration nativeOwner;
+        private readonly Action<MlxWorker> clearCaches;
+        private readonly Action retireOwners;
         private int workerThreadId;
         private WorkItem<int> retirement;
 
-        public static MlxWorker Shared { get; } = new MlxWorker();
+        private static readonly Lazy<MlxWorker> shared = new(() => new MlxWorker());
+
+        public static MlxWorker Shared => shared.Value;
+
+        internal static void RetireShared()
+        {
+            if (shared.IsValueCreated) shared.Value.Dispose();
+        }
 
         private MlxWorker()
+            : this(static worker =>
+            {
+                if (MlxNative.HasEnteredNative) worker.ClearNativeCache();
+            }, static () =>
+            {
+                MlxCompiledOps.RetireReleasedOwner();
+                MlxQuantizedOps.RetireReleasedOwner();
+                MlxNative.RetireReleasedOwners();
+            })
+        { }
+
+        internal MlxWorker(Action<MlxWorker> clearCaches, Action retireOwners)
         {
+            ArgumentNullException.ThrowIfNull(clearCaches);
+            ArgumentNullException.ThrowIfNull(retireOwners);
+            this.clearCaches = clearCaches;
+            this.retireOwners = retireOwners;
             nativeOwner = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Worker);
             nativeOwner.AttachMlxSharedRuntime();
             thread = new Thread(Run)
@@ -401,10 +426,9 @@ namespace TensorSharp.MLX
                 if (nativeResources.Count != 0)
                     throw new InvalidOperationException("MLX worker still owns native resources after accepted work drained.");
 
+                clearCaches(this);
                 using NativeMlxReleaseReservation reservation = nativeOwner.ReserveMlxRelease(this);
-                MlxCompiledOps.RetireReleasedOwner();
-                MlxQuantizedOps.RetireReleasedOwner();
-                MlxNative.RetireReleasedOwners();
+                retireOwners();
                 using NativeEffectLease effect = reservation.EnterEffect();
                 effect.ValidateMlxRelease(this, reservation);
                 effect.CompleteSafeRelease(this);

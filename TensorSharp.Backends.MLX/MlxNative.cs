@@ -23,6 +23,7 @@ namespace TensorSharp.MLX
         private static readonly object fastKernelSync = new();
         private static bool resolverInstalled;
         private static bool errorHandlerInstalled;
+        internal static bool HasEnteredNative { get { lock (initSync) return errorHandlerInstalled; } }
         private static int initializedDevice = -1;
         private static bool cacheLimitConfigured;
         private static readonly DeviceStreamRuntime deviceStreams = new();
