@@ -47,6 +47,7 @@ namespace TensorSharp.Models.QwenImage
             Console.WriteLine($"Qwen-Image-2.1: {width}x{height}, {steps} steps, CFG {cfg}, seed {p.Seed}, {inputs.Length} reference(s)");
 
             Exception operationFailure = null;
+            QwenImage21Conditioner conditioner = null;
             try
             {
                 var refs = new RgbImage[inputs.Length];
@@ -71,19 +72,19 @@ namespace TensorSharp.Models.QwenImage
                 int[] positiveSlots, negativeSlots = null;
                 // Encoder residency ends before the DiT starts. This also bounds
                 // GPU memory on discrete devices; no encoder is needed during denoising.
-                var conditioner = new QwenImage21Conditioner(_model.TePath, _model.MmprojPath, _model.Backend);
+                conditioner = new QwenImage21Conditioner(_model.TePath, _model.MmprojPath, _model.Backend);
                 try
                 {
                     (positive, positiveLength, positiveSlots) = conditioner.EncodePrompt(prompt, refs);
                     if (cfg > 1f)
                         (negative, negativeLength, negativeSlots) = conditioner.EncodePrompt(p.NegativePrompt ?? "", refs);
+                    conditioner.Dispose();
                 }
                 catch (Exception failure)
                 {
                     conditioner.DisposeAfterFailure(failure);
                     throw;
                 }
-                conditioner.Dispose();
                 Phase("text and vision encode");
                 GgmlBasicOps.ReleaseReuseComputeBuffers();
                 GgmlBasicOps.ClearHostBufferCache();
@@ -164,7 +165,8 @@ namespace TensorSharp.Models.QwenImage
             finally
             {
                 // A failed construction's handle retains buffers needed by its unfinished cleanup.
-                if (operationFailure is not NativeConstructionCleanupException)
+                if (operationFailure is not NativeConstructionCleanupException
+                    && (conditioner == null || conditioner.IsReleased))
                 {
                     try
                     {

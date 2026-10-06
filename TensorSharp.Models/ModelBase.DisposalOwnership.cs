@@ -69,9 +69,8 @@ public abstract partial class ModelBase
                 _ownershipCleanupFailure);
     }
 
-    internal bool OwnsConstructionCleanupFailure(System.Exception error)
-        => error is NativeConstructionCleanupException failure
-            && ReferenceEquals(failure.Cleanup, _constructionCleanup);
+    internal bool OwnershipResourcesReleased => _ownershipResourcesReleased;
+    internal bool IsOwnershipCleanupUnsafe => _ownershipCleanupFailed;
 
     internal void CollectDFlashDisposalOwnership(ICollection<Tensor> tensors)
     {

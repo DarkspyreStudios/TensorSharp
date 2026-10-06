@@ -77,6 +77,9 @@ namespace TensorSharp.Models.QwenImage
             _conditioner = conditioner;
         }
 
+        internal void RetainConditionerCleanupFailure(Qwen35VisionEncoder child, Exception error)
+            => RetainFailedModelOwnership(child, error);
+
         internal void RollBackConditionerConstruction(Exception loadError)
             => RollBackFailedConstruction(loadError, static () => { },
                 releaseAfterModelCaches: DisposeTextEncoderResources,

@@ -4,12 +4,41 @@ using System.Text.Json;
 using TensorSharp;
 using TensorSharp.Cpu;
 using TensorSharp.Models;
+using TensorSharp.Models.QwenImage;
 using TensorSharp.Runtime;
 
 namespace InferenceWeb.Tests;
 
 public sealed class MediaConstructionCleanupTests
 {
+    [Fact]
+    public void ConditionerPreservesFailedTextValidationAndReleasesItsInputFile()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "conditioner-construction-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string path = Path.Combine(directory, "text.gguf");
+            using (var writer = new BinaryWriter(File.Create(path)))
+            {
+                writer.Write(0x46554747u);
+                writer.Write(3u);
+                writer.Write(0ul);
+                writer.Write(0ul);
+                writer.Write(0ul);
+            }
+
+            var failure = Assert.Throws<NotSupportedException>(() =>
+                new QwenImage21Conditioner(path, path, BackendType.Cpu));
+            Assert.Contains("Qwen3-VL-8B text encoder", failure.Message);
+            using var reopened = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public void HealthyStorageAdmissionRefusalRetainsConstructionRecoveryForExplicitRelease()
     {

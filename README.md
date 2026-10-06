@@ -68,9 +68,14 @@ The Qwen-Image-2.1 conditioner joins its vision tensors to the text model's actu
 disposal census. The text model releases that child before its allocator, through
 the same coordinated cleanup. A failed vision constructor remains attached before
 acquisition, including an unpublished weight or displaced temporal-patch weight.
-Construction recovery uses the text model's existing release-only handle and preserves
-the construction error plus any cleanup error. The pipeline preserves operation and
-cleanup failures and leaves global buffer cleanup to an unresolved construction's handle.
+The conditioner reserves its own release-only handle before creating text. A failed text
+constructor keeps its original model recovery carrier when no text returns. After text
+returns, the conditioner handle owns text and any failed lazy vision child. Explicit release
+checks vision release before text release; normal disposal never retries a prior failed cleanup.
+Uncertain child cleanup retains the actual text owner through its existing failure fence.
+The pipeline preserves operation and cleanup failures and skips dependent global buffer
+cleanup while the acquired conditioner remains unreleased. Proven text release remains
+complete after a later context-restoration error.
 Standalone Qwen35-compatible, Mistral3, GlmNext and Gemma4 vision and Gemma4 audio encoders
 reserve a release-only cleanup handle before file or tensor acquisition.
 Failed construction releases the child's actual tensors and
