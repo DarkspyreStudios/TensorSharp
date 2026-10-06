@@ -67,8 +67,7 @@ The artifact manifest records each binary's actual identity, dependencies and no
 layout or successful cross-build does not establish runtime qualification on the target device.
 
 The managed GGML project excludes native binaries from its package. `eng/pack-ggml-natives.py`
-packages staged bridges into separate per-RID native packages and variant archives. Ordinary source
-builds still build and copy the platform bridge unless `TensorSharpSkipGgmlNative=true` is set.
+packages staged bridges into separate per-RID native packages and variant archives.
 
 Consumers build against this repository by source through
 [eng/SourceReferences.targets](../eng/SourceReferences.targets). A consumer that sets `TensorSharpSourceRoot` to a
@@ -464,12 +463,10 @@ unregistered native buffers through finalizer drainage, shutdown refusal and all
 remaining alive. The base mode holds a controlled managed call lease, not a blocked native call.
 The disposal mode constructs the probe successfully, then refuses at its graph phase; repeated
 disposal preserves the first exception without rerunning teardown, and actual model/storage
-owners and all four leases survive finalizer drainage. `observe-dispose-refusal` is the historical
-red reproduction of actual model/storage collection despite an abandoned numeric Model lease.
+owners and all four leases survive finalizer drainage.
 These tests do not qualify pretrained, quantized, whole-native-executor or multi-device models,
 every nested allocation helper, actual captured-graph teardown, other RIDs or CUDA/Vulkan devices.
-`observe-refusal` is a historical red-reproduction mode for the pre-fix checkpoint and is not a
-current success gate. Run each mode/backend in a separate process against a matching real bridge:
+Run each mode/backend in a separate process against a matching real bridge:
 
 ```sh
 env TMPDIR="$PWD/tmp" TENSORSHARP_GGML_NATIVE_SKIP=true TENSORSHARP_MLX_NATIVE_SKIP=true dotnet build eng/tests/ggml-model-lifetime/ggml-model-lifetime.csproj -c Release -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true -p:TensorSharpSkipCudaNative=true -p:GeneratePackageOnBuild=false -p:PublishAot=false
