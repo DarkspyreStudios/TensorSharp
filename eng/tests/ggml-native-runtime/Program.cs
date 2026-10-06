@@ -134,7 +134,7 @@ try
 
     var context = new GgmlContext([0], backend);
     MethodInfo enter = typeof(GgmlNativeLoader).GetMethod("EnterNativeCall", BindingFlags.NonPublic | BindingFlags.Static)!;
-    using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero])!)
+    using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero, Type.Missing, Type.Missing])!)
     {
         Refused(context.Dispose, "Context memory cannot be freed during a native call.");
         Refused(() => context.ReleasePooledMemory(), "Pooled memory cannot be trimmed during a native call.");
@@ -177,7 +177,7 @@ try
     Require(allocation != IntPtr.Zero && !GgmlNativeLoader.Shutdown().Released, "Owned native allocations independently refuse teardown.");
     GgmlBasicOps.AlignedFree(allocation);
     Refused(() => GgmlBasicOps.AlignedFree(allocation), "A freed native handle is not freed twice.");
-    using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero])!)
+    using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero, Type.Missing, Type.Missing])!)
         Require(!GgmlNativeLoader.Shutdown().Released, "An active native call independently refuses teardown.");
     Type native = typeof(GgmlNativeLoader).Assembly.GetType("TensorSharp.GGML.GgmlNative", throwOnError: true)!;
     Require((bool)native.GetField("s_earlyTunablesApplied", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!, "Import binding applies tunables after identity selection.");

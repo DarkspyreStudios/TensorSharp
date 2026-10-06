@@ -146,7 +146,7 @@ public static class ForeignNativeRetirement
             Busy("A real native allocation retains foreign ownership.");
             GgmlBasicOps.AlignedFree(allocation);
             MethodInfo enter = typeof(GgmlNativeLoader).GetMethod("EnterNativeCall", BindingFlags.NonPublic | BindingFlags.Static)!;
-            using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero])!)
+            using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero, Type.Missing, Type.Missing])!)
                 Busy("A manually held native-call lease prevents teardown; no blocked P/Invoke is claimed.");
             GgmlNativeShutdownResult shutdown = GgmlNativeLoader.Shutdown();
             Require(shutdown.Released && GgmlNativeLoader.State == GgmlRuntimeState.Stopped, "Guarded teardown succeeds after all owned work drains: " + shutdown.Diagnostic);
