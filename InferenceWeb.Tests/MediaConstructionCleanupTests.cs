@@ -12,6 +12,59 @@ namespace InferenceWeb.Tests;
 public sealed class MediaConstructionCleanupTests
 {
     [Fact]
+    public void FileOnlyFailureRetainsRecoveryWithoutRepeatingReleasedResources()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "media-file-recovery-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string path = Path.Combine(directory, "resource.bin");
+            File.WriteAllBytes(path, [1]);
+            using var file = File.OpenRead(path);
+            var allocator = new CpuAllocator(BlasEnum.DotNet);
+            using var tensor = new Tensor(allocator, DType.Float32, 1);
+            tensor.SetElementsAsFloat([9]);
+            var original = new InvalidDataException("Media construction failed.");
+            var fileFailure = new IOException("The input file could not be closed.");
+            bool refuseFileClose = true;
+            int resourceReleases = 0;
+            var cleanup = new MediaConstructionCleanup(new object(), allocator,
+                tensors => tensors.Add(tensor), () =>
+                {
+                    resourceReleases++;
+                    tensor.Dispose();
+                }, () =>
+                {
+                    if (refuseFileClose) throw fileFailure;
+                    file.Dispose();
+                }, _ => Assert.Fail("A file-only failure must not fence native resources."));
+
+            NativeConstructionCleanupException failure = Assert.Throws<NativeConstructionCleanupException>(() =>
+                cleanup.RollBackConstruction(original));
+            Assert.Same(original, failure.InnerExceptions[0]);
+            Assert.Same(fileFailure, failure.InnerExceptions[1]);
+            Assert.Same(cleanup.Cleanup, failure.Cleanup);
+            Assert.False(failure.Cleanup.IsReleased);
+            Assert.Equal(IntPtr.Zero, Assert.IsType<CpuStorage>(tensor.Storage).buffer);
+            Assert.Throws<IOException>(() => File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose());
+
+            refuseFileClose = false;
+            failure.Cleanup.Dispose();
+            failure.Cleanup.Dispose();
+            Assert.True(failure.Cleanup.IsReleased);
+            Assert.Equal(1, resourceReleases);
+            using var reopened = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            using var borrowed = new Tensor(allocator, DType.Float32, 1);
+            borrowed.SetElementsAsFloat([7]);
+            Assert.Equal([7f], borrowed.GetElementsAsFloat(1));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ConditionerPreservesFailedTextValidationAndReleasesItsInputFile()
     {
         string directory = Path.Combine(Path.GetTempPath(), "conditioner-construction-" + Guid.NewGuid().ToString("N"));
