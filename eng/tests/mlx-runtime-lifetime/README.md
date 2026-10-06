@@ -21,6 +21,11 @@ The nested native-work result does not establish generation collection. The fina
 collectible result and process exit code report that separate check. Retained roots
 produce a failed final result and exit code 1 after the native checks complete.
 
+The explicit `--collectible-dump` mode performs the same root observation, prints
+the process ID and retained names, then waits for one input line before reporting
+the result. This pause permits a dump of the actual retired generation. It does
+not retain the generation through a strong managed reference or alter cleanup.
+
 Build the managed executable with native hooks disabled:
 
 ```bash

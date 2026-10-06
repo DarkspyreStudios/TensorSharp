@@ -11,6 +11,8 @@ using TensorSharp.MLX;
 
 if (args is ["--collectible", var collectibleEntry])
     return ForeignMlxGeneration.Run(collectibleEntry);
+if (args is ["--collectible-dump", var dumpEntry])
+    return ForeignMlxGeneration.Run(dumpEntry, waitForDump: true);
 
 if (args.Length != 1 || !Path.IsPathFullyQualified(args[0])
     || !OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
@@ -121,7 +123,7 @@ internal static class ForeignMlxGeneration
 {
     private sealed record Evidence(WeakReference[] Roots, string[] Names);
 
-    internal static int Run(string entry)
+    internal static int Run(string entry, bool waitForDump = false)
     {
         try
         {
@@ -135,6 +137,11 @@ internal static class ForeignMlxGeneration
                 Thread.Sleep(10);
             }
             string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
+            if (waitForDump)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new { diagnosticProcessId = Environment.ProcessId, retained }));
+                Console.ReadLine();
+            }
             if (retained.Length != 0)
                 throw new InvalidOperationException("Safely retired real MLX generation remains rooted: " + string.Join(",", retained));
             Console.WriteLine(JsonSerializer.Serialize(new
