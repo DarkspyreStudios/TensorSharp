@@ -17,4 +17,4 @@
 
 # Darkspyre
 
-- Never rebuild the native GGML libraries unless Brandon explicitly asks. Builds use the prebuilt bridges.
+- Never build the native GGML, MLX or CUDA libraries unless Brandon asks for it in that task. This overrides the native build steps in DEVELOPMENT.md. Managed builds leave native compilation off; it only runs when `TensorSharpBuildGgmlNative`, `TensorSharpBuildMlxNative` or `TensorSharpBuildCudaNative` is set.
