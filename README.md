@@ -287,6 +287,11 @@ Publication and construction share one worker call; failed publication retains t
 parent and remaining arrays. Per-key and device cleanup release both weight dictionaries
 after the reserved all-stream boundary. Stacked cleanup clears only checked-success fields.
 Stacked preload propagates Busy and retained unsafe failures without reporting fallback.
+Model retirement releases ordinary and stacked MLX cache identities before freeing quantized
+backing buffers or the GGUF mapping. Expert cache handles can differ from stacked pointer keys.
+A checked cache-release failure stops backing-memory cleanup and retains the model owner.
+Focused managed ordering tests cover those distinct keys and the original release failure;
+they do not qualify native synchronization or full model retirement.
 The registered parent also owns the actual dense-FFN closure dictionary. The worker retains
 its real slot before closure creation, reserves dictionary capacity first and publishes
 only after checked construction returns. Publication failure retains the actual graph.

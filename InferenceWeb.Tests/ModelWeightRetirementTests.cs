@@ -7,6 +7,35 @@ namespace InferenceWeb.Tests;
 
 public sealed class ModelWeightRetirementTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MlxStackedCacheReleasePrecedesBackingOwnerReleaseAndPreservesFailure(bool failRelease)
+    {
+        using var backing = new QuantizedWeight(new byte[] { 7, 8 }, ggmlType: 0, ne0: 1, ne1: 2);
+        var stacked = new StackedExpertWeights(backing.Data, 0, 1, 1, 2, 2,
+            isExternalView: false, ownerToken: backing, ownedBuffer: IntPtr.Zero);
+        using QuantizedWeight expert = QuantizedWeight.CreateExpertView(stacked, 0);
+        IntPtr expertKey = expert.EnsureDeviceCacheKey();
+        Assert.NotEqual(stacked.Data, expertKey);
+        var calls = new List<IntPtr>();
+        var original = new IOException("Stacked native cache release failed.");
+        Exception? failure = Record.Exception(() => ModelDisposalOwnership.ReleaseMlxWeightCaches(
+            [expert], [stacked], key =>
+            {
+                Assert.Equal(7, System.Runtime.InteropServices.Marshal.ReadByte(backing.Data));
+                Assert.True(expert.HasHostData);
+                calls.Add(key);
+                if (key == stacked.Data && failRelease) throw original;
+            }));
+
+        Assert.Equal(new[] { expertKey, stacked.Data }, calls);
+        Assert.Equal(7, System.Runtime.InteropServices.Marshal.ReadByte(backing.Data));
+        Assert.True(expert.HasHostData);
+        if (failRelease) Assert.Same(original, failure);
+        else Assert.Null(failure);
+    }
+
     [Fact]
     public void StorageBoundBusyRefusalKeepsWholeModelCleanupRecoverableAndExecutionFenced()
     {

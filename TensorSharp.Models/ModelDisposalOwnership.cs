@@ -18,6 +18,14 @@ internal static class ModelDisposalOwnership
         weights.Remove(name);
     }
 
+    internal static void ReleaseMlxWeightCaches(IEnumerable<QuantizedWeight> weights,
+        IEnumerable<StackedExpertWeights> stackedWeights, System.Action<System.IntPtr> release)
+    {
+        foreach (QuantizedWeight weight in weights) release(weight.CacheKey);
+        // Expert cache handles can differ from the stacked buffer's pointer identity.
+        foreach (StackedExpertWeights stacked in stackedWeights) release(stacked.Data);
+    }
+
     internal static void RetainPendingWeight(ref Tensor incoming, List<Tensor> displaced)
     {
         if (incoming == null) return;

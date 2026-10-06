@@ -2870,8 +2870,8 @@ namespace TensorSharp.Models
 
                         if (_backend == BackendType.Mlx && _allocator is MlxAllocator mlxAllocator)
                         {
-                            foreach (var qw in _quantWeights.Values)
-                                MlxQuantizedOps.ReleaseQuantizedWeight(mlxAllocator, qw.CacheKey);
+                            ModelDisposalOwnership.ReleaseMlxWeightCaches(_quantWeights.Values, _stackedExpertWeights.Values,
+                                key => MlxQuantizedOps.ReleaseQuantizedWeight(mlxAllocator, key));
                         }
 
                         foreach (var qw in _quantWeights.Values)
