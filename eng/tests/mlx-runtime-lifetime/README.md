@@ -8,6 +8,13 @@ checked terminal worker shutdown, repeated shutdown, rejected post-retirement wo
 and collection of the actual storage owners. The ten finalizer passes bound the
 weak-reference observation; the probe never resets ownership or retries native frees.
 
+The fixture invokes the existing internal compiled-closure entrypoints through
+reflection. Its typed trace delegate throws once through the actual native callback.
+The returned error must contain that exact managed exception once. Checked array and
+closure release then completes. Subsequent GELU and Q8 work must succeed. Weak roots
+cover the trace target and closure as well as tensor storage. This case does not
+inject a native free/synchronization failure or qualify concurrent callbacks.
+
 The executable preloads the explicit library and sets the existing
 `TENSORSHARP_MLX_LIBRARY` selector. It records the bridge hash and actual Core/MLX MVIDs.
 It loads no model weights, modifies no shared driver and builds no native library.

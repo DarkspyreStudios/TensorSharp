@@ -47,7 +47,7 @@ try
     MlxBackend.EnsureAvailable();
     MlxBackend.ClearCache();
     MlxMemorySnapshot before = MlxBackend.GetMemorySnapshot();
-    WeakReference[] storage = [.. RunTensorScope(), .. RunQuantizedScope()];
+    WeakReference[] owners = [.. TraceFailureProbe.Run(), .. RunTensorScope(), .. RunQuantizedScope()];
     MlxMemorySnapshot after = MlxBackend.GetMemorySnapshot();
     Require(after.ActiveBytes == before.ActiveBytes,
         $"Explicit tensor and cache disposal restores active bytes: before={before.ActiveBytes}, after={after.ActiveBytes}.");
@@ -64,22 +64,23 @@ try
     catch (InvalidOperationException error) when (error.Message == "Native ownership was already safely released.")
     {
     }
-    for (int pass = 0; pass < 10 && storage.Any(reference => reference.IsAlive); pass++)
+    for (int pass = 0; pass < 10 && owners.Any(reference => reference.IsAlive); pass++)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
     }
-    Require(storage.All(reference => !reference.IsAlive),
-        "Safely disposed real storage owners are not retained after finalizer drainage.");
+    Require(owners.All(reference => !reference.IsAlive),
+        "Safely disposed real storage, closure and callback owners are not retained after finalizer drainage.");
     Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
     {
         ["result"] = "passed",
         ["before"] = SnapshotValues(before),
         ["after"] = SnapshotValues(after),
-        ["storagesCollected"] = storage.Length,
+        ["ownerRootsCollected"] = owners.Length,
         ["compiledActivation"] = "GELU",
         ["quantizedWeight"] = "Q8_0 cached matmul creation/reuse/release",
+        ["traceFailure"] = "exact managed cause through native callback; checked closure release",
         ["terminalWorkerRetirement"] = "completed"
     }));
     return 0;
@@ -271,5 +272,57 @@ internal static class ForeignMlxGeneration
                 throw new FileNotFoundException("The foreign MLX generation requires its actual private dependency.", path);
             return LoadFromAssemblyPath(path);
         }
+    }
+}
+
+internal sealed class TraceFailureProbe
+{
+    private readonly Exception original = new InvalidOperationException("Actual native trace callback refuses its work.");
+    private int calls;
+
+    private T[] RefuseTrace<T>(T[] inputs)
+    {
+        calls++;
+        throw original;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static WeakReference[] Run()
+    {
+        const BindingFlags methods = BindingFlags.NonPublic | BindingFlags.Static;
+        Type native = typeof(MlxBackend).Assembly.GetType("TensorSharp.MLX.MlxNative", throwOnError: true)!;
+        Type arrayType = native.GetNestedType("MlxArray", BindingFlags.NonPublic | BindingFlags.Public)!;
+        Type traceType = native.GetNestedType("TraceFunc", BindingFlags.NonPublic)!;
+        var target = new TraceFailureProbe();
+        Delegate trace = typeof(TraceFailureProbe).GetMethod(nameof(RefuseTrace), BindingFlags.Instance | BindingFlags.NonPublic)!
+            .MakeGenericMethod(arrayType).CreateDelegate(traceType, target);
+        using var allocator = new MlxAllocator();
+        using var input = Tensor.FromArray(allocator, new[] { 1f, 2f });
+        object closure = native.GetMethod("NewClosure", methods)!.Invoke(null, [trace, true])!;
+        object? view = null;
+        try
+        {
+            view = input.Storage.GetType().GetMethod("CreateArrayView", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .Invoke(input.Storage, [input])!;
+            try
+            {
+                native.GetMethod("ApplyClosure1", methods)!.Invoke(null, [closure, view]);
+                throw new InvalidOperationException("The actual native trace callback did not refuse its work.");
+            }
+            catch (TargetInvocationException invocation) when (invocation.InnerException != null)
+            {
+                Exception error = invocation.InnerException;
+                Exception[] causes = error is AggregateException aggregate
+                    ? aggregate.Flatten().InnerExceptions.ToArray() : [error];
+                if (target.calls != 1 || causes.Count(cause => ReferenceEquals(cause, target.original)) != 1)
+                    throw new InvalidOperationException("The native callback did not preserve its exact managed cause once.", error);
+            }
+        }
+        finally
+        {
+            if (view != null) native.GetMethod("FreeArrayReference", methods)!.Invoke(null, [view]);
+            native.GetMethod("FreeCompiledClosure", methods)!.Invoke(null, [closure]);
+        }
+        return [new(input.Storage), new(closure), new(target)];
     }
 }
