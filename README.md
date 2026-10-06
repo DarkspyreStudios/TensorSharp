@@ -81,6 +81,9 @@ complete after a later context-restoration error.
 The text encoder reserves its fused-weight pointer collection before allocation and records
 each acquired unmanaged buffer before copying its data. A failed copy leaves the buffer reachable
 through the text owner's existing release recipe.
+Qwen35 and GLM vision fusion and Qwen-Image text layer-table construction preserve failures
+recorded by the shared native quarantine authority. Their fallback catches admit only failures
+with no recorded unsafe cleanup. Original and wrapped recorded failures unwind unchanged.
 Standalone Qwen35-compatible, Mistral3, GlmNext and Gemma4 vision and Gemma4 audio encoders
 reserve a release-only cleanup handle before file or tensor acquisition.
 Failed construction releases the child's actual tensors and

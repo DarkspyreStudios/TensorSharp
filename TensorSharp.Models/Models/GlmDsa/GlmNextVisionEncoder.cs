@@ -444,7 +444,7 @@ namespace TensorSharp.Models
                     _fusedEncoderUnavailable = true;
                 return ok;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!NativeQuarantineAuthority.TryGetFailure(ex, out _))
             {
                 Console.WriteLine($"GLM fused vision encoder unavailable ({ex.Message}); using the per-block path.");
                 _fusedEncoderUnavailable = true;

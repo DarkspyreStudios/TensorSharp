@@ -516,7 +516,7 @@ namespace TensorSharp.Models.QwenImage
                 _fusedLayers = layers;
                 return true;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!NativeQuarantineAuthority.TryGetFailure(ex, out _))
             {
                 Console.WriteLine($"  [te-fused] layer table build failed ({ex.Message}); using the per-op path.");
                 return false;

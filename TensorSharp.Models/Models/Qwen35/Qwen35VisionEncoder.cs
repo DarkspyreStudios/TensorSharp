@@ -736,7 +736,7 @@ namespace TensorSharp.Models
                     _hostModel?.YieldGpuComputeLock();
                 return ok;
             }
-            catch (Exception e)
+            catch (Exception e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
             {
                 if (!_wholeEncoderFusedWarned)
                 {
@@ -772,7 +772,7 @@ namespace TensorSharp.Models
                         cosTable, sinTable, numPatches, _numHeads, headDim, halfDim, attnScale);
                     fusedAttn = true;
                 }
-                catch (Exception e)
+                catch (Exception e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
                 {
                     fusedAttn = false;
                     if (!_fusedVisionAttnWarned)
@@ -813,7 +813,7 @@ namespace TensorSharp.Models
                     GgmlBasicOps.FusedVisionMLP(hidden, ln2W, ln2B, _eps, upW, upB, downW, downB);
                     return hidden;
                 }
-                catch (Exception e)
+                catch (Exception e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
                 {
                     // Fall back to unfused path on failure.
                     if (!_fusedVisionMlpWarned)
