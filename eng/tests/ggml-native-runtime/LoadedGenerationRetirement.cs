@@ -22,8 +22,14 @@ internal static class LoadedGenerationRetirement
         }
         if (evidence.Roots.Any(root => root.IsAlive))
             throw new InvalidOperationException("A loaded and stopped foreign GGML generation remains rooted after its invocation frame returns.");
-        Console.WriteLine(JsonSerializer.Serialize(new { mode, evidence.NativeEvidence, collectedRoots = evidence.Roots.Length,
-            actualModelQualification = "not-run", multiDeviceWorkers = "not-run" }));
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            mode,
+            evidence.NativeEvidence,
+            collectedRoots = evidence.Roots.Length,
+            actualModelQualification = "not-run",
+            multiDeviceWorkers = "not-run"
+        }));
         return 0;
     }
 
