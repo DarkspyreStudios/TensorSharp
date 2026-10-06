@@ -532,9 +532,10 @@ namespace TensorSharp.Models.QwenImage
             var host = new float[n];
             byte[] raw = _gguf.ReadTensorData(info);
             NativeDequant.DequantizeToFloat32((int)info.Type, raw, 0, host, 0, n);
+            _fusedAllocs.EnsureCapacity(checked(_fusedAllocs.Count + 1));
             IntPtr p = System.Runtime.InteropServices.Marshal.AllocHGlobal((IntPtr)(n * sizeof(float)));
-            System.Runtime.InteropServices.Marshal.Copy(host, 0, p, (int)n);
             _fusedAllocs.Add(p);
+            System.Runtime.InteropServices.Marshal.Copy(host, 0, p, (int)n);
             return p;
         }
 

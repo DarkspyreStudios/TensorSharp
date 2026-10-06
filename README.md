@@ -78,6 +78,9 @@ Uncertain child cleanup retains the actual text owner through its existing failu
 The pipeline preserves operation and cleanup failures and skips dependent global buffer
 cleanup while the acquired conditioner remains unreleased. Proven text release remains
 complete after a later context-restoration error.
+The text encoder reserves its fused-weight pointer collection before allocation and records
+each acquired unmanaged buffer before copying its data. A failed copy leaves the buffer reachable
+through the text owner's existing release recipe.
 Standalone Qwen35-compatible, Mistral3, GlmNext and Gemma4 vision and Gemma4 audio encoders
 reserve a release-only cleanup handle before file or tensor acquisition.
 Failed construction releases the child's actual tensors and
