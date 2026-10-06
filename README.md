@@ -336,6 +336,9 @@ it does not create a worker or load a missing native library for an unused runti
 The caller coordinates live model/allocator/probe leases before terminal retirement.
 Ordinary cache clearing leaves its reusable parent registrations active. Managed queue tests
 do not establish live native callback/finalizer/concurrency qualification.
+The [MLX runtime lifetime probe](eng/tests/mlx-runtime-lifetime/README.md) checks tiny real
+compiled activations, checked explicit disposal and terminal retirement against a selected
+prebuilt bridge. It does not qualify full model, concurrency or native-failure recovery paths.
 Built-in compiled activations and quantized cache consumers keep lookup and use in one
 worker operation. Other queued cache clearing cannot release their entries between those
 steps. Two-weight MoE and dense-FFN calls retain separate native array references before
