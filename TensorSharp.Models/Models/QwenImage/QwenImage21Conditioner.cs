@@ -73,9 +73,7 @@ namespace TensorSharp.Models.QwenImage
                             float alpha = image.Alpha == null ? 1f : image.Alpha[j % hw];
                             pixels[j] = 2f * (pixels[j] * alpha + 1f - alpha) - 1f;
                         }
-                        var tensors = _vision.EncodeWithDeepStack(pixels, image.Height, image.Width);
-                        try { features = tensors.Select(t => t.GetElementsAsFloat((int)t.ElementCount())).ToArray(); }
-                        finally { foreach (var tensor in tensors) tensor.Dispose(); }
+                        features = _vision.EncodeWithDeepStack(pixels, image.Height, image.Width, _cleanup);
                         if (features.Length != 4) throw new InvalidOperationException("Qwen3-VL vision projector must provide three DeepStack mergers.");
                         _imageCache[image] = features;
                     }

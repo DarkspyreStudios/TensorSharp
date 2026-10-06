@@ -26,6 +26,7 @@ namespace TensorSharp.Models
         private readonly List<Tensor> _displacedWeights = new();
         private GgufFile _constructionFile;
         private readonly MediaConstructionCleanup _constructionCleanup;
+        private readonly Action<Exception> _retainUnsafe;
         private readonly Dictionary<string, Tensor> _transposedWeights = new();
         private readonly Dictionary<long, Tensor> _positionEmbeddingCache = new();
         private readonly Dictionary<long, RopeCache> _ropeCache = new();
@@ -89,9 +90,10 @@ namespace TensorSharp.Models
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
+            _retainUnsafe = retainUnsafe == null ? null : error => retainUnsafe(this, error);
             _constructionCleanup = new MediaConstructionCleanup(this, allocator,
                 CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile,
-                retainUnsafe == null ? null : error => retainUnsafe(this, error));
+                _retainUnsafe);
             try
             {
                 // Retain the actual child and reader before either constructor can fail to return.
@@ -335,6 +337,7 @@ namespace TensorSharp.Models
             ApplyVisionGelu(fc1);
 
             var projected = LinearForwardWithBias(fc1, "mm.2.weight", "mm.2.bias");
+            if (deepStack != null) deepStack.Insert(0, projected);
 
             // The direct-CUDA path only *queues* its kernels, so without this the
             // numbers below would report launch cost (tens of ms) rather than
@@ -1432,6 +1435,7 @@ namespace TensorSharp.Models
         {
             ModelDisposalOwnership.Add(tensors, _constructionWeight);
             ModelDisposalOwnership.AddRange(tensors, _displacedWeights);
+            ModelDisposalOwnership.AddRange(tensors, _deepStackResults);
             ModelDisposalOwnership.AddRange(tensors, _positionEmbeddingCache.Values);
             ModelDisposalOwnership.AddRange(tensors, _transposedWeights.Values);
             ModelDisposalOwnership.AddRange(tensors, _weights.Values);
@@ -1446,6 +1450,7 @@ namespace TensorSharp.Models
 
         private void ReleaseOwnedResources()
         {
+            _deepStackCleanup?.ReleaseOwned();
             _constructionWeight?.Dispose();
             _constructionWeight = null;
             foreach (var weight in _displacedWeights) weight.Dispose();

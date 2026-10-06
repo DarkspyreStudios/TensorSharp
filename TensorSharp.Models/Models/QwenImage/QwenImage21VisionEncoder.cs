@@ -2,12 +2,16 @@
 // Licensed under the BSD-3-Clause license in the root of this source tree.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using TensorSharp.GGML;
 
 namespace TensorSharp.Models
 {
     public partial class Qwen35VisionEncoder
     {
+        private readonly List<Tensor> _deepStackResults = new();
+        private MediaConstructionCleanup _deepStackCleanup;
+
         // Restrict the new path to GGML CUDA. The switch
         // restores the previous host-erf/per-block implementation for A/B runs.
         private bool UseFusedVision21 => _qwenImage21 &&
@@ -17,19 +21,48 @@ namespace TensorSharp.Models
         /// <summary>Qwen3-VL main image embedding and additions for the first language blocks.
         /// The deepstack projectors normalize merged (4*1152) features, unlike the final
         /// projector, whose normalization precedes spatial merging.</summary>
-        internal Tensor[] EncodeWithDeepStack(float[] pixels, int height, int width)
+        internal float[][] EncodeWithDeepStack(float[] pixels, int height, int width,
+            NativeConstructionCleanupHandle recovery)
+            => EncodeWithDeepStack(results => EncodeCore(pixels, null, height, width, results), recovery);
+
+        internal float[][] EncodeWithDeepStack(Action<List<Tensor>> encode,
+            NativeConstructionCleanupHandle recovery = null)
         {
-            var deepStack = new List<Tensor>();
+            _hostModel?.ThrowIfOwnershipCleanupFailed();
+            if (_constructionCleanup.Cleanup.IsReleased)
+                throw new ObjectDisposedException(nameof(Qwen35VisionEncoder));
+            if (_deepStackCleanup != null && !_deepStackCleanup.Cleanup.IsReleased)
+                throw new InvalidOperationException("A failed vision result batch still owns resources; release its cleanup handle before encoding again.");
+            // Each block can publish one projector and the final projection occupies the first slot.
+            _deepStackResults.EnsureCapacity(checked(_blockCount + 1));
+            _deepStackCleanup = new MediaConstructionCleanup(this, _allocator,
+                tensors => ModelDisposalOwnership.AddRange(tensors, _deepStackResults),
+                ReleaseDeepStackResults, static () => { }, _retainUnsafe);
+            recovery ??= ConstructionCleanup;
+            float[][] features;
             try
             {
-                var main = EncodeCore(pixels, null, height, width, deepStack);
-                deepStack.Insert(0, main);
-                return deepStack.ToArray();
+                encode(_deepStackResults);
+                features = _deepStackResults.Select(t => t.GetElementsAsFloat((int)t.ElementCount())).ToArray();
             }
-            catch
+            catch (Exception operationError)
             {
-                foreach (var tensor in deepStack) tensor.Dispose();
+                try { _deepStackCleanup.Cleanup.Dispose(); }
+                catch (Exception cleanup) { throw new NativeConstructionCleanupException(operationError, cleanup, recovery); }
                 throw;
+            }
+            // A failed release is not retried by the operation-error catch above.
+            try { _deepStackCleanup.Cleanup.Dispose(); }
+            catch (Exception cleanup) { throw new NativeConstructionCleanupException(cleanup, recovery); }
+            return features;
+        }
+
+        private void ReleaseDeepStackResults()
+        {
+            while (_deepStackResults.Count != 0)
+            {
+                _deepStackResults[0].Dispose();
+                _deepStackResults.RemoveAt(0);
             }
         }
 

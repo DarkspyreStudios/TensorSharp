@@ -4,9 +4,13 @@ using System.Threading;
 
 namespace TensorSharp;
 
-/// <summary>Preserves construction and cleanup errors with release-only recovery authority.</summary>
+/// <summary>Preserves construction or result-release errors with release-only recovery authority.</summary>
 public sealed class NativeConstructionCleanupException : AggregateException
 {
+    internal NativeConstructionCleanupException(Exception cleanupError, NativeConstructionCleanupHandle cleanup)
+        : base("Native-backed result cleanup did not complete.", cleanupError)
+        => Cleanup = cleanup ?? throw new ArgumentNullException(nameof(cleanup));
+
     internal NativeConstructionCleanupException(Exception loadError, Exception cleanupError,
         NativeConstructionCleanupHandle cleanup)
         : base("Native-backed construction failed and its owned-resource cleanup did not complete.",

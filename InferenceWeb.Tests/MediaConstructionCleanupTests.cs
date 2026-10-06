@@ -12,6 +12,128 @@ namespace InferenceWeb.Tests;
 public sealed class MediaConstructionCleanupTests
 {
     [Fact]
+    public void DeepStackReadbackReleasesResultsBeforeReturningAndKeepsTheEncoderReusable()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "deepstack-results-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string path = Path.Combine(directory, "projector.gguf");
+            WriteProjector(path, "v.weight");
+            var allocator = new ResultAllocator();
+            using var encoder = new Qwen35VisionEncoder(path, allocator);
+            using var borrowed = new Tensor(allocator, DType.Float32, 1);
+            borrowed.SetElementsAsFloat([7]);
+            for (int pass = 0; pass < 2; pass++)
+            {
+                using var main = new Tensor(allocator, DType.Float32, 1);
+                using var tap = new Tensor(allocator, DType.Float32, 1);
+                main.SetElementsAsFloat([2 + pass]);
+                tap.SetElementsAsFloat([4 + pass]);
+                float[][] features = encoder.EncodeWithDeepStack(results =>
+                {
+                    results.Add(main);
+                    results.Add(tap);
+                });
+
+                Assert.Equal([2f + pass], features[0]);
+                Assert.Equal([4f + pass], features[1]);
+                Assert.Equal(IntPtr.Zero, Assert.IsType<ResultStorage>(main.Storage).buffer);
+                Assert.Equal(IntPtr.Zero, Assert.IsType<ResultStorage>(tap.Storage).buffer);
+                var owned = new List<Tensor>();
+                encoder.CollectDisposalOwnership(owned);
+                Assert.DoesNotContain(main, owned);
+                Assert.DoesNotContain(tap, owned);
+            }
+            Assert.Equal([7f], borrowed.GetElementsAsFloat(1));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
+    public void DeepStackGenerationFailurePreservesItsErrorAndReleasesAcquiredResults()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "deepstack-generation-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string path = Path.Combine(directory, "projector.gguf");
+            WriteProjector(path, "v.weight");
+            var allocator = new ResultAllocator();
+            using var encoder = new Qwen35VisionEncoder(path, allocator);
+            using var tap = new Tensor(allocator, DType.Float32, 1);
+            var original = new InvalidOperationException("A later vision block failed.");
+            Assert.Same(original, Assert.Throws<InvalidOperationException>(() =>
+                encoder.EncodeWithDeepStack(results =>
+                {
+                    results.Add(tap);
+                    throw original;
+                })));
+            Assert.Equal(1, Assert.IsType<ResultStorage>(tap.Storage).Releases);
+            Assert.Equal(IntPtr.Zero, Assert.IsType<ResultStorage>(tap.Storage).buffer);
+            Assert.False(encoder.ConstructionCleanup.IsReleased);
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void DeepStackCleanupFailureRetainsRemainingResultsAndNeverReplaysTheFailedRelease(bool failReadback)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "deepstack-recovery-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string path = Path.Combine(directory, "projector.gguf");
+            WriteProjector(path, "v.weight");
+            var allocator = new ResultAllocator();
+            var encoder = new Qwen35VisionEncoder(path, allocator);
+            using var first = new Tensor(allocator, DType.Float32, 1);
+            var releaseError = new InvalidOperationException("Checked result release failed.");
+            allocator.NextReleaseFailure = releaseError;
+            using var failed = new Tensor(allocator, DType.Float32, 1);
+            var readbackError = new InvalidOperationException("Vision result readback failed.");
+            allocator.NextReadbackFailure = failReadback ? readbackError : null;
+            using var later = new Tensor(allocator, DType.Float32, 1);
+            using var last = new Tensor(allocator, DType.Float32, 1);
+            foreach (var tensor in new[] { first, failed, later, last }) tensor.SetElementsAsFloat([9]);
+
+            NativeConstructionCleanupException failure = Assert.Throws<NativeConstructionCleanupException>(() =>
+                encoder.EncodeWithDeepStack(results => results.AddRange([first, failed, later, last])));
+            Assert.Same(encoder.ConstructionCleanup, failure.Cleanup);
+            if (failReadback)
+            {
+                Assert.Equal(2, failure.InnerExceptions.Count);
+                Assert.Same(readbackError, failure.InnerExceptions[0]);
+                Assert.Same(releaseError, failure.InnerExceptions[1]);
+            }
+            else Assert.Same(releaseError, Assert.Single(failure.InnerExceptions));
+
+            var owned = new List<Tensor>();
+            encoder.CollectDisposalOwnership(owned);
+            Assert.DoesNotContain(first, owned);
+            Assert.Contains(failed, owned);
+            Assert.Contains(later, owned);
+            Assert.Contains(last, owned);
+            Assert.Equal(1, Assert.IsType<ResultStorage>(first.Storage).Releases);
+            Assert.Equal(1, Assert.IsType<ResultStorage>(failed.Storage).Releases);
+            Assert.Equal(0, Assert.IsType<ResultStorage>(later.Storage).Releases);
+            Assert.Equal([9f], last.GetElementsAsFloat(1));
+            Assert.Throws<InvalidOperationException>(() => encoder.EncodeWithDeepStack(_ =>
+                Assert.Fail("An unresolved batch must fence new generation.")));
+            Assert.Same(releaseError, Assert.Throws<InvalidOperationException>(failure.Cleanup.Dispose));
+            Assert.Same(releaseError, Assert.Throws<InvalidOperationException>(failure.Cleanup.Dispose));
+            Assert.Equal(1, Assert.IsType<ResultStorage>(failed.Storage).Releases);
+            Assert.Equal(0, Assert.IsType<ResultStorage>(last.Storage).Releases);
+            Assert.False(failure.Cleanup.IsReleased);
+            // Release the cheap CPU stand-ins directly; the failed recipe stays terminal.
+            foreach (Tensor tensor in owned) tensor.Dispose();
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
     public void FileOnlyFailureRetainsRecoveryWithoutRepeatingReleasedResources()
     {
         string directory = Path.Combine(Path.GetTempPath(), "media-file-recovery-" + Guid.NewGuid().ToString("N"));
@@ -288,6 +410,36 @@ public sealed class MediaConstructionCleanupTests
         writer.Write((ulong)header.Length);
         writer.Write(header.ToArray());
         for (int index = 0; index < offset / sizeof(float); index++) writer.Write(1f);
+    }
+
+    private sealed class ResultAllocator : IAllocator
+    {
+        internal Exception? NextReadbackFailure;
+        internal Exception? NextReleaseFailure;
+        public BlasEnum BlasEnum => BlasEnum.DotNet;
+        public int DeviceId => 0;
+        public float GetAllocatedMemoryRatio() => 0;
+        public Storage Allocate(DType type, long count)
+        {
+            var storage = new ResultStorage(this, type, count, NextReadbackFailure, NextReleaseFailure);
+            NextReadbackFailure = null;
+            NextReleaseFailure = null;
+            return storage;
+        }
+    }
+
+    private sealed class ResultStorage(IAllocator allocator, DType type, long count,
+        Exception? readbackFailure, Exception? releaseFailure) : CpuStorage(allocator, type, count)
+    {
+        public int Releases { get; private set; }
+        public override float[] GetElementsAsFloat(long index, int length)
+            => readbackFailure is null ? base.GetElementsAsFloat(index, length) : throw readbackFailure;
+        protected override void Destroy()
+        {
+            Releases++;
+            base.Destroy();
+            if (releaseFailure is not null) throw releaseFailure;
+        }
     }
 
     private sealed class PopulationFailureAllocator(Exception failure) : IAllocator, IDisposable
