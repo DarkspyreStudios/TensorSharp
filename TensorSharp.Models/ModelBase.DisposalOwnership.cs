@@ -46,7 +46,7 @@ public abstract partial class ModelBase
     {
         ModelDisposalOwnership.AddRange(ownedTensors, _weights.Values);
         ModelDisposalOwnership.AddRows(ownedTensors, _tpWeights.Values);
-        ModelDisposalOwnership.AddRange(ownedTensors, _tpWeightReplicaCache.Values);
+        ModelDisposalOwnership.AddRange(ownedTensors, _tpWeightReplicaCache?.Values);
         if (MultimodalInjector is ModelMultimodalInjector injector)
             injector.CollectDisposalOwnership(ownedTensors);
         CollectBaseOwnedAllocators(ownedAllocators, ownsTensorParallelGroup);

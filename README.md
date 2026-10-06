@@ -63,6 +63,8 @@ Core exposes `NativeRuntimeQuarantine.Observe()` and exact-exception-identity
 context, stream, module, kernel, allocator and storage owners use this authority.
 Allocator retirement checks actual storage reference ownership before cleanup.
 Group and model cleanup share the same ownership census and restoration call.
+The model census includes tensor-parallel replicas only when their lazy cache exists.
+Models without replicas retain the same construction rollback and retirement path.
 Cleanup uncertainty retains actual owners and fences the affected device.
 The Qwen-Image-2.1 conditioner joins its vision tensors to the text model's actual
 disposal census. The text model releases that child before its allocator, through
