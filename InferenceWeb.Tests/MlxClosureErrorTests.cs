@@ -22,13 +22,14 @@ public sealed class MlxClosureErrorTests
         var errors = Assert.IsType<AggregateException>(wrapper.InnerException).Flatten().InnerExceptions;
 
         Assert.Equal(nativeStatus == 0 ? 2 : 3, errors.Count);
-        Assert.Same(callback, errors[0]);
-        Assert.Same(cleanup, errors[1]);
+        Assert.Same(callback, Assert.Single(errors, error => ReferenceEquals(error, callback)));
+        Assert.Same(cleanup, Assert.Single(errors, error => ReferenceEquals(error, cleanup)));
         Assert.Same(cleanup, invocation.CleanupError);
         if (nativeStatus != 0)
         {
-            Assert.Contains("applying compiled MLX closure", errors[2].Message);
-            Assert.Contains($"error code {nativeStatus}", errors[2].Message);
+            Exception native = Assert.Single(errors, error => !ReferenceEquals(error, callback) && !ReferenceEquals(error, cleanup));
+            Assert.Contains("applying compiled MLX closure", native.Message);
+            Assert.Contains($"error code {nativeStatus}", native.Message);
         }
     }
 }
