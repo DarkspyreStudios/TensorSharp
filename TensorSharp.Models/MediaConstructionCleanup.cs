@@ -58,12 +58,7 @@ internal sealed class MediaConstructionCleanup
     }
 
     private bool IsHealthyBusy(Exception failure)
-    {
-        if (failure is not NativeMlxCallbackBusyException busy) return false;
-        foreach (Tensor tensor in _ownedTensors)
-            if (tensor.GetLiveOwnedStorageForDisposal() is { } storage && busy.IsFor(storage)) return true;
-        return false;
-    }
+        => ModelDisposalOwnership.IsHealthyStorageRefusal(failure, _ownedTensors);
 
     internal void RollBackConstruction(Exception original, bool fileCloseFailed = false)
     {

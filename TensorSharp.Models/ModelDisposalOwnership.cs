@@ -4,6 +4,14 @@ namespace TensorSharp.Models;
 
 internal static class ModelDisposalOwnership
 {
+    internal static bool IsHealthyStorageRefusal(System.Exception failure, IEnumerable<Tensor> ownedTensors)
+    {
+        if (failure is not NativeMlxCallbackBusyException busy) return false;
+        foreach (Tensor tensor in ownedTensors)
+            if (tensor.GetLiveOwnedStorageForDisposal() is { } storage && busy.IsFor(storage)) return true;
+        return false;
+    }
+
     internal static void ReleasePublishedWeight(Dictionary<string, Tensor> weights, string name)
     {
         weights[name].Dispose();

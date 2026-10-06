@@ -2769,17 +2769,24 @@ namespace TensorSharp.Models
                 plan.Drain(restoration);
                 drainCompleted = true;
                 DisposeBaseResourcesCore(ownsTensorParallelGroup, releaseDerivedResources, releaseAfterModelCaches,
-                    releaseDerivedGraphs, plan, restoration, out cleanupBodyEntered);
+                    releaseDerivedGraphs, plan, restoration, ownedTensors, out cleanupBodyEntered);
                 plan.Complete();
                 _ownershipResourcesReleased = true;
                 _constructionCleanup.CompleteRelease(this);
             }
             catch (Exception cleanupError)
             {
-                if (!IsGgmlBackend || !drainCompleted || cleanupBodyEntered || GgmlNativeLoader.IsUnsafeCleanupRefusal(cleanupError))
+                bool healthyStorageRefusal = ModelDisposalOwnership.IsHealthyStorageRefusal(cleanupError, ownedTensors);
+                if (!healthyStorageRefusal && (!IsGgmlBackend || !drainCompleted || cleanupBodyEntered
+                    || GgmlNativeLoader.IsUnsafeCleanupRefusal(cleanupError)))
                 {
                     restoration?.MarkCleanupFailed();
                     RetainFailedModelOwnership(cleanupFailure: cleanupError);
+                }
+                else if (healthyStorageRefusal)
+                {
+                    try { restoration?.Restore(); }
+                    catch (Exception restoreError) { throw new AggregateException(cleanupError, restoreError); }
                 }
                 throw;
             }
@@ -2789,7 +2796,7 @@ namespace TensorSharp.Models
 
         private void DisposeBaseResourcesCore(bool ownsTensorParallelGroup, Action releaseDerivedResources,
             Action releaseAfterModelCaches, Action releaseDerivedGraphs, CudaRetirementPlan plan,
-            CudaContextRestoration restoration, out bool cleanupBodyEntered)
+            CudaContextRestoration restoration, IEnumerable<Tensor> ownedTensors, out bool cleanupBodyEntered)
         {
             cleanupBodyEntered = false;
             using (var ggmlCleanup = _ggmlRuntimeLease == null ? null : GgmlNativeLoader.ReserveResourceCleanup(this))
@@ -2899,7 +2906,8 @@ namespace TensorSharp.Models
                     }
                     catch (Exception failure)
                     {
-                        plan.PublishModelCleanupFailure(cleanupLease, failure);
+                        if (!ModelDisposalOwnership.IsHealthyStorageRefusal(failure, ownedTensors))
+                            plan.PublishModelCleanupFailure(cleanupLease, failure);
                         throw;
                     }
                 }

@@ -87,6 +87,9 @@ retains either its GGUF or safetensors reader and invalidates GGML bindings befo
 The recipe snapshots actual tensor identities before native effects. A typed MLX busy refusal
 against a still-owned storage keeps recovery available for explicit release instead of declaring
 an uncertain native release. Healthy refusal restores borrowed CUDA context after effects exit.
+Whole-model cleanup uses the same actual-storage identity check. A storage-bound busy refusal
+keeps model execution fenced and leaves explicit cleanup recovery available. It does not
+publish an uncertain native release or release the model's remaining resources.
 Qwen35, Qwen4Exp, Mistral3, GlmDsa and Gemma4 retain every vision child before its constructor acquires resources.
 A successful construction publishes the active child; a failure leaves the previous
 active child unchanged. Failed nested construction attempts the same checked child rollback
