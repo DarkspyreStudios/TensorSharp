@@ -43,7 +43,7 @@ internal static class Retirement
             Thread.Sleep(10);
         }
         string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
-        bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
+        bool unsafeCleanup = (mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure") || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
         if (!unsafeCleanup && retained.Length != 0)
             throw new InvalidOperationException("Disposed real model generation remains rooted: " + string.Join(",", retained));
         if (unsafeCleanup && retained.Length != evidence.Roots.Length)
@@ -212,7 +212,7 @@ public static partial class ForeignModelLifetime
                 _ => RefuseModel(modelPath, backend)
             };
             // Finalization is diagnostic here. A failed construction must not require GC to retire its model lease.
-            bool unsafeCleanup = mode.EndsWith("cleanup-failure", StringComparison.Ordinal) || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
+            bool unsafeCleanup = (mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure") || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
             for (int attempt = 0; unsafeCleanup && attempt < 10; attempt++)
             {
                 GC.Collect();
@@ -220,7 +220,7 @@ public static partial class ForeignModelLifetime
                 GC.Collect();
             }
             int modelLeases = ModelLeaseCount();
-            if (mode.EndsWith("cleanup-failure", StringComparison.Ordinal)) VerifyRetainedOwner(mode);
+            if ((mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure")) VerifyRetainedOwner(mode);
             if (mode is "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal") VerifyQuantizedRetention(mode);
             if (mode is "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement") VerifyTpRetention(mode);
             if (mode is "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal") VerifyBroadcastRetention();
@@ -268,7 +268,9 @@ public static partial class ForeignModelLifetime
     private static int ModelLeaseCount()
     {
         var resources = (IDictionary)typeof(GgmlNativeLoader).GetField("s_resources", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
-        return resources.Values.Cast<GgmlRuntimeResourceKind>().Count(kind => kind == GgmlRuntimeResourceKind.Model);
+        return resources.Values.Cast<object>().Count(resource =>
+            (GgmlRuntimeResourceKind)resource.GetType().GetField("Kind", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(resource)! == GgmlRuntimeResourceKind.Model);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -600,24 +602,36 @@ public static partial class ForeignModelLifetime
     private static string RefuseBaseCleanup(string path, BackendType backend)
     {
         IDisposable call = (IDisposable)typeof(GgmlNativeLoader).GetMethod("EnterNativeCall", BindingFlags.Static | BindingFlags.NonPublic)!
-            .Invoke(null, [null, IntPtr.Zero])!;
+            .Invoke(null, [null, IntPtr.Zero, Type.Missing, Type.Missing])!;
         TextWriter previous = Console.Out;
         var original = new IOException("controlled base-constructor output failure");
+        TensorSharp.NativeConstructionCleanupException? failure = null;
         try
         {
             Console.SetOut(new FailingOutput(original));
             try { _ = new BaseConstructionProbe(path, backend); }
-            catch (AggregateException error)
+            catch (TensorSharp.NativeConstructionCleanupException error)
             {
                 Require(ReferenceEquals(error.InnerExceptions[0], original) && error.InnerExceptions[1] is InvalidOperationException,
                     "Base rollback retains the original failure and actual resource-cleanup refusal while a controlled call lease is held.");
                 Require(ModelLeaseCount() == 1 && RuntimeResourceCount() == 2,
                     "Base rollback refusal retains its context and Model lease.");
-                return "injected-base-output-failure;real-resource-cleanup-refusal-with-controlled-call-lease";
+                Require(!error.Cleanup.IsReleased &&
+                    typeof(TensorSharp.NativeConstructionCleanupHandle).GetField("_owner", BindingFlags.Instance | BindingFlags.NonPublic)!
+                        .GetValue(error.Cleanup) is BaseConstructionProbe,
+                    "The actual failed construction remains owned by its release-only recovery handle.");
+                failure = error;
             }
         }
         finally { Console.SetOut(previous); call.Dispose(); }
-        throw new InvalidOperationException("Base rollback must report its cleanup refusal.");
+        Require(failure != null, "Base rollback must report its cleanup refusal.");
+        var retained = (IList)typeof(ModelBase).GetField("FailedGgmlModelOwners", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+        Require(retained.Count == 0, "A pre-effect Busy refusal does not poison the failed construction.");
+        failure!.Cleanup.Dispose();
+        failure.Cleanup.Dispose();
+        Require(failure.Cleanup.IsReleased && ModelLeaseCount() == 0 && RuntimeResourceCount() == 0,
+            "Explicit recovery after the call drains releases the actual context and model lease without replaying construction.");
+        return "injected-base-output-failure;real-pre-effect-Busy;actual-construction-owned;explicit-release-only-recovery";
     }
 
     private sealed class FailingOutput(Exception error) : TextWriter

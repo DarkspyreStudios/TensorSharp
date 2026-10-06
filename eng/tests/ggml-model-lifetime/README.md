@@ -5,6 +5,17 @@ Each mode/backend runs in a separate process against an explicit matching native
 The existing model modes generate a tiny F32 HunyuanDense GGUF. The ownership-only quantized
 modes generate one valid Q4_0 tensor and do not execute a model forward.
 
+The model-lease census reads each runtime resource record's `Kind` field. A retained
+resource record is not an enum value. The base-construction refusal supplies all
+four native-admission reflection parameters and uses the optional parameter defaults.
+These checks observe actual retained owners without changing runtime ownership.
+
+`base-cleanup-failure` holds a real native call while a base constructor fails.
+The pre-effect Busy refusal leaves the actual partial model on its release-only
+cleanup handle. It does not poison the model. Once the call drains, explicit handle
+disposal releases the context and model lease without replaying construction.
+The clean generation then collects. Terminal-refusal modes retain their unsafe owners.
+
 ## Quantized Ownership Gates
 
 `raw-quantized-read-refusal` and `stacked-quantized-read-refusal` capture the destination
