@@ -378,6 +378,9 @@ Availability probing uses the same worker-owned device carrier and checked relea
 errors propagate through the existing decoder. A failed device release retains the actual device
 and fences the shared runtime. Missing or incompatible libraries report unavailable only when no
 probe device remains owned; they do not hide a failed release.
+GPU initialization reports Metal as unavailable only after its native query succeeds with a
+false result. A failed query preserves its native action, status and captured error through
+the existing decoder.
 Default-stream acquisition retains the actual C wrapper before validation. One registered
 owner keeps cached and uncached wrappers until synchronized checked release. Cache invalidation
 retains old wrappers; the uncached benchmark mode still acquires a fresh wrapper per operation.

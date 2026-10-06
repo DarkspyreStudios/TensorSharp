@@ -3259,7 +3259,8 @@ if (kind == 0) {
                         return 0;
 
                     EnsureErrorHandlerInstalled();
-                    ThrowIfUnavailable();
+                    int availabilityStatus = mlx_metal_is_available(out bool metalAvailable);
+                    CheckMetalAvailability(availabilityStatus, metalAvailable);
                     ClearCapturedError();
                     resources.Device = mlx_device_new_type(MlxGpu, deviceId);
                     CheckNativeValue(resources.Device.Ctx == IntPtr.Zero, "creating MLX GPU device");
@@ -9469,9 +9470,10 @@ if (tile_b + TileSize <= InRows && tile_m + TileSize <= OutDim) {
             }
         }
 
-        private static void ThrowIfUnavailable()
+        internal static void CheckMetalAvailability(int status, bool metalAvailable)
         {
-            if (mlx_metal_is_available(out bool metalAvailable) != 0 || !metalAvailable)
+            Check(status, "checking MLX Metal availability");
+            if (!metalAvailable)
                 throw new PlatformNotSupportedException("MLX Metal is not available on this machine.");
         }
 
