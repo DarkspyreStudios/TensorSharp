@@ -81,22 +81,14 @@ namespace TensorSharp.Models
         private GgmlBasicOps.CrossNodeAllReduce TpCrossNodeCallback =>
             _tpCrossNodeCallback ??= (user, data, count) =>
             {
-                try
-                {
-                    if (count <= 0)
-                        return true;
-                    if (_tpCrossNodeBuf.Length < count)
-                        _tpCrossNodeBuf = new float[count];
-                    System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
-                    TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
-                    System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                if (count <= 0)
                     return true;
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[qwen35-tp] cross-node AllReduce failed: {ex.Message}");
-                    return false;
-                }
+                if (_tpCrossNodeBuf.Length < count)
+                    _tpCrossNodeBuf = new float[count];
+                Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
+                TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
+                Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                return true;
             };
 
         private bool TpFdBail(string reason)
@@ -400,6 +392,8 @@ namespace TensorSharp.Models
             int previousRank = GgmlBasicOps.GetActiveRank();
             var planSlot = new IntPtr[1];
             long t0 = Stopwatch.GetTimestamp();
+            bool plansExecuting = false;
+            Exception operationFailure = null;
             try
             {
                 fixed (float* lp = logitsOut)
@@ -439,27 +433,33 @@ namespace TensorSharp.Models
                         offset += lm.Ne1;
                     }
 
+                    plansExecuting = true;
                     if (TpCrossNodeReducer != null)
                         GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
                     else
                         GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                 }
             }
-            catch (InvalidOperationException e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
+            catch (InvalidOperationException e) when (!plansExecuting && !NativeQuarantineAuthority.TryGetFailure(e, out _))
             {
                 _tpFdFailed = true;
                 if (!_tpFdLogged)
                 {
                     _tpFdLogged = true;
                     Console.Error.WriteLine(
-                        $"[tp-full-decode] native execution failed ({e.Message}); " +
+                        $"[tp-full-decode] native plan construction failed ({e.Message}); " +
                         "staying on the per-op TP decode (roughly 10x slower). Reported once.");
                 }
                 return false;
             }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
+                throw;
+            }
             finally
             {
-                GgmlBasicOps.SetActiveRank(previousRank);
+                TensorParallelRankRestoration.Restore(previousRank, operationFailure, GgmlBasicOps.SetActiveRank);
             }
             _tpAttnBlockTicks += Stopwatch.GetTimestamp() - t0;
 
@@ -667,6 +667,8 @@ namespace TensorSharp.Models
             int headDim = Config.HeadDim;
 
             long t0 = Stopwatch.GetTimestamp();
+            bool plansExecuting = false;
+            Exception operationFailure = null;
             // Native TP plans borrow process-global per-rank execution resources
             // between the build calls and TensorParallelExecutePlans. Owner-keyed
             // pending slots prevent accidental replacement, while this lock closes
@@ -717,27 +719,33 @@ namespace TensorSharp.Models
                             offset += lm.Ne1;
                         }
 
+                        plansExecuting = true;
                         if (TpCrossNodeReducer != null)
                             GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFdPlans, TpCrossNodeCallback);
                         else
                             GgmlBasicOps.TensorParallelExecutePlans(_tpFdPlans);
                     }
                 }
-                catch (InvalidOperationException e) when (!NativeQuarantineAuthority.TryGetFailure(e, out _))
+                catch (InvalidOperationException e) when (!plansExecuting && !NativeQuarantineAuthority.TryGetFailure(e, out _))
                 {
                     _tpPfFailed = true;
                     if (!_tpPfLogged)
                     {
                         _tpPfLogged = true;
                         Console.Error.WriteLine(
-                            $"[tp-full-prefill] native execution failed ({e.Message}); " +
+                            $"[tp-full-prefill] native plan construction failed ({e.Message}); " +
                             "staying on the per-layer TP prefill (significantly slower). Reported once.");
                     }
                     return false;
                 }
+                catch (Exception failure)
+                {
+                    operationFailure = failure;
+                    throw;
+                }
                 finally
                 {
-                    GgmlBasicOps.SetActiveRank(previousRank);
+                    TensorParallelRankRestoration.Restore(previousRank, operationFailure, GgmlBasicOps.SetActiveRank);
                 }
             }
             _tpAttnBlockTicks += Stopwatch.GetTimestamp() - t0;

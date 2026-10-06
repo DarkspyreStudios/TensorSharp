@@ -96,22 +96,14 @@ namespace TensorSharp.Models
         private GgmlBasicOps.CrossNodeAllReduce TpCrossNodeCallback =>
             _tpCrossNodeCallback ??= (user, data, count) =>
             {
-                try
-                {
-                    if (count <= 0)
-                        return true;
-                    if (_tpCrossNodeBuf.Length < count)
-                        _tpCrossNodeBuf = new float[count];
-                    System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
-                    TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
-                    System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                if (count <= 0)
                     return true;
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[muse-tp] cross-node AllReduce failed: {ex.Message}");
-                    return false;
-                }
+                if (_tpCrossNodeBuf.Length < count)
+                    _tpCrossNodeBuf = new float[count];
+                System.Runtime.InteropServices.Marshal.Copy(data, _tpCrossNodeBuf, 0, count);
+                TpCrossNodeReducer.CrossNodeAllReduce(_tpCrossNodeBuf, count);
+                System.Runtime.InteropServices.Marshal.Copy(_tpCrossNodeBuf, 0, data, count);
+                return true;
             };
 
         internal bool CanUseTpFusedForward =>
@@ -318,6 +310,8 @@ namespace TensorSharp.Models
             bool ok = true;
 
             long t0 = Stopwatch.GetTimestamp();
+            bool plansExecuting = false;
+            Exception operationFailure = null;
             try
             {
                 fixed (float* logitsPtr = target)
@@ -373,6 +367,7 @@ namespace TensorSharp.Models
 
                     if (ok)
                     {
+                        plansExecuting = true;
                         if (TpCrossNodeReducer != null)
                             GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpFusedPlans, TpCrossNodeCallback);
                         else
@@ -380,15 +375,20 @@ namespace TensorSharp.Models
                     }
                 }
             }
-            catch (InvalidOperationException)
+            catch (InvalidOperationException error) when (!plansExecuting && !NativeQuarantineAuthority.TryGetFailure(error, out _))
             {
                 // The native side declined this shape (an unusually wide prefill
                 // chunk, a window it cannot express). Nothing ran.
                 ok = false;
             }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
+                throw;
+            }
             finally
             {
-                GgmlBasicOps.SetActiveRank(previousRank);
+                TensorParallelRankRestoration.Restore(previousRank, operationFailure, GgmlBasicOps.SetActiveRank);
             }
             _linearTicks += Stopwatch.GetTimestamp() - t0;
 

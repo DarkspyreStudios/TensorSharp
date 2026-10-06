@@ -64,6 +64,8 @@ namespace TensorSharp.Models
             int tp = TpDegree;
             int previousRank = GgmlBasicOps.GetActiveRank();
             var planSlot = new IntPtr[1];
+            bool plansExecuting = false;
+            Exception operationFailure = null;
             try
             {
                 for (int r = 0; r < tp; r++)
@@ -80,19 +82,25 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
+                plansExecuting = true;
                 if (TpCrossNodeReducer != null)
                     GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
                 else
                     GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (Exception ex) when ((ex is InvalidOperationException or NotSupportedException or ArgumentException)
-                && !NativeQuarantineAuthority.TryGetFailure(ex, out _))
+                && !plansExecuting && !NativeQuarantineAuthority.TryGetFailure(ex, out _))
             {
                 return false;
             }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
+                throw;
+            }
             finally
             {
-                GgmlBasicOps.SetActiveRank(previousRank);
+                TensorParallelRankRestoration.Restore(previousRank, operationFailure, GgmlBasicOps.SetActiveRank);
             }
 
             for (int r = 0; r < tp; r++)
@@ -126,6 +134,8 @@ namespace TensorSharp.Models
             int tp = TpDegree;
             int previousRank = GgmlBasicOps.GetActiveRank();
             var planSlot = new IntPtr[1];
+            bool plansExecuting = false;
+            Exception operationFailure = null;
             try
             {
                 for (int r = 0; r < tp; r++)
@@ -148,19 +158,25 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
+                plansExecuting = true;
                 if (TpCrossNodeReducer != null)
                     GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
                 else
                     GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
             catch (Exception ex) when ((ex is InvalidOperationException or NotSupportedException or ArgumentException)
-                && !NativeQuarantineAuthority.TryGetFailure(ex, out _))
+                && !plansExecuting && !NativeQuarantineAuthority.TryGetFailure(ex, out _))
             {
                 return false;
             }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
+                throw;
+            }
             finally
             {
-                GgmlBasicOps.SetActiveRank(previousRank);
+                TensorParallelRankRestoration.Restore(previousRank, operationFailure, GgmlBasicOps.SetActiveRank);
             }
 
             for (int r = 0; r < tp; r++)
@@ -336,6 +352,8 @@ namespace TensorSharp.Models
             int previousRank = GgmlBasicOps.GetActiveRank();
             var planSlot = new IntPtr[1];
             long t0 = Stopwatch.GetTimestamp();
+            bool plansExecuting = false;
+            Exception operationFailure = null;
             try
             {
                 for (int r = 0; r < tp; r++)
@@ -363,18 +381,24 @@ namespace TensorSharp.Models
                     _tpAttnPlans[r] = planSlot[0];
                 }
 
+                plansExecuting = true;
                 if (TpCrossNodeReducer != null)
                     GgmlBasicOps.TensorParallelExecutePlansDistributed(_tpAttnPlans, TpCrossNodeCallback);
                 else
                     GgmlBasicOps.TensorParallelExecutePlans(_tpAttnPlans);
             }
-            catch (InvalidOperationException error) when (!NativeQuarantineAuthority.TryGetFailure(error, out _))
+            catch (InvalidOperationException error) when (!plansExecuting && !NativeQuarantineAuthority.TryGetFailure(error, out _))
             {
                 return false;
             }
+            catch (Exception failure)
+            {
+                operationFailure = failure;
+                throw;
+            }
             finally
             {
-                GgmlBasicOps.SetActiveRank(previousRank);
+                TensorParallelRankRestoration.Restore(previousRank, operationFailure, GgmlBasicOps.SetActiveRank);
             }
             _tpAttnBlockTicks += Stopwatch.GetTimestamp() - t0;
 

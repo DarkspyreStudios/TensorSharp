@@ -68,6 +68,15 @@ Models without replicas retain the same construction rollback and retirement pat
 Cleanup uncertainty retains actual owners and fences the affected device.
 Qwen35 tensor-parallel fusion and cache synchronization preserve failures recorded by that
 same authority. Their fallback and missing-weight catches handle only unrecorded failures.
+Qwen35, GPT-OSS and Muse-Glimmer tensor-parallel plan fallbacks stop before execution.
+An executor failure propagates instead of replaying a partly executed graph through per-op fallback.
+Their cross-node callbacks leave exceptions to the existing GGML native-call owner.
+That owner returns failure across the unmanaged boundary and rethrows the original in managed code.
+These plan paths restore the previous rank without replacing a pending execution failure.
+An independent restoration failure carries both errors; the same exception is not duplicated.
+Focused managed tests exercise these three callbacks' real buffer marshalling and reducer failures,
+plus the shared restoration helper with a stand-in native rank setter.
+They do not execute native plans, load models or qualify actual native rank restoration.
 The Qwen-Image-2.1 conditioner joins its vision tensors to the text model's actual
 disposal census. The text model releases that child before its allocator, through
 the same coordinated cleanup. A failed vision constructor remains attached before
