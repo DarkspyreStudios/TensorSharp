@@ -434,10 +434,13 @@ These source paths do not establish executed GPU completion, callback/finalizer 
 or full model and cross-generation retirement. Worker admission alone proves none of them.
 Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
-certify availability, initialization or safe native cleanup. GGML integration
-has production compilation and source-review evidence, not executed native or
-device qualification. Protocol-2 MLX callbacks, checked backend retirement and
-the final-release hook have no executed runtime qualification.
+certify availability, initialization or safe native cleanup. GGML initialization
+shares one producer and result. Each caller's wait separately checks cancellation
+and process quarantine. The [native runtime harness](eng/tests/ggml-native-runtime/Program.cs)
+checks shared results, not wait-task identity. Its native runs do not establish
+all model, device or package qualification. The MLX lifetime probe exercises a
+tiny compiled activation and checked shutdown. Protocol-2 callback failure,
+GPU synchronization failure and full model retirement remain separate checks.
 
 MLX's shared array-reference release helper waits for the native free and checks
 its return status. Worker reentrant calls remain inline. The helper alone does not

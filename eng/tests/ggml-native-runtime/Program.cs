@@ -93,12 +93,13 @@ try
         catch (OperationCanceledException) { }
         object ownerGate = typeof(GgmlNativeLoader).GetField("s_gate", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
         Task<GgmlInitializationResult> first;
+        Task<GgmlInitializationResult> second;
         Monitor.Enter(ownerGate);
         try
         {
             first = GgmlNativeLoader.InitializeAsync();
-            Task<GgmlInitializationResult> second = GgmlNativeLoader.InitializeAsync();
-            Require(ReferenceEquals(first, second), "Concurrent initialization requests share one task.");
+            second = GgmlNativeLoader.InitializeAsync();
+            Require(!first.IsCompleted && !second.IsCompleted, "Concurrent callers wait for the pending initialization.");
             using var waitingCaller = new CancellationTokenSource();
             Task<GgmlInitializationResult> waiting = GgmlNativeLoader.InitializeAsync(waitingCaller.Token);
             waitingCaller.Cancel();
@@ -108,7 +109,9 @@ try
             Require(!GgmlNativeLoader.Shutdown().Released, "Shutdown cannot race initialization.");
         }
         finally { Monitor.Exit(ownerGate); }
-        selected = (await first).Selection;
+        GgmlInitializationResult shared = await first;
+        Require(ReferenceEquals(shared, await second), "Concurrent callers receive the same initialization result.");
+        selected = shared.Selection;
         Require(selected.Refusals.Single().Code == GgmlNativeRefusalCodes.NotSelected, "A different ABI plan is refused before loading.");
     }
     Require(selected.State == GgmlNativeSelectionState.Loaded, "The requested real backend initializes after pre-load refusals.");
