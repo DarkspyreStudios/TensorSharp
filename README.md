@@ -422,11 +422,13 @@ owner keeps cached and uncached wrappers until synchronized checked release. Cac
 retains old wrappers; the uncached benchmark mode still acquires a fresh wrapper per operation.
 Only successful frees clear owned references. Reusable stream-owner registration remains active
 after cache clearing; wrapper release does not claim native stream or worker retirement.
-Full retirement integration of all-used-stream synchronization remains unfinished.
-Final cached-kernel owner retirement, raw temporaries,
-other stateful fused operations, quantized caches, other trace callers, tensor-owned child disposal and replacement
-paths still require checked ownership recovery;
-worker admission does not prove successful GPU synchronization or worker retirement.
+Terminal worker retirement invokes the checked all-stream cache-release path when the
+native error handler was installed. It then retires the empty compiled, quantized,
+kernel and stream owners before completing the worker registration. Final storage
+release also synchronizes all used streams before freeing its array and host mirror.
+Synchronization failure preserves the array and records the Synchronization stage.
+These source paths do not establish executed GPU completion, callback/finalizer safety
+or full model and cross-generation retirement. Worker admission alone proves none of them.
 Remaining raw CUDA
 paths do not gain ownership guarantees from it. `NoRecordedFailure` does not
 certify availability, initialization or safe native cleanup. GGML integration
@@ -435,9 +437,10 @@ device qualification. Protocol-2 MLX callbacks, checked backend retirement and
 the final-release hook have no executed runtime qualification.
 
 MLX's shared array-reference release helper waits for the native free and checks
-its return status. Worker reentrant calls remain inline. Other raw native cleanup sites
-and all-used-stream retirement are not covered by this helper.
-Storage release checks the array reference, not GPU execution completion.
+its return status. Worker reentrant calls remain inline. The helper alone does not
+synchronize GPU work; final storage release and destructive cache release add their
+own all-stream completion boundary. Borrowed no-copy backing and native execution
+remain separate lifetime and qualification obligations.
 
 ## Quick Start
 
