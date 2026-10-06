@@ -26,6 +26,10 @@ the process ID and retained names, then waits for one input line before reportin
 the result. This pause permits a dump of the actual retired generation. It does
 not retain the generation through a strong managed reference or alter cleanup.
 
+JSON output contains only BCL dictionary, array and primitive values. Reflection-based
+serialization of a private anonymous type or `MlxMemorySnapshot` retains its loader
+through the shared serializer's member-accessor cache and invalidates unload checks.
+
 Build the managed executable with native hooks disabled:
 
 ```bash

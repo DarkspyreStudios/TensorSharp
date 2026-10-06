@@ -17,7 +17,7 @@ if (args is ["--collectible-dump", var dumpEntry])
 if (args.Length != 1 || !Path.IsPathFullyQualified(args[0])
     || !OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
 {
-    Console.Error.WriteLine("Usage on macOS ARM64: mlx-runtime-lifetime [--collectible] <absolute-libmlxc.dylib-path>");
+    Console.Error.WriteLine("Usage on macOS ARM64: mlx-runtime-lifetime [--collectible | --collectible-dump] <absolute-libmlxc.dylib-path>");
     return 2;
 }
 
@@ -31,13 +31,13 @@ try
     Environment.SetEnvironmentVariable("TENSORSHARP_MLX_LIBRARY", entry);
     // Retain the loaded library for the process lifetime, including callback retirement.
     _ = NativeLibrary.Load(entry);
-    Console.WriteLine(JsonSerializer.Serialize(new
+    Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
     {
-        entry,
-        sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(entry))),
-        coreMvid = typeof(Tensor).Module.ModuleVersionId,
-        mlxMvid = typeof(MlxBackend).Module.ModuleVersionId,
-        collectible = AssemblyLoadContext.GetLoadContext(typeof(MlxBackend).Assembly)!.IsCollectible
+        ["entry"] = entry,
+        ["sha256"] = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(entry))),
+        ["coreMvid"] = typeof(Tensor).Module.ModuleVersionId,
+        ["mlxMvid"] = typeof(MlxBackend).Module.ModuleVersionId,
+        ["collectible"] = AssemblyLoadContext.GetLoadContext(typeof(MlxBackend).Assembly)!.IsCollectible
     }));
     Require(NativeRuntimeQuarantine.Observe().State == NativeRuntimeQuarantineState.NoRecordedFailure,
         "The fresh process has no recorded cleanup failure.");
@@ -70,14 +70,14 @@ try
     }
     Require(storage.All(reference => !reference.IsAlive),
         "Safely disposed real storage owners are not retained after finalizer drainage.");
-    Console.WriteLine(JsonSerializer.Serialize(new
+    Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
     {
-        result = "passed",
-        before,
-        after,
-        storagesCollected = storage.Length,
-        compiledActivation = "GELU",
-        terminalWorkerRetirement = "completed"
+        ["result"] = "passed",
+        ["before"] = SnapshotValues(before),
+        ["after"] = SnapshotValues(after),
+        ["storagesCollected"] = storage.Length,
+        ["compiledActivation"] = "GELU",
+        ["terminalWorkerRetirement"] = "completed"
     }));
     return 0;
 }
@@ -119,6 +119,14 @@ static void Require(bool condition, string message)
     if (!condition) throw new InvalidOperationException(message);
 }
 
+// Reflection-based serialization of private types roots a collectible generation.
+static Dictionary<string, ulong> SnapshotValues(MlxMemorySnapshot snapshot) => new()
+{
+    ["ActiveBytes"] = snapshot.ActiveBytes,
+    ["CacheBytes"] = snapshot.CacheBytes,
+    ["PeakBytes"] = snapshot.PeakBytes
+};
+
 internal static class ForeignMlxGeneration
 {
     private sealed record Evidence(WeakReference[] Roots, string[] Names);
@@ -139,26 +147,34 @@ internal static class ForeignMlxGeneration
             string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
             if (waitForDump)
             {
-                Console.WriteLine(JsonSerializer.Serialize(new { diagnosticProcessId = Environment.ProcessId, retained }));
+                Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
+                {
+                    ["diagnosticProcessId"] = Environment.ProcessId,
+                    ["retained"] = retained
+                }));
                 Console.ReadLine();
             }
             if (retained.Length != 0)
                 throw new InvalidOperationException("Safely retired real MLX generation remains rooted: " + string.Join(",", retained));
-            Console.WriteLine(JsonSerializer.Serialize(new
+            Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
             {
-                result = "passed",
-                mode = "collectible",
-                collectedRoots = evidence.Roots.Length,
-                assemblies = evidence.Names,
-                nativeFailureQualification = "not-run",
-                actualModelQualification = "not-run"
+                ["result"] = "passed",
+                ["mode"] = "collectible",
+                ["collectedRoots"] = evidence.Roots.Length,
+                ["assemblies"] = evidence.Names,
+                ["nativeFailureQualification"] = "not-run",
+                ["actualModelQualification"] = "not-run"
             }));
             return 0;
         }
         catch (Exception error)
         {
             Console.Error.WriteLine(error);
-            Console.WriteLine(JsonSerializer.Serialize(new { result = "failed", mode = "collectible" }));
+            Console.WriteLine(JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["result"] = "failed",
+                ["mode"] = "collectible"
+            }));
             return 1;
         }
     }
