@@ -206,13 +206,14 @@ call installs its generation's error handler under the shared gate.
 Only the native payload destructor releases its exact callback root, except failed import
 binding before native adoption. Checked closure-reference release completes registration
 only when that root is actually gone. A later payload destructor does not automatically
-complete a pending registration; deferred payload completion remains unfinished.
-The seven built-in activation traces and GELU helper retain their acquired intermediates and
+complete a pending registration. The worker settles deferred payload receipts outside callbacks
+and retires the registration only after the source, compiled reference, callback root and active
+invocation are gone. Busy retirement retains the holder; failed retirement preserves its error.
+The seven built-in traces, GELU helper and dense-FFN trace retain their acquired intermediates and
 unreturned outputs through the same worker-owned array carrier as basic operations. Callback
 inputs remain borrowed from their existing invocation owner. Outputs transfer only after
 checked intermediate cleanup succeeds, including allocation of the returned output collection.
-Other trace delegates still require construction/replacement recovery; invocation retention
-does not supply their missing intermediate ownership.
+This source ownership does not establish native trace execution or cross-generation retirement.
 Graph evaluation, asynchronous submission and host-copy evaluation retain their actual vector
 resources through the worker before native acquisition. Submission waits for checked native
 return, not GPU completion. Failed evaluation retains the graph and fences the shared runtime;
