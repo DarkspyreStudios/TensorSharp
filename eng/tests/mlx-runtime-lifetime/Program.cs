@@ -1,14 +1,21 @@
+#nullable enable
+
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Security.Cryptography;
 using System.Text.Json;
 using TensorSharp;
 using TensorSharp.MLX;
 
+if (args is ["--collectible", var collectibleEntry])
+    return ForeignMlxGeneration.Run(collectibleEntry);
+
 if (args.Length != 1 || !Path.IsPathFullyQualified(args[0])
     || !OperatingSystem.IsMacOS() || RuntimeInformation.ProcessArchitecture != Architecture.Arm64)
 {
-    Console.Error.WriteLine("Usage on macOS ARM64: mlx-runtime-lifetime <absolute-libmlxc.dylib-path>");
+    Console.Error.WriteLine("Usage on macOS ARM64: mlx-runtime-lifetime [--collectible] <absolute-libmlxc.dylib-path>");
     return 2;
 }
 
@@ -27,7 +34,8 @@ try
         entry,
         sha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(entry))),
         coreMvid = typeof(Tensor).Module.ModuleVersionId,
-        mlxMvid = typeof(MlxBackend).Module.ModuleVersionId
+        mlxMvid = typeof(MlxBackend).Module.ModuleVersionId,
+        collectible = AssemblyLoadContext.GetLoadContext(typeof(MlxBackend).Assembly)!.IsCollectible
     }));
     Require(NativeRuntimeQuarantine.Observe().State == NativeRuntimeQuarantineState.NoRecordedFailure,
         "The fresh process has no recorded cleanup failure.");
@@ -107,4 +115,82 @@ static WeakReference[] RunTensorScope()
 static void Require(bool condition, string message)
 {
     if (!condition) throw new InvalidOperationException(message);
+}
+
+internal static class ForeignMlxGeneration
+{
+    private sealed record Evidence(WeakReference[] Roots, string[] Names);
+
+    internal static int Run(string entry)
+    {
+        try
+        {
+            Evidence evidence = LoadAndRetire(entry);
+            // Match the existing GGML collectible fixture's bounded root observation.
+            for (int pass = 0; pass < 30 && evidence.Roots.Any(root => root.IsAlive); pass++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+                Thread.Sleep(10);
+            }
+            string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
+            if (retained.Length != 0)
+                throw new InvalidOperationException("Safely retired real MLX generation remains rooted: " + string.Join(",", retained));
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                result = "passed",
+                mode = "collectible",
+                collectedRoots = evidence.Roots.Length,
+                assemblies = evidence.Names,
+                nativeFailureQualification = "not-run",
+                actualModelQualification = "not-run"
+            }));
+            return 0;
+        }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine(error);
+            Console.WriteLine(JsonSerializer.Serialize(new { result = "failed", mode = "collectible" }));
+            return 1;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static Evidence LoadAndRetire(string entry)
+    {
+        string assemblyPath = typeof(ForeignMlxGeneration).Assembly.Location;
+        var generation = new Generation(Path.GetDirectoryName(assemblyPath)!);
+        try
+        {
+            Assembly fixture = generation.LoadFromAssemblyPath(assemblyPath);
+            int exit = (int)fixture.EntryPoint!.Invoke(null, [new[] { entry }])!;
+            if (exit != 0)
+                throw new InvalidOperationException("The foreign native MLX lifetime checks did not complete successfully.");
+            Assembly[] assemblies = generation.Assemblies.ToArray();
+            foreach (string name in new[] { "mlx-runtime-lifetime", "TensorSharp.Core", "TensorSharp.Backends.MLX" })
+                if (!assemblies.Any(assembly => assembly.GetName().Name == name &&
+                    AssemblyLoadContext.GetLoadContext(assembly) == generation))
+                    throw new InvalidOperationException("The native MLX probe requires its actual private dependency: " + name);
+            return new([new(generation), .. assemblies.Select(assembly => new WeakReference(assembly))],
+                ["collectible ALC", .. assemblies.Select(assembly => assembly.GetName().Name!)]);
+        }
+        finally
+        {
+            generation.Unload();
+        }
+    }
+
+    private sealed class Generation(string directory) : AssemblyLoadContext("native-mlx-lifetime-" + Guid.NewGuid(), true)
+    {
+        protected override Assembly? Load(AssemblyName name)
+        {
+            if (name.Name != "mlx-runtime-lifetime" && !name.Name!.StartsWith("TensorSharp.", StringComparison.Ordinal))
+                return null;
+            string path = Path.Combine(directory, name.Name + ".dll");
+            if (!File.Exists(path))
+                throw new FileNotFoundException("The foreign MLX generation requires its actual private dependency.", path);
+            return LoadFromAssemblyPath(path);
+        }
+    }
 }

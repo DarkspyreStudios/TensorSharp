@@ -12,6 +12,15 @@ The executable preloads the explicit library and sets the existing
 It loads no model weights, modifies no shared driver and builds no native library.
 The selected library's dependencies and `mlx.metallib` must already be present.
 
+The explicit `--collectible` mode loads the actual probe, Core and MLX assemblies
+into one private collectible generation. It executes the same native checks,
+unloads after checked worker retirement, and observes the actual assembly and
+load-context weak roots. Its 30 collection passes and 10 ms waits match the
+existing GGML fixture's bounded observation. It never resets native ownership.
+The nested native-work result does not establish generation collection. The final
+collectible result and process exit code report that separate check. Retained roots
+produce a failed final result and exit code 1 after the native checks complete.
+
 Build the managed executable with native hooks disabled:
 
 ```bash
@@ -24,9 +33,17 @@ Run against the absolute shared bridge path:
 dotnet eng/tests/mlx-runtime-lifetime/bin/Debug/net10.0/mlx-runtime-lifetime.dll /absolute/shared/driver/libmlxc.dylib
 ```
 
+Run the same native checks in a collectible generation:
+
+```bash
+dotnet eng/tests/mlx-runtime-lifetime/bin/Debug/net10.0/mlx-runtime-lifetime.dll --collectible /absolute/shared/driver/libmlxc.dylib
+```
+
 An unsupported platform or missing runtime fails visibly. A successful probe does not
 qualify actual synchronization/free failures, concurrent callbacks, quantized model
-caches, multi-device execution, foreign-generation collection, AOT, archive provenance
+caches, multi-device execution, AOT, archive provenance
 or package delivery. The quarantine snapshot reports recorded cleanup failures only;
 it does not establish native readiness. Memory observations do not establish every
-native reference's lifetime.
+native reference's lifetime. The default mode does not prove foreign-generation
+collection. The collectible mode qualifies only this tiny normal native lifetime,
+not callbacks during failed retirement, raw external supplier use or full models.
