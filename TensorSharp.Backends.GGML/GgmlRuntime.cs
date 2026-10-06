@@ -529,6 +529,10 @@ public static partial class GgmlNativeLoader
             lock (s_gate)
             {
                 RemoveProcessExitHook();
+                // Retain the terminal process claim without rooting the retired assembly.
+                lock (AppDomain.CurrentDomain)
+                    if (ReferenceEquals(AppDomain.CurrentDomain.GetData(ProcessOwnerKey), s_processOwnerToken))
+                        AppDomain.CurrentDomain.SetData(ProcessOwnerKey, new object());
                 s_shutDown = true;
                 s_runtimeState = GgmlRuntimeState.Stopped;
                 return s_shutdownResult = new(true, null);

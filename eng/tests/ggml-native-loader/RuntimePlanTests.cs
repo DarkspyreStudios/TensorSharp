@@ -17,9 +17,10 @@ public sealed class RuntimePlanTests
         Assert.Equal("Configured", owner.State);
         Task first = owner.Initialize();
         Task second = owner.Initialize();
-        Assert.Same(first, second);
         await first;
+        await second;
         object result = first.GetType().GetProperty("Result")!.GetValue(first)!;
+        Assert.Same(result, second.GetType().GetProperty("Result")!.GetValue(second));
         Assert.Equal("Unavailable", result.GetType().GetProperty("State")!.GetValue(result)!.ToString());
         Assert.Equal("Unavailable", owner.State);
         Assert.Null(owner.Loader.GetProperty("Current")!.GetValue(null)!.GetType().GetProperty("LibraryPath")!.GetValue(owner.Loader.GetProperty("Current")!.GetValue(null)));

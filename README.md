@@ -438,7 +438,10 @@ certify availability, initialization or safe native cleanup. GGML initialization
 shares one producer and result. Each caller's wait separately checks cancellation
 and process quarantine. The [native runtime harness](eng/tests/ggml-native-runtime/Program.cs)
 checks shared results, not wait-task identity. Its native runs do not establish
-all model, device or package qualification. The MLX lifetime probe exercises a
+all model, device or package qualification. Successful GGML shutdown replaces
+its process-wide managed owner with a BCL-only terminal marker. The marker
+prevents process reuse without retaining the retired collectible assembly.
+Busy or failed cleanup retains the actual owner graph. The MLX lifetime probe exercises a
 tiny compiled activation and checked shutdown. Protocol-2 callback failure,
 GPU synchronization failure and full model retirement remain separate checks.
 
