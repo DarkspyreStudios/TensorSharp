@@ -3791,11 +3791,7 @@ if (kind == 0) {
         {
             CollectClosureErrors(invocation);
             try { Check(status, action); }
-            catch when (invocation.Error != null)
-            {
-                ExceptionDispatchInfo.Capture(invocation.Error).Throw();
-                throw;
-            }
+            catch (Exception error) { invocation.Error = JoinNativeErrors(invocation.Error, error); }
             if (invocation.Error != null)
                 ExceptionDispatchInfo.Capture(invocation.Error).Throw();
         }

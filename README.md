@@ -171,7 +171,9 @@ a native gate across trace callbacks. Compiled closure creation/application and 
 reference release use callback-aware leases. Managed tracing suspends the native monitor
 without dropping its counted invocation. Failed framework cleanup retains the actual closure,
 invocation vectors and array references. Native callbacks record their original errors
-before returning; aggregation occurs after the callback. Each admitted ordinary/compiled
+before returning; aggregation occurs after the callback. Compile/apply status checks preserve
+the native-status failure alongside each recorded callback error. A successful native status
+does not erase a callback failure. Each admitted ordinary/compiled
 call installs its generation's error handler under the shared gate.
 Only the native payload destructor releases its exact callback root, except failed import
 binding before native adoption. Checked closure-reference release completes registration
