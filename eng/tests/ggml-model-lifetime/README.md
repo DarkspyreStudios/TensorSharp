@@ -16,6 +16,11 @@ cleanup handle. It does not poison the model. Once the call drains, explicit han
 disposal releases the context and model lease without replaying construction.
 The clean generation then collects. Terminal-refusal modes retain their unsafe owners.
 
+`local-cleanup-failure` checks the construction cleanup exception's actual nested
+read/rollback errors. Its terminal cleanup cause is the same exception instance as
+the local rollback cause. The cleanup handle remains unreleased and the failed
+model retains its actual unregistered storage.
+
 ## Quantized Ownership Gates
 
 `raw-quantized-read-refusal` and `stacked-quantized-read-refusal` capture the destination

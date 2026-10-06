@@ -325,9 +325,11 @@ public static partial class ForeignModelLifetime
             Require(ReadFailingQwen3.Last!.TryGetTarget(out ReadFailingQwen3? model), "The construction frame still exposes the inspected model.");
             if (failCleanup)
             {
-                Require(error is AggregateException aggregate && aggregate.InnerExceptions[0] is EndOfStreamException &&
-                    aggregate.InnerExceptions[1] is InvalidOperationException,
-                    "The local transfer records both the actual read failure and injected storage cleanup failure.");
+                Require(error is TensorSharp.NativeConstructionCleanupException aggregate && !aggregate.Cleanup.IsReleased &&
+                    aggregate.InnerExceptions[0] is AggregateException work && work.InnerExceptions[0] is EndOfStreamException &&
+                    work.InnerExceptions[1] is InvalidOperationException &&
+                    ReferenceEquals(work.InnerExceptions[1], aggregate.InnerExceptions[1]),
+                    "The local transfer records both the actual read failure and injected storage cleanup failure: " + error);
                 Require(model!.LoadedWeights == 1 && RuntimeResourceCount() == 4,
                     "The first owned weight, unregistered second storage, context and Model lease remain retained.");
             }
