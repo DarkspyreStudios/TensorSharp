@@ -3213,35 +3213,33 @@ if (kind == 0) {
             if (!OperatingSystem.IsMacOS())
                 return false;
 
+            var resources = new DeviceAcquisitionResources(deviceStreams, 0);
             try
             {
                 InstallResolver();
-                return MlxWorker.Shared.InvokeNative(() =>
+                return MlxWorker.Shared.InvokeNative(resources, _ =>
                 {
                     EnsureErrorHandlerInstalled();
-                    if (mlx_metal_is_available(out bool metalAvailable) != 0 || !metalAvailable)
+                    Check(mlx_metal_is_available(out bool metalAvailable), "checking MLX Metal availability");
+                    if (!metalAvailable)
                         return false;
 
-                    MlxDevice device = mlx_device_new_type(MlxGpu, 0);
-                    try
-                    {
-                        return mlx_device_is_available(out bool deviceAvailable, device) == 0 && deviceAvailable;
-                    }
-                    finally
-                    {
-                        _ = mlx_device_free(device);
-                    }
-                });
+                    ClearCapturedError();
+                    resources.Device = mlx_device_new_type(MlxGpu, 0);
+                    CheckNativeValue(resources.Device.Ctx == IntPtr.Zero, "creating MLX probe device");
+                    Check(mlx_device_is_available(out bool deviceAvailable, resources.Device), "checking MLX device availability");
+                    return deviceAvailable;
+                }, resources.Release);
             }
-            catch (DllNotFoundException)
+            catch (DllNotFoundException) when (resources.Device.Ctx == IntPtr.Zero)
             {
                 return false;
             }
-            catch (EntryPointNotFoundException)
+            catch (EntryPointNotFoundException) when (resources.Device.Ctx == IntPtr.Zero)
             {
                 return false;
             }
-            catch (BadImageFormatException)
+            catch (BadImageFormatException) when (resources.Device.Ctx == IntPtr.Zero)
             {
                 return false;
             }

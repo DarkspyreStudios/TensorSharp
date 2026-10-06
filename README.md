@@ -370,6 +370,10 @@ as successful cache cleanup. Upstream MLX sources remain unchanged.
 Device initialization retains the actual temporary device before native validation and
 checks its release before publishing initialized-device readiness. Failure after default-device
 selection records unsafe context state and requires process restart; initialization does not retry it.
+Availability probing uses the same worker-owned device carrier and checked release. Native query
+errors propagate through the existing decoder. A failed device release retains the actual device
+and fences the shared runtime. Missing or incompatible libraries report unavailable only when no
+probe device remains owned; they do not hide a failed release.
 Default-stream acquisition retains the actual C wrapper before validation. One registered
 owner keeps cached and uncached wrappers until synchronized checked release. Cache invalidation
 retains old wrappers; the uncached benchmark mode still acquires a fresh wrapper per operation.
