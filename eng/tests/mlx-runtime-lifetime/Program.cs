@@ -1,5 +1,6 @@
 #nullable enable
 
+using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -8,6 +9,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using TensorSharp;
 using TensorSharp.MLX;
+using TensorSharp.Runtime;
 
 if (args is ["--collectible", var collectibleEntry])
     return ForeignMlxGeneration.Run(collectibleEntry);
@@ -45,7 +47,7 @@ try
     MlxBackend.EnsureAvailable();
     MlxBackend.ClearCache();
     MlxMemorySnapshot before = MlxBackend.GetMemorySnapshot();
-    WeakReference[] storage = RunTensorScope();
+    WeakReference[] storage = [.. RunTensorScope(), .. RunQuantizedScope()];
     MlxMemorySnapshot after = MlxBackend.GetMemorySnapshot();
     Require(after.ActiveBytes == before.ActiveBytes,
         $"Explicit tensor and cache disposal restores active bytes: before={before.ActiveBytes}, after={after.ActiveBytes}.");
@@ -77,6 +79,7 @@ try
         ["after"] = SnapshotValues(after),
         ["storagesCollected"] = storage.Length,
         ["compiledActivation"] = "GELU",
+        ["quantizedWeight"] = "Q8_0 cached matmul creation/reuse/release",
         ["terminalWorkerRetirement"] = "completed"
     }));
     return 0;
@@ -112,6 +115,59 @@ static WeakReference[] RunTensorScope()
             "A real compiled MLX activation and its cached reuse match the CPU formula.");
     }
     return [new(input.Storage), new(first.Storage), new(reused.Storage)];
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static WeakReference[] RunQuantizedScope()
+{
+    const int inDim = 32, outDim = 4, rows = 2, blockBytes = 34;
+    const float scale = 0.125f;
+    byte[] weights = new byte[outDim * blockBytes];
+    float[,] values = new float[rows, inDim];
+    float[] expected = new float[rows * outDim];
+    for (int row = 0; row < rows; row++)
+        for (int index = 0; index < inDim; index++)
+            values[row, index] = (index - 12 + row * 3) / 32f;
+    for (int output = 0; output < outDim; output++)
+    {
+        BinaryPrimitives.WriteUInt16LittleEndian(weights.AsSpan(output * blockBytes),
+            BitConverter.HalfToUInt16Bits((System.Half)scale));
+        for (int index = 0; index < inDim; index++)
+        {
+            int quantized = (index + output * 7) % 32 - 16;
+            weights[output * blockBytes + 2 + index] = unchecked((byte)(sbyte)quantized);
+            for (int row = 0; row < rows; row++)
+                expected[row * outDim + output] += values[row, index] * quantized * scale;
+        }
+    }
+
+    using var allocator = new MlxAllocator();
+    IntPtr host = Marshal.AllocHGlobal(weights.Length);
+    try
+    {
+        Marshal.Copy(weights, 0, host, weights.Length);
+        MlxQuantizedOps.PreloadQuantizedWeight(allocator, host, host,
+            (int)GgmlTensorType.Q8_0, inDim, outDim, weights.Length);
+        using var input = Tensor.FromArray(allocator, values);
+        using var first = new Tensor(allocator, DType.Float32, rows, outDim);
+        using var reused = new Tensor(allocator, DType.Float32, rows, outDim);
+        foreach (Tensor result in new[] { first, reused })
+        {
+            Require(MlxQuantizedOps.TryAddmmQuantizedToFloat32(result, input, host, IntPtr.Zero,
+                (int)GgmlTensorType.Q8_0, inDim, outDim, weights.Length),
+                "A real Q8 matmul reuses the preloaded weight without host data.");
+            float[] actual = result.GetElementsAsFloat(expected.Length);
+            Require(actual.Length == expected.Length && actual.Zip(expected).All(pair =>
+                float.IsFinite(pair.First) && MathF.Abs(pair.First - pair.Second) <= 1e-5f),
+                "A real cached Q8 matmul and its reuse match the CPU dot products.");
+        }
+        return [new(input.Storage), new(first.Storage), new(reused.Storage)];
+    }
+    finally
+    {
+        MlxQuantizedOps.ReleaseQuantizedWeight(allocator, host);
+        Marshal.FreeHGlobal(host);
+    }
 }
 
 static void Require(bool condition, string message)

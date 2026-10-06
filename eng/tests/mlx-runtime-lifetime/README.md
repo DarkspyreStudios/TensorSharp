@@ -2,7 +2,8 @@
 
 This executable uses a selected prebuilt MLX bridge on macOS ARM64. Each invocation
 starts a fresh process. It checks real compiled GELU creation and cached reuse against
-the CPU formula, explicit tensor and allocator disposal, native active/cache bytes,
+the CPU formula, tiny Q8 weight preload and cached matmul reuse against CPU dot
+products, explicit weight/tensor/allocator disposal, native active/cache bytes,
 checked terminal worker shutdown, repeated shutdown, rejected post-retirement work
 and collection of the actual storage owners. The ten finalizer passes bound the
 weak-reference observation; the probe never resets ownership or retries native frees.
@@ -49,8 +50,8 @@ dotnet eng/tests/mlx-runtime-lifetime/bin/Debug/net10.0/mlx-runtime-lifetime.dll
 ```
 
 An unsupported platform or missing runtime fails visibly. A successful probe does not
-qualify actual synchronization/free failures, concurrent callbacks, quantized model
-caches, multi-device execution, AOT, archive provenance
+qualify actual synchronization/free failures, concurrent callbacks, full quantized
+model caches, multi-device execution, AOT, archive provenance
 or package delivery. The quarantine snapshot reports recorded cleanup failures only;
 it does not establish native readiness. Memory observations do not establish every
 native reference's lifetime. The default mode does not prove foreign-generation
