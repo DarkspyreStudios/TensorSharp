@@ -65,17 +65,18 @@ namespace TensorSharp.Models
         public int ImageSize => _imageSize;
 
         public Mistral3VisionEncoder(string mmProjPath, IAllocator allocator)
-            : this(mmProjPath, allocator, null)
+            : this(mmProjPath, allocator, null, null)
         {
         }
 
         internal Mistral3VisionEncoder(string mmProjPath, IAllocator allocator,
-            Action<Mistral3VisionEncoder> retainConstruction)
+            Action<Mistral3VisionEncoder> retainConstruction, Action<Mistral3VisionEncoder, Exception> retainUnsafe)
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _constructionCleanup = new MediaConstructionCleanup(this, allocator,
-                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile,
+                retainUnsafe == null ? null : error => retainUnsafe(this, error));
             bool closingFile = false;
             try
             {
@@ -114,8 +115,7 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                if (retainConstruction == null)
-                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
+                _constructionCleanup.RollBackConstruction(loadError, closingFile);
                 throw;
             }
         }
@@ -675,6 +675,8 @@ namespace TensorSharp.Models
             _hostModel?.ThrowIfOwnershipCleanupFailed();
             _constructionCleanup.Cleanup.Dispose();
         }
+
+        internal NativeConstructionCleanupHandle ConstructionCleanup => _constructionCleanup.Cleanup;
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
             => _constructionCleanup.CollectDisposalOwnership(tensors);

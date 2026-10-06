@@ -15,24 +15,35 @@ internal sealed class MediaConstructionCleanup
     private readonly Action<ICollection<Tensor>> _collect;
     private readonly Action _releaseResources;
     private readonly Action _releaseFiles;
+    private readonly Action<Exception> _retainUnsafeParent;
     private bool _resourcesReleased;
     private bool _released;
     private Exception _unsafeFailure;
     private Tensor[] _ownedTensors = Array.Empty<Tensor>();
 
     internal MediaConstructionCleanup(object owner, IAllocator allocator,
-        Action<ICollection<Tensor>> collect, Action releaseResources, Action releaseFiles)
+        Action<ICollection<Tensor>> collect, Action releaseResources, Action releaseFiles,
+        Action<Exception> retainUnsafeParent)
     {
         _owner = owner;
         _ggml = allocator is GgmlAllocator;
         _collect = collect;
         _releaseResources = releaseResources;
         _releaseFiles = releaseFiles;
+        _retainUnsafeParent = retainUnsafeParent;
         Cleanup = new NativeConstructionCleanupHandle(owner, Release, () => _released,
             () => _unsafeFailure != null);
     }
 
     internal NativeConstructionCleanupHandle Cleanup { get; }
+
+    internal static void RequireReleasedConstruction(ref NativeConstructionCleanupHandle pending)
+    {
+        if (pending == null) return;
+        if (!pending.IsReleased)
+            throw new InvalidOperationException("A failed media construction still owns resources; release its cleanup handle before loading another encoder.");
+        pending = null;
+    }
 
     internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
     {
@@ -116,6 +127,9 @@ internal sealed class MediaConstructionCleanup
                 {
                     restoration?.MarkCleanupFailed();
                     _unsafeFailure = failure;
+                    // Parent retention can allocate and take host locks only after native effects exit.
+                    try { _retainUnsafeParent?.Invoke(failure); }
+                    catch (Exception retentionError) { throw new AggregateException(failure, retentionError); }
                 }
                 else
                 {

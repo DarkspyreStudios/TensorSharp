@@ -6297,19 +6297,28 @@ namespace TensorSharp.Models
 
         #region Vision Support
 
+        private NativeConstructionCleanupHandle _pendingVisionConstruction;
+
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
+            MediaConstructionCleanup.RequireReleasedConstruction(ref _pendingVisionConstruction);
             _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
-            var encoder = new Qwen35VisionEncoder(mmProjPath, _allocator, false, RetainVisionConstruction);
+            var encoder = new Qwen35VisionEncoder(mmProjPath, _allocator, false,
+                RetainVisionConstruction, RetainUnsafeVisionConstruction);
             VisionEncoder = encoder;
+            _pendingVisionConstruction = null;
         }
 
         private void RetainVisionConstruction(Qwen35VisionEncoder encoder)
         {
             _ownedVisionEncoders.Add(encoder);
+            _pendingVisionConstruction = encoder.ConstructionCleanup;
             encoder.SetHostModel(this);
         }
+
+        private void RetainUnsafeVisionConstruction(Qwen35VisionEncoder encoder, Exception error)
+            => RetainFailedModelOwnership(encoder, error);
 
         public void SetVisionEmbeddings(Tensor visionEmbeddings, int startPosition)
         {

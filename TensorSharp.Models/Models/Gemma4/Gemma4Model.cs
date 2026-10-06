@@ -377,9 +377,13 @@ namespace TensorSharp.Models
             return 0;
         }
 
+        private NativeConstructionCleanupHandle _pendingVisionConstruction;
+        private NativeConstructionCleanupHandle _pendingAudioConstruction;
+
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
+            MediaConstructionCleanup.RequireReleasedConstruction(ref _pendingVisionConstruction);
             // The direct CUDA backend currently diverges numerically in the Gemma4
             // vision stack; keep projector embeddings on the stable CPU path and
             // copy the final embeddings into the CUDA language model.
@@ -387,30 +391,43 @@ namespace TensorSharp.Models
                 ? new CpuAllocator(BlasEnum.DotNet)
                 : _allocator;
             _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
-            var encoder = new Gemma4VisionEncoder(mmProjPath, visionAllocator, RetainVisionConstruction);
+            var encoder = new Gemma4VisionEncoder(mmProjPath, visionAllocator,
+                RetainVisionConstruction, RetainUnsafeVisionConstruction);
             _visionEncoder = encoder;
+            _pendingVisionConstruction = null;
         }
 
         private void RetainVisionConstruction(Gemma4VisionEncoder encoder)
         {
             _ownedVisionEncoders.Add(encoder);
+            _pendingVisionConstruction = encoder.ConstructionCleanup;
             // The per-block loop yields the model's GPU compute lock between image blocks.
             encoder.SetHostModel(this);
         }
 
+        private void RetainUnsafeVisionConstruction(Gemma4VisionEncoder encoder, Exception error)
+            => RetainFailedModelOwnership(encoder, error);
+
         public void LoadAudioEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
+            MediaConstructionCleanup.RequireReleasedConstruction(ref _pendingAudioConstruction);
             _ownedAudioEncoders.EnsureCapacity(checked(_ownedAudioEncoders.Count + 1));
-            var encoder = new Gemma4AudioEncoder(mmProjPath, _allocator, RetainAudioConstruction);
+            var encoder = new Gemma4AudioEncoder(mmProjPath, _allocator,
+                RetainAudioConstruction, RetainUnsafeAudioConstruction);
             _audioEncoder = encoder;
+            _pendingAudioConstruction = null;
         }
 
         private void RetainAudioConstruction(Gemma4AudioEncoder encoder)
         {
             _ownedAudioEncoders.Add(encoder);
+            _pendingAudioConstruction = encoder.ConstructionCleanup;
             encoder.SetHostModel(this);
         }
+
+        private void RetainUnsafeAudioConstruction(Gemma4AudioEncoder encoder, Exception error)
+            => RetainFailedModelOwnership(encoder, error);
 
         public void SetAudioEmbeddings(Tensor embeddings, int insertPosition)
         {

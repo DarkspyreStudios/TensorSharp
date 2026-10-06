@@ -30,12 +30,13 @@ public sealed class MediaConstructionCleanupTests
                 typeof(Tensor).Assembly.GetType("TensorSharp.NativeMlxCallbackBusyException", throwOnError: true)!,
                 BindingFlags.Instance | BindingFlags.NonPublic, binder: null, args: [tensor.Storage], culture: null)!;
             Exception? refusal = busy;
+            Exception? retainedUnsafe = null;
             var cleanup = new MediaConstructionCleanup(new object(), allocator,
                 tensors => tensors.Add(tensor), () =>
                 {
                     if (refusal is not null) throw refusal;
                     tensor.Dispose();
-                }, file.Dispose);
+                }, file.Dispose, error => retainedUnsafe = error);
 
             NativeConstructionCleanupException failure = Assert.Throws<NativeConstructionCleanupException>(() =>
                 cleanup.RollBackConstruction(original));
@@ -43,6 +44,11 @@ public sealed class MediaConstructionCleanupTests
             Assert.Same(busy, failure.InnerExceptions[1]);
             Assert.Same(cleanup.Cleanup, failure.Cleanup);
             Assert.False(failure.Cleanup.IsReleased);
+            Assert.Null(retainedUnsafe);
+            NativeConstructionCleanupHandle? pending = failure.Cleanup;
+            Assert.Throws<InvalidOperationException>(() =>
+                MediaConstructionCleanup.RequireReleasedConstruction(ref pending));
+            Assert.Same(failure.Cleanup, pending);
             Assert.True(tensor.Storage.IsOwnerExclusive());
             Assert.Equal([9f], tensor.GetElementsAsFloat(1));
             Assert.Throws<IOException>(() => File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose());
@@ -50,6 +56,8 @@ public sealed class MediaConstructionCleanupTests
             refusal = null;
             failure.Cleanup.Dispose();
             Assert.True(failure.Cleanup.IsReleased);
+            MediaConstructionCleanup.RequireReleasedConstruction(ref pending);
+            Assert.Null(pending);
             Assert.Equal(IntPtr.Zero, Assert.IsType<CpuStorage>(tensor.Storage).buffer);
             using var reopened = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         }
@@ -60,13 +68,19 @@ public sealed class MediaConstructionCleanupTests
     }
 
     [Theory]
-    [InlineData("qwen")]
-    [InlineData("mistral")]
-    [InlineData("glm")]
-    [InlineData("gemma-audio")]
-    [InlineData("gemma-vision")]
-    [InlineData("gemma-vision-safetensors")]
-    public void FailedMediaWeightPopulationReleasesTheWeightAndFileButNotTheBorrowedAllocator(string encoder)
+    [InlineData("qwen", false)]
+    [InlineData("qwen", true)]
+    [InlineData("mistral", false)]
+    [InlineData("mistral", true)]
+    [InlineData("glm", false)]
+    [InlineData("glm", true)]
+    [InlineData("gemma-audio", false)]
+    [InlineData("gemma-audio", true)]
+    [InlineData("gemma-vision", false)]
+    [InlineData("gemma-vision", true)]
+    [InlineData("gemma-vision-safetensors", false)]
+    [InlineData("gemma-vision-safetensors", true)]
+    public void FailedMediaWeightPopulationReleasesTheWeightAndFileButNotTheBorrowedAllocator(string encoder, bool parentOwned)
     {
         string directory = Path.Combine(Path.GetTempPath(), "vision-construction-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -81,8 +95,15 @@ public sealed class MediaConstructionCleanupTests
             using var borrowed = new Tensor(allocator, DType.Float32, 1);
             borrowed.SetElementsAsFloat([7]);
 
+            NativeConstructionCleanupHandle? reserved = null;
             Assert.Same(failure, Assert.Throws<InvalidOperationException>(() =>
-                CreateEncoder(encoder, path, allocator)));
+                CreateEncoder(encoder, path, allocator, parentOwned ? cleanup => reserved = cleanup : null)));
+
+            if (parentOwned)
+            {
+                Assert.NotNull(reserved);
+                Assert.True(reserved.IsReleased);
+            }
 
             Assert.Equal(1, allocator.FailedWeight!.Releases);
             Assert.Equal(IntPtr.Zero, allocator.FailedWeight.buffer);
@@ -105,6 +126,26 @@ public sealed class MediaConstructionCleanupTests
         "gemma-vision" or "gemma-vision-safetensors" => new Gemma4VisionEncoder(path, allocator),
         _ => throw new ArgumentOutOfRangeException(nameof(encoder))
     };
+
+    private static IDisposable CreateEncoder(string encoder, string path, IAllocator allocator,
+        Action<NativeConstructionCleanupHandle>? reserve)
+    {
+        if (reserve is null) return CreateEncoder(encoder, path, allocator);
+        return encoder switch
+        {
+            "qwen" => new Qwen35VisionEncoder(path, allocator, false,
+                child => reserve(child.ConstructionCleanup), (_, _) => Assert.Fail("Healthy rollback must not fence the parent.")),
+            "mistral" => new Mistral3VisionEncoder(path, allocator,
+                child => reserve(child.ConstructionCleanup), (_, _) => Assert.Fail("Healthy rollback must not fence the parent.")),
+            "glm" => new GlmNextVisionEncoder(path, allocator,
+                child => reserve(child.ConstructionCleanup), (_, _) => Assert.Fail("Healthy rollback must not fence the parent.")),
+            "gemma-audio" => new Gemma4AudioEncoder(path, allocator,
+                child => reserve(child.ConstructionCleanup), (_, _) => Assert.Fail("Healthy rollback must not fence the parent.")),
+            "gemma-vision" or "gemma-vision-safetensors" => new Gemma4VisionEncoder(path, allocator,
+                child => reserve(child.ConstructionCleanup), (_, _) => Assert.Fail("Healthy rollback must not fence the parent.")),
+            _ => throw new ArgumentOutOfRangeException(nameof(encoder))
+        };
+    }
 
     private static void WriteProjector(string path, string weightName)
     {

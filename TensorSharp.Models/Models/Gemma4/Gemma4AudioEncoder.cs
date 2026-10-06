@@ -71,16 +71,17 @@ namespace TensorSharp.Models
         public bool IsEncoderFree => _isEncoderFree;
 
         public Gemma4AudioEncoder(string mmProjPath, IAllocator allocator)
-            : this(mmProjPath, allocator, null)
+            : this(mmProjPath, allocator, null, null)
         {
         }
 
         internal Gemma4AudioEncoder(string mmProjPath, IAllocator allocator,
-            Action<Gemma4AudioEncoder> retainConstruction)
+            Action<Gemma4AudioEncoder> retainConstruction, Action<Gemma4AudioEncoder, Exception> retainUnsafe)
         {
             _allocator = allocator;
             _constructionCleanup = new MediaConstructionCleanup(this, allocator,
-                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile,
+                retainUnsafe == null ? null : error => retainUnsafe(this, error));
             bool closingFile = false;
             try
             {
@@ -129,8 +130,7 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                if (retainConstruction == null)
-                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
+                _constructionCleanup.RollBackConstruction(loadError, closingFile);
                 throw;
             }
         }
@@ -993,6 +993,8 @@ namespace TensorSharp.Models
             _hostModel?.ThrowIfOwnershipCleanupFailed();
             _constructionCleanup.Cleanup.Dispose();
         }
+
+        internal NativeConstructionCleanupHandle ConstructionCleanup => _constructionCleanup.Cleanup;
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
             => _constructionCleanup.CollectDisposalOwnership(tensors);

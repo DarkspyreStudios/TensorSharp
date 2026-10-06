@@ -417,19 +417,28 @@ namespace TensorSharp.Models
         }
 
         // Vision support
+        private NativeConstructionCleanupHandle _pendingVisionConstruction;
+
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
+            MediaConstructionCleanup.RequireReleasedConstruction(ref _pendingVisionConstruction);
             _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
-            var encoder = new Mistral3VisionEncoder(mmProjPath, _allocator, RetainVisionConstruction);
+            var encoder = new Mistral3VisionEncoder(mmProjPath, _allocator,
+                RetainVisionConstruction, RetainUnsafeVisionConstruction);
             _visionEncoder = encoder;
+            _pendingVisionConstruction = null;
         }
 
         private void RetainVisionConstruction(Mistral3VisionEncoder encoder)
         {
             _ownedVisionEncoders.Add(encoder);
+            _pendingVisionConstruction = encoder.ConstructionCleanup;
             encoder.SetHostModel(this);
         }
+
+        private void RetainUnsafeVisionConstruction(Mistral3VisionEncoder encoder, Exception error)
+            => RetainFailedModelOwnership(encoder, error);
 
         /// <summary>Text-embedding rows for <paramref name="tokens"/>, for multimodal
         /// layouts that interleave marker tokens with encoder output.</summary>

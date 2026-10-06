@@ -26,6 +26,8 @@ namespace TensorSharp.Models
         public GlmNextVisionEncoder VisionEncoder { get; private set; }
         private readonly List<GlmNextVisionEncoder> _ownedVisionEncoders = new();
 
+        private NativeConstructionCleanupHandle _pendingVisionConstruction;
+
         public void LoadVisionEncoder(string mmProjPath)
         {
             ThrowIfOwnershipCleanupFailed();
@@ -34,16 +36,23 @@ namespace TensorSharp.Models
                 Console.WriteLine($"Warning: {Config.Architecture} has no vision tower; ignoring mmproj {mmProjPath}.");
                 return;
             }
+            MediaConstructionCleanup.RequireReleasedConstruction(ref _pendingVisionConstruction);
             _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
-            var encoder = new GlmNextVisionEncoder(mmProjPath, _allocator, RetainVisionConstruction);
+            var encoder = new GlmNextVisionEncoder(mmProjPath, _allocator,
+                RetainVisionConstruction, RetainUnsafeVisionConstruction);
             VisionEncoder = encoder;
+            _pendingVisionConstruction = null;
         }
 
         private void RetainVisionConstruction(GlmNextVisionEncoder encoder)
         {
             _ownedVisionEncoders.Add(encoder);
+            _pendingVisionConstruction = encoder.ConstructionCleanup;
             encoder.SetHostModel(this);
         }
+
+        private void RetainUnsafeVisionConstruction(GlmNextVisionEncoder encoder, Exception error)
+            => RetainFailedModelOwnership(encoder, error);
 
         /// <summary>
         /// Queue projected vision embeddings to replace the token embeddings of

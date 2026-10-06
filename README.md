@@ -84,20 +84,23 @@ against a still-owned storage keeps recovery available for explicit release inst
 an uncertain native release. Healthy refusal restores borrowed CUDA context after effects exit.
 Qwen35, Qwen4Exp, Mistral3, GlmDsa and Gemma4 retain every vision child before its constructor acquires resources.
 A successful construction publishes the active child; a failure leaves the previous
-active child unchanged. The parent owns partial and replaced children until its coordinated
-retirement collects and releases all of them before the allocator. Replacement does not
-immediately reclaim the previous child's memory. The active reference and retained collection
+active child unchanged. Failed nested construction attempts the same checked child rollback
+as standalone construction. An unresolved child handle blocks another load until explicit
+release completes. A released failed child no longer blocks replacement. Uncertain child
+cleanup fences the actual parent through its existing failure owner after native effects exit.
+Parent retirement collects remaining partial and replaced children before the allocator.
+Replacement does not immediately reclaim the previous child's memory. The active reference and retained collection
 clear only after all child releases succeed.
 Qwen35, Mistral3, GlmDsa and Gemma4 retain acquired constructor input files and unpublished weights
 until checked release. One weight-publication helper preserves actual displaced weights
 before replacing a dictionary entry. Qwen35 uses that same helper. Gemma4 includes pending
 and displaced weights in its GGML binding invalidation and preserves its existing CPU
 vision allocator for the direct CUDA language backend. Parent-owned Mistral validation
-failure leaves cleanup to coordinated retirement instead of attempting standalone child release.
+failure attempts checked child rollback without retiring the healthy language model.
 Gemma4 audio children use the same pre-acquisition parent retention and weight-publication
-recipe. Failed audio replacement preserves the previous active child. Qwen35 leaves an
-acquired projector file with its retaining parent when construction fails; standalone
-construction uses the same owned file in its release-only recovery. Audio and vision construction
+recipe. Failed audio replacement preserves the previous active child. Qwen35 retains an
+acquired projector file until checked construction rollback closes it; an unresolved close
+remains reachable through the actual child handle. Audio and vision construction
 do not acquire disposal authority over their borrowed allocators.
 QwenImage21 retains lazy vision children in its owned collection before constructor work.
 Its ready vision field publishes only after construction returns. Checked text-owned cleanup

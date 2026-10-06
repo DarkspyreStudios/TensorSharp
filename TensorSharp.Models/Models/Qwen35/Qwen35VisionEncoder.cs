@@ -78,19 +78,20 @@ namespace TensorSharp.Models
         public int TemporalPatchSize => _weights.ContainsKey("v.patch_embd.weight.1") ? 2 : 1;
 
         public Qwen35VisionEncoder(string mmProjPath, IAllocator allocator, bool qwenImage21 = false)
-            : this(mmProjPath, allocator, qwenImage21, null)
+            : this(mmProjPath, allocator, qwenImage21, null, null)
         {
         }
 
         internal Qwen35VisionEncoder(string mmProjPath, IAllocator allocator, bool qwenImage21,
-            Action<Qwen35VisionEncoder> retainConstruction)
+            Action<Qwen35VisionEncoder> retainConstruction, Action<Qwen35VisionEncoder, Exception> retainUnsafe)
         {
             _qwenImage21 = qwenImage21;
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _cudaDirect = allocator is TensorSharp.Cuda.CudaAllocator;
             _constructionCleanup = new MediaConstructionCleanup(this, allocator,
-                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile);
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFile,
+                retainUnsafe == null ? null : error => retainUnsafe(this, error));
             try
             {
                 // Retain the actual child and reader before either constructor can fail to return.
@@ -124,16 +125,14 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                if (retainConstruction == null)
-                    _constructionCleanup.RollBackConstruction(loadError);
+                _constructionCleanup.RollBackConstruction(loadError);
                 throw;
             }
             try { ReleaseConstructionFile(); }
             catch (Exception closeError)
             {
                 // Release weights without automatically repeating the reader's failed close.
-                if (retainConstruction == null)
-                    _constructionCleanup.RollBackConstruction(closeError, fileCloseFailed: true);
+                _constructionCleanup.RollBackConstruction(closeError, fileCloseFailed: true);
                 throw;
             }
         }
@@ -1423,6 +1422,8 @@ namespace TensorSharp.Models
             _hostModel?.ThrowIfOwnershipCleanupFailed();
             _constructionCleanup.Cleanup.Dispose();
         }
+
+        internal NativeConstructionCleanupHandle ConstructionCleanup => _constructionCleanup.Cleanup;
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
             => _constructionCleanup.CollectDisposalOwnership(tensors);

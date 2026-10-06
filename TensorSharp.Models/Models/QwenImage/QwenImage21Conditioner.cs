@@ -116,7 +116,7 @@ namespace TensorSharp.Models.QwenImage
             {
                 _ownedVisionEncoders.EnsureCapacity(checked(_ownedVisionEncoders.Count + 1));
                 var vision = new Qwen35VisionEncoder(_visionPath, _text.ConditionerAllocator, true,
-                    RetainVisionConstruction);
+                    RetainVisionConstruction, null);
                 _vision = vision;
             }
             catch (Exception loadError)

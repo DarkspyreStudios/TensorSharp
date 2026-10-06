@@ -132,17 +132,18 @@ namespace TensorSharp.Models
         /// Gemma4VisionEncoder.Safetensors.cs).
         /// </param>
         public Gemma4VisionEncoder(string projectorPath, IAllocator allocator)
-            : this(projectorPath, allocator, null)
+            : this(projectorPath, allocator, null, null)
         {
         }
 
         internal Gemma4VisionEncoder(string projectorPath, IAllocator allocator,
-            Action<Gemma4VisionEncoder> retainConstruction)
+            Action<Gemma4VisionEncoder> retainConstruction, Action<Gemma4VisionEncoder, Exception> retainUnsafe)
         {
             _allocator = allocator;
             _useNativeAttention = allocator is GgmlAllocator;
             _constructionCleanup = new MediaConstructionCleanup(this, allocator,
-                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFiles);
+                CollectOwnedTensors, ReleaseOwnedResources, ReleaseConstructionFiles,
+                retainUnsafe == null ? null : error => retainUnsafe(this, error));
             bool closingFile = false;
             try
             {
@@ -196,8 +197,7 @@ namespace TensorSharp.Models
             }
             catch (Exception loadError)
             {
-                if (retainConstruction == null)
-                    _constructionCleanup.RollBackConstruction(loadError, closingFile);
+                _constructionCleanup.RollBackConstruction(loadError, closingFile);
                 throw;
             }
         }
@@ -1120,6 +1120,8 @@ namespace TensorSharp.Models
             _hostModel?.ThrowIfOwnershipCleanupFailed();
             _constructionCleanup.Cleanup.Dispose();
         }
+
+        internal NativeConstructionCleanupHandle ConstructionCleanup => _constructionCleanup.Cleanup;
 
         internal void CollectDisposalOwnership(ICollection<Tensor> tensors)
             => _constructionCleanup.CollectDisposalOwnership(tensors);
