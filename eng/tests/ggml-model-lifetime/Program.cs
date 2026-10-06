@@ -13,7 +13,7 @@ using TensorSharp.Models;
 using TensorSharp.Runtime;
 
 if (args.Length != 3 || args[0] is not ("normal" or "refusal" or "phase-order" or "borrowed-tp" or "constructor-matrix" or "partial-weight" or
-    "derived-cleanup-failure" or "base-cleanup-failure" or "local-cleanup-failure" or "dispose-cleanup-failure" or "observe-dispose-refusal" or "observe-refusal" or
+    "derived-cleanup-failure" or "base-cleanup-failure" or "local-cleanup-failure" or "dispose-cleanup-failure" or
     "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" or "bonsai-unregister-refusal" or
     "local-quantized-transfer" or "quantized-fusion-ownership" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "bonsai-registration-refusal" or
     "observe-tp-column-owner" or "observe-tp-generic-column" or "observe-tp-generic-row" or "observe-tp-generic-copy" or "observe-tp-concatenated" or "observe-tp-separate" or
@@ -43,7 +43,7 @@ internal static class Retirement
             Thread.Sleep(10);
         }
         string[] retained = evidence.Names.Where((_, index) => evidence.Roots[index].IsAlive).ToArray();
-        bool unsafeCleanup = (mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure") || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
+        bool unsafeCleanup = (mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure") || mode is "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "vision-load-cleanup-refusal" or "vision-dispose-cleanup-refusal" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
         if (!unsafeCleanup && retained.Length != 0)
             throw new InvalidOperationException("Disposed real model generation remains rooted: " + string.Join(",", retained));
         if (unsafeCleanup && retained.Length != evidence.Roots.Length)
@@ -170,7 +170,7 @@ public static partial class ForeignModelLifetime
                 IncludeMistralControlTokens = false,
                 IncludeQkNorms = true,
                 RopeBase = 10000f,
-                ValueHeadDim = mode is "refusal" or "borrowed-tp" or "observe-refusal" ? 8 : DenseDecoderSyntheticModelBuilder.HeadDim,
+                ValueHeadDim = mode is "refusal" or "borrowed-tp" ? 8 : DenseDecoderSyntheticModelBuilder.HeadDim,
                 IncludeTokenizer = mode != "constructor-matrix"
             }.Write(modelPath);
             if (mode is "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or
@@ -189,7 +189,6 @@ public static partial class ForeignModelLifetime
                 "derived-cleanup-failure" => RefuseDerivedCleanup(modelPath, backend),
                 "base-cleanup-failure" => RefuseBaseCleanup(modelPath, backend),
                 "dispose-cleanup-failure" => RefuseNormalDispose(modelPath, backend),
-                "observe-dispose-refusal" => ObserveNormalDisposeRefusal(modelPath, backend),
                 "raw-quantized-read-refusal" or "stacked-quantized-read-refusal" or
                     "stacked-owner-insertion-refusal" or "stacked-partial-view-refusal" => ExerciseQuantizedTransfer(mode, modelPath, backend),
                 "bonsai-unregister-refusal" => RefuseBonsaiUnregister(modelPath, backend),
@@ -212,7 +211,7 @@ public static partial class ForeignModelLifetime
                 _ => RefuseModel(modelPath, backend)
             };
             // Finalization is diagnostic here. A failed construction must not require GC to retire its model lease.
-            bool unsafeCleanup = (mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure") || mode is "observe-refusal" or "observe-dispose-refusal" or "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
+            bool unsafeCleanup = (mode.EndsWith("cleanup-failure", StringComparison.Ordinal) && mode != "base-cleanup-failure") || mode is "bonsai-unregister-refusal" or "local-bonsai-transfer-refusal" or "quantized-fusion-source-refusal" or "tp-view-unregister-refusal" or "observe-tp-view-cleanup-order" or "observe-tp-sync-retirement" or "tp-broadcast-source-cleanup-refusal" or "tp-broadcast-rollback-refusal" or "tp-broadcast-temporary-cleanup-refusal";
             for (int attempt = 0; unsafeCleanup && attempt < 10; attempt++)
             {
                 GC.Collect();
@@ -505,46 +504,6 @@ public static partial class ForeignModelLifetime
         protected override void ResetKVCacheCore() { }
     }
 
-    private sealed record DisposeRefusalEvidence(WeakReference Model, WeakReference[] Tensors, WeakReference[] Storages);
-
-    private static string ObserveNormalDisposeRefusal(string path, BackendType backend)
-    {
-        DisposeRefusalEvidence evidence = UseAndDropDisposeFailingModel(path, backend);
-        for (int attempt = 0; attempt < 20; attempt++)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-            if (!evidence.Model.IsAlive && evidence.Tensors.All(root => !root.IsAlive) &&
-                evidence.Storages.All(root => !root.IsAlive) && RuntimeResourceCount() == 1) break;
-        }
-        Require(!evidence.Model.IsAlive && evidence.Tensors.All(root => !root.IsAlive) && evidence.Storages.All(root => !root.IsAlive),
-            "The current normal Dispose refusal loses the actual model, both tensors and both native storage owners after caller/finalizer drainage.");
-        Require(ModelLeaseCount() == 1 && RuntimeResourceCount() == 1,
-            "Only the abandoned numeric Model lease remains; context and tensor storage finalizers drained their real ownership.");
-        var retained = (IList)typeof(ModelBase).GetField("FailedGgmlModelOwners", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
-        Require(retained.Count == 0, "Normal Dispose failure never enters the constructor-only strong retention collection.");
-        return "observed-defect:controlled-normal-Dispose-graph-phase-refusal;modelAlive=false;tensorsAlive=0;storagesAlive=0;" +
-            "contextAndTensorLeases=0;abandonedNumericModelLease=1;no-freed-pointer-read;not-actual-GPU-failure";
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static DisposeRefusalEvidence UseAndDropDisposeFailingModel(string path, BackendType backend)
-    {
-        var model = new DisposeFailingModel(path, backend);
-        Require(RuntimeResourceCount() == 4 && model.ValuesIntact,
-            "Successful construction owns a real context, two actual native tensors and Model lease before controlled graph refusal.");
-        DisposeRefusalEvidence evidence = model.Evidence;
-        try { model.Dispose(); }
-        catch (InvalidOperationException error) when (error.Message == DisposeFailingModel.Refusal)
-        {
-            Require(RuntimeResourceCount() == 4 && model.ValuesIntact,
-                "The graph-phase exception initially preserves every actual buffer and lease before the caller drops its model.");
-            return evidence;
-        }
-        throw new InvalidOperationException("Normal Dispose must encounter the controlled graph-phase refusal.");
-    }
-
     private sealed class DisposeFailingModel : ModelBase
     {
         internal const string Refusal = "controlled normal Dispose graph cleanup refusal before any model buffer release";
@@ -559,8 +518,6 @@ public static partial class ForeignModelLifetime
             _weights["controlled-base-weight"].SetElementsAsFloat([5, 6, 7, 8]);
         }
 
-        internal DisposeRefusalEvidence Evidence => new(new(this), [new(_held), new(_weights["controlled-base-weight"])],
-            [new(_held.Storage), new(_weights["controlled-base-weight"].Storage)]);
         internal bool ValuesIntact => _held.GetElementsAsFloat(4).SequenceEqual(new float[] { 1, 2, 3, 4 }) &&
             _weights["controlled-base-weight"].GetElementsAsFloat(4).SequenceEqual(new float[] { 5, 6, 7, 8 });
         public override void Dispose() => DisposeBaseResources(() => _held.Dispose(), releaseDerivedGraphs: RefuseGraphCleanup);

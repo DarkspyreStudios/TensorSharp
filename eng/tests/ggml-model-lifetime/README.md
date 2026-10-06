@@ -21,6 +21,11 @@ read/rollback errors. Its terminal cleanup cause is the same exception instance 
 the local rollback cause. The cleanup handle remains unreleased and the failed
 model retains its actual unregistered storage.
 
+`refusal` verifies clean constructor rollback. `dispose-cleanup-failure` verifies
+actual model and buffer retention after terminal disposal failure, including
+original-cause preservation and refusal of repeated teardown. These are the
+current acceptance cases for those ownership paths.
+
 ## Quantized Ownership Gates
 
 `raw-quantized-read-refusal` and `stacked-quantized-read-refusal` capture the destination
