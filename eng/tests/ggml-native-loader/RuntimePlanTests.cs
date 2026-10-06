@@ -79,12 +79,37 @@ public sealed class RuntimePlanTests
         Assert.All(roots, root => Assert.False(root.IsAlive));
     }
 
+    [Fact]
+    public void RetiredProcessClaimRefusesAnotherOwnerWithoutRootingItsAssembly()
+    {
+        const string key = "Darkspyre.TensorSharp.GGML.ProcessOwner";
+        object? previous = AppDomain.CurrentDomain.GetData(key);
+        try
+        {
+            WeakReference[] roots = RegisterHookShutdownAndUnload(claimProcess: true);
+            using var other = new IsolatedOwner();
+            var error = Assert.Throws<TargetInvocationException>(() => other.Loader
+                .GetMethod("ClaimProcess", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null));
+            Assert.Contains("Another managed GGML runtime owns this process", Assert.IsType<InvalidOperationException>(error.InnerException).Message);
+            for (int attempt = 0; attempt < 20 && roots.Any(root => root.IsAlive); attempt++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+            Assert.All(roots, root => Assert.False(root.IsAlive));
+        }
+        finally { AppDomain.CurrentDomain.SetData(key, previous); }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static WeakReference[] RegisterHookShutdownAndUnload()
+    private static WeakReference[] RegisterHookShutdownAndUnload(bool claimProcess = false)
     {
         var context = new AssemblyLoadContext("owned-hook-no-native-test", isCollectible: true);
         Assembly assembly = context.LoadFromAssemblyPath(typeof(GgmlNativeLoader).Assembly.Location);
         Type loader = assembly.GetType(typeof(GgmlNativeLoader).FullName!)!;
+        if (claimProcess)
+            loader.GetMethod("ClaimProcess", BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, null);
         MethodInfo register = loader.GetMethod("RegisterProcessExitHook", BindingFlags.NonPublic | BindingFlags.Static)!;
         register.Invoke(null, null);
         register.Invoke(null, null);

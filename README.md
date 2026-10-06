@@ -441,7 +441,9 @@ checks shared results, not wait-task identity. Its native runs do not establish
 all model, device or package qualification. Successful GGML shutdown replaces
 its process-wide managed owner with a BCL-only terminal marker. The marker
 prevents process reuse without retaining the retired collectible assembly.
-Busy or failed cleanup retains the actual owner graph. The MLX lifetime probe exercises a
+Busy or failed cleanup retains the actual owner graph. The managed runtime-plan
+regression exercises actual process claiming and foreign assembly collection
+without loading a driver. It does not qualify native shutdown. The MLX lifetime probe exercises a
 tiny compiled activation and checked shutdown. Protocol-2 callback failure,
 GPU synchronization failure and full model retirement remain separate checks.
 
