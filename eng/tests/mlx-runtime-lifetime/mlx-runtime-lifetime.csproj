@@ -8,5 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../../TensorSharp.Backends.MLX/TensorSharp.Backends.MLX.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Models/TensorSharp.Models.csproj" />
+    <Compile Include="../../../InferenceWeb.Tests/QwenVLSyntheticMmprojBuilder.cs" Link="QwenVLSyntheticMmprojBuilder.cs" />
   </ItemGroup>
 </Project>

@@ -15,12 +15,19 @@ closure release then completes. Subsequent GELU and Q8 work must succeed. Weak r
 cover the trace target and closure as well as tensor storage. This case does not
 inject a native free/synchronization failure or qualify concurrent callbacks.
 
+The fixture reuses `QwenVLSyntheticMmprojBuilder` to construct a complete tiny
+Qwen-VL vision projector. The actual Qwen35 vision encoder runs twice on MLX and
+matches the managed CPU encoder within 1e-4 absolute error. The input file closes
+after construction. Explicit disposal retires real MLX weight/cache storages and
+both output storages before their weak-root observation. This is a one-layer
+synthetic encoder check, not pretrained accuracy or a complete text/media model.
+
 The executable preloads the explicit library and sets the existing
 `TENSORSHARP_MLX_LIBRARY` selector. It records the bridge hash and actual Core/MLX MVIDs.
-It loads no model weights, modifies no shared driver and builds no native library.
+It loads only generated tiny weights, modifies no shared driver and builds no native library.
 The selected library's dependencies and `mlx.metallib` must already be present.
 
-The explicit `--collectible` mode loads the actual probe, Core and MLX assemblies
+The explicit `--collectible` mode loads the actual probe, Core, MLX and Models assemblies
 into one private collectible generation. It executes the same native checks,
 unloads after checked worker retirement, and observes the actual assembly and
 load-context weak roots. Its 30 collection passes and 10 ms waits match the
