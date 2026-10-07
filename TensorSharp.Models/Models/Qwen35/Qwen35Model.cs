@@ -6443,8 +6443,8 @@ namespace TensorSharp.Models
                 {
                     // Disposal intentionally abandons recurrent state. Clear both
                     // managed residency latches before destroying the native state;
-                    // later holder cleanup calls InvalidateVerifyCache(), which must
-                    // not try to drain a verify buffer that no longer exists.
+                    // holder cleanup then skips graph resets because this phase
+                    // releases the bindings before holder storage is freed.
                     _fvDeviceStateCurrent = false;
                     _fvStateResident = false;
                 },

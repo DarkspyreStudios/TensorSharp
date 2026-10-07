@@ -849,6 +849,12 @@ Allocated once in `InitGDNBuffers()`:
   decode on the primary cache. The arena batched decode treats a holder without a
   scratch the same way. `Qwen35ConvScratchTests` (model-gated) covers it.
 
+Model retirement fences new execution and mutation before releasing resources.
+`DisposeQwen35Graphs` releases native graph bindings before holder storage cleanup.
+`DisposeAllFusedHolders` suppresses per-holder graph resets during that cleanup.
+Active cache eviction still resets bindings before freeing storage. Retirement does
+not reopen the mutation fence or drain recurrent state that it already discards.
+
 ### Retained holders: the one-block minimum
 
 A finished request's per-request holder is kept for its conversation's next turn

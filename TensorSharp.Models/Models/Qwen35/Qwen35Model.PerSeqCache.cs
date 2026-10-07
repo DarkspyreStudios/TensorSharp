@@ -1004,7 +1004,9 @@ namespace TensorSharp.Models
             // concurrent request), so rebuilding the surviving holders' graphs on
             // their next token is a small price for deterministic lifetime safety.
             // A batched release (DiscardRetainedCaches) resets once, before its
-            // first disposal, and suppresses the per-holder reset here.
+            // first disposal, and suppresses the per-holder reset here. Model
+            // retirement also suppresses it after DisposeQwen35Graphs releases
+            // every binding before derived storage cleanup.
             if (IsGgmlBackend && _holderGraphResetSuppressed == 0)
             {
                 GgmlBasicOps.Qwen35ResetDecodeCache();
@@ -1070,49 +1072,59 @@ namespace TensorSharp.Models
         /// freed by the normal cache teardown).</summary>
         private void DisposeAllFusedHolders()
         {
-            // Read once, before the key is cleared: the primary-holder block below
-            // still has to know whether a fused holder was active, and the key itself
-            // must not outlive the dictionary it indexes (see RestorePrimaryCache).
-            bool fusedWasActive = _activeFusedKey != null;
-            if (_fusedHolders != null)
+            // The model retirement graph phase already releases these bindings.
+            // Holder cleanup must not reenter mutation after admission is fenced.
+            _holderGraphResetSuppressed++;
+            try
             {
-                foreach (var kv in _fusedHolders)
+                // Read once, before the key is cleared: the primary-holder block below
+                // still has to know whether a fused holder was active, and the key itself
+                // must not outlive the dictionary it indexes (see RestorePrimaryCache).
+                bool fusedWasActive = _activeFusedKey != null;
+                if (_fusedHolders != null)
                 {
-                    if (string.Equals(kv.Key, _activeFusedKey, StringComparison.Ordinal))
-                        continue; // active holder shares the model fields
-                    DisposeHolder(kv.Value);
+                    foreach (var kv in _fusedHolders)
+                    {
+                        if (string.Equals(kv.Key, _activeFusedKey, StringComparison.Ordinal))
+                            continue; // active holder shares the model fields
+                        DisposeHolder(kv.Value);
+                    }
+                    _fusedHolders.Clear();
+                    _fusedHolders = null;
+                    // Before anything else can look: _activeFusedKey is a key INTO the
+                    // dictionary just freed, and every reader that trusts the key to name a
+                    // live entry is correct only while both are true together. Clearing it
+                    // last left a window in which the key outlived what it pointed at.
+                    _activeFusedKey = null;
                 }
-                _fusedHolders.Clear();
-                _fusedHolders = null;
-                // Before anything else can look: _activeFusedKey is a key INTO the
-                // dictionary just freed, and every reader that trusts the key to name a
-                // live entry is correct only while both are true together. Clearing it
-                // last left a window in which the key outlived what it pointed at.
+                if (_retainedFusedHolders != null)
+                {
+                    foreach (var holder in _retainedFusedHolders.Values)
+                        DisposeHolder(holder);
+                    _retainedFusedHolders.Clear();
+                    _retainedFusedHolders = null;
+                }
+                if (_holderPool != null)
+                {
+                    foreach (var h in _holderPool)
+                        DisposeHolder(h);
+                    _holderPool = null;
+                }
+                if (_primaryHolder != null)
+                {
+                    // If a fused holder was active, the primary snapshot owns distinct
+                    // arrays that must be freed; if the primary is active it shares the
+                    // model fields and is freed by the main teardown.
+                    if (fusedWasActive)
+                        DisposeHolder(_primaryHolder);
+                    _primaryHolder = null;
+                }
                 _activeFusedKey = null;
             }
-            if (_retainedFusedHolders != null)
+            finally
             {
-                foreach (var holder in _retainedFusedHolders.Values)
-                    DisposeHolder(holder);
-                _retainedFusedHolders.Clear();
-                _retainedFusedHolders = null;
+                _holderGraphResetSuppressed--;
             }
-            if (_holderPool != null)
-            {
-                foreach (var h in _holderPool)
-                    DisposeHolder(h);
-                _holderPool = null;
-            }
-            if (_primaryHolder != null)
-            {
-                // If a fused holder was active, the primary snapshot owns distinct
-                // arrays that must be freed; if the primary is active it shares the
-                // model fields and is freed by the main teardown.
-                if (fusedWasActive)
-                    DisposeHolder(_primaryHolder);
-                _primaryHolder = null;
-            }
-            _activeFusedKey = null;
         }
     }
 }

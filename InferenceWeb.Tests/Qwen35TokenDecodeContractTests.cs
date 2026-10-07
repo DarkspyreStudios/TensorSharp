@@ -8,7 +8,9 @@
 // TensorSharp is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
+using System.Collections;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using TensorSharp;
 using TensorSharp.Cpu;
@@ -244,6 +246,34 @@ public class Qwen35TokenDecodeContractTests
 
         Assert.True(managedStateDiscarded);
         Assert.Equal("native reset failed", error.Message);
+    }
+
+    [Fact]
+    public void RetiredHolderCleanup_DoesNotReenterReleasedGraphsOrOpenMutationAdmission()
+    {
+        var model = (Qwen35Model)RuntimeHelpers.GetUninitializedObject(typeof(Qwen35Model));
+        typeof(ModelBase).GetField("_backend", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(model, BackendType.GgmlMetal);
+        typeof(ModelBase).GetField("<ExecutionPlan>k__BackingField", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(model, new BackendExecutionPlan(BackendType.GgmlMetal));
+        typeof(ModelBase).GetField("_ownershipRetirementStarted", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(model, true);
+        Type holderType = typeof(Qwen35Model).GetNestedType("Qwen35KvCacheHolder", BindingFlags.NonPublic)!;
+        object holder = Activator.CreateInstance(holderType, nonPublic: true)!;
+        var pool = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(holderType))!;
+        pool.Add(holder);
+        FieldInfo poolField = typeof(Qwen35Model).GetField("_holderPool", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        poolField.SetValue(model, pool);
+
+        typeof(Qwen35Model).GetMethod("DisposeAllFusedHolders", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(model, null);
+
+        Assert.Null(poolField.GetValue(model));
+        Assert.True((bool)holderType.GetField("Retired")!.GetValue(holder)!);
+        Assert.True((bool)holderType.GetField("DisposalStarted")!.GetValue(holder)!);
+        Assert.Equal(0, (int)typeof(Qwen35Model).GetField("_holderGraphResetSuppressed", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(model)!);
+        Assert.Throws<ObjectDisposedException>(() => model.InvalidateVerifyCache());
     }
 
     [Fact]
