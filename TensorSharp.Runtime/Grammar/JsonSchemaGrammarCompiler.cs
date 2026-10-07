@@ -670,7 +670,7 @@ ws     ::= [ \t\n]{0,20}
                 switch (value.ValueKind)
                 {
                     case JsonValueKind.String:
-                        return GbnfString(JsonSerializer.Serialize(value.GetString()));
+                        return GbnfString(JsonSerializer.Serialize(value.GetString(), RuntimeChatJson.Default.String));
                     case JsonValueKind.Number:
                         return GbnfString(value.GetRawText());
                     case JsonValueKind.True: return GbnfString("true");
@@ -679,7 +679,7 @@ ws     ::= [ \t\n]{0,20}
                     default:
                         // Structured const/enum members are compared literally
                         // against their compact JSON encoding.
-                        return GbnfString(JsonSerializer.Serialize(value));
+                        return GbnfString(JsonSerializer.Serialize(value, RuntimeChatJson.Default.JsonElement));
                 }
             }
 
@@ -709,7 +709,7 @@ ws     ::= [ \t\n]{0,20}
 
             /// <summary>Quote a property name as a JSON string terminal.</summary>
             private static string GbnfPropertyName(string propertyName) =>
-                GbnfString(JsonSerializer.Serialize(propertyName));
+                GbnfString(JsonSerializer.Serialize(propertyName, RuntimeChatJson.Default.String));
         }
 
     }

@@ -722,6 +722,9 @@ Parsed JSON values retain their scalar, dictionary, list and JsonElement shapes.
 OpenAI tool-history import uses that same Runtime-owned map metadata. Argument
 values remain valid after the request document is disposed. Invalid argument
 roots report JsonException without consulting reflection metadata.
+JSON Schema grammar compilation uses the same string and JsonElement metadata
+for property terminals, string enums and constants, and structured literals.
+The generated grammar retains its existing JSON and GBNF escaping rules.
 
 ### Performance Optimizations
 

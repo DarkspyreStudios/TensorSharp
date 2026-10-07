@@ -208,6 +208,10 @@ public class GrammarConstrainedDecodingTests
         Assert.True(Feed(g, "{\"c\": \"red\", \"k\": 7}").Complete);
         Assert.False(Feed(g, "{\"c\": \"blue\", \"k\": 7}").Accepted);
         Assert.False(Feed(g, "{\"c\": \"red\", \"k\": 8}").Accepted);
+
+        var structured = Grammar.FromJsonSchema("""{"const":{"tags":["red",1,true]}}""");
+        Assert.True(Feed(structured, """{"tags":["red",1,true]}""").Complete);
+        Assert.False(Feed(structured, """{"tags":["blue",1,true]}""").Accepted);
     }
 
     [Fact]
