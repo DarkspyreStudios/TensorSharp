@@ -708,6 +708,12 @@ The Jinja `tojson` filter and Qwen tool declarations share the recursive
 uses `JsonEncodedText` for string escaping. This path works with reflection-based
 JSON serialization disabled and does not cache model or caller types.
 
+Shared-prefix render keys use the Chat assembly's fixed generated
+`SharedPrefixRenderJson` metadata. The key includes the architecture, thinking
+settings, template, leading messages, tools and original parameter schemas.
+The tokenizer-scoped cache retains rendered token lists without reflection
+serialization or metadata for caller-defined types.
+
 ### Performance Optimizations
 
 The list below is the cross-architecture summary; each per-model card under

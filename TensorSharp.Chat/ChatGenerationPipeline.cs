@@ -1223,11 +1223,10 @@ namespace TensorSharp.Server
                 var parameterSchemas = new string[tools?.Count ?? 0];
                 for (int i = 0; i < parameterSchemas.Length; i++)
                     parameterSchemas[i] = tools[i].ParametersSchemaJson;
-                string key = JsonSerializer.Serialize(new
-                {
-                    arch, enableThinking, reasoningEffort, template = model.Config.ChatTemplate,
-                    messages = history.GetRange(0, leading), tools, parameterSchemas,
-                });
+                string key = JsonSerializer.Serialize(new SharedPrefixRenderKey(
+                    arch, enableThinking, reasoningEffort, model.Config.ChatTemplate,
+                    history.GetRange(0, leading), tools, parameterSchemas),
+                    SharedPrefixRenderJson.Default.SharedPrefixRenderKey);
                 SharedPrefixRenderCache cache = _sharedPrefixRenders.GetValue(model.Tokenizer,
                     static _ => new SharedPrefixRenderCache());
 

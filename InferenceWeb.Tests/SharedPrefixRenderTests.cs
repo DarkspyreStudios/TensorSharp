@@ -207,7 +207,8 @@ public sealed class SharedPrefixRenderTests : IDisposable
             var text = new StringBuilder(template).Append('|');
             if (tools != null)
                 foreach (var tool in tools)
-                    text.Append(JsonSerializer.Serialize(tool)).Append(tool.ParametersSchemaJson);
+                    text.Append(JsonSerializer.Serialize(tool, SharedPrefixRenderJson.Default.ToolFunction))
+                        .Append(tool.ParametersSchemaJson);
             foreach (var message in messages)
                 text.Append('<').Append(message.Role).Append('>').Append(message.Content).Append("</>");
             if (addGenerationPrompt) text.Append("<assistant>");
