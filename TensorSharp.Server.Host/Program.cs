@@ -663,22 +663,25 @@ if (!hostingOptions.EmbeddingsEnabled && hostingOptions.PrefixCacheEnabled
 
 StartupBanner.Emit(startupLogger, hostingOptions, hostingOptions.ListenUrls);
 
-// Tear down the process-global GGML backend after the host stops. On macOS
-// the ggml-metal device's C++ static destructor asserts that its resource
-// set is empty; if g_backend (and its MTLBuffer wrappers) outlive the .NET
-// host the assertion aborts the process during exit. ApplicationStopped
-// fires after all hosted services have shut down, so all in-flight
-// inference is already complete. The shutdown call is idempotent and a
-// no-op when no GGML backend was ever initialised. Also hooked onto
-// ProcessExit as a safety net for non-graceful exits.
+// ApplicationStopped precedes container disposal. Resident models still own
+// GGML leases then, so explicit retirement follows Run's owned host disposal.
+EventHandler? runtimeExit = null;
 if (!hostingOptions.UsesManagedEmbeddingBackend)
 {
-    app.Lifetime.ApplicationStopped.Register(static () => GgmlBasicOps.Shutdown());
-    AppDomain.CurrentDomain.ProcessExit += static (_, _) => GgmlBasicOps.Shutdown();
+    runtimeExit = static (_, _) => GgmlBasicOps.Shutdown();
+    AppDomain.CurrentDomain.ProcessExit += runtimeExit;
 }
 
 // Bind the address resolved by ServerOptionsBuilder (--port / --host / --urls,
 // then PORT / HOST / ASPNETCORE_URLS, then http://0.0.0.0:5000). Passing it to
 // Run() overrides anything the host builder configured, so ASPNETCORE_URLS is
 // folded into that resolution rather than being silently discarded here.
-app.Run(hostingOptions.ListenUrls);
+HostRuntimeRetirement.Run(() =>
+{
+    try { app.Run(hostingOptions.ListenUrls); }
+    finally
+    {
+        // Detach before explicit shutdown, including when it fails. Do not replay cleanup.
+        if (runtimeExit is not null) AppDomain.CurrentDomain.ProcessExit -= runtimeExit;
+    }
+}, runtimeExit is null ? null : GgmlBasicOps.Shutdown);

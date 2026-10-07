@@ -45,6 +45,11 @@ Disposal fences new requests before releasing the model. Repeated disposal deleg
 to the same model owner, which reports checked release or its cleanup failure.
 A failed release never becomes a successful disposal merely because requests are fenced.
 
+The server retires its GGML runtime after the host disposes its container-owned model.
+`ApplicationStopped` does not release that model. The normal retirement path detaches the
+process-exit callback before explicit runtime shutdown. Independent host and runtime failures
+remain visible together, and failed shutdown is not replayed during process exit.
+
 ## Host an embedding service
 
 For native GGML execution, build the native library as described in
