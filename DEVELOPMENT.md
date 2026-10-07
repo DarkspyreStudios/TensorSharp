@@ -730,6 +730,12 @@ JsonNode metadata. Valid JSON remains parseable with reflection serialization
 disabled. Normalization retains schema order, nullable filling and extra-field
 removal.
 
+The existing prefix-checkpoint ownership fixture selects verified GGML CPU
+candidates from the installed package catalog before cache synchronization or
+retirement. Its tracked buffers use .NET CPU storage for deterministic allocation
+and read failures. The fixture preserves checkpoint state and verifies reclamation;
+it does not execute pretrained inference or qualify GPU cache accuracy.
+
 ### Performance Optimizations
 
 The list below is the cross-architecture summary; each per-model card under

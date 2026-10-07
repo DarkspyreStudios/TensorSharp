@@ -5,6 +5,7 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using TensorSharp;
 using TensorSharp.Cpu;
+using TensorSharp.GGML;
 using TensorSharp.Models;
 using TensorSharp.Runtime;
 
@@ -14,12 +15,20 @@ namespace InferenceWeb.Tests;
 /// Real cache allocation/copy/serialization code with tiny CPU tensors, without
 /// loading weights or running inference. The allocator records storage lifetime;
 /// injected failures are one-shot so cleanup and a subsequent retry can proceed.
+/// Cache synchronization and retirement use the verified installed GGML CPU
+/// candidate. The fixture requires its package catalog and prebuilt driver.
 /// This does not qualify GPU graph lifetime or model-level speculative accuracy.
 /// </summary>
 public class PrefixCheckpointOwnershipTests
 {
     static PrefixCheckpointOwnershipTests()
     {
+        var candidates = GgmlNativeLoader.ResolvePackageCandidatesAsync().GetAwaiter().GetResult();
+        var selected = GgmlNativeLoader.Select(candidates.Where(candidate => candidate.Backend == GgmlBackendType.Cpu).ToArray());
+        if (selected.State != GgmlNativeSelectionState.Loaded)
+            throw new InvalidOperationException("Prefix ownership checks require a verified GGML CPU driver: " +
+                string.Join("; ", selected.Refusals.Select(refusal => refusal.Message)));
+
         // OpRegistry matches storage types exactly. Register only this private
         // subtype and delegate to the real CPU fill implementation; all normal
         // storage dispatch remains unchanged. This test assembly is serialized.
@@ -237,11 +246,15 @@ public class PrefixCheckpointOwnershipTests
             Model = (ModelBase)RuntimeHelpers.GetUninitializedObject(modelType);
             Set(typeof(ModelBase), Model, "<Config>k__BackingField", new ModelConfig
             {
-                Architecture = qwen ? "qwen35" : "gemma4", NumLayers = 4,
-                HiddenSize = 8, NumHeads = 2, NumKVHeads = 2,
+                Architecture = qwen ? "qwen35" : "gemma4",
+                NumLayers = 4,
+                HiddenSize = 8,
+                NumHeads = 2,
+                NumKVHeads = 2,
             });
             // Public checkpoint APIs are enabled for the GGML CPU execution plan;
-            // storage and all arithmetic here are actual .NET CPU allocations.
+            // storage and arithmetic are .NET CPU allocations. Synchronization
+            // and cache retirement use the explicitly selected native CPU owner.
             Set(typeof(ModelBase), Model, "<ExecutionPlan>k__BackingField", new BackendExecutionPlan(BackendType.GgmlCpu));
             Set(typeof(ModelBase), Model, "_backend", BackendType.GgmlCpu);
             Set(typeof(ModelBase), Model, "_allocator", Allocator);
