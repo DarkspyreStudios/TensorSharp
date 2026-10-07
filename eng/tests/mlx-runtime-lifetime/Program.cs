@@ -88,6 +88,7 @@ try
         ["traceFailure"] = "exact managed cause through native callback; checked closure release",
         ["callbackBusyRefusals"] = "three reentrant and two external-thread owner-specific cleanup refusals; healthy authority",
         ["visionEncoder"] = "tiny Qwen-VL construction, repeated forward/CPU parity and checked disposal",
+        ["visionTemporalPair"] = "ordered/reversed video frames, duplicated-frame parity and temporal-weight cache retirement",
         ["visionConstructionFailure"] = "real truncated final-weight read; 21 actual MLX storages released before GC",
         ["terminalWorkerRetirement"] = "completed"
     }));
@@ -237,12 +238,30 @@ static WeakReference[] RunVisionScope()
         string path = QwenVLSyntheticMmprojBuilder.Write(Path.Combine(directory, "projector.gguf"));
         float[] pixels = Enumerable.Range(0, 3 * QwenVLSyntheticMmprojBuilder.ImageSize * QwenVLSyntheticMmprojBuilder.ImageSize)
             .Select(index => (index % 17 - 8) * 0.02f).ToArray();
-        float[] expected;
+        float[] secondFrame = pixels.Reverse().Select(value => value * 3f + 0.05f).ToArray();
+        (string Name, float[] First, float[]? Second)[] cases =
+        [
+            ("still", pixels, null), ("duplicated", pixels, pixels),
+            ("forward", pixels, secondFrame), ("reversed", secondFrame, pixels)
+        ];
+        var expected = new Dictionary<string, float[]>();
         using (var reference = new Qwen35VisionEncoder(path, new CpuAllocator(BlasEnum.DotNet)))
-        using (Tensor output = reference.Encode(pixels, QwenVLSyntheticMmprojBuilder.ImageSize, QwenVLSyntheticMmprojBuilder.ImageSize))
-            expected = output.GetElementsAsFloat(checked((int)output.ElementCount()));
-        Require(expected.Length == QwenVLSyntheticMmprojBuilder.ProjectionDim,
-            "The CPU reference produces one real merged token with the declared projection width.");
+        {
+            Require(reference.TemporalPatchSize == 2, "The actual projector has two temporal patch slices.");
+            foreach (var test in cases)
+            {
+                using Tensor output = test.Second is null
+                    ? reference.Encode(test.First, QwenVLSyntheticMmprojBuilder.ImageSize, QwenVLSyntheticMmprojBuilder.ImageSize)
+                    : reference.Encode(test.First, test.Second, QwenVLSyntheticMmprojBuilder.ImageSize, QwenVLSyntheticMmprojBuilder.ImageSize);
+                expected.Add(test.Name, output.GetElementsAsFloat(checked((int)output.ElementCount())));
+            }
+        }
+        Require(expected.Values.All(values => values.Length == QwenVLSyntheticMmprojBuilder.ProjectionDim),
+            "Every CPU reference produces one real merged token with the declared projection width.");
+        Require(expected["still"].Zip(expected["duplicated"]).All(pair => MathF.Abs(pair.First - pair.Second) <= 1e-4f),
+            "A duplicated temporal pair matches the still-image reference.");
+        Require(expected["forward"].Zip(expected["reversed"]).Any(pair => MathF.Abs(pair.First - pair.Second) > 1e-3f),
+            "The fixture's distinct temporal slices make frame order observable.");
         using var allocator = new MlxAllocator();
         var roots = new List<WeakReference>();
         using (var encoder = new Qwen35VisionEncoder(path, allocator))
@@ -251,14 +270,19 @@ static WeakReference[] RunVisionScope()
             using (var reopened = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             for (int pass = 0; pass < 2; pass++)
             {
-                using Tensor output = encoder.Encode(pixels, QwenVLSyntheticMmprojBuilder.ImageSize, QwenVLSyntheticMmprojBuilder.ImageSize);
-                Require(output.Sizes.SequenceEqual(new long[] { 1, QwenVLSyntheticMmprojBuilder.ProjectionDim }),
-                    "The MLX encoder produces the actual one-token projection shape.");
-                float[] actual = output.GetElementsAsFloat(checked((int)output.ElementCount()));
-                Require(actual.Length == expected.Length && actual.Zip(expected).All(pair =>
-                    float.IsFinite(pair.First) && MathF.Abs(pair.First - pair.Second) <= 1e-4f),
-                    "A real tiny MLX vision encode and its cached reuse match the managed CPU encoder.");
-                roots.Add(new(output.Storage));
+                foreach (var test in cases)
+                {
+                    using Tensor output = test.Second is null
+                        ? encoder.Encode(test.First, QwenVLSyntheticMmprojBuilder.ImageSize, QwenVLSyntheticMmprojBuilder.ImageSize)
+                        : encoder.Encode(test.First, test.Second, QwenVLSyntheticMmprojBuilder.ImageSize, QwenVLSyntheticMmprojBuilder.ImageSize);
+                    Require(output.Sizes.SequenceEqual(new long[] { 1, QwenVLSyntheticMmprojBuilder.ProjectionDim }),
+                        "The MLX encoder produces the actual one-token projection shape.");
+                    float[] actual = output.GetElementsAsFloat(checked((int)output.ElementCount()));
+                    Require(actual.Length == expected[test.Name].Length && actual.Zip(expected[test.Name]).All(pair =>
+                        float.IsFinite(pair.First) && MathF.Abs(pair.First - pair.Second) <= 1e-4f),
+                        $"Real MLX {test.Name} encode and its cached reuse match the managed CPU encoder.");
+                    roots.Add(new(output.Storage));
+                }
             }
             var owned = new List<Tensor>();
             typeof(Qwen35VisionEncoder).GetMethod("CollectDisposalOwnership", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -321,7 +345,7 @@ internal static class ForeignMlxGeneration
                 ["collectedRoots"] = evidence.Roots.Length,
                 ["assemblies"] = evidence.Names,
                 ["nativeFailureQualification"] = "not-run",
-                ["actualModelQualification"] = "tiny Qwen-VL encoder/CPU parity and actual truncated-read rollback; full models not-run"
+                ["actualModelQualification"] = "tiny Qwen-VL still/video encoder/CPU parity and actual truncated-read rollback; full models not-run"
             }));
             return 0;
         }

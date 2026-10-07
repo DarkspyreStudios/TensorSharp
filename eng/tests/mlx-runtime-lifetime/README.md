@@ -21,10 +21,13 @@ inject a native free/synchronization failure, run simultaneous native callbacks 
 qualify failed retirement.
 
 The fixture reuses `QwenVLSyntheticMmprojBuilder` to construct a complete tiny
-Qwen-VL vision projector. The actual Qwen35 vision encoder runs twice on MLX and
-matches the managed CPU encoder within 1e-4 absolute error. The input file closes
+Qwen-VL vision projector. The actual Qwen35 vision encoder runs still, duplicated,
+ordered and reversed frame-pair cases twice on MLX. Each matches the managed CPU
+encoder within 1e-4 absolute error. The duplicated pair matches the still reference,
+and distinct frame order changes the reference output. The input file closes
 after construction. Explicit disposal retires real MLX weight/cache storages and
-both output storages before their weak-root observation. This is a one-layer
+all eight output storages before their weak-root observation. Temporal pairs exercise
+the concatenated temporal-weight and transposed-weight caches. This is a one-layer
 synthetic encoder check, not pretrained accuracy or a complete text/media model.
 
 A truncated copy of that projector fails its actual final tensor read after 21
