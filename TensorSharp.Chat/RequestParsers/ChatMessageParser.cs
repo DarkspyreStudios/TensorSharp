@@ -443,7 +443,7 @@ namespace TensorSharp.Server.RequestParsers
                 if (function.TryGetProperty("arguments", out var value))
                 {
                     string json = value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
-                    arguments = JsonSerializer.Deserialize<Dictionary<string, object>>(json)
+                    arguments = JsonSerializer.Deserialize(json, RuntimeChatJson.Default.ObjectMap)
                         ?? throw new JsonException("Tool arguments must be a JSON object.");
                 }
                 message.ToolCalls.Add(new ToolCall

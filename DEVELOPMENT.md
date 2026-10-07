@@ -719,6 +719,9 @@ declarations and argument values. ChatML, Qwen, Harmony, GLM, DeepSeek and Gemma
 rendering/parsing do not require reflection serialization. DeepSeek V4.1 uses
 the same metadata with its Unicode-preserving encoder for history normalization.
 Parsed JSON values retain their scalar, dictionary, list and JsonElement shapes.
+OpenAI tool-history import uses that same Runtime-owned map metadata. Argument
+values remain valid after the request document is disposed. Invalid argument
+roots report JsonException without consulting reflection metadata.
 
 ### Performance Optimizations
 
