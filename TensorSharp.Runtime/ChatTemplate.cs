@@ -201,7 +201,7 @@ namespace TensorSharp.Runtime
             if (tools != null && tools.Count > 0)
             {
                 sb.Append("<|im_start|>system\nYou are a helpful assistant with access to the following functions. Use them if required -\n");
-                sb.Append(JsonSerializer.Serialize(tools, new JsonSerializerOptions { WriteIndented = false }));
+                sb.Append(JsonSerializer.Serialize(tools, RuntimeChatJson.Default.Tools));
                 sb.Append("<|im_end|>\n");
             }
 
@@ -230,7 +230,7 @@ namespace TensorSharp.Runtime
         private static string SerializeToolCall(ToolCall tc)
         {
             var obj = new Dictionary<string, object?> { ["name"] = tc.Name, ["arguments"] = tc.Arguments };
-            return JsonSerializer.Serialize(obj);
+            return JsonSerializer.Serialize(obj, RuntimeChatJson.Default.Object);
         }
 
         /// <summary>
@@ -514,12 +514,12 @@ namespace TensorSharp.Runtime
                         if (!string.IsNullOrEmpty(kv.Value.Description))
                             sb.Append("\n<description>").Append(kv.Value.Description.Trim()).Append("</description>");
                         if (kv.Value.Enum != null && kv.Value.Enum.Count > 0)
-                            sb.Append("\n<enum>").Append(JsonSerializer.Serialize(kv.Value.Enum)).Append("</enum>");
+                            sb.Append("\n<enum>").Append(JsonSerializer.Serialize(kv.Value.Enum, RuntimeChatJson.Default.Strings)).Append("</enum>");
                         sb.Append("\n</parameter>");
                     }
                 }
                 if (tool.Required != null && tool.Required.Count > 0)
-                    sb.Append("\n<required>").Append(JsonSerializer.Serialize(tool.Required)).Append("</required>");
+                    sb.Append("\n<required>").Append(JsonSerializer.Serialize(tool.Required, RuntimeChatJson.Default.Strings)).Append("</required>");
                 sb.Append("\n</parameters>\n</function>");
             }
             sb.Append("\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n");
@@ -537,7 +537,7 @@ namespace TensorSharp.Runtime
                 foreach (var kv in tc.Arguments)
                 {
                     sb.Append("<parameter=").Append(kv.Key).Append(">\n");
-                    string val = kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value);
+                    string val = kv.Value is string s ? s : JsonSerializer.Serialize(kv.Value, RuntimeChatJson.Default.Object);
                     sb.Append(val).Append("\n</parameter>\n");
                 }
             }
@@ -754,7 +754,7 @@ namespace TensorSharp.Runtime
             if (value is string s) return s;
             if (value is bool b) return b.ToString().ToLowerInvariant();
             if (value is Dictionary<string, object> || value is List<object>)
-                return JsonSerializer.Serialize(value);
+                return JsonSerializer.Serialize(value, RuntimeChatJson.Default.Object);
             return value?.ToString() ?? "null";
         }
 
@@ -1217,7 +1217,7 @@ namespace TensorSharp.Runtime
                         bool isString = kv.Value is string;
                         sb.Append('<').Append(DsmlToken).Append("parameter name=\"").Append(kv.Key)
                           .Append("\" string=\"").Append(isString ? "true" : "false").Append("\">")
-                          .Append(kv.Value is string text ? text : JsonSerializer.Serialize(kv.Value))
+                          .Append(kv.Value is string text ? text : JsonSerializer.Serialize(kv.Value, RuntimeChatJson.Default.Object))
                           .Append("</").Append(DsmlToken).Append("parameter>\n");
                     }
                 }
@@ -1251,7 +1251,7 @@ namespace TensorSharp.Runtime
                 ["properties"] = props,
                 ["required"] = tool.Required ?? new List<string>(),
             };
-            return JsonSerializer.Serialize(fn);
+            return JsonSerializer.Serialize(fn, RuntimeChatJson.Default.Object);
         }
 
         private static bool IsQwen35Family(string? architecture)
@@ -1993,7 +1993,7 @@ namespace TensorSharp.Runtime
         {
             if (arguments == null || arguments.Count == 0)
                 return "{}";
-            return JsonSerializer.Serialize(arguments);
+            return JsonSerializer.Serialize(arguments, RuntimeChatJson.Default.Object);
         }
 
         /// <summary>

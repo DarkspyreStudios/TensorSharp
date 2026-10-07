@@ -131,7 +131,7 @@ namespace TensorSharp.Runtime
             var function = new Dictionary<string, object?> { ["name"] = tool.Name };
             if (!string.IsNullOrEmpty(tool.Description)) function["description"] = tool.Description;
             function["parameters"] = schema.RootElement;
-            return JsonSerializer.Serialize(function);
+            return JsonSerializer.Serialize(function, RuntimeChatJson.Default.Object);
         }
 
         private static void OrderDeepSeek41ToolResults(List<ChatMessage> messages)
@@ -191,7 +191,7 @@ namespace TensorSharp.Runtime
                     bool rawString = text != null && !Grammar.DeepSeek41ToolGrammar.ContainsReservedMarkup(text);
                     sb.Append("<｜DSML｜ parameter name=\"").Append(parameter.Key)
                         .Append("\" string=\"").Append(rawString ? "true" : "false").Append("\">");
-                    sb.Append(rawString ? text : SpaceDeepSeek41Json(JsonSerializer.Serialize(parameter.Value), protectToolDelimiters: true));
+                    sb.Append(rawString ? text : SpaceDeepSeek41Json(JsonSerializer.Serialize(parameter.Value, RuntimeChatJson.Default.Object), protectToolDelimiters: true));
                     sb.Append("</｜DSML｜ parameter>");
                 }
                 sb.Append("\n</｜DSML｜ invoke>\n");
@@ -204,7 +204,7 @@ namespace TensorSharp.Runtime
         private static string SpaceDeepSeek41Json(string json, bool protectToolDelimiters = false)
         {
             using JsonDocument document = JsonDocument.Parse(json);
-            string compact = JsonSerializer.Serialize(document.RootElement, DeepSeek41JsonOptions);
+            string compact = JsonSerializer.Serialize(document.RootElement, DeepSeek41Json.JsonElement);
             // Replaying parsed arguments must not undo the JSON-string escape
             // that kept a literal marker inside the parameter's value. Apply
             // protection after Unicode-preserving normalization, including keys
@@ -224,10 +224,10 @@ namespace TensorSharp.Runtime
             return sb.ToString();
         }
 
-        private static readonly JsonSerializerOptions DeepSeek41JsonOptions = new()
+        private static readonly RuntimeChatJson DeepSeek41Json = new(new JsonSerializerOptions
         {
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        };
+        });
 
         private const string DeepSeek41ToolsHeader = 
             "## Tools\n"

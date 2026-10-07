@@ -99,6 +99,16 @@ public class Qwen35ToolCallTests
         Assert.IsAssignableFrom<List<object>>(call.Arguments["seats"]);
         // A date is not JSON — it must survive as text rather than becoming 2026 - 8 - 1.
         Assert.Equal("2026-08-01", call.Arguments["depart"]);
+
+        string prompt = ChatTemplate.RenderQwen35(
+            [new ChatMessage { Role = "assistant", ToolCalls = [call] }],
+            addGenerationPrompt: false);
+        Assert.Contains("<parameter=seats>\n[\"12A\",\"12B\"]\n</parameter>", prompt);
+        var replayed = Assert.Single(ParseAll(prompt).ToolCalls!);
+        Assert.Equal(call.Arguments["passengers"], replayed.Arguments["passengers"]);
+        Assert.Equal(call.Arguments["refundable"], replayed.Arguments["refundable"]);
+        Assert.Equal((List<object>)call.Arguments["seats"], Assert.IsType<List<object>>(replayed.Arguments["seats"]));
+        Assert.Equal(call.Arguments["depart"], replayed.Arguments["depart"]);
     }
 
     [Fact]

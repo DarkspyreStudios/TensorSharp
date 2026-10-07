@@ -215,7 +215,7 @@ namespace TensorSharp.Runtime
 
         public override string ToString()
         {
-            string args = Arguments != null ? JsonSerializer.Serialize(Arguments) : "{}";
+            string args = Arguments != null ? JsonSerializer.Serialize(Arguments, RuntimeChatJson.Default.Object) : "{}";
             return $"{Name}({args})";
         }
     }
@@ -1121,7 +1121,7 @@ namespace TensorSharp.Runtime
 
             for (int i = 0; i < quotedStrings.Count; i++)
             {
-                string escaped = JsonSerializer.Serialize(quotedStrings[i]);
+                string escaped = JsonSerializer.Serialize(quotedStrings[i], RuntimeChatJson.Default.String);
                 text = text.Replace("\x00" + (char)i + "\x00", escaped);
             }
 
@@ -1170,7 +1170,7 @@ namespace TensorSharp.Runtime
                     {
                         bool scalar = token == "true" || token == "false" || token == "null"
                                       || JsonNumberRe.IsMatch(token);
-                        sb.Append(scalar ? token : JsonSerializer.Serialize(token));
+                        sb.Append(scalar ? token : JsonSerializer.Serialize(token, RuntimeChatJson.Default.String));
                     }
                     sb.Append(run, token.Length, run.Length - token.Length);
                     continue;

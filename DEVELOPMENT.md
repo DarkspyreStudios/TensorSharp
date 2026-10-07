@@ -714,6 +714,12 @@ settings, template, leading messages, tools and original parameter schemas.
 The tokenizer-scoped cache retains rendered token lists without reflection
 serialization or metadata for caller-defined types.
 
+Runtime protocol JSON uses the fixed `RuntimeChatJson` metadata for tool
+declarations and argument values. ChatML, Qwen, Harmony, GLM, DeepSeek and Gemma
+rendering/parsing do not require reflection serialization. DeepSeek V4.1 uses
+the same metadata with its Unicode-preserving encoder for history normalization.
+Parsed JSON values retain their scalar, dictionary, list and JsonElement shapes.
+
 ### Performance Optimizations
 
 The list below is the cross-architecture summary; each per-model card under
