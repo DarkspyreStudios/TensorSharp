@@ -735,6 +735,9 @@ candidates from the installed package catalog before cache synchronization or
 retirement. Its tracked buffers use .NET CPU storage for deterministic allocation
 and read failures. The fixture preserves checkpoint state and verifies reclamation;
 it does not execute pretrained inference or qualify GPU cache accuracy.
+Qwen primary-cache adoption reserves the fused dictionary capacity and allocates
+the fresh primary holder before publishing the move. A failed allocation leaves
+the original KV and recurrent state active and publishes no fused holder.
 
 ### Performance Optimizations
 

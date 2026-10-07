@@ -66,6 +66,43 @@ public class PrefixCheckpointOwnershipTests
     }
 
     [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    public void QwenPrimaryAdoptionFailure_PreservesLiveStateAndPublishesNoHolder(int allocation)
+    {
+        using var f = new Fixture(qwen: true);
+        var model = (Qwen35Model)f.Model;
+        byte[] before = f.State(f.Source);
+        var live = f.Allocator.LiveSet();
+        f.Allocator.FailAllocation = f.Allocator.Allocations + allocation;
+
+        try
+        {
+            Assert.Throws<OutOfMemoryException>(() => model.AdoptPrimaryCacheToFused("failed-adoption"));
+            Assert.False(model.HasFusedSequenceCache("failed-adoption"));
+            Assert.Null(Get(model, "_activeFusedKey"));
+            Assert.Null(Get(model, "_primaryHolder"));
+            Assert.Equal(9, model.PrimaryCacheLength);
+            Assert.Equal(before, f.State(Invoke(model, "SnapshotActiveCache")!));
+            f.Allocator.AssertLiveSet(live);
+
+            Assert.True(f.Checkpoint("after-failed-adoption"));
+            f.AssertIndependent(f.Source, f.Retained["after-failed-adoption"]!);
+        }
+        finally
+        {
+            // A failed red implementation can publish a second holder of Source's
+            // scratch pointer. The fixture releases Source once, after assertions.
+            f.Active.Remove("failed-adoption");
+            Set(typeof(Qwen35Model), model, "_activeFusedKey", null!);
+        }
+    }
+
+    [Theory]
     [InlineData(false, 0)]
     [InlineData(false, 3)]
     [InlineData(false, 5)]
