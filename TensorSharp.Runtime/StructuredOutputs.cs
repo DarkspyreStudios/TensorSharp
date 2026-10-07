@@ -52,7 +52,7 @@ namespace TensorSharp.Runtime
 
     public static class StructuredOutputPrompt
     {
-        public static List<ChatMessage> Apply(List<ChatMessage> messages, StructuredOutputFormat?format)
+        public static List<ChatMessage> Apply(List<ChatMessage> messages, StructuredOutputFormat? format)
         {
             if (format == null)
                 return messages;
@@ -366,7 +366,7 @@ namespace TensorSharp.Runtime
                 return new StructuredOutputNormalizationResult
                 {
                     IsValid = true,
-                    NormalizedContent = normalizedNode.ToJsonString(new JsonSerializerOptions { WriteIndented = false })
+                    NormalizedContent = JsonSerializer.Serialize(normalizedNode, RuntimeChatJson.Default.JsonNode)
                 };
             }
             catch (Exception ex)
@@ -402,7 +402,7 @@ namespace TensorSharp.Runtime
                 return new StructuredOutputNormalizationResult
                 {
                     IsValid = true,
-                    NormalizedContent = JsonSerializer.Serialize(doc.RootElement)
+                    NormalizedContent = JsonSerializer.Serialize(doc.RootElement, RuntimeChatJson.Default.JsonElement)
                 };
             }
             catch (Exception ex)
@@ -1018,7 +1018,7 @@ namespace TensorSharp.Runtime
                 using var doc = JsonDocument.Parse(candidate);
                 if (doc.RootElement.ValueKind != JsonValueKind.Object)
                     return false;
-                json = JsonSerializer.Serialize(doc.RootElement);
+                json = JsonSerializer.Serialize(doc.RootElement, RuntimeChatJson.Default.JsonElement);
                 return true;
             }
             catch

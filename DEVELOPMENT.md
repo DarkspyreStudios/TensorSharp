@@ -725,6 +725,10 @@ roots report JsonException without consulting reflection metadata.
 JSON Schema grammar compilation uses the same string and JsonElement metadata
 for property terminals, string enums and constants, and structured literals.
 The generated grammar retains its existing JSON and GBNF escaping rules.
+Structured-output extraction and normalization use fixed JsonElement and
+JsonNode metadata. Valid JSON remains parseable with reflection serialization
+disabled. Normalization retains schema order, nullable filling and extra-field
+removal.
 
 ### Performance Optimizations
 
