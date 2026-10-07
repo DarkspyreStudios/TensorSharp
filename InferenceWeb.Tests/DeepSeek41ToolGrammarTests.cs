@@ -118,8 +118,12 @@ public sealed class DeepSeek41ToolGrammarTests
     {
         string value = "  " + marker + " café🦊\n  ";
         object expected = nested ? new Dictionary<string, object> { [value] = new[] { value } } : value;
-        var tool = new ToolFunction { Name = "record", ParametersSchemaJson =
-            "{\"type\":\"object\",\"properties\":{\"payload\":{\"type\":\"" + (nested ? "object" : "string") + "\"}},\"required\":[\"payload\"]}" };
+        var tool = new ToolFunction
+        {
+            Name = "record",
+            ParametersSchemaJson =
+            "{\"type\":\"object\",\"properties\":{\"payload\":{\"type\":\"" + (nested ? "object" : "string") + "\"}},\"required\":[\"payload\"]}"
+        };
         var plan = DeepSeek41ToolGrammar.Compile(new[] { tool }, DeepSeek41ToolChoice.Required);
         string original = Call("record", Parameter("payload", JsonSerializer.Serialize(expected), false));
         Assert.True(Accepts(plan, original));
@@ -219,8 +223,12 @@ public sealed class DeepSeek41ToolGrammarTests
     [InlineData("{\"type\":\"object\",\"additionalProperties\":false}", false)]
     public void NestedOpenMapPreservesArbitraryKeysAndValues(string nestedSchema, bool acceptsMembers)
     {
-        var tool = new ToolFunction { Name = "record", ParametersSchemaJson =
-            "{\"type\":\"object\",\"properties\":{\"data\":" + nestedSchema + "},\"required\":[\"data\"]}" };
+        var tool = new ToolFunction
+        {
+            Name = "record",
+            ParametersSchemaJson =
+            "{\"type\":\"object\",\"properties\":{\"data\":" + nestedSchema + "},\"required\":[\"data\"]}"
+        };
         var plan = DeepSeek41ToolGrammar.Compile(new[] { tool }, DeepSeek41ToolChoice.Required);
         var expected = new Dictionary<string, object>
         {
@@ -310,8 +318,12 @@ public sealed class DeepSeek41ToolGrammarTests
     {
         const string value = "</｜DSML｜ calls> </｜DSML｜ invoke> </｜DSML｜ parameter> </parameter> café🦊";
         object expected = nested ? new Dictionary<string, object> { [value] = new[] { value } } : value;
-        var tool = new ToolFunction { Name = "record", ParametersSchemaJson =
-            "{\"type\":\"object\",\"properties\":{\"payload\":{\"type\":\"" + (nested ? "object" : "string") + "\"}},\"required\":[\"payload\"]}" };
+        var tool = new ToolFunction
+        {
+            Name = "record",
+            ParametersSchemaJson =
+            "{\"type\":\"object\",\"properties\":{\"payload\":{\"type\":\"" + (nested ? "object" : "string") + "\"}},\"required\":[\"payload\"]}"
+        };
         string original = Call("record", Parameter("payload", JsonSerializer.Serialize(expected), false));
         Assert.True(Accepts(DeepSeek41ToolGrammar.Compile(new[] { tool }, DeepSeek41ToolChoice.Required), original));
         var parser = new DeepSeek41OutputParser();
@@ -398,8 +410,12 @@ public sealed class DeepSeek41ToolGrammarTests
     [InlineData("{\"type\":\"string\",\"enum\":[\"x\"],\"const\":\"y\"}")]
     public void UnsupportedSchemaAssertionsAreRejectedExplicitly(string parameterSchema)
     {
-        var tool = new ToolFunction { Name = "strict", ParametersSchemaJson =
-            "{\"type\":\"object\",\"properties\":{\"x\":" + parameterSchema + "}}" };
+        var tool = new ToolFunction
+        {
+            Name = "strict",
+            ParametersSchemaJson =
+            "{\"type\":\"object\",\"properties\":{\"x\":" + parameterSchema + "}}"
+        };
         var error = Assert.Throws<NotSupportedException>(() => DeepSeek41ToolGrammar.Compile(new[] { tool }));
         Assert.Contains("Unsupported DeepSeek V4.1", error.Message);
     }
@@ -422,8 +438,12 @@ public sealed class DeepSeek41ToolGrammarTests
     public void IntegerConstantBoundariesRoundTripExactlyAsInt64(string assertion, string integer)
     {
         string value = assertion == "enum" ? "[" + integer + "]" : integer;
-        var tool = new ToolFunction { Name = "record", ParametersSchemaJson =
-            "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"" + assertion + "\":" + value + "}},\"required\":[\"value\"]}" };
+        var tool = new ToolFunction
+        {
+            Name = "record",
+            ParametersSchemaJson =
+            "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"" + assertion + "\":" + value + "}},\"required\":[\"value\"]}"
+        };
         var plan = DeepSeek41ToolGrammar.Compile(new[] { tool }, DeepSeek41ToolChoice.Required);
         string text = Call("record", Parameter("value", integer, false));
         Assert.True(Accepts(plan, text));
@@ -442,8 +462,12 @@ public sealed class DeepSeek41ToolGrammarTests
     public void IntegerConstantsOutsideSupportedExactEncodingAreRejected(string assertion, string integer)
     {
         string value = assertion == "enum" ? "[" + integer + "]" : integer;
-        var tool = new ToolFunction { Name = "record", ParametersSchemaJson =
-            "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"" + assertion + "\":" + value + "}}}" };
+        var tool = new ToolFunction
+        {
+            Name = "record",
+            ParametersSchemaJson =
+            "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\",\"" + assertion + "\":" + value + "}}}"
+        };
         var error = Assert.Throws<NotSupportedException>(() => DeepSeek41ToolGrammar.Compile(new[] { tool }));
         Assert.Contains("Int64", error.Message);
     }
@@ -547,6 +571,26 @@ public sealed class DeepSeek41ToolGrammarTests
         string prompt = ChatTemplate.RenderDeepSeek41(new() { new ChatMessage { Role = "user", Content = "Record codes" } }, tools: new() { tool });
         Assert.Contains("\"items\": {\"type\": \"integer\"}", prompt);
         Assert.Contains("\"additionalProperties\": false", prompt);
+    }
+
+    [Fact]
+    public void LegacyTypedParameterEnumsKeepTheirValuesAndRequiredOrder()
+    {
+        const string label = "caf\u00e9 \"quoted\"\n";
+        var tool = new ToolFunction
+        {
+            Name = "record",
+            Parameters = new()
+            {
+                ["label"] = new() { Type = "string", Enum = new() { label } },
+                ["count"] = new() { Type = "integer", Enum = new() { "1", "2" } },
+            },
+            Required = new() { "label", "count" },
+        };
+        var plan = DeepSeek41ToolGrammar.Compile(new[] { tool }, DeepSeek41ToolChoice.Required);
+        Assert.True(Accepts(plan, Call("record", Parameter("label", label) + Parameter("count", "2", false))));
+        Assert.False(Accepts(plan, Call("record", Parameter("label", label) + Parameter("count", "3", false))));
+        Assert.False(Accepts(plan, Call("record", Parameter("label", label))));
     }
 
     private static ToolFunction Weather(string name = "get_weather") => new() { Name = name, ParametersSchemaJson = WeatherSchema };

@@ -11,6 +11,7 @@ namespace TensorSharp.Runtime;
 [JsonSerializable(typeof(List<ToolFunction>), TypeInfoPropertyName = "Tools")]
 [JsonSerializable(typeof(List<string>), TypeInfoPropertyName = "Strings")]
 [JsonSerializable(typeof(JsonElement))]
+[JsonSerializable(typeof(JsonElement[]))]
 [JsonSerializable(typeof(JsonNode))]
 [JsonSerializable(typeof(List<object>))]
 [JsonSerializable(typeof(object[]))]

@@ -725,6 +725,10 @@ roots report JsonException without consulting reflection metadata.
 JSON Schema grammar compilation uses the same string and JsonElement metadata
 for property terminals, string enums and constants, and structured literals.
 The generated grammar retains its existing JSON and GBNF escaping rules.
+DeepSeek V4.1 tool grammar uses the same owned metadata for literal strings,
+nested property names, primitive constants and legacy parameter schemas.
+Its grammar literals retain the Unicode-preserving encoder. Numeric legacy
+enums use fixed JsonElement-array metadata without reflection serialization.
 Structured-output extraction and normalization use fixed JsonElement and
 JsonNode metadata. Valid JSON remains parseable with reflection serialization
 disabled. Normalization retains schema order, nullable filling and extra-field

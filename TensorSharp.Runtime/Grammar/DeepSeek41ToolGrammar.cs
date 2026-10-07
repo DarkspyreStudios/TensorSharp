@@ -22,7 +22,7 @@ public sealed class DeepSeek41ToolGrammar
     // argument and can absorb the rest of the response. Literal values bearing
     // these prefixes still use the lossless JSON-string representation below.
     private static readonly string[] RawReserved = { ParameterClose, "<param", "</param", "<invoke", "</invoke", "<｜DSML｜ parameter", "<｜DSML｜ invoke", "</｜DSML｜ invoke>", CallsClose };
-    private static readonly JsonSerializerOptions JsonOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly RuntimeChatJson JsonContext = new(new JsonSerializerOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
     public string Source { get; }
     public DeepSeek41ToolChoice Choice { get; }
 
@@ -95,7 +95,12 @@ public sealed class DeepSeek41ToolGrammar
             }
             properties[name] = schema;
         }
-        return JsonSerializer.Serialize(new { type = "object", properties, required = tool.Required ?? new() });
+        return JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["type"] = "object",
+            ["properties"] = properties,
+            ["required"] = tool.Required ?? new(),
+        }, RuntimeChatJson.Default.ObjectMap);
     }
 
     private static NotSupportedException Unsupported(string detail)
@@ -107,7 +112,7 @@ public sealed class DeepSeek41ToolGrammar
             throw Unsupported($"{kind} names must be nonempty and contain no quotes, angle brackets or control characters");
     }
 
-    private static string Literal(string value) => JsonSerializer.Serialize(value, JsonOptions);
+    private static string Literal(string value) => JsonSerializer.Serialize(value, JsonContext.String);
 
     internal static bool ContainsReservedMarkup(string value)
         => RawReserved.Any(marker => value.Contains(marker, StringComparison.Ordinal));
@@ -248,7 +253,7 @@ public sealed class DeepSeek41ToolGrammar
                         var property = properties[i];
                         string value = valueRules[i];
                         string present = (hasPrevious != 0 ? "\",\" ws " : "") +
-                            Literal(JsonSerializer.Serialize(property.Name)) + " \":\" ws " + value + " " + prefix + "-" + (i + 1) + "-1";
+                            Literal(JsonSerializer.Serialize(property.Name, RuntimeChatJson.Default.String)) + " \":\" ws " + value + " " + prefix + "-" + (i + 1) + "-1";
                         Add(name, required.Contains(property.Name) ? present : present + " | " + prefix + "-" + (i + 1) + "-" + hasPrevious);
                     }
                 string rule = Next("object");
@@ -279,7 +284,7 @@ public sealed class DeepSeek41ToolGrammar
                 _ => false,
             };
             if (!valid) throw Unsupported("enum/const value does not match its primitive parameter type");
-            return Literal(JsonSerializer.Serialize(value));
+            return Literal(JsonSerializer.Serialize(value, RuntimeChatJson.Default.JsonElement));
         }
 
         private static string Type(JsonElement schema, string fallback = "any")
