@@ -703,6 +703,11 @@ Runtime routing is unchanged and still capability-driven:
 `ISpeculativeTarget` and friends once per step. None of the three tables above is
 consulted on a per-token path.
 
+The Jinja `tojson` filter and Qwen tool declarations share the recursive
+`Jinja2Template.ToJson` renderer. It preserves Python-style JSON separators and
+uses `JsonEncodedText` for string escaping. This path works with reflection-based
+JSON serialization disabled and does not cache model or caller types.
+
 ### Performance Optimizations
 
 The list below is the cross-architecture summary; each per-model card under

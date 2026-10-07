@@ -1130,7 +1130,7 @@ namespace TensorSharp.Runtime
         {
             if (val == null) return "null";
             if (val is bool b) return b ? "true" : "false";
-            if (val is string s) return System.Text.Json.JsonSerializer.Serialize(s);
+            if (val is string s) return JsonString(s);
             if (val is int i) return i.ToString(CultureInfo.InvariantCulture);
             if (val is double d) return d.ToString(CultureInfo.InvariantCulture);
             if (val is IList<object> list)
@@ -1152,15 +1152,18 @@ namespace TensorSharp.Runtime
                 {
                     if (!first) sb.Append(", ");
                     first = false;
-                    sb.Append(System.Text.Json.JsonSerializer.Serialize(kv.Key));
+                    sb.Append(JsonString(kv.Key));
                     sb.Append(": ");
                     sb.Append(ToJson(kv.Value));
                 }
                 sb.Append('}');
                 return sb.ToString();
             }
-            return System.Text.Json.JsonSerializer.Serialize(val.ToString());
+            return JsonString(val.ToString());
         }
+
+        private static string JsonString(string? value)
+            => value == null ? "null" : "\"" + System.Text.Json.JsonEncodedText.Encode(value).ToString() + "\"";
 
         private static bool Truthy(object? val)
         {
@@ -1666,4 +1669,3 @@ namespace TensorSharp.Runtime
         #endregion
     }
 }
-
