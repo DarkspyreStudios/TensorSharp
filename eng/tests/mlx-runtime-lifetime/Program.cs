@@ -51,7 +51,8 @@ try
     MlxBackend.EnsureAvailable();
     MlxBackend.ClearCache();
     MlxMemorySnapshot before = MlxBackend.GetMemorySnapshot();
-    WeakReference[] owners = [.. TraceFailureProbe.Run(), .. RunTensorScope(), .. RunQuantizedScope(), .. RunVisionScope()];
+    WeakReference[] owners = [.. TraceFailureProbe.Run(), .. RunTensorScope(), .. RunQuantizedScope(),
+        .. RunVisionRollbackScope(), .. RunVisionScope()];
     MlxMemorySnapshot after = MlxBackend.GetMemorySnapshot();
     Require(after.ActiveBytes == before.ActiveBytes,
         $"Explicit tensor and cache disposal restores active bytes: before={before.ActiveBytes}, after={after.ActiveBytes}.");
@@ -86,6 +87,7 @@ try
         ["quantizedWeight"] = "Q8_0 cached matmul creation/reuse/release",
         ["traceFailure"] = "exact managed cause through native callback; checked closure release",
         ["visionEncoder"] = "tiny Qwen-VL construction, repeated forward/CPU parity and checked disposal",
+        ["visionConstructionFailure"] = "real truncated final-weight read; 21 actual MLX storages released before GC",
         ["terminalWorkerRetirement"] = "completed"
     }));
     return 0;
@@ -174,6 +176,55 @@ static WeakReference[] RunQuantizedScope()
         MlxQuantizedOps.ReleaseQuantizedWeight(allocator, host);
         Marshal.FreeHGlobal(host);
     }
+}
+
+[MethodImpl(MethodImplOptions.NoInlining)]
+static WeakReference[] RunVisionRollbackScope()
+{
+    string directory = Directory.CreateTempSubdirectory("mlx-vision-rollback-").FullName;
+    try
+    {
+        string path = QwenVLSyntheticMmprojBuilder.Write(Path.Combine(directory, "truncated.gguf"));
+        using (var truncated = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            truncated.SetLength(truncated.Length - sizeof(float));
+        using var allocator = new MlxAllocator();
+        var observed = new ObservedMlxAllocator(allocator);
+        Qwen35VisionEncoder? partial = null;
+        Action<Qwen35VisionEncoder> retain = encoder => partial = encoder;
+        ConstructorInfo constructor = typeof(Qwen35VisionEncoder).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(string), typeof(IAllocator), typeof(bool), typeof(Action<Qwen35VisionEncoder>),
+                typeof(Action<Qwen35VisionEncoder, Exception>)], null)!;
+        MlxBackend.ClearCache();
+        MlxMemorySnapshot before = MlxBackend.GetMemorySnapshot();
+        try
+        {
+            constructor.Invoke([path, observed, false, retain, null]);
+            throw new InvalidOperationException("The actual truncated weight read did not fail.");
+        }
+        catch (TargetInvocationException error) when (error.InnerException is EndOfStreamException)
+        {
+        }
+        Require(partial != null && observed.Roots.Count == 21,
+            "The real failed constructor retains its child after 21 actual MLX weight allocations.");
+        var cleanup = (NativeConstructionCleanupHandle)typeof(Qwen35VisionEncoder)
+            .GetProperty("ConstructionCleanup", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(partial)!;
+        Require(cleanup.IsReleased, "The actual failed child's construction cleanup completes.");
+        MethodInfo referenceCount = typeof(RefCounted).GetMethod("ReadReferenceCount", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Require(observed.Roots.All(root => root.Target is MlxStorage storage
+                && (int)referenceCount.Invoke(storage, null)! == 0),
+            "Every observed actual MLX weight storage releases before garbage collection.");
+        using (var reopened = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+        MlxBackend.ClearCache();
+        MlxMemorySnapshot after = MlxBackend.GetMemorySnapshot();
+        Require(after.ActiveBytes == before.ActiveBytes && after.CacheBytes == 0,
+            "Actual partial-weight rollback restores native active/cache bytes without finalizer cleanup.");
+        using var reused = Tensor.FromArray(allocator, new[] { 3f });
+        Require(reused.GetElementsAsFloat(1).SequenceEqual(new[] { 3f }),
+            "The borrowed actual MLX allocator remains reusable after failed construction.");
+        return [new(partial), .. observed.Roots, new(reused.Storage)];
+    }
+    finally { Directory.Delete(directory, recursive: true); }
 }
 
 [MethodImpl(MethodImplOptions.NoInlining)]
@@ -269,7 +320,7 @@ internal static class ForeignMlxGeneration
                 ["collectedRoots"] = evidence.Roots.Length,
                 ["assemblies"] = evidence.Names,
                 ["nativeFailureQualification"] = "not-run",
-                ["actualModelQualification"] = "tiny Qwen-VL encoder/CPU parity; full models not-run"
+                ["actualModelQualification"] = "tiny Qwen-VL encoder/CPU parity and actual truncated-read rollback; full models not-run"
             }));
             return 0;
         }
@@ -321,6 +372,21 @@ internal static class ForeignMlxGeneration
                 throw new FileNotFoundException("The foreign MLX generation requires its actual private dependency.", path);
             return LoadFromAssemblyPath(path);
         }
+    }
+}
+
+// Observe real supplier allocations without replacing storage or injecting a failure.
+internal sealed class ObservedMlxAllocator(MlxAllocator inner) : IAllocator
+{
+    internal List<WeakReference> Roots { get; } = new();
+    BlasEnum IAllocator.BlasEnum => inner.BlasEnum;
+    int IAllocator.DeviceId => inner.DeviceId;
+    float IAllocator.GetAllocatedMemoryRatio() => inner.GetAllocatedMemoryRatio();
+    Storage IAllocator.Allocate(DType type, long count)
+    {
+        Storage storage = inner.Allocate(type, count);
+        Roots.Add(new(storage));
+        return storage;
     }
 }
 

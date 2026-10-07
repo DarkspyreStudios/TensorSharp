@@ -22,6 +22,13 @@ after construction. Explicit disposal retires real MLX weight/cache storages and
 both output storages before their weak-root observation. This is a one-layer
 synthetic encoder check, not pretrained accuracy or a complete text/media model.
 
+A truncated copy of that projector fails its actual final tensor read after 21
+real MLX weight allocations. The fixture observes the existing retained-construction
+callback and actual storage reference counts. Rollback releases every weight before
+garbage collection, closes the input reader and restores native active/cache bytes.
+The borrowed allocator remains reusable. This case does not inject a native release
+failure or qualify the other media families' construction paths.
+
 The executable preloads the explicit library and sets the existing
 `TENSORSHARP_MLX_LIBRARY` selector. It records the bridge hash and actual Core/MLX MVIDs.
 It loads only generated tiny weights, modifies no shared driver and builds no native library.
