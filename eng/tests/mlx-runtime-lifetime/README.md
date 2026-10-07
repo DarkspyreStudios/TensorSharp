@@ -10,10 +10,15 @@ weak-reference observation; the probe never resets ownership or retries native f
 
 The fixture invokes the existing internal compiled-closure entrypoints through
 reflection. Its typed trace delegate throws once through the actual native callback.
+The callback first checks owner-specific Busy refusal of closure, input-storage and
+cache release on its own thread. It then holds for a second thread to verify actual
+input-storage and cache release refusal. Storage ownership stays intact, and native
+authority stays healthy. Five-second waits bound this synchronization in the fixture.
 The returned error must contain that exact managed exception once. Checked array and
 closure release then completes. Subsequent GELU and Q8 work must succeed. Weak roots
 cover the trace target and closure as well as tensor storage. This case does not
-inject a native free/synchronization failure or qualify concurrent callbacks.
+inject a native free/synchronization failure, run simultaneous native callbacks or
+qualify failed retirement.
 
 The fixture reuses `QwenVLSyntheticMmprojBuilder` to construct a complete tiny
 Qwen-VL vision projector. The actual Qwen35 vision encoder runs twice on MLX and

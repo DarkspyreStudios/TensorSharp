@@ -86,6 +86,7 @@ try
         ["compiledActivation"] = "GELU",
         ["quantizedWeight"] = "Q8_0 cached matmul creation/reuse/release",
         ["traceFailure"] = "exact managed cause through native callback; checked closure release",
+        ["callbackBusyRefusals"] = "three reentrant and two external-thread owner-specific cleanup refusals; healthy authority",
         ["visionEncoder"] = "tiny Qwen-VL construction, repeated forward/CPU parity and checked disposal",
         ["visionConstructionFailure"] = "real truncated final-weight read; 21 actual MLX storages released before GC",
         ["terminalWorkerRetirement"] = "completed"
@@ -394,10 +395,12 @@ internal sealed class TraceFailureProbe
 {
     private readonly Exception original = new InvalidOperationException("Actual native trace callback refuses its work.");
     private int calls;
+    private Action? beforeFailure;
 
     private T[] RefuseTrace<T>(T[] inputs)
     {
         calls++;
+        beforeFailure?.Invoke();
         throw original;
     }
 
@@ -413,31 +416,59 @@ internal sealed class TraceFailureProbe
             .MakeGenericMethod(arrayType).CreateDelegate(traceType, target);
         using var allocator = new MlxAllocator();
         using var input = Tensor.FromArray(allocator, new[] { 1f, 2f });
+        using var entered = new ManualResetEventSlim();
+        using var resume = new ManualResetEventSlim();
         object closure = native.GetMethod("NewClosure", methods)!.Invoke(null, [trace, true])!;
+        target.beforeFailure = () =>
+        {
+            RequireBusy(() => native.GetMethod("FreeCompiledClosure", methods)!.Invoke(null, [closure]), closure);
+            RequireBusy(input.Dispose, input.Storage);
+            RequireBusy(MlxBackend.ClearCache, MlxWorker.Shared);
+            entered.Set();
+            if (!resume.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("The held actual MLX trace callback did not resume within the fixture bound.");
+        };
         object? view = null;
+        Task? application = null;
+        TargetInvocationException? invocationFailure = null;
         try
         {
             view = input.Storage.GetType().GetMethod("CreateArrayView", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .Invoke(input.Storage, [input])!;
-            try
-            {
-                native.GetMethod("ApplyClosure1", methods)!.Invoke(null, [closure, view]);
-                throw new InvalidOperationException("The actual native trace callback did not refuse its work.");
-            }
-            catch (TargetInvocationException invocation) when (invocation.InnerException != null)
-            {
-                Exception error = invocation.InnerException;
-                Exception[] causes = error is AggregateException aggregate
-                    ? aggregate.Flatten().InnerExceptions.ToArray() : [error];
-                if (target.calls != 1 || causes.Count(cause => ReferenceEquals(cause, target.original)) != 1)
-                    throw new InvalidOperationException("The native callback did not preserve its exact managed cause once.", error);
-            }
+            application = Task.Run(() => native.GetMethod("ApplyClosure1", methods)!.Invoke(null, [closure, view]));
+            if (!entered.Wait(TimeSpan.FromSeconds(5)))
+                throw new TimeoutException("The actual MLX callback did not enter its held phase within the fixture bound.");
+            RequireBusy(input.Dispose, input.Storage);
+            RequireBusy(MlxBackend.ClearCache, MlxWorker.Shared);
+            if (!input.Storage.IsOwnerExclusive()
+                || NativeRuntimeQuarantine.Observe().State != NativeRuntimeQuarantineState.NoRecordedFailure)
+                throw new InvalidOperationException("Healthy callback cleanup refusal changed storage ownership or poisoned native authority.");
         }
         finally
         {
+            resume.Set();
+            try { application?.GetAwaiter().GetResult(); }
+            catch (TargetInvocationException error) { invocationFailure = error; }
             if (view != null) native.GetMethod("FreeArrayReference", methods)!.Invoke(null, [view]);
             native.GetMethod("FreeCompiledClosure", methods)!.Invoke(null, [closure]);
         }
+        Exception failure = invocationFailure?.InnerException
+            ?? throw new InvalidOperationException("The actual native trace callback did not refuse its work.");
+        Exception[] causes = failure is AggregateException aggregate
+            ? aggregate.Flatten().InnerExceptions.ToArray() : [failure];
+        if (target.calls != 1 || causes.Count(cause => ReferenceEquals(cause, target.original)) != 1)
+            throw new InvalidOperationException("The native callback did not preserve its exact managed cause once.", failure);
         return [new(input.Storage), new(closure), new(target)];
+    }
+
+    private static void RequireBusy(Action operation, object owner)
+    {
+        Exception? refusal = null;
+        try { operation(); }
+        catch (TargetInvocationException error) when (error.InnerException != null) { refusal = error.InnerException; }
+        catch (InvalidOperationException error) { refusal = error; }
+        if (refusal?.GetType().FullName != "TensorSharp.NativeMlxCallbackBusyException"
+            || refusal.GetType().GetMethod("IsFor", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(refusal, [owner]) is not true)
+            throw new InvalidOperationException("Callback-time cleanup must refuse for its actual owner before native release.", refusal);
     }
 }
