@@ -745,6 +745,7 @@
 
   // ---- model state ---------------------------------------------------------
   function paintModel(d) {
+    var previousModel = state.model;
     state.model = (d && d.loaded) || null;
     state.arch = (d && d.architecture) || null;
     state.backend = (d && d.loadedBackend) || null;
@@ -773,6 +774,13 @@
     paintComposerHint();
     paintModelButton();
     paintChips();
+    if (previousModel !== state.model) {
+      loraModelVersion++;
+      state.loras = null;
+      if ($('lora-sheet').classList.contains('on')) closeSheets();
+    }
+    paintLoraAccess();
+    if (state.model && makesImages() && !state.loras) loadLoras(true).catch(function () { /* retry when the model details are opened */ });
   }
 
   function paintComposerHint() {
@@ -2790,7 +2798,11 @@
   function openSheet(id) { $('sheet-bg').classList.add('on'); $(id).classList.add('on'); }
   function closeSheets() {
     $('sheet-bg').classList.remove('on');
+    var closingLoras = $('lora-sheet').classList.contains('on');
     ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
+    $('lora-sheet').hidden = true;
+    if (loraPoll) { clearInterval(loraPoll); loraPoll = null; }
+    if (closingLoras && loraReturnFocus) { loraReturnFocus.focus(); loraReturnFocus = null; }
   }
   $('sheet-bg').addEventListener('click', closeSheets);
 
@@ -2887,8 +2899,9 @@
         // leave the sheet closed for good, with nothing said.
         openSheet(sheet);
         if (sheet === 'skills-sheet') {
+          skillsError('');
           loadSkills().catch(function (e) {
-            notice(t('page.nav.skillsFailed', { error: (e && e.message) || e }), 'error');
+            skillsError(t('page.nav.skillsFailed', { error: (e && e.message) || e }));
           });
         }
         return;
@@ -2930,16 +2943,8 @@
     info.innerHTML = '';
     info.appendChild(el('div', 'skillrow',
       state.model ? (pretty(state.model) + ' · ' + (state.arch || '?') + ' · ' + (state.backend || '')) : t('page.modelSheet.none')));
-    var loraBtn = $('open-loras');
-    loraBtn.style.display = makesImages() ? '' : 'none';
-    if (makesImages()) {
-      // Only the names, for the hint: the sheet keeps its own list, which a late answer
-      // here must not replace.
-      fetch('/api/agent/loras').then(function (r) { return r.json(); }).then(function (d) {
-        var on = ((d && d.loras) || []).filter(function (l) { return l.chosen; }).map(function (l) { return l.name; });
-        $('loras-hint').textContent = on.length ? on.join(' + ') : t('page.modelSheet.lorasHint');
-      }).catch(function () { /* the button still opens the sheet, which says what failed */ });
-    }
+    paintLoraAccess();
+    if (state.model && makesImages()) loadLoras(true).catch(function () {});
     openSheet('model-sheet');
   });
 
@@ -2949,6 +2954,22 @@
   // downloaded, what is on, and how strongly. A change is saved, and the host applies
   // it to the next picture, so a picture being drawn keeps the plug-ins it started with.
   var loraPoll = null;
+  var loraModelVersion = 0;
+  var loraReturnFocus = null;
+  function supportsLoras(d) {
+    return !!(state.model && makesImages() && d && d.supportsLoras === true
+      && (!d.loadedModelFile || d.loadedModelFile === state.model) && d.loras && d.loras.length);
+  }
+  function paintLoraAccess() {
+    var d = state.loras, supported = supportsLoras(d);
+    $('composer-loras').style.display = supported ? '' : 'none';
+    $('open-loras').style.display = supported ? '' : 'none';
+    var selected = ((d && d.loras) || []).filter(function (l) { return l.chosen; }).map(function (l) { return l.name; });
+    var summary = selected.length ? selected.join(' + ') : t('page.lora.choose');
+    $('composer-loras-hint').textContent = summary;
+    $('loras-hint').textContent = selected.length ? summary : t('page.modelSheet.lorasHint');
+    if (!supported && $('lora-sheet').classList.contains('on')) closeSheets();
+  }
   // The choice last sent, until the host answers it: a second change made before then
   // builds on it rather than on the list painted before the first. Saves go one at a
   // time, in the order they were made, because each one replaces the whole choice; a
@@ -2995,9 +3016,9 @@
     if (message && !inSheet) notice(message, 'error');
   }
   function loadLoras(tick) {
-    var seq = loraSeq;
-    return fetch('/api/agent/loras').then(loraJson).then(function (d) {
-      if (seq !== loraSeq || loraChoice) return state.loras;
+    var seq = loraSeq, version = loraModelVersion;
+    return fetchTimed('/api/agent/loras', 10000).then(loraJson).then(function (d) {
+      if (version !== loraModelVersion || seq !== loraSeq || loraChoice) return state.loras;
       return paintLoras(d, tick);
     });
   }
@@ -3005,14 +3026,16 @@
   // sheet as it now is. Every answer is kept as the latest the host said, and only the
   // latest change's is painted. `failed` words a refusal, or is null to show it as is.
   function queueLoras(send, failed, isSave) {
-    var seq = ++loraSeq;
+    var seq = ++loraSeq, version = loraModelVersion;
     loraQueue = loraQueue.then(function () {
       return send().then(function (d) {
+        if (version !== loraModelVersion) return finishPreviousModelChoice(seq);
         state.loras = d;
         if (seq !== loraSeq) return;
         loraChoice = null;
         paintLoras(d);
       }, function (e) {
+        if (version !== loraModelVersion) return finishPreviousModelChoice(seq);
         var reason = (e && e.message) || e;
         var why = failed ? failed(reason) : String(reason);
         if (seq !== loraSeq) {
@@ -3030,6 +3053,14 @@
       }).catch(function () { /* the list stays as it was painted */ });
     });
     return loraQueue;
+  }
+  // A model switch can happen while the old model's choice is still saving. Its
+  // response must not repaint that model, but the new model needs a fresh capability
+  // read once the last queued choice has settled.
+  function finishPreviousModelChoice(seq) {
+    if (seq !== loraSeq) return;
+    loraChoice = null;
+    if (state.model && makesImages()) return loadLoras();
   }
   function saveLoras(list) {
     loraChoice = list;
@@ -3086,6 +3117,7 @@
     var sw = el('label', 'switch');
     var box = el('input');
     box.type = 'checkbox';
+    box.setAttribute('aria-label', t('page.lora.use', { name: l.name }));
     box.checked = !!l.chosen;
     box.addEventListener('change', function () { toggleLora(l, box.checked); });
     sw.appendChild(box);
@@ -3104,11 +3136,18 @@
     }));
   }
   function paintLoras(d, tick) {
+    if (d && d.loadedModelFile && d.loadedModelFile !== state.model) return state.loras;
     state.loras = d;
+    paintLoraAccess();
     var list = $('lora-list');
-    var loras = (d && d.loras) || [];
-    var running = loras.some(function (l) { return l.download && l.download.running; });
-    var shape = loraShapeOf(d);
+    list.setAttribute('aria-busy', 'false');
+    $('lora-context').textContent = d && d.loadedModelName ? t('page.lora.compatible', { model: d.loadedModelName }) : '';
+    var query = String($('lora-search').value || '').trim().toLocaleLowerCase();
+    var loras = ((d && d.loras) || []).filter(function (l) {
+      return !query || [l.name, l.purpose, l.trigger || '', l.kind].join(' ').toLocaleLowerCase().indexOf(query) >= 0;
+    });
+    var running = ((d && d.loras) || []).some(function (l) { return l.download && l.download.running; });
+    var shape = query + loraShapeOf(d);
     // A poll while a download runs moves only its percentage. The rows stay, so a
     // strength being dragged or a button being pressed is not replaced under the finger.
     if (tick && shape === loraShape && list.children.length) {
@@ -3118,7 +3157,7 @@
     loraShape = shape;
     loraPct = {};
     list.innerHTML = '';
-    if (!loras.length) list.appendChild(el('div', 'notice', t('page.lora.none')));
+    if (!loras.length) list.appendChild(el('div', 'notice', t(query ? 'page.lora.noMatches' : 'page.lora.none')));
     loras.forEach(function (l) {
       var row = el('div', 'skillrow lorarow');
       row.setAttribute('data-lora', l.id);
@@ -3173,6 +3212,7 @@
           var strength = el('div', 'strength');
           var range = el('input');
           range.type = 'range';
+          range.setAttribute('aria-label', t('page.lora.strengthFor', { name: l.name }));
           range.min = String(d.minStrength);
           range.max = String(d.maxStrength);
           range.step = '0.05';
@@ -3191,7 +3231,7 @@
       row.appendChild(act);
       list.appendChild(row);
     });
-    if (running && !loraPoll) {
+    if (running && !loraPoll && $('lora-sheet').classList.contains('on')) {
       loraPoll = setInterval(function () {
         if (!$('lora-sheet').classList.contains('on')) { clearInterval(loraPoll); loraPoll = null; return; }
         loadLoras(true).catch(function () {});
@@ -3200,11 +3240,34 @@
     if (!running && loraPoll) { clearInterval(loraPoll); loraPoll = null; }
     return d;
   }
-  $('open-loras').addEventListener('click', function () {
+  function openLoraSheet(source) {
+    if (!supportsLoras(state.loras)) return;
     closeSheets();
+    loraReturnFocus = source === $('open-loras') ? modelBtn : source;
+    $('lora-search').value = '';
     loraError('');
-    loadLoras().then(function () { openSheet('lora-sheet'); })
-      .catch(function (e) { notice(t('page.lora.listFailed', { error: (e && e.message) || e }), 'error'); });
+    $('lora-sheet').hidden = false;
+    openSheet('lora-sheet');
+    paintLoras(state.loras);
+    $('lora-list').setAttribute('aria-busy', 'true');
+    $('lora-close').focus();
+    loadLoras().catch(function (e) {
+      $('lora-list').setAttribute('aria-busy', 'false');
+      loraError(t('page.lora.listFailed', { error: (e && e.message) || e }));
+    });
+  }
+  $('open-loras').addEventListener('click', function () { openLoraSheet($('open-loras')); });
+  $('composer-loras').addEventListener('click', function () { openLoraSheet($('composer-loras')); });
+  $('lora-search').addEventListener('input', function () { if (state.loras) paintLoras(state.loras); });
+  $('lora-close').addEventListener('click', closeSheets);
+  document.addEventListener('keydown', function (e) {
+    if (!$('lora-sheet').classList.contains('on')) return;
+    if (e.key === 'Escape') { e.preventDefault(); closeSheets(); return; }
+    if (e.key !== 'Tab') return;
+    var items = $('lora-sheet').querySelectorAll('button:not([disabled]), input:not([disabled])');
+    var first = items[0], last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   });
   $('open-models').addEventListener('click', function () {
     closeSheets();
@@ -3215,7 +3278,7 @@
 
   // ---- skills --------------------------------------------------------------
   //
-  // Two switches, and they answer different questions. The one inside a skill is
+  // Two switches, and they answer different questions. The one on each skill row is
   // "use this one in THIS chat"; the one at the top of the list is whether the
   // feature exists at all. The second is a setting rather than a chat property
   // because it is not a per-conversation decision: with twelve skills declaring
@@ -3230,20 +3293,68 @@
     return !(state.settings && state.settings.skillsEnabled === false);
   }
 
+  var skillControls = [];
+  var skillRemovals = Object.create(null);
+  var skillsLoadVersion = 0;
+  var skillSettingsVersion = 0;
+  var skillsCatalogLoaded = false;
+  var skillsMasterBusy = false;
+  var detailSkill = null;
+
+  function skillsError(message) {
+    var line = $('skills-error');
+    line.textContent = message || '';
+    line.style.display = message ? '' : 'none';
+    if (message && typeof line.scrollIntoView === 'function') line.scrollIntoView({ block: 'nearest' });
+  }
+  function syncSkillControls() {
+    (skillControls || []).forEach(function (control) {
+      control.box.checked = state.skills.indexOf(control.name) >= 0;
+      control.box.disabled = !skillsOn() || skillsMasterBusy || !!skillRemovals[control.name];
+      control.remove.disabled = !!skillRemovals[control.name];
+      control.info.disabled = !!skillRemovals[control.name];
+    });
+    if (detailSkill) {
+      var removed = !state.catalogSkills.some(function (s) { return s.name === detailSkill.name; });
+      $('skill-on').checked = state.skills.indexOf(detailSkill.name) >= 0;
+      $('skill-on').disabled = removed || !skillsOn() || skillsMasterBusy || !!skillRemovals[detailSkill.name];
+      $('skill-remove').disabled = removed || !!skillRemovals[detailSkill.name];
+    }
+  }
+  function setSkillSelected(skill, on) {
+    if (!skillsOn() || skillsMasterBusy || skillRemovals[skill.name]
+      || !state.catalogSkills.some(function (s) { return s.name === skill.name; })) {
+      syncSkillControls(); return;
+    }
+    var i = state.skills.indexOf(skill.name);
+    if (on && i < 0) state.skills.push(skill.name);
+    if (!on && i >= 0) state.skills.splice(i, 1);
+    state.skillSelectionExplicit = true;
+    paintSkillChips();
+  }
+
   function paintSkillsMaster() {
     var box = $('skills-master');
     if (!box) return;
     var on = skillsOn();
     box.checked = on;
+    box.disabled = skillsMasterBusy;
     var label = $('skills-master-label');
     if (label) label.textContent = on ? t('page.skills.on') : t('page.skills.off');
     var list = $('skills-list');
     if (list) list.className = on ? '' : 'off';
     var add = $('skill-add');
     if (add) add.style.display = on ? '' : 'none';
+    syncSkillControls();
   }
 
   function setSkillsEnabled(on) {
+    if (skillsMasterBusy) { paintSkillsMaster(); return; }
+    var previous = { on: skillsOn(), skills: state.skills.slice(), explicit: state.skillSelectionExplicit,
+      conversation: state.conversation };
+    skillsMasterBusy = true;
+    skillSettingsVersion++;
+    skillsError('');
     var next = Object.assign({}, state.settings || {}, { skillsEnabled: !!on });
     // Painted from the intent first: the round trip is a loopback POST, but the
     // switch must not sit in its old position while it happens.
@@ -3260,9 +3371,22 @@
           state.skillSelectionExplicit = true;
           paintSkillChips();
         }
-        paintSkillsMaster();
       })
-      .catch(function (e) { notice(t('page.skills.saveFailed', { error: e }), 'error'); });
+      .catch(function (e) {
+        state.settings = Object.assign({}, state.settings || {}, { skillsEnabled: previous.on });
+        if (state.conversation === previous.conversation) {
+          state.skills = previous.skills.filter(function (name) {
+            return !skillsCatalogLoaded || state.catalogSkills.some(function (skill) { return skill.name === name; });
+          });
+          state.skillSelectionExplicit = previous.explicit;
+        }
+        skillsError(t('page.skills.saveFailed', { error: (e && e.message) || e }));
+      }).then(function () {
+        skillsMasterBusy = false;
+        skillSettingsVersion++;
+        paintSkillChips();
+        paintSkillsMaster();
+      });
   }
 
   (function () {
@@ -3271,38 +3395,99 @@
   })();
 
   function loadSkills() {
-    return fetch('/api/skills').then(function (r) { return r.json(); }).then(function (d) {
+    var version = ++skillsLoadVersion;
+    var settingsVersion = skillSettingsVersion;
+    return fetch('/api/skills').then(skillJson).then(function (d) {
+      if (version !== skillsLoadVersion) return state.catalogSkills;
       state.catalogSkills = (d && d.skills) || [];
+      skillsCatalogLoaded = true;
       // The host is the authority on whether the feature is on; the settings copy
       // this page holds may predate a change made anywhere else.
-      if (d && typeof d.enabled === 'boolean') {
+      if (!skillsMasterBusy && settingsVersion === skillSettingsVersion && d && typeof d.enabled === 'boolean') {
         state.settings = Object.assign({}, state.settings || {}, { skillsEnabled: d.enabled });
       }
       paintSkillsMaster();
-      var list = $('skills-list');
-      list.innerHTML = '';
-      if (!state.catalogSkills.length) list.appendChild(el('div', 'notice', t('page.skills.none')));
-      state.catalogSkills.forEach(function (s) {
-        // The whole row opens the skill. A description is almost always longer
-        // than the two lines a list can spare, and truncating it to a tooltip
-        // nobody can hover on a phone is the same as not shipping it.
-        var row = el('div', 'skillrow');
-        var meta = el('div', 'meta');
-        meta.appendChild(el('div', 'nm', (state.skills.indexOf(s.name) >= 0 ? '● ' : '') + s.name));
-        meta.appendChild(el('div', 'ds', s.description || ''));
-        row.appendChild(meta);
-        row.appendChild(el('span', 'chev', '›'));
-        row.addEventListener('click', function () { openSkill(s); });
-        list.appendChild(row);
-      });
+      paintSkillsList();
       return state.catalogSkills;
     });
+  }
+
+  function paintSkillsList() {
+    var list = $('skills-list');
+    list.innerHTML = '';
+    skillControls = [];
+    if (!state.catalogSkills.length) list.appendChild(el('div', 'notice', t('page.skills.none')));
+    state.catalogSkills.forEach(function (s) {
+      var row = el('div', 'skillrow skill-manage-row');
+      row.setAttribute('data-skill', s.name);
+      var meta = el('div', 'meta');
+      var info = el('button', 'nm skill-info', s.name + ' ›');
+      info.type = 'button';
+      info.setAttribute('aria-label', t('page.skill.details', { name: s.name }));
+      info.addEventListener('click', function () { openSkill(s); });
+      meta.appendChild(info);
+      meta.appendChild(el('div', 'ds', s.description || ''));
+      row.appendChild(meta);
+      var actions = el('div', 'skill-actions');
+      var choice = el('label', 'switch skill-choice');
+      var box = el('input', 'skill-toggle');
+      box.type = 'checkbox';
+      box.setAttribute('aria-label', t('page.skill.use', { name: s.name }));
+      box.addEventListener('change', function () { setSkillSelected(s, box.checked); });
+      choice.appendChild(box);
+      choice.appendChild(el('span', 'track'));
+      choice.appendChild(el('span', '', t('markup.skill.useInChat')));
+      actions.appendChild(choice);
+      var remove = el('button', 'mini quiet skill-remove', t('markup.skill.remove'));
+      remove.type = 'button';
+      remove.setAttribute('aria-label', t('page.skill.removeNamed', { name: s.name }));
+      remove.addEventListener('click', function () { removeSkill(s); });
+      actions.appendChild(remove);
+      row.appendChild(actions);
+      list.appendChild(row);
+      skillControls.push({ name: s.name, box: box, remove: remove, info: info });
+    });
+    syncSkillControls();
+  }
+
+  function skillJson(r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error((d && d.error) || ('HTTP ' + r.status));
+      return d;
+    });
+  }
+  function removeSkill(skill) {
+    if (skillRemovals[skill.name]) return;
+    skillRemovals[skill.name] = true;
+    skillsLoadVersion++;
+    skillsError('');
+    syncSkillControls();
+    return fetch('/api/skills/' + encodeURIComponent(skill.name), { method: 'DELETE' })
+      .then(skillJson).then(function (d) {
+        if (!d || d.removed !== true) throw new Error((d && d.error) || t('page.skill.removeNotConfirmed'));
+        // Invalidate any list read started before deletion finished. It must not
+        // put the removed row back while the sheet stays open.
+        skillsLoadVersion++;
+        state.catalogSkills = state.catalogSkills.filter(function (s) { return s.name !== skill.name; });
+        var i = state.skills.indexOf(skill.name);
+        if (i >= 0) { state.skills.splice(i, 1); state.skillSelectionExplicit = true; }
+        paintSkillChips();
+        paintSkillsList();
+        notice(t('page.skill.removed', { name: skill.name }));
+      }).catch(function (e) {
+        skillsError(t('page.skill.removeFailed', { error: (e && e.message) || e }));
+      }).then(function () {
+        delete skillRemovals[skill.name];
+        syncSkillControls();
+      });
   }
 
   // One skill, in full: the name, everything the description says, whether it is
   // on for this chat, and the way to remove it.
   function openSkill(s) {
+    if (skillRemovals[s.name] || !state.catalogSkills.some(function (skill) { return skill.name === s.name; })) return;
     closeSheets();
+    detailSkill = s;
     $('skill-name').textContent = s.name;
     var body = $('skill-body');
     body.innerHTML = '';
@@ -3317,30 +3502,14 @@
     body.appendChild(document.createTextNode(s.description || t('page.skill.noDescription')));
 
     var on = $('skill-on');
-    on.checked = state.skills.indexOf(s.name) >= 0;
-    on.onchange = function () {
-      var i = state.skills.indexOf(s.name);
-      if (on.checked && i < 0) state.skills.push(s.name);
-      if (!on.checked && i >= 0) state.skills.splice(i, 1);
-      state.skillSelectionExplicit = true;
-      paintSkillChips();
-    };
+    on.onchange = function () { setSkillSelected(s, on.checked); };
 
     $('skill-remove').onclick = function () {
-      fetch('/api/skills/' + encodeURIComponent(s.name), { method: 'DELETE' })
-        .then(function (r) { return r.json(); })
-        .then(function () {
-          var i = state.skills.indexOf(s.name);
-          if (i >= 0) {
-            state.skills.splice(i, 1);
-            state.skillSelectionExplicit = true;
-            paintSkillChips();
-          }
-          closeSheets();
-          notice(t('page.skill.removed', { name: s.name }));
-        })
-        .catch(function (e) { notice(t('page.skill.removeFailed', { error: e }), 'error'); });
+      closeSheets();
+      openSheet('skills-sheet');
+      removeSkill(s);
     };
+    syncSkillControls();
     openSheet('skill-sheet');
   }
 
@@ -3393,6 +3562,7 @@
   function paintSkillChips() {
     var box = $('skillchips');
     box.innerHTML = '';
+    syncSkillControls();
     if (!skillsOn()) return;
     state.skills.forEach(function (n) { box.appendChild(el('span', 'skillchip', '🧩 ' + n)); });
   }

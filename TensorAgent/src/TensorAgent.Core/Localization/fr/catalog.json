@@ -33,6 +33,8 @@
   "catalog.lora.funAcc4Step.purpose": "Images et retouches en 4 étapes. Les petits textes et certaines retouches sont moins réussis qu’avec le modèle complet.",
   "catalog.lora.filmStills.purpose": "L’apparence d’une image de film cinématographique 35 mm.",
   "catalog.lora.grainscape.purpose": "L’apparence granuleuse d’un film négatif couleur 35 mm à haute sensibilité ISO.",
+  "catalog.lora.casualPhone.purpose": "Un style de photo prise sur le vif au téléphone. Commencez à une intensité de 0.8 avec lbxstyle et décrivez le sujet et le cadre. Petit ajustement expérimental ; comparez plusieurs graines.",
+  "catalog.lora.voxelStyle.purpose": "Transforme une photo jointe en art voxel fait de blocs. Expérimental ; les sujets peuvent rester reconnaissables alors que le fond change considérablement.",
   "catalog.lora.qualityFix.purpose": "Un DoRA créé par son auteur pour corriger les défauts fréquents du modèle. Il a été réglé pour un autre échantillonneur que celui de l’app ; évaluez-le donc sur vos propres images.",
   "catalog.license.noneStated": "Aucune licence indiquée par l’auteur",
   "catalog.lora.detailEnhancer.purpose": "Des détails plus fins et des textures plus nettes pour une image jointe, tout en conservant sa composition.",

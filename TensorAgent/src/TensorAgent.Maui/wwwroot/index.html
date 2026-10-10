@@ -538,12 +538,25 @@ body.voice #toggles { display: flex; }
 .skillrow { cursor: pointer; }
 .skillrow .chev { color: var(--muted); font-size: 15px; padding-left: 6px; }
 .opt.danger { color: #fca5a5; }
-.skill-toggle { padding: 12px 4px; }
+label.skill-toggle { padding: 12px 4px; }
 .skills-master { padding: 4px 4px 12px; font-size: 14px; color: var(--text); border-bottom: 1px solid var(--border); margin-bottom: 4px; }
-/* Off, the roster is still readable -- a user deciding whether to turn it back on
-   is looking at exactly this list -- but it is plainly not in play. */
-#skills-list.off { opacity: .45; }
-#skills-list.off .skillrow { pointer-events: none; }
+/* Turning skills off disables chat selection; managing the installed roster
+   remains available on the same page. */
+#skills-list.off .skill-choice { opacity: .5; }
+.skill-manage-row { cursor: default; }
+.skill-manage-row .meta { overflow-wrap: anywhere; }
+.skill-info { display: block; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--text); text-align: left; overflow-wrap: anywhere; max-width: 100%; }
+.skill-actions { display: flex; flex-direction: column; align-items: flex-start; flex: 0 0 auto; gap: 4px; }
+.skill-choice { min-height: 44px; cursor: pointer; }
+#skills-sheet .skill-remove { min-height: 44px; color: #fca5a5; }
+#skills-sheet button:disabled { opacity: .5; cursor: default; }
+#skills-sheet .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 3px; }
+#skills-error { font-size: 13px; color: #fca5a5; margin: 8px 4px; overflow-wrap: anywhere; }
+@media (max-width: 420px) {
+  .skill-manage-row { flex-wrap: wrap; }
+  .skill-manage-row .meta { flex-basis: 100%; }
+  .skill-actions { flex-direction: row; align-items: center; justify-content: space-between; flex-wrap: wrap; width: 100%; gap: 4px 12px; }
+}
 #skill-body { font-size: 14px; color: var(--muted); line-height: 1.55; white-space: pre-wrap; margin-bottom: 6px; }
 #skill-body .meta { font-size: 12px; color: #7f8ea8; margin-bottom: 8px; }
 .urlrow { display: flex; gap: 8px; margin: 4px 0 8px; }
@@ -556,6 +569,23 @@ body.voice #toggles { display: flex; }
   border-radius: 10px; background: var(--accent); color: #fff; border: 0;
 }
 .hint-block { font-size: 12px; color: var(--muted); margin: 0; }
+/* Compatible LoRAs are one tap from the image composer, without changing navigation. */
+#composer-loras { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 8px 12px; margin-bottom: 8px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); color: var(--text); text-align: left; }
+#composer-loras > :first-child { flex: 0 0 auto; font-weight: 600; }
+#composer-loras-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.lora-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+#lora-close { min-width: 44px; min-height: 44px; border: 0; background: transparent; color: var(--text); font-size: 26px; }
+#lora-search { display: block; width: 100%; min-height: 44px; margin: 10px 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 16px; }
+#lora-sheet[hidden] { display: none; }
+#lora-sheet .mini, #lora-sheet .switch { min-height: 44px; }
+#lora-sheet .switch { min-width: 44px; justify-content: center; }
+#lora-sheet .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 3px; }
+.lorarow .meta { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 420px) {
+  .lorarow { flex-wrap: wrap; }
+  .lorarow .meta { flex-basis: 100%; }
+  #lora-sheet .lorarow .act { flex-direction: row; align-items: center; flex-wrap: wrap; width: 100%; }
+}
 /* LoRA plug-ins: a decision per row, so the actions sit on the row itself. */
 .lorarow { cursor: default; }
 .lorarow .ds { display: block; -webkit-line-clamp: unset; }
@@ -594,6 +624,7 @@ button.mini.quiet { background: transparent; color: var(--muted); }
 </div>
 
 <div id="composer">
+  <button id="composer-loras" type="button" style="display:none" aria-controls="lora-sheet" aria-haspopup="dialog"><span data-i18n="markup.model.loras">LoRA plug-ins</span><span id="composer-loras-hint"></span><span aria-hidden="true">›</span></button>
   <div id="skillchips"></div>
   <div id="chips"></div>
   <!-- Above the message box, so the answer to "is it stuck?" is never off-screen and
@@ -633,13 +664,12 @@ button.mini.quiet { background: transparent; color: var(--muted); }
        declared to the model at all, which is thousands of prompt tokens a chat
        that does not want them should not be paying on every turn. -->
   <label class="switch skills-master"><input type="checkbox" id="skills-master" checked><span class="track"></span><span id="skills-master-label" data-i18n="markup.skills.useSkills">Use skills</span></label>
+  <p id="skills-error" role="alert" style="display:none"></p>
   <div id="skills-list"></div>
   <button class="opt" id="skill-add"><span class="em">＋</span> <span data-i18n="markup.skills.add">Add a skill</span><span class="hint" data-i18n="markup.skills.addHint">.zip or a link</span></button>
 </div>
 
-<!-- One skill, in full. The list can only ever show a couple of lines of a
-     description, and most are longer than that; this is where the whole thing
-     lives, together with the switch and the way to remove it. -->
+<!-- Optional full description. Selection and removal are also on every list row. -->
 <div class="sheet" id="skill-sheet">
   <div class="grab"></div>
   <h2 id="skill-name" data-i18n="markup.skill.title">Skill</h2>
@@ -686,16 +716,18 @@ button.mini.quiet { background: transparent; color: var(--muted); }
   <div class="grab"></div>
   <h2 data-i18n="markup.model.title">Model</h2>
   <div id="model-info"></div>
-  <!-- Shown while an image model is loaded: its LoRA plug-ins (WebUiRoutes.MapLoras). -->
+  <!-- Shown only when the loaded model has compatible LoRA plug-ins. -->
   <button class="opt" id="open-loras" style="display:none"><span class="em">🎨</span> <span data-i18n="markup.model.loras">LoRA plug-ins</span><span class="hint" id="loras-hint" data-i18n="markup.model.lorasHint">speed, style</span></button>
   <button class="opt" id="open-models"><span class="em">📚</span> <span data-i18n="markup.model.manage">Manage models</span><span class="hint" data-i18n="markup.model.manageHint">download, switch</span></button>
 </div>
 
 <!-- The image model's LoRA plug-ins: what is downloaded, what is on, and how strongly.
      A change applies from the next picture; a picture being drawn keeps its own. -->
-<div class="sheet" id="lora-sheet">
+<div class="sheet" id="lora-sheet" role="dialog" aria-modal="true" aria-labelledby="lora-title" hidden>
   <div class="grab"></div>
-  <h2 data-i18n="markup.loras.title">LoRA plug-ins</h2>
+  <div class="lora-heading"><h2 id="lora-title" data-i18n="markup.loras.title">LoRA plug-ins</h2><button id="lora-close" type="button" data-i18n-aria-label="page.lora.close" aria-label="Close LoRA selection">×</button></div>
+  <p class="hint-block" id="lora-context"></p>
+  <input id="lora-search" type="search" data-i18n-placeholder="page.lora.search" data-i18n-aria-label="page.lora.search" placeholder="Search LoRA plug-ins" aria-label="Search LoRA plug-ins">
   <p class="hint-block" id="lora-hint" data-i18n="markup.loras.hint">They apply from the next picture. One speed plug-in at a time; styles and edits combine with it.</p>
   <p id="lora-error" role="alert" style="display:none"></p>
   <div id="lora-list"></div>

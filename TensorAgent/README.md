@@ -8,7 +8,7 @@ in the app process for text and reasoning, multimodal questions, agentic code an
 document work, **Qwen-Image 2.1 image generation and editing**, and MiniMax-H3 short
 video with audio. Choose a model for the task and use the same composer, saved chats
 and artifact links. Image edits support painted selections, protected pixels,
-original/result comparison and twelve optional LoRA plug-ins. The interface is
+original/result comparison and fourteen optional LoRA plug-ins. The interface is
 available in [eight languages](#languages).
 
 The .NET MAUI project shares its chat page and loopback API across iOS/iPadOS,
@@ -393,15 +393,18 @@ HEIC/HEIF photos use a full-resolution PNG for editing and comparison while thei
 small preview remains in the attachment list. Reattach older HEIC/HEIF uploads if
 the editor asks for a full-resolution source.
 
-**LoRA plug-ins.** With Qwen-Image 2.1 loaded, Model > LoRA plug-ins lists twelve LoRAs
-made for it. Each is pinned to a commit and a SHA-256 in `LoraCatalog` and downloaded on its
+**LoRA plug-ins.** With a compatible Qwen-Image 2.1 model loaded, the **LoRA plug-ins**
+button above the message box opens its compatible adapters in one tap. The model details
+sheet keeps the same shortcut; both hide when the loaded model has no supported LoRAs.
+The existing side menu is unchanged. Search filters the list locally, and the composer
+shows the selected adapters. The catalog contains fourteen LoRAs in total. Each is pinned to a commit and a SHA-256 in `LoraCatalog` and downloaded on its
 own, 80-680 MB, into `Library/Caches/TensorAgent/loras/<id>/`. A switch turns one on, a
 slider sets the strength of a style or an edit (10-150%), and Remove deletes the files and
 turns it off. Speed plug-ins (Viggle Turbo, 6 steps; Pruna 8-Step; Pruna 5-Step; Fun-Acc
 4-Step) replace the model's 40 steps with their own schedule, so only one can be on and
-turning on another turns it off. Styles (Film Stills, Grainscape, Quality Fix) apply to every
+turning on another turns it off. Styles (Film Stills, Grainscape, Casual Phone Photo, Quality Fix) apply to every
 picture. Edits (Detail Enhancer, Natural Exposure, Object Remover, Object Mover, Anime
-Consistency) apply only when a photo is attached, and the sheet shows the phrase a request
+Consistency, Voxel Style) apply only when a photo is attached, and the sheet shows the phrase a request
 needs for the ones trained on one. The choice is saved (`imageLoras` in the settings) and
 applies from the next picture, never to one being drawn, and the progress line names what
 the picture is drawn with ("Drawing with Viggle Turbo + Film Stills… step 3 of 6"). Object
@@ -410,16 +413,22 @@ applies to; on its own example photos it removed both marked cats but none of th
 cars, which is why its row says to check the result. A plug-in that is on but whose files
 have gone refuses the picture with the reason rather than drawing without it, and its row
 keeps the switch that turns it off. Most are under the Qwen Research License
-(non-commercial), Anime Consistency is Apache-2.0, and the authors of Quality Fix and Detail
-Enhancer state none; each row says which.
+(non-commercial), Anime Consistency is Apache-2.0, and the authors of Quality Fix, Detail
+Enhancer and Casual Phone Photo state none; each row says which.
 
 **Qwen-Image 2.1 Turbo.** The Turbo entries' GGUFs carry no metadata and have the base
 model's tensors, so each entry declares that it is Turbo (`CatalogModel.ImageVariant`,
 published to the engine as `TS_QWEN_IMAGE_VARIANT` with its companions) and every picture
 samples Turbo's own 8-step schedule at CFG 1, whatever the file is called. Turbo is
 step-distilled already, so the LoRA sheet does not offer it a speed plug-in: while a Turbo
-entry is loaded the sheet lists only the plug-ins validated on it, Film Stills and
-Grainscape. A plug-in turned on for Qwen-Image 2.1 that does not apply to Turbo stays saved
+entry is loaded the sheet lists only compatible plug-ins: Film Stills,
+Grainscape, Casual Phone Photo, and Voxel Style. Casual Phone Photo uses strength 0.8 and
+the `lbxstyle` trigger; Voxel Style uses strength 1 with an attached photo and the
+instruction `Transform the image into a voxel style`. Both keep Turbo’s eight steps.
+The new adapters' image validation covers AD-Q4_K; Q8 shares their architecture
+and adapter mapping, but has not been separately image-tested. See the
+[validation scope](../docs/models/qwenimage21.md#lora-plug-ins-on-turbo).
+A plug-in turned on for Qwen-Image 2.1 that does not apply to Turbo stays saved
 and sits out Turbo's pictures, which the log says for each one ("Viggle Turbo sits out:
 Qwen-Image 2.1 Turbo is step-distilled already", "Detail Enhancer sits out: not validated on
 Qwen-Image 2.1 Turbo"). The picture planner, the Qwen3-VL scoring and edits that keep the source size work
@@ -680,7 +689,11 @@ running keeps the terms it started with.
 a link — one archive, or a plain-text list of links, one per line — and can remove any
 skill, bundled ones included: removing a bundled skill is recorded in
 `removed-skills.txt` in the backed-up data directory, so an app update does not bring it
-back.
+back. Each row in the Skills list has a **Use in this chat** switch and a **Remove
+this skill** button, so multiple skills can be managed without opening their details.
+The skill name opens its full description. When the Skills master switch is off,
+chat switches are disabled, while removal remains available. Failed removals show
+an error in the list and keep the skill and its selection intact.
 
 **Code, generated and run.** The agent host's shell tool works here, backed by an
 in-process POSIX shell, an embedded CPython 3.13 and JavaScriptCore, because iOS
@@ -1821,7 +1834,7 @@ the real files load is `InferenceWeb.Tests`' `RealArticleLoras_LoadCompletelyAga
 with `TENSORSHARP_QWEN21_LORA_DIR` pointing at the app's `Library/Caches/TensorAgent/loras`
 and `TENSORSHARP_QWEN21_DIT` at its Qwen-Image transformer GGUF. Its rank-256 Viggle Turbo
 row needs a file the app does not ship, so against that folder it fails with
-FileNotFoundException and the twelve the app offers pass.
+FileNotFoundException; the original twelve catalog adapters passed that validation.
 
 None of this runs in CI. `.github/workflows/pr-unit-tests.yml` runs `InferenceWeb.Tests`,
 whose `TensorAgentMauiProjectTests` read the MAUI head's project file, `Info.plist`,
@@ -2102,10 +2115,11 @@ checked and these were not:
   never came that close: 14 follow-ups written to be ambiguous, in four languages, led by
   0.24 at the least (`ImageTurnsRealModelTests`). So the question and its buttons have not
   been shown for a real answer, and whether 0.15 is the right line is not measured.
-- **LoRA plug-ins beyond the prompts tried.** Each of the twelve made pictures in the app
+- **LoRA plug-ins beyond the prompts tried.** Each of the original twelve made pictures in the app
   from the prompts and photos `chat-e2e.py` sends, and the two box-driven edits were also run
   on their authors' example photos. Object Remover failed on one of its two. How each fares
-  on other subjects is up to the plug-in, and nothing here measures it.
+  on other subjects is up to the plug-in, and nothing here measures it. The two newly added
+  adapters have separate AD-Q4_K image validation; their Q8 image quality and latency remain untested.
 - **Qwen3.8 Flash Next beyond the recorded configurations.** UD-Q2_K_XL was measured
   in the Debug app on one 48 GB M5 Pro. A Mac with more memory gets a different expert
   placement plan, which nothing here has measured; the Q2 entry retains its 48 GB tier.

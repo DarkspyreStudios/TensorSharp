@@ -33,6 +33,8 @@
   "catalog.lora.funAcc4Step.purpose": "4 ステップで画像を生成・編集します。小さな文字や一部の編集は、通常のモデルより品質が下がります。",
   "catalog.lora.filmStills.purpose": "映画の 35mm フィルムの一コマのような表現です。",
   "catalog.lora.grainscape.purpose": "粒子感のある、高感度 ISO の 35mm カラーネガフィルムのような表現です。",
+  "catalog.lora.casualPhone.purpose": "スマートフォンで気軽に撮った写真のような雰囲気にします。強度0.8とlbxstyleから始め、被写体と場所を指定してください。小規模な実験的追加学習モデルのため、複数のシードで比較してください。",
+  "catalog.lora.voxelStyle.purpose": "添付写真をブロック状のボクセルアートに変換します。実験的なモデルです。被写体の特徴が残っても、背景が大きく変わることがあります。",
   "catalog.lora.qualityFix.purpose": "モデルによくある欠点を補正するために作者が作成した DoRA です。このアプリとは異なるサンプラー向けに調整されているため、ご自身の画像で効果を確認してください。",
   "catalog.license.noneStated": "作者によるライセンスの記載なし",
   "catalog.lora.detailEnhancer.purpose": "添付画像の構図を保ちながら、細部を精細にし、質感を整えます。",

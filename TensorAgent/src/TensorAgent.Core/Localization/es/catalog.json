@@ -33,6 +33,8 @@
   "catalog.lora.funAcc4Step.purpose": "Imágenes y ediciones en 4 pasos. El texto pequeño y algunas ediciones salen peor que con el modelo completo.",
   "catalog.lora.filmStills.purpose": "El aspecto de un fotograma cinematográfico de película de 35 mm.",
   "catalog.lora.grainscape.purpose": "El aspecto granulado de una película negativa en color de 35 mm con ISO alto.",
+  "catalog.lora.casualPhone.purpose": "Un estilo de foto casual de móvil. Empieza con intensidad 0.8 y lbxstyle, y describe el sujeto y el entorno. Es un ajuste experimental pequeño; compara varias semillas.",
+  "catalog.lora.voxelStyle.purpose": "Convierte una foto adjunta en arte vóxel de bloques. Experimental; los sujetos pueden seguir siendo reconocibles mientras el fondo cambia mucho.",
   "catalog.lora.qualityFix.purpose": "Un DoRA creado por su autor para corregir los defectos habituales del modelo. Se ajustó para un muestreador distinto del de la app, así que evalúalo con tus propias imágenes.",
   "catalog.license.noneStated": "El autor no indicó ninguna licencia",
   "catalog.lora.detailEnhancer.purpose": "Detalles más finos y texturas más limpias en una imagen adjunta, manteniendo su composición.",

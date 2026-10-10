@@ -33,6 +33,8 @@
   "catalog.lora.funAcc4Step.purpose": "用 4 步生成和编辑图片。小字号文字和部分编辑的效果弱于完整模型。",
   "catalog.lora.filmStills.purpose": "呈现电影中 35mm 胶片剧照的风格。",
   "catalog.lora.grainscape.purpose": "呈现高 ISO 35mm 彩色负片的颗粒感。",
+  "catalog.lora.casualPhone.purpose": "呈现随手拍摄的手机照片风格。建议从强度0.8开始，使用lbxstyle并描述主体与场景。这是小规模实验性微调模型，建议比较多个随机种子。",
+  "catalog.lora.voxelStyle.purpose": "将附加照片转换为方块状体素艺术。实验性模型；主体可能仍然可辨认，但背景可能发生较大变化。",
   "catalog.lora.qualityFix.purpose": "作者为修正模型常见缺陷制作的 DoRA。它针对与应用不同的采样器进行调整，请根据自己生成的图片判断效果。",
   "catalog.license.noneStated": "作者未声明许可",
   "catalog.lora.detailEnhancer.purpose": "为附加图片增强细节、改善纹理，同时保留构图。",

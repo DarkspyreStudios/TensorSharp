@@ -311,6 +311,9 @@ public sealed class AgentAppHostTests : IDisposable
 
         JsonElement listed = await Get("/api/agent/loras");
         Assert.Equal(LoraCatalog.BuiltIn.Count, listed.GetProperty("loras").GetArrayLength());
+        Assert.False(listed.GetProperty("supportsLoras").GetBoolean());
+        Assert.False(listed.GetProperty("loadedModelIsImage").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, listed.GetProperty("loadedModelName").ValueKind);
         Assert.All(listed.GetProperty("loras").EnumerateArray(), l => Assert.Equal("NotInstalled", l.GetProperty("state").GetString()));
         Assert.Equal(0, listed.GetProperty("chosen").GetArrayLength());
 

@@ -115,7 +115,7 @@ entry is skipped, so nothing is fetched for it.`。`--config` 可重复出现以
 因此在全新机器上也能直接运行。该目录还提供聊天模型（`gemma-4-*`、`qwen3.5-9b-*`、`qwen3.6-*`、
 `gpt-oss-20b`）、智能体托管（`agent-*`）、嵌入服务（`embedding-*`）、DiffusionGemma 与 Jev
 （`diffusiongemma-*`、`jev-diffusiongemma-q4`）以及视频（`minimax-h3-*`、`wan-video-*`）的预设，
-[`config/lora/`](config/lora/) 中则有十二个 Qwen-Image-2.1 LoRA 插件。完整说明见
+[`config/lora/`](config/lora/) 中则有十四个 Qwen-Image-2.1 LoRA 插件。完整说明见
 [`config/README.md`](config/README.md)。
 
 ## 控制台应用
@@ -962,7 +962,9 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.js
 
 Qwen-Image-2.1-Turbo（`--qwen-image-variant turbo`）本身已经过步数蒸馏：带采样配方的插件
 （下表中的四个步数蒸馏插件，或任何带 `"sampling"` 的配置）在加载时被拒绝并说明原因；不带
-配方的插件可以加载。Film Stills 与 Grainscape 已在 Turbo 上验证（风格会生效，部分场景会被重画），见
+配方的插件可以加载。TensorAgent 为 Turbo 提供 Film Stills、Grainscape、Casual Phone Photo
+与 Voxel Style，均保留 Turbo 的 8 步与 CFG 1；风格变化可能重画部分场景。新增两个适配器的
+实际图像验证仅覆盖 AD-Q4_K；Q8 的目录与规划测试不代表其图像质量或延迟已验证。见
 [Turbo 上的 LoRA 插件](docs/models/qwenimage21_zh-cn.md#turbo-上的-lora-插件)。
 
 ```bash
@@ -1008,6 +1010,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/q
 | `qwen-image-2.1-fun-acc-4step.json` | 阿里巴巴 PAI Fun-Acc，并行解码蒸馏（PDD）包：rank-64 增量、四个替换 `proj_out` 的逐步输出头，以及替换的 Q/K 与文本归一化增益。转发其 `pdd_config.json` | 4 步，包内固定网格，bf16 时间步；CFG 1 | 1.0 |
 | `qwen-image-2.1-film-stills.json` | Danrisi Film Stills：电影感 35 mm 剧照风格 | 模型默认值 | 0.7 |
 | `qwen-image-2.1-grainscape.json` | Danrisi Grainscape：颗粒感 35 mm 彩色负片风格 | 模型默认值 | 0.7 |
+| `qwen-image-2.1-casual-phone.json` | Casual Phone Photo：随手拍摄的手机照片风格；提示词包含 `lbxstyle`、主体和场景 | 模型默认值；Turbo 为 8 步 / CFG 1 | 0.8 |
+| `qwen-image-2.1-voxel-style.json` | Voxel Style：实验性照片转体素艺术；附加照片并使用 `Transform the image into a voxel style` | 模型默认值；Turbo 为 8 步 / CFG 1 | 1.0 |
 | `qwen-image-2.1-fix.json` | e-n-v-y Qwen-Image-2.1-Fix：DoRA 质量修正 | 模型默认值 | 1.0 |
 | `qwen-image-2.1-detail-enhancer.json` | elusarca Detail Enhancer（编辑）：细节增强、放大与修复 | 模型默认值 | 1.0 |
 | `qwen-image-2.1-natural-exposure.json` | prithivMLmods Natural Exposure（编辑）：均衡、中性的曝光 | 模型默认值 | 1.0 |
