@@ -133,7 +133,7 @@ directory also holds presets for chat models (`gemma-4-*`, `qwen3.5-9b-*`,
 `qwen3.6-*`, `gpt-oss-20b`), agent hosting (`agent-*`), embedding services
 (`embedding-*`), DiffusionGemma and Jev (`diffusiongemma-*`,
 `jev-diffusiongemma-q4`) and video (`minimax-h3-*`, `wan-video-*`), and
-[`config/lora/`](config/lora/) holds twelve Qwen-Image-2.1 LoRA plug-ins. See
+[`config/lora/`](config/lora/) holds fourteen Qwen-Image-2.1 LoRA plug-ins. See
 [`config/README.md`](config/README.md) for the full reference.
 
 ## Console Application
@@ -1046,8 +1046,8 @@ the same advice.
 On Qwen-Image-2.1-Turbo (`--qwen-image-variant turbo`), which is step-distilled
 already, a plug-in that carries a sampling recipe (the four step-distillation plug-ins
 below, or any config with `"sampling"`) is refused at load with the reason; plug-ins
-without a recipe load. Film Stills and Grainscape were validated on Turbo (the look
-applies, and part of the scene is redrawn); see
+without a recipe load. TensorAgent offers Film Stills, Grainscape, Casual Phone Photo
+and Voxel Style on Turbo. These change the look and can redraw parts of the scene; see
 [LoRA plug-ins on Turbo](docs/models/qwenimage21.md#lora-plug-ins-on-turbo).
 
 ```bash
@@ -1097,6 +1097,8 @@ license; several are under the Qwen Research License (non-commercial).
 | `qwen-image-2.1-fun-acc-4step.json` | Alibaba PAI Fun-Acc, a parallel decoding distillation (PDD) bundle: rank-64 deltas, four per-step output heads that replace `proj_out`, and replaced Q/K and text norm gains. Forwards its `pdd_config.json` | 4, the bundle's fixed grid, bf16 timesteps; CFG 1 | 1.0 |
 | `qwen-image-2.1-film-stills.json` | Danrisi Film Stills: cinematic 35 mm film-still style | Model defaults | 0.7 |
 | `qwen-image-2.1-grainscape.json` | Danrisi Grainscape: grainy 35 mm colour-negative film look | Model defaults | 0.7 |
+| `qwen-image-2.1-casual-phone.json` | Casual Phone Photo: candid phone-photo style; include `lbxstyle`, a subject and setting | Model defaults, including Turbo's 8 / 1 | 0.8 |
+| `qwen-image-2.1-voxel-style.json` | Voxel Style: experimental photo-to-voxel conversion; attach a photo and request `Transform the image into a voxel style` | Model defaults, including Turbo's 8 / 1 | 1.0 |
 | `qwen-image-2.1-fix.json` | e-n-v-y Qwen-Image-2.1-Fix: a DoRA quality fix | Model defaults | 1.0 |
 | `qwen-image-2.1-detail-enhancer.json` | elusarca Detail Enhancer (editing): detail, upscaling and restoration | Model defaults | 1.0 |
 | `qwen-image-2.1-natural-exposure.json` | prithivMLmods Natural Exposure (editing): balanced, neutral exposure | Model defaults | 1.0 |

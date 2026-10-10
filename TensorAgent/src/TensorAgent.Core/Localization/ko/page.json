@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "설치됨",
   "page.skill.origin.discovered": "발견됨",
   "page.skill.noDescription": "이 스킬에는 설명이 없습니다.",
+  "page.skill.details": "{name} 세부 정보",
+  "page.skill.use": "이 채팅에서 {name} 사용",
+  "page.skill.removeNamed": "{name} 제거",
+  "page.skill.removeNotConfirmed": "호스트에서 제거를 확인하지 않았습니다.",
   "page.skill.removed": "{name}을(를) 제거했습니다.",
   "page.skill.removeFailed": "제거할 수 없습니다: {error}",
   "page.skillAdd.zipFailed": "해당 스킬을 설치할 수 없습니다: {error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "스킬 {count}개를 설치했고, {failed}개는 설치하지 못했습니다.",
   "page.skillAdd.installedSomeFailed.other": "스킬 {count}개를 설치했고, {failed}개는 설치하지 못했습니다.",
   "page.skillAdd.installedNamed": "{name}을(를) 설치했습니다.",
-  "page.skillAdd.installedUnnamed": "스킬을 설치했습니다."
+  "page.skillAdd.installedUnnamed": "스킬을 설치했습니다.",
+  "page.lora.choose": "스타일 또는 편집 선택",
+  "page.lora.compatible": "{model}과(와) 호환",
+  "page.lora.search": "LoRA 플러그인 검색",
+  "page.lora.noMatches": "일치하는 LoRA 플러그인이 없습니다.",
+  "page.lora.close": "LoRA 선택 닫기",
+  "page.lora.use": "{name} 사용",
+  "page.lora.strengthFor": "{name} 강도"
 }

@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "installed",
   "page.skill.origin.discovered": "discovered",
   "page.skill.noDescription": "This skill has no description.",
+  "page.skill.details": "Details for {name}",
+  "page.skill.use": "Use {name} in this chat",
+  "page.skill.removeNamed": "Remove {name}",
+  "page.skill.removeNotConfirmed": "The host did not confirm removal.",
   "page.skill.removed": "{name} was removed.",
   "page.skill.removeFailed": "Could not remove it: {error}",
   "page.skillAdd.zipFailed": "That skill could not be installed: {error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "Installed {count} skill, {failed} could not be installed.",
   "page.skillAdd.installedSomeFailed.other": "Installed {count} skills, {failed} could not be installed.",
   "page.skillAdd.installedNamed": "Installed {name}.",
-  "page.skillAdd.installedUnnamed": "Installed the skill."
+  "page.skillAdd.installedUnnamed": "Installed the skill.",
+  "page.lora.choose": "Choose a style or edit",
+  "page.lora.compatible": "Compatible with {model}",
+  "page.lora.search": "Search LoRA plug-ins",
+  "page.lora.noMatches": "No matching LoRA plug-ins.",
+  "page.lora.close": "Close LoRA selection",
+  "page.lora.use": "Use {name}",
+  "page.lora.strengthFor": "Strength for {name}"
 }

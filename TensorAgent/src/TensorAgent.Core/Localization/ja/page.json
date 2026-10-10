@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "インストール済み",
   "page.skill.origin.discovered": "検出済み",
   "page.skill.noDescription": "このスキルには説明がありません。",
+  "page.skill.details": "{name} の詳細",
+  "page.skill.use": "このチャットで {name} を使う",
+  "page.skill.removeNamed": "{name} を削除",
+  "page.skill.removeNotConfirmed": "ホストが削除を確認できませんでした。",
   "page.skill.removed": "{name} を削除しました。",
   "page.skill.removeFailed": "削除できませんでした：{error}",
   "page.skillAdd.zipFailed": "そのスキルをインストールできませんでした：{error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "スキルを {count} 件インストールしました。{failed} 件はインストールできませんでした。",
   "page.skillAdd.installedSomeFailed.other": "スキルを {count} 件インストールしました。{failed} 件はインストールできませんでした。",
   "page.skillAdd.installedNamed": "{name} をインストールしました。",
-  "page.skillAdd.installedUnnamed": "スキルをインストールしました。"
+  "page.skillAdd.installedUnnamed": "スキルをインストールしました。",
+  "page.lora.choose": "スタイルや編集を選択",
+  "page.lora.compatible": "{model} に対応",
+  "page.lora.search": "LoRA プラグインを検索",
+  "page.lora.noMatches": "一致する LoRA プラグインがありません。",
+  "page.lora.close": "LoRA の選択を閉じる",
+  "page.lora.use": "{name} を使用",
+  "page.lora.strengthFor": "{name} の強度"
 }

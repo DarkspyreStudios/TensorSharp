@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "instalada",
   "page.skill.origin.discovered": "descubierta",
   "page.skill.noDescription": "Esta habilidad no tiene descripción.",
+  "page.skill.details": "Detalles de {name}",
+  "page.skill.use": "Usar {name} en este chat",
+  "page.skill.removeNamed": "Eliminar {name}",
+  "page.skill.removeNotConfirmed": "El servidor no confirmó la eliminación.",
   "page.skill.removed": "Se eliminó {name}.",
   "page.skill.removeFailed": "No se pudo eliminar: {error}",
   "page.skillAdd.zipFailed": "No se pudo instalar esa habilidad: {error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "Se instaló {count} habilidad; no se pudieron instalar {failed}.",
   "page.skillAdd.installedSomeFailed.other": "Se instalaron {count} habilidades; no se pudieron instalar {failed}.",
   "page.skillAdd.installedNamed": "Se instaló {name}.",
-  "page.skillAdd.installedUnnamed": "Se instaló la habilidad."
+  "page.skillAdd.installedUnnamed": "Se instaló la habilidad.",
+  "page.lora.choose": "Elegir estilo o edición",
+  "page.lora.compatible": "Compatible con {model}",
+  "page.lora.search": "Buscar complementos LoRA",
+  "page.lora.noMatches": "No hay complementos LoRA coincidentes.",
+  "page.lora.close": "Cerrar selección de LoRA",
+  "page.lora.use": "Usar {name}",
+  "page.lora.strengthFor": "Intensidad de {name}"
 }

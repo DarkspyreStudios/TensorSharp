@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "installée",
   "page.skill.origin.discovered": "découverte",
   "page.skill.noDescription": "Cette compétence n’a pas de description.",
+  "page.skill.details": "Détails de {name}",
+  "page.skill.use": "Utiliser {name} dans cette conversation",
+  "page.skill.removeNamed": "Supprimer {name}",
+  "page.skill.removeNotConfirmed": "Le serveur n’a pas confirmé la suppression.",
   "page.skill.removed": "{name} a été supprimé.",
   "page.skill.removeFailed": "Impossible de la supprimer : {error}",
   "page.skillAdd.zipFailed": "Impossible d’installer cette compétence : {error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "{count} compétence installée, {failed} n’ont pas pu être installées.",
   "page.skillAdd.installedSomeFailed.other": "{count} compétences installées, {failed} n’ont pas pu être installées.",
   "page.skillAdd.installedNamed": "{name} installé.",
-  "page.skillAdd.installedUnnamed": "Compétence installée."
+  "page.skillAdd.installedUnnamed": "Compétence installée.",
+  "page.lora.choose": "Choisir un style ou une retouche",
+  "page.lora.compatible": "Compatible avec {model}",
+  "page.lora.search": "Rechercher des modules LoRA",
+  "page.lora.noMatches": "Aucun module LoRA correspondant.",
+  "page.lora.close": "Fermer la sélection LoRA",
+  "page.lora.use": "Utiliser {name}",
+  "page.lora.strengthFor": "Intensité de {name}"
 }

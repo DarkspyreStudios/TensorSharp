@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "installiert",
   "page.skill.origin.discovered": "gefunden",
   "page.skill.noDescription": "Dieser Skill hat keine Beschreibung.",
+  "page.skill.details": "Details zu {name}",
+  "page.skill.use": "{name} in diesem Chat verwenden",
+  "page.skill.removeNamed": "{name} entfernen",
+  "page.skill.removeNotConfirmed": "Der Host hat das Entfernen nicht bestätigt.",
   "page.skill.removed": "{name} wurde entfernt.",
   "page.skill.removeFailed": "Entfernen nicht möglich: {error}",
   "page.skillAdd.zipFailed": "Dieser Skill konnte nicht installiert werden: {error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "{count} Skill installiert, {failed} konnten nicht installiert werden.",
   "page.skillAdd.installedSomeFailed.other": "{count} Skills installiert, {failed} konnten nicht installiert werden.",
   "page.skillAdd.installedNamed": "{name} installiert.",
-  "page.skillAdd.installedUnnamed": "Skill installiert."
+  "page.skillAdd.installedUnnamed": "Skill installiert.",
+  "page.lora.choose": "Stil oder Bearbeitung wählen",
+  "page.lora.compatible": "Kompatibel mit {model}",
+  "page.lora.search": "LoRA-Plug-ins suchen",
+  "page.lora.noMatches": "Keine passenden LoRA-Plug-ins.",
+  "page.lora.close": "LoRA-Auswahl schließen",
+  "page.lora.use": "{name} verwenden",
+  "page.lora.strengthFor": "Stärke für {name}"
 }

@@ -202,6 +202,10 @@
   "page.skill.origin.installed": "已安裝",
   "page.skill.origin.discovered": "已發現",
   "page.skill.noDescription": "此技能沒有描述。",
+  "page.skill.details": "{name} 的詳細資訊",
+  "page.skill.use": "在此聊天中使用 {name}",
+  "page.skill.removeNamed": "移除 {name}",
+  "page.skill.removeNotConfirmed": "主機未確認移除。",
   "page.skill.removed": "已移除 {name}。",
   "page.skill.removeFailed": "無法移除：{error}",
   "page.skillAdd.zipFailed": "無法安裝該技能：{error}",
@@ -212,5 +216,12 @@
   "page.skillAdd.installedSomeFailed.one": "已安裝 {count} 個技能，{failed} 個無法安裝。",
   "page.skillAdd.installedSomeFailed.other": "已安裝 {count} 個技能，{failed} 個無法安裝。",
   "page.skillAdd.installedNamed": "已安裝 {name}。",
-  "page.skillAdd.installedUnnamed": "已安裝技能。"
+  "page.skillAdd.installedUnnamed": "已安裝技能。",
+  "page.lora.choose": "選擇風格或編輯效果",
+  "page.lora.compatible": "相容於 {model}",
+  "page.lora.search": "搜尋 LoRA 外掛",
+  "page.lora.noMatches": "沒有符合的 LoRA 外掛。",
+  "page.lora.close": "關閉 LoRA 選擇",
+  "page.lora.use": "使用 {name}",
+  "page.lora.strengthFor": "{name} 的強度"
 }
