@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "Selecciona como máximo 32 colecciones por chat.",
   "page.knowledge.open": "Abrir la colección de conocimiento {name}",
   "page.knowledge.sources": "Fuentes recuperadas",
-  "page.knowledge.loadMore": "Cargar más documentos"
+  "page.knowledge.loadMore": "Cargar más documentos",
+  "page.knowledge.setupPreparing": "Preparando las herramientas de lectura de PDF…",
+  "page.knowledge.setupDownloading": "Descargando herramientas de PDF y datos de idiomas… {progress}",
+  "page.knowledge.setupInstalling": "Verificando e instalando las herramientas de lectura de PDF…",
+  "page.knowledge.setupRetry": "Reintentar la configuración de PDF",
+  "page.knowledge.setupFailed": "No se pudieron preparar las herramientas de lectura de PDF. Reinténtalo para continuar."
 }

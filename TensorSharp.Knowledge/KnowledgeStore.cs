@@ -18,7 +18,7 @@ public sealed class KnowledgeStore : IDisposable
     // Only query-side function words are ignored, and only when the query also has
     // content terms. Thus an exact all-function-word phrase remains searchable.
     private static readonly HashSet<string> QueryFunctionWords = new(
-        "a an and are as at be been being but by can could did do does doing for from had has have how i if in into is it its may me might my of on or our ours should so than that the their them then there these they this those to too us was we were what when where which who why will with would you your".Split(' '), StringComparer.Ordinal);
+        "a an and are as at be been being but by can could did do does doing for from had has have how i if in into is it its may me might my of on or our ours should so than that the their them then there these they this those to too us was we were what when where which who why will with would you your 的 了 和 是 在 有 与 及 哪个 什么 如何 怎么 其中 这个 那个 一个 以及 还有 是否 我们 你们 他们 它们 请问 比较".Split(' '), StringComparer.Ordinal);
     private readonly string _root;
     private readonly IKnowledgeExtractor _extractor;
     private readonly IKnowledgeEmbeddingProvider? _embeddings;
@@ -227,7 +227,8 @@ public sealed class KnowledgeStore : IDisposable
         finally { _mutations.Release(); }
     }
 
-    /// <summary>BM25 inverted-index retrieval, optionally fused with exact cosine ranks using reciprocal rank fusion.</summary>
+    /// <summary>BM25 inverted-index retrieval, optionally fused with exact cosine ranks using reciprocal rank fusion.
+    /// Result scores include a modest repeated-page penalty for ambiguous broad queries; they are ranking scores, not probabilities.</summary>
     public async Task<IReadOnlyList<KnowledgeSearchResult>> SearchAsync(string query, KnowledgeSearchOptions options,
         CancellationToken cancellationToken = default)
     {
@@ -250,6 +251,8 @@ public sealed class KnowledgeStore : IDisposable
         var denseScores = new Dictionary<string, double>(StringComparer.Ordinal);
         IndexedChunk[] denseCandidates;
         Dictionary<string, IndexedChunk> candidates;
+        var anchoredCandidates = new HashSet<string>(StringComparer.Ordinal);
+        HashSet<string> coverageDocuments;
         lock (_sync)
         {
             ThrowIfDisposed();
@@ -259,9 +262,15 @@ public sealed class KnowledgeStore : IDisposable
             double averageLength = Math.Max(1, scope.Sum(id => _collectionTokenCounts.GetValueOrDefault(id)) / (double)scopedCount);
             lexical = new(StringComparer.Ordinal);
             candidates = new(StringComparer.Ordinal);
-            var queryTerms = Tokenize(query).Distinct(StringComparer.Ordinal).ToArray();
+            var queryTerms = QueryTerms(query);
             var contentTerms = queryTerms.Where(term => !QueryFunctionWords.Contains(term)).ToArray();
-            foreach (string term in contentTerms.Length > 0 ? contentTerms : queryTerms)
+            var terms = contentTerms.Length > 0 ? contentTerms : queryTerms;
+            // In mixed-script questions, a source-language name or identifier is
+            // a stronger anchor than coincidental CJK wording in unrelated sources.
+            var anchors = queryTerms.Any(IsCjkTerm)
+                ? terms.Where(term => !IsCjkTerm(term)).ToHashSet(StringComparer.Ordinal) : [];
+            var matchedDocumentTerms = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            foreach (string term in terms)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!_postings.TryGetValue(term, out var posting)) continue;
@@ -273,8 +282,18 @@ public sealed class KnowledgeStore : IDisposable
                     double score = idf * match.Value * 2.2 / (match.Value + 1.2 * (.25 + .75 * chunk.Length / averageLength));
                     lexical[match.Key] = lexical.GetValueOrDefault(match.Key) + score;
                     candidates[match.Key] = chunk;
+                    if (anchors.Contains(term)) anchoredCandidates.Add(match.Key);
+                    if (!matchedDocumentTerms.TryGetValue(chunk.Document.Id, out var documentTerms))
+                        matchedDocumentTerms[chunk.Document.Id] = documentTerms = new(StringComparer.Ordinal);
+                    documentTerms.Add(term);
                 }
             }
+            // A focused one-term lookup keeps BM25 relevance: a later page may
+            // explain the topic while earlier pages only mention it in passing.
+            // Coverage is useful when a broader question reduces to one indexed
+            // term, or its only source-language matches are mixed-script anchors.
+            coverageDocuments = matchedDocumentTerms.Where(pair => terms.Length > 1 && pair.Value.Count == 1
+                || anchors.Count > 0 && pair.Value.All(anchors.Contains)).Select(pair => pair.Key).ToHashSet(StringComparer.Ordinal);
             denseCandidates = _embeddings is null ? Array.Empty<IndexedChunk>() : scope
                 .SelectMany(id => _collectionChunks.TryGetValue(id, out var keys) ? (IEnumerable<string>)keys : Array.Empty<string>())
                 .Select(key => _chunks[key]).Where(c => c.Chunk.Vector is not null
@@ -283,7 +302,9 @@ public sealed class KnowledgeStore : IDisposable
         var ranked = new Dictionary<string, double>(StringComparer.Ordinal);
         int rank = 0;
         int candidateLimit = Math.Max(options.Limit * 8, 64);
-        foreach (var item in lexical.OrderByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.Ordinal).Take(candidateLimit))
+        var lexicalOrder = lexical.OrderByDescending(p => anchoredCandidates.Contains(p.Key))
+            .ThenByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.Ordinal);
+        foreach (var item in lexicalOrder.Take(candidateLimit))
             ranked[item.Key] = 1.0 / (60 + ++rank);
         if (_embeddings is not null && denseCandidates.Length > 0)
         {
@@ -307,23 +328,52 @@ public sealed class KnowledgeStore : IDisposable
             }
         }
         var results = new List<KnowledgeSearchResult>();
+        var selected = new List<IndexedChunk>();
+        var fingerprints = new Dictionary<string, DuplicateFingerprint>(StringComparer.Ordinal);
         int remaining = options.MaxCharacters;
         lock (_sync)
         {
-            foreach (var item in ranked.OrderByDescending(p => p.Value)
+            var order = ranked.OrderByDescending(p => p.Value)
                 .ThenByDescending(p => lexical.GetValueOrDefault(p.Key))
                 .ThenByDescending(p => denseScores.GetValueOrDefault(p.Key))
                 .ThenBy(p => candidates[p.Key].Document.FileName, StringComparer.Ordinal)
-                .ThenBy(p => p.Key, StringComparer.Ordinal))
+                .ThenBy(p => p.Key, StringComparer.Ordinal);
+            var remainingCandidates = order.ToList();
+            var selectedPages = new Dictionary<(string Document, int Page), int>();
+            while (remainingCandidates.Count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (remaining <= 0 || results.Count >= options.Limit) break;
+                int bestIndex = 0;
+                double bestScore = double.NegativeInfinity;
+                for (int i = 0; i < remainingCandidates.Count; i++)
+                {
+                    var candidate = remainingCandidates[i];
+                    var chunk = candidates[candidate.Key];
+                    int repeats = coverageDocuments.Contains(chunk.Document.Id) && chunk.Chunk.Location?.Page is int page
+                        ? selectedPages.GetValueOrDefault((chunk.Document.Id, page)) : 0;
+                    // Relevance always chooses the first hit. For an ambiguous
+                    // broad query, repeated pages need proportionally stronger
+                    // evidence; page numbers never substitute for query relevance.
+                    double score = candidate.Value / (1 + .25 * repeats);
+                    if (score > bestScore) { bestIndex = i; bestScore = score; }
+                }
+                var item = remainingCandidates[bestIndex];
+                remainingCandidates.RemoveAt(bestIndex);
                 // Embedding can take appreciable time. A deletion or replacement during
                 // that await revokes the snapshot: never disclose stale source text.
                 if (!_chunks.TryGetValue(item.Key, out var current) || !ReferenceEquals(current, candidates[item.Key])
                     || !_collections.ContainsKey(current.Document.CollectionId)) continue;
-                var result = Result(current, item.Value, remaining);
-                results.Add(result); remaining -= result.Text.Length;
+                // OCR and selectable PDF text can represent the same paragraph.
+                // Keep complementary evidence, but do not spend the result budget twice.
+                if (selected.Any(previous => IsDuplicateEvidence(previous, current, fingerprints))) continue;
+                var result = Result(current, bestScore, remaining);
+                results.Add(result); selected.Add(current); remaining -= result.Text.Length;
+                if (current.Chunk.Location?.Page is int selectedPage)
+                {
+                    var pageKey = (current.Document.Id, selectedPage);
+                    selectedPages[pageKey] = selectedPages.GetValueOrDefault(pageKey) + 1;
+                }
             }
         }
         return results;
@@ -357,8 +407,122 @@ public sealed class KnowledgeStore : IDisposable
                 var item = Result(_chunks[Reference(document.Document, i)], 0, remaining);
                 result.Add(item); remaining -= item.Text.Length;
             }
-            return result.OrderBy(r => r.ChunkIndex).ToArray();
+            // Keep the requested chunk first when a downstream tool must apply a
+            // smaller serialization budget; neighbors carry their own positions.
+            return result;
         }
+    }
+
+    /// <summary>
+    /// Expands a current reference to all of its document's indexed excerpts, in
+    /// source order. Returns null if the complete deduplicated result exceeds the
+    /// budget; it never returns a partially expanded document. Source status still
+    /// describes extraction completeness. Returned chunks retain their exact text
+    /// and provenance. Callers must separately budget serialization and model tokens.
+    /// </summary>
+    public IReadOnlyList<KnowledgeSearchResult>? ReadDocumentContext(string reference, int maxCharacters = 32000,
+        IReadOnlyList<string>? collectionIds = null)
+    {
+        if (maxCharacters <= 0 || maxCharacters > _options.MaxDocumentContextCharacters)
+            throw new ArgumentOutOfRangeException(nameof(maxCharacters));
+        var parsed = ParseReference(reference);
+        var scope = collectionIds is null ? null : Scope(collectionIds);
+        if (scope is not null && !scope.Contains(parsed.CollectionId))
+            throw new KeyNotFoundException("Source is outside the selected collections.");
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            var document = RequireDocument(parsed.CollectionId, parsed.DocumentId);
+            if (document.Document.Version != parsed.Version)
+                throw new KnowledgeStaleReferenceException("This source version is stale. Search again for the current document.");
+            if (parsed.ChunkIndex >= document.Chunks.Length) throw new KeyNotFoundException("Knowledge chunk does not exist.");
+            var chunks = Enumerable.Range(0, document.Chunks.Length)
+                .Select(index => _chunks[Reference(document.Document, index)]).ToArray();
+            var redundant = new HashSet<int>();
+            foreach (var page in chunks.Where(chunk => chunk.Chunk.Location?.Page is not null)
+                .GroupBy(chunk => chunk.Chunk.Location))
+            {
+                var native = page.Where(chunk => chunk.Chunk.Modality == "text").ToArray();
+                var ocr = page.Where(chunk => chunk.Chunk.Modality == "ocr").ToArray();
+                if (native.Length == 0 || ocr.Length == 0) continue;
+                // Page representations can have different chunk boundaries. Compare
+                // their reconstructed text, but emit only untouched original chunks.
+                // Complete context is stricter than search's near-duplicate filter:
+                // even a changed number, punctuation or added OCR sentence is kept.
+                string nativeText = NormalizeEvidenceWhitespace(StitchForComparison(native));
+                string ocrText = NormalizeEvidenceWhitespace(StitchForComparison(ocr));
+                if (nativeText == ocrText)
+                    foreach (var chunk in ocr) redundant.Add(chunk.Index);
+                else
+                    foreach (var chunk in ocr)
+                        if (ContainsExactEvidenceExcerpt(nativeText, ocrText, NormalizeEvidenceWhitespace(chunk.Chunk.Text)))
+                            redundant.Add(chunk.Index);
+            }
+
+            var result = new List<KnowledgeSearchResult>();
+            var seen = new HashSet<(KnowledgeLocation? Location, string Text)>();
+            int remaining = maxCharacters;
+            foreach (var chunk in chunks)
+            {
+                if (redundant.Contains(chunk.Index)
+                    || !seen.Add((chunk.Chunk.Location, NormalizeEvidenceWhitespace(chunk.Chunk.Text)))) continue;
+                if (chunk.Chunk.Text.Length > remaining) return null;
+                result.Add(Result(chunk, 0, chunk.Chunk.Text.Length));
+                remaining -= chunk.Chunk.Text.Length;
+            }
+            return result;
+        }
+    }
+
+    private string StitchForComparison(IReadOnlyList<IndexedChunk> chunks)
+    {
+        var text = new StringBuilder(chunks[0].Chunk.Text);
+        for (int i = 1; i < chunks.Count; i++)
+        {
+            string previous = chunks[i - 1].Chunk.Text, current = chunks[i].Chunk.Text;
+            int overlap = _options.ChunkOverlapCharacters;
+            if (overlap > previous.Length || overlap > current.Length) overlap = 0;
+            if (overlap > 0 && !previous.AsSpan(previous.Length - overlap).SequenceEqual(current.AsSpan(0, overlap)))
+            {
+                // Chunking advances past a low surrogate at an overlap boundary.
+                // Do not guess shorter overlaps between independently extracted
+                // segments: repeated words may represent distinct source content.
+                if (overlap > 1 && char.IsLowSurrogate(previous[previous.Length - overlap])
+                    && previous.AsSpan(previous.Length - overlap + 1).SequenceEqual(current.AsSpan(0, overlap - 1))) overlap--;
+                else overlap = 0;
+            }
+            if (overlap == 0) text.Append('\n');
+            text.Append(current.AsSpan(overlap));
+        }
+        return text.ToString();
+    }
+
+    private static string NormalizeEvidenceWhitespace(string text) => string.Join(' ',
+        text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static bool ContainsExactEvidenceExcerpt(string nativeText, string ocrText, string excerpt)
+    {
+        if (excerpt.Length == 0) return false;
+        // Match against the whole native page so different chunk boundaries do not
+        // hide exact duplicates. Include complete boundary tokens from the OCR page:
+        // an overlap may start mid-word, but "adequate" must not match "inadequate",
+        // nor "4.5" match "14.5". Punctuation, signs and numeric spacing stay exact.
+        for (int start = ocrText.IndexOf(excerpt, StringComparison.Ordinal); start >= 0;
+            start = ocrText.IndexOf(excerpt, start + 1, StringComparison.Ordinal))
+        {
+            int left = start, right = start + excerpt.Length;
+            while (left > 0 && ocrText[left - 1] != ' ') left--;
+            while (right < ocrText.Length && ocrText[right] != ' ') right++;
+            string completeTokens = ocrText[left..right];
+            for (int match = nativeText.IndexOf(completeTokens, StringComparison.Ordinal); match >= 0;
+                match = nativeText.IndexOf(completeTokens, match + 1, StringComparison.Ordinal))
+            {
+                if ((match == 0 || nativeText[match - 1] == ' ')
+                    && (match + completeTokens.Length == nativeText.Length || nativeText[match + completeTokens.Length] == ' '))
+                    return true;
+            }
+        }
+        return false;
     }
 
     public Stream OpenOriginal(string collectionId, string documentId, int version)
@@ -611,17 +775,66 @@ public sealed class KnowledgeStore : IDisposable
     private static IEnumerable<string> Tokenize(string text)
     {
         var current = new StringBuilder();
+        string? previousCjk = null;
         foreach (Rune rune in text.EnumerateRunes())
         {
-            bool cjk = rune.Value is >= 0x3400 and <= 0x9FFF or >= 0x20000 and <= 0x3134F or >= 0x3040 and <= 0x30FF;
+            bool cjk = IsCjk(rune);
             if (cjk || !Rune.IsLetterOrDigit(rune))
             {
                 if (current.Length > 0) { yield return current.ToString(); current.Clear(); }
-                if (cjk) yield return rune.ToString();
+                if (cjk)
+                {
+                    string token = rune.ToString();
+                    yield return token;
+                    if (previousCjk is not null) yield return previousCjk + token;
+                    previousCjk = token;
+                }
+                else previousCjk = null;
             }
-            else if (current.Length < 128) current.Append(Rune.ToLowerInvariant(rune).ToString());
+            else
+            {
+                previousCjk = null;
+                if (current.Length < 128) current.Append(Rune.ToLowerInvariant(rune).ToString());
+            }
         }
         if (current.Length > 0) yield return current.ToString();
+    }
+
+    private static bool IsCjk(Rune rune) => rune.Value is >= 0x3400 and <= 0x9FFF or >= 0x20000 and <= 0x3134F or >= 0x3040 and <= 0x30FF;
+    private static bool IsCjkTerm(string term) => IsCjk(Rune.GetRuneAt(term, 0));
+    private static string[] QueryTerms(string query)
+    {
+        var terms = Tokenize(query).Distinct(StringComparer.Ordinal).ToArray();
+        // Unigrams are retained in the index for one-character queries. Longer
+        // CJK questions use bigrams so unrelated characters do not overwhelm names
+        // and meaningful phrases. This index is rebuilt on load, without reimport.
+        bool hasCjkPairs = terms.Any(term => IsCjkTerm(term) && term.EnumerateRunes().Count() == 2);
+        return hasCjkPairs ? terms.Where(term => !IsCjkTerm(term) || term.EnumerateRunes().Count() > 1).ToArray() : terms;
+    }
+
+    private static bool IsDuplicateEvidence(IndexedChunk first, IndexedChunk second,
+        Dictionary<string, DuplicateFingerprint> fingerprints)
+    {
+        if (first.Document.Id != second.Document.Id || first.Chunk.Location != second.Chunk.Location) return false;
+        if (first.Chunk.Text == second.Chunk.Text) return true;
+        // Approximate suppression is restricted to two representations of the same
+        // PDF page. Different pages, same-modality passages and changed numbers
+        // remain independently retrievable.
+        if (first.Chunk.Location?.Page is null || first.Chunk.Modality == second.Chunk.Modality
+            || !(first.Chunk.Modality is "ocr" or "text") || !(second.Chunk.Modality is "ocr" or "text")) return false;
+        var a = Fingerprint(first); var b = Fingerprint(second);
+        if (a.Shingles.Count < 12 || b.Shingles.Count < 12 || a.Numbers != b.Numbers) return false;
+        int intersection = a.Shingles.Count(value => b.Shingles.Contains(value));
+        return intersection >= .9 * (a.Shingles.Count + b.Shingles.Count - intersection);
+
+        DuplicateFingerprint Fingerprint(IndexedChunk chunk)
+        {
+            if (fingerprints.TryGetValue(chunk.Key, out var value)) return value;
+            var tokens = Tokenize(chunk.Chunk.Text).ToArray();
+            var shingles = new HashSet<int>();
+            for (int i = 2; i < tokens.Length; i++) shingles.Add(HashCode.Combine(tokens[i - 2], tokens[i - 1], tokens[i]));
+            return fingerprints[chunk.Key] = new(shingles, string.Join('\0', tokens.Where(token => token.Any(char.IsDigit))));
+        }
     }
 
     private static KnowledgeSearchResult Result(IndexedChunk chunk, double score, int maximum)
@@ -632,6 +845,7 @@ public sealed class KnowledgeStore : IDisposable
         {
             Reference = chunk.Key, CollectionId = chunk.Document.CollectionId, DocumentId = chunk.Document.Id,
             FileName = chunk.Document.FileName, Version = chunk.Document.Version, ChunkIndex = chunk.Index,
+            DocumentChunkCount = chunk.Document.ChunkCount,
             Text = chunk.Chunk.Text[..count], Location = chunk.Chunk.Location, Modality = chunk.Chunk.Modality,
             Score = score, Status = chunk.Document.Status, Truncated = count < chunk.Chunk.Text.Length,
         };
@@ -681,7 +895,10 @@ public sealed class KnowledgeStore : IDisposable
         if (o.MaxFileBytes <= 0 || o.MaxStoredBytes <= 0 || o.MaxDocuments <= 0 || o.MaxCollections <= 0 || o.MaxExtractedCharacters <= 0
             || o.MaxSegments <= 0 || o.MaxChunksPerDocument <= 0 || o.MaxTotalChunks <= 0 || o.ChunkCharacters is < 16 or > 32000
             || o.ChunkOverlapCharacters < 0 || o.ChunkOverlapCharacters >= o.ChunkCharacters / 2 || o.MaxSearchResults is <= 0 or > 1000
-            || o.MaxContextCharacters is <= 0 or > 1000000 || o.MaxQueryCharacters is <= 0 or > 100000 || o.EmbeddingBatchSize is <= 0 or > 256)
+            || o.MaxContextCharacters is <= 0 or > 1000000 || o.MaxDocumentContextCharacters is <= 0 or > 1000000
+            || o.MaxQueryCharacters is <= 0 or > 100000 || o.EmbeddingBatchSize is <= 0 or > 256
+            || o.MaxPdfOcrPages is < 0 or > 4096 || o.MaxPdfPagePixels is < 65536 or > 64_000_000
+            || o.MaxPdfEmbeddedImagePixels is < 1 or > 256_000_000 || o.PdfOcrPageTimeoutSeconds is < 1 or > 600)
             throw new ArgumentOutOfRangeException(nameof(o), "Knowledge limits must be positive and chunk overlap must be less than half the chunk size.");
     }
     private static void ValidateVectors(float[][] vectors, int count, int dimensions)
@@ -779,4 +996,5 @@ public sealed class KnowledgeStore : IDisposable
         public float[]? Vector { get; set; }
     }
     private sealed record IndexedChunk(string Key, KnowledgeDocument Document, StoredChunk Chunk, int Index, int Length, string[] Terms);
+    private sealed record DuplicateFingerprint(HashSet<int> Shingles, string Numbers);
 }

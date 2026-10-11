@@ -107,6 +107,11 @@ namespace TensorSharp.Server.Skills
         /// </summary>
         internal WorkspaceArtifactCompletionRequirement CompletionRequirement { get; set; }
 
+        /// <summary>Explicit terminal recovery after a knowledge turn exhausted reasoning
+        /// without an answer. Only the final answer generation remains; ordinary retrieval
+        /// completion does not set this and continues to permit requested code work.</summary>
+        internal bool KnowledgeAnswerRecovery { get; set; }
+
         /// <summary>
         /// Each attachment's upload path to the name the code tools stage it under, set by
         /// the adapter that staged them and named them on their messages

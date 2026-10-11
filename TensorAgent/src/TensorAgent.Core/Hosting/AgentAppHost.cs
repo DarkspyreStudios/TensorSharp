@@ -250,7 +250,11 @@ public sealed class AgentAppHost : IDisposable
         });
 
         ModelService = modelService ?? new ModelService(_loggerFactory.CreateLogger<ModelService>());
-        Knowledge = KnowledgeRuntime.CreateStore(paths.KnowledgeDirectory, ModelService);
+        // Trusted OCR dependencies belong to the app, independently of model/code-runner
+        // network settings. Preparation is lazy: ordinary startup and text imports are offline.
+        if (PdfOcrProvisioner.IsSupported && PdfOcrProvisioner.ShouldManage(PdfOcrOptions.FromEnvironment()))
+            PdfOcr = new PdfOcrProvisioner(paths.PdfOcrDirectory);
+        Knowledge = KnowledgeRuntime.CreateStore(paths.KnowledgeDirectory, ModelService, PdfOcr);
         EngineHasWorkInFlight = EngineIsProcessing;
         // Whether the model may run at all right now. Closed by the iOS head while the
         // app is not frontmost, because iOS refuses GPU work from the background and
@@ -393,7 +397,8 @@ public sealed class AgentAppHost : IDisposable
             hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare,
             onModelCacheDirectoryChanged: SetModelCacheDirectory, device: Paths.DeviceClass);
         Server.MapLoras(this);
-        Server.MapKnowledge(Knowledge);
+        Server.MapKnowledge(Knowledge, PdfOcr == null ? null : () => PdfOcr.Status,
+            PdfOcr == null ? null : async ct => { await PdfOcr.PrepareAsync(ct).ConfigureAwait(false); });
     }
 
     public AgentPaths Paths { get; }
@@ -421,6 +426,8 @@ public sealed class AgentAppHost : IDisposable
     public WebUiChatService Chat { get; }
     /// <summary>Durable personal sources and their retrieval index, separate from temporary chat uploads.</summary>
     public KnowledgeStore Knowledge { get; }
+    /// <summary>Verified app-private PDF tools and language data, prepared lazily on supported desktop hosts.</summary>
+    public PdfOcrProvisioner? PdfOcr { get; }
 
     /// <summary>
     /// How a picture turn reads the conversation it ends: the uploads the pictures are kept in,
@@ -3344,6 +3351,7 @@ public sealed class AgentAppHost : IDisposable
         // and has nothing to do with the model: making a five-second transfer teardown
         // wait behind a generation would be for no reason.
         Close(Downloads);
+        if (PdfOcr != null) Close(PdfOcr);
         WaitForTheEngineToStop();
         Close(Turns);
         Close(Knowledge);
@@ -3416,6 +3424,8 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     public string ConversationsDirectory => Path.Combine(DataRoot, "conversations");
     /// <summary>Durable user sources and their index; never part of purgeable upload or workspace caches.</summary>
     public string KnowledgeDirectory => Path.Combine(DataRoot, "knowledge");
+    /// <summary>Re-downloadable OCR dependencies, separate from durable user sources and model caches.</summary>
+    public string PdfOcrDirectory => Path.Combine(CacheRoot, "knowledge-tools");
     public string UploadsDirectory => Path.Combine(CacheRoot, "uploads");
     public string ScratchDirectory => Path.Combine(CacheRoot, "scratch");
     public string ArtifactsDirectory => Path.Combine(CacheRoot, "artifacts");
@@ -3443,7 +3453,7 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     {
         foreach (string directory in new[]
                  {
-                     DataRoot, CacheRoot, ModelsDirectory, ConversationsDirectory, KnowledgeDirectory, UploadsDirectory,
+                     DataRoot, CacheRoot, ModelsDirectory, ConversationsDirectory, KnowledgeDirectory, PdfOcrDirectory, UploadsDirectory,
                      ScratchDirectory, ArtifactsDirectory, LogsDirectory, InstalledSkillsDirectory,
                  })
         {

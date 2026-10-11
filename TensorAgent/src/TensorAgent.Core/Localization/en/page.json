@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "Select at most 32 collections for one chat.",
   "page.knowledge.open": "Open knowledge collection {name}",
   "page.knowledge.sources": "Retrieved sources",
-  "page.knowledge.loadMore": "Load more documents"
+  "page.knowledge.loadMore": "Load more documents",
+  "page.knowledge.setupPreparing": "Preparing PDF reading tools…",
+  "page.knowledge.setupDownloading": "Downloading PDF tools and language data… {progress}",
+  "page.knowledge.setupInstalling": "Verifying and installing PDF reading tools…",
+  "page.knowledge.setupRetry": "Retry PDF setup",
+  "page.knowledge.setupFailed": "PDF reading tools could not be prepared. Retry to continue."
 }

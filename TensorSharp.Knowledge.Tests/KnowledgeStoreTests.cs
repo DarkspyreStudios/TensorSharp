@@ -98,6 +98,161 @@ public sealed class KnowledgeStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ChineseQuestionFindsEnglishNamedSourceInsteadOfUnrelatedCharacterMatchesAfterRestart()
+    {
+        string collectionId;
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            collectionId = (await store.CreateCollectionAsync("School documents")).Id;
+            await Import(store, collectionId, "report.txt", "Jonathan: Mathematics 4; Writing 2. Teacher comments: strong reasoning; needs clearer structure.");
+            for (int i = 0; i < 12; i++)
+                await Import(store, collectionId, $"unrelated-{i}.txt", "这是一个关于系统的介绍。其中包括较多的功能和综合资料。出点不足以成为老师的评价标准。");
+        }
+        using var reopened = new KnowledgeStore(_root, new TextExtractor());
+        var results = await Search(reopened, collectionId,
+            "Jonathan的哪个成绩比较好，哪个成绩比较差。请综合老师给他的评语，找出其中的亮点和不足。");
+        Assert.Equal("report.txt", results[0].FileName);
+        Assert.Contains("Mathematics 4", results[0].Text);
+    }
+
+    [Fact]
+    public async Task MixedScriptQuestionPrioritizesNamedPersonOverOtherStudentsMatchingChineseTopics()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var collection = await store.CreateCollectionAsync("School");
+        await Import(store, collection.Id, "jonathan.txt", "Jonathan shows strong mathematical reasoning and needs to improve writing.");
+        await Import(store, collection.Id, "other-student.txt", "另一位同学的成绩评语：数学成绩很好，老师评语指出写作成绩需要提高。");
+        Assert.Equal("jonathan.txt", (await Search(store, collection.Id, "Jonathan 成绩 评语"))[0].FileName);
+    }
+
+    [Theory]
+    [InlineData("知识", "知识系统资料。", "知其所以然，学而后识。")]
+    [InlineData("𠀀文", "𠀀文资料。", "𠀀，其他文字。")]
+    public async Task CjkPhrasesRequireAdjacentCharactersWhileSingleCharacterQueriesRemainSearchable(string query, string relevant, string noise)
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var collection = await store.CreateCollectionAsync("CJK");
+        await Import(store, collection.Id, "target.txt", relevant);
+        await Import(store, collection.Id, "noise.txt", noise);
+        Assert.Equal("target.txt", Assert.Single(await Search(store, collection.Id, query)).FileName);
+        string firstRune = query.EnumerateRunes().First().ToString();
+        Assert.Equal(2, (await Search(store, collection.Id, firstRune)).Count);
+    }
+
+    [Fact]
+    public async Task SearchSuppressesDuplicatePageRepresentationsButKeepsChangedScoresAndOtherPages()
+    {
+        const string paragraph = "Jonathan demonstrates clear mathematical reasoning and consistently explains the steps used to solve challenging problems. The teacher recommends continued practice with written explanations and independent revision. During group projects he listens carefully to the ideas shared by other students and contributes thoughtful suggestions for improving the final presentation. He checks his work and supports classmates as they develop their own understanding. Score 4.";
+        var extraction = new KnowledgeExtraction { Segments = [
+            new(paragraph, new() { Page = 1 }, "text"),
+            new(paragraph.Replace("teacher recommends", "teacher suggests"), new() { Page = 1 }, "ocr"),
+            new(paragraph.Replace("Score 4", "Score 2"), new() { Page = 1 }, "ocr"),
+            new(paragraph, new() { Page = 2 }, "text"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)));
+        var collection = await store.CreateCollectionAsync("Duplicates");
+        await Import(store, collection.Id, "report.pdf", "fixture");
+        var results = await Search(store, collection.Id, "Jonathan mathematical reasoning");
+        Assert.Equal(3, results.Count);
+        Assert.Contains(results, result => result.Location?.Page == 2);
+        Assert.Contains(results, result => result.Text.Contains("Score 2"));
+        Assert.All(results, result => Assert.Equal(4, result.DocumentChunkCount));
+        // Suppressed search duplicates remain explicitly readable by their stable
+        // reference if an OCR difference or original page needs inspection.
+        string reference = results[0].Reference[..(results[0].Reference.LastIndexOf('/') + 1)] + "1";
+        Assert.Contains("teacher suggests", Assert.Single(store.Read(reference)).Text);
+    }
+
+    [Theory]
+    [InlineData("Jonathan的成绩和老师评语")]
+    [InlineData("Jonathan strengths weaknesses")]
+    public async Task BroadOverviewDiversifiesRelevantPagesWithoutTreatingPageNumberAsRelevance(string query)
+    {
+        var extraction = new KnowledgeExtraction { Segments = [
+            new("Jonathan. Report card scale: 3 meets standard, 4 exceeds standard. Mathematics 4; writing 3.", new() { Page = 1 }, "text"),
+            new("Jonathan. Jonathan. Jonathan. A repeated footer unrelated to grades.", new() { Page = 1 }, "text"),
+            new("Jonathan. Computer science 4, keyboarding 3.5. Spanish reading 4.", new() { Page = 2 }, "text"),
+            new("Jonathan participates well. Jonathan helps others. Jonathan shows enthusiasm. Jonathan enjoys school.", new() { Page = 3 }, "text"),
+            new("Jonathan participates well. Jonathan helps others. Jonathan shows enthusiasm. Jonathan enjoys school.", new() { Page = 3 }, "ocr"),
+            new("Jonathan has made progress. Jonathan is an engaged learner. Jonathan works well. Jonathan is curious.", new() { Page = 3 }, "text"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((context, _) => Task.FromResult(context.FileName == "other.txt"
+            ? new KnowledgeExtraction { Segments = [new("另一位同学成绩评语：老师的评语和成绩显示进步。")] } : extraction)));
+        var collection = await store.CreateCollectionAsync("Report");
+        await Import(store, collection.Id, "report.pdf", "fixture");
+        await Import(store, collection.Id, "other.txt", "other fixture");
+        var results = await store.SearchAsync(query, new() { CollectionIds = [collection.Id], Limit = 3 });
+        Assert.Equal(new int?[] { 1, 2, 3 }, results.Select(result => result.Location?.Page).Order());
+        Assert.Equal(results.Select(result => result.Score).OrderDescending(), results.Select(result => result.Score));
+    }
+
+    [Fact]
+    public async Task BroadCoverageDoesNotPromoteDenseOnlyPagesAheadOfLexicalEvidence()
+    {
+        var extraction = new KnowledgeExtraction { Segments = [
+            new("Jonathan mathematics results", new() { Page = 1 }),
+            new("Unrelated school lunch information", new() { Page = 2 }),
+            new("Jonathan teacher comments", new() { Page = 3 }),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)), new VectorProvider());
+        var collection = await store.CreateCollectionAsync("Hybrid coverage");
+        await Import(store, collection.Id, "report.pdf", "fixture");
+        var results = await store.SearchAsync("Jonathan strengths weaknesses", new() { CollectionIds = [collection.Id], Limit = 2 });
+        Assert.Equal(new int?[] { 1, 3 }, results.Select(result => result.Location?.Page));
+    }
+
+    [Theory]
+    [InlineData("contraindications")]
+    [InlineData("contraindications for children")]
+    public async Task FocusedQueryPrefersDetailedLaterPageEvenWhenOtherQueryTermsAreAbsent(string query)
+    {
+        var extraction = new KnowledgeExtraction { Segments = [
+            new("Introduction: consult the contraindications section later in this handbook. "
+                + string.Join(' ', Enumerable.Repeat("general background information", 60)), new() { Page = 1 }),
+            new("Contraindications: the contraindications checklist and contraindications assessment are explained here.", new() { Page = 8 }),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)));
+        var collection = await store.CreateCollectionAsync("Focused lookup");
+        await Import(store, collection.Id, "handbook.pdf", "fixture");
+        var results = await store.SearchAsync(query, new() { CollectionIds = [collection.Id], Limit = 1 });
+        Assert.Equal(8, Assert.Single(results).Location?.Page);
+    }
+
+    [Theory]
+    [InlineData("Orion 故障诊断")]
+    [InlineData("Orion diagnostic overview")]
+    public async Task BroadMixedLanguageQueryKeepsStrongerLaterEvidenceFirst(string query)
+    {
+        var extraction = new KnowledgeExtraction { Segments = [
+            new("Orion is briefly mentioned in this general introduction. "
+                + string.Join(' ', Enumerable.Repeat("background and unrelated system details", 30)), new() { Page = 1 }, "text"),
+            new("Orion troubleshooting: Orion fault codes and Orion recovery steps are explained here.", new() { Page = 9 }, "text"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)));
+        var collection = await store.CreateCollectionAsync("System handbook");
+        await Import(store, collection.Id, "system.pdf", "fixture");
+        var results = await store.SearchAsync(query, new() { CollectionIds = [collection.Id], Limit = 2 });
+        Assert.Equal(new int?[] { 9, 1 }, results.Select(result => result.Location?.Page));
+        Assert.True(results[0].Score >= results[1].Score);
+    }
+
+    [Fact]
+    public async Task FocusedMultiTermRelevanceCanReturnTwoStrongExcerptsFromOnePage()
+    {
+        var extraction = new KnowledgeExtraction { Segments = [
+            new("Alarm reset: press the reset switch when the alarm flashes.", new() { Page = 4 }, "text"),
+            new("Alarm reset troubleshooting: a reset clears the alarm after repair.", new() { Page = 4 }, "text"),
+            new("Alarm and reset appear in this index. " + string.Join(' ', Enumerable.Repeat("general reference material", 40)), new() { Page = 1 }, "text"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)));
+        var collection = await store.CreateCollectionAsync("Service manual");
+        await Import(store, collection.Id, "service.pdf", "fixture");
+        var results = await store.SearchAsync("alarm reset", new() { CollectionIds = [collection.Id], Limit = 2 });
+        Assert.Equal(new int?[] { 4, 4 }, results.Select(result => result.Location?.Page));
+        Assert.True(results[0].Score >= results[1].Score);
+    }
+
+    [Fact]
     public async Task ChunkingRetainsLocationsAndCharacterBudgetsWithoutBreakingSurrogates()
     {
         var extraction = new KnowledgeExtraction
@@ -390,6 +545,138 @@ public sealed class KnowledgeStoreTests : IDisposable
         var read = Assert.Single(store.Read(result.Reference, maxCharacters: 5, adjacentChunks: 2, collectionIds: [collection.Id]));
         Assert.Equal(result.ChunkIndex, read.ChunkIndex);
         Assert.Equal("reque", read.Text);
+        var context = store.Read(result.Reference, adjacentChunks: 2, collectionIds: [collection.Id]);
+        Assert.Equal(result.ChunkIndex, context[0].ChunkIndex);
+        Assert.Equal(3, context.Count);
+        Assert.All(context, chunk => Assert.Equal(3, chunk.DocumentChunkCount));
+    }
+
+    [Fact]
+    public async Task DocumentContextIncludesUnmatchedLaterEvidenceWithExactProvenanceAndNoPartialReturn()
+    {
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(new KnowledgeExtraction
+        { Segments = [new("Aster overview: performance 4.", new() { Page = 1 }, "text"),
+            new("The reviewer recommends clearer written explanations and checking each result.", new() { Page = 2 }, "text")] })));
+        var collection = await store.CreateCollectionAsync("Whole document");
+        await Import(store, collection.Id, "review.pdf", "fixture");
+        var anchor = Assert.Single(await Search(store, collection.Id, "Aster"));
+        var context = Assert.IsAssignableFrom<IReadOnlyList<KnowledgeSearchResult>>(
+            store.ReadDocumentContext(anchor.Reference, collectionIds: [collection.Id]));
+        Assert.Equal(new int?[] { 1, 2 }, context.Select(chunk => chunk.Location?.Page));
+        Assert.Contains("clearer written explanations", context[1].Text);
+        Assert.All(context, chunk =>
+        {
+            Assert.False(chunk.Truncated);
+            Assert.Equal(Assert.Single(store.Read(chunk.Reference)).Text, chunk.Text);
+            Assert.Equal(anchor.DocumentId, chunk.DocumentId);
+            Assert.Equal(2, chunk.DocumentChunkCount);
+        });
+        int exactBudget = context.Sum(chunk => chunk.Text.Length);
+        Assert.NotNull(store.ReadDocumentContext(anchor.Reference, exactBudget));
+        Assert.Null(store.ReadDocumentContext(anchor.Reference, exactBudget - 1));
+    }
+
+    [Fact]
+    public async Task DocumentContextDeduplicatesEquivalentPageTextAcrossDifferentChunkBoundaries()
+    {
+        string paragraph = string.Join(' ', Enumerable.Range(0, 40).Select(i => $"Observation{i}: clear reasoning."));
+        var extraction = new KnowledgeExtraction { Segments = [
+            new(paragraph, new() { Page = 1 }, "text"),
+            new(paragraph.Replace(" ", "  \n"), new() { Page = 1 }, "ocr"),
+            new(paragraph, new() { Page = 2 }, "text"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)),
+            options: new() { ChunkCharacters = 150, ChunkOverlapCharacters = 20 });
+        var collection = await store.CreateCollectionAsync("Representations");
+        var document = await Import(store, collection.Id, "review.pdf", "fixture");
+        string reference = $"kb://{collection.Id}/{document.Id}@{document.Version}/0";
+        var context = Assert.IsAssignableFrom<IReadOnlyList<KnowledgeSearchResult>>(store.ReadDocumentContext(reference));
+        Assert.All(context, chunk => Assert.Equal("text", chunk.Modality));
+        Assert.Contains(context, chunk => chunk.Location?.Page == 1);
+        Assert.Contains(context, chunk => chunk.Location?.Page == 2);
+        Assert.True(context.Count < document.ChunkCount);
+        Assert.All(context, chunk => Assert.Equal(Assert.Single(store.Read(chunk.Reference)).Text, chunk.Text));
+    }
+
+    [Fact]
+    public async Task DocumentContextPreservesChangedNumbersPunctuationAndUniqueOcrContent()
+    {
+        const string paragraph = "Aster demonstrates clear reasoning and explains each conclusion carefully. Result 4.";
+        var extraction = new KnowledgeExtraction { Segments = [
+            new(paragraph, new() { Page = 1 }, "text"),
+            new(paragraph.Replace("4", "3"), new() { Page = 1 }, "ocr"),
+            new(paragraph.Replace("4", "-4"), new() { Page = 1 }, "ocr"),
+            new(paragraph + " Additional handwritten note.", new() { Page = 1 }, "ocr"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)));
+        var collection = await store.CreateCollectionAsync("Complementary evidence");
+        var document = await Import(store, collection.Id, "review.pdf", "fixture");
+        string reference = $"kb://{collection.Id}/{document.Id}@{document.Version}/0";
+        var context = Assert.IsAssignableFrom<IReadOnlyList<KnowledgeSearchResult>>(store.ReadDocumentContext(reference));
+        Assert.Equal(4, context.Count);
+        Assert.Contains(context, chunk => chunk.Text.Contains("Result 3"));
+        Assert.Contains(context, chunk => chunk.Text.Contains("Result -4"));
+        Assert.Contains(context, chunk => chunk.Text.Contains("Additional handwritten note"));
+    }
+
+    [Fact]
+    public async Task DocumentContextDropsExactOcrExcerptsSpanningNativeChunksButKeepsUniqueNotes()
+    {
+        const string passage = "The reviewer recommends clear written explanations, independent checking and careful revision before submission.";
+        string native = new string('a', 90) + " " + passage + " " + new string('b', 80);
+        var extraction = new KnowledgeExtraction { Segments = [
+            new(native, new() { Page = 1 }, "text"),
+            new("A distinct image caption.", new() { Page = 1 }, "ocr"),
+            new(passage.Replace(" ", "\n  "), new() { Page = 1 }, "ocr"),
+            new("Unique handwritten follow-up.", new() { Page = 1 }, "ocr"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)),
+            options: new() { ChunkCharacters = 150, ChunkOverlapCharacters = 20 });
+        var collection = await store.CreateCollectionAsync("Exact excerpts");
+        var document = await Import(store, collection.Id, "review.pdf", "fixture");
+        string reference = $"kb://{collection.Id}/{document.Id}@{document.Version}/0";
+        var context = Assert.IsAssignableFrom<IReadOnlyList<KnowledgeSearchResult>>(store.ReadDocumentContext(reference));
+        var ocr = context.Where(chunk => chunk.Modality == "ocr").ToArray();
+        Assert.Equal(2, ocr.Length);
+        Assert.Contains(ocr, chunk => chunk.Text == "A distinct image caption.");
+        Assert.Contains(ocr, chunk => chunk.Text == "Unique handwritten follow-up.");
+        Assert.All(context, chunk => Assert.Equal(Assert.Single(store.Read(chunk.Reference)).Text, chunk.Text));
+    }
+
+    [Fact]
+    public async Task DocumentContextDoesNotDiscardDifferentWordOrNumericBoundaryMeanings()
+    {
+        var extraction = new KnowledgeExtraction { Segments = [
+            new("An inadequate score: 14.5 or -4.5.", new() { Page = 1 }, "text"),
+            new("adequate", new() { Page = 1 }, "ocr"),
+            new("4.5", new() { Page = 1 }, "ocr"),
+            new("4 5", new() { Page = 1 }, "ocr"),
+        ] };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)));
+        var collection = await store.CreateCollectionAsync("Meaningful boundaries");
+        var document = await Import(store, collection.Id, "review.pdf", "fixture");
+        string reference = $"kb://{collection.Id}/{document.Id}@{document.Version}/0";
+        var context = Assert.IsAssignableFrom<IReadOnlyList<KnowledgeSearchResult>>(store.ReadDocumentContext(reference));
+        Assert.Equal(4, context.Count);
+    }
+
+    [Fact]
+    public async Task DocumentContextEnforcesScopeVersionAndItsSeparateBudgetCeiling()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor(), options: new()
+            { MaxContextCharacters = 32, MaxDocumentContextCharacters = 128 });
+        var collection = await store.CreateCollectionAsync("Allowed");
+        var other = await store.CreateCollectionAsync("Other");
+        var document = await Import(store, collection.Id, "a.txt", new string('a', 80));
+        string reference = $"kb://{collection.Id}/{document.Id}@{document.Version}/0";
+        Assert.Equal(80, Assert.Single(store.ReadDocumentContext(reference, 128)!).Text.Length);
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.Read(reference, 128));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.ReadDocumentContext(reference, 129));
+        Assert.Throws<ArgumentOutOfRangeException>(() => store.ReadDocumentContext(reference, 0));
+        Assert.Throws<KeyNotFoundException>(() => store.ReadDocumentContext(reference, 128, [other.Id]));
+        Assert.Throws<KeyNotFoundException>(() => store.ReadDocumentContext(reference, 128, []));
+        await Import(store, collection.Id, "a.txt", "replacement");
+        Assert.Throws<KnowledgeStaleReferenceException>(() => store.ReadDocumentContext(reference, 128));
     }
 
     [Theory]

@@ -446,7 +446,7 @@
     if (extra && extra.artifacts) extra.artifacts.forEach(function (f) { fileLine({ turn: turn, bubble: b }, f); });
     var view = { turn: turn, bubble: b, entry: entry };
     if (role === 'assistant' && extra && extra.stats) showTurnStats(view, extra.stats);
-    if (role === 'assistant' && entry && entry.knowledgeSources) showKnowledgeSources(view, entry.knowledgeSources);
+    if (role === 'assistant' && entry && entry.knowledgeSources) showKnowledgeSources(view, entry.knowledgeSources, content);
     // What a picture was made from, and on the newest turn the other readings of its
     // request -- or, for a turn that asked instead of guessing, the readings it offered.
     if (entry && extra.imageUrl && entry.imagePlan) {
@@ -2129,7 +2129,10 @@
     }
     function paint() {
       if (thinkingDirty && thinkBody) { thinkBody.textContent = thinking; thinkingDirty = false; }
-      if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
+      if (answerDirty) {
+        view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false;
+        if (view.knowledgeSourceCandidates) showKnowledgeSources(view, view.knowledgeSourceCandidates, answer);
+      }
       if (stickBottom) toBottom();
     }
     /**
@@ -2166,7 +2169,6 @@
         });
     }
     function handle(f) {
-      if (Array.isArray(f.knowledgeSources)) showKnowledgeSources(view, f.knowledgeSources);
       if (f.done === true) {
         terminal = true;
         stats = statsOf(f);
@@ -2202,6 +2204,7 @@
       // before starting it again, and treating it as "no frame" left the fragment on
       // screen with the fresh answer glued to the end of it.
       if (typeof f.replace === 'string') { answer = f.replace; answerDirty = true; }
+      if (Array.isArray(f.knowledgeSources)) showKnowledgeSources(view, f.knowledgeSources, answer);
       // The host has thrown away a dying engine and is answering again -- carrying
       // the text on screen on, or starting over. Said plainly, because the
       // alternative is an answer that visibly stalls or restarts for no reason the
@@ -3315,7 +3318,16 @@
     }
     // A create/upload is not automatically retried: an ambiguous transport
     // failure may have committed it already. Refresh exposes the durable result.
-    return fetch(url, options).then(skillJson);
+    return fetch(url, options).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok) {
+          var error = new Error(data.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : data.error || response.statusText);
+          error.code = data.code;
+          throw error;
+        }
+        return data;
+      });
+    });
   }
   function knowledgeCollectionUrl(id) { return '/api/knowledge/collections/' + encodeURIComponent(id); }
   function knowledgeDocumentUrl(id, documentId) {
@@ -3394,7 +3406,50 @@
     $('knowledge-upload').disabled = knowledgeBusy || !knowledgeActive;
     $('knowledge-file-input').disabled = knowledgeBusy || !knowledgeActive;
     $('knowledge-search').disabled = !knowledgeActive;
-    $('knowledge-status').textContent = knowledgeBusy ? t('page.knowledge.working') : '';
+    var status = knowledgeBusy ? t('page.knowledge.working') : '';
+    if (knowledgeOcrPreparing) {
+      var setup = knowledgeOcrStatus || {}, progress = '';
+      if (Number.isFinite(setup.downloadedBytes) && Number.isFinite(setup.totalBytes) && setup.totalBytes > 0)
+        progress = Math.min(100, Math.max(0, Math.round(setup.downloadedBytes * 100 / setup.totalBytes))) + '%';
+      status = setup.state === 'downloading' ? t('page.knowledge.setupDownloading', { progress: progress })
+        : setup.state === 'installing' ? t('page.knowledge.setupInstalling') : t('page.knowledge.setupPreparing');
+    }
+    $('knowledge-status').textContent = status;
+    $('knowledge-ocr-retry').style.display = knowledgeOcrRetry && !knowledgeBusy ? '' : 'none';
+    $('knowledge-ocr-retry').disabled = knowledgeBusy;
+  }
+  var knowledgeOcrStatus = null, knowledgeOcrPreparing = false;
+  var knowledgeOcrRetry = null, knowledgeOcrPollVersion = 0;
+  function observeKnowledgePdf(action) {
+    knowledgeOcrPreparing = false; knowledgeOcrStatus = null; knowledgeBusyControls();
+    var polling = true, version = ++knowledgeOcrPollVersion;
+    function update(data) {
+      if (version === knowledgeOcrPollVersion && data) {
+        knowledgeOcrStatus = data.managed ? data.status : null;
+        knowledgeOcrPreparing = !!(knowledgeOcrStatus &&
+          (knowledgeOcrStatus.state === 'checking' || knowledgeOcrStatus.state === 'downloading' || knowledgeOcrStatus.state === 'installing'));
+        if (!data.managed) polling = false;
+        knowledgeBusyControls();
+      }
+      return data;
+    }
+    function poll() {
+      if (!polling || version !== knowledgeOcrPollVersion) return;
+      knowledgeRequest('/api/knowledge/ocr/status').then(update).catch(function () {}).then(function () {
+        if (polling && version === knowledgeOcrPollVersion) setTimeout(poll, 400);
+      });
+    }
+    function finish() {
+      polling = false;
+      if (version === knowledgeOcrPollVersion) {
+        knowledgeOcrPreparing = false; knowledgeOcrPollVersion++; knowledgeBusyControls();
+      }
+    }
+    // Upload first; only a page that needs OCR should prepare dependencies.
+    // Status reads are observational and never block text-only PDF ingestion.
+    var pending = Promise.resolve().then(action);
+    poll();
+    return pending.then(function (result) { finish(); return result; }, function (error) { finish(); throw error; });
   }
   function loadKnowledge() {
     knowledgeError('');
@@ -3415,6 +3470,7 @@
   }
   function selectKnowledgeCollection(id) {
     knowledgeActive = id;
+    knowledgeOcrRetry = null;
     knowledgeDocuments = []; knowledgeNextOffset = null; knowledgeDocumentsLoading = false;
     knowledgeSearchVersion++;
     knowledgeReadVersion++;
@@ -3453,21 +3509,44 @@
   // The host supplies source identities separately from model prose. Build these
   // links only from validated identities, so a model-invented URL cannot become an
   // authoritative citation. Keep the metadata with the turn across replay/save.
-  function showKnowledgeSources(view, sources) {
+  function knowledgeReferenceInAnswer(answer, reference) {
+    if (!reference) return false;
+    var offset = 0, at;
+    while ((at = answer.indexOf(reference, offset)) >= 0) {
+      var end = at + reference.length;
+      var starts = at === 0 || /[\s(\[<"'`（【“‘「『，。！？；：]/.test(answer.charAt(at - 1));
+      var ends = end === answer.length || /[\s)\]>"'`,;!，。！？；：）】”’」』]/.test(answer.charAt(end))
+        || (answer.charAt(end) === '.' && (end + 1 === answer.length || /\s/.test(answer.charAt(end + 1))));
+      if (starts && ends) return true;
+      offset = end;
+    }
+    return false;
+  }
+  function showKnowledgeSources(view, sources, answer) {
+    view.knowledgeSourceCandidates = Array.isArray(sources) ? sources : [];
+    answer = typeof answer === 'string' ? answer : (view.answerSoFar || '');
     var seen = Object.create(null), safe = [];
-    (Array.isArray(sources) ? sources : []).slice(0, 50).forEach(function (source) {
+    view.knowledgeSourceCandidates.slice(0, 50).forEach(function (source) {
       if (!source || !/^[a-zA-Z0-9_-]{1,128}$/.test(source.collectionId || '')
         || !/^[a-zA-Z0-9_-]{1,128}$/.test(source.documentId || '')
         || !Number.isInteger(source.version) || source.version <= 0
-        || typeof source.reference !== 'string' || source.reference.length > 1024
-        || seen[source.reference]) return;
-      seen[source.reference] = true;
-      safe.push({ reference: source.reference, collectionId: source.collectionId,
+        || typeof source.reference !== 'string' || source.reference.length > 1024) return;
+      var url = knowledgeDocumentUrl(source.collectionId, source.documentId) + '/source?version=' + encodeURIComponent(source.version);
+      var citedChunk = source.reference !== url && knowledgeReferenceInAnswer(answer, source.reference);
+      // Also filter older saved transcripts that recorded every search hit. A
+      // source name alone does not establish a citation or identify its version.
+      if ((!citedChunk && !knowledgeReferenceInAnswer(answer, url)) || seen[url]) return;
+      seen[url] = true;
+      safe.push({ reference: citedChunk ? source.reference : url, collectionId: source.collectionId,
         documentId: source.documentId, fileName: String(source.fileName || '').slice(0, 500),
-        version: source.version, chunkIndex: source.chunkIndex, location: source.location,
+        version: source.version, chunkIndex: citedChunk ? source.chunkIndex : -1, location: citedChunk ? source.location : null,
         modality: source.modality, status: source.status });
     });
     view.knowledgeSources = safe;
+    if (view.entry) {
+      if (safe.length) view.entry.knowledgeSources = safe;
+      else delete view.entry.knowledgeSources;
+    }
     if (view.sourceBox) { view.sourceBox.remove(); view.sourceBox = null; }
     if (!safe.length) return;
     var box = el('div', 'knowledge-citations');
@@ -3518,15 +3597,7 @@
       var controls = el('div', 'knowledge-actions');
       knowledgeSourceLink(controls, doc);
       var reindex = knowledgeButton(controls, 'knowledge-reindex', t('page.knowledge.reindex'), function () {
-        return mutateKnowledge(function () {
-          return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id) + '/reindex', 'POST', {}).then(function () {
-            if (knowledgeActive === doc.collectionId) {
-              knowledgeSearchVersion++; knowledgeReadVersion++;
-              $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
-              return loadKnowledgeDocuments();
-            }
-          });
-        });
+        return mutateKnowledge(function () { return reindexKnowledgeDocument(doc); });
       });
       reindex.disabled = knowledgeBusy;
       knowledgeDeleteButton(controls, doc.fileName, function () {
@@ -3548,13 +3619,35 @@
       more.disabled = knowledgeBusy || knowledgeDocumentsLoading;
     }
   }
+  function reindexKnowledgeDocument(doc) {
+    function send() { return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id) + '/reindex', 'POST', {}); }
+    var pending = /\.pdf$/i.test(doc.fileName || '') ? observeKnowledgePdf(send) : send();
+    return pending.then(function () {
+      if (knowledgeActive === doc.collectionId) {
+        knowledgeSearchVersion++; knowledgeReadVersion++;
+        $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+        return loadKnowledgeDocuments();
+      }
+    }, function (error) {
+      if (error.code === 'pdf_ocr_setup_failed' && knowledgeActive === doc.collectionId)
+        knowledgeOcrRetry = function () { return reindexKnowledgeDocument(doc); };
+      throw error;
+    });
+  }
   function mutateKnowledge(action) {
     if (knowledgeBusy) return Promise.resolve();
+    knowledgeOcrRetry = null;
     knowledgeBusy = true; knowledgeError(''); paintKnowledgeDocuments();
-    return Promise.resolve().then(action).catch(knowledgeFailure).then(function () {
+    return Promise.resolve().then(action).catch(function (error) {
+      knowledgeFailure(error);
+    }).then(function () {
       knowledgeBusy = false; paintKnowledgeDocuments();
     });
   }
+  $('knowledge-ocr-retry').addEventListener('click', function () {
+    var action = knowledgeOcrRetry;
+    if (action) return mutateKnowledge(action);
+  });
   function knowledgeLocation(location) {
     if (!location) return '';
     var parts = [];
@@ -3617,16 +3710,32 @@
     e.target.value = '';
     if (!files.length || !id || knowledgeBusy) return;
     if (files.length > 16) { knowledgeError(t('page.knowledge.maxFiles')); return; }
-    return mutateKnowledge(function () {
+    return mutateKnowledge(function () { return uploadKnowledgeFiles(id, files); });
+  });
+  function uploadKnowledgeFiles(id, files) {
+    function send() {
       var form = new FormData();
       files.forEach(function (file) { form.append('files', file, file.name); });
-      return knowledgeRequest(knowledgeCollectionUrl(id) + '/documents', 'POST', form).then(function (d) {
-        var errors = (d.errors || []).map(function (e) { return e.fileName + ': ' + e.error; }).join('\n');
-        if (errors) knowledgeError(errors);
-        if (knowledgeActive === id) return loadKnowledgeDocuments();
-      });
+      return knowledgeRequest(knowledgeCollectionUrl(id) + '/documents', 'POST', form);
+    }
+    var pending = files.some(function (file) { return /\.pdf$/i.test(file.name || '') || file.type === 'application/pdf'; })
+      ? observeKnowledgePdf(send) : send();
+    return pending.then(function (d) {
+      var failures = d.errors || [];
+      var errors = failures.map(function (e) { return e.fileName + ': ' +
+        (e.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : e.error); }).join('\n');
+      if (errors) knowledgeError(errors);
+      if (knowledgeActive === id) {
+        // Retry only input ordinals the host explicitly confirms were not published.
+        // Names can be duplicated; global setup status and transport errors prove nothing.
+        var retryFiles = files.filter(function (_, index) {
+          return failures.some(function (e) { return e.code === 'pdf_ocr_setup_failed' && e.fileIndex === index; });
+        });
+        if (retryFiles.length) knowledgeOcrRetry = function () { return uploadKnowledgeFiles(id, retryFiles); };
+        return loadKnowledgeDocuments();
+      }
     });
-  });
+  }
   function searchKnowledge() {
     var id = knowledgeActive, query = ($('knowledge-query').value || '').trim();
     if (!id || !query) return;

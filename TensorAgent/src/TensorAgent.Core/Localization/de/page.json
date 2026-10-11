@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "Wählen Sie höchstens 32 Sammlungen für einen Chat.",
   "page.knowledge.open": "Wissenssammlung {name} öffnen",
   "page.knowledge.sources": "Abgerufene Quellen",
-  "page.knowledge.loadMore": "Weitere Dokumente laden"
+  "page.knowledge.loadMore": "Weitere Dokumente laden",
+  "page.knowledge.setupPreparing": "PDF-Lesewerkzeuge werden vorbereitet…",
+  "page.knowledge.setupDownloading": "PDF-Werkzeuge und Sprachdaten werden heruntergeladen… {progress}",
+  "page.knowledge.setupInstalling": "PDF-Lesewerkzeuge werden geprüft und installiert…",
+  "page.knowledge.setupRetry": "PDF-Einrichtung erneut versuchen",
+  "page.knowledge.setupFailed": "Die PDF-Lesewerkzeuge konnten nicht vorbereitet werden. Versuchen Sie es erneut, um fortzufahren."
 }

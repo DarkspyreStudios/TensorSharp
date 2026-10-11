@@ -68,6 +68,97 @@ but must remain distinguishable from model-extracted observations.
 
 ## Identity, scope, and performance decisions
 
+### Answer completion and evidence selection
+
+Follow-up review on **2026-10-11**: [Open WebUI's knowledge guide](https://docs.openwebui.com/features/workspace/knowledge/)
+documents bounded reads and notes that smaller models can struggle with autonomous
+multi-step retrieval. TensorSharp therefore tracks repeated calls and new evidence
+within a request, and switches stalled retrieval toward synthesis. Requested code
+and artifact work retains its tools; repeated requests for disabled retrieval
+trigger a terminal answer pass. The ceiling is a termination safeguard, not a claim
+that all evidence has been read. Missing evidence must remain explicit in the answer.
+
+For a strongly identified source, bounded document expansion can keep tables,
+headings and related sections together. Chat hosts with a tokenizer fit check consider this only when
+the initial search has at least three hits and all gathered candidates (up to
+eight when reranking is available, otherwise six) belong
+to one document, or that is the sole document in the selected collections. The
+candidate must include all conservatively deduplicated indexed text within the
+default 64,000-character store limit and 96,000 serialized UTF-8 bytes. Approval
+additionally requires the actual rendered prompt's tokenizer count, the requested answer-token reserve,
+and a 1,024-token margin to fit both the model and engine capacity. Media-bearing history
+skips expansion. Mixed-source results, unavailable fit checks and any failed bound
+use the ordinary excerpt path; the host never calls a clipped document complete.
+
+An approved complete-source payload closes retrieval and is replayed exactly during
+synthesis or thinking recovery, preserving middle sections and citations. This is
+an explicit exception to the ordinary evidence ceiling, not a larger autonomous
+search budget. It represents coverage of that source's indexed text and a source
+selection assumption; it does not establish complete extraction, library-wide
+coverage, answer correctness or benchmarked latency gains. Normal mixed code work
+and artifact completion guards remain available.
+
+Without an accepted complete-source candidate, tool-capable requests begin with
+two short excerpts (at most 4,000 UTF-8 bytes), then retrieve against concrete gaps.
+Tool-free requests keep the larger six-excerpt window. Query guidance encourages
+distinctive terms from the source text. Synthesis guidance asks the model to preserve
+definitions, units, comparison criteria and relevant qualifiers, distinguish
+observations from opinions and measured outcomes, and avoid unsupported broader
+conclusions from isolated statements. It follows the user's requested format,
+language and level of detail. These rules apply across knowledge domains;
+lexical relevance alone does not establish that a generated answer is accurate.
+
+Ordinary retrieval stops after 16 knowledge calls, three consecutive calls without
+new evidence, or a cumulative per-conversation evidence budget (twice the response
+budget, with a 4,096-byte floor and 24,000-byte ceiling), so a batch of individually
+bounded searches cannot keep growing the prompt. Eager evidence, citation metadata and full retransmitted expansions count
+toward it; compact duplicate notices do not. Novel text remains a separate progress
+signal. This bounds model prefill work as well as retrieval calls. A last response
+may cross the ceiling before the next call is suppressed. A model requesting
+disabled retrieval tools proceeds to the terminal synthesis pass.
+
+TensorAgent normally bounds knowledge-turn planning to at most 512 thinking tokens
+within each generation's total token allowance; allowances below 512 tokens stay
+unchanged. An explicit `TS_THINKING_BUDGET` overrides that default. Child agents
+inherit the request's thinking-token limit while retaining private
+transcripts and cache scopes. Delegation does not restore a larger default limit.
+Muse-Glimmer uses message channels rather than `</think>`. When its trained transition tokens
+are available, the sampler closes reasoning within the same request and KV state,
+opening the answer channel for tool-free turns or preserving recipient selection
+when tools remain available. At most three transitions are attempted. Unsupported
+framing or continued reasoning retains the thinking-off fallback: bounded prior
+evidence and one final pass without host tools (verified-artifact workflows retain
+their guard). A tool-free, thinking-off prompt explicitly opens the user-answer
+channel. This design does not by itself establish a latency or semantic-quality gain.
+Its template reads `reasoning_strength`, so explicit
+reasoning effort is mapped to that field. Budgeted Muse knowledge planning defaults
+to medium effort only when none was supplied; explicit choices and other requests
+retain their existing behavior. Host continuation messages retain the original user
+question during context compaction. Code tools needed for an unfinished requested
+computation remain available within the normal tool-loop limit.
+General delegation and completed-retrieval guidance favor direct synthesis when
+the needed evidence already fits in context. They discourage partitioning that
+evidence solely to create subagents, while preserving explicit delegation requests
+and substantial independent tool, source, verification or workspace work. This is
+guidance rather than a hard ban or a measured performance guarantee.
+
+[Dify's retrieval service](https://github.com/langgenius/dify/blob/main/api/core/rag/datasource/retrieval_service.py)
+deduplicates retrieved material while preserving source identity. TensorSharp also
+suppresses overlapping selectable-text/OCR candidates so they do not consume the
+search result budget twice. Its lexical path retains names in mixed-language
+queries and uses CJK word fragments instead of allowing common individual
+characters to outweigh a specific name. This does not provide general cross-language
+semantic retrieval without compatible embeddings.
+
+Retrieval candidates and final-answer sources are separate sets. Only explicit
+citations in the completed answer are bound to current, retrieved source identities;
+localized bracket variants of an actually issued marker are recognized without
+repairing unknown markers or external URL origins.
+Unused candidates do not become source chips. A document URL cites the document,
+while an exact chunk reference can retain its page/row location. This checks
+provenance and citation identity, not whether every generated claim is entailed
+by the source.
+
 - **Identity:** source identity, content identity, chunk identity, and embedding
   identity are separate. A rename need not alter content; identical text in two
   user-authorized collections must retain independent ownership. A parser change
@@ -91,6 +182,68 @@ but must remain distinguishable from model-extracted observations.
   identify audio/video moments; page/slide/row ranges identify document locations.
   A generated caption is a derived interpretation and should not be presented as
   verbatim source text.
+
+### Bounded query-aware reranking
+
+Additional primary-source review accessed **2026-10-11**. Reranking should remain
+a separate relevance-selection stage, without prescribing the user's answer format
+or a subject-specific interpretation of the evidence. TensorSharp now implements
+a bounded optional LLM pass informed by these patterns. The references explain
+the design; they do not establish TensorSharp quality or latency gains.
+
+- [LlamaIndex's LLMRerank implementation](https://github.com/run-llama/llama_index/blob/main/llama-index-core/llama_index/core/postprocessor/llm_rerank.py)
+  supplies the query with bounded candidate batches, parses selected candidate
+  positions and scores, maps them back to original nodes, and returns a separate
+  `top_n`. The applicable pattern is a bounded model judgment over already retrieved
+  candidates. TensorSharp should validate every returned identifier against the
+  offered set; a model must not create source identities or rewrite excerpts.
+- [Dify's reranker](https://github.com/langgenius/dify/blob/main/api/core/rag/rerank/rerank_model.py)
+  deduplicates candidates before scoring, retains original metadata/provider
+  identity through returned indices, and applies score and result-count limits.
+  TensorSharp should preserve document/version/location ownership through reranking
+  and keep original retrieval scores distinct from model relevance scores. A
+  relevance judgment does not establish that the final answer used that source.
+- [Open WebUI's reranking configuration](https://docs.openwebui.com/reference/env-configuration/)
+  separates retrieval and reranking result limits, exposes local scoring batch
+  size, and supports an external-reranker timeout. TensorSharp should separately
+  bound candidate count, serialized prompt size, model output and elapsed work;
+  adding a reranker must not recreate an unbounded retrieval loop.
+
+Integration safeguards here are TensorSharp design conclusions, not
+claims that each upstream implements identical policies. Filter scope before
+candidate generation, keep the original user query available, and perform ranking
+before clipping to the final evidence budget. Reject unknown/duplicate identifiers
+and malformed output; on timeout or invalid output, preserve the original candidate
+order. Cancellation must propagate. A reranker using the loaded generation model
+must run outside an already-held generation lease, without recursive tool calls or
+conversation-history mutation. Otherwise it can deadlock or consume more prefill
+time than it saves. An optional model stage cannot recover evidence absent from the
+candidate pool, and its scores should not be treated as calibrated probabilities.
+
+The implemented pass is shared across eager and tool retrieval and attempted at
+most once per request. It offers at most eight candidates, caps its serialized
+input at 12,000 UTF-8 bytes, preserves the full bounded search query, and reserves
+96 output tokens after checking the active model's actual prompt capacity. An
+approved complete-source snapshot bypasses the pass. Generation has no tools or
+thinking, uses an isolated session through the shared scheduler, and observes a
+10-second cancellation deadline followed by awaited cleanup. Only a complete
+set of offered IDs is accepted, each paired with one query-relative integer
+usefulness rating from 0 to 3. A private JSON grammar constrains response shape;
+the host checks membership and uniqueness and sorts ratings with baseline ties.
+Ratings are ordinal, not confidence probabilities, and never threshold-drop a
+candidate. Malformed output and timeouts retain the baseline order. Excerpts
+remain original source objects, versions are revalidated
+after the model await, and final evidence serialization still enforces the user's
+scope budget. The envelope identifies model ordering separately from original
+retrieval scores. `TS_KNOWLEDGE_RERANK=0` opts out. Focused managed tests cover the
+failure paths and integration; live outcome and latency evidence must be recorded
+separately rather than counted as success when the model falls back.
+
+Evaluate relevance and answer coverage on generic positive, negative, identifier,
+multilingual and multi-document cases. Report retrieval and reranking latency
+separately, including fallback rates; do not infer general gains from one document
+or one completed answer. Domain-specific evaluation fixtures may measure factual
+accuracy, but should not become runtime prompt rules.
 
 ## Validation required for implementation claims
 

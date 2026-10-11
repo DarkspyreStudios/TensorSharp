@@ -13,4 +13,7 @@
     <Using Include="Xunit" />
     <ProjectReference Include="../TensorSharp.Knowledge/TensorSharp.Knowledge.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="../InferenceWeb.Tests/Fixtures/Knowledge/*" Link="Fixtures/Knowledge/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -89,6 +89,7 @@ internal sealed class AgentWorkspace : IDisposable
             {
                 Workspace = owner.Workspace,
                 Knowledge = parent.Knowledge,
+                KnowledgeRetrieval = parent.Knowledge == null ? null : new Knowledge.KnowledgeRetrievalProgress(parent.Knowledge.MaxCharacters),
                 CodeRunner = runner,
                 ScriptRunner = mutable
                     ? parent.ScriptRunner?.ForkForWorkspace(owner.Workspace, runner) : null,

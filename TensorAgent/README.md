@@ -17,6 +17,18 @@ Retrieved source links persist with the conversation; code agents can open compl
 datasets in their private workspace. See the [knowledge guide](../docs/knowledge-system.md)
 for supported formats, model setup, scope and current limits.
 
+PDF reading uses the system OCR frameworks on Apple devices. On supported Windows
+hosts, TensorAgent automatically prepares the PDF tools and English, Simplified
+Chinese and Traditional Chinese language data in its private cache when a PDF
+page first needs OCR. Selectable-text PDFs work offline without setup. The Knowledge
+panel shows progress and offers **Retry PDF setup** if a download fails; later uses
+work offline. English and Simplified Chinese are selected by default; Traditional
+Chinese is available through the OCR language option. This setup needs no administrator
+rights or package-manager commands, and does not upload your documents. Explicit
+OCR executable/data paths or the disabled provider override automatic setup.
+The reusable TensorAgent host also supports this setup on Linux; there is no Linux
+MAUI application package.
+
 The .NET MAUI project shares its chat page and loopback API across iOS/iPadOS,
 Mac Catalyst and Windows WinUI heads. Physical iPhones and iPads use GGML Metal
 (`ggml_metal`), Macs use Metal or CPU, and Windows offers CUDA/Vulkan when available,

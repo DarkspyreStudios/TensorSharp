@@ -34,6 +34,7 @@ public sealed partial class WebUiPageTests
         };
         R['/api/knowledge/search'] = { results: [libraryHit] };
         R['/api/knowledge/read'] = { results: [Object.assign({}, libraryHit, { text: 'Expanded evidence from page three.' })] };
+        R['/api/knowledge/ocr/status'] = { managed: false, status: null };
         var knowledgeNav = document.createElement('button');
         knowledgeNav.className = 'opt'; knowledgeNav.setAttribute('data-sheet', 'knowledge-sheet');
         document.getElementById('nav-sheet').appendChild(knowledgeNav);
@@ -244,7 +245,7 @@ public sealed partial class WebUiPageTests
     {
         JsonElement result = Run(KnowledgeLibrary + """
             R['/api/chat'] = { __sse: [
-              { knowledgeSources: [libraryHit] }, { token: 'The answer refers to a source.' },
+              { knowledgeSources: [libraryHit] }, { token: '来源：/api/knowledge/collections/alpha/documents/doc1/source?version=1。' },
               { knowledgeSources: [libraryHit, libraryHit, Object.assign({}, libraryHit,
                 { reference: 'bad', documentId: '../outside' })] }, { done: true }] };
             """, """
@@ -271,7 +272,7 @@ public sealed partial class WebUiPageTests
     {
         JsonElement result = Run(KnowledgeLibrary + """
             R['/api/sessions?conversation=saved'] = { sessionId: 's2', conversationId: 'saved',
-              knowledgeCollections: ['alpha'], messages: [{ role: 'assistant', content: 'Saved answer',
+              knowledgeCollections: ['alpha'], messages: [{ role: 'assistant', content: 'Saved answer [source](/api/knowledge/collections/alpha/documents/doc1/source?version=4)',
                 knowledgeSources: [Object.assign({}, libraryHit, { version: 4, chunkIndex: -1 })] }] };
             """, """
             window.TensorAgent.openConversation('saved');
@@ -283,9 +284,83 @@ public sealed partial class WebUiPageTests
             });
             """);
         Assert.EndsWith("version=4", result.GetProperty("href").GetString());
-        Assert.Equal("knowledge:alpha/doc1/v1/0", result.GetProperty("title").GetString());
+        Assert.Equal("/api/knowledge/collections/alpha/documents/doc1/source?version=4", result.GetProperty("title").GetString());
         Assert.DoesNotContain("-1", result.GetProperty("label").GetString());
         Assert.Equal(4, result.GetProperty("saved").GetProperty("version").GetInt32());
+    }
+
+    [WebJavaScriptFact]
+    public void KnowledgeSourcesFollowTheFinalAnswerAndEmptySnapshotClearsSavedSources()
+    {
+        JsonElement result = Run(KnowledgeLibrary + """
+            R['/api/chat'] = { __sse: [
+              { token: 'Initially [cited](/api/knowledge/collections/alpha/documents/doc1/source?version=1).' },
+              { knowledgeSources: [libraryHit] }, { replace: 'The final answer uses no source.' },
+              { knowledgeSources: [] }, { done: true }] };
+            """, """
+            __page.byId['text'].value = 'Read my sources'; __page.byId['send'].dispatch('click');
+            return settle(35).then(function () {
+              var shown = __page.byId['chat'].querySelectorAll('.knowledge-citations .knowledge-source').length;
+              __page.byId['text'].value = 'Continue'; __page.byId['send'].dispatch('click');
+              return { shown: shown, messages: __page.requests('/api/chat')[1].body.messages };
+            });
+            """);
+        Assert.Equal(0, result.GetProperty("shown").GetInt32());
+        var assistant = result.GetProperty("messages").EnumerateArray().First(m => m.GetProperty("role").GetString() == "assistant");
+        Assert.False(assistant.TryGetProperty("knowledgeSources", out _));
+    }
+
+    [WebJavaScriptFact]
+    public void LegacySavedSourcesKeepOnlyExactCitedReferences()
+    {
+        JsonElement result = Run(KnowledgeLibrary + """
+            R['/api/sessions?conversation=saved'] = { sessionId: 's2', conversationId: 'saved',
+              messages: [{ role: 'assistant', content: 'Evidence [knowledge:alpha/doc1/v1/0].', knowledgeSources: [libraryHit,
+                Object.assign({}, libraryHit, { reference: 'unused', documentId: 'doc2' })] },
+                { role: 'assistant', content: 'Uncited answer', knowledgeSources: [libraryHit] }] };
+            """, """
+            window.TensorAgent.openConversation('saved');
+            return settle(25).then(function () {
+              var links = __page.byId['chat'].querySelectorAll('.knowledge-citations .knowledge-source');
+              __page.byId['text'].value = 'Continue'; __page.byId['send'].dispatch('click');
+              return { shown: links.length, messages: __page.requests('/api/chat')[0].body.messages };
+            });
+            """);
+        Assert.Equal(1, result.GetProperty("shown").GetInt32());
+        var messages = result.GetProperty("messages");
+        Assert.Single(messages[0].GetProperty("knowledgeSources").EnumerateArray());
+        Assert.False(messages[1].TryGetProperty("knowledgeSources", out _));
+    }
+
+    [WebJavaScriptFact]
+    public void SavedChineseCitationsAcceptPunctuationButRejectExternalOriginsAndPathPrefixes()
+    {
+        JsonElement result = Run(KnowledgeLibrary + """
+            var sourceUrl = '/api/knowledge/collections/alpha/documents/doc1/source?version=1';
+            R['/api/sessions?conversation=saved'] = { sessionId: 's2', conversationId: 'saved',
+              messages: [
+                { role: 'assistant', content: '来源：' + sourceUrl + '。', knowledgeSources: [libraryHit] },
+                { role: 'assistant', content: '评语：' + libraryHit.reference + '】', knowledgeSources: [libraryHit] },
+                { role: 'assistant', content: '来源：https://untrusted.example' + sourceUrl + '。', knowledgeSources: [libraryHit] },
+                { role: 'assistant', content: '来源：//untrusted.example' + sourceUrl + '。', knowledgeSources: [libraryHit] },
+                { role: 'assistant', content: '来源：/prefix' + sourceUrl + '。', knowledgeSources: [libraryHit] }
+              ] };
+            """, """
+            window.TensorAgent.openConversation('saved');
+            return settle(25).then(function () {
+              var links = __page.byId['chat'].querySelectorAll('.knowledge-citations .knowledge-source');
+              __page.byId['text'].value = 'Continue'; __page.byId['send'].dispatch('click');
+              return { shown: links.map(function (a) { return a.href; }),
+                messages: __page.requests('/api/chat')[0].body.messages };
+            });
+            """);
+        Assert.Equal(2, result.GetProperty("shown").GetArrayLength());
+        Assert.All(result.GetProperty("shown").EnumerateArray(), href =>
+            Assert.Equal("/api/knowledge/collections/alpha/documents/doc1/source?version=1", href.GetString()));
+        var messages = result.GetProperty("messages");
+        Assert.Single(messages[0].GetProperty("knowledgeSources").EnumerateArray());
+        Assert.Single(messages[1].GetProperty("knowledgeSources").EnumerateArray());
+        for (int i = 2; i < 5; i++) Assert.False(messages[i].TryGetProperty("knowledgeSources", out _));
     }
 
     [WebJavaScriptFact]

@@ -5,16 +5,36 @@ using System.Text.Json;
 using TensorSharp.AgentHost.Knowledge;
 using TensorSharp.Knowledge;
 using TensorSharp.Server.Hosting;
+using TensorSharp.Server.Knowledge;
 
 namespace TensorAgent.Core.Hosting;
 
 public static partial class WebUiRoutes
 {
     /// <summary>Personal, authenticated loopback library. Original sources outlive the upload cache.</summary>
-    public static void MapKnowledge(this LoopbackServer server, KnowledgeStore store)
+    public static void MapKnowledge(this LoopbackServer server, KnowledgeStore store,
+        Func<PdfOcrSetupStatus>? getOcrStatus = null, Func<CancellationToken, Task>? prepareOcr = null)
     {
         const string root = "/api/knowledge";
         const long maxBatchBytes = 128L * 1024 * 1024;
+        server.MapGet(root + "/ocr/status", (_, _) => Task.FromResult<LoopbackResponse?>(KnowledgeJson(
+            new { managed = getOcrStatus != null, status = getOcrStatus?.Invoke() })));
+        server.MapPost(root + "/ocr/prepare", async (_, ct) =>
+        {
+            try
+            {
+                // Optional explicit preparation. Normal upload/reindex prepares only
+                // if a page needs OCR, before starting the PDF page deadline.
+                if (prepareOcr != null) await prepareOcr(ct).ConfigureAwait(false);
+                return KnowledgeJson(new { managed = getOcrStatus != null, status = getOcrStatus?.Invoke() });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidOperationException or NotSupportedException or OperationCanceledException)
+            {
+                return KnowledgeJson(new { error = "PDF reading tools could not be prepared. Please retry.",
+                    managed = getOcrStatus != null, status = getOcrStatus?.Invoke() }, 503);
+            }
+        });
         server.MapGet(root + "/collections", (_, _) => KnowledgeRoute(() =>
             Task.FromResult<LoopbackResponse?>(KnowledgeJson(new { collections = store.ListCollections() }))));
         server.MapPost(root + "/collections", (request, ct) => KnowledgeRoute(async () =>
@@ -51,18 +71,27 @@ public static partial class WebUiRoutes
             if (form.Files.Count == 0) throw new ArgumentException("Select at least one source file.");
             var documents = new List<KnowledgeDocument>();
             var errors = new List<object>();
+            int fileIndex = -1;
             foreach (var file in form.Files)
             {
+                fileIndex++;
                 try
                 {
                     await using Stream input = file.OpenRead();
                     documents.Add(await store.ImportAsync(collection, UploadNaming.ResolveFileName(file), input, file.ContentType, ct));
                 }
+                catch (PdfOcrSetupException)
+                {
+                    // This file was not published. Earlier files may have succeeded;
+                    // identify only this failed input so an explicit retry is safe.
+                    errors.Add(new { fileName = file.FileName, fileIndex, code = "pdf_ocr_setup_failed",
+                        error = "PDF reading tools could not be prepared. Please retry." });
+                }
                 catch (Exception ex) when (ex is ArgumentException or InvalidDataException or KnowledgeLimitException)
                 {
                     // A batch may contain several independent formats. Report each
                     // failure explicitly while retaining the successfully imported sources.
-                    errors.Add(new { fileName = file.FileName, error = ex.Message });
+                    errors.Add(new { fileName = file.FileName, fileIndex, error = ex.Message });
                 }
             }
             return KnowledgeJson(new { documents, errors });
@@ -155,6 +184,8 @@ public static partial class WebUiRoutes
     private static async Task<LoopbackResponse?> KnowledgeRoute(Func<Task<LoopbackResponse?>> action)
     {
         try { return await action(); }
+        catch (PdfOcrSetupException) { return KnowledgeJson(new { code = "pdf_ocr_setup_failed",
+            error = "PDF reading tools could not be prepared. Please retry." }, 503); }
         catch (KnowledgeLimitException ex) { return KnowledgeJson(new { error = ex.Message }, 413); }
         catch (KnowledgeStaleReferenceException ex) { return KnowledgeJson(new { error = ex.Message }, 409); }
         catch (KeyNotFoundException ex) { return KnowledgeJson(new { error = ex.Message }, 404); }

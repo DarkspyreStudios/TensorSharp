@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "每个聊天最多选择 32 个集合。",
   "page.knowledge.open": "打开知识集合 {name}",
   "page.knowledge.sources": "检索到的来源",
-  "page.knowledge.loadMore": "加载更多文档"
+  "page.knowledge.loadMore": "加载更多文档",
+  "page.knowledge.setupPreparing": "正在准备 PDF 读取工具…",
+  "page.knowledge.setupDownloading": "正在下载 PDF 工具和语言数据… {progress}",
+  "page.knowledge.setupInstalling": "正在验证并安装 PDF 读取工具…",
+  "page.knowledge.setupRetry": "重试 PDF 设置",
+  "page.knowledge.setupFailed": "无法准备 PDF 读取工具。请重试以继续。"
 }

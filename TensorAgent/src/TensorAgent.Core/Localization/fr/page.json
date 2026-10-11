@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "Sélectionnez au maximum 32 collections par conversation.",
   "page.knowledge.open": "Ouvrir la collection de connaissances {name}",
   "page.knowledge.sources": "Sources consultées",
-  "page.knowledge.loadMore": "Charger plus de documents"
+  "page.knowledge.loadMore": "Charger plus de documents",
+  "page.knowledge.setupPreparing": "Préparation des outils de lecture PDF…",
+  "page.knowledge.setupDownloading": "Téléchargement des outils PDF et des données linguistiques… {progress}",
+  "page.knowledge.setupInstalling": "Vérification et installation des outils de lecture PDF…",
+  "page.knowledge.setupRetry": "Réessayer la préparation PDF",
+  "page.knowledge.setupFailed": "Les outils de lecture PDF n’ont pas pu être préparés. Réessayez pour continuer."
 }

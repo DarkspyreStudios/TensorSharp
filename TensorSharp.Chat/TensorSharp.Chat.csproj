@@ -40,6 +40,8 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.6" />
   </ItemGroup>
   <ItemGroup>
+    <EmbeddedResource Include="Knowledge/OcrAssets/manifest.json;Knowledge/OcrAssets/NOTICE.md;Knowledge/OcrAssets/package-notices.json" />
+    <None Update="Knowledge/OcrAssets/NOTICE.md;Knowledge/OcrAssets/package-notices.json" Pack="true" PackagePath="licenses/pdf-ocr/" />
     <None Update="Jev/NOTICE.md;Jev/Apache-2.0.txt"
           Pack="true" PackagePath="licenses/jev/"
           CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

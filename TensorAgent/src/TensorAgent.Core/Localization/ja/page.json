@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "1つのチャットで選択できるコレクションは32個までです。",
   "page.knowledge.open": "ナレッジコレクション {name} を開く",
   "page.knowledge.sources": "検索されたソース",
-  "page.knowledge.loadMore": "ドキュメントをさらに読み込む"
+  "page.knowledge.loadMore": "ドキュメントをさらに読み込む",
+  "page.knowledge.setupPreparing": "PDF 読み取りツールを準備中…",
+  "page.knowledge.setupDownloading": "PDF ツールと言語データをダウンロード中… {progress}",
+  "page.knowledge.setupInstalling": "PDF 読み取りツールを検証・インストール中…",
+  "page.knowledge.setupRetry": "PDF のセットアップを再試行",
+  "page.knowledge.setupFailed": "PDF 読み取りツールを準備できませんでした。再試行して続行してください。"
 }

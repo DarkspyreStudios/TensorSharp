@@ -148,7 +148,10 @@ public sealed class KnowledgeIntegrationTests : IDisposable
         var context = new SkillToolContext(Array.Empty<Skill>()) { Knowledge = scope };
         var result = SkillTools.Execute(new ToolCall { Name = KnowledgeTools.Search, Arguments = new() { ["query"] = "Aurora" } }, context);
         Assert.True(result.Ok);
-        Assert.Contains("cobalt orchard", result.Content);
+        // Eager evidence is already visible in the prepared user message. A follow-up
+        // query finding the same excerpt should not append it again or claim no match.
+        Assert.True(JsonDocument.Parse(result.Content).RootElement.GetProperty("alreadyRetrieved").GetBoolean());
+        Assert.Contains("cobalt orchard", Assert.Single(scope.Sources).Text);
         Assert.DoesNotContain("hidden secret", result.Content);
         string foreignReference = (await store.SearchAsync("Aurora", new() { CollectionIds = new[] { hidden.Id } }))[0].Reference;
         Assert.False(SkillTools.Execute(new ToolCall { Name = KnowledgeTools.Read, Arguments = new() { ["reference"] = foreignReference } }, context).Ok);
@@ -221,8 +224,10 @@ public sealed class KnowledgeIntegrationTests : IDisposable
         Assert.Contains("cobalt orchard", prepared[^1].Content);
     }
 
-    [Fact]
-    public async Task SourceMetadataSurvivesBackgroundCompletionAndBufferCompaction()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SourceMetadataSurvivesBackgroundCompletionAndBufferCompaction(bool clearUnusedSources)
     {
         var store = new ConversationStore(Path.Combine(_root, "conversations"));
         var conversation = store.Create();
@@ -238,15 +243,22 @@ public sealed class KnowledgeIntegrationTests : IDisposable
         Assert.False(turns.StatusOfId(id)!.IsRunning);
         await foreach (var frame in turns.WatchAsync(id, 0, CancellationToken.None)) replay.Add(JsonSerializer.SerializeToElement(frame));
         var saved = store.Load(conversation.Id)!.Messages[^1];
-        Assert.Equal("source-id", Assert.Single(saved.KnowledgeSources!).GetProperty("documentId").GetString());
-        Assert.Contains(replay, frame => frame.TryGetProperty("knowledgeSources", out var sources)
-            && sources.ValueKind == JsonValueKind.Array && sources.GetArrayLength() == 1);
+        if (clearUnusedSources) Assert.Null(saved.KnowledgeSources);
+        else Assert.Equal("source-id", Assert.Single(saved.KnowledgeSources!).GetProperty("documentId").GetString());
+        var finalSources = replay.Last(frame => frame.TryGetProperty("knowledgeSources", out _)).GetProperty("knowledgeSources");
+        Assert.Equal(clearUnusedSources ? 0 : 1, finalSources.GetArrayLength());
 
-        static async IAsyncEnumerable<object> Frames()
+        async IAsyncEnumerable<object> Frames()
         {
             yield return new { sessionId = "source-session" };
             yield return new { knowledgeSources = new[] { new { reference = "ref-1", documentId = "source-id", fileName = "notes.txt" } } };
             for (int i = 0; i < 12; i++) yield return new { token = "evidence " };
+            if (clearUnusedSources)
+            {
+                yield return new { replace = "Final answer does not cite this source." };
+                yield return new { knowledgeSources = Array.Empty<object>() };
+                for (int i = 0; i < 12; i++) yield return new { token = " " };
+            }
             yield return new { done = true };
             await Task.CompletedTask;
         }

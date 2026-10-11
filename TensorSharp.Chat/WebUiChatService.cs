@@ -2407,7 +2407,8 @@ namespace TensorSharp.Chat
                 uiTools = ToolFunctionParser.ParseOllama(body);
 
             var messages = ChatMessageParser.ParseWebUi(messagesEl);
-            KnowledgeToolScope knowledge = KnowledgeRequestContext.Parse(body, Knowledge, _svc.ContextTokens);
+            KnowledgeToolScope knowledge = KnowledgeRequestContext.Parse(body, Knowledge, _svc.ContextTokens,
+                _svc.CreateKnowledgeReranker());
             string audioInputError = ChatGenerationPipeline.UnsupportedAudioInputError(_svc.Architecture, messages,
                 _svc.IsAudioEncoderLoaded);
             if (audioInputError != null)
@@ -2492,8 +2493,6 @@ namespace TensorSharp.Chat
                 }
                 messages = await KnowledgeRequestContext.PrepareAsync(messages, knowledge, toolsAvailable: false, cancellationToken);
                 OnChatRequest?.Invoke(chatSession.Id, body);
-                if (knowledge != null)
-                    yield return new { knowledgeSources = knowledge.Sources.Select(KnowledgeTools.DescribeSource).ToArray() };
                 await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, uiThink, webUiLogger, cancellationToken, samplingConfig, knowledge))
                     yield return frame;
                 yield break;
@@ -2699,14 +2698,15 @@ namespace TensorSharp.Chat
                     skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
             }
 
+            // Keep the actual task without eager evidence for a possible thinking
+            // recovery; the loop will replay the evidence it really collected once.
+            var messagesBeforeKnowledge = messages;
             messages = await KnowledgeRequestContext.PrepareAsync(messages, knowledge,
-                toolsAvailable: skillPlan?.ToolsOffered == true, cancellationToken);
+                toolsAvailable: skillPlan?.ToolsOffered == true, cancellationToken,
+                candidate => _svc.KnowledgePromptFits(candidate, maxTokens, uiTools, uiThink));
 
             // Every refusal is behind us: this request is going to stream.
             OnChatRequest?.Invoke(chatSession.Id, body);
-
-            if (knowledge != null)
-                yield return new { knowledgeSources = knowledge.Sources.Select(KnowledgeTools.DescribeSource).ToArray() };
 
             var sw = Stopwatch.StartNew();
             int tokenCount = 0;
@@ -2765,7 +2765,7 @@ namespace TensorSharp.Chat
             // guarded, and the frames for each update are yielded outside it.
             IAsyncEnumerator<ChatStreamUpdate> stream = _svc
                 .ChatStreamWithSkillsAsync(chatSession, messages, maxTokens, cancellationToken, samplingConfig,
-                    uiTools, uiThink, skillPlan, webUiLogger)
+                    uiTools, uiThink, skillPlan, webUiLogger, thinkingTokenLimit: knowledge == null ? null : 512)
                 .GetAsyncEnumerator(cancellationToken);
             try
             {
@@ -2905,8 +2905,12 @@ namespace TensorSharp.Chat
             // engine's guard already ends and explains those turns.
             bool reasonedPastItsBudget = string.Equals(
                 turnFinishReason, FinishReasonMapper.PipelineThinkingBudget, StringComparison.Ordinal);
-            if (reasonedPastItsBudget && tokenCount == 0 && !aborted && inferenceError == null && uiThink)
+            if (reasonedPastItsBudget && IsNullOrWhiteSpace(visibleAnswer) && !aborted && inferenceError == null
+                && (uiThink || knowledge != null))
             {
+                // Raw reasoning pieces, whitespace, and retracted text are not an
+                // answer. Only the final visible content can suppress recovery.
+                tokenCount = 0;
                 webUiLogger.LogWarning(LogEventIds.ChatCompleted,
                     "chat.retry-without-thinking sessionId={SessionId}: the turn spent its whole "
                     + "token budget reasoning and produced no answer; retrying with thinking off.",
@@ -2920,9 +2924,11 @@ namespace TensorSharp.Chat
                 retryParser?.AcceptRetractions();
                 bool retryCompleted = false;
                 bool retrySawParsedUpdate = false;
+                var retryMessages = PrepareKnowledgeThinkingRetry(messagesBeforeKnowledge, messages, knowledge, skillPlan);
                 IAsyncEnumerator<ChatStreamUpdate> retry = _svc
-                    .ChatStreamWithSkillsAsync(chatSession, messages, maxTokens, cancellationToken,
-                        samplingConfig, uiTools, false, skillPlan, webUiLogger)
+                    .ChatStreamWithSkillsAsync(chatSession, retryMessages, maxTokens, cancellationToken,
+                        samplingConfig, uiTools, false, skillPlan, webUiLogger,
+                        thinkingTokenLimit: knowledge == null ? null : 512)
                     .GetAsyncEnumerator(cancellationToken);
                 try
                 {
@@ -2994,9 +3000,6 @@ namespace TensorSharp.Chat
                     sawParsedUpdate = retrySawParsedUpdate;
                 }
             }
-
-            if (knowledge != null)
-                yield return new { knowledgeSources = knowledge.Sources.Select(KnowledgeTools.DescribeSource).ToArray() };
 
             foreach (object frame in FinalFrames(sawParsedUpdate ? null : uiParser, aborted, inferenceError, chatSession, sw, tokenCount,
                 turnPromptTokens, turnKvReusedTokens, turnTruncated, visibleAnswer, turnFinishReason,
@@ -3620,13 +3623,32 @@ namespace TensorSharp.Chat
                 truncated && !FinishReasonMapper.IsRepetition(finishReason));
         }
 
+        internal static List<ChatMessage> PrepareKnowledgeThinkingRetry(List<ChatMessage> originalMessages,
+            List<ChatMessage> preparedMessages, KnowledgeToolScope knowledge, SkillRequestPlan plan)
+        {
+            if (knowledge == null || plan?.ToolsOffered != true) return preparedMessages;
+            // A fresh loop cannot assume that previous tool-result messages remain
+            // in its history. Replay its bounded evidence and disable new retrieval
+            // before generation instead of starting the same search cycle again.
+            (plan.ToolContext.KnowledgeRetrieval ?? knowledge.Retrieval).RequestSynthesis();
+            plan.KnowledgeAnswerRecovery = plan.CompletionRequirement == null;
+            return SkillPrompt.Apply(originalMessages, KnowledgeTools.Guidance);
+        }
+
         internal static IEnumerable<object> KnowledgeCitationFrames(StringBuilder visibleAnswer, KnowledgeToolScope knowledge)
         {
+            if (knowledge == null) yield break;
             var normalized = KnowledgeTools.NormalizeCitationUrls(visibleAnswer.ToString(), knowledge);
-            if (normalized.RepairCount == 0) yield break;
-            visibleAnswer.Clear().Append(normalized.Text);
-            yield return WebUiSseEvents.Replace(normalized.Text);
-            yield return new { knowledgeCitationRepairs = normalized.RepairCount };
+            if (normalized.RepairCount > 0)
+            {
+                visibleAnswer.Clear().Append(normalized.Text);
+                yield return WebUiSseEvents.Replace(normalized.Text);
+                yield return new { knowledgeCitationRepairs = normalized.RepairCount };
+            }
+            // Emit a replacement snapshot, including an empty one, only once the
+            // final parser flush and any URL repairs have settled the visible answer.
+            yield return new { knowledgeSources = KnowledgeCitations.UsedSources(normalized.Text, knowledge)
+                .Select(KnowledgeTools.DescribeSource).ToArray() };
         }
     }
 }

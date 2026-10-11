@@ -3,10 +3,11 @@ using TensorSharp.Knowledge;
 
 namespace TensorSharp.Server.Knowledge;
 
-/// <summary>Optional host configuration. No model downloads or external services are used implicitly.</summary>
+/// <summary>Host configuration. TensorAgent can opt into app-private PDF OCR provisioning.</summary>
 public static class KnowledgeRuntime
 {
-    public static KnowledgeStore CreateStore(string root, ModelService modelService = null)
+    public static KnowledgeStore CreateStore(string root, ModelService modelService = null,
+        PdfOcrProvisioner managedPdfOcr = null)
     {
         var options = new KnowledgeOptions();
         GgufKnowledgeEmbeddingProvider embeddings = null;
@@ -18,8 +19,13 @@ public static class KnowledgeRuntime
                     Environment.GetEnvironmentVariable("TS_KNOWLEDGE_EMBEDDING_BACKEND") ?? "CPU",
                     Environment.GetEnvironmentVariable("TS_KNOWLEDGE_QUERY_PREFIX") ?? "",
                     Environment.GetEnvironmentVariable("TS_KNOWLEDGE_DOCUMENT_PREFIX") ?? "");
-            return new KnowledgeStore(root, new BuiltInKnowledgeExtractor(options,
-                modelService == null ? null : new ModelKnowledgeMediaExtractor(modelService)), embeddings, options);
+            var media = modelService == null ? null : new ModelKnowledgeMediaExtractor(modelService);
+            var requested = PdfOcrOptions.FromEnvironment();
+            IKnowledgePdfPageExtractor pages = managedPdfOcr != null && PdfOcrProvisioner.ShouldManage(requested)
+                ? new ManagedPdfKnowledgePageExtractor(managedPdfOcr.PrepareAsync, requested)
+                : new PdfKnowledgePageExtractor(requested);
+            IKnowledgeExtractor extractor = new BuiltInKnowledgeExtractor(options, media, pages);
+            return new KnowledgeStore(root, extractor, embeddings, options);
         }
         catch { embeddings?.Dispose(); throw; }
     }

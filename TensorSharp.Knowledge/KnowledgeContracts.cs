@@ -16,8 +16,20 @@ public sealed class KnowledgeOptions
     public int ChunkOverlapCharacters { get; init; } = 120;
     public int MaxSearchResults { get; init; } = 50;
     public int MaxContextCharacters { get; init; } = 32000;
+    /// <summary>Separate ceiling for all-or-nothing small-document context expansion.
+    /// Hosts must also check serialized bytes and the active model's token budget.</summary>
+    public int MaxDocumentContextCharacters { get; init; } = 64000;
     public int MaxQueryCharacters { get; init; } = 4000;
     public int EmbeddingBatchSize { get; init; } = 32;
+    /// <summary>Maximum complete PDF pages submitted to OCR in one import or reindex.</summary>
+    public int MaxPdfOcrPages { get; init; } = 128;
+    /// <summary>Maximum pixels in the complete rendered page, including rotation.</summary>
+    public int MaxPdfPagePixels { get; init; } = 16_777_216;
+    /// <summary>Maximum sum of embedded-image pixels per page before native rendering;
+    /// applies to individual images too, and counts repeated image placements again.</summary>
+    public long MaxPdfEmbeddedImagePixels { get; init; } = 64_000_000;
+    /// <summary>Cancellation deadline per page; native drawing observes cancellation between stages.</summary>
+    public int PdfOcrPageTimeoutSeconds { get; init; } = 60;
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -52,6 +64,27 @@ public sealed record KnowledgeExtraction
 public interface IKnowledgeExtractor
 {
     Task<KnowledgeExtraction> ExtractAsync(KnowledgeExtractionContext context, CancellationToken cancellationToken = default);
+}
+
+/// <summary>A host-provided OCR reader for a complete rendered PDF page, never merely its largest image.
+/// The file is a store-owned, immutable original; page numbers are one-based. Implementations must
+/// honor cancellation and all supplied resource bounds, and return an empty result when unavailable.</summary>
+public interface IKnowledgePdfPageExtractor
+{
+    /// <summary>Optional one-time dependency preparation. The core calls this only when a page
+    /// needs OCR, before starting its per-page deadline. Failure prevents an incomplete import.
+    /// Implementations without external setup need not override the default.</summary>
+    Task PrepareAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    Task<KnowledgePdfPageExtraction> ExtractPageAsync(KnowledgePdfPageContext context, CancellationToken cancellationToken = default);
+}
+
+public sealed record KnowledgePdfPageContext(string FilePath, string FileName, int PageNumber, int MaxCharacters, int MaxPixels);
+
+public sealed record KnowledgePdfPageExtraction
+{
+    public string? Text { get; init; }
+    public string? ExtractorId { get; init; }
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
 
 public interface IKnowledgeEmbeddingProvider
@@ -97,6 +130,8 @@ public sealed record KnowledgeSearchResult
     public required string FileName { get; init; }
     public int Version { get; init; }
     public int ChunkIndex { get; init; }
+    /// <summary>Total chunks in this source version, for bounded follow-up navigation.</summary>
+    public int DocumentChunkCount { get; init; }
     public required string Text { get; init; }
     public KnowledgeLocation? Location { get; init; }
     public string? Modality { get; init; }

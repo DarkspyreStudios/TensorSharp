@@ -261,5 +261,10 @@
   "page.knowledge.maxCollections": "채팅 하나에 최대 32개 컬렉션을 선택하세요.",
   "page.knowledge.open": "지식 컬렉션 {name} 열기",
   "page.knowledge.sources": "검색된 출처",
-  "page.knowledge.loadMore": "문서 더 불러오기"
+  "page.knowledge.loadMore": "문서 더 불러오기",
+  "page.knowledge.setupPreparing": "PDF 읽기 도구 준비 중…",
+  "page.knowledge.setupDownloading": "PDF 도구 및 언어 데이터 다운로드 중… {progress}",
+  "page.knowledge.setupInstalling": "PDF 읽기 도구 확인 및 설치 중…",
+  "page.knowledge.setupRetry": "PDF 설정 다시 시도",
+  "page.knowledge.setupFailed": "PDF 읽기 도구를 준비하지 못했습니다. 계속하려면 다시 시도하세요."
 }

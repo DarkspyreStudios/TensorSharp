@@ -3,17 +3,16 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using UglyToad.PdfPig;
-using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
 namespace TensorSharp.Knowledge;
 
 /// <summary>Local managed document readers. Originals are never rewritten. Media understanding
 /// is supplied by a host-owned extractor; unsupported formats remain explicitly metadata-only.</summary>
-public sealed class BuiltInKnowledgeExtractor : IKnowledgeExtractor
+public sealed partial class BuiltInKnowledgeExtractor : IKnowledgeExtractor
 {
     private readonly KnowledgeOptions _options;
     private readonly IKnowledgeExtractor? _media;
+    private readonly IKnowledgePdfPageExtractor? _pdfPages;
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".txt", ".md", ".markdown", ".log", ".cs", ".py", ".js", ".ts", ".tsx", ".jsx", ".java",
@@ -22,10 +21,15 @@ public sealed class BuiltInKnowledgeExtractor : IKnowledgeExtractor
         ".html", ".htm"
     };
 
-    public BuiltInKnowledgeExtractor(KnowledgeOptions? options = null, IKnowledgeExtractor? mediaExtractor = null)
+    public BuiltInKnowledgeExtractor(KnowledgeOptions? options = null, IKnowledgeExtractor? mediaExtractor = null,
+        IKnowledgePdfPageExtractor? pdfPageExtractor = null)
     {
         _options = options ?? new();
         _media = mediaExtractor;
+        _pdfPages = pdfPageExtractor;
+        if (_options.MaxPdfOcrPages is < 0 or > 4096 || _options.MaxPdfPagePixels is < 65536 or > 64_000_000
+            || _options.MaxPdfEmbeddedImagePixels is < 1 or > 256_000_000 || _options.PdfOcrPageTimeoutSeconds is < 1 or > 600)
+            throw new ArgumentOutOfRangeException(nameof(options), "PDF OCR page, pixel and time limits are outside supported bounds.");
     }
 
     public async Task<KnowledgeExtraction> ExtractAsync(KnowledgeExtractionContext context, CancellationToken cancellationToken = default)
@@ -38,7 +42,7 @@ public sealed class BuiltInKnowledgeExtractor : IKnowledgeExtractor
     {
         cancellationToken.ThrowIfCancellationRequested();
         string extension = Path.GetExtension(context.FileName).ToLowerInvariant();
-        if (extension == ".pdf") return ExtractPdf(context.FilePath, cancellationToken);
+        if (extension == ".pdf") return await ExtractPdfAsync(context, cancellationToken).ConfigureAwait(false);
         if (extension is ".docx" or ".pptx" or ".xlsx")
         {
             var segments = OfficeKnowledgeText.ExtractSegments(context.FilePath, extension,
@@ -108,28 +112,6 @@ public sealed class BuiltInKnowledgeExtractor : IKnowledgeExtractor
             Status = segments.Count == 0 ? KnowledgeDocumentStatus.MetadataOnly : warnings?.Count > 0 ? KnowledgeDocumentStatus.Partial : KnowledgeDocumentStatus.Ready,
             Warnings = warnings ?? (segments.Count == 0 ? new[] { "The file has no readable text." } : Array.Empty<string>())
         };
-    }
-
-    private KnowledgeExtraction ExtractPdf(string path, CancellationToken ct)
-    {
-        using var document = PdfDocument.Open(path);
-        if (document.NumberOfPages > Math.Min(_options.MaxSegments, 4096))
-            throw new KnowledgeLimitException("PDF has too many pages; split the document.");
-        var segments = new List<KnowledgeSegment>();
-        int emptyPages = 0;
-        long characters = 0;
-        for (int page = 1; page <= document.NumberOfPages; page++)
-        {
-            ct.ThrowIfCancellationRequested();
-            string text = ContentOrderTextExtractor.GetText(document.GetPage(page), true);
-            characters += text.Length;
-            if (characters > _options.MaxExtractedCharacters) throw new KnowledgeLimitException("PDF text exceeds the extraction limit.");
-            if (string.IsNullOrWhiteSpace(text)) { emptyPages++; continue; }
-            segments.Add(new(text, new KnowledgeLocation { Page = page, Label = "Page " + page }, "text"));
-        }
-        return Complete(segments, emptyPages > 0
-            ? new[] { $"{emptyPages} page(s) have no selectable text. Scanned pages require OCR; PDF image content is not indexed by this reader." }
-            : new[] { "PDF text and page numbers extracted. Embedded images, layout coordinates, and scanned text are not interpreted." });
     }
 
     private KnowledgeExtraction ExtractLines(string text, bool markdown, CancellationToken ct)
