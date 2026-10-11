@@ -358,6 +358,7 @@ public sealed class ChatTurnManager : IDisposable
         var content = new StringBuilder();
         var thinking = new StringBuilder();
         var artifacts = new List<StoredArtifact>();
+        var knowledgeSources = new List<JsonElement>();
         var artifactUrls = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
         string? imageUrl = null, videoUrl = null, audioUrl = null;
@@ -369,8 +370,8 @@ public sealed class ChatTurnManager : IDisposable
         {
             await foreach (object frame in frames(turn.Token).WithCancellation(turn.Token).ConfigureAwait(false))
             {
-                turn.Append(frame, content, MaxBufferedFrames);
-                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl, ref videoUrl, ref audioUrl, ref image, ref stats);
+                turn.Append(frame, content, MaxBufferedFrames, knowledgeSources);
+                ReadInto(frame, content, thinking, artifacts, artifactUrls, ref sessionId, ref imageUrl, ref videoUrl, ref audioUrl, ref image, ref stats, knowledgeSources);
             }
             state = ChatTurnState.Completed;
         }
@@ -389,7 +390,7 @@ public sealed class ChatTurnManager : IDisposable
             }
             else
             {
-                turn.Append(new { error = ex.Message }, content, MaxBufferedFrames);
+                turn.Append(new { error = ex.Message }, content, MaxBufferedFrames, knowledgeSources);
             }
             state = ChatTurnState.Failed;
         }
@@ -416,7 +417,8 @@ public sealed class ChatTurnManager : IDisposable
                     videoUrl,
                     audioUrl,
                     stats,
-                    image);
+                    image,
+                    knowledgeSources);
             }
             catch (Exception) { /* a lost transcript must not be a crash on a background thread */ }
         }
@@ -448,7 +450,8 @@ public sealed class ChatTurnManager : IDisposable
         ref string? videoUrl,
         ref string? audioUrl,
         ref ImageTurnRecord? image,
-        ref StoredTurnStats? stats)
+        ref StoredTurnStats? stats,
+        List<JsonElement> knowledgeSources)
     {
         try
         {
@@ -457,6 +460,7 @@ public sealed class ChatTurnManager : IDisposable
             JsonElement root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
                 return;
+            Hosting.WebUiRoutes.CollectKnowledgeSources(root, knowledgeSources);
             if (root.TryGetProperty("done", out JsonElement done) && done.ValueKind == JsonValueKind.True)
                 stats = StoredTurnStats.FromDoneFrame(root);
             if (root.TryGetProperty("token", out JsonElement token) && token.GetString() is { } piece)
@@ -637,7 +641,7 @@ public sealed class ChatTurnManager : IDisposable
             catch (ObjectDisposedException) { return false; }
         }
 
-        public void Append(object frame, StringBuilder answerSoFar, int maxFrames)
+        public void Append(object frame, StringBuilder answerSoFar, int maxFrames, IReadOnlyList<JsonElement>? knowledgeSources = null)
         {
             lock (Sync)
             {
@@ -649,7 +653,7 @@ public sealed class ChatTurnManager : IDisposable
                     // so every position a reader can be holding is still meaningful.
                     _dropped += _frames.Count - 1;
                     _frames.Clear();
-                    _frames.Add(new { replace = answerSoFar.ToString() });
+                    _frames.Add(new { replace = answerSoFar.ToString(), knowledgeSources = knowledgeSources?.ToArray() });
                 }
                 _frames.Add(frame);
                 Signal();

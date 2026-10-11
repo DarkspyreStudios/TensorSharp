@@ -1,0 +1,490 @@
+using System.Text;
+using System.Text.Json.Nodes;
+
+namespace TensorSharp.Knowledge.Tests;
+
+public sealed class KnowledgeStoreTests : IDisposable
+{
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "tensorsharp-knowledge-" + Guid.NewGuid().ToString("N"));
+    public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
+
+    [Fact]
+    public async Task DurableImportSearchReadAndOriginalSurviveRestartWithoutReextraction()
+    {
+        var extractor = new TextExtractor();
+        KnowledgeCollection collection;
+        KnowledgeDocument imported;
+        string reference;
+        using (var store = new KnowledgeStore(_root, extractor))
+        {
+            collection = await store.CreateCollectionAsync("Engineering", "Runbooks");
+            imported = await Import(store, collection.Id, "runbook.md", "Quasar release approval requires violet telemetry.");
+            var hit = Assert.Single(await Search(store, collection.Id, "quasar violet"));
+            reference = hit.Reference;
+            Assert.Equal(imported.Id, hit.DocumentId);
+            Assert.Equal(KnowledgeDocumentStatus.Ready, hit.Status);
+            Assert.Equal("text-v1", imported.ExtractorId);
+            Assert.Contains("telemetry", Assert.Single(store.Read(reference, collectionIds: [collection.Id])).Text);
+        }
+        using (var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => throw new Exception("Restart must not extract"))))
+        {
+            Assert.Equal(collection, Assert.Single(store.ListCollections()));
+            Assert.Equal(imported.ContentHash, Assert.Single(store.ListDocuments(collection.Id)).ContentHash);
+            Assert.Equal(reference, Assert.Single(await Search(store, collection.Id, "violet")).Reference);
+            using var original = new StreamReader(store.OpenOriginal(collection.Id, imported.Id, imported.Version));
+            Assert.Equal("Quasar release approval requires violet telemetry.", await original.ReadToEndAsync());
+        }
+        Assert.Equal(1, extractor.Calls);
+    }
+
+    [Fact]
+    public async Task IdempotentImportUpdateReindexAndDeletionInvalidateOldReferences()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var collection = await store.CreateCollectionAsync("Notes");
+        var first = await Import(store, collection.Id, "a.txt", "Old zephyr protocol.");
+        string reference = Assert.Single(await Search(store, collection.Id, "zephyr")).Reference;
+        var duplicate = await Import(store, collection.Id, "a.txt", "Old zephyr protocol.");
+        Assert.Equal(first.Id, duplicate.Id);
+        Assert.Equal(1, duplicate.Version);
+        var updated = await Import(store, collection.Id, "a.txt", "Replacement quartz protocol.");
+        Assert.Equal(first.Id, updated.Id);
+        Assert.Equal(2, updated.Version);
+        Assert.Empty(await Search(store, collection.Id, "zephyr"));
+        Assert.Throws<KnowledgeStaleReferenceException>(() => store.Read(reference));
+        Assert.Throws<KnowledgeStaleReferenceException>(() => store.OpenOriginal(collection.Id, first.Id, 1));
+        var current = Assert.Single(await Search(store, collection.Id, "quartz"));
+        var reindexed = await store.ReindexAsync(collection.Id, first.Id);
+        Assert.Equal(3, reindexed.Version);
+        Assert.Equal(updated.ContentHash, reindexed.ContentHash);
+        Assert.Throws<KnowledgeStaleReferenceException>(() => store.Read(current.Reference));
+        Assert.True(await store.DeleteDocumentAsync(collection.Id, first.Id));
+        Assert.False(await store.DeleteDocumentAsync(collection.Id, first.Id));
+        Assert.Empty(store.ListDocuments(collection.Id));
+        Assert.Empty(await Search(store, collection.Id, "quartz"));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "objects")));
+    }
+
+    [Fact]
+    public async Task CollectionScopeFiltersBeforeRankingAndReferenceResolution()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var privateCollection = await store.CreateCollectionAsync("Private");
+        var selected = await store.CreateCollectionAsync("Selected");
+        await Import(store, privateCollection.Id, "private.txt", "supersecret supersecret code 9274");
+        await Import(store, selected.Id, "public.txt", "supersecret is a placeholder in this document");
+        var privateHit = Assert.Single(await Search(store, privateCollection.Id, "9274"));
+        var selectedHit = Assert.Single(await Search(store, selected.Id, "supersecret"));
+        Assert.Equal("public.txt", selectedHit.FileName);
+        Assert.Empty(await Search(store, selected.Id, "9274"));
+        Assert.Empty(await store.SearchAsync("supersecret", new()));
+        Assert.Throws<KeyNotFoundException>(() => store.Read(privateHit.Reference, collectionIds: [selected.Id]));
+        Assert.Throws<KeyNotFoundException>(() => store.Read(privateHit.Reference, collectionIds: []));
+        Assert.Throws<KeyNotFoundException>(() => store.OpenOriginal(selected.Id, privateHit.DocumentId, 1));
+        Assert.False(await store.DeleteDocumentAsync(selected.Id, privateHit.DocumentId));
+    }
+
+    [Fact]
+    public async Task Bm25RanksFocusedDocumentAboveLongNoisyMatchAndHandlesCjk()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor(), options: new() { ChunkCharacters = 10000 });
+        var collection = await store.CreateCollectionAsync("Manuals");
+        await Import(store, collection.Id, "focused.txt", "helium cooling specification");
+        await Import(store, collection.Id, "noise.txt", "helium " + string.Join(" ", Enumerable.Repeat("irrelevant", 500)));
+        await Import(store, collection.Id, "chinese.txt", "知识系统支持中文资料检索。");
+        var results = await Search(store, collection.Id, "helium cooling");
+        Assert.Equal("focused.txt", results[0].FileName);
+        Assert.Equal("chinese.txt", Assert.Single(await Search(store, collection.Id, "知识")).FileName);
+    }
+
+    [Fact]
+    public async Task ChunkingRetainsLocationsAndCharacterBudgetsWithoutBreakingSurrogates()
+    {
+        var extraction = new KnowledgeExtraction
+        {
+            Segments = [new(new string('A', 50) + " 😀 " + new string('B', 60), new() { Page = 7 }, "text"),
+                new("At fifty seconds the alarm sounded.", new() { StartSeconds = 50, EndSeconds = 53 }, "audio")],
+            Status = KnowledgeDocumentStatus.Partial, Warnings = ["One unreadable page"]
+        };
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction)),
+            options: new() { ChunkCharacters = 64, ChunkOverlapCharacters = 8 });
+        var collection = await store.CreateCollectionAsync("Evidence");
+        var doc = await Import(store, collection.Id, "recording.bin", "anything");
+        Assert.True(doc.ChunkCount >= 3);
+        var hits = await Search(store, collection.Id, "alarm");
+        var audio = Assert.Single(hits);
+        Assert.Equal("audio", audio.Modality);
+        Assert.Equal(50, audio.Location!.StartSeconds);
+        Assert.Equal(KnowledgeDocumentStatus.Partial, audio.Status);
+        var bounded = store.Read(audio.Reference, 11, adjacentChunks: 2, collectionIds: [collection.Id]);
+        Assert.True(bounded.Sum(x => x.Text.Length) <= 11);
+        Assert.True(bounded.Last().Truncated);
+        Assert.All(bounded, r => Assert.False(r.Text.Length > 0 && char.IsHighSurrogate(r.Text[^1])));
+    }
+
+    [Fact]
+    public async Task MetadataOnlyAssetsAreExplicitAndNeverEmbeddedAsSemanticContent()
+    {
+        var provider = new VectorProvider();
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(new KnowledgeExtraction
+        { Status = KnowledgeDocumentStatus.MetadataOnly, Warnings = ["No image description provider configured."] })), provider);
+        var collection = await store.CreateCollectionAsync("Photos");
+        var doc = await Import(store, collection.Id, "nebula.png", "fake image bytes");
+        Assert.Equal(KnowledgeDocumentStatus.MetadataOnly, doc.Status);
+        Assert.Null(doc.EmbeddingModelId);
+        var hit = Assert.Single(await Search(store, collection.Id, "nebula"));
+        Assert.Equal("metadata", hit.Modality);
+        Assert.Equal(0, provider.Calls);
+    }
+
+    [Fact]
+    public async Task DenseRetrievalFindsSemanticMatchAndNeverMixesEmbeddingModelSpaces()
+    {
+        string collectionId, documentId;
+        using (var store = new KnowledgeStore(_root, new TextExtractor(), new VectorProvider("space-a")))
+        {
+            var collection = await store.CreateCollectionAsync("Things"); collectionId = collection.Id;
+            documentId = (await Import(store, collection.Id, "a.txt", "automobile maintenance")).Id;
+            await Import(store, collection.Id, "b.txt", "apple orchard");
+            Assert.Equal("a.txt", Assert.Single(await Search(store, collection.Id, "car")).FileName);
+        }
+        var otherSpace = new VectorProvider("space-b");
+        using (var store = new KnowledgeStore(_root, new TextExtractor(), otherSpace))
+        {
+            Assert.Empty(await Search(store, collectionId, "car"));
+            Assert.Equal(0, otherSpace.Calls);
+            Assert.Equal("a.txt", Assert.Single(await Search(store, collectionId, "automobile")).FileName);
+            var doc = await store.ReindexAsync(collectionId, documentId);
+            Assert.Equal("space-b", doc.EmbeddingModelId);
+            Assert.Equal("a.txt", Assert.Single(await Search(store, collectionId, "car")).FileName);
+        }
+        Assert.True(otherSpace.Disposed);
+    }
+
+    [Theory]
+    [InlineData("count")]
+    [InlineData("dimension")]
+    [InlineData("nan")]
+    [InlineData("zero")]
+    public async Task InvalidEmbeddingResponsesNeverPublishDocument(string invalid)
+    {
+        var provider = new InvalidVectorProvider(invalid);
+        using var store = new KnowledgeStore(_root, new TextExtractor(), provider);
+        var collection = await store.CreateCollectionAsync("Broken");
+        await Assert.ThrowsAsync<InvalidDataException>(() => Import(store, collection.Id, "file.txt", "hello"));
+        Assert.Empty(store.ListDocuments(collection.Id));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "objects")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "staging")));
+    }
+
+    [Fact]
+    public async Task FailedAndCancelledUpdatesKeepPreviouslyCommittedVersion()
+    {
+        var extractor = new TextExtractor();
+        using var store = new KnowledgeStore(_root, extractor);
+        var collection = await store.CreateCollectionAsync("Stable");
+        var first = await Import(store, collection.Id, "a.txt", "committed jade record");
+        extractor.Fail = true;
+        await Assert.ThrowsAsync<InvalidDataException>(() => Import(store, collection.Id, "a.txt", "replacement"));
+        using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Import(store, collection.Id, "a.txt", "cancelled", cancelled.Token));
+        Assert.Equal(first.Version, Assert.Single(store.ListDocuments(collection.Id)).Version);
+        Assert.Equal(first.Id, Assert.Single(await Search(store, collection.Id, "jade")).DocumentId);
+        Assert.Single(Directory.GetFiles(Path.Combine(_root, "objects")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "staging")));
+    }
+
+    [Fact]
+    public async Task CancellationDuringExtractionLeavesNoVisibleOrStagedDocument()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var store = new KnowledgeStore(_root, new DelegateExtractor(async (_, ct) =>
+        { entered.SetResult(); await Task.Delay(Timeout.Infinite, ct); return new(); }));
+        var collection = await store.CreateCollectionAsync("Cancelled");
+        using var cancellation = new CancellationTokenSource();
+        var pending = Import(store, collection.Id, "a.txt", "transient", cancellation.Token);
+        await entered.Task; cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending);
+        Assert.Empty(store.ListDocuments(collection.Id));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "staging")));
+    }
+
+    [Fact]
+    public async Task LimitsRejectOversizedStreamsAndExtractionWithoutSilentTruncation()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor(), options: new()
+        { MaxFileBytes = 40, MaxExtractedCharacters = 20, ChunkCharacters = 16, ChunkOverlapCharacters = 0 });
+        var collection = await store.CreateCollectionAsync("Bounded");
+        await Assert.ThrowsAsync<KnowledgeLimitException>(() => Import(store, collection.Id, "big.txt", new string('x', 41)));
+        await Assert.ThrowsAsync<KnowledgeLimitException>(() => Import(store, collection.Id, "text.txt", new string('x', 30)));
+        Assert.Empty(store.ListDocuments(collection.Id));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "staging")));
+    }
+
+    [Fact]
+    public async Task DocumentChunkAndStorageQuotasAllowReplacementButRejectGrowth()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor(), options: new()
+        { MaxDocuments = 1, MaxStoredBytes = 20, MaxTotalChunks = 1, MaxChunksPerDocument = 1, ChunkCharacters = 16, ChunkOverlapCharacters = 0 });
+        var collection = await store.CreateCollectionAsync("Bounded");
+        await Import(store, collection.Id, "a.txt", "short");
+        await Import(store, collection.Id, "a.txt", "changed");
+        await Assert.ThrowsAsync<KnowledgeLimitException>(() => Import(store, collection.Id, "b.txt", "other"));
+        await Assert.ThrowsAsync<KnowledgeLimitException>(() => Import(store, collection.Id, "a.txt", new string('x', 18)));
+        await Assert.ThrowsAsync<KnowledgeLimitException>(() => Import(store, collection.Id, "a.txt", new string('x', 21)));
+        Assert.Equal(2, Assert.Single(store.ListDocuments(collection.Id)).Version);
+    }
+
+    [Theory]
+    [InlineData("../escape")]
+    [InlineData("/etc/passwd")]
+    [InlineData("ABCDEF0123456789ABCDEF0123456789")]
+    [InlineData("")]
+    public async Task MalformedIdsCannotReachStorage(string id)
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Throws<ArgumentException>(() => store.ListDocuments(id));
+        await Assert.ThrowsAsync<ArgumentException>(() => Import(store, id, "a.txt", "data"));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.DeleteCollectionAsync(id));
+    }
+
+    [Theory]
+    [InlineData("../secret.txt")]
+    [InlineData("folder\\secret.txt")]
+    [InlineData("name\n.txt")]
+    public async Task DisplayNamesCannotCarryPathsOrControlCharacters(string name)
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var collection = await store.CreateCollectionAsync("Files");
+        await Assert.ThrowsAsync<ArgumentException>(() => Import(store, collection.Id, name, "data"));
+    }
+
+    [Theory]
+    [InlineData("file:///etc/passwd")]
+    [InlineData("kb://../x@1/0")]
+    [InlineData("kb://00000000000000000000000000000000/00000000000000000000000000000000@1/-1")]
+    [InlineData("kb://00000000000000000000000000000000/00000000000000000000000000000000@1/0?x")]
+    public void InvalidSourceReferencesAreRejected(string reference)
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Throws<ArgumentException>(() => store.Read(reference));
+    }
+
+    [Fact]
+    public async Task ConcurrentImportsSerializeAndSingleWriterLockSurvivesFailedSecondOpen()
+    {
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            Assert.Throws<IOException>(() => new KnowledgeStore(_root, new TextExtractor()));
+            var collection = await store.CreateCollectionAsync("Concurrent");
+            var docs = await Task.WhenAll(Enumerable.Range(0, 30).Select(i => Import(store, collection.Id, $"{i}.txt", $"unique{i} marker")));
+            Assert.Equal(30, store.ListDocuments(collection.Id).Count);
+            Assert.Equal(30, docs.Select(d => d.Id).Distinct().Count());
+            Assert.Equal("17.txt", Assert.Single(await Search(store, collection.Id, "unique17")).FileName);
+        }
+        using var reopened = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Equal(30, reopened.ListDocuments(Assert.Single(reopened.ListCollections()).Id).Count);
+    }
+
+    [Fact]
+    public async Task DeletingCollectionPreservesOtherCollectionAndSharedOriginal()
+    {
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            var first = await store.CreateCollectionAsync("First");
+            var second = await store.CreateCollectionAsync("Second");
+            await Import(store, first.Id, "first.txt", "shared durable text");
+            var survivor = await Import(store, second.Id, "second.txt", "shared durable text");
+            Assert.Single(Directory.GetFiles(Path.Combine(_root, "objects")));
+            Assert.True(await store.DeleteCollectionAsync(first.Id));
+            Assert.False(await store.DeleteCollectionAsync(first.Id));
+            Assert.Single(Directory.GetFiles(Path.Combine(_root, "objects")));
+            using var original = store.OpenOriginal(second.Id, survivor.Id, 1);
+            Assert.Equal(survivor.SizeBytes, original.Length);
+        }
+        using var reopened = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Equal("Second", Assert.Single(reopened.ListCollections()).Name);
+    }
+
+    [Fact]
+    public async Task StartupRecoversInterruptedCollectionDeletionAndOrphanBlobs()
+    {
+        string collectionId;
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            collectionId = (await store.CreateCollectionAsync("Interrupted")).Id;
+            await Import(store, collectionId, "a.txt", "orphan after deletion");
+        }
+        File.Delete(Path.Combine(_root, "collections", collectionId + ".json"));
+        File.WriteAllText(Path.Combine(_root, "staging", "abandoned.upload"), "interrupted");
+        using var reopened = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Empty(reopened.ListCollections());
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "documents")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "objects")));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_root, "staging")));
+    }
+
+    [Fact]
+    public async Task CorruptManifestFailsExplicitlyAndReleasesWriterLock()
+    {
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            var collection = await store.CreateCollectionAsync("Corrupt");
+            await Import(store, collection.Id, "a.txt", "stored");
+        }
+        string manifest = Assert.Single(Directory.GetFiles(Path.Combine(_root, "documents")));
+        string valid = File.ReadAllText(manifest);
+        JsonNode node = JsonNode.Parse(valid)!;
+        node["Schema"] = 999;
+        File.WriteAllText(manifest, node.ToJsonString());
+        Assert.Throws<InvalidDataException>(() => new KnowledgeStore(_root, new TextExtractor()));
+        File.WriteAllText(manifest, valid);
+        using var repaired = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Single(repaired.ListCollections());
+    }
+
+    [Fact]
+    public async Task ProviderIsNotDisposedUntilInFlightSearchCompletes()
+    {
+        var provider = new BlockingQueryProvider();
+        var store = new KnowledgeStore(_root, new TextExtractor(), provider);
+        var collection = await store.CreateCollectionAsync("Lifecycle");
+        await Import(store, collection.Id, "car.txt", "automobile maintenance");
+        var search = Search(store, collection.Id, "car");
+        await provider.Entered.Task;
+        var disposing = Task.Run(store.Dispose);
+        await Task.Delay(30);
+        Assert.False(provider.Disposed);
+        provider.Release.SetResult();
+        Assert.Single(await search);
+        await disposing;
+        Assert.True(provider.Disposed);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => Search(store, collection.Id, "car"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task QueryEmbeddingAwaitCannotDiscloseDeletedOrReplacedSnapshot(bool replace)
+    {
+        var provider = new BlockingQueryProvider();
+        using var store = new KnowledgeStore(_root, new TextExtractor(), provider);
+        var collection = await store.CreateCollectionAsync("Revocation");
+        var document = await Import(store, collection.Id, "car.txt", "automobile old confidential content");
+        var pending = Search(store, collection.Id, "car");
+        await provider.Entered.Task;
+        if (replace) await Import(store, collection.Id, "car.txt", "apple replacement public content");
+        else await store.DeleteDocumentAsync(collection.Id, document.Id);
+        provider.Release.SetResult();
+        Assert.Empty(await pending);
+    }
+
+    [Fact]
+    public async Task ReadBudgetAlwaysIncludesRequestedChunkBeforeAdjacentContext()
+    {
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(new KnowledgeExtraction
+            { Segments = [new("earlier irrelevant text"), new("requested important text"), new("later extra text")] })));
+        var collection = await store.CreateCollectionAsync("Read");
+        await Import(store, collection.Id, "a.txt", "fixture");
+        var result = Assert.Single(await Search(store, collection.Id, "requested"));
+        var read = Assert.Single(store.Read(result.Reference, maxCharacters: 5, adjacentChunks: 2, collectionIds: [collection.Id]));
+        Assert.Equal(result.ChunkIndex, read.ChunkIndex);
+        Assert.Equal("reque", read.Text);
+    }
+
+    [Theory]
+    [InlineData("zero")]
+    [InlineData("dimensions")]
+    public async Task CorruptStoredEmbeddingsFailBeforeIndexPublication(string corruption)
+    {
+        using (var store = new KnowledgeStore(_root, new TextExtractor(), new VectorProvider(),
+            new() { ChunkCharacters = 16, ChunkOverlapCharacters = 0 }))
+        {
+            var collection = await store.CreateCollectionAsync("Corrupt vectors");
+            await Import(store, collection.Id, "a.txt", "automobile maintenance instructions are here");
+        }
+        string path = Assert.Single(Directory.GetFiles(Path.Combine(_root, "documents")));
+        var manifest = JsonNode.Parse(File.ReadAllText(path))!;
+        manifest["Chunks"]![0]!["Vector"] = corruption == "zero" ? JsonNode.Parse("[0,0]") : JsonNode.Parse("[1,0,0]");
+        File.WriteAllText(path, manifest.ToJsonString());
+        Assert.Throws<InvalidDataException>(() => new KnowledgeStore(_root, new TextExtractor(), options: new() { ChunkCharacters = 16, ChunkOverlapCharacters = 0 }));
+    }
+
+    [Fact]
+    public async Task HybridDoesNotBoostUnrelatedDocumentsSolelyForQueryFunctionWords()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor(), new VectorProvider());
+        var collection = await store.CreateCollectionAsync("Relevance");
+        await Import(store, collection.Id, "a-noise.txt", "the apple is in the orchard and should be picked");
+        await Import(store, collection.Id, "z-target.txt", "automobile maintenance");
+        var result = await Search(store, collection.Id, "when should the car be serviced");
+        Assert.Equal("z-target.txt", result[0].FileName);
+        Assert.Equal("a-noise.txt", (await Search(store, collection.Id, "the in should"))[0].FileName);
+    }
+
+    [Fact]
+    public async Task OversizedProvenanceCannotAmplifyChunkManifests()
+    {
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(new KnowledgeExtraction
+            { Segments = [new("text", new() { Section = new string('x', 1001) })] })));
+        var collection = await store.CreateCollectionAsync("Metadata bounds");
+        await Assert.ThrowsAsync<InvalidDataException>(() => Import(store, collection.Id, "a.txt", "fixture"));
+        Assert.Empty(store.ListDocuments(collection.Id));
+    }
+
+    private static async Task<KnowledgeDocument> Import(KnowledgeStore store, string collection, string name, string text, CancellationToken ct = default)
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(text));
+        return await store.ImportAsync(collection, name, stream, "text/plain", ct);
+    }
+    private static Task<IReadOnlyList<KnowledgeSearchResult>> Search(KnowledgeStore store, string collection, string query) =>
+        store.SearchAsync(query, new() { CollectionIds = [collection] });
+
+    private sealed class TextExtractor : IKnowledgeExtractor
+    {
+        public int Calls;
+        public bool Fail;
+        public async Task<KnowledgeExtraction> ExtractAsync(KnowledgeExtractionContext context, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            if (Fail) throw new InvalidDataException("Intentional extraction failure.");
+            return new() { ExtractorId = "text-v1", Segments = [new(await File.ReadAllTextAsync(context.FilePath, cancellationToken))] };
+        }
+    }
+    private sealed class DelegateExtractor(Func<KnowledgeExtractionContext, CancellationToken, Task<KnowledgeExtraction>> extract) : IKnowledgeExtractor
+    {
+        public Task<KnowledgeExtraction> ExtractAsync(KnowledgeExtractionContext context, CancellationToken cancellationToken = default) => extract(context, cancellationToken);
+    }
+    private class VectorProvider(string modelId = "test-space") : IKnowledgeEmbeddingProvider, IDisposable
+    {
+        public string ModelId => modelId;
+        public int Dimensions => 2;
+        public int Calls;
+        public bool Disposed;
+        public virtual Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, bool isQuery, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            return Task.FromResult(texts.Select(t => t.Contains("car") || t.Contains("automobile") ? new float[] { 3, 0 } : new float[] { 0, 5 }).ToArray());
+        }
+        public void Dispose() => Disposed = true;
+    }
+    private sealed class InvalidVectorProvider(string invalid) : VectorProvider
+    {
+        public override Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, bool isQuery, CancellationToken cancellationToken = default) => Task.FromResult(invalid switch
+        {
+            "count" => Array.Empty<float[]>(), "dimension" => new[] { new[] { 1f } },
+            "nan" => new[] { new[] { float.NaN, 0f } }, _ => new[] { new[] { 0f, 0f } },
+        });
+    }
+    private sealed class BlockingQueryProvider : VectorProvider
+    {
+        public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async Task<float[][]> EmbedAsync(IReadOnlyList<string> texts, bool isQuery, CancellationToken cancellationToken = default)
+        {
+            if (isQuery) { Entered.SetResult(); await Release.Task.WaitAsync(cancellationToken); }
+            Assert.False(Disposed);
+            return await base.EmbedAsync(texts, isQuery, cancellationToken);
+        }
+    }
+}

@@ -138,7 +138,7 @@ public sealed class ConversationRecorder
         string sessionId, string content, string? thinking = null,
         IReadOnlyList<StoredArtifact>? artifacts = null, string? imageUrl = null,
         string? videoUrl = null, string? audioUrl = null, StoredTurnStats? stats = null,
-        ImageTurnRecord? image = null)
+        ImageTurnRecord? image = null, IReadOnlyList<JsonElement>? knowledgeSources = null)
     {
         // Image/video completion frames carry zero-token placeholder counters. Keep
         // actual LLM counters when a text turn also produced media through a tool.
@@ -169,6 +169,7 @@ public sealed class ConversationRecorder
                 // the answer (a small model repeats a link erratically), so it is written
                 // down here or it is lost the moment the user opens another chat.
                 Artifacts = artifacts is { Count: > 0 } ? new List<StoredArtifact>(artifacts) : null,
+                KnowledgeSources = knowledgeSources is { Count: > 0 } ? knowledgeSources.Select(source => source.Clone()).ToList() : null,
                 ImageUrl = string.IsNullOrEmpty(imageUrl) ? null : imageUrl,
                 VideoUrl = string.IsNullOrEmpty(videoUrl) ? null : videoUrl,
                 AudioUrl = string.IsNullOrEmpty(videoUrl) || string.IsNullOrEmpty(audioUrl) ? null : audioUrl,
@@ -241,6 +242,12 @@ public sealed class ConversationRecorder
                 conversation.ModelId = name;
             if (body.TryGetProperty("think", out JsonElement think) && think.ValueKind is JsonValueKind.True or JsonValueKind.False)
                 conversation.Think = think.GetBoolean();
+            // Omission never inherits a different conversation's library scope.
+            conversation.KnowledgeCollections = body.TryGetProperty("knowledgeCollections", out JsonElement collections)
+                && collections.ValueKind == JsonValueKind.Array
+                ? collections.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+                    .Select(item => item.GetString()!).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToList()
+                : new List<string>();
             if (body.TryGetProperty("skills", out JsonElement skills) && skills.ValueKind == JsonValueKind.Array)
             {
                 conversation.Skills.Clear();

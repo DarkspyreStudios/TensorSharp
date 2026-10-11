@@ -20,6 +20,7 @@ using Microsoft.Extensions.Logging;
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Chat;
+using TensorSharp.Knowledge;
 using TensorSharp.Server.Endpoints;
 using TensorSharp.Server.Hosting;
 using TensorSharp.Server.RequestParsers;
@@ -63,11 +64,13 @@ public sealed class WebUiAdapter
         ICodeRunner codeRunner,
         SessionWorkspaceManager workspaces,
         CodeArtifactStore codeArtifacts,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        KnowledgeStore? knowledge = null)
     {
         _service = new WebUiChatService(
             svc, sessions, options, uploads, skills, codeRunner, workspaces, codeArtifacts, loggerFactory,
             CodeArtifactEndpoints.RoutePrefix);
+        if (knowledge != null) _service.Knowledge = knowledge;
         _svc = svc;
         _options = options;
         _uploads = uploads;

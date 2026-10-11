@@ -17,6 +17,7 @@ Current source covers text and reasoning, multimodal input, embeddings, image ge
 - **Embeddings and media generation.** [Text/code embeddings](docs/embeddings.md), [Qwen-Image-2.1](docs/models/qwenimage21.md) generation and masked editing, and video models including [MiniMax-H3 with audio](docs/models/minimax-h3.md).
 - **Efficient serving.** Continuous batching and a paged, Radix prefix-shared KV cache are on by default. Speculative decoding and multi-GPU placement are available for supported models. See [Features](FEATURES.md).
 - **Agent Skills and code tools.** `TensorSharp.AgentHost` adds file, shell and document workflows. Server and TensorAgent chats also support [bounded sub-agent delegation](docs/multi_agent.md) with private workspaces and read-only defaults.
+- **Personal knowledge collections.** [Upload and index documents, datasets, images, audio and sampled video](docs/knowledge-system.md), select collections per chat, and retrieve versioned sources during inference or agent work. Optional local embeddings add semantic retrieval; extraction coverage depends on the format and available models.
 - **Recorded comparisons.** Benchmarks against `llama.cpp` use identical GGUF files and hardware; results apply to the measured model, backend and workload. See [Benchmarks](docs/benchmarks.md).
 - **TensorAgent apps.** Local chat, attachments, skills and saved work on phones and desktops. See the [Mac/Windows installation guide](docs/tensoragent_desktop.md) and [app coverage notes](TensorAgent/README.md).
 

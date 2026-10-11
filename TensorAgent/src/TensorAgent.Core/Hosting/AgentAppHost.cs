@@ -26,6 +26,8 @@ using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.AgentHost.Skills;
 using TensorSharp.Chat;
+using TensorSharp.Knowledge;
+using TensorSharp.Server.Knowledge;
 using TensorSharp.GGML;
 using TensorSharp.Runtime;
 using TensorSharp.Runtime.Scheduling;
@@ -248,6 +250,7 @@ public sealed class AgentAppHost : IDisposable
         });
 
         ModelService = modelService ?? new ModelService(_loggerFactory.CreateLogger<ModelService>());
+        Knowledge = KnowledgeRuntime.CreateStore(paths.KnowledgeDirectory, ModelService);
         EngineHasWorkInFlight = EngineIsProcessing;
         // Whether the model may run at all right now. Closed by the iOS head while the
         // app is not frontmost, because iOS refuses GPU work from the background and
@@ -289,6 +292,7 @@ public sealed class AgentAppHost : IDisposable
             CodeRunner!, Workspaces, Artifacts, _loggerFactory,
             WebUiChatService.DefaultArtifactUriPrefix,
             skillRouter: TensorAgentSkillRouter.Route);
+        Chat.Knowledge = Knowledge;
         ImagePlanner = ImageTurns.Planner.For(Chat, Options.UploadDirectory);
 
         // The share contract stays platform-neutral. On iOS the path points into the
@@ -389,6 +393,7 @@ public sealed class AgentAppHost : IDisposable
             hasShareContainer: () => ShareInbox is not null, discardShare: DiscardPendingShare,
             onModelCacheDirectoryChanged: SetModelCacheDirectory, device: Paths.DeviceClass);
         Server.MapLoras(this);
+        Server.MapKnowledge(Knowledge);
     }
 
     public AgentPaths Paths { get; }
@@ -414,6 +419,8 @@ public sealed class AgentAppHost : IDisposable
     public UploadStoragePolicy Uploads { get; }
     public ServerHostingOptions Options { get; }
     public WebUiChatService Chat { get; }
+    /// <summary>Durable personal sources and their retrieval index, separate from temporary chat uploads.</summary>
+    public KnowledgeStore Knowledge { get; }
 
     /// <summary>
     /// How a picture turn reads the conversation it ends: the uploads the pictures are kept in,
@@ -3339,6 +3346,7 @@ public sealed class AgentAppHost : IDisposable
         Close(Downloads);
         WaitForTheEngineToStop();
         Close(Turns);
+        Close(Knowledge);
         Close(ModelService);
         foreach (IDisposable owned in _owned)
             Close(owned);
@@ -3406,6 +3414,8 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     /// model's own directory, which the store's completeness check walks.</summary>
     public string LorasDirectory => Path.Combine(CacheRoot, "loras");
     public string ConversationsDirectory => Path.Combine(DataRoot, "conversations");
+    /// <summary>Durable user sources and their index; never part of purgeable upload or workspace caches.</summary>
+    public string KnowledgeDirectory => Path.Combine(DataRoot, "knowledge");
     public string UploadsDirectory => Path.Combine(CacheRoot, "uploads");
     public string ScratchDirectory => Path.Combine(CacheRoot, "scratch");
     public string ArtifactsDirectory => Path.Combine(CacheRoot, "artifacts");
@@ -3433,7 +3443,7 @@ public sealed record AgentPaths(string DataRoot, string CacheRoot)
     {
         foreach (string directory in new[]
                  {
-                     DataRoot, CacheRoot, ModelsDirectory, ConversationsDirectory, UploadsDirectory,
+                     DataRoot, CacheRoot, ModelsDirectory, ConversationsDirectory, KnowledgeDirectory, UploadsDirectory,
                      ScratchDirectory, ArtifactsDirectory, LogsDirectory, InstalledSkillsDirectory,
                  })
         {

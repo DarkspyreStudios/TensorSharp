@@ -214,6 +214,7 @@ public static partial class WebUiRoutes
                 messages = conversation.Messages,
                 think = conversation.Think,
                 skills = conversation.Skills,
+                knowledgeCollections = conversation.KnowledgeCollections,
                 skillsExplicit = conversation.SkillsExplicit,
                 modelId = conversation.ModelId,
                 // The answer a previous page left running here, if there is one. Sent
@@ -846,6 +847,7 @@ public static partial class WebUiRoutes
         var content = new StringBuilder();
         var thinking = new StringBuilder();
         var artifacts = new List<StoredArtifact>();
+        var knowledgeSources = new List<JsonElement>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
         string? sessionId = null;
         string? imageUrl = null, videoUrl = null, audioUrl = null;
@@ -861,6 +863,7 @@ public static partial class WebUiRoutes
             // only way to stay honest about what was actually sent.
             using JsonDocument document = JsonDocument.Parse(JsonSerializer.Serialize(frame, SseFraming.JsonOptions));
             JsonElement root = document.RootElement;
+            CollectKnowledgeSources(root, knowledgeSources);
             if (root.TryGetProperty("done", out JsonElement done) && done.ValueKind == JsonValueKind.True)
                 stats = StoredTurnStats.FromDoneFrame(root);
             if (root.TryGetProperty("token", out JsonElement token) && token.GetString() is { } piece)
@@ -893,7 +896,15 @@ public static partial class WebUiRoutes
         }
 
         if (sessionId is not null)
-            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl, videoUrl, audioUrl, stats, image);
+            recorder.Complete(sessionId, content.ToString(), thinking.ToString(), artifacts, imageUrl, videoUrl, audioUrl, stats, image, knowledgeSources);
+    }
+
+    internal static void CollectKnowledgeSources(JsonElement frame, List<JsonElement> destination)
+    {
+        if (!frame.TryGetProperty("knowledgeSources", out var sources) || sources.ValueKind != JsonValueKind.Array) return;
+        destination.Clear();
+        foreach (var source in sources.EnumerateArray().Take(50))
+            if (source.ValueKind == JsonValueKind.Object) destination.Add(source.Clone());
     }
 
     /// <summary>

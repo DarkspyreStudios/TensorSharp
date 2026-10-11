@@ -552,6 +552,30 @@ label.skill-toggle { padding: 12px 4px; }
 #skills-sheet button:disabled { opacity: .5; cursor: default; }
 #skills-sheet .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 3px; }
 #skills-error { font-size: 13px; color: #fca5a5; margin: 8px 4px; overflow-wrap: anywhere; }
+#knowledgechips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+#knowledgechips:empty { display: none; }
+#knowledgechips button { color: var(--text); border: 1px solid var(--border); cursor: pointer; }
+#knowledge-sheet { max-height: 88vh; }
+.knowledge-heading, .knowledge-collection, .knowledge-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.knowledge-heading { justify-content: space-between; }
+.knowledge-heading h2, .knowledge-heading h3 { margin: 8px 0; overflow-wrap: anywhere; }
+.knowledge-collection { border: 1px solid var(--border); border-radius: 10px; padding: 4px 8px; margin: 6px 0; }
+.knowledge-collection.active { border-color: var(--accent); }
+.knowledge-choice { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; min-height: 44px; overflow-wrap: anywhere; }
+.knowledge-choice input { width: 20px; height: 20px; flex: 0 0 auto; accent-color: var(--accent); }
+.knowledge-document, .knowledge-result { border-top: 1px solid var(--border); padding: 12px 0; overflow-wrap: anywhere; }
+#knowledge-sheet .mini { min-height: 44px; white-space: normal; text-align: left; }
+#knowledge-sheet button:disabled { opacity: .45; cursor: default; }
+#knowledge-sheet .knowledge-delete, #knowledge-error { color: #fca5a5; }
+#knowledge-error { white-space: pre-wrap; overflow-wrap: anywhere; }
+.knowledge-warning { color: #e7c485; font-size: 13px; margin: 6px 0; }
+.knowledge-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 14px; line-height: 1.5; }
+.knowledge-reference { display: block; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.knowledge-citations { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.knowledge-citations .hint-block { width: 100%; }
+.knowledge-citations .knowledge-source { max-width: 100%; white-space: normal; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.knowledge-source { display: inline-flex; align-items: center; color: var(--accent); text-decoration: none; }
+#knowledge-read:not(:empty) { padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; }
 @media (max-width: 420px) {
   .skill-manage-row { flex-wrap: wrap; }
   .skill-manage-row .meta { flex-basis: 100%; }
@@ -626,6 +650,7 @@ button.mini.quiet { background: transparent; color: var(--muted); }
 <div id="composer">
   <button id="composer-loras" type="button" style="display:none" aria-controls="lora-sheet" aria-haspopup="dialog"><span data-i18n="markup.model.loras">LoRA plug-ins</span><span id="composer-loras-hint"></span><span aria-hidden="true">›</span></button>
   <div id="skillchips"></div>
+  <div id="knowledgechips"></div>
   <div id="chips"></div>
   <!-- Above the message box, so the answer to "is it stuck?" is never off-screen and
        the box the thumb aims at never moves. -->
@@ -669,6 +694,35 @@ button.mini.quiet { background: transparent; color: var(--muted); }
   <button class="opt" id="skill-add"><span class="em">＋</span> <span data-i18n="markup.skills.add">Add a skill</span><span class="hint" data-i18n="markup.skills.addHint">.zip or a link</span></button>
 </div>
 
+<div class="sheet" id="knowledge-sheet" role="dialog" aria-modal="true" aria-labelledby="knowledge-title">
+  <div class="grab"></div>
+  <div class="knowledge-heading">
+    <h2 id="knowledge-title" data-i18n="page.knowledge.title">Knowledge</h2>
+    <button class="mini quiet" id="knowledge-close" type="button" data-i18n="page.knowledge.close">Done</button>
+  </div>
+  <p class="hint-block" data-i18n="page.knowledge.intro">Choose the collections this chat can search. Browse to upload and manage their sources.</p>
+  <p id="knowledge-error" role="alert" style="display:none"></p>
+  <div class="urlrow">
+    <input id="knowledge-name" type="text" maxlength="120" data-i18n-placeholder="page.knowledge.name" data-i18n-aria-label="page.knowledge.name" placeholder="Collection name">
+    <button id="knowledge-create" type="button" data-i18n="page.knowledge.create">Create</button>
+  </div>
+  <button class="mini quiet" id="knowledge-refresh" type="button" data-i18n="page.knowledge.refresh">Refresh</button>
+  <div id="knowledge-collections"></div>
+  <div class="knowledge-heading">
+    <h3 id="knowledge-active-name"></h3>
+    <div id="knowledge-collection-actions" class="knowledge-actions"></div>
+  </div>
+  <button class="opt" id="knowledge-upload" type="button" disabled data-i18n="page.knowledge.upload">Upload documents or media</button>
+  <p id="knowledge-status" class="hint-block" role="status" aria-live="polite"></p>
+  <div id="knowledge-documents"></div>
+  <div class="urlrow">
+    <input id="knowledge-query" type="search" maxlength="4000" data-i18n-placeholder="page.knowledge.query" data-i18n-aria-label="page.knowledge.query" placeholder="Search this collection">
+    <button id="knowledge-search" type="button" disabled data-i18n="page.knowledge.search">Search</button>
+  </div>
+  <div id="knowledge-results" aria-live="polite"></div>
+  <div id="knowledge-read" aria-live="polite"></div>
+</div>
+
 <!-- Optional full description. Selection and removal are also on every list row. -->
 <div class="sheet" id="skill-sheet">
   <div class="grab"></div>
@@ -707,6 +761,7 @@ button.mini.quiet { background: transparent; color: var(--muted); }
     <!-- Skills is the app's own sheet rather than a native route, so it is marked by
          the sheet it opens instead of by a route the shell would have to register. -->
     <button class="opt" data-sheet="skills-sheet"><span class="em">🧩</span> <span data-i18n="markup.nav.skills">Skills</span><span class="hint" data-i18n="markup.nav.skillsHint">add, choose</span></button>
+    <button class="opt" data-sheet="knowledge-sheet"><span class="em">🗂️</span> <span data-i18n="page.knowledge.title">Knowledge</span></button>
     <button class="opt" data-route="settings"><span class="em">⚙️</span> <span data-i18n="markup.nav.settings">Settings</span></button>
     <button class="opt" data-route="about"><span class="em">ℹ️</span> <span data-i18n="markup.nav.about">About</span></button>
   </div>
@@ -734,6 +789,7 @@ button.mini.quiet { background: transparent; color: var(--muted); }
 </div>
 
 <input type="file" id="skill-zip-input" style="display:none" accept=".zip">
+<input type="file" id="knowledge-file-input" style="display:none" multiple>
 <input type="file" id="file-input" style="display:none" multiple
        accept="image/*,video/*,audio/*,.pdf,.txt,.csv,.json,.md,.py,.js,.html,.xml,.log">
 </body>

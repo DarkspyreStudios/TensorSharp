@@ -36,6 +36,7 @@
     attachments: [],        // /api/upload responses
     maskEditing: false,
     skills: [],             // selected skill names
+    knowledgeCollections: [], // explicit scope for this conversation; empty searches nothing
     skillSelectionExplicit: false, // distinguishes untouched discovery from deselect-all
     catalogSkills: [],
     conversations: [],      // the saved chats, for the menu
@@ -445,6 +446,7 @@
     if (extra && extra.artifacts) extra.artifacts.forEach(function (f) { fileLine({ turn: turn, bubble: b }, f); });
     var view = { turn: turn, bubble: b, entry: entry };
     if (role === 'assistant' && extra && extra.stats) showTurnStats(view, extra.stats);
+    if (role === 'assistant' && entry && entry.knowledgeSources) showKnowledgeSources(view, entry.knowledgeSources);
     // What a picture was made from, and on the newest turn the other readings of its
     // request -- or, for a turn that asked instead of guessing, the readings it offered.
     if (entry && extra.imageUrl && entry.imagePlan) {
@@ -975,6 +977,9 @@
         : (!fresh && Array.isArray(s.skills) ? s.skills.slice() : defaultSkills());
       state.skillSelectionExplicit = !skillsOn() || state.skills.length > 0
         || (!fresh && s.skillsExplicit === true);
+      state.knowledgeCollections = Array.isArray(s.knowledgeCollections) ? s.knowledgeCollections.slice() : [];
+      paintKnowledgeCollections();
+      paintKnowledgeChips();
       paintSkillChips();
       if (!fresh) {
         renderMessages(msgs);
@@ -1441,6 +1446,7 @@
       messages: state.history.slice(),
       maxTokens: state.maxTokens,
       think: !!state.think,
+      knowledgeCollections: state.knowledgeCollections.slice(),
     };
     if (state.session) body.sessionId = state.session;
     if (!skillsOn()) body.skills_discovery = false;
@@ -1707,7 +1713,9 @@
     if (view && view.answerSoFar) {
       // So the next request does not send a history with a hole where this answer
       // was and write that hole over the saved chat.
-      state.history.push({ role: 'assistant', content: view.answerSoFar });
+      var interrupted = { role: 'assistant', content: view.answerSoFar };
+      if (view.knowledgeSources && view.knowledgeSources.length) interrupted.knowledgeSources = view.knowledgeSources;
+      state.history.push(interrupted);
     } else if (view && view.turn && view.turn.parentNode) {
       // Nothing ever arrived in it; an empty bubble under the question says less than
       // the notice below does.
@@ -1917,6 +1925,7 @@
     if (live && live.turn.parentNode) {
       live.bubble.innerHTML = '';
       live.answerSoFar = '';
+      showKnowledgeSources(live, []);
       if (live.stats) { live.stats.remove(); live.stats = null; }
       Array.prototype.slice.call(live.turn.querySelectorAll('.step, .think, .copy'))
         .forEach(function (n) { n.remove(); });
@@ -2157,6 +2166,7 @@
         });
     }
     function handle(f) {
+      if (Array.isArray(f.knowledgeSources)) showKnowledgeSources(view, f.knowledgeSources);
       if (f.done === true) {
         terminal = true;
         stats = statsOf(f);
@@ -2351,6 +2361,7 @@
       // the turn ends; the page has to hold it too, because
       // the next request sends this array and the host saves what it is sent.
       var entry = { role: 'assistant', content: answer };
+      if (view.knowledgeSources && view.knowledgeSources.length) entry.knowledgeSources = view.knowledgeSources;
       if (stats) entry.stats = stats;
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
@@ -2799,7 +2810,7 @@
   function closeSheets() {
     $('sheet-bg').classList.remove('on');
     var closingLoras = $('lora-sheet').classList.contains('on');
-    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
+    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet', 'knowledge-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
     $('lora-sheet').hidden = true;
     if (loraPoll) { clearInterval(loraPoll); loraPoll = null; }
     if (closingLoras && loraReturnFocus) { loraReturnFocus.focus(); loraReturnFocus = null; }
@@ -2904,6 +2915,7 @@
             skillsError(t('page.nav.skillsFailed', { error: (e && e.message) || e }));
           });
         }
+        if (sheet === 'knowledge-sheet') loadKnowledge().catch(knowledgeFailure);
         return;
       }
       openRoute(b.getAttribute('data-route'));
@@ -3275,6 +3287,362 @@
   });
   var cta = $('empty-cta');
   if (cta) cta.addEventListener('click', function () { openRoute('models'); });
+
+  // ---- knowledge library ---------------------------------------------------
+  // Browsing a library and attaching it to a chat are separate choices. Every
+  // request carries a captured scope; a slow response cannot populate another
+  // collection after the user switches. Source content is always rendered as text.
+  var knowledgeCatalog = [], knowledgeDocuments = [], knowledgeActive = null;
+  var knowledgeNextOffset = null, knowledgeDocumentsLoading = false;
+  var knowledgeCatalogVersion = 0, knowledgeDocumentVersion = 0;
+  var knowledgeSearchVersion = 0, knowledgeReadVersion = 0, knowledgeBusy = false;
+
+  function knowledgeError(message) {
+    var line = $('knowledge-error');
+    if (!line) return;
+    line.textContent = message || '';
+    line.style.display = message ? '' : 'none';
+  }
+  function knowledgeFailure(e) {
+    knowledgeError(t('page.knowledge.failed', { error: (e && e.message) || String(e) }));
+  }
+  function knowledgeRequest(url, method, body) {
+    var options = { method: method || 'GET' };
+    if (body instanceof FormData) options.body = body;
+    else if (body !== undefined) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify(body);
+    }
+    // A create/upload is not automatically retried: an ambiguous transport
+    // failure may have committed it already. Refresh exposes the durable result.
+    return fetch(url, options).then(skillJson);
+  }
+  function knowledgeCollectionUrl(id) { return '/api/knowledge/collections/' + encodeURIComponent(id); }
+  function knowledgeDocumentUrl(id, documentId) {
+    return knowledgeCollectionUrl(id) + '/documents/' + encodeURIComponent(documentId);
+  }
+  function knowledgeButton(parent, cls, label, action) {
+    var button = el('button', 'mini quiet ' + cls, label);
+    button.type = 'button';
+    button.addEventListener('click', action);
+    parent.appendChild(button);
+    return button;
+  }
+  function knowledgeDeleteButton(parent, name, action) {
+    var armed = false;
+    var button = knowledgeButton(parent, 'knowledge-delete', t('page.knowledge.remove'), function () {
+      if (knowledgeBusy) return;
+      if (!armed) {
+        armed = true;
+        button.textContent = t('page.knowledge.confirmRemove', { name: name });
+        cancel.hidden = false;
+      } else action();
+    });
+    button.disabled = knowledgeBusy;
+    var cancel = knowledgeButton(parent, 'knowledge-cancel', t('page.knowledge.cancel'), function () {
+      armed = false; button.textContent = t('page.knowledge.remove'); cancel.hidden = true;
+    });
+    cancel.hidden = true;
+  }
+  function paintKnowledgeChips() {
+    var box = $('knowledgechips');
+    if (!box) return;
+    box.textContent = '';
+    state.knowledgeCollections.forEach(function (id) {
+      var collection = knowledgeCatalog.filter(function (c) { return c.id === id; })[0];
+      var chip = el('button', 'skillchip', '📚 ' + (collection ? collection.name : id));
+      chip.type = 'button';
+      chip.setAttribute('aria-label', t('page.knowledge.open', { name: collection ? collection.name : id }));
+      chip.addEventListener('click', function () { openSheet('knowledge-sheet'); loadKnowledge().catch(knowledgeFailure); });
+      box.appendChild(chip);
+    });
+  }
+  function paintKnowledgeCollections() {
+    var list = $('knowledge-collections');
+    if (!list) return;
+    list.textContent = '';
+    if (!knowledgeCatalog.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.empty')));
+    knowledgeCatalog.forEach(function (c) {
+      var row = el('div', 'knowledge-collection' + (knowledgeActive === c.id ? ' active' : ''));
+      row.setAttribute('data-collection', c.id);
+      var choice = el('label', 'knowledge-choice');
+      var box = el('input', 'knowledge-toggle');
+      box.type = 'checkbox';
+      box.checked = state.knowledgeCollections.indexOf(c.id) >= 0;
+      box.setAttribute('aria-label', t('page.knowledge.use', { name: c.name }));
+      box.addEventListener('change', function () {
+        if (box.checked && state.knowledgeCollections.indexOf(c.id) < 0 && state.knowledgeCollections.length >= 32) {
+          box.checked = false;
+          knowledgeError(t('page.knowledge.maxCollections'));
+          return;
+        }
+        state.knowledgeCollections = state.knowledgeCollections.filter(function (id) { return id !== c.id; });
+        if (box.checked) state.knowledgeCollections.push(c.id);
+        paintKnowledgeChips();
+      });
+      choice.appendChild(box);
+      choice.appendChild(el('span', '', c.name));
+      row.appendChild(choice);
+      var browse = knowledgeButton(row, 'knowledge-browse', t('page.knowledge.browse'), function () { selectKnowledgeCollection(c.id); });
+      browse.setAttribute('aria-pressed', knowledgeActive === c.id ? 'true' : 'false');
+      list.appendChild(row);
+    });
+    paintKnowledgeChips();
+  }
+  function knowledgeBusyControls() {
+    $('knowledge-create').disabled = knowledgeBusy;
+    $('knowledge-upload').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-file-input').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-search').disabled = !knowledgeActive;
+    $('knowledge-status').textContent = knowledgeBusy ? t('page.knowledge.working') : '';
+  }
+  function loadKnowledge() {
+    knowledgeError('');
+    var version = ++knowledgeCatalogVersion;
+    return knowledgeRequest('/api/knowledge/collections').then(function (d) {
+      if (version !== knowledgeCatalogVersion) return;
+      knowledgeCatalog = Array.isArray(d.collections) ? d.collections : [];
+      // A collection removed from another window or an older saved chat must not
+      // leave an invisible selection that the user cannot uncheck.
+      state.knowledgeCollections = state.knowledgeCollections.filter(function (id) {
+        return knowledgeCatalog.some(function (c) { return c.id === id; });
+      });
+      if (!knowledgeCatalog.some(function (c) { return c.id === knowledgeActive; }))
+        knowledgeActive = knowledgeCatalog.length ? knowledgeCatalog[0].id : null;
+      paintKnowledgeCollections();
+      return selectKnowledgeCollection(knowledgeActive);
+    });
+  }
+  function selectKnowledgeCollection(id) {
+    knowledgeActive = id;
+    knowledgeDocuments = []; knowledgeNextOffset = null; knowledgeDocumentsLoading = false;
+    knowledgeSearchVersion++;
+    knowledgeReadVersion++;
+    $('knowledge-results').textContent = '';
+    $('knowledge-read').textContent = '';
+    knowledgeError('');
+    paintKnowledgeCollections();
+    paintKnowledgeDocuments();
+    return loadKnowledgeDocuments();
+  }
+  function loadKnowledgeDocuments(append) {
+    if (append && (knowledgeDocumentsLoading || knowledgeNextOffset === null)) return Promise.resolve();
+    var id = knowledgeActive, offset = append ? knowledgeNextOffset : 0, version = ++knowledgeDocumentVersion;
+    if (!append) { knowledgeDocuments = []; knowledgeNextOffset = null; }
+    knowledgeDocumentsLoading = !!id;
+    paintKnowledgeDocuments();
+    if (!id) return Promise.resolve();
+    var url = knowledgeCollectionUrl(id) + '/documents' + (offset ? '?offset=' + offset + '&limit=100' : '');
+    return knowledgeRequest(url).then(function (d) {
+      if (version !== knowledgeDocumentVersion || id !== knowledgeActive) return;
+      var page = Array.isArray(d.documents) ? d.documents.slice(0, 100) : [];
+      page.forEach(function (doc) {
+        var previous = knowledgeDocuments.findIndex(function (item) { return item.id === doc.id; });
+        if (previous < 0) knowledgeDocuments.push(doc); else knowledgeDocuments[previous] = doc;
+      });
+      knowledgeNextOffset = Number.isInteger(d.nextOffset) && d.nextOffset > offset ? d.nextOffset : null;
+    }).catch(function (e) {
+      if (version === knowledgeDocumentVersion && id === knowledgeActive) knowledgeFailure(e);
+    }).then(function () {
+      if (version === knowledgeDocumentVersion && id === knowledgeActive) {
+        knowledgeDocumentsLoading = false;
+        paintKnowledgeDocuments();
+      }
+    });
+  }
+  // The host supplies source identities separately from model prose. Build these
+  // links only from validated identities, so a model-invented URL cannot become an
+  // authoritative citation. Keep the metadata with the turn across replay/save.
+  function showKnowledgeSources(view, sources) {
+    var seen = Object.create(null), safe = [];
+    (Array.isArray(sources) ? sources : []).slice(0, 50).forEach(function (source) {
+      if (!source || !/^[a-zA-Z0-9_-]{1,128}$/.test(source.collectionId || '')
+        || !/^[a-zA-Z0-9_-]{1,128}$/.test(source.documentId || '')
+        || !Number.isInteger(source.version) || source.version <= 0
+        || typeof source.reference !== 'string' || source.reference.length > 1024
+        || seen[source.reference]) return;
+      seen[source.reference] = true;
+      safe.push({ reference: source.reference, collectionId: source.collectionId,
+        documentId: source.documentId, fileName: String(source.fileName || '').slice(0, 500),
+        version: source.version, chunkIndex: source.chunkIndex, location: source.location,
+        modality: source.modality, status: source.status });
+    });
+    view.knowledgeSources = safe;
+    if (view.sourceBox) { view.sourceBox.remove(); view.sourceBox = null; }
+    if (!safe.length) return;
+    var box = el('div', 'knowledge-citations');
+    box.appendChild(el('div', 'hint-block', t('page.knowledge.sources')));
+    safe.forEach(function (source) {
+      var link = knowledgeSourceLink(box, source);
+      var location = knowledgeLocation(source.location);
+      link.textContent = source.fileName + (location ? ' · ' + location : '');
+      link.title = source.reference;
+    });
+    view.sourceBox = box;
+    view.turn.appendChild(box);
+  }
+  function knowledgeSourceLink(parent, doc) {
+    var link = el('a', 'mini quiet knowledge-source', t('page.knowledge.source'));
+    // Never trust a URL embedded in extracted text or a returned source title.
+    link.href = knowledgeDocumentUrl(doc.collectionId, doc.documentId || doc.id) + '/source?version=' + encodeURIComponent(doc.version);
+    link.target = '_blank'; link.rel = 'noopener'; link.setAttribute('download', doc.fileName || '');
+    parent.appendChild(link);
+    return link;
+  }
+  function paintKnowledgeDocuments() {
+    var list = $('knowledge-documents'), actions = $('knowledge-collection-actions');
+    list.textContent = ''; actions.textContent = '';
+    var collection = knowledgeCatalog.filter(function (c) { return c.id === knowledgeActive; })[0];
+    $('knowledge-active-name').textContent = collection ? collection.name : '';
+    knowledgeBusyControls();
+    if (!collection) return;
+    if (collection.description) list.appendChild(el('p', 'hint-block', collection.description));
+    knowledgeDeleteButton(actions, collection.name, function () {
+      return mutateKnowledge(function () {
+        return knowledgeRequest(knowledgeCollectionUrl(collection.id), 'DELETE').then(function () {
+          state.knowledgeCollections = state.knowledgeCollections.filter(function (id) { return id !== collection.id; });
+          knowledgeCatalogVersion++;
+          return loadKnowledge();
+        });
+      });
+    });
+    if (!knowledgeDocuments.length && !knowledgeDocumentsLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.documentsEmpty')));
+    knowledgeDocuments.forEach(function (doc) {
+      var row = el('div', 'knowledge-document');
+      row.setAttribute('data-document', doc.id);
+      row.appendChild(el('strong', '', doc.fileName));
+      var status = doc.status === 'Ready' ? t('page.knowledge.ready')
+        : doc.status === 'MetadataOnly' ? t('page.knowledge.metadataOnly') : t('page.knowledge.partial');
+      row.appendChild(el('div', 'hint-block', status + ' · ' + tn('page.knowledge.chunks', doc.chunkCount || 0)));
+      (doc.warnings || []).forEach(function (warning) { row.appendChild(el('p', 'knowledge-warning', warning)); });
+      var controls = el('div', 'knowledge-actions');
+      knowledgeSourceLink(controls, doc);
+      var reindex = knowledgeButton(controls, 'knowledge-reindex', t('page.knowledge.reindex'), function () {
+        return mutateKnowledge(function () {
+          return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id) + '/reindex', 'POST', {}).then(function () {
+            if (knowledgeActive === doc.collectionId) {
+              knowledgeSearchVersion++; knowledgeReadVersion++;
+              $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+              return loadKnowledgeDocuments();
+            }
+          });
+        });
+      });
+      reindex.disabled = knowledgeBusy;
+      knowledgeDeleteButton(controls, doc.fileName, function () {
+        return mutateKnowledge(function () {
+          return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id), 'DELETE').then(function () {
+            if (knowledgeActive === doc.collectionId) {
+              knowledgeSearchVersion++; knowledgeReadVersion++;
+              $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+              return loadKnowledgeDocuments();
+            }
+          });
+        });
+      });
+      row.appendChild(controls); list.appendChild(row);
+    });
+    if (knowledgeDocumentsLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.loading')));
+    if (knowledgeNextOffset !== null) {
+      var more = knowledgeButton(list, 'knowledge-more', t('page.knowledge.loadMore'), function () { return loadKnowledgeDocuments(true); });
+      more.disabled = knowledgeBusy || knowledgeDocumentsLoading;
+    }
+  }
+  function mutateKnowledge(action) {
+    if (knowledgeBusy) return Promise.resolve();
+    knowledgeBusy = true; knowledgeError(''); paintKnowledgeDocuments();
+    return Promise.resolve().then(action).catch(knowledgeFailure).then(function () {
+      knowledgeBusy = false; paintKnowledgeDocuments();
+    });
+  }
+  function knowledgeLocation(location) {
+    if (!location) return '';
+    var parts = [];
+    if (location.label) parts.push(location.label);
+    else if (location.page != null) parts.push(t('page.knowledge.page', { number: location.page }));
+    if (location.section) parts.push(location.section);
+    if (location.sheet) parts.push(location.sheet);
+    if (location.row != null) parts.push(t('page.knowledge.row', { number: location.row }));
+    if (location.startLine != null) parts.push(t('page.knowledge.line', { number: location.startLine }));
+    var start = location.startSeconds != null ? location.startSeconds : location.startMilliseconds != null ? location.startMilliseconds / 1000 : null;
+    var end = location.endSeconds != null ? location.endSeconds : location.endMilliseconds != null ? location.endMilliseconds / 1000 : null;
+    if (start != null) parts.push(start + (end != null ? '–' + end : '') + ' s');
+    return parts.join(' · ');
+  }
+  function paintKnowledgeResults(box, results, expanded) {
+    box.textContent = '';
+    if (!results.length) box.appendChild(el('p', 'hint-block', t('page.knowledge.noResults')));
+    results.forEach(function (hit) {
+      var row = el('article', 'knowledge-result');
+      row.appendChild(el('strong', '', hit.fileName));
+      row.appendChild(el('div', 'hint-block', knowledgeLocation(hit.location)));
+      row.appendChild(el('code', 'knowledge-reference', hit.reference));
+      row.appendChild(el('pre', 'knowledge-text', hit.text));
+      if (hit.truncated) row.appendChild(el('p', 'hint-block', t('page.knowledge.truncated')));
+      var actions = el('div', 'knowledge-actions');
+      knowledgeSourceLink(actions, hit);
+      if (!expanded) knowledgeButton(actions, 'knowledge-expand', t('page.knowledge.read'), function () { readKnowledge(hit); });
+      row.appendChild(actions); box.appendChild(row);
+    });
+  }
+  function readKnowledge(hit) {
+    var id = knowledgeActive, version = ++knowledgeReadVersion;
+    knowledgeError('');
+    $('knowledge-read').textContent = t('page.knowledge.loading');
+    return knowledgeRequest('/api/knowledge/read', 'POST', {
+      reference: hit.reference, collectionIds: [id], adjacentChunks: 1, maxCharacters: 12000
+    }).then(function (d) {
+      if (id !== knowledgeActive || version !== knowledgeReadVersion) return;
+      paintKnowledgeResults($('knowledge-read'), d.results || [], true);
+    }).catch(function (e) {
+      if (id === knowledgeActive && version === knowledgeReadVersion) { $('knowledge-read').textContent = ''; knowledgeFailure(e); }
+    });
+  }
+  $('knowledge-refresh').addEventListener('click', function () { loadKnowledge().catch(knowledgeFailure); });
+  $('knowledge-close').addEventListener('click', closeSheets);
+  $('knowledge-create').addEventListener('click', function () {
+    var name = ($('knowledge-name').value || '').trim();
+    if (!name) { knowledgeError(t('page.knowledge.nameRequired')); return; }
+    return mutateKnowledge(function () {
+      return knowledgeRequest('/api/knowledge/collections', 'POST', { name: name }).then(function (d) {
+        $('knowledge-name').value = '';
+        knowledgeActive = d.collection.id;
+        return loadKnowledge();
+      });
+    });
+  });
+  $('knowledge-upload').addEventListener('click', function () { if (knowledgeActive && !knowledgeBusy) $('knowledge-file-input').click(); });
+  $('knowledge-file-input').addEventListener('change', function (e) {
+    var files = Array.prototype.slice.call(e.target.files || []), id = knowledgeActive;
+    e.target.value = '';
+    if (!files.length || !id || knowledgeBusy) return;
+    if (files.length > 16) { knowledgeError(t('page.knowledge.maxFiles')); return; }
+    return mutateKnowledge(function () {
+      var form = new FormData();
+      files.forEach(function (file) { form.append('files', file, file.name); });
+      return knowledgeRequest(knowledgeCollectionUrl(id) + '/documents', 'POST', form).then(function (d) {
+        var errors = (d.errors || []).map(function (e) { return e.fileName + ': ' + e.error; }).join('\n');
+        if (errors) knowledgeError(errors);
+        if (knowledgeActive === id) return loadKnowledgeDocuments();
+      });
+    });
+  });
+  function searchKnowledge() {
+    var id = knowledgeActive, query = ($('knowledge-query').value || '').trim();
+    if (!id || !query) return;
+    var version = ++knowledgeSearchVersion;
+    knowledgeReadVersion++;
+    knowledgeError(''); $('knowledge-read').textContent = '';
+    $('knowledge-results').textContent = t('page.knowledge.loading');
+    return knowledgeRequest('/api/knowledge/search', 'POST', { query: query, collectionIds: [id], limit: 8, maxCharacters: 12000 }).then(function (d) {
+      if (id !== knowledgeActive || version !== knowledgeSearchVersion) return;
+      paintKnowledgeResults($('knowledge-results'), d.results || [], false);
+    }).catch(function (e) {
+      if (id === knowledgeActive && version === knowledgeSearchVersion) { $('knowledge-results').textContent = ''; knowledgeFailure(e); }
+    });
+  }
+  $('knowledge-search').addEventListener('click', searchKnowledge);
+  $('knowledge-query').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); searchKnowledge(); } });
 
   // ---- skills --------------------------------------------------------------
   //
@@ -3806,7 +4174,7 @@
     // Wait for mutations and send acceptance to settle. In particular a sent share
     // is still owned by the composer until the chat response's headers arrive.
     if ((state.abort && state.abort.awaitingHeaders) || state.visionChecking
-        || shareDiscarding || shareDrain || conversationOpening || pendingUploadCount || state.maskEditing)
+        || shareDiscarding || shareDrain || conversationOpening || pendingUploadCount || knowledgeBusy || state.maskEditing)
       return 'busy';
     try {
       window.sessionStorage.setItem(languageDraftKey, JSON.stringify({
@@ -3815,6 +4183,7 @@
         attachments: state.attachments,
         skills: state.skills,
         skillsExplicit: state.skillSelectionExplicit,
+        knowledgeCollections: state.knowledgeCollections,
         think: state.think,
         shareOrder: appliedShareOrder,
         shareParts: appliedShareParts,
@@ -3838,6 +4207,7 @@
       state.attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
       state.skills = skillsOn() && Array.isArray(draft.skills) ? draft.skills : [];
       state.skillSelectionExplicit = draft.skillsExplicit === true;
+      state.knowledgeCollections = Array.isArray(draft.knowledgeCollections) ? draft.knowledgeCollections.slice() : [];
       state.think = draft.think === true;
       (Array.isArray(draft.shareOrder) ? draft.shareOrder : []).forEach(function (id) {
         rememberAppliedShare(id, draft.shareParts && draft.shareParts[id]);
@@ -3845,6 +4215,7 @@
       autoGrow();
       paintChips();
       paintSkillChips();
+      paintKnowledgeChips();
     } catch (e) {
       note('language-draft-restore-failed', (e && e.message) || e);
     }

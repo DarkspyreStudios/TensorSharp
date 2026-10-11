@@ -11,6 +11,12 @@ and artifact links. Image edits support painted selections, protected pixels,
 original/result comparison and fourteen optional LoRA plug-ins. The interface is
 available in [eight languages](#languages).
 
+**Personal knowledge:** open **Menu → Knowledge** to upload reusable documents,
+datasets and media, inspect extraction coverage, and select collections for a chat.
+Retrieved source links persist with the conversation; code agents can open complete
+datasets in their private workspace. See the [knowledge guide](../docs/knowledge-system.md)
+for supported formats, model setup, scope and current limits.
+
 The .NET MAUI project shares its chat page and loopback API across iOS/iPadOS,
 Mac Catalyst and Windows WinUI heads. Physical iPhones and iPads use GGML Metal
 (`ggml_metal`), Macs use Metal or CPU, and Windows offers CUDA/Vulkan when available,

@@ -76,6 +76,7 @@ namespace TensorSharp.AgentHost.Skills
         /// </summary>
         public static bool IsBuiltInTool(string? name) =>
             IsSkillTool(name) || SkillToolNames.IsCodeTool(name)
+            || Knowledge.KnowledgeTools.IsTool(name)
             || Agents.MultiAgentTools.IsTool(name);
 
         /// <summary>
@@ -477,6 +478,9 @@ namespace TensorSharp.AgentHost.Skills
                     ListToolName => ExecuteList(context),
                     ReadToolName => ExecuteRead(call, context),
                     RunToolName => ExecuteRun(call, context, onToolOutput),
+                    _ when Knowledge.KnowledgeTools.IsTool(call.Name) =>
+                        Knowledge.KnowledgeTools.Execute(call, context.Knowledge,
+                            context.CodeRunner != null ? context.Workspace : null),
 
                     // Every code tool goes to the same runner, which dispatches on the
                     // name itself. Listing them one by one here is what let apply_patch
@@ -974,6 +978,9 @@ namespace TensorSharp.AgentHost.Skills
 
         /// <summary>Ceiling on one read's returned bytes.</summary>
         public int MaxReadBytes { get; }
+
+        /// <summary>Read-only knowledge access restricted to collections explicitly selected for this request.</summary>
+        public Knowledge.KnowledgeToolScope? Knowledge { get; set; }
 
         /// <summary>
         /// Set to enable <see cref="SkillTools.RunToolName"/>. Null — the default —

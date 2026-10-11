@@ -23,6 +23,9 @@ using Microsoft.Extensions.Logging;
 using TensorSharp.AgentHost.Agents;
 using TensorSharp.AgentHost.CodeExec;
 using TensorSharp.AgentHost.Skills;
+using TensorSharp.AgentHost.Knowledge;
+using TensorSharp.Knowledge;
+using TensorSharp.Server.Knowledge;
 using TensorSharp.Server.Hosting;
 using TensorSharp.Server.ProtocolAdapters;
 using TensorSharp.Server.RequestParsers;
@@ -185,6 +188,9 @@ namespace TensorSharp.Chat
         /// fails the request; the host owns that decision.
         /// </summary>
         public Action<string, JsonElement> OnChatRequest { get; set; }
+
+        /// <summary>Optional personal library. Each request must explicitly select collections before retrieval or tools can access it.</summary>
+        public KnowledgeStore Knowledge { get; set; }
 
         /// <summary>
         /// Optional host-owned lease acquired near the start of a chat request, before
@@ -2401,6 +2407,7 @@ namespace TensorSharp.Chat
                 uiTools = ToolFunctionParser.ParseOllama(body);
 
             var messages = ChatMessageParser.ParseWebUi(messagesEl);
+            KnowledgeToolScope knowledge = KnowledgeRequestContext.Parse(body, Knowledge, _svc.ContextTokens);
             string audioInputError = ChatGenerationPipeline.UnsupportedAudioInputError(_svc.Architecture, messages,
                 _svc.IsAudioEncoderLoaded);
             if (audioInputError != null)
@@ -2483,8 +2490,11 @@ namespace TensorSharp.Chat
                         error = "The attached CSV could not be read from upload storage. Upload it again and retry.",
                     });
                 }
+                messages = await KnowledgeRequestContext.PrepareAsync(messages, knowledge, toolsAvailable: false, cancellationToken);
                 OnChatRequest?.Invoke(chatSession.Id, body);
-                await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, uiThink, webUiLogger, cancellationToken, samplingConfig))
+                if (knowledge != null)
+                    yield return new { knowledgeSources = knowledge.Sources.Select(KnowledgeTools.DescribeSource).ToArray() };
+                await foreach (object frame in ChatStreamDiffusionAsync(chatSession, messages, maxTokens, uiThink, webUiLogger, cancellationToken, samplingConfig, knowledge))
                     yield return frame;
                 yield break;
             }
@@ -2508,7 +2518,7 @@ namespace TensorSharp.Chat
                 workspace: workspace,
                 captureProducedFiles: ScriptFileCapture(),
                 logger: webUiLogger,
-                multiAgent: SkillSelectionParser.ParseMultiAgent(body));
+                multiAgent: SkillSelectionParser.ParseMultiAgent(body), knowledge: knowledge);
 
             if (unknownSkills.Count > 0)
             {
@@ -2689,8 +2699,14 @@ namespace TensorSharp.Chat
                     skillPlan.Prompt.Catalog.Count, skillPlan.ToolsOffered);
             }
 
+            messages = await KnowledgeRequestContext.PrepareAsync(messages, knowledge,
+                toolsAvailable: skillPlan?.ToolsOffered == true, cancellationToken);
+
             // Every refusal is behind us: this request is going to stream.
             OnChatRequest?.Invoke(chatSession.Id, body);
+
+            if (knowledge != null)
+                yield return new { knowledgeSources = knowledge.Sources.Select(KnowledgeTools.DescribeSource).ToArray() };
 
             var sw = Stopwatch.StartNew();
             int tokenCount = 0;
@@ -2979,9 +2995,12 @@ namespace TensorSharp.Chat
                 }
             }
 
+            if (knowledge != null)
+                yield return new { knowledgeSources = knowledge.Sources.Select(KnowledgeTools.DescribeSource).ToArray() };
+
             foreach (object frame in FinalFrames(sawParsedUpdate ? null : uiParser, aborted, inferenceError, chatSession, sw, tokenCount,
                 turnPromptTokens, turnKvReusedTokens, turnTruncated, visibleAnswer, turnFinishReason,
-                turnRepetitionExplained, turnEvalTokens, turnEvalNs))
+                turnRepetitionExplained, turnEvalTokens, turnEvalNs, knowledge))
             {
                 yield return frame;
             }
@@ -2991,13 +3010,14 @@ namespace TensorSharp.Chat
 
         private async IAsyncEnumerable<object> ChatStreamDiffusionAsync(
             ChatSession chatSession, List<ChatMessage> messages, int maxTokens, bool think, ILogger webUiLogger,
-            [EnumeratorCancellation] CancellationToken cancellationToken, SamplingConfig samplingConfig)
+            [EnumeratorCancellation] CancellationToken cancellationToken, SamplingConfig samplingConfig, KnowledgeToolScope knowledge = null)
         {
             var sw = Stopwatch.StartNew();
             bool aborted = false;
             string inferenceError = null;
             int finalTokenCount = 0;
             int turnPromptTokens = 0;
+            var visibleAnswer = new StringBuilder();
 
             // The canvas text arrives with its channels already separated (the thought
             // block is dropped unless the request asked for it), so the replace frames
@@ -3038,6 +3058,7 @@ namespace TensorSharp.Chat
                         continue;
                     }
                     // Both intermediate previews and the final answer use whole-message replace.
+                    visibleAnswer.Clear().Append(u.Text);
                     yield return WebUiSseEvents.Replace(u.Text, u.Step, u.TotalSteps, u.IsPreview);
                 }
             }
@@ -3046,6 +3067,9 @@ namespace TensorSharp.Chat
                 await stream.DisposeAsync();
             }
 
+            if (!aborted && inferenceError == null)
+                foreach (object frame in KnowledgeCitationFrames(visibleAnswer, knowledge))
+                    yield return frame;
             sw.Stop();
             double tokPerSec = finalTokenCount > 0 ? finalTokenCount / sw.Elapsed.TotalSeconds : 0;
             yield return WebUiSseEvents.Done(finalTokenCount, sw.Elapsed.TotalSeconds, tokPerSec, aborted, inferenceError,
@@ -3527,7 +3551,7 @@ namespace TensorSharp.Chat
             IOutputParser uiParser, bool aborted, string inferenceError,
             ChatSession chatSession, Stopwatch sw, int tokenCount, int turnPromptTokens, int turnKvReusedTokens,
             bool truncated, StringBuilder visibleAnswer, string finishReason = null,
-            bool repetitionExplained = false, long evalTokens = 0, long evalNs = 0)
+            bool repetitionExplained = false, long evalTokens = 0, long evalNs = 0, KnowledgeToolScope knowledge = null)
         {
             if (uiParser != null && !aborted)
             {
@@ -3541,6 +3565,10 @@ namespace TensorSharp.Chat
                 if (finalParsed.ToolCalls != null)
                     yield return WebUiSseEvents.ToolCalls(finalParsed.ToolCalls);
             }
+
+            if (!aborted && inferenceError == null)
+                foreach (object frame in KnowledgeCitationFrames(visibleAnswer, knowledge))
+                    yield return frame;
 
             // The silence a user actually hits: the turn ran a skill
             // or a tool, streamed plenty of tokens doing it, and then ended without writing
@@ -3590,6 +3618,15 @@ namespace TensorSharp.Chat
             yield return WebUiSseEvents.Done(generated, sw.Elapsed.TotalSeconds, tokPerSec, aborted, inferenceError, chatSession.Id,
                 turnPromptTokens, turnKvReusedTokens,
                 truncated && !FinishReasonMapper.IsRepetition(finishReason));
+        }
+
+        internal static IEnumerable<object> KnowledgeCitationFrames(StringBuilder visibleAnswer, KnowledgeToolScope knowledge)
+        {
+            var normalized = KnowledgeTools.NormalizeCitationUrls(visibleAnswer.ToString(), knowledge);
+            if (normalized.RepairCount == 0) yield break;
+            visibleAnswer.Clear().Append(normalized.Text);
+            yield return WebUiSseEvents.Replace(normalized.Text);
+            yield return new { knowledgeCitationRepairs = normalized.RepairCount };
         }
     }
 }
