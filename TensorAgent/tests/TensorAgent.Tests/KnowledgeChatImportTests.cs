@@ -192,7 +192,12 @@ public sealed class KnowledgeChatImportTests : IDisposable
         Assert.Equal(3, errors.Length);
         Assert.Equal("expired.png", Assert.Single(errors, error => error.GetProperty("conversationId").GetString() == good.Id).GetProperty("fileName").GetString());
         Assert.All(errors.Where(error => error.GetProperty("conversationId").GetString() != good.Id), error => Assert.False(error.TryGetProperty("fileName", out _)));
-        Assert.Single(await _knowledge.SearchAsync("historical conversation", new KnowledgeSearchOptions { CollectionIds = [collection.Id] }));
+        var source = Assert.Single(_knowledge.ListDocuments(collection.Id));
+        var hits = await _knowledge.SearchAsync("historical conversation", new KnowledgeSearchOptions { CollectionIds = [collection.Id] });
+        // The filename conversation.md also matches the header chunk. Require
+        // the actual transcript body and the correct imported source identity.
+        Assert.All(hits, hit => Assert.Equal(source.Id, hit.DocumentId));
+        Assert.Contains(hits, hit => hit.Text.Contains("Visible historical conversation", StringComparison.Ordinal));
     }
 
     [Fact]

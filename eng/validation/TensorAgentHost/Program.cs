@@ -125,6 +125,8 @@ loadClock.Stop();
 string connection = JsonSerializer.Serialize(new
 {
     baseUrl = host.Server.BaseUrl,
+    dataRoot = paths.DataRoot,
+    cacheRoot = paths.CacheRoot,
     entryUrl = host.Server.EntryUrl,
     cookie,
     executionBackend = host.Backend.Name,

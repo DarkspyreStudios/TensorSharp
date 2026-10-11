@@ -19,6 +19,18 @@ public sealed class KnowledgeStore : IDisposable
     // content terms. Thus an exact all-function-word phrase remains searchable.
     private static readonly HashSet<string> QueryFunctionWords = new(
         "a an and are as at be been being but by can could did do does doing for from had has have how i if in into is it its may me might my of on or our ours should so than that the their them then there these they this those to too us was we were what when where which who why will with would you your 的 了 和 是 在 有 与 及 哪个 什么 如何 怎么 其中 这个 那个 一个 以及 还有 是否 我们 你们 他们 它们 请问 比较".Split(' '), StringComparer.Ordinal);
+    private static readonly HashSet<string> ImageQueryTerms = new(
+        "image images picture pictures photo photos photograph photographs poster posters banner banners illustration illustrations screenshot screenshots artwork".Split(' '), StringComparer.Ordinal);
+    private static readonly HashSet<string> AudioQueryTerms = new(
+        "audio sound sounds podcast podcasts music song songs".Split(' '), StringComparer.Ordinal);
+    private static readonly HashSet<string> VideoQueryTerms = new(
+        "video videos movie movies footage".Split(' '), StringComparer.Ordinal);
+    private static readonly HashSet<string> QueryRequestWords = new(
+        "please find search looking look locate show fetch retrieve".Split(' '), StringComparer.Ordinal);
+    private static readonly HashSet<string> MediaConceptTerms = new(
+        "encode encoding encoder encoders decode decoding decoder decoders generation generator generators model models api implementation documentation docs guide manual tutorial processing inference".Split(' '), StringComparer.Ordinal);
+    private static readonly HashSet<string> QueryQuestionWords = new(
+        "how why what explain describe support supports use uses work works".Split(' '), StringComparer.Ordinal);
     private readonly string _root;
     private readonly IKnowledgeExtractor _extractor;
     private readonly IKnowledgeEmbeddingProvider? _embeddings;
@@ -279,7 +291,9 @@ public sealed class KnowledgeStore : IDisposable
         IndexedChunk[] denseCandidates;
         Dictionary<string, IndexedChunk> candidates;
         var anchoredCandidates = new HashSet<string>(StringComparer.Ordinal);
+        var preferredMediaCandidates = new HashSet<string>(StringComparer.Ordinal);
         HashSet<string> coverageDocuments;
+        string? requestedMedia;
         lock (_sync)
         {
             ThrowIfDisposed();
@@ -290,12 +304,16 @@ public sealed class KnowledgeStore : IDisposable
             lexical = new(StringComparer.Ordinal);
             candidates = new(StringComparer.Ordinal);
             var queryTerms = QueryTerms(query);
+            requestedMedia = RequestedMedia(query, queryTerms);
             var contentTerms = queryTerms.Where(term => !QueryFunctionWords.Contains(term)).ToArray();
             var terms = contentTerms.Length > 0 ? contentTerms : queryTerms;
             // In mixed-script questions, a source-language name or identifier is
             // a stronger anchor than coincidental CJK wording in unrelated sources.
-            var anchors = queryTerms.Any(IsCjkTerm)
-                ? terms.Where(term => !IsCjkTerm(term)).ToHashSet(StringComparer.Ordinal) : [];
+            var anchors = queryTerms.Any(IsCjkTerm) || requestedMedia is not null
+                ? terms.Where(term => !IsCjkTerm(term) && (requestedMedia is null
+                    || !ImageQueryTerms.Contains(term) && !AudioQueryTerms.Contains(term)
+                        && !VideoQueryTerms.Contains(term) && !QueryRequestWords.Contains(term)))
+                    .ToHashSet(StringComparer.Ordinal) : [];
             var matchedDocumentTerms = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             foreach (string term in terms)
             {
@@ -315,6 +333,15 @@ public sealed class KnowledgeStore : IDisposable
                     documentTerms.Add(term);
                 }
             }
+            // A named image can have only one occurrence in a long generated
+            // caption while hundreds of short source-code chunks repeat the same
+            // name. Explicit asset requests prefer matching originals of that
+            // media type, without treating PDF OCR or unrelated media as matches.
+            if (requestedMedia is not null)
+                foreach (var candidate in candidates)
+                    if (MatchesMedia(candidate.Value.Document, requestedMedia)
+                        && (anchors.Count == 0 || anchoredCandidates.Contains(candidate.Key)))
+                        preferredMediaCandidates.Add(candidate.Key);
             // A focused one-term lookup keeps BM25 relevance: a later page may
             // explain the topic while earlier pages only mention it in passing.
             // Coverage is useful when a broader question reduces to one indexed
@@ -329,9 +356,21 @@ public sealed class KnowledgeStore : IDisposable
         var ranked = new Dictionary<string, double>(StringComparer.Ordinal);
         int rank = 0;
         int candidateLimit = Math.Max(options.Limit * 8, 64);
-        var lexicalOrder = lexical.OrderByDescending(p => anchoredCandidates.Contains(p.Key))
+        var lexicalOrder = lexical.OrderByDescending(p => preferredMediaCandidates.Contains(p.Key))
+            .ThenByDescending(p => anchoredCandidates.Contains(p.Key))
             .ThenByDescending(p => p.Value).ThenBy(p => p.Key, StringComparer.Ordinal);
-        foreach (var item in lexicalOrder.Take(candidateLimit))
+        IEnumerable<KeyValuePair<string, double>> lexicalCandidates = lexicalOrder;
+        if (requestedMedia is not null)
+        {
+            // Keep the best match from each source in the candidate budget before
+            // adding more excerpts from any one large source. Otherwise pruning
+            // can discard an asset or complementary source before diversification.
+            var documents = new HashSet<string>(StringComparer.Ordinal);
+            var firstChunks = lexicalOrder.Where(item => documents.Add(candidates[item.Key].Document.Id))
+                .Select(item => item.Key).ToHashSet(StringComparer.Ordinal);
+            lexicalCandidates = lexicalOrder.OrderByDescending(item => firstChunks.Contains(item.Key));
+        }
+        foreach (var item in lexicalCandidates.Take(candidateLimit))
             ranked[item.Key] = 1.0 / (60 + ++rank);
         if (_embeddings is not null && denseCandidates.Length > 0)
         {
@@ -367,23 +406,29 @@ public sealed class KnowledgeStore : IDisposable
                 .ThenBy(p => p.Key, StringComparer.Ordinal);
             var remainingCandidates = order.ToList();
             var selectedPages = new Dictionary<(string Document, int Page), int>();
+            var selectedDocuments = new Dictionary<string, int>(StringComparer.Ordinal);
             while (remainingCandidates.Count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (remaining <= 0 || results.Count >= options.Limit) break;
                 int bestIndex = 0;
                 double bestScore = double.NegativeInfinity;
+                bool bestPreferredMedia = false;
                 for (int i = 0; i < remainingCandidates.Count; i++)
                 {
                     var candidate = remainingCandidates[i];
                     var chunk = candidates[candidate.Key];
                     int repeats = coverageDocuments.Contains(chunk.Document.Id) && chunk.Chunk.Location?.Page is int page
                         ? selectedPages.GetValueOrDefault((chunk.Document.Id, page)) : 0;
+                    if (requestedMedia is not null)
+                        repeats = Math.Max(repeats, selectedDocuments.GetValueOrDefault(chunk.Document.Id));
                     // Relevance always chooses the first hit. For an ambiguous
                     // broad query, repeated pages need proportionally stronger
                     // evidence; page numbers never substitute for query relevance.
                     double score = candidate.Value / (1 + .25 * repeats);
-                    if (score > bestScore) { bestIndex = i; bestScore = score; }
+                    bool preferredMedia = preferredMediaCandidates.Contains(candidate.Key);
+                    if ((preferredMedia && !bestPreferredMedia) || (preferredMedia == bestPreferredMedia && score > bestScore))
+                    { bestIndex = i; bestScore = score; bestPreferredMedia = preferredMedia; }
                 }
                 var item = remainingCandidates[bestIndex];
                 remainingCandidates.RemoveAt(bestIndex);
@@ -396,6 +441,7 @@ public sealed class KnowledgeStore : IDisposable
                 if (selected.Any(previous => IsDuplicateEvidence(previous, current, fingerprints))) continue;
                 var result = Result(current, bestScore, remaining);
                 results.Add(result); selected.Add(current); remaining -= result.Text.Length;
+                selectedDocuments[current.Document.Id] = selectedDocuments.GetValueOrDefault(current.Document.Id) + 1;
                 if (current.Chunk.Location?.Page is int selectedPage)
                 {
                     var pageKey = (current.Document.Id, selectedPage);
@@ -815,6 +861,11 @@ public sealed class KnowledgeStore : IDisposable
         {
             var chunk = stored.Chunks[i];
             var terms = Tokenize(chunk.Text).GroupBy(t => t, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+            // Names and folder paths remain searchable after OCR/captioning.
+            // Index them once, without inserting metadata into source evidence or
+            // amplifying a filename across every chunk of a large document.
+            if (i == 0)
+                foreach (string term in Tokenize(DocumentName(document))) terms.TryAdd(term, 1);
             string key = Reference(stored.Document, i);
             int length = Math.Max(1, terms.Values.Sum());
             _chunks.Add(key, new IndexedChunk(key, stored.Document, chunk, i, length, terms.Keys.ToArray()));
@@ -877,6 +928,36 @@ public sealed class KnowledgeStore : IDisposable
 
     private static bool IsCjk(Rune rune) => rune.Value is >= 0x3400 and <= 0x9FFF or >= 0x20000 and <= 0x3134F or >= 0x3040 and <= 0x30FF;
     private static bool IsCjkTerm(string term) => IsCjk(Rune.GetRuneAt(term, 0));
+    private static string? RequestedMedia(string query, string[] terms)
+    {
+        // A question about image encoding, an audio model, or video APIs needs
+        // documentation. A modality noun alone is insufficient asset intent.
+        if (terms.Any(MediaConceptTerms.Contains)
+            || ContainsPhrase(query, "编码", "解码", "模型", "接口", "原理", "算法", "文档", "教程", "实现")) return null;
+        bool lookup = terms.Any(QueryRequestWords.Contains) || ContainsPhrase(query, "寻找", "查找", "搜索", "检索", "找到", "展示", "显示", "获取");
+        if (!lookup && (terms.Any(QueryQuestionWords.Contains) || ContainsPhrase(query, "如何", "怎么", "为什么", "原理", "支持"))) return null;
+        bool image = terms.Any(ImageQueryTerms.Contains) || ContainsPhrase(query, "图片", "图像", "照片", "相片", "海报", "宣传画", "宣传图", "插画", "截图");
+        bool audio = terms.Any(AudioQueryTerms.Contains) || ContainsPhrase(query, "音频", "声音", "录音", "播客", "歌曲", "音乐");
+        bool video = terms.Any(VideoQueryTerms.Contains) || ContainsPhrase(query, "视频", "影片", "录像");
+        // Requests discussing several modalities retain ordinary relevance.
+        return (image ? 1 : 0) + (audio ? 1 : 0) + (video ? 1 : 0) == 1
+            ? image ? "image" : audio ? "audio" : "video" : null;
+
+        static bool ContainsPhrase(string text, params string[] phrases) => phrases.Any(phrase => text.Contains(phrase, StringComparison.Ordinal));
+    }
+    private static bool MatchesMedia(KnowledgeDocument document, string requested)
+    {
+        if (document.ContentType?.StartsWith(requested + "/", StringComparison.OrdinalIgnoreCase) == true) return true;
+        string? kind = Path.GetExtension(document.FileName).ToLowerInvariant() switch
+        {
+            ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp" or ".tif" or ".tiff"
+                or ".heic" or ".heif" or ".avif" or ".svg" => "image",
+            ".mp3" or ".wav" or ".m4a" or ".aac" or ".flac" or ".ogg" or ".opus" => "audio",
+            ".mp4" or ".mov" or ".webm" or ".mkv" or ".avi" => "video",
+            _ => null,
+        };
+        return kind == requested;
+    }
     private static string[] QueryTerms(string query)
     {
         var terms = Tokenize(query).Distinct(StringComparer.Ordinal).ToArray();

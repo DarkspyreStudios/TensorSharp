@@ -802,6 +802,10 @@ button.mini.quiet { background: transparent; color: var(--muted); }
     <div id="knowledge-collection-actions" class="knowledge-actions"></div>
   </div>
   <div class="knowledge-upload-panel">
+    <div id="knowledge-chat-scope" hidden>
+      <label class="knowledge-choice"><input id="knowledge-use-active" type="checkbox" aria-describedby="knowledge-scope-help" disabled><span id="knowledge-use-active-label"></span></label>
+      <p id="knowledge-scope-help" class="hint-block" role="status" aria-live="polite"></p>
+    </div>
     <div class="knowledge-upload-heading" data-i18n="page.knowledge.addSources">Add documents, media or datasets</div>
     <div class="knowledge-upload-buttons">
       <button class="knowledge-upload-button" id="knowledge-upload" type="button" disabled><span aria-hidden="true">＋</span><span data-i18n="page.knowledge.upload">Upload files</span></button>

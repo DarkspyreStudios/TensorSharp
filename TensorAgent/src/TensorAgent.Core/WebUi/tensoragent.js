@@ -3374,6 +3374,29 @@
       chip.addEventListener('click', function () { openSheet('knowledge-sheet'); loadKnowledge().catch(knowledgeFailure); });
       box.appendChild(chip);
     });
+    paintKnowledgeScope();
+  }
+  function paintKnowledgeScope() {
+    var collection = knowledgeCatalog.filter(function (c) { return c.id === knowledgeActive; })[0];
+    $('knowledge-chat-scope').hidden = !collection;
+    $('knowledge-use-active').disabled = !collection;
+    var selected = !!collection && state.knowledgeCollections.indexOf(collection.id) >= 0;
+    $('knowledge-use-active').checked = selected;
+    $('knowledge-use-active-label').textContent = collection ? t('page.knowledge.use', { name: collection.name }) : '';
+    $('knowledge-scope-help').textContent = collection ? t(selected ? 'page.knowledge.inChat' : 'page.knowledge.notInChat') : '';
+  }
+  function setKnowledgeCollectionSelected(id, selected) {
+    if (selected && state.knowledgeCollections.indexOf(id) < 0 && state.knowledgeCollections.length >= 32) {
+      knowledgeError(t('page.knowledge.maxCollections'));
+      paintKnowledgeCollections();
+      return;
+    }
+    state.knowledgeCollections = state.knowledgeCollections.filter(function (existing) { return existing !== id; });
+    if (selected) state.knowledgeCollections.push(id);
+    Array.prototype.forEach.call($('knowledge-collections').querySelectorAll('.knowledge-collection'), function (row) {
+      row.querySelector('.knowledge-toggle').checked = state.knowledgeCollections.indexOf(row.getAttribute('data-collection')) >= 0;
+    });
+    paintKnowledgeChips();
   }
   function paintKnowledgeCollections() {
     var list = $('knowledge-collections');
@@ -3393,14 +3416,7 @@
       box.checked = state.knowledgeCollections.indexOf(c.id) >= 0;
       box.setAttribute('aria-label', t('page.knowledge.use', { name: c.name }));
       box.addEventListener('change', function () {
-        if (box.checked && state.knowledgeCollections.indexOf(c.id) < 0 && state.knowledgeCollections.length >= 32) {
-          box.checked = false;
-          knowledgeError(t('page.knowledge.maxCollections'));
-          return;
-        }
-        state.knowledgeCollections = state.knowledgeCollections.filter(function (id) { return id !== c.id; });
-        if (box.checked) state.knowledgeCollections.push(c.id);
-        paintKnowledgeChips();
+        setKnowledgeCollectionSelected(c.id, box.checked);
       });
       choice.appendChild(box);
       var label = el('span', 'knowledge-collection-label');
@@ -4260,6 +4276,9 @@
     });
   }
   $('knowledge-collection-filter').addEventListener('input', paintKnowledgeCollections);
+  $('knowledge-use-active').addEventListener('change', function () {
+    if (knowledgeActive) setKnowledgeCollectionSelected(knowledgeActive, $('knowledge-use-active').checked);
+  });
   $('knowledge-file-query').addEventListener('input', function () {
     clearTimeout(knowledgeFilterTimer);
     // Invalidate the in-flight page immediately, before the debounced request.

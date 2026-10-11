@@ -232,6 +232,8 @@
   "page.knowledge.refresh": "更新",
   "page.knowledge.empty": "コレクションはまだありません。作成して文書、メディア、データセットを追加してください。",
   "page.knowledge.use": "このチャットで {name} を使用",
+  "page.knowledge.inChat": "このコレクションはこのチャットで選択されています。",
+  "page.knowledge.notInChat": "このコレクションを選択すると、このチャットで索引済みのソースを検索できます。",
   "page.knowledge.browse": "参照",
   "page.knowledge.upload": "ファイルをアップロード",
   "page.knowledge.documentsEmpty": "ファイルはまだありません。ファイルまたはフォルダーをアップロードして索引を作成してください。",

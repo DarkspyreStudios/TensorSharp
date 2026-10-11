@@ -432,6 +432,110 @@ public sealed class KnowledgeStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task ExtractedAssetsKeepNamesAndFolderPathsSearchableWithoutChangingEvidenceAcrossRestart()
+    {
+        const string caption = "An abstract blue illustration with scattered glowing cubes.";
+        var extraction = new KnowledgeExtraction { Segments = [
+            new(caption, new() { Label = "Image description" }, "image"),
+            new("Small lettering at the bottom.", new() { Label = "Visible text" }, "ocr"),
+        ] };
+        string collectionId, documentId, reference;
+        using (var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(extraction))))
+        {
+            collectionId = (await store.CreateCollectionAsync("Media")).Id;
+            using var bytes = new MemoryStream(Encoding.UTF8.GetBytes("image fixture"));
+            var document = await store.ImportAsync(collectionId, "banner_1.png", bytes, "image/png", "TensorSharp/promotions/banner_1.png");
+            documentId = document.Id;
+            var byName = Assert.Single(await Search(store, collectionId, "banner_1.png"));
+            Assert.Equal(caption, byName.Text);
+            Assert.Equal("image", byName.Modality);
+            Assert.Equal(0, byName.ChunkIndex);
+            Assert.Equal(2, byName.DocumentChunkCount);
+            Assert.Equal(documentId, Assert.Single(await Search(store, collectionId, "请到知识库中寻找tensorsharp的宣传画")).DocumentId);
+            await store.ReindexAsync(collectionId, documentId);
+            reference = Assert.Single(await Search(store, collectionId, "banner")).Reference;
+        }
+        using var reopened = new KnowledgeStore(_root, new DelegateExtractor((_, _) => throw new Exception("Restart must not re-extract")));
+        Assert.Equal(reference, Assert.Single(await Search(reopened, collectionId, "banner")).Reference);
+        var byFolder = Assert.Single(await Search(reopened, collectionId, "TensorSharp promotions"));
+        Assert.Equal(documentId, byFolder.DocumentId);
+        Assert.Equal(caption, byFolder.Text);
+        Assert.Equal(caption, Assert.Single(reopened.Read(byFolder.Reference)).Text);
+        Assert.DoesNotContain("banner", reopened.PreviewDocument(collectionId, documentId, 2).Text);
+        await reopened.DeleteDocumentAsync(collectionId, documentId);
+        Assert.Empty(await Search(reopened, collectionId, "TensorSharp banner"));
+    }
+
+    [Theory]
+    [InlineData("请到知识库中寻找tensorsharp的宣传画")]
+    [InlineData("Please find the TensorSharp poster")]
+    public async Task ExplicitImageLookupSurfacesMatchingOriginalBeforeRepeatedCodeChunks(string query)
+    {
+        var caption = "A woman on a white background with blue geometric decorations. Visible text: TensorSharp. Open-Source Deep Learning/AI C# Library.";
+        var extractor = new DelegateExtractor((context, _) => Task.FromResult(context.FileName switch
+        {
+            "banner_1.png" => new KnowledgeExtraction { Segments = [new(caption, new() { Label = "Image description and visible text" }, "image")], Status = KnowledgeDocumentStatus.Partial },
+            "unrelated.png" => new KnowledgeExtraction { Segments = [new("An unrelated promotional poster. 宣传画。", Modality: "image")] },
+            "manual.pdf" => new KnowledgeExtraction { Segments = [new("TensorSharp image poster API examples", new() { Page = 1 }, "ocr")] },
+            "source.txt" => new KnowledgeExtraction { Segments = Enumerable.Range(0, 100).Select(index => new KnowledgeSegment($"TensorSharp namespace Code{index}", Modality: "text")).ToArray() },
+            _ => new KnowledgeExtraction { Segments = [new("TensorSharp project readme.", Modality: "text")] },
+        }));
+        using var store = new KnowledgeStore(_root, extractor);
+        var collection = await store.CreateCollectionAsync("test");
+        var otherCollection = await store.CreateCollectionAsync("unselected");
+        await Import(store, collection.Id, "source.txt", "code fixture");
+        await Import(store, collection.Id, "readme.txt", "readme fixture");
+        await Import(store, collection.Id, "manual.pdf", "pdf fixture");
+        await Import(store, collection.Id, "unrelated.png", "unrelated image fixture");
+        var image = await Import(store, collection.Id, "banner_1.png", "image fixture");
+        var hiddenImage = await Import(store, otherCollection.Id, "banner_1.png", "hidden fixture");
+
+        var results = await store.SearchAsync(query, new() { CollectionIds = [collection.Id], Limit = 4 });
+        Assert.Equal(image.Id, results[0].DocumentId);
+        Assert.Equal("image", results[0].Modality);
+        Assert.Equal(caption, results[0].Text);
+        Assert.DoesNotContain(results, result => result.DocumentId == hiddenImage.Id);
+        Assert.Contains(results, result => result.FileName == "readme.txt");
+        Assert.Contains(results, result => result.FileName == "manual.pdf");
+    }
+
+    [Theory]
+    [InlineData("请寻找TensorSharp的录音", "recording.wav", "audio")]
+    [InlineData("Find the TensorSharp audio", "recording.wav", "audio")]
+    [InlineData("请寻找TensorSharp的视频", "trailer.mp4", "video")]
+    [InlineData("Find the TensorSharp video", "trailer.mp4", "video")]
+    public async Task ExplicitMediaLookupUsesOriginalTypeInsteadOfExtractedCaptionModality(string query, string fileName, string requested)
+    {
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((context, _) => Task.FromResult(new KnowledgeExtraction
+        { Segments = [new(context.FileName == fileName ? "TensorSharp presentation." : "TensorSharp", Modality: context.FileName == fileName ? "image" : "text")] })));
+        var collection = await store.CreateCollectionAsync("Media");
+        await Import(store, collection.Id, "source.txt", "source fixture");
+        using var bytes = new MemoryStream(Encoding.UTF8.GetBytes("media fixture"));
+        var document = await store.ImportAsync(collection.Id, fileName, bytes, requested + "/fixture");
+        Assert.Equal(document.Id, (await Search(store, collection.Id, query))[0].DocumentId);
+    }
+
+    [Theory]
+    [InlineData("How does TensorSharp image encoding work?")]
+    [InlineData("What model does TensorSharp use for image encoding?")]
+    [InlineData("Find the TensorSharp image API documentation")]
+    [InlineData("TensorSharp如何编码图片")]
+    public async Task QuestionsAboutMediaProcessingKeepDocumentationRelevance(string query)
+    {
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((context, _) => Task.FromResult(new KnowledgeExtraction
+        {
+            Segments = [new(context.FileName == "guide.pdf"
+                ? "TensorSharp image encoding uses an encoder model. API documentation explains the work."
+                : "TensorSharp image poster. " + string.Join(' ', Enumerable.Repeat("blue decorative background artwork", 40)),
+                Modality: context.FileName == "guide.pdf" ? "ocr" : "image")],
+        })));
+        var collection = await store.CreateCollectionAsync("Media documentation");
+        await Import(store, collection.Id, "banner_1.png", "image fixture");
+        var guide = await Import(store, collection.Id, "guide.pdf", "guide fixture");
+        Assert.Equal(guide.Id, (await Search(store, collection.Id, query))[0].DocumentId);
+    }
+
+    [Fact]
     public async Task DenseRetrievalFindsSemanticMatchAndNeverMixesEmbeddingModelSpaces()
     {
         string collectionId, documentId;

@@ -232,6 +232,8 @@
   "page.knowledge.refresh": "Actualiser",
   "page.knowledge.empty": "Aucune collection. Créez-en une pour ajouter des documents, médias et jeux de données.",
   "page.knowledge.use": "Utiliser {name} dans cette conversation",
+  "page.knowledge.inChat": "Cette collection est sélectionnée pour cette conversation.",
+  "page.knowledge.notInChat": "Sélectionnez cette collection pour rechercher ses sources indexées dans cette conversation.",
   "page.knowledge.browse": "Parcourir",
   "page.knowledge.upload": "Téléverser des fichiers",
   "page.knowledge.documentsEmpty": "Aucun fichier. Téléversez des fichiers ou un dossier pour créer l’index de cette collection.",

@@ -41,6 +41,28 @@ separate source metadata. Candidates excluded by the evidence budget do not issu
 markers. Unused, unknown and stale markers never add source chips; external URLs
 must remain unchanged.
 
+## Image import, reindex and retrieval
+
+`media_retrieval_probe.py` imports an image and reindexes it with the loaded
+vision model, then verifies original bytes, idempotent imports, visible text,
+filename lookup, query ranking and empty-scope isolation. It mutates the isolated
+library copy. Copy the library before starting `TensorAgentHost` with a dedicated
+root under `artifacts/` or `docs/validation/`; never use the live app's data root.
+The probe requires the current launcher's `dataRoot` connection metadata.
+
+```sh
+python3 eng/validation/knowledge/media_retrieval_probe.py \
+  --connection artifacts/knowledge-banner/host/connection.json \
+  --collection test --image TensorSharp.Server.Host/wwwroot/images/banner_1.png \
+  --query '请到知识库中寻找tensorsharp的宣传画' --expected-text TensorSharp \
+  --output artifacts/knowledge-banner/media
+```
+
+Run `answer_quality_probe.py` separately with the same query and collection to
+check the generated answer and authoritative citations. Record the actual
+model/backend and coverage. The image probe does not validate caption accuracy,
+native media embeddings, audio/video extraction, or other devices.
+
 ## Protocol matrix
 
 The standalone `TensorSharp.Server.Host` exposes OpenAI Chat Completions,

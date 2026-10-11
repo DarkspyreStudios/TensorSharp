@@ -232,6 +232,8 @@
   "page.knowledge.refresh": "Aktualisieren",
   "page.knowledge.empty": "Noch keine Sammlungen. Erstellen Sie eine für Dokumente, Medien und Datensätze.",
   "page.knowledge.use": "{name} in diesem Chat verwenden",
+  "page.knowledge.inChat": "Diese Sammlung ist für diesen Chat ausgewählt.",
+  "page.knowledge.notInChat": "Wähle diese Sammlung aus, um ihre indizierten Quellen in diesem Chat zu durchsuchen.",
   "page.knowledge.browse": "Durchsuchen",
   "page.knowledge.upload": "Dateien hochladen",
   "page.knowledge.documentsEmpty": "Noch keine Dateien. Laden Sie Dateien oder einen Ordner hoch, um diese Sammlung zu indexieren.",

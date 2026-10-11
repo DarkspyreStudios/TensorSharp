@@ -41,7 +41,9 @@ open-source references that informed these independently implemented patterns.
    PDFs, and **Download original**. PDF previews show indexed text first; native
    apps present the original through the platform file viewer. Long text previews
    offer excerpt navigation.
-5. Check the collections to use in this chat. Browsing a collection does not
+5. Check **Use {collection} in this chat** beside the upload controls, or select
+   the collection's checkbox in the catalog. The upload panel shows whether the
+   collection is available to this chat. Browsing, importing and reindexing do not
    select it for inference. Selected collection chips appear above the composer;
    up to 32 collections can be selected. A new chat starts with no selection, and
    reopening a saved chat restores its selection.
@@ -223,6 +225,22 @@ an installed compatible codec and vision model, with limits of ten minutes,
 36,000 frames, and 16,777,216 pixels per frame. Each local media generation has a
 three-minute deadline, a 768-token output budget, and a 16,000-character cap.
 File extensions alone do not establish codec or model support.
+Supported media MIME types can also identify uploads whose names have no
+recognized extension. Codec readers receive a private copy with a known suffix;
+the retained original name and bytes stay intact. Media generation is parsed
+before indexing: protocol framing, private reasoning and tool calls do not become
+source evidence. Image extraction requests visible text first, then a factual
+description, to preserve names within the output budget.
+
+Filenames and folder paths remain searchable after successful extraction without
+being inserted into the returned source text. Explicit image, audio and video
+lookups prefer matching original media of the requested type, preventing many
+short code chunks mentioning the same name from hiding a matching asset. This
+preference still requires a query match and respects selected collections. PDF
+OCR stays document evidence. Optional model reranking receives the source
+modality and both ends of long image/frame captions so trailing visible text is
+available within its bounded excerpt budget. These are retrieval aids; the
+default index still searches derived text rather than native media embeddings.
 
 ## Store lifecycle and retrieval
 

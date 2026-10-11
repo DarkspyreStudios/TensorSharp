@@ -232,6 +232,8 @@
   "page.knowledge.refresh": "Refresh",
   "page.knowledge.empty": "No collections yet. Create one to add documents, media and datasets.",
   "page.knowledge.use": "Use {name} in this chat",
+  "page.knowledge.inChat": "This collection is selected for this chat.",
+  "page.knowledge.notInChat": "Select this collection to search its indexed sources in this chat.",
   "page.knowledge.browse": "Browse",
   "page.knowledge.upload": "Upload files",
   "page.knowledge.documentsEmpty": "No files yet. Upload files or a folder to build this collection’s index.",

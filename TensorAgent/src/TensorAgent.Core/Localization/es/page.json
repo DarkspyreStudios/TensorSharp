@@ -232,6 +232,8 @@
   "page.knowledge.refresh": "Actualizar",
   "page.knowledge.empty": "Aún no hay colecciones. Crea una para añadir documentos, medios y conjuntos de datos.",
   "page.knowledge.use": "Usar {name} en este chat",
+  "page.knowledge.inChat": "Esta colección está seleccionada para este chat.",
+  "page.knowledge.notInChat": "Selecciona esta colección para buscar en sus fuentes indexadas en este chat.",
   "page.knowledge.browse": "Explorar",
   "page.knowledge.upload": "Subir archivos",
   "page.knowledge.documentsEmpty": "Aún no hay archivos. Sube archivos o una carpeta para crear el índice de esta colección.",

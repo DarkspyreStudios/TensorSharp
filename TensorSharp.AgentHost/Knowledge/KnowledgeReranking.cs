@@ -95,7 +95,9 @@ public sealed class KnowledgeReranking
         {
             query,
             candidates = candidates.Select((candidate, id) => new
-            { id, fileName = Prefix(candidate.FileName, 160), excerpt = Prefix(candidate.Text, excerptCharacters) }),
+            { id, fileName = Prefix(candidate.FileName, 160), modality = Prefix(candidate.Modality ?? "text", 32),
+                excerpt = candidate.Modality is "image" or "video"
+                    ? MediaExcerpt(candidate.Text, excerptCharacters) : Prefix(candidate.Text, excerptCharacters) }),
         }, JsonOptions);
         string input = Serialize();
         while (Encoding.UTF8.GetByteCount(input) > MaxInputBytes && excerptCharacters > 0)
@@ -141,6 +143,18 @@ public sealed class KnowledgeReranking
         int length = Math.Min(text.Length, limit);
         if (length > 0 && char.IsHighSurrogate(text[length - 1])) length--;
         return text[..length];
+    }
+
+    // Image/frame captions may put visible text after a long scene description.
+    // Preserve both ends so bounded reranking still sees those names and labels.
+    private static string MediaExcerpt(string text, int limit)
+    {
+        const string omission = "\n…\n";
+        if (text.Length <= limit || limit <= omission.Length) return Prefix(text, limit);
+        string lead = Prefix(text, (limit - omission.Length) / 2);
+        int start = text.Length - (limit - omission.Length - lead.Length);
+        if (char.IsLowSurrogate(text[start])) start++;
+        return lead + omission + text[start..];
     }
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };

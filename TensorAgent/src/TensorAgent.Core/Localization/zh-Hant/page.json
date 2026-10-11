@@ -232,6 +232,8 @@
   "page.knowledge.refresh": "重新整理",
   "page.knowledge.empty": "尚無集合。建立一個集合以新增文件、媒體和資料集。",
   "page.knowledge.use": "在此聊天中使用 {name}",
+  "page.knowledge.inChat": "此聊天已選擇使用該集合。",
+  "page.knowledge.notInChat": "選擇此集合，才能在此聊天中搜尋其已索引的來源。",
   "page.knowledge.browse": "瀏覽",
   "page.knowledge.upload": "上傳檔案",
   "page.knowledge.documentsEmpty": "暫無檔案。上傳檔案或資料夾以建立此集合的索引。",

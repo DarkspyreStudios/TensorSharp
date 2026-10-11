@@ -166,6 +166,49 @@ public sealed class KnowledgeRerankingTests : IDisposable
     }
 
     [Fact]
+    public async Task ImageVisibleTextAfterLongDescriptionRemainsAvailableToRelevanceRanking()
+    {
+        var image = Hit(2, "An illustration with a white backdrop. " + new string('x', 950)
+            + "\nVisible text: TensorSharp\nOpen-Source Deep Learning/AI C# Library")
+            with { FileName = "banner_1.png", Modality = "image" };
+        var hits = new[] { Hit(0, "using TensorSharp.Core;"), Hit(1, "using TensorSharp.Models;"), image };
+        var provider = new Provider((input, _) =>
+        {
+            using var parsed = JsonDocument.Parse(input);
+            return Task.FromResult(JsonSerializer.Serialize(new
+            {
+                scores = parsed.RootElement.GetProperty("candidates").EnumerateArray().Select(candidate => new[]
+                {
+                    candidate.GetProperty("id").GetInt32(),
+                    candidate.GetProperty("modality").GetString() == "image"
+                        && candidate.GetProperty("excerpt").GetString()!.Contains("Visible text: TensorSharp") ? 3 : 1,
+                }).ToArray(),
+            }));
+        });
+        var result = await new KnowledgeReranking(provider).RankAsync("请到知识库中寻找tensorsharp的宣传画", hits);
+        Assert.Same(image, result.Results[0]);
+        using var sent = JsonDocument.Parse(provider.Input!);
+        string excerpt = sent.RootElement.GetProperty("candidates")[2].GetProperty("excerpt").GetString()!;
+        Assert.StartsWith("An illustration", excerpt);
+        Assert.EndsWith("C# Library", excerpt);
+        Assert.True(excerpt.Length <= 800);
+        Assert.Equal(image.Text, result.Results[0].Text);
+    }
+
+    [Fact]
+    public void TruncatedMediaExcerptsPreserveUnicodeAndTheInputByteBudget()
+    {
+        var hits = Enumerable.Range(0, 8).Select(id => Hit(id,
+            string.Concat(Enumerable.Repeat("图😀", 500)) + " visible TensorSharp 😀") with { Modality = "video" }).ToArray();
+        string input = KnowledgeReranking.BuildInput("TensorSharp宣传画", hits);
+        Assert.True(Encoding.UTF8.GetByteCount(input) <= KnowledgeReranking.MaxInputBytes);
+        Assert.DoesNotContain("\uFFFD", input);
+        using var parsed = JsonDocument.Parse(input);
+        Assert.All(parsed.RootElement.GetProperty("candidates").EnumerateArray(), candidate =>
+            Assert.EndsWith("visible TensorSharp 😀", candidate.GetProperty("excerpt").GetString()));
+    }
+
+    [Fact]
     public async Task QueryThatCannotFitDoesNotGetSilentlyTruncatedOrSentToModel()
     {
         var provider = new Provider((input, _) => Task.FromResult(RateLaterCandidates(input)));
