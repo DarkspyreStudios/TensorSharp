@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "已索引文本",
   "page.knowledge.sourceVersion": "版本 {number}",
   "page.knowledge.sourcePrevious": "上一段摘录",
-  "page.knowledge.sourceNext": "下一段摘录"
+  "page.knowledge.sourceNext": "下一段摘录",
+  "page.knowledge.addChats": "添加聊天",
+  "page.knowledge.selectChats": "选择历史聊天",
+  "page.knowledge.findChats": "查找聊天",
+  "page.knowledge.chatHelp": "选择已保存的聊天，将消息和可用附件复制到此集合并建立索引。再次添加可更新快照。",
+  "page.knowledge.importChats": "添加所选聊天并建立索引",
+  "page.knowledge.chatsSelected": "已选择 {count} 个",
+  "page.knowledge.selectChat": "选择聊天 {name}",
+  "page.knowledge.maxChats": "每次最多选择 32 个聊天。",
+  "page.knowledge.chatMessages.one": "{count} 条消息",
+  "page.knowledge.chatMessages.other": "{count} 条消息",
+  "page.knowledge.previousChats": "上一页聊天",
+  "page.knowledge.nextChats": "下一页聊天",
+  "page.knowledge.noChats": "没有符合搜索条件的已保存聊天。",
+  "page.knowledge.indexingChats": "正在复制聊天并建立索引…",
+  "page.knowledge.chatImportComplete": "已为 {added} 个聊天建立索引 · {failed} 个问题需要处理"
 }

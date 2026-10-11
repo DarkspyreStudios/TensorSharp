@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "색인된 텍스트",
   "page.knowledge.sourceVersion": "버전 {number}",
   "page.knowledge.sourcePrevious": "이전 발췌문",
-  "page.knowledge.sourceNext": "다음 발췌문"
+  "page.knowledge.sourceNext": "다음 발췌문",
+  "page.knowledge.addChats": "채팅 추가",
+  "page.knowledge.selectChats": "이전 채팅 선택",
+  "page.knowledge.findChats": "채팅 찾기",
+  "page.knowledge.chatHelp": "저장된 채팅을 선택하면 메시지와 사용 가능한 첨부 파일을 이 컬렉션에 복사하고 색인을 만듭니다. 다시 추가하면 스냅샷이 업데이트됩니다.",
+  "page.knowledge.importChats": "선택한 채팅 추가 및 색인 생성",
+  "page.knowledge.chatsSelected": "{count}개 선택됨",
+  "page.knowledge.selectChat": "채팅 {name} 선택",
+  "page.knowledge.maxChats": "한 번에 최대 32개의 채팅을 선택하세요.",
+  "page.knowledge.chatMessages.one": "메시지 {count}개",
+  "page.knowledge.chatMessages.other": "메시지 {count}개",
+  "page.knowledge.previousChats": "이전 채팅",
+  "page.knowledge.nextChats": "다음 채팅",
+  "page.knowledge.noChats": "검색과 일치하는 저장된 채팅이 없습니다.",
+  "page.knowledge.indexingChats": "채팅 복사 및 색인 생성 중…",
+  "page.knowledge.chatImportComplete": "채팅 {added}개 색인 생성 완료 · 문제 {failed}개 확인 필요"
 }

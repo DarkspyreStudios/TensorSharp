@@ -399,6 +399,7 @@ public sealed class AgentAppHost : IDisposable
         Server.MapLoras(this);
         Server.MapKnowledge(Knowledge, PdfOcr == null ? null : () => PdfOcr.Status,
             PdfOcr == null ? null : async ct => { await PdfOcr.PrepareAsync(ct).ConfigureAwait(false); });
+        Server.MapKnowledgeChats(Knowledge, Conversations, Options.UploadDirectory, Artifacts);
     }
 
     public AgentPaths Paths { get; }

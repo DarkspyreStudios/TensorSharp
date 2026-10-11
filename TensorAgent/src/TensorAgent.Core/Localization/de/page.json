@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "Indexierter Text",
   "page.knowledge.sourceVersion": "Version {number}",
   "page.knowledge.sourcePrevious": "Vorheriger Auszug",
-  "page.knowledge.sourceNext": "Nächster Auszug"
+  "page.knowledge.sourceNext": "Nächster Auszug",
+  "page.knowledge.addChats": "Chats hinzufügen",
+  "page.knowledge.selectChats": "Frühere Chats auswählen",
+  "page.knowledge.findChats": "Chats suchen",
+  "page.knowledge.chatHelp": "Gespeicherte Chats auswählen, um Nachrichten und verfügbare Anhänge in diese Sammlung zu kopieren und zu indexieren. Erneutes Hinzufügen aktualisiert den Stand.",
+  "page.knowledge.importChats": "Ausgewählte Chats hinzufügen und indexieren",
+  "page.knowledge.chatsSelected": "{count} ausgewählt",
+  "page.knowledge.selectChat": "Chat {name} auswählen",
+  "page.knowledge.maxChats": "Höchstens 32 Chats gleichzeitig auswählen.",
+  "page.knowledge.chatMessages.one": "{count} Nachricht",
+  "page.knowledge.chatMessages.other": "{count} Nachrichten",
+  "page.knowledge.previousChats": "Vorherige Chats",
+  "page.knowledge.nextChats": "Nächste Chats",
+  "page.knowledge.noChats": "Keine gespeicherten Chats entsprechen dieser Suche.",
+  "page.knowledge.indexingChats": "Chats werden kopiert und indexiert…",
+  "page.knowledge.chatImportComplete": "{added} Chats indexiert · {failed} Probleme erfordern Aufmerksamkeit"
 }

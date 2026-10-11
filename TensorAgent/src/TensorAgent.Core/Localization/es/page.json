@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "Texto indexado",
   "page.knowledge.sourceVersion": "Versión {number}",
   "page.knowledge.sourcePrevious": "Extracto anterior",
-  "page.knowledge.sourceNext": "Extracto siguiente"
+  "page.knowledge.sourceNext": "Extracto siguiente",
+  "page.knowledge.addChats": "Añadir chats",
+  "page.knowledge.selectChats": "Seleccionar chats anteriores",
+  "page.knowledge.findChats": "Buscar chats",
+  "page.knowledge.chatHelp": "Selecciona chats guardados para copiar e indexar sus mensajes y archivos adjuntos disponibles en esta colección. Añádelos de nuevo para actualizar la copia.",
+  "page.knowledge.importChats": "Añadir e indexar los chats seleccionados",
+  "page.knowledge.chatsSelected": "{count} seleccionados",
+  "page.knowledge.selectChat": "Seleccionar chat {name}",
+  "page.knowledge.maxChats": "Selecciona como máximo 32 chats a la vez.",
+  "page.knowledge.chatMessages.one": "{count} mensaje",
+  "page.knowledge.chatMessages.other": "{count} mensajes",
+  "page.knowledge.previousChats": "Chats anteriores",
+  "page.knowledge.nextChats": "Chats siguientes",
+  "page.knowledge.noChats": "No hay chats guardados que coincidan con esta búsqueda.",
+  "page.knowledge.indexingChats": "Copiando e indexando chats…",
+  "page.knowledge.chatImportComplete": "{added} chats indexados · {failed} problemas requieren atención"
 }

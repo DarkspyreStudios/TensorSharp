@@ -3302,6 +3302,9 @@
   var knowledgeSummary = null, knowledgeFilterTimer = null, knowledgeUploadProgress = '', knowledgeNativeUpload = null, knowledgeUploadResult = null;
   var knowledgeCatalogVersion = 0, knowledgeDocumentVersion = 0;
   var knowledgeSearchVersion = 0, knowledgeReadVersion = 0, knowledgeBusy = false;
+  var knowledgeChats = [], knowledgeChatSelected = Object.create(null), knowledgeChatLoading = false;
+  var knowledgeChatOffset = 0, knowledgeChatOffsets = [0], knowledgeChatNextOffset = null;
+  var knowledgeChatVersion = 0, knowledgeChatPickerVersion = 0, knowledgeChatFilterTimer = null;
 
   function knowledgeError(message) {
     var line = $('knowledge-error');
@@ -3416,6 +3419,7 @@
     $('knowledge-upload').disabled = knowledgeBusy || !knowledgeActive;
     $('knowledge-file-input').disabled = knowledgeBusy || !knowledgeActive;
     $('knowledge-upload-folder').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-add-chats').disabled = knowledgeBusy || !knowledgeActive;
     $('knowledge-folder-input').disabled = knowledgeBusy || !knowledgeActive;
     ['knowledge-file-query', 'knowledge-type', 'knowledge-sort'].forEach(function (id) { $(id).disabled = knowledgeBusy || !knowledgeActive; });
     $('knowledge-upload-help').textContent = t(knowledgeActive ? 'page.knowledge.uploadHelp' : 'page.knowledge.uploadChooseCollection');
@@ -3432,6 +3436,7 @@
     $('knowledge-status').textContent = status;
     $('knowledge-ocr-retry').style.display = knowledgeOcrRetry && !knowledgeBusy ? '' : 'none';
     $('knowledge-ocr-retry').disabled = knowledgeBusy;
+    paintKnowledgeChats();
   }
   var knowledgeOcrStatus = null, knowledgeOcrPreparing = false;
   var knowledgeOcrRetry = null, knowledgeOcrPollVersion = 0;
@@ -3484,6 +3489,7 @@
     });
   }
   function selectKnowledgeCollection(id) {
+    closeKnowledgeChats();
     knowledgeActive = id;
     knowledgeOcrRetry = null; knowledgeUploadResult = null;
     knowledgeDocuments = []; knowledgeNextOffset = null; knowledgeDocumentsLoading = false;
@@ -3639,7 +3645,9 @@
     safe.forEach(function (source) {
       var link = knowledgeSourceLink(box, source);
       var location = knowledgeLocation(source.location);
-      link.textContent = (source.relativePath || source.fileName) + (location ? ' · ' + location : '');
+      link.textContent = '';
+      knowledgeSourceThumbnail(link, source);
+      link.appendChild(el('span', 'knowledge-source-label', (source.relativePath || source.fileName) + (location ? ' · ' + location : '')));
       link.title = source.reference;
     });
     view.sourceBox = box;
@@ -3678,6 +3686,63 @@
       || !/^[a-zA-Z0-9_-]{1,128}$/.test(id || '')
       || !Number.isInteger(doc.version) || doc.version <= 0) return null;
     return { collectionId: doc.collectionId, documentId: id, version: doc.version };
+  }
+  var knowledgeThumbnailPreviews = Object.create(null);
+  function knowledgeThumbnailKind(doc) {
+    var name = typeof doc.fileName === 'string' ? doc.fileName.toLowerCase() : '';
+    if (doc.modality === 'image' || /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif|avif|svg)$/.test(name)) return 'image';
+    if (doc.modality === 'video' || /\.(mp4|mov|webm|mkv|avi)$/.test(name)) return 'video';
+    if (doc.modality === 'audio' || /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/.test(name)) return 'audio';
+    return '';
+  }
+  function knowledgeSourceThumbnail(link, doc) {
+    var identity = knowledgeSourceIdentity(doc), kind = knowledgeThumbnailKind(doc);
+    if (!identity || !kind) return;
+    link.classList.add('knowledge-source-thumbnail');
+    var thumbnail = el('span', 'knowledge-thumbnail knowledge-thumbnail-placeholder', kind === 'audio' ? '♫' : kind === 'video' ? '▶' : '▧');
+    thumbnail.setAttribute('aria-hidden', 'true');
+    link.appendChild(thumbnail);
+    var base = knowledgeDocumentUrl(identity.collectionId, identity.documentId);
+    var previewUrl = base + '/preview?version=' + identity.version;
+    // Repeated citations and adjacent excerpts share one metadata request. The
+    // version is part of the key, so reindexing cannot reuse an older preview.
+    if (!knowledgeThumbnailPreviews[previewUrl]) {
+      var keys = Object.keys(knowledgeThumbnailPreviews);
+      if (keys.length >= 128) delete knowledgeThumbnailPreviews[keys[0]];
+      var pending = knowledgeRequest(previewUrl).catch(function () {
+        // A temporary disconnect should be retryable on the next search/replay.
+        // Do not remove a newer request if this one was evicted while pending.
+        if (knowledgeThumbnailPreviews[previewUrl] === pending) delete knowledgeThumbnailPreviews[previewUrl];
+        return null;
+      });
+      knowledgeThumbnailPreviews[previewUrl] = pending;
+    }
+    knowledgeThumbnailPreviews[previewUrl].then(function (preview) {
+      if (!preview || thumbnail.isConnected === false) return;
+      // Only the authenticated host can authorize an inline media type. Ignore
+      // URLs in extracted text, model output, and even returned metadata.
+      var type = preview.inlineContentType || '', media;
+      if (/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(type)) {
+        media = el('img', 'knowledge-thumbnail');
+        media.alt = ''; media.loading = 'lazy'; media.decoding = 'async';
+      } else if (/^video\/(mp4|quicktime|webm)$/.test(type)) {
+        media = el('video', 'knowledge-thumbnail');
+        media.muted = true; media.preload = 'metadata'; media.setAttribute('playsinline', '');
+        media.setAttribute('aria-hidden', 'true');
+        // Show the retrieved frame's timestamp when the excerpt names one.
+        var location = doc.location || {}, start = location.startSeconds != null ? location.startSeconds
+          : location.startMilliseconds != null ? location.startMilliseconds / 1000 : 0;
+        media.addEventListener('loadedmetadata', function () {
+          if (Number.isFinite(start) && start >= 0 && Number.isFinite(media.duration) && start < media.duration)
+            media.currentTime = start || Math.min(0.01, media.duration / 2);
+        });
+      } else return; // Audio and unsupported image formats retain a media icon.
+      media.addEventListener('error', function () {
+        if (media.parentNode === link) { link.insertBefore(thumbnail, media); media.remove(); }
+      });
+      media.src = base + '/source?version=' + identity.version + '&inline=1';
+      link.insertBefore(media, thumbnail); thumbnail.remove();
+    });
   }
   function openKnowledgeSource(doc, returnFocus) {
     var identity = knowledgeSourceIdentity(doc);
@@ -3870,6 +3935,131 @@
       more.disabled = knowledgeBusy || knowledgeDocumentsLoading;
     }
   }
+  // Import saved history through the host: it snapshots the transcript and copies
+  // attachments into the collection, using the same index as uploaded sources.
+  function closeKnowledgeChats() {
+    knowledgeChatVersion++; knowledgeChatPickerVersion++;
+    clearTimeout(knowledgeChatFilterTimer);
+    knowledgeChatLoading = false; knowledgeChats = [];
+    knowledgeChatSelected = Object.create(null);
+    $('knowledge-chat-picker').hidden = true;
+  }
+  function paintKnowledgeChats() {
+    var picker = $('knowledge-chat-picker');
+    if (picker.hidden) return;
+    var selected = Object.keys(knowledgeChatSelected);
+    $('knowledge-chat-count').textContent = t('page.knowledge.chatsSelected', { count: selected.length });
+    $('knowledge-chat-import').disabled = knowledgeBusy || !knowledgeActive || !selected.length;
+    $('knowledge-chat-query').disabled = knowledgeBusy;
+    var list = $('knowledge-chat-list'), pagination = $('knowledge-chat-pagination');
+    list.textContent = ''; pagination.textContent = '';
+    list.setAttribute('aria-busy', knowledgeChatLoading ? 'true' : 'false');
+    if (knowledgeChatLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.loading')));
+    else if (!knowledgeChats.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.noChats')));
+    knowledgeChats.forEach(function (chat) {
+      if (!chat || !/^[a-fA-F0-9]{32}$/.test(chat.id || '')) return;
+      var row = el('label', 'knowledge-chat-row'); row.setAttribute('data-conversation', chat.id);
+      var choice = el('input', 'knowledge-chat-toggle'); choice.type = 'checkbox';
+      choice.checked = !!knowledgeChatSelected[chat.id]; choice.disabled = knowledgeBusy;
+      choice.setAttribute('aria-label', t('page.knowledge.selectChat', { name: chat.title || chat.id }));
+      choice.addEventListener('change', function () {
+        if (knowledgeBusy) { choice.checked = !!knowledgeChatSelected[chat.id]; return; }
+        if (choice.checked && !knowledgeChatSelected[chat.id] && Object.keys(knowledgeChatSelected).length >= 32) {
+          choice.checked = false; knowledgeError(t('page.knowledge.maxChats')); return;
+        }
+        if (choice.checked) knowledgeChatSelected[chat.id] = chat;
+        else delete knowledgeChatSelected[chat.id];
+        $('knowledge-chat-count').textContent = t('page.knowledge.chatsSelected', { count: Object.keys(knowledgeChatSelected).length });
+        $('knowledge-chat-import').disabled = !Object.keys(knowledgeChatSelected).length;
+      });
+      row.appendChild(choice);
+      var label = el('span', 'knowledge-chat-label');
+      label.appendChild(el('strong', '', chat.title || chat.id));
+      var metadata = tn('page.knowledge.chatMessages', chat.messageCount || 0);
+      var updated = new Date(chat.updatedAt);
+      if (Number.isFinite(updated.getTime())) metadata += ' · ' + updated.toLocaleDateString();
+      label.appendChild(el('span', 'hint-block knowledge-chat-meta', metadata));
+      row.appendChild(label); list.appendChild(row);
+    });
+    if (knowledgeChatOffset > 0) {
+      var previous = knowledgeButton(pagination, 'knowledge-chat-previous', t('page.knowledge.previousChats'), function () {
+        return loadKnowledgeChats(knowledgeChatOffsets.length > 1 ? knowledgeChatOffsets[knowledgeChatOffsets.length - 2] : 0);
+      });
+      previous.disabled = knowledgeBusy || knowledgeChatLoading;
+    }
+    if (knowledgeChatNextOffset !== null) {
+      var next = knowledgeButton(pagination, 'knowledge-chat-next', t('page.knowledge.nextChats'), function () {
+        return loadKnowledgeChats(knowledgeChatNextOffset);
+      });
+      next.disabled = knowledgeBusy || knowledgeChatLoading;
+    }
+  }
+  function loadKnowledgeChats(offset) {
+    if (!knowledgeActive || $('knowledge-chat-picker').hidden) return Promise.resolve();
+    var collectionId = knowledgeActive, version = ++knowledgeChatVersion;
+    offset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+    knowledgeChats = []; knowledgeChatNextOffset = null; knowledgeChatLoading = true;
+    paintKnowledgeChats();
+    var query = ($('knowledge-chat-query').value || '').trim();
+    var url = '/api/knowledge/chats?offset=' + offset + '&limit=100' + (query ? '&q=' + encodeURIComponent(query) : '');
+    return knowledgeRequest(url).then(function (data) {
+      if (version !== knowledgeChatVersion || knowledgeActive !== collectionId) return;
+      knowledgeChats = Array.isArray(data.chats) ? data.chats.slice(0, 100) : [];
+      if (offset === 0) knowledgeChatOffsets = [0];
+      else if (offset > knowledgeChatOffset) knowledgeChatOffsets.push(offset);
+      else knowledgeChatOffsets = knowledgeChatOffsets.filter(function (value) { return value <= offset; });
+      knowledgeChatOffset = offset;
+      knowledgeChatNextOffset = Number.isInteger(data.nextOffset) && data.nextOffset > offset ? data.nextOffset : null;
+    }).catch(function (error) {
+      if (version === knowledgeChatVersion && knowledgeActive === collectionId) knowledgeFailure(error);
+    }).then(function () {
+      if (version === knowledgeChatVersion && knowledgeActive === collectionId) {
+        knowledgeChatLoading = false; paintKnowledgeChats();
+      }
+    });
+  }
+  $('knowledge-add-chats').addEventListener('click', function () {
+    if (!knowledgeActive || knowledgeBusy) return;
+    closeKnowledgeChats(); knowledgeError('');
+    $('knowledge-chat-picker').hidden = false; $('knowledge-chat-query').value = '';
+    knowledgeChatOffset = 0; knowledgeChatOffsets = [0]; knowledgeChatNextOffset = null;
+    $('knowledge-chat-query').focus();
+    return loadKnowledgeChats(0);
+  });
+  $('knowledge-chat-close').addEventListener('click', closeKnowledgeChats);
+  $('knowledge-chat-query').addEventListener('input', function () {
+    if (knowledgeBusy) return;
+    clearTimeout(knowledgeChatFilterTimer); knowledgeChatVersion++;
+    knowledgeChats = []; knowledgeChatNextOffset = null; knowledgeChatLoading = true; paintKnowledgeChats();
+    knowledgeChatFilterTimer = setTimeout(function () { loadKnowledgeChats(0); }, 180);
+  });
+  $('knowledge-chat-import').addEventListener('click', function () {
+    var ids = Object.keys(knowledgeChatSelected), collectionId = knowledgeActive, pickerVersion = knowledgeChatPickerVersion;
+    if (!collectionId || knowledgeBusy || !ids.length) return;
+    return mutateKnowledge(function () {
+      knowledgeUploadProgress = t('page.knowledge.indexingChats'); knowledgeBusyControls();
+      return knowledgeRequest(knowledgeCollectionUrl(collectionId) + '/chats', 'POST', { conversationIds: ids }).then(function (data) {
+        var imported = Array.isArray(data.importedChats) ? data.importedChats : [], errors = Array.isArray(data.errors) ? data.errors : [];
+        if (pickerVersion === knowledgeChatPickerVersion) {
+          imported.forEach(function (chat) {
+            if (!errors.some(function (error) { return error.conversationId === chat.id; })) delete knowledgeChatSelected[chat.id];
+          });
+        }
+        if (knowledgeActive === collectionId) {
+          knowledgeSearchVersion++; knowledgeReadVersion++;
+          $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+          knowledgeUploadResult = { collectionId: collectionId,
+            label: t('page.knowledge.chatImportComplete', { added: imported.length, failed: errors.length }) };
+          if (errors.length) knowledgeError(errors.slice(0, 8).map(function (error) {
+            return (error.title || error.conversationId || '') + (error.fileName ? ' / ' + error.fileName : '') + ': ' + error.error;
+          }).join('\n') + (errors.length > 8 ? '\n' + t('page.knowledge.moreUploadFailures', { count: errors.length - 8 }) : ''));
+        }
+        return refreshKnowledgeCollection(collectionId);
+      }).catch(function (error) {
+        if (knowledgeActive === collectionId) throw error;
+      });
+    });
+  });
   function refreshKnowledgeCollection(collectionId) {
     var id = collectionId || knowledgeActive, version = ++knowledgeCatalogVersion;
     return knowledgeRequest('/api/knowledge/collections').then(function (d) {
@@ -3927,6 +4117,13 @@
     if (!results.length) box.appendChild(el('p', 'hint-block', t('page.knowledge.noResults')));
     results.forEach(function (hit) {
       var row = el('article', 'knowledge-result');
+      if (knowledgeSourceIdentity(hit) && knowledgeThumbnailKind(hit)) {
+        var thumbnailLink = knowledgeSourceLink(row, hit);
+        thumbnailLink.classList.add('knowledge-thumbnail-link');
+        thumbnailLink.textContent = '';
+        thumbnailLink.setAttribute('aria-label', t('page.knowledge.source') + ' · ' + (hit.relativePath || hit.fileName));
+        knowledgeSourceThumbnail(thumbnailLink, hit);
+      }
       row.appendChild(el('strong', '', hit.fileName));
       if (hit.relativePath && hit.relativePath !== hit.fileName) row.appendChild(el('div', 'knowledge-path hint-block', hit.relativePath));
       row.appendChild(el('div', 'hint-block', knowledgeLocation(hit.location)));

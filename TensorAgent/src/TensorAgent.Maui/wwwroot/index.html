@@ -555,13 +555,24 @@ label.skill-toggle { padding: 12px 4px; }
 #knowledgechips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
 #knowledgechips:empty { display: none; }
 #knowledgechips button { color: var(--text); border: 1px solid var(--border); cursor: pointer; }
-#knowledge-sheet { max-height: 88vh; max-width: 960px; margin-inline: auto; }
+/* Anchor the library to the visible viewport, including when a phone keyboard
+   covers the bottom of the layout viewport. Only its body scrolls so Done stays
+   reachable while browsing a long collection or a source preview. */
+#knowledge-sheet {
+  --knowledge-top: max(calc(var(--safe-top) + 8px), calc(var(--vh) * .12));
+  top: var(--knowledge-top); bottom: auto;
+  height: calc(var(--vh) - var(--knowledge-top)); max-height: none;
+  max-width: 960px; margin-inline: auto;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+#knowledge-sheet > .grab, #knowledge-sheet > .knowledge-heading { flex: 0 0 auto; }
+.knowledge-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 0 2px 4px; }
 .knowledge-heading, .knowledge-collection, .knowledge-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .knowledge-heading { justify-content: space-between; }
 .knowledge-heading h2, .knowledge-heading h3 { margin: 8px 0; overflow-wrap: anywhere; }
 .knowledge-library-heading { margin-top: 18px; }
 .knowledge-library-heading h3 { flex: 1; min-width: 0; }
-#knowledge-collections { max-height: 230px; overflow-y: auto; overscroll-behavior: contain; }
+#knowledge-collections { max-height: min(230px, calc(var(--vh) * .3)); overflow-y: auto; overscroll-behavior: contain; }
 .knowledge-collection { border: 1px solid var(--border); border-radius: 10px; padding: 4px 8px; margin: 6px 0; }
 .knowledge-collection.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--surface)); }
 .knowledge-choice { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; min-height: 44px; overflow-wrap: anywhere; cursor: pointer; }
@@ -571,6 +582,15 @@ label.skill-toggle { padding: 12px 4px; }
 .knowledge-upload-panel { padding: 14px; margin: 10px 0 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg); }
 .knowledge-upload-heading { font-size: 14px; margin-bottom: 10px; }
 .knowledge-upload-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+.knowledge-chat-picker { padding: 12px; margin: 10px 0 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg); }
+.knowledge-chat-picker[hidden] { display: none; }
+.knowledge-chat-picker > .knowledge-heading { margin-bottom: 10px; }
+.knowledge-chat-picker .knowledge-search-input { width: 100%; min-height: 44px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text); font: inherit; font-size: 14px; }
+#knowledge-chat-list { max-height: min(300px, calc(var(--vh) * .4)); overflow-y: auto; overscroll-behavior: contain; margin: 8px 0; }
+.knowledge-chat-row { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 8px 4px; border-top: 1px solid var(--border); cursor: pointer; }
+.knowledge-chat-row input { flex: 0 0 auto; width: 20px; height: 20px; accent-color: var(--accent); }
+.knowledge-chat-label { display: grid; gap: 2px; min-width: 0; overflow-wrap: anywhere; }
+.knowledge-chat-meta { margin: 0; font-size: 12px; color: var(--muted); }
 #knowledge-sheet .knowledge-upload-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 46px; padding: 10px 16px; border: 1px solid var(--accent); border-radius: 10px; background: var(--accent); color: var(--bg); font: inherit; font-size: 14px; font-weight: 650; cursor: pointer; }
 #knowledge-sheet .knowledge-upload-button.secondary { background: var(--surface); color: var(--accent); }
 #knowledge-upload-help { margin: 10px 0 0; font-size: 12px; line-height: 1.5; }
@@ -604,19 +624,19 @@ label.skill-toggle { padding: 12px 4px; }
 .knowledge-warning { color: #e7c485; font-size: 13px; margin: 6px 0; }
 .knowledge-warnings > summary { cursor: pointer; min-height: 30px; }
 .knowledge-empty { padding: 14px 0; }
-#knowledge-documents { max-height: 55vh; overflow-y: auto; overscroll-behavior: contain; }
+#knowledge-documents { max-height: calc(var(--vh) * .55); overflow-y: auto; overscroll-behavior: contain; }
 #knowledge-pagination { display: flex; justify-content: space-between; gap: 12px; }
 #knowledge-pagination .knowledge-more { margin-left: auto; }
-.knowledge-source-viewer { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.72); }
-.knowledge-source-dialog { width: min(960px, 100%); max-height: 90vh; max-height: 90dvh; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--text); box-shadow: 0 18px 64px rgba(0,0,0,.4); overflow: hidden; }
-.knowledge-source-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.knowledge-source-viewer { position: fixed; inset: 0 0 auto; height: var(--vh); z-index: 90; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(0,0,0,.72); }
+.knowledge-source-dialog { width: min(960px, 100%); max-height: calc(var(--vh) - 40px); min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); color: var(--text); box-shadow: 0 18px 64px rgba(0,0,0,.4); overflow: hidden; }
+.knowledge-source-header { display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .knowledge-source-header h2, .knowledge-source-header h3 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
 .knowledge-source-header .mini { min-height: 44px; }
-.knowledge-source-content { overflow-y: auto; padding: 18px; min-height: 120px; overscroll-behavior: contain; }
+.knowledge-source-content { overflow-y: auto; padding: 18px; min-height: 0; overscroll-behavior: contain; }
 .knowledge-source-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; margin: 0; }
 .knowledge-source-content img { display: block; max-width: 100%; height: auto; margin: auto; }
-.knowledge-source-content audio, .knowledge-source-content video { display: block; width: 100%; max-height: 65vh; }
-.knowledge-source-content iframe { width: 100%; height: 60vh; border: 0; background: white; }
+.knowledge-source-content audio, .knowledge-source-content video { display: block; width: 100%; max-height: calc(var(--vh) * .65); }
+.knowledge-source-content iframe { width: 100%; height: calc(var(--vh) * .6); border: 0; background: white; }
 @media (max-width: 520px) {
   .knowledge-upload-buttons > button { flex: 1; padding-inline: 10px; }
   .knowledge-file-toolbar .knowledge-find { flex-basis: 100%; }
@@ -624,7 +644,7 @@ label.skill-toggle { padding: 12px 4px; }
   .knowledge-file-toolbar select { width: 100%; }
   .knowledge-library-heading #knowledge-collection-actions { flex-basis: 100%; }
   .knowledge-source-viewer { padding: 8px; }
-  .knowledge-source-dialog { max-height: 94vh; max-height: 94dvh; }
+  .knowledge-source-dialog { max-height: calc(var(--vh) - 16px); }
   .knowledge-source-header, .knowledge-source-content { padding: 12px; }
 }
 .knowledge-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 14px; line-height: 1.5; }
@@ -633,6 +653,11 @@ label.skill-toggle { padding: 12px 4px; }
 .knowledge-citations .hint-block { width: 100%; }
 .knowledge-citations .knowledge-source { max-width: 100%; white-space: normal; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 .knowledge-source { display: inline-flex; align-items: center; color: var(--accent); text-decoration: none; }
+.knowledge-thumbnail { display: block; flex: 0 0 auto; width: 96px; height: 72px; max-width: 100%; object-fit: cover; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.knowledge-thumbnail-placeholder { display: inline-flex; align-items: center; justify-content: center; font-size: 28px; color: var(--muted); }
+.knowledge-source-thumbnail { display: flex; align-items: center; gap: 10px; max-width: 100%; margin: 6px 0; }
+.knowledge-thumbnail-link { width: fit-content; }
+.knowledge-source-label { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 #knowledge-read:not(:empty) { padding: 8px 12px; border: 1px solid var(--accent); border-radius: 10px; }
 @media (max-width: 420px) {
   .skill-manage-row { flex-wrap: wrap; }
@@ -758,6 +783,7 @@ button.mini.quiet { background: transparent; color: var(--muted); }
     <h2 id="knowledge-title" data-i18n="page.knowledge.title">Knowledge</h2>
     <button class="mini quiet" id="knowledge-close" type="button" data-i18n="page.knowledge.close">Done</button>
   </div>
+  <div class="knowledge-body">
   <p class="hint-block" data-i18n="page.knowledge.intro">Choose the collections this chat can search. Browse to upload and manage their sources.</p>
   <p id="knowledge-error" role="alert" style="display:none"></p>
   <div class="urlrow">
@@ -780,11 +806,26 @@ button.mini.quiet { background: transparent; color: var(--muted); }
     <div class="knowledge-upload-buttons">
       <button class="knowledge-upload-button" id="knowledge-upload" type="button" disabled><span aria-hidden="true">＋</span><span data-i18n="page.knowledge.upload">Upload files</span></button>
       <button class="knowledge-upload-button secondary" id="knowledge-upload-folder" type="button" disabled><span aria-hidden="true">📁</span><span data-i18n="page.knowledge.uploadFolder">Upload folder</span></button>
+      <button class="knowledge-upload-button secondary" id="knowledge-add-chats" type="button" disabled><span aria-hidden="true">＋</span><span data-i18n="page.knowledge.addChats">Add chats</span></button>
     </div>
     <p id="knowledge-upload-help" class="hint-block" data-i18n="page.knowledge.uploadChooseCollection">Create or browse a collection to add files.</p>
     <p id="knowledge-status" class="hint-block" role="status" aria-live="polite"></p>
     <button class="mini quiet" id="knowledge-ocr-retry" type="button" style="display:none" data-i18n="page.knowledge.setupRetry">Retry PDF setup</button>
   </div>
+  <section class="knowledge-chat-picker" id="knowledge-chat-picker" hidden aria-labelledby="knowledge-chat-title">
+    <div class="knowledge-heading">
+      <strong id="knowledge-chat-title" data-i18n="page.knowledge.selectChats">Select historical chats</strong>
+      <button class="mini quiet" id="knowledge-chat-close" type="button" data-i18n="page.knowledge.cancel">Cancel</button>
+    </div>
+    <input class="knowledge-search-input" id="knowledge-chat-query" type="search" maxlength="400" data-i18n-placeholder="page.knowledge.findChats" data-i18n-aria-label="page.knowledge.findChats" placeholder="Find chats">
+    <p class="hint-block" id="knowledge-chat-help" data-i18n="page.knowledge.chatHelp">Select chats to add their messages and attachments to this collection.</p>
+    <div id="knowledge-chat-list"></div>
+    <div class="knowledge-actions" id="knowledge-chat-pagination"></div>
+    <div class="knowledge-actions">
+      <button class="mini" id="knowledge-chat-import" type="button" disabled data-i18n="page.knowledge.importChats">Add and index selected chats</button>
+      <span class="hint-block" id="knowledge-chat-count" aria-live="polite"></span>
+    </div>
+  </section>
   <div id="knowledge-summary"></div>
   <div class="knowledge-file-toolbar">
     <label class="knowledge-find"><span data-i18n="page.knowledge.findFiles">Find files</span><input id="knowledge-file-query" type="search" maxlength="400" data-i18n-placeholder="page.knowledge.findFilesHint" placeholder="Search names or folder paths"></label>
@@ -810,6 +851,7 @@ button.mini.quiet { background: transparent; color: var(--muted); }
   </div>
   <div id="knowledge-results" aria-live="polite"></div>
   <div id="knowledge-read" aria-live="polite"></div>
+  </div>
 </div>
 
 <!-- Optional full description. Selection and removal are also on every list row. -->

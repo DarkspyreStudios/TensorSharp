@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "Indexed text",
   "page.knowledge.sourceVersion": "Version {number}",
   "page.knowledge.sourcePrevious": "Previous excerpt",
-  "page.knowledge.sourceNext": "Next excerpt"
+  "page.knowledge.sourceNext": "Next excerpt",
+  "page.knowledge.addChats": "Add chats",
+  "page.knowledge.selectChats": "Select historical chats",
+  "page.knowledge.findChats": "Find chats",
+  "page.knowledge.chatHelp": "Select saved chats to copy and index their messages and available attachments in this collection. Add them again to update the snapshot.",
+  "page.knowledge.importChats": "Add and index selected chats",
+  "page.knowledge.chatsSelected": "{count} selected",
+  "page.knowledge.selectChat": "Select chat {name}",
+  "page.knowledge.maxChats": "Select at most 32 chats at a time.",
+  "page.knowledge.chatMessages.one": "{count} message",
+  "page.knowledge.chatMessages.other": "{count} messages",
+  "page.knowledge.previousChats": "Previous chats",
+  "page.knowledge.nextChats": "Next chats",
+  "page.knowledge.noChats": "No saved chats match this search.",
+  "page.knowledge.indexingChats": "Copying and indexing chats…",
+  "page.knowledge.chatImportComplete": "Indexed chats: {added} · issues to review: {failed}"
 }

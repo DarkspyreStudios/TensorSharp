@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "索引のテキスト",
   "page.knowledge.sourceVersion": "バージョン {number}",
   "page.knowledge.sourcePrevious": "前の抜粋",
-  "page.knowledge.sourceNext": "次の抜粋"
+  "page.knowledge.sourceNext": "次の抜粋",
+  "page.knowledge.addChats": "チャットを追加",
+  "page.knowledge.selectChats": "過去のチャットを選択",
+  "page.knowledge.findChats": "チャットを検索",
+  "page.knowledge.chatHelp": "保存済みのチャットを選択すると、メッセージと利用可能な添付ファイルがこのコレクションにコピーされ、索引が作成されます。再度追加するとスナップショットが更新されます。",
+  "page.knowledge.importChats": "選択したチャットを追加して索引を作成",
+  "page.knowledge.chatsSelected": "{count} 件を選択",
+  "page.knowledge.selectChat": "チャット「{name}」を選択",
+  "page.knowledge.maxChats": "一度に選択できるチャットは32件までです。",
+  "page.knowledge.chatMessages.one": "{count} 件のメッセージ",
+  "page.knowledge.chatMessages.other": "{count} 件のメッセージ",
+  "page.knowledge.previousChats": "前のチャット",
+  "page.knowledge.nextChats": "次のチャット",
+  "page.knowledge.noChats": "検索に一致する保存済みチャットはありません。",
+  "page.knowledge.indexingChats": "チャットをコピーして索引を作成中…",
+  "page.knowledge.chatImportComplete": "{added} 件のチャットに索引を作成 · {failed} 件の問題を確認してください"
 }

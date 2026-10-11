@@ -315,5 +315,20 @@
   "page.knowledge.sourceIndexedText": "Texte indexé",
   "page.knowledge.sourceVersion": "Version {number}",
   "page.knowledge.sourcePrevious": "Extrait précédent",
-  "page.knowledge.sourceNext": "Extrait suivant"
+  "page.knowledge.sourceNext": "Extrait suivant",
+  "page.knowledge.addChats": "Ajouter des chats",
+  "page.knowledge.selectChats": "Sélectionner des chats précédents",
+  "page.knowledge.findChats": "Rechercher des chats",
+  "page.knowledge.chatHelp": "Sélectionnez des chats enregistrés pour copier et indexer leurs messages et pièces jointes disponibles dans cette collection. Ajoutez-les à nouveau pour actualiser la copie.",
+  "page.knowledge.importChats": "Ajouter et indexer les chats sélectionnés",
+  "page.knowledge.chatsSelected": "{count} sélectionnés",
+  "page.knowledge.selectChat": "Sélectionner le chat {name}",
+  "page.knowledge.maxChats": "Sélectionnez au maximum 32 chats à la fois.",
+  "page.knowledge.chatMessages.one": "{count} message",
+  "page.knowledge.chatMessages.other": "{count} messages",
+  "page.knowledge.previousChats": "Chats précédents",
+  "page.knowledge.nextChats": "Chats suivants",
+  "page.knowledge.noChats": "Aucun chat enregistré ne correspond à cette recherche.",
+  "page.knowledge.indexingChats": "Copie et indexation des chats…",
+  "page.knowledge.chatImportComplete": "{added} chats indexés · {failed} problèmes nécessitent votre attention"
 }

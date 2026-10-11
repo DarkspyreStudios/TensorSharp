@@ -1,7 +1,7 @@
 # Personal multimodal knowledge
 
 TensorSharp.Knowledge stores original files and searchable, cited representations
-of their contents. TensorAgent adds collection management, uploads, search, and
+of their contents. TensorAgent adds collection management, uploads, saved-chat imports, search, and
 per-chat selection. The same store and retrieval contracts serve the standalone
 TensorSharp server and agent tools.
 
@@ -22,6 +22,14 @@ open-source references that informed these independently implemented patterns.
    TensorAgent uses the native folder picker inside the app and the browser's
    directory picker on the Web UI. The library retains originals after the
    upload cache or chat is cleared.
+   **Add chats** opens a searchable, paginated history picker. Select up to 32
+   saved chats across pages, then choose **Add and index selected chats**. The
+   collection stores each transcript and available attachments or produced files;
+   both user and assistant messages become searchable. Missing files are reported,
+   and incomplete chats stay selected for retry. Private reasoning is excluded.
+   Adding a chat again refreshes its transcript and files at stable source paths
+   without duplicating unchanged sources. The snapshot does not update automatically
+   when the conversation changes.
 3. Read each document's extraction status and warnings. A batch can succeed for
    some files and fail for others; both outcomes are shown.
 4. Use the collection counts, document/media/dataset totals, filename or path
@@ -52,6 +60,12 @@ Clicking either an answer's source link or a **Retrieved sources** link opens th
 same preview, starting at the cited chunk when one is available. Stale or deleted
 sources show an error instead of silently opening another version. Native
 downloads present the original in the platform file viewer.
+Image and video sources show thumbnails in search results, expanded excerpts, and
+cited-source links. Supported video previews seek to the retrieved timestamp.
+Audio, unsupported formats, and unavailable previews show media icons. Thumbnails
+use the same authenticated, versioned originals as source previews; they are not
+separate resized image files. The knowledge menu scrolls within the visible
+viewport while keeping **Done** accessible, including at reduced viewport heights.
 
 Folder uploads are processed in bounded batches with visible progress and
 per-file failures. Unsupported formats remain visibly metadata-only; failed or
@@ -118,7 +132,7 @@ unchanged. This normalization neither retrieves new evidence nor proves generate
 claims; the separate **Retrieved sources** links remain the authoritative source
 identities supplied by the host.
 
-Documents load in pages of 100 with **Load more documents**. Refresh reloads the
+Documents load in pages of 100 with **Previous files** and **Next files**. Refresh reloads the
 current catalog. **Reindex** processes the retained original again using the
 currently available extractors and embedding provider. This is useful after
 loading a media model or changing an embedding model. Removing a document or
@@ -475,6 +489,16 @@ totals and an unfiltered collection summary. Folder multipart batches pair each
 file with `relativePath0`, `relativePath1`, etc.; these paths are metadata and
 never storage destinations. The store's original blobs remain content-addressed.
 
+TensorAgent's authenticated `GET /chats?q=&offset=0&limit=100` lists nonempty
+saved chats with `chats`, `total`, and `nextOffset`. Import selected history with
+`POST /collections/{collection}/chats` and `{ conversationIds: [...] }` (1–32
+IDs). The response separates committed `documents`, successful transcript
+`importedChats`, and per-chat or per-file `errors`. Transcripts use
+`Chats/{conversationId}/conversation.md`; copied attachments and produced files
+live under the same prefix. Media extraction follows the collection's usual
+model availability and coverage limits. Load a compatible model and **Reindex**
+metadata-only sources to extract their content.
+
 ## Embedding in a .NET application
 
 The core project has no dependency on TensorAgent or a running inference model:
@@ -528,6 +552,11 @@ format extraction, provenance, durable lifecycle, stale references, model-space
 compatibility, bounds, request scope, tool behavior, transport, saved-chat
 metadata, and executable UI workflows. Optional live-model tests require an
 explicitly configured model and must be reported as not run when unavailable.
+The [TensorAgent browser probe](../eng/validation/tensoragent-knowledge-layout.py)
+uses the real HTML/CSS and JavaScript with explicit API fixtures to check chat
+selection, importing, scoped search, thumbnails, and preview navigation. Its
+geometry checks cover long content, short and touch viewports, and a simulated
+keyboard height. It does not exercise a native keyboard, MAUI device, or inference.
 
 The [knowledge benchmark](../eng/validation/KnowledgeBench/README.md) measures
 deterministic corpus ingestion, warm retrieval, restart, memory, and a small
