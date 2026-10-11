@@ -62,6 +62,165 @@ public sealed class KnowledgeIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task HttpFolderImportsKeepPathsAndExposeFilteredPagedInventoryAndCollectionRename()
+    {
+        var host = Start();
+        var collection = await host.Knowledge.CreateCollectionAsync("Before");
+        string route = $"/api/knowledge/collections/{collection.Id}";
+        using var form = new MultipartFormDataContent();
+        var files = new[] { (Path: "Project/north/notes.txt", Type: "text/plain", Text: "north cobalt"),
+            (Path: "Project/south/notes.txt", Type: "text/plain", Text: "south quartz"),
+            (Path: "Project/data/table.csv", Type: "text/csv", Text: "name,value\norchard,5") };
+        for (int index = 0; index < files.Length; index++)
+        {
+            var file = new ByteArrayContent(Encoding.UTF8.GetBytes(files[index].Text));
+            file.Headers.ContentType = new(files[index].Type);
+            form.Add(file, "files", Path.GetFileName(files[index].Path));
+            form.Add(new StringContent(files[index].Path), "relativePath" + index);
+        }
+        using var uploaded = await _client!.PostAsync(route + "/documents", form);
+        var upload = await uploaded.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(uploaded.IsSuccessStatusCode, upload.ToString());
+        Assert.Empty(upload.GetProperty("errors").EnumerateArray());
+        Assert.Equal(3, upload.GetProperty("documents").GetArrayLength());
+        Assert.Equal(3, upload.GetProperty("documents").EnumerateArray().Select(document => document.GetProperty("id").GetString()).Distinct().Count());
+
+        var page = await _client.GetFromJsonAsync<JsonElement>(route + "/documents?limit=1&type=document&q=notes&sort=name");
+        Assert.Equal(2, page.GetProperty("total").GetInt32());
+        Assert.Equal(3, page.GetProperty("collectionTotal").GetInt32());
+        Assert.Equal(1, page.GetProperty("nextOffset").GetInt32());
+        Assert.Equal("Project/north/notes.txt", page.GetProperty("documents")[0].GetProperty("relativePath").GetString());
+        Assert.Equal(2, page.GetProperty("summary").GetProperty("documents").GetInt32());
+        Assert.Equal(1, page.GetProperty("summary").GetProperty("datasets").GetInt32());
+        var next = await _client.GetFromJsonAsync<JsonElement>(route + "/documents?limit=1&type=document&q=notes&offset=1");
+        Assert.Equal("Project/south/notes.txt", next.GetProperty("documents")[0].GetProperty("relativePath").GetString());
+        Assert.Equal(JsonValueKind.Null, next.GetProperty("nextOffset").ValueKind);
+        var dataset = await _client.GetFromJsonAsync<JsonElement>(route + "/documents?type=dataset");
+        Assert.Equal("dataset", Assert.Single(dataset.GetProperty("documents").EnumerateArray()).GetProperty("kind").GetString());
+        var nestedQuery = await _client.GetFromJsonAsync<JsonElement>(route + "/documents?q=PROJECT%2FSOUTH");
+        Assert.Equal(1, nestedQuery.GetProperty("total").GetInt32());
+        using var invalidType = await _client.GetAsync(route + "/documents?type=unknown");
+        Assert.Equal(HttpStatusCode.BadRequest, invalidType.StatusCode);
+        using var invalidSort = await _client.GetAsync(route + "/documents?sort=unknown");
+        Assert.Equal(HttpStatusCode.BadRequest, invalidSort.StatusCode);
+
+        var renamed = await Post(route + "/rename", new { name = "  After  " });
+        Assert.Equal(collection.Id, renamed.GetProperty("collection").GetProperty("id").GetString());
+        Assert.Equal("After", renamed.GetProperty("collection").GetProperty("name").GetString());
+        var listing = await _client.GetFromJsonAsync<JsonElement>("/api/knowledge/collections");
+        var listed = Assert.Single(listing.GetProperty("collections").EnumerateArray());
+        Assert.Equal("After", listed.GetProperty("name").GetString());
+        Assert.Equal(3, listed.GetProperty("documentCount").GetInt32());
+        Assert.True(listed.GetProperty("sizeBytes").GetInt64() > 0);
+        using var emptyRename = await _client.PostAsJsonAsync(route + "/rename", new { name = " " });
+        Assert.Equal(HttpStatusCode.BadRequest, emptyRename.StatusCode);
+    }
+
+    [Fact]
+    public async Task HttpFolderBatchReportsInvalidPathIndividuallyAndKeepsValidFiles()
+    {
+        var host = Start();
+        var collection = await host.Knowledge.CreateCollectionAsync("Folder");
+        using var form = new MultipartFormDataContent();
+        form.Add(new ByteArrayContent("bad"u8.ToArray()), "files", "notes.txt");
+        form.Add(new StringContent("Folder/../notes.txt"), "relativePath0");
+        var good = new ByteArrayContent("valid orchard"u8.ToArray());
+        good.Headers.ContentType = new("text/plain");
+        form.Add(good, "files", "notes.txt");
+        form.Add(new StringContent("Folder/nested/notes.txt"), "relativePath1");
+        var malformed = new ByteArrayContent("{malformed"u8.ToArray());
+        malformed.Headers.ContentType = new("application/json");
+        form.Add(malformed, "files", "broken.json");
+        form.Add(new StringContent("Folder/nested/broken.json"), "relativePath2");
+        using var response = await _client!.PostAsync($"/api/knowledge/collections/{collection.Id}/documents", form);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(response.IsSuccessStatusCode, body.ToString());
+        Assert.Equal(new[] { 0, 2 }, body.GetProperty("errors").EnumerateArray().Select(error => error.GetProperty("fileIndex").GetInt32()));
+        Assert.Equal("Folder/nested/notes.txt", Assert.Single(body.GetProperty("documents").EnumerateArray()).GetProperty("relativePath").GetString());
+        Assert.Single(host.Knowledge.ListDocuments(collection.Id));
+    }
+
+    [Fact]
+    public async Task HttpBrowserFolderUploadPreservesQuotedSemicolonUnicodeAndPercentFileNames()
+    {
+        var host = Start();
+        var collection = await host.Knowledge.CreateCollectionAsync("Folder");
+        string[] names = ["report;part.txt", "quoted \"draft\".txt", "literal%22%2F.txt", "研究资料 空间.txt", "mixed%22\".txt"];
+        const string boundary = "TensorAgentKnowledgeNameBoundary";
+        var wire = new StringBuilder();
+        for (int index = 0; index < names.Length; index++)
+        {
+            // Match browser FormData: only CR, LF, and double quotes in disposition
+            // values are percent-escaped. Literal percent sequences are unchanged.
+            string headerName = names[index].Replace("\"", "%22", StringComparison.Ordinal);
+            wire.Append($"--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"{headerName}\"\r\n")
+                .Append($"Content-Type: text/plain\r\n\r\nindexed orchard {index}\r\n")
+                .Append($"--{boundary}\r\nContent-Disposition: form-data; name=\"relativePath{index}\"\r\n\r\n")
+                .Append($"Folder/sub; \"section\"/session 10:30/{names[index]}\r\n");
+        }
+        wire.Append($"--{boundary}--\r\n");
+        using var request = new ByteArrayContent(Encoding.UTF8.GetBytes(wire.ToString()));
+        request.Headers.ContentType = new("multipart/form-data");
+        request.Headers.ContentType.Parameters.Add(new("boundary", boundary));
+        using var response = await _client!.PostAsync($"/api/knowledge/collections/{collection.Id}/documents", request);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.True(response.IsSuccessStatusCode, body.ToString());
+        Assert.Empty(body.GetProperty("errors").EnumerateArray());
+        Assert.Equal(names, body.GetProperty("documents").EnumerateArray().Select(document => document.GetProperty("fileName").GetString()));
+        Assert.Equal(names.Select(name => "Folder/sub; \"section\"/session 10:30/" + name),
+            body.GetProperty("documents").EnumerateArray().Select(document => document.GetProperty("relativePath").GetString()));
+        Assert.Equal(names.Length, host.Knowledge.ListDocuments(collection.Id).Count);
+    }
+
+    [Fact]
+    public async Task HttpSourcePreviewIsBoundedAndInlineRoutesOnlyServeApprovedMediaTypes()
+    {
+        var host = Start();
+        var collection = await host.Knowledge.CreateCollectionAsync("Sources");
+        string indexedText = string.Concat(Enumerable.Repeat("orchard plans ", 3000));
+        var imported = await Upload(collection.Id, "notes.txt", Encoding.UTF8.GetBytes(indexedText));
+        string id = imported.GetProperty("documents")[0].GetProperty("id").GetString()!;
+        string route = $"/api/knowledge/collections/{collection.Id}/documents/{id}";
+        var preview = await _client!.GetFromJsonAsync<JsonElement>(route + "/preview?version=1");
+        Assert.StartsWith("orchard plans", preview.GetProperty("text").GetString());
+        Assert.True(preview.GetProperty("text").GetString()!.Length <= 32000);
+        Assert.True(preview.GetProperty("truncated").GetBoolean());
+        int nextChunkIndex = preview.GetProperty("nextChunkIndex").GetInt32();
+        Assert.True(nextChunkIndex > 0);
+        var nextPreview = await _client!.GetFromJsonAsync<JsonElement>(route + "/preview?version=1&chunkIndex=" + nextChunkIndex);
+        Assert.Equal(nextChunkIndex, nextPreview.GetProperty("chunkIndex").GetInt32());
+        Assert.Equal(JsonValueKind.Number, nextPreview.GetProperty("previousChunkIndex").ValueKind);
+        Assert.False(nextPreview.GetProperty("truncated").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, preview.GetProperty("inlineContentType").ValueKind);
+        using var missingVersion = await _client.GetAsync(route + "/preview");
+        Assert.Equal(HttpStatusCode.BadRequest, missingVersion.StatusCode);
+        using var source = await _client.GetAsync(route + "/source?version=1&inline=1");
+        Assert.Equal("attachment", source.Content.Headers.ContentDisposition!.DispositionType);
+        await Post(route + "/reindex", new { });
+        using var stale = await _client.GetAsync(route + "/preview?version=1");
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        using var missing = await _client.GetAsync($"/api/knowledge/collections/{collection.Id}/documents/{new string('a', 32)}/preview?version=1");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+
+        // Imported bytes stay untrusted: HTML, SVG, and mismatched MIME types are
+        // always downloadable attachments, even when a caller requests inline.
+        foreach (var item in new[] { (Name: "image.png", Type: "image/png", Inline: true),
+            (Name: "spoof.png", Type: "text/html", Inline: false), (Name: "active.svg", Type: "image/svg+xml", Inline: false),
+            (Name: "page.html", Type: "text/html", Inline: false), (Name: "recording.wav", Type: "audio/wav", Inline: true) })
+        {
+            var doc = await host.Knowledge.ImportAsync(collection.Id, item.Name, new MemoryStream([1, 2, 3]), item.Type);
+            string mediaRoute = $"/api/knowledge/collections/{collection.Id}/documents/{doc.Id}";
+            var mediaPreview = await _client.GetFromJsonAsync<JsonElement>(mediaRoute + "/preview?version=1");
+            Assert.Equal(item.Inline ? item.Type : null, mediaPreview.GetProperty("inlineContentType").GetString());
+            using var mediaSource = await _client.GetAsync(mediaRoute + "/source?version=1&inline=1");
+            Assert.Equal(item.Inline ? "inline" : "attachment", mediaSource.Content.Headers.ContentDisposition!.DispositionType);
+            Assert.Equal(item.Inline ? item.Type : "application/octet-stream", mediaSource.Content.Headers.ContentType!.MediaType);
+            Assert.Equal("sandbox; default-src 'none'", mediaSource.Headers.GetValues("Content-Security-Policy").Single());
+            Assert.Equal("nosniff", mediaSource.Headers.GetValues("X-Content-Type-Options").Single());
+        }
+    }
+
+    [Fact]
     public async Task RealHttpUploadSearchReadOriginalReindexAndDeletePreserveProvenance()
     {
         AgentAppHost host = Start();

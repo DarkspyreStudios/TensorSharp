@@ -56,6 +56,7 @@
     speech: '',            // BCP-47 for dictation; empty follows the device
     settings: null,
     native: false,         // true when the page is inside the app, not a browser
+    knowledgeDirectory: false, // host can choose and recursively index a folder
     dictation: false,      // native pickers can exist without a speech recogniser
     composerHint: t('page.composer.message'),
     netMsg: '',            // the host's own wording for a network refusal
@@ -3297,6 +3298,8 @@
   // collection after the user switches. Source content is always rendered as text.
   var knowledgeCatalog = [], knowledgeDocuments = [], knowledgeActive = null;
   var knowledgeNextOffset = null, knowledgeDocumentsLoading = false;
+  var knowledgeOffset = 0, knowledgePageOffsets = [0], knowledgeTotal = 0, knowledgeCollectionTotal = 0;
+  var knowledgeSummary = null, knowledgeFilterTimer = null, knowledgeUploadProgress = '', knowledgeNativeUpload = null, knowledgeUploadResult = null;
   var knowledgeCatalogVersion = 0, knowledgeDocumentVersion = 0;
   var knowledgeSearchVersion = 0, knowledgeReadVersion = 0, knowledgeBusy = false;
 
@@ -3373,8 +3376,12 @@
     var list = $('knowledge-collections');
     if (!list) return;
     list.textContent = '';
+    var query = ($('knowledge-collection-filter').value || '').trim().toLocaleLowerCase();
+    $('knowledge-collection-count').textContent = tn('page.knowledge.collections', knowledgeCatalog.length);
     if (!knowledgeCatalog.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.empty')));
-    knowledgeCatalog.forEach(function (c) {
+    var visible = knowledgeCatalog.filter(function (c) { return !query || c.name.toLocaleLowerCase().indexOf(query) >= 0; });
+    if (knowledgeCatalog.length && !visible.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.noCollections')));
+    visible.forEach(function (c) {
       var row = el('div', 'knowledge-collection' + (knowledgeActive === c.id ? ' active' : ''));
       row.setAttribute('data-collection', c.id);
       var choice = el('label', 'knowledge-choice');
@@ -3393,7 +3400,10 @@
         paintKnowledgeChips();
       });
       choice.appendChild(box);
-      choice.appendChild(el('span', '', c.name));
+      var label = el('span', 'knowledge-collection-label');
+      label.appendChild(el('strong', '', c.name));
+      if (Number.isFinite(c.documentCount)) label.appendChild(el('span', 'hint-block', tn('page.knowledge.files', c.documentCount)));
+      choice.appendChild(label);
       row.appendChild(choice);
       var browse = knowledgeButton(row, 'knowledge-browse', t('page.knowledge.browse'), function () { selectKnowledgeCollection(c.id); });
       browse.setAttribute('aria-pressed', knowledgeActive === c.id ? 'true' : 'false');
@@ -3405,8 +3415,13 @@
     $('knowledge-create').disabled = knowledgeBusy;
     $('knowledge-upload').disabled = knowledgeBusy || !knowledgeActive;
     $('knowledge-file-input').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-upload-folder').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-folder-input').disabled = knowledgeBusy || !knowledgeActive;
+    ['knowledge-file-query', 'knowledge-type', 'knowledge-sort'].forEach(function (id) { $(id).disabled = knowledgeBusy || !knowledgeActive; });
+    $('knowledge-upload-help').textContent = t(knowledgeActive ? 'page.knowledge.uploadHelp' : 'page.knowledge.uploadChooseCollection');
     $('knowledge-search').disabled = !knowledgeActive;
-    var status = knowledgeBusy ? t('page.knowledge.working') : '';
+    var status = knowledgeBusy ? knowledgeUploadProgress || t('page.knowledge.working')
+      : knowledgeUploadResult && knowledgeUploadResult.collectionId === knowledgeActive ? knowledgeUploadResult.label : '';
     if (knowledgeOcrPreparing) {
       var setup = knowledgeOcrStatus || {}, progress = '';
       if (Number.isFinite(setup.downloadedBytes) && Number.isFinite(setup.totalBytes) && setup.totalBytes > 0)
@@ -3470,8 +3485,11 @@
   }
   function selectKnowledgeCollection(id) {
     knowledgeActive = id;
-    knowledgeOcrRetry = null;
+    knowledgeOcrRetry = null; knowledgeUploadResult = null;
     knowledgeDocuments = []; knowledgeNextOffset = null; knowledgeDocumentsLoading = false;
+    knowledgeOffset = 0; knowledgePageOffsets = [0]; knowledgeTotal = 0; knowledgeCollectionTotal = 0; knowledgeSummary = null;
+    clearTimeout(knowledgeFilterTimer);
+    $('knowledge-file-query').value = ''; $('knowledge-type').value = 'all'; $('knowledge-sort').value = 'name';
     knowledgeSearchVersion++;
     knowledgeReadVersion++;
     $('knowledge-results').textContent = '';
@@ -3481,21 +3499,33 @@
     paintKnowledgeDocuments();
     return loadKnowledgeDocuments();
   }
-  function loadKnowledgeDocuments(append) {
-    if (append && (knowledgeDocumentsLoading || knowledgeNextOffset === null)) return Promise.resolve();
-    var id = knowledgeActive, offset = append ? knowledgeNextOffset : 0, version = ++knowledgeDocumentVersion;
-    if (!append) { knowledgeDocuments = []; knowledgeNextOffset = null; }
+  function knowledgeDocumentFilters() {
+    return { query: ($('knowledge-file-query').value || '').trim(), type: $('knowledge-type').value || 'all', sort: $('knowledge-sort').value || 'name' };
+  }
+  function loadKnowledgeDocuments(pageOffset) {
+    if (pageOffset === true && (knowledgeDocumentsLoading || knowledgeNextOffset === null)) return Promise.resolve();
+    var id = knowledgeActive, offset = pageOffset === true ? knowledgeNextOffset : Number.isInteger(pageOffset) ? pageOffset : 0;
+    var filters = knowledgeDocumentFilters(), version = ++knowledgeDocumentVersion;
+    knowledgeDocuments = []; knowledgeNextOffset = null;
     knowledgeDocumentsLoading = !!id;
     paintKnowledgeDocuments();
     if (!id) return Promise.resolve();
-    var url = knowledgeCollectionUrl(id) + '/documents' + (offset ? '?offset=' + offset + '&limit=100' : '');
+    var parameters = [];
+    if (offset) { parameters.push('offset=' + offset); parameters.push('limit=100'); }
+    if (filters.query) parameters.push('q=' + encodeURIComponent(filters.query));
+    if (filters.type !== 'all') parameters.push('type=' + encodeURIComponent(filters.type));
+    if (filters.sort !== 'name') parameters.push('sort=' + encodeURIComponent(filters.sort));
+    var url = knowledgeCollectionUrl(id) + '/documents' + (parameters.length ? '?' + parameters.join('&') : '');
     return knowledgeRequest(url).then(function (d) {
       if (version !== knowledgeDocumentVersion || id !== knowledgeActive) return;
-      var page = Array.isArray(d.documents) ? d.documents.slice(0, 100) : [];
-      page.forEach(function (doc) {
-        var previous = knowledgeDocuments.findIndex(function (item) { return item.id === doc.id; });
-        if (previous < 0) knowledgeDocuments.push(doc); else knowledgeDocuments[previous] = doc;
-      });
+      knowledgeDocuments = Array.isArray(d.documents) ? d.documents.slice(0, 100) : [];
+      knowledgeTotal = Number.isInteger(d.total) && d.total >= 0 ? d.total : knowledgeDocuments.length;
+      knowledgeCollectionTotal = Number.isInteger(d.collectionTotal) && d.collectionTotal >= 0 ? d.collectionTotal : knowledgeTotal;
+      knowledgeSummary = d.summary || null;
+      if (offset === 0) knowledgePageOffsets = [0];
+      else if (offset > knowledgeOffset) knowledgePageOffsets.push(offset);
+      else knowledgePageOffsets = knowledgePageOffsets.filter(function (value) { return value <= offset; });
+      knowledgeOffset = offset;
       knowledgeNextOffset = Number.isInteger(d.nextOffset) && d.nextOffset > offset ? d.nextOffset : null;
     }).catch(function (e) {
       if (version === knowledgeDocumentVersion && id === knowledgeActive) knowledgeFailure(e);
@@ -3505,6 +3535,60 @@
         paintKnowledgeDocuments();
       }
     });
+  }
+  function knowledgeBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+  function paintKnowledgeSummary() {
+    var box = $('knowledge-summary'); box.textContent = '';
+    if (!knowledgeActive) return;
+    var summary = knowledgeSummary;
+    if (summary) {
+      [['documents', 'document', t('page.knowledge.documents')], ['media', 'media', t('page.knowledge.media')], ['datasets', 'dataset', t('page.knowledge.datasets')]].forEach(function (item) {
+        var button = knowledgeButton(box, 'knowledge-stat', item[2] + ' · ' + (summary[item[0]] || 0), function () {
+          $('knowledge-type').value = $('knowledge-type').value === item[1] ? 'all' : item[1];
+          return loadKnowledgeDocuments();
+        });
+        button.setAttribute('aria-pressed', $('knowledge-type').value === item[1] ? 'true' : 'false');
+        button.disabled = knowledgeBusy;
+      });
+      var status = t('page.knowledge.indexSummary', { ready: summary.ready || 0, partial: summary.partial || 0, metadata: summary.metadataOnly || 0 });
+      if (Number.isFinite(summary.sizeBytes)) status += ' · ' + knowledgeBytes(summary.sizeBytes);
+      box.appendChild(el('p', 'hint-block knowledge-index-summary', status));
+    }
+    $('knowledge-files-count').textContent = tn('page.knowledge.files', knowledgeCollectionTotal);
+    var start = knowledgeDocuments.length ? knowledgeOffset + 1 : 0, end = knowledgeOffset + knowledgeDocuments.length;
+    $('knowledge-page-count').textContent = t('page.knowledge.showingFiles', { start: start, end: end, total: knowledgeTotal });
+  }
+  function renameKnowledgeCollection(collection) {
+    var actions = $('knowledge-collection-actions'); actions.textContent = '';
+    var input = el('input', 'knowledge-rename-input'); input.type = 'text'; input.maxLength = 120; input.value = collection.name;
+    input.setAttribute('aria-label', t('page.knowledge.name')); actions.appendChild(input);
+    function save() {
+      var name = (input.value || '').trim();
+      if (!name) { knowledgeError(t('page.knowledge.nameRequired')); input.focus(); return; }
+      return mutateKnowledge(function () {
+        knowledgeCatalogVersion++;
+        return knowledgeRequest(knowledgeCollectionUrl(collection.id) + '/rename', 'POST', { name: name }).then(function (d) {
+          // A catalog fetched before this write committed cannot restore the old name.
+          knowledgeCatalogVersion++;
+          var renamed = d.collection;
+          if (renamed) knowledgeCatalog = knowledgeCatalog.map(function (c) { return c.id === renamed.id ? Object.assign({}, c, renamed) : c; });
+          paintKnowledgeCollections();
+        });
+      });
+    }
+    knowledgeButton(actions, 'knowledge-rename-save', t('page.knowledge.save'), save);
+    knowledgeButton(actions, 'knowledge-rename-cancel', t('page.knowledge.cancel'), paintKnowledgeDocuments);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); save(); }
+      else if (e.key === 'Escape') { e.preventDefault(); paintKnowledgeDocuments(); }
+    });
+    input.focus();
   }
   // The host supplies source identities separately from model prose. Build these
   // links only from validated identities, so a model-invented URL cannot become an
@@ -3539,6 +3623,7 @@
       seen[url] = true;
       safe.push({ reference: citedChunk ? source.reference : url, collectionId: source.collectionId,
         documentId: source.documentId, fileName: String(source.fileName || '').slice(0, 500),
+        relativePath: typeof source.relativePath === 'string' ? source.relativePath.slice(0, 2000) : null,
         version: source.version, chunkIndex: citedChunk ? source.chunkIndex : -1, location: citedChunk ? source.location : null,
         modality: source.modality, status: source.status });
     });
@@ -3554,7 +3639,7 @@
     safe.forEach(function (source) {
       var link = knowledgeSourceLink(box, source);
       var location = knowledgeLocation(source.location);
-      link.textContent = source.fileName + (location ? ' · ' + location : '');
+      link.textContent = (source.relativePath || source.fileName) + (location ? ' · ' + location : '');
       link.title = source.reference;
     });
     view.sourceBox = box;
@@ -3564,18 +3649,160 @@
     var link = el('a', 'mini quiet knowledge-source', t('page.knowledge.source'));
     // Never trust a URL embedded in extracted text or a returned source title.
     link.href = knowledgeDocumentUrl(doc.collectionId, doc.documentId || doc.id) + '/source?version=' + encodeURIComponent(doc.version);
-    link.target = '_blank'; link.rel = 'noopener'; link.setAttribute('download', doc.fileName || '');
+    link.addEventListener('click', function (event) {
+      if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      openKnowledgeSource(doc, link);
+    });
     parent.appendChild(link);
     return link;
   }
+
+  // Open originals inside the app as well as a browser. Indexed text is always
+  // textContent; only the server's conservative media allowlist may be embedded.
+  var knowledgeSourceViewer = null, knowledgeSourceViewVersion = 0;
+  function closeKnowledgeSource() {
+    knowledgeSourceViewVersion++;
+    if (!knowledgeSourceViewer) return;
+    var previous = knowledgeSourceViewer;
+    knowledgeSourceViewer = null;
+    previous.overlay.querySelectorAll('audio, video').forEach(function (media) { media.pause(); });
+    previous.overlay.remove();
+    previous.background.forEach(function (item) { item.element.inert = item.inert; });
+    document.body.style.overflow = previous.overflow;
+    if (previous.returnFocus && previous.returnFocus.focus) previous.returnFocus.focus();
+  }
+  function knowledgeSourceIdentity(doc) {
+    var id = doc && (doc.documentId || doc.id);
+    if (!doc || !/^[a-zA-Z0-9_-]{1,128}$/.test(doc.collectionId || '')
+      || !/^[a-zA-Z0-9_-]{1,128}$/.test(id || '')
+      || !Number.isInteger(doc.version) || doc.version <= 0) return null;
+    return { collectionId: doc.collectionId, documentId: id, version: doc.version };
+  }
+  function openKnowledgeSource(doc, returnFocus) {
+    var identity = knowledgeSourceIdentity(doc);
+    if (!identity) return Promise.resolve();
+    closeKnowledgeSource();
+    var version = ++knowledgeSourceViewVersion;
+    var base = knowledgeDocumentUrl(identity.collectionId, identity.documentId);
+    var sourceUrl = base + '/source?version=' + identity.version;
+    var overlay = el('div', 'knowledge-source-viewer');
+    var dialog = el('section', 'knowledge-source-dialog');
+    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', t('page.knowledge.sourceTitle'));
+    var header = el('div', 'knowledge-source-header');
+    var heading = el('div', 'knowledge-source-heading');
+    var title = el('strong', '', doc.relativePath || doc.fileName || t('page.knowledge.sourceTitle'));
+    var meta = el('div', 'hint-block', t('page.knowledge.sourceVersion', { number: identity.version }));
+    heading.appendChild(title); heading.appendChild(meta); header.appendChild(heading);
+    var actions = el('div', 'knowledge-actions');
+    var download = el('a', 'mini quiet', t('page.knowledge.sourceDownload'));
+    download.href = sourceUrl; download.setAttribute('download', doc.fileName || '');
+    download.addEventListener('click', function (event) {
+      if (!state.native) return;
+      event.preventDefault();
+      post('/api/agent/events', { type: 'open-knowledge-source', url: sourceUrl, name: doc.fileName || '' })
+        .catch(function (error) { content.textContent = t('page.knowledge.sourceUnavailable', { error: error.message || String(error) }); });
+    });
+    actions.appendChild(download);
+    var close = knowledgeButton(actions, '', t('page.knowledge.sourceClose'), closeKnowledgeSource);
+    header.appendChild(actions); dialog.appendChild(header);
+    var content = el('div', 'knowledge-source-content', t('page.knowledge.sourceLoading'));
+    content.setAttribute('aria-live', 'polite'); content.setAttribute('aria-busy', 'true');
+    dialog.appendChild(content); overlay.appendChild(dialog);
+    overlay.addEventListener('click', function (event) { if (event.target === overlay) closeKnowledgeSource(); });
+    knowledgeSourceViewer = { overlay: overlay, returnFocus: returnFocus || document.activeElement,
+      overflow: document.body.style.overflow || '', close: close, download: download,
+      background: Array.prototype.map.call(document.body.children, function (child) {
+        var item = { element: child, inert: child.inert }; child.inert = true; return item;
+      }) };
+    document.body.style.overflow = 'hidden'; document.body.appendChild(overlay); close.focus();
+    var previewRequestVersion = 0;
+    function loadPreview(chunkIndex) {
+      var requestVersion = ++previewRequestVersion;
+      content.setAttribute('aria-busy', 'true');
+      return knowledgeRequest(base + '/preview?version=' + identity.version + (chunkIndex > 0 ? '&chunkIndex=' + chunkIndex : '')).then(function (data) {
+        if (version !== knowledgeSourceViewVersion || requestVersion !== previewRequestVersion || !knowledgeSourceViewer) return;
+        content.querySelectorAll('audio, video').forEach(function (media) { media.pause(); });
+        content.textContent = ''; content.setAttribute('aria-busy', 'false');
+        var original = data.document || doc;
+        title.textContent = original.relativePath || original.fileName || title.textContent;
+        var sourceLocation = data.location || doc.location;
+        var location = knowledgeLocation(sourceLocation);
+        meta.textContent = t('page.knowledge.sourceVersion', { number: identity.version }) + (location ? ' · ' + location : '');
+        (original.warnings || []).forEach(function (warning) { content.appendChild(el('p', 'knowledge-warning', warning)); });
+        var type = data.inlineContentType || '', media = null;
+        if (/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(type)) {
+          media = el('img'); media.alt = original.fileName || title.textContent;
+        } else if (/^(audio|video)\/[a-z0-9.+-]+$/.test(type)) {
+          media = el(type.indexOf('audio/') === 0 ? 'audio' : 'video');
+          media.controls = true; media.preload = 'metadata';
+        } else if (type === 'application/pdf' && !state.native && window.navigator && (window.navigator.pdfViewerEnabled === true
+          || (window.navigator.pdfViewerEnabled === undefined && window.navigator.mimeTypes && window.navigator.mimeTypes['application/pdf']))) {
+          media = el('iframe'); media.title = original.fileName || t('page.knowledge.sourceTitle');
+        }
+        if (media) {
+          media.src = sourceUrl + '&inline=1' + (type === 'application/pdf' && sourceLocation && Number.isInteger(sourceLocation.page)
+            && sourceLocation.page > 0 ? '#page=' + sourceLocation.page : '');
+          if (/^(audio|video)\//.test(type) && sourceLocation) {
+            var seconds = sourceLocation.startSeconds != null ? sourceLocation.startSeconds : sourceLocation.startMilliseconds / 1000;
+            if (Number.isFinite(seconds) && seconds > 0) media.addEventListener('loadedmetadata', function () {
+              if (Number.isFinite(media.duration) && seconds < media.duration) media.currentTime = seconds;
+            });
+          }
+          if (type !== 'application/pdf') content.appendChild(media);
+        }
+        if (typeof data.text === 'string' && data.text.length) {
+          content.appendChild(el('p', 'hint-block', t('page.knowledge.sourceIndexedText')));
+          content.appendChild(el('pre', 'knowledge-source-text', data.text));
+        } else if (!media) content.appendChild(el('p', 'hint-block', t('page.knowledge.sourceNoText')));
+        if (data.truncated) content.appendChild(el('p', 'hint-block', t('page.knowledge.sourceTruncated')));
+        if (Number.isInteger(data.previousChunkIndex) || Number.isInteger(data.nextChunkIndex)) {
+          var pages = el('div', 'knowledge-actions');
+          function previewPage(index) {
+            if (!Number.isInteger(index) || index < 0) return;
+            close.focus(); return loadPreview(index);
+          }
+          if (Number.isInteger(data.previousChunkIndex) && data.previousChunkIndex >= 0)
+            knowledgeButton(pages, 'knowledge-source-previous', t('page.knowledge.sourcePrevious'), function () { return previewPage(data.previousChunkIndex); });
+          if (Number.isInteger(data.nextChunkIndex) && data.nextChunkIndex > chunkIndex)
+            knowledgeButton(pages, 'knowledge-source-next', t('page.knowledge.sourceNext'), function () { return previewPage(data.nextChunkIndex); });
+          content.appendChild(pages);
+        }
+        // Put the cited text first: WebViews can advertise PDF support while
+        // leaving an embedded original blank. Native originals use FilePresenter.
+        if (media && type === 'application/pdf') content.appendChild(media);
+        content.scrollTop = 0;
+      }).catch(function (error) {
+        if (version !== knowledgeSourceViewVersion || requestVersion !== previewRequestVersion || !knowledgeSourceViewer) return;
+        content.setAttribute('aria-busy', 'false');
+        content.textContent = t('page.knowledge.sourceUnavailable', { error: error.message || String(error) });
+      });
+    }
+    return loadPreview(Number.isInteger(doc.chunkIndex) && doc.chunkIndex > 0 ? doc.chunkIndex : 0);
+  }
+  document.addEventListener('keydown', function (event) {
+    if (!knowledgeSourceViewer) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeKnowledgeSource(); return; }
+    if (event.key !== 'Tab') return;
+    var items = Array.prototype.filter.call(knowledgeSourceViewer.overlay.querySelectorAll('a, button, audio, video, iframe'),
+      function (item) { return !item.disabled && !item.hidden; });
+    var first = items[0], last = items[items.length - 1];
+    if (!first) return;
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
   function paintKnowledgeDocuments() {
-    var list = $('knowledge-documents'), actions = $('knowledge-collection-actions');
-    list.textContent = ''; actions.textContent = '';
+    var list = $('knowledge-documents'), actions = $('knowledge-collection-actions'), pagination = $('knowledge-pagination');
+    list.textContent = ''; actions.textContent = ''; pagination.textContent = '';
     var collection = knowledgeCatalog.filter(function (c) { return c.id === knowledgeActive; })[0];
     $('knowledge-active-name').textContent = collection ? collection.name : '';
-    knowledgeBusyControls();
+    $('knowledge-files-count').textContent = ''; $('knowledge-page-count').textContent = '';
+    knowledgeBusyControls(); paintKnowledgeSummary();
     if (!collection) return;
     if (collection.description) list.appendChild(el('p', 'hint-block', collection.description));
+    var rename = knowledgeButton(actions, 'knowledge-rename', t('page.knowledge.rename'), function () { renameKnowledgeCollection(collection); });
+    rename.disabled = knowledgeBusy;
     knowledgeDeleteButton(actions, collection.name, function () {
       return mutateKnowledge(function () {
         return knowledgeRequest(knowledgeCollectionUrl(collection.id), 'DELETE').then(function () {
@@ -3585,39 +3812,72 @@
         });
       });
     });
-    if (!knowledgeDocuments.length && !knowledgeDocumentsLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.documentsEmpty')));
+    if (!knowledgeDocuments.length && !knowledgeDocumentsLoading) {
+      var filters = knowledgeDocumentFilters();
+      list.appendChild(el('p', 'hint-block knowledge-empty', t(filters.query || filters.type !== 'all' ? 'page.knowledge.noFiles' : 'page.knowledge.documentsEmpty')));
+    }
     knowledgeDocuments.forEach(function (doc) {
       var row = el('div', 'knowledge-document');
       row.setAttribute('data-document', doc.id);
-      row.appendChild(el('strong', '', doc.fileName));
+      var title = el('div', 'knowledge-document-heading');
+      title.appendChild(el('strong', '', doc.fileName));
+      var kind = doc.kind === 'media' || doc.kind === 'dataset' ? doc.kind : 'document';
+      title.appendChild(el('span', 'knowledge-kind', kind === 'media' ? t('page.knowledge.media') : kind === 'dataset' ? t('page.knowledge.dataset') : t('page.knowledge.document')));
+      row.appendChild(title);
+      if (doc.relativePath && doc.relativePath !== doc.fileName) row.appendChild(el('div', 'knowledge-path hint-block', doc.relativePath));
       var status = doc.status === 'Ready' ? t('page.knowledge.ready')
         : doc.status === 'MetadataOnly' ? t('page.knowledge.metadataOnly') : t('page.knowledge.partial');
-      row.appendChild(el('div', 'hint-block', status + ' · ' + tn('page.knowledge.chunks', doc.chunkCount || 0)));
-      (doc.warnings || []).forEach(function (warning) { row.appendChild(el('p', 'knowledge-warning', warning)); });
+      var metadata = status + ' · ' + tn('page.knowledge.chunks', doc.chunkCount || 0), size = knowledgeBytes(doc.sizeBytes);
+      if (size) metadata += ' · ' + size;
+      row.appendChild(el('div', 'hint-block knowledge-document-meta', metadata));
+      if ((doc.warnings || []).length) {
+        var warnings = el('details', 'knowledge-warnings');
+        warnings.appendChild(el('summary', 'knowledge-warning', tn('page.knowledge.warnings', doc.warnings.length)));
+        doc.warnings.forEach(function (warning) { warnings.appendChild(el('p', 'knowledge-warning', warning)); });
+        row.appendChild(warnings);
+      }
       var controls = el('div', 'knowledge-actions');
       knowledgeSourceLink(controls, doc);
-      var reindex = knowledgeButton(controls, 'knowledge-reindex', t('page.knowledge.reindex'), function () {
+      var manage = el('details', 'knowledge-manage'); manage.appendChild(el('summary', '', t('page.knowledge.manage')));
+      var manageActions = el('div', 'knowledge-actions');
+      var reindex = knowledgeButton(manageActions, 'knowledge-reindex', t('page.knowledge.reindex'), function () {
         return mutateKnowledge(function () { return reindexKnowledgeDocument(doc); });
       });
       reindex.disabled = knowledgeBusy;
-      knowledgeDeleteButton(controls, doc.fileName, function () {
+      knowledgeDeleteButton(manageActions, doc.fileName, function () {
         return mutateKnowledge(function () {
           return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id), 'DELETE').then(function () {
             if (knowledgeActive === doc.collectionId) {
               knowledgeSearchVersion++; knowledgeReadVersion++;
               $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
-              return loadKnowledgeDocuments();
+              return refreshKnowledgeCollection();
             }
           });
         });
       });
+      manage.appendChild(manageActions); controls.appendChild(manage);
       row.appendChild(controls); list.appendChild(row);
     });
     if (knowledgeDocumentsLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.loading')));
+    if (knowledgeOffset > 0) {
+      var previous = knowledgeButton(pagination, 'knowledge-previous', t('page.knowledge.previousFiles'), function () {
+        return loadKnowledgeDocuments(knowledgePageOffsets.length > 1 ? knowledgePageOffsets[knowledgePageOffsets.length - 2] : 0);
+      });
+      previous.disabled = knowledgeBusy || knowledgeDocumentsLoading;
+    }
     if (knowledgeNextOffset !== null) {
-      var more = knowledgeButton(list, 'knowledge-more', t('page.knowledge.loadMore'), function () { return loadKnowledgeDocuments(true); });
+      var more = knowledgeButton(pagination, 'knowledge-more', t('page.knowledge.nextFiles'), function () { return loadKnowledgeDocuments(true); });
       more.disabled = knowledgeBusy || knowledgeDocumentsLoading;
     }
+  }
+  function refreshKnowledgeCollection(collectionId) {
+    var id = collectionId || knowledgeActive, version = ++knowledgeCatalogVersion;
+    return knowledgeRequest('/api/knowledge/collections').then(function (d) {
+      if (version !== knowledgeCatalogVersion) return;
+      knowledgeCatalog = Array.isArray(d.collections) ? d.collections : knowledgeCatalog;
+      paintKnowledgeCollections();
+      if (knowledgeActive === id) return loadKnowledgeDocuments();
+    });
   }
   function reindexKnowledgeDocument(doc) {
     function send() { return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id) + '/reindex', 'POST', {}); }
@@ -3626,7 +3886,7 @@
       if (knowledgeActive === doc.collectionId) {
         knowledgeSearchVersion++; knowledgeReadVersion++;
         $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
-        return loadKnowledgeDocuments();
+        return refreshKnowledgeCollection();
       }
     }, function (error) {
       if (error.code === 'pdf_ocr_setup_failed' && knowledgeActive === doc.collectionId)
@@ -3636,12 +3896,12 @@
   }
   function mutateKnowledge(action) {
     if (knowledgeBusy) return Promise.resolve();
-    knowledgeOcrRetry = null;
+    knowledgeOcrRetry = null; knowledgeUploadResult = null;
     knowledgeBusy = true; knowledgeError(''); paintKnowledgeDocuments();
     return Promise.resolve().then(action).catch(function (error) {
       knowledgeFailure(error);
     }).then(function () {
-      knowledgeBusy = false; paintKnowledgeDocuments();
+      knowledgeBusy = false; knowledgeUploadProgress = ''; paintKnowledgeDocuments();
     });
   }
   $('knowledge-ocr-retry').addEventListener('click', function () {
@@ -3668,6 +3928,7 @@
     results.forEach(function (hit) {
       var row = el('article', 'knowledge-result');
       row.appendChild(el('strong', '', hit.fileName));
+      if (hit.relativePath && hit.relativePath !== hit.fileName) row.appendChild(el('div', 'knowledge-path hint-block', hit.relativePath));
       row.appendChild(el('div', 'hint-block', knowledgeLocation(hit.location)));
       row.appendChild(el('code', 'knowledge-reference', hit.reference));
       row.appendChild(el('pre', 'knowledge-text', hit.text));
@@ -3705,37 +3966,115 @@
     });
   });
   $('knowledge-upload').addEventListener('click', function () { if (knowledgeActive && !knowledgeBusy) $('knowledge-file-input').click(); });
-  $('knowledge-file-input').addEventListener('change', function (e) {
+  $('knowledge-upload-folder').addEventListener('click', function () {
+    if (!knowledgeActive || knowledgeBusy) return;
+    if (!state.native || !state.knowledgeDirectory) { $('knowledge-folder-input').click(); return; }
+    var id = knowledgeActive, requestId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    var finishNative;
+    var nativeFinished = new Promise(function (resolve) { finishNative = resolve; });
+    knowledgeNativeUpload = { collectionId: id, requestId: requestId, finish: finishNative };
+    knowledgeOcrRetry = null; knowledgeUploadResult = null; knowledgeBusy = true; knowledgeError('');
+    knowledgeUploadProgress = t('page.knowledge.folderScanning'); paintKnowledgeDocuments();
+    observeKnowledgePdf(function () {
+      return post('/api/agent/events', { type: 'pick-knowledge-directory', collectionId: id, requestId: requestId }).then(function () { return nativeFinished; });
+    }).catch(function (error) {
+      if (!knowledgeNativeUpload || knowledgeNativeUpload.requestId !== requestId) return;
+      knowledgeNativeUpload = null; knowledgeBusy = false; knowledgeUploadProgress = ''; paintKnowledgeDocuments(); knowledgeFailure(error);
+    });
+  });
+  function knowledgeDirectoryProgress(progress) {
+    if (!progress || !knowledgeNativeUpload || progress.requestId !== knowledgeNativeUpload.requestId
+      || progress.collectionId !== knowledgeNativeUpload.collectionId) return false;
+    knowledgeUploadProgress = progress.phase === 'scanning' ? t('page.knowledge.folderScanning')
+      : t('page.knowledge.uploadProgress', { completed: progress.completed || 0, total: progress.total || 0 });
+    knowledgeBusyControls();
+    if (!progress.done) return true;
+    var id = knowledgeNativeUpload.collectionId;
+    knowledgeNativeUpload.finish(); knowledgeNativeUpload = null;
+    if (!progress.cancelled) knowledgeUploadResult = { collectionId: id, label: t('page.knowledge.uploadComplete', { added: progress.imported || 0, failed: progress.failed || 0 }) };
+    var errors = (progress.errors || []).map(function (failure) { return failure.fileName + ': ' +
+      (failure.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : failure.error); });
+    if (progress.error) errors.push(progress.error);
+    if (Number.isInteger(progress.failed) && progress.failed > errors.length) errors.push(t('page.knowledge.moreUploadFailures', { count: progress.failed - errors.length }));
+    refreshKnowledgeCollection(id).catch(knowledgeFailure).then(function () {
+      knowledgeBusy = false; knowledgeUploadProgress = ''; paintKnowledgeDocuments();
+      if (knowledgeActive === id && errors.length) knowledgeError(errors.join('\n'));
+    });
+    return true;
+  }
+  function chooseKnowledgeFiles(e) {
     var files = Array.prototype.slice.call(e.target.files || []), id = knowledgeActive;
     e.target.value = '';
     if (!files.length || !id || knowledgeBusy) return;
-    if (files.length > 16) { knowledgeError(t('page.knowledge.maxFiles')); return; }
     return mutateKnowledge(function () { return uploadKnowledgeFiles(id, files); });
-  });
+  }
+  $('knowledge-file-input').addEventListener('change', chooseKnowledgeFiles);
+  $('knowledge-folder-input').addEventListener('change', chooseKnowledgeFiles);
   function uploadKnowledgeFiles(id, files) {
-    function send() {
-      var form = new FormData();
-      files.forEach(function (file) { form.append('files', file, file.name); });
-      return knowledgeRequest(knowledgeCollectionUrl(id) + '/documents', 'POST', form);
-    }
-    var pending = files.some(function (file) { return /\.pdf$/i.test(file.name || '') || file.type === 'application/pdf'; })
-      ? observeKnowledgePdf(send) : send();
-    return pending.then(function (d) {
-      var failures = d.errors || [];
-      var errors = failures.map(function (e) { return e.fileName + ': ' +
-        (e.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : e.error); }).join('\n');
-      if (errors) knowledgeError(errors);
-      if (knowledgeActive === id) {
-        // Retry only input ordinals the host explicitly confirms were not published.
-        // Names can be duplicated; global setup status and transport errors prove nothing.
-        var retryFiles = files.filter(function (_, index) {
-          return failures.some(function (e) { return e.code === 'pdf_ocr_setup_failed' && e.fileIndex === index; });
-        });
-        if (retryFiles.length) knowledgeOcrRetry = function () { return uploadKnowledgeFiles(id, retryFiles); };
-        return loadKnowledgeDocuments();
+    var batches = [], batch = [], bytes = 0, errors = [], retryFiles = [], completed = 0, imported = 0;
+    files.forEach(function (file) {
+      var size = Number.isFinite(file.size) ? file.size : 0;
+      if (size > 64 * 1024 * 1024) {
+        errors.push((file.webkitRelativePath || file.name) + ': ' + t('page.knowledge.fileTooLarge'));
+        completed++; return;
       }
+      if (batch.length && (batch.length >= 16 || bytes + size > 120 * 1024 * 1024)) {
+        batches.push(batch); batch = []; bytes = 0;
+      }
+      batch.push(file); bytes += size;
+    });
+    if (batch.length) batches.push(batch);
+    function sendBatch(selected) {
+      knowledgeUploadProgress = t('page.knowledge.uploadProgress', { completed: completed, total: files.length });
+      knowledgeBusyControls();
+      function send() {
+        var form = new FormData();
+        selected.forEach(function (file, index) {
+          form.append('files', file, file.name);
+          // Multipart encodes quotes in filenames. Exact path metadata also preserves
+          // ordinary filenames without confusing a literal %22 with an escaped quote.
+          form.append('relativePath' + index, file.webkitRelativePath || file.name);
+        });
+        return knowledgeRequest(knowledgeCollectionUrl(id) + '/documents', 'POST', form);
+      }
+      var pending = selected.some(function (file) { return /\.pdf$/i.test(file.name || '') || file.type === 'application/pdf'; })
+        ? observeKnowledgePdf(send) : send();
+      return pending.then(function (d) {
+        imported += Array.isArray(d.documents) ? d.documents.length : 0;
+        (d.errors || []).forEach(function (failure) {
+          var file = Number.isInteger(failure.fileIndex) ? selected[failure.fileIndex] : null;
+          errors.push((file && (file.webkitRelativePath || file.name) || failure.fileName) + ': ' +
+            (failure.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : failure.error));
+          // Only a confirmed uncommitted input can be safely retried. Keep its full
+          // browser path with the original File, including duplicate basenames.
+          if (failure.code === 'pdf_ocr_setup_failed' && file) retryFiles.push(file);
+        });
+        completed += selected.length;
+      });
+    }
+    var pending = Promise.resolve();
+    batches.forEach(function (selected) { pending = pending.then(function () { return sendBatch(selected); }); });
+    return pending.catch(function (error) {
+      errors.push(t('page.knowledge.uploadStopped', { completed: completed, total: files.length, error: error.message || String(error) }));
+    }).then(function () {
+      knowledgeUploadResult = { collectionId: id, label: t('page.knowledge.uploadComplete', { added: imported, failed: Math.max(0, files.length - imported) }) };
+      if (knowledgeActive === id && retryFiles.length) knowledgeOcrRetry = function () { return uploadKnowledgeFiles(id, retryFiles); };
+      return refreshKnowledgeCollection(id).then(function () { if (knowledgeActive === id && errors.length) knowledgeError(errors.join('\n')); });
     });
   }
+  $('knowledge-collection-filter').addEventListener('input', paintKnowledgeCollections);
+  $('knowledge-file-query').addEventListener('input', function () {
+    clearTimeout(knowledgeFilterTimer);
+    // Invalidate the in-flight page immediately, before the debounced request.
+    knowledgeDocumentVersion++;
+    knowledgeFilterTimer = setTimeout(function () { loadKnowledgeDocuments(); }, 250);
+  });
+  $('knowledge-file-query').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(knowledgeFilterTimer); loadKnowledgeDocuments(); }
+  });
+  ['knowledge-type', 'knowledge-sort'].forEach(function (id) { $(id).addEventListener('change', function () {
+    clearTimeout(knowledgeFilterTimer); loadKnowledgeDocuments();
+  }); });
   function searchKnowledge() {
     var id = knowledgeActive, query = ($('knowledge-query').value || '').trim();
     if (!id || !query) return;
@@ -4267,6 +4606,7 @@
    */
   var hostCalls = {
     nativeReady: function (a) { window.TensorAgent.nativeReady(a); },
+    knowledgeDirectoryProgress: function (a) { knowledgeDirectoryProgress(a); },
     addAttachment: function (a) { window.TensorAgent.addAttachment(a); },
     insertText: function (a) { window.TensorAgent.insertText(a && a.text); },
     takeShare: function () { window.TensorAgent.takeShare(); },
@@ -4332,6 +4672,7 @@
 
   window.TensorAgent = {
     notice: notice,
+    knowledgeDirectoryProgress: knowledgeDirectoryProgress,
     prepareLanguageReload: prepareLanguageReload,
 
     /**
@@ -4452,6 +4793,7 @@
     /** Native pickers and dictation are separate capabilities on Windows. */
     nativeReady: function (capabilities) {
       state.native = true;
+      state.knowledgeDirectory = !!(capabilities && capabilities.knowledgeDirectory);
       state.dictation = !capabilities || capabilities.dictation !== false;
       state.composerHint = (capabilities && capabilities.composerHint) || t('page.composer.message');
       paintComposerHint();
@@ -4503,6 +4845,29 @@
     var slash = href.indexOf('/', scheme + 3);
     return slash < 0 ? href : href.slice(0, slash);
   }
+  function knowledgeSourceHref(node) {
+    for (var n = node; n && n !== document; n = n.parentNode) {
+      if (n.tagName !== 'A') continue;
+      if (n.getAttribute && n.getAttribute('download') !== null) return null;
+      var path = String((n.getAttribute && n.getAttribute('href')) || n.href || '');
+      if (path.charAt(0) !== '/') {
+        var origin = pageOrigin();
+        if (!origin || path.indexOf(origin + '/') !== 0) return null;
+        path = path.slice(origin.length);
+      }
+      var match = /^\/api\/knowledge\/collections\/([a-zA-Z0-9_-]{1,128})\/documents\/([a-zA-Z0-9_-]{1,128})\/source\?version=([1-9][0-9]*)(?:#.*)?$/.exec(path);
+      if (!match || !Number.isSafeInteger(Number(match[3]))) return null;
+      return { doc: { collectionId: match[1], documentId: match[2], version: Number(match[3]), fileName: n.textContent || '' }, link: n };
+    }
+    return null;
+  }
+  // Model-written Markdown source links use the same viewer as the source cards.
+  document.addEventListener('click', function (event) {
+    if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    var hit = knowledgeSourceHref(event.target);
+    if (!hit) return;
+    event.preventDefault(); openKnowledgeSource(hit.doc, hit.link);
+  });
   function artifactPath(href) {
     var path = href;
     if (href.charAt(0) !== '/') {

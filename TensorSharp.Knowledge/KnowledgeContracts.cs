@@ -101,6 +101,20 @@ public sealed record KnowledgeDocument
     public required string Id { get; init; }
     public required string CollectionId { get; init; }
     public required string FileName { get; init; }
+    /// <summary>Original path within an uploaded folder, using forward slashes. Never a local filesystem path.</summary>
+    public string? RelativePath { get; init; }
+    public string Kind => Path.GetExtension(FileName).ToLowerInvariant() switch
+    {
+        ".csv" or ".tsv" or ".json" or ".jsonl" or ".ndjson" or ".xlsx" or ".xls" or ".ods"
+            or ".parquet" or ".arrow" or ".feather" => "dataset",
+        ".png" or ".jpg" or ".jpeg" or ".gif" or ".webp" or ".bmp" or ".tif" or ".tiff"
+            or ".heic" or ".heif" or ".avif" or ".svg" or ".mp3" or ".wav" or ".m4a" or ".aac"
+            or ".flac" or ".ogg" or ".opus" or ".mp4" or ".mov" or ".webm" or ".mkv" or ".avi" => "media",
+        _ when ContentType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) == true
+            || ContentType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true
+            || ContentType?.StartsWith("video/", StringComparison.OrdinalIgnoreCase) == true => "media",
+        _ => "document",
+    };
     public string? ContentType { get; init; }
     public required string ContentHash { get; init; }
     public int Version { get; init; }
@@ -122,12 +136,17 @@ public sealed record KnowledgeSearchOptions
     public int MaxCharacters { get; init; } = 12000;
 }
 
+/// <summary>A bounded view of indexed text; extraction status describes whether the original was fully indexed.</summary>
+public sealed record KnowledgeDocumentPreview(KnowledgeDocument Document, string Text, bool Truncated,
+    int ChunkIndex, KnowledgeLocation? Location, int? PreviousChunkIndex, int? NextChunkIndex);
+
 public sealed record KnowledgeSearchResult
 {
     public required string Reference { get; init; }
     public required string CollectionId { get; init; }
     public required string DocumentId { get; init; }
     public required string FileName { get; init; }
+    public string? RelativePath { get; init; }
     public int Version { get; init; }
     public int ChunkIndex { get; init; }
     /// <summary>Total chunks in this source version, for bounded follow-up navigation.</summary>

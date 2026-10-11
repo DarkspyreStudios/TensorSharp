@@ -12,8 +12,10 @@ original/result comparison and fourteen optional LoRA plug-ins. The interface is
 available in [eight languages](#languages).
 
 **Personal knowledge:** open **Menu → Knowledge** to upload reusable documents,
-datasets and media, inspect extraction coverage, and select collections for a chat.
-Retrieved source links persist with the conversation; code agents can open complete
+datasets and media, or upload an entire folder with nested files. Browse by filename,
+folder path and type, inspect indexed totals and extraction coverage, rename collections,
+and select collections for a chat. Retrieved source links open an in-app preview
+and persist with the conversation; code agents can open complete
 datasets in their private workspace. See the [knowledge guide](../docs/knowledge-system.md)
 for supported formats, model setup, scope and current limits.
 

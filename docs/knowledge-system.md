@@ -16,14 +16,23 @@ open-source references that informed these independently implemented patterns.
 ## Using the library in TensorAgent
 
 1. Open **Menu → Knowledge**, name a collection, and select **Create**.
-2. Browse that collection and choose **Upload documents or media**. The library
-   upload is separate from a one-turn chat attachment. It retains the original
-   after the upload cache or chat is cleared.
+2. Browse that collection and choose **Upload files** or **Upload folder**.
+   Folder upload includes files in every nested folder and retains their relative
+   paths, so identical filenames in different folders remain separate sources.
+   TensorAgent uses the native folder picker inside the app and the browser's
+   directory picker on the Web UI. The library retains originals after the
+   upload cache or chat is cleared.
 3. Read each document's extraction status and warnings. A batch can succeed for
    some files and fail for others; both outcomes are shown.
-4. Search the collection to inspect excerpts and source locations. **Read
-   surrounding context** expands a result within a bounded window. **Original
-   source** retrieves the exact current source version.
+4. Use the collection counts, document/media/dataset totals, filename or path
+   filter, type filter, sort order and page controls to browse a large library.
+   **Rename** changes a collection's display name without changing its identity
+   or the chats that select it. Search the collection's contents to inspect
+   excerpts and source locations; **Read surrounding context** expands a result.
+   Source links open a preview with indexed text, supported original media or
+   PDFs, and **Download original**. PDF previews show indexed text first; native
+   apps present the original through the platform file viewer. Long text previews
+   offer excerpt navigation.
 5. Check the collections to use in this chat. Browsing a collection does not
    select it for inference. Selected collection chips appear above the composer;
    up to 32 collections can be selected. A new chat starts with no selection, and
@@ -39,6 +48,15 @@ are omitted; an answer with no source citations has no source list. Links use ho
 survive saved-chat restoration and stream replay. Document citations do not claim
 every retrieved page was used. Citation identity does not guarantee that every
 statement in the answer is supported. Source text and titles are rendered as text.
+Clicking either an answer's source link or a **Retrieved sources** link opens the
+same preview, starting at the cited chunk when one is available. Stale or deleted
+sources show an error instead of silently opening another version. Native
+downloads present the original in the platform file viewer.
+
+Folder uploads are processed in bounded batches with visible progress and
+per-file failures. Unsupported formats remain visibly metadata-only; failed or
+unreadable files are reported. Native imports report symbolic links instead of
+following them outside the selected tree. Empty folders contain no indexable source.
 
 Ordinary retrieval suppresses repeated evidence and stops after three consecutive
 lookups without new evidence, 16 knowledge calls, or a cumulative evidence budget
@@ -444,6 +462,18 @@ the multipart envelope before committing it. Source responses are downloads with
 Ordinary argument/format errors use 400, missing sources use 404, stale references
 use 409, and exceeded quotas use 413. Chat requests use `knowledgeCollections`;
 search/read bodies use `collectionIds`.
+
+TensorAgent additionally supports `POST /collections/{collection}/rename` with
+`{ name }`, and `GET /collections/{collection}/documents/{document}/preview`
+with a required `version` and optional `chunkIndex`. Preview responses contain
+bounded indexed text, source metadata, a safe `inlineContentType`, and neighboring
+excerpt positions. `source?version=1&inline=1` serves only allowlisted file
+extensions with matching media/PDF MIME types; all other originals remain
+attachments. TensorAgent's document listing accepts `q`,
+`type=all|document|media|dataset`, and `sort=name|updated|size`, returning filtered
+totals and an unfiltered collection summary. Folder multipart batches pair each
+file with `relativePath0`, `relativePath1`, etc.; these paths are metadata and
+never storage destinations. The store's original blobs remain content-addressed.
 
 ## Embedding in a .NET application
 

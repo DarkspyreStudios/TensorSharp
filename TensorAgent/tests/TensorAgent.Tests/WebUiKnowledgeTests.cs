@@ -165,7 +165,8 @@ public sealed partial class WebUiPageTests
               return settle(25);
             }).then(function () {
               var call = __page.requests('/api/knowledge/collections/alpha/documents').filter(function (c) { return c.method === 'POST'; })[0];
-              return { names: call.parts.map(function (p) { return p.fileName; }), fields: call.parts.map(function (p) { return p.name; }),
+              return { names: call.parts.filter(function (p) { return p.name === 'files'; }).map(function (p) { return p.fileName; }),
+                fields: call.parts.filter(function (p) { return p.name === 'files'; }).map(function (p) { return p.name; }),
                 error: __page.byId['knowledge-error'].textContent, documents: __page.byId['knowledge-documents'].textContent,
                 enabled: !__page.byId['knowledge-upload'].disabled, composerUploads: __page.requests('/api/upload').length };
             });
@@ -399,11 +400,11 @@ public sealed partial class WebUiPageTests
             """, """
             return openKnowledgeLibrary().then(function () {
               var first = __page.byId['knowledge-documents'].querySelectorAll('.knowledge-document').length;
-              __page.byId['knowledge-documents'].querySelector('.knowledge-more').dispatch('click');
+              __page.byId['knowledge-pagination'].querySelector('.knowledge-more').dispatch('click');
               return settle(20).then(function () {
                 var second = __page.byId['knowledge-documents'].querySelectorAll('.knowledge-document').length;
                 hold('/api/knowledge/collections/alpha/documents?offset=200&limit=100');
-                var more = __page.byId['knowledge-documents'].querySelector('.knowledge-more');
+                var more = __page.byId['knowledge-pagination'].querySelector('.knowledge-more');
                 more.dispatch('click'); more.dispatch('click');
                 return settle(15).then(function () {
                   knowledgeCollection('beta').querySelector('.knowledge-browse').dispatch('click');
@@ -412,14 +413,14 @@ public sealed partial class WebUiPageTests
                   return settle(20).then(function () {
                     return { first: first, second: second, pending: heldFor('/api/knowledge/collections/alpha/documents?offset=200&limit=100').length,
                       active: __page.byId['knowledge-active-name'].textContent, docs: __page.byId['knowledge-documents'].textContent,
-                      more: !!__page.byId['knowledge-documents'].querySelector('.knowledge-more') };
+                      more: !!__page.byId['knowledge-pagination'].querySelector('.knowledge-more') };
                   });
                 });
               });
             });
             """);
         Assert.Equal(100, result.GetProperty("first").GetInt32());
-        Assert.Equal(101, result.GetProperty("second").GetInt32());
+        Assert.Equal(1, result.GetProperty("second").GetInt32());
         Assert.Equal(1, result.GetProperty("pending").GetInt32());
         Assert.Equal("Private notes", result.GetProperty("active").GetString());
         Assert.Contains("private.txt", result.GetProperty("docs").GetString());

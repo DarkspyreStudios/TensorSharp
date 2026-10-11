@@ -58,7 +58,7 @@ public sealed partial class WebUiPageTests
         Assert.Equal(0, result.GetProperty("prepares").GetInt32());
         Assert.Equal("paper.PDF", result.GetProperty("fileName").GetString());
         Assert.True(result.GetProperty("enabled").GetBoolean());
-        Assert.Equal("", result.GetProperty("status").GetString());
+        Assert.Contains("1 files added", result.GetProperty("status").GetString());
     }
 
     [WebJavaScriptFact]
@@ -86,8 +86,8 @@ public sealed partial class WebUiPageTests
                 retryVisible: __page.byId['knowledge-ocr-retry'].style.display !== 'none' };
               __page.byId['knowledge-ocr-retry'].dispatch('click');
               return settle(30).then(function () {
-                out.attempts = attempts; out.firstCount = knowledgeUploads()[0].parts.length;
-                out.retryCount = knowledgeUploads()[1].parts.length;
+                out.attempts = attempts; out.firstCount = knowledgeUploads()[0].parts.filter(function (p) { return p.name === 'files'; }).length;
+                out.retryCount = knowledgeUploads()[1].parts.filter(function (p) { return p.name === 'files'; }).length;
                 out.retried = knowledgeUploads()[1].parts[0].value.marker;
                 out.retryHidden = __page.byId['knowledge-ocr-retry'].style.display === 'none';
                 return out;

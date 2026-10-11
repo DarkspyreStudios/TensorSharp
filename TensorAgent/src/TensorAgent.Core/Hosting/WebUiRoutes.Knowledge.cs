@@ -36,13 +36,24 @@ public static partial class WebUiRoutes
             }
         });
         server.MapGet(root + "/collections", (_, _) => KnowledgeRoute(() =>
-            Task.FromResult<LoopbackResponse?>(KnowledgeJson(new { collections = store.ListCollections() }))));
+            Task.FromResult<LoopbackResponse?>(KnowledgeJson(new { collections = store.ListCollections().Select(collection =>
+            {
+                var documents = store.ListDocuments(collection.Id);
+                return new { collection.Id, collection.Name, collection.Description, collection.CreatedAt,
+                    documentCount = documents.Count, sizeBytes = documents.Sum(document => document.SizeBytes) };
+            }).ToArray() }))));
         server.MapPost(root + "/collections", (request, ct) => KnowledgeRoute(async () =>
         {
             JsonElement body = await ReadKnowledgeJson(request, ct);
             string name = RequiredString(body, "name");
             string? description = body.TryGetProperty("description", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
             return KnowledgeJson(new { collection = await store.CreateCollectionAsync(name, description, ct) }, 201);
+        }));
+        server.MapPost(root + "/collections/{collection}/rename", (request, ct) => KnowledgeRoute(async () =>
+        {
+            JsonElement body = await ReadKnowledgeJson(request, ct);
+            return KnowledgeJson(new { collection = await store.RenameCollectionAsync(
+                request.RouteValues["collection"], RequiredString(body, "name"), ct) });
         }));
         server.MapDelete(root + "/collections/{collection}", (request, ct) => KnowledgeRoute(async () =>
             await store.DeleteCollectionAsync(request.RouteValues["collection"], ct)
@@ -52,11 +63,30 @@ public static partial class WebUiRoutes
             int offset = QueryInteger(request, "offset", 0, 0, int.MaxValue);
             int limit = QueryInteger(request, "limit", 100, 1, 200);
             var all = store.ListDocuments(request.RouteValues["collection"]);
-            var documents = all.Skip(offset).Take(limit).ToArray();
+            string query = request.Query("q")?.Trim() ?? "";
+            if (query.Length > 2000) throw new ArgumentException("Source search exceeds 2000 characters.");
+            string type = request.Query("type") ?? "all", sort = request.Query("sort") ?? "name";
+            if (type is not ("all" or "document" or "media" or "dataset")) throw new ArgumentException("Unknown source type.");
+            if (sort is not ("name" or "updated" or "size")) throw new ArgumentException("Unknown source sort order.");
+            var filtered = all.Where(document => (type == "all" || document.Kind == type)
+                && (query.Length == 0 || (document.RelativePath ?? document.FileName).Contains(query, StringComparison.OrdinalIgnoreCase))).ToArray();
+            var ordered = sort switch
+            {
+                "updated" => filtered.OrderByDescending(document => document.UpdatedAt).ThenBy(document => document.RelativePath ?? document.FileName, StringComparer.Ordinal),
+                "size" => filtered.OrderByDescending(document => document.SizeBytes).ThenBy(document => document.RelativePath ?? document.FileName, StringComparer.Ordinal),
+                _ => filtered.OrderBy(document => document.RelativePath ?? document.FileName, StringComparer.Ordinal),
+            };
+            var documents = ordered.Skip(offset).Take(limit).ToArray();
             return Task.FromResult<LoopbackResponse?>(KnowledgeJson(new
             {
-                documents, total = all.Count,
-                nextOffset = offset < all.Count - documents.Length ? offset + documents.Length : (int?)null,
+                documents, total = filtered.Length, collectionTotal = all.Count,
+                nextOffset = offset < filtered.Length - documents.Length ? offset + documents.Length : (int?)null,
+                summary = new { documents = all.Count(document => document.Kind == "document"),
+                    media = all.Count(document => document.Kind == "media"), datasets = all.Count(document => document.Kind == "dataset"),
+                    ready = all.Count(document => document.Status == KnowledgeDocumentStatus.Ready),
+                    partial = all.Count(document => document.Status == KnowledgeDocumentStatus.Partial),
+                    metadataOnly = all.Count(document => document.Status == KnowledgeDocumentStatus.MetadataOnly),
+                    sizeBytes = all.Sum(document => document.SizeBytes), chunks = all.Sum(document => document.ChunkCount) },
             }));
         }));
         server.MapPost(root + "/collections/{collection}/documents", (request, ct) => KnowledgeRoute(async () =>
@@ -78,7 +108,29 @@ public static partial class WebUiRoutes
                 try
                 {
                     await using Stream input = file.OpenRead();
-                    documents.Add(await store.ImportAsync(collection, UploadNaming.ResolveFileName(file), input, file.ContentType, ct));
+                    string? relativePath = form["relativePath" + fileIndex];
+                    string uploadName = file.FileName;
+                    if (relativePath is not null)
+                    {
+                        if (relativePath.Length is 0 or > 2048)
+                            throw new ArgumentException("Source paths must contain 1–2048 characters.");
+                        string pathName = relativePath[(relativePath.LastIndexOf('/') + 1)..];
+                        // Browser FormData escapes quotes as %22 without escaping
+                        // literal percent signs. The path disambiguates the two;
+                        // never generally URI-decode an untrusted upload name.
+                        if (pathName != uploadName && pathName.Replace("\"", "%22", StringComparison.Ordinal) != uploadName)
+                            throw new ArgumentException("Source path does not match the uploaded file name.");
+                        uploadName = pathName;
+                    }
+                    string name = UploadNaming.ResolveFileName(uploadName, file.ContentType, file.TempPath);
+                    // Extensionless native media can receive an extension from UploadNaming.
+                    // Preserve its folder while requiring metadata to name this upload.
+                    if (relativePath is not null && name != uploadName)
+                    {
+                        int slash = relativePath.LastIndexOf('/');
+                        relativePath = relativePath[..(slash + 1)] + name;
+                    }
+                    documents.Add(await store.ImportAsync(collection, name, input, file.ContentType, relativePath, ct));
                 }
                 catch (PdfOcrSetupException)
                 {
@@ -87,7 +139,7 @@ public static partial class WebUiRoutes
                     errors.Add(new { fileName = file.FileName, fileIndex, code = "pdf_ocr_setup_failed",
                         error = "PDF reading tools could not be prepared. Please retry." });
                 }
-                catch (Exception ex) when (ex is ArgumentException or InvalidDataException or KnowledgeLimitException)
+                catch (Exception ex) when (ex is ArgumentException or InvalidDataException or KnowledgeLimitException or JsonException)
                 {
                     // A batch may contain several independent formats. Report each
                     // failure explicitly while retaining the successfully imported sources.
@@ -101,6 +153,16 @@ public static partial class WebUiRoutes
                 ? KnowledgeJson(new { deleted = true }) : LoopbackResponse.NotFound(new { error = "Source not found." })));
         server.MapPost(root + "/collections/{collection}/documents/{document}/reindex", (request, ct) => KnowledgeRoute(async () =>
             KnowledgeJson(new { document = await store.ReindexAsync(request.RouteValues["collection"], request.RouteValues["document"], ct) })));
+        server.MapGet(root + "/collections/{collection}/documents/{document}/preview", (request, _) => KnowledgeRoute(() =>
+        {
+            if (!int.TryParse(request.Query("version"), out int version) || version < 1)
+                throw new ArgumentException("A positive source version is required.");
+            var preview = store.PreviewDocument(request.RouteValues["collection"], request.RouteValues["document"],
+                version, chunkIndex: QueryInteger(request, "chunkIndex", 0, 0, int.MaxValue));
+            return Task.FromResult<LoopbackResponse?>(KnowledgeJson(new { preview.Document, preview.Text, preview.Truncated,
+                preview.ChunkIndex, preview.Location, preview.PreviousChunkIndex, preview.NextChunkIndex,
+                inlineContentType = KnowledgeInlineContentType(preview.Document) }));
+        }));
         server.MapGet(root + "/collections/{collection}/documents/{document}/source", (request, _) => KnowledgeRoute(() =>
         {
             if (!int.TryParse(request.Query("version"), out int version) || version < 1)
@@ -109,7 +171,8 @@ public static partial class WebUiRoutes
             var document = store.ListDocuments(collection).FirstOrDefault(d => d.Id == id)
                 ?? throw new KeyNotFoundException("Source not found.");
             return Task.FromResult<LoopbackResponse?>(new KnowledgeSourceResponse(
-                store.OpenOriginal(collection, id, version), document.FileName));
+                store.OpenOriginal(collection, id, version), document.FileName,
+                request.Query("inline") == "1" ? KnowledgeInlineContentType(document) : null));
         }));
         server.MapPost(root + "/search", (request, ct) => KnowledgeRoute(async () =>
         {
@@ -195,16 +258,36 @@ public static partial class WebUiRoutes
         { return KnowledgeJson(new { error = ex.Message }, 400); }
     }
 
-    private sealed class KnowledgeSourceResponse(Stream source, string fileName) : LoopbackResponse
+    private static string? KnowledgeInlineContentType(KnowledgeDocument document)
+    {
+        string? expected = Path.GetExtension(document.FileName).ToLowerInvariant() switch
+        {
+            ".pdf" => "application/pdf",
+            ".png" => "image/png", ".jpg" or ".jpeg" => "image/jpeg", ".gif" => "image/gif",
+            ".webp" => "image/webp", ".bmp" => "image/bmp", ".avif" => "image/avif",
+            ".mp3" => "audio/mpeg", ".wav" => "audio/wav", ".m4a" => "audio/mp4",
+            ".aac" => "audio/aac", ".flac" => "audio/flac", ".ogg" => "audio/ogg", ".opus" => "audio/ogg",
+            ".mp4" => "video/mp4", ".mov" => "video/quicktime", ".webm" => "video/webm",
+            _ => null,
+        };
+        string? supplied = document.ContentType?.Split(';')[0].Trim();
+        if (expected == "audio/wav" && supplied?.Equals("audio/x-wav", StringComparison.OrdinalIgnoreCase) == true)
+            supplied = "audio/wav";
+        return expected is not null && expected.Equals(supplied, StringComparison.OrdinalIgnoreCase) ? expected : null;
+    }
+
+    private sealed class KnowledgeSourceResponse(Stream source, string fileName, string? inlineContentType) : LoopbackResponse
     {
         public override async Task WriteAsync(HttpListenerResponse response, CancellationToken ct)
         {
             await using (source)
             {
                 response.StatusCode = 200;
-                response.ContentType = "application/octet-stream";
+                response.ContentType = inlineContentType ?? "application/octet-stream";
                 response.Headers["X-Content-Type-Options"] = "nosniff";
-                response.Headers["Content-Disposition"] = "attachment; filename*=UTF-8''" + Uri.EscapeDataString(fileName);
+                response.Headers["Content-Disposition"] = (inlineContentType is null ? "attachment" : "inline")
+                    + "; filename*=UTF-8''" + Uri.EscapeDataString(fileName);
+                response.Headers["Content-Security-Policy"] = "sandbox; default-src 'none'";
                 response.Headers["Cache-Control"] = "no-store";
                 if (source.CanSeek) response.ContentLength64 = source.Length;
                 await source.CopyToAsync(response.OutputStream, ct);

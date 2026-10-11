@@ -203,6 +203,7 @@ public static class KnowledgeTools
             sources = new[] { new
             {
                 fileName = first.FileName,
+                relativePath = first.RelativePath,
                 sourceUrl = SourceUrl(first.CollectionId, first.DocumentId, first.Version),
                 citationMarker,
                 first.Status,
@@ -334,7 +335,7 @@ public static class KnowledgeTools
 
     private static object DescribeWithMarker(KnowledgeSearchResult hit, string? marker) => new
     {
-        hit.Reference, hit.CollectionId, hit.DocumentId, hit.FileName, hit.Version,
+        hit.Reference, hit.CollectionId, hit.DocumentId, hit.FileName, hit.RelativePath, hit.Version,
         hit.ChunkIndex, hit.DocumentChunkCount, hit.Text, hit.Location, hit.Modality, hit.Score, hit.Status, hit.Truncated,
         sourceUrl = SourceUrl(hit.CollectionId, hit.DocumentId, hit.Version),
         citationMarker = marker,
@@ -344,7 +345,7 @@ public static class KnowledgeTools
     public static object DescribeSource(KnowledgeSearchResult hit) => new
     {
         reference = hit.Reference, collectionId = hit.CollectionId, documentId = hit.DocumentId,
-        fileName = hit.FileName, version = hit.Version, chunkIndex = hit.ChunkIndex,
+        fileName = hit.FileName, relativePath = hit.RelativePath, version = hit.Version, chunkIndex = hit.ChunkIndex,
         location = hit.Location == null ? null : new
         {
             page = hit.Location.Page, sheet = hit.Location.Sheet, row = hit.Location.Row,
@@ -429,7 +430,7 @@ public static class KnowledgeTools
                         .Skip(offset).Take(21).ToArray();
                     var rows = sources.Take(20).Select(d => (object)new
                     {
-                        d.Id, d.CollectionId, d.FileName, d.Version, d.Status, d.ChunkCount,
+                        d.Id, d.CollectionId, d.FileName, d.RelativePath, d.Version, d.Status, d.ChunkCount,
                         sourceUrl = SourceUrl(d.CollectionId, d.Id, d.Version),
                     }).ToList();
                     string ListJson() => JsonSerializer.Serialize(new
@@ -539,7 +540,7 @@ public static class KnowledgeTools
             scope.RecordSources(new[] { new KnowledgeSearchResult
             {
                 Reference = SourceUrl(collection, id, version), CollectionId = collection,
-                DocumentId = id, Version = version, FileName = document.FileName,
+                DocumentId = id, Version = version, FileName = document.FileName, RelativePath = document.RelativePath,
                 ChunkIndex = -1, Text = "", Status = document.Status,
             } }, retrieval);
             return SkillToolResult.Success(json);
@@ -578,6 +579,7 @@ public static class KnowledgeTools
             sources = accepted.GroupBy(s => (s.CollectionId, s.DocumentId, s.Version)).Select(group => new
             {
                 fileName = group.First().FileName,
+                relativePath = group.First().RelativePath,
                 sourceUrl = SourceUrl(group.Key.CollectionId, group.Key.DocumentId, group.Key.Version),
                 citationMarker = scope?.ReserveCitationMarker(group.First()),
                 excerpts = group.Select(s => new { s.Reference, s.Text, s.Location, s.Status, s.Truncated }),

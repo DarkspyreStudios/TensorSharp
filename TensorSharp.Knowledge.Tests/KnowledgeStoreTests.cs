@@ -9,6 +9,145 @@ public sealed class KnowledgeStoreTests : IDisposable
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, true); }
 
     [Fact]
+    public async Task FolderPathsPreserveDuplicateBasenamesAndReplacementIdentityAcrossRestart()
+    {
+        string collectionId, firstId, secondId;
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            collectionId = (await store.CreateCollectionAsync("Project" )).Id;
+            using var firstBytes = new MemoryStream(Encoding.UTF8.GetBytes("orchard north"));
+            var first = await store.ImportAsync(collectionId, "notes.txt", firstBytes, "text/plain", "Project/north/notes.txt");
+            using var secondBytes = new MemoryStream(Encoding.UTF8.GetBytes("orchard south"));
+            var second = await store.ImportAsync(collectionId, "notes.txt", secondBytes, "text/plain", "Project/south/notes.txt");
+            firstId = first.Id; secondId = second.Id;
+            Assert.NotEqual(firstId, secondId);
+            Assert.Equal(2, store.ListDocuments(collectionId).Count);
+            using var changedBytes = new MemoryStream(Encoding.UTF8.GetBytes("orchard updated north"));
+            var changed = await store.ImportAsync(collectionId, "notes.txt", changedBytes, "text/plain", first.RelativePath);
+            Assert.Equal(firstId, changed.Id);
+            Assert.Equal(2, changed.Version);
+            Assert.Equal(1, store.ListDocuments(collectionId).Single(document => document.Id == secondId).Version);
+            Assert.Equal("Project/north/notes.txt", Assert.Single(await Search(store, collectionId, "updated")).RelativePath);
+        }
+        using var reopened = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Equal(new[] { "Project/north/notes.txt", "Project/south/notes.txt" },
+            reopened.ListDocuments(collectionId).Select(document => document.RelativePath));
+        Assert.Equal("Project/south/notes.txt", (await reopened.ReindexAsync(collectionId, secondId)).RelativePath);
+        using var rootBytes = new MemoryStream(Encoding.UTF8.GetBytes("orchard root"));
+        var root = await reopened.ImportAsync(collectionId, "notes.txt", rootBytes, "text/plain");
+        Assert.DoesNotContain(root.Id, new[] { firstId, secondId });
+        Assert.Equal(3, reopened.ListDocuments(collectionId).Count);
+    }
+
+    [Theory]
+    [InlineData("/Folder/notes.txt")]
+    [InlineData("Folder/../notes.txt")]
+    [InlineData("Folder/./notes.txt")]
+    [InlineData("Folder//notes.txt")]
+    [InlineData("C:/Folder/notes.txt")]
+    [InlineData("Folder\\notes.txt")]
+    [InlineData("Folder/other.txt")]
+    [InlineData("Folder/notes.txt\n")]
+    public async Task FolderPathsRejectTraversalAbsolutePathsAndMismatchedUploadNames(string path)
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var collection = await store.CreateCollectionAsync("Project");
+        using var bytes = new MemoryStream(Encoding.UTF8.GetBytes("private notes"));
+        await Assert.ThrowsAsync<ArgumentException>(() => store.ImportAsync(collection.Id, "notes.txt", bytes, "text/plain", path));
+        Assert.Empty(store.ListDocuments(collection.Id));
+        Assert.Equal(0, bytes.Position);
+    }
+
+    [Fact]
+    public async Task FolderPathsPreserveUnicodeSpacesAndColonsWithinFolderNames()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor());
+        var collection = await store.CreateCollectionAsync("Project");
+        using var bytes = new MemoryStream(Encoding.UTF8.GetBytes("orchard plans"));
+        var document = await store.ImportAsync(collection.Id, "notes.txt", bytes, "text/plain", "研究资料/session 10:30/notes.txt");
+        Assert.Equal("研究资料/session 10:30/notes.txt", document.RelativePath);
+        Assert.Equal(document.Id, Assert.Single(await Search(store, collection.Id, "orchard")).DocumentId);
+    }
+
+    [Fact]
+    public async Task CollectionRenamePreservesScopeDescriptionsAndCitationsAcrossRestart()
+    {
+        KnowledgeCollection collection;
+        string reference;
+        using (var store = new KnowledgeStore(_root, new TextExtractor()))
+        {
+            collection = await store.CreateCollectionAsync("Before", "Shared plans");
+            await Import(store, collection.Id, "notes.txt", "orchard blue");
+            reference = Assert.Single(await Search(store, collection.Id, "orchard")).Reference;
+            var renamed = await store.RenameCollectionAsync(collection.Id, "  After  ");
+            Assert.Equal(collection with { Name = "After" }, renamed);
+            Assert.Equal("orchard blue", Assert.Single(store.Read(reference)).Text);
+            await Assert.ThrowsAsync<ArgumentException>(() => store.RenameCollectionAsync(collection.Id, " "));
+            await Assert.ThrowsAsync<ArgumentException>(() => store.RenameCollectionAsync(collection.Id, new string('a', 201)));
+            await Assert.ThrowsAsync<KeyNotFoundException>(() => store.RenameCollectionAsync(new string('a', 32), "Missing"));
+        }
+        using var reopened = new KnowledgeStore(_root, new TextExtractor());
+        Assert.Equal(collection with { Name = "After" }, Assert.Single(reopened.ListCollections()));
+        Assert.Equal(reference, Assert.Single(await Search(reopened, collection.Id, "orchard")).Reference);
+    }
+
+    [Fact]
+    public async Task SourcePreviewIsBoundedVersionCheckedAndExcludesMetadataPlaceholder()
+    {
+        using var store = new KnowledgeStore(_root, new TextExtractor(), options: new()
+        { ChunkCharacters = 16, ChunkOverlapCharacters = 3 });
+        var collection = await store.CreateCollectionAsync("Sources");
+        var document = await Import(store, collection.Id, "notes.txt", "alpha beta gamma delta epsilon zeta eta theta");
+        var preview = store.PreviewDocument(collection.Id, document.Id, 1, 24);
+        Assert.StartsWith("alpha beta gamma", preview.Text);
+        Assert.True(preview.Text.Length <= 24);
+        Assert.True(preview.Truncated);
+        Assert.Equal(document.Id, preview.Document.Id);
+        var complete = store.PreviewDocument(collection.Id, document.Id, 1);
+        Assert.Equal("alpha beta gamma delta epsilon zeta eta theta", complete.Text);
+        Assert.False(complete.Truncated);
+        await store.ReindexAsync(collection.Id, document.Id);
+        Assert.Throws<KnowledgeStaleReferenceException>(() => store.PreviewDocument(collection.Id, document.Id, 1));
+        Assert.Throws<KeyNotFoundException>(() => store.PreviewDocument(collection.Id, new string('a', 32), 1));
+
+        using var metadataStore = new KnowledgeStore(Path.Combine(_root, "metadata"), new DelegateExtractor((_, _) =>
+            Task.FromResult(new KnowledgeExtraction { Status = KnowledgeDocumentStatus.MetadataOnly })));
+        var mediaCollection = await metadataStore.CreateCollectionAsync("Media");
+        var media = await Import(metadataStore, mediaCollection.Id, "recording.wav", "fixture");
+        Assert.Equal("", metadataStore.PreviewDocument(mediaCollection.Id, media.Id, 1).Text);
+        Assert.Equal("media", media.Kind);
+    }
+
+    [Fact]
+    public async Task SourcePreviewStartsAtCitedChunkAndNavigatesWithoutDroppingIndexedExcerpts()
+    {
+        using var store = new KnowledgeStore(_root, new DelegateExtractor((_, _) => Task.FromResult(new KnowledgeExtraction
+        {
+            Segments = [new(new string('a', 23000), new() { Page = 1 }, "text"),
+                new(new string('b', 23000), new() { Page = 2 }, "text"),
+                new(new string('c', 23000), new() { Page = 3 }, "text")],
+        })), options: new() { ChunkCharacters = 32000, ChunkOverlapCharacters = 0 });
+        var collection = await store.CreateCollectionAsync("Pages");
+        var document = await Import(store, collection.Id, "pages.pdf", "fixture");
+        var first = store.PreviewDocument(collection.Id, document.Id, 1);
+        Assert.Equal(new string('a', 23000), first.Text);
+        Assert.Equal(1, first.NextChunkIndex);
+        Assert.Null(first.PreviousChunkIndex);
+        Assert.Equal(1, first.Location!.Page);
+        var next = store.PreviewDocument(collection.Id, document.Id, 1, chunkIndex: first.NextChunkIndex!.Value);
+        Assert.Equal(new string('b', 23000), next.Text);
+        Assert.Equal(0, next.PreviousChunkIndex);
+        Assert.Equal(2, next.NextChunkIndex);
+        var cited = store.PreviewDocument(collection.Id, document.Id, 1, chunkIndex: 2);
+        Assert.Equal(new string('c', 23000), cited.Text);
+        Assert.Equal(3, cited.Location!.Page);
+        Assert.Equal(1, cited.PreviousChunkIndex);
+        Assert.Null(cited.NextChunkIndex);
+        Assert.False(cited.Truncated);
+        Assert.Throws<KeyNotFoundException>(() => store.PreviewDocument(collection.Id, document.Id, 1, chunkIndex: 3));
+    }
+
+    [Fact]
     public async Task DurableImportSearchReadAndOriginalSurviveRestartWithoutReextraction()
     {
         var extractor = new TextExtractor();

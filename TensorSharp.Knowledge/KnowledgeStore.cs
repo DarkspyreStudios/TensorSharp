@@ -103,6 +103,28 @@ public sealed class KnowledgeStore : IDisposable
         lock (_sync) { ThrowIfDisposed(); return _collections.Values.OrderBy(c => c.CreatedAt).ToArray(); }
     }
 
+    public async Task<KnowledgeCollection> RenameCollectionAsync(string collectionId, string name,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateId(collectionId, nameof(collectionId));
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 200)
+            throw new ArgumentException("Collection name must contain 1–200 characters.", nameof(name));
+        await _mutations.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            KnowledgeCollection renamed;
+            lock (_sync)
+            {
+                ThrowIfDisposed(); RequireCollection(collectionId);
+                renamed = _collections[collectionId] with { Name = name.Trim() };
+            }
+            await WriteJsonAtomicAsync(CollectionPath(collectionId), renamed, cancellationToken).ConfigureAwait(false);
+            lock (_sync) _collections[collectionId] = renamed;
+            return renamed;
+        }
+        finally { _mutations.Release(); }
+    }
+
     public IReadOnlyList<KnowledgeDocument> ListDocuments(string collectionId)
     {
         ValidateId(collectionId, nameof(collectionId));
@@ -110,15 +132,20 @@ public sealed class KnowledgeStore : IDisposable
         {
             ThrowIfDisposed(); RequireCollection(collectionId);
             return _documents.Values.Where(d => d.Document.CollectionId == collectionId)
-                .OrderBy(d => d.Document.FileName, StringComparer.Ordinal).Select(d => PublicDocument(d.Document)).ToArray();
+                .OrderBy(d => DocumentName(d.Document), StringComparer.Ordinal).Select(d => PublicDocument(d.Document)).ToArray();
         }
     }
 
-    public async Task<KnowledgeDocument> ImportAsync(string collectionId, string fileName, Stream content,
+    public Task<KnowledgeDocument> ImportAsync(string collectionId, string fileName, Stream content,
         string? contentType = null, CancellationToken cancellationToken = default)
+        => ImportAsync(collectionId, fileName, content, contentType, relativePath: null, cancellationToken);
+
+    public async Task<KnowledgeDocument> ImportAsync(string collectionId, string fileName, Stream content,
+        string? contentType, string? relativePath, CancellationToken cancellationToken = default)
     {
         ValidateId(collectionId, nameof(collectionId));
         ValidateFileName(fileName);
+        ValidateRelativePath(relativePath, fileName);
         ArgumentNullException.ThrowIfNull(content);
         if (contentType?.Length > 200) throw new ArgumentException("Content type exceeds 200 characters.", nameof(contentType));
         await _mutations.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -131,7 +158,7 @@ public sealed class KnowledgeStore : IDisposable
             lock (_sync)
             {
                 RequireCollection(collectionId);
-                _documentsByName.TryGetValue((collectionId, fileName), out previous);
+                _documentsByName.TryGetValue((collectionId, relativePath ?? fileName), out previous);
                 if (previous is null && _documents.Count >= _options.MaxDocuments) throw new KnowledgeLimitException("Document limit reached.");
             }
             staged = Path.Combine(_root, "staging", Guid.NewGuid().ToString("N") + ".upload");
@@ -142,7 +169,7 @@ public sealed class KnowledgeStore : IDisposable
                 if (_storedBytes - (previous?.Document.SizeBytes ?? 0) + length > _options.MaxStoredBytes)
                     throw new KnowledgeLimitException("Knowledge storage quota exceeded.");
             var extraction = await _extractor.ExtractAsync(new(staged, fileName, contentType), cancellationToken).ConfigureAwait(false);
-            var stored = await PrepareAsync(collectionId, fileName, contentType, hash, length, previous, extraction, cancellationToken).ConfigureAwait(false);
+            var stored = await PrepareAsync(collectionId, fileName, contentType, relativePath, hash, length, previous, extraction, cancellationToken).ConfigureAwait(false);
             string blob = ObjectPath(hash);
             if (!File.Exists(blob)) File.Move(staged, blob);
             else
@@ -173,7 +200,7 @@ public sealed class KnowledgeStore : IDisposable
             lock (_sync) previous = RequireDocument(collectionId, documentId);
             KnowledgeDocument doc = previous.Document;
             var extraction = await _extractor.ExtractAsync(new(ObjectPath(doc.ContentHash), doc.FileName, doc.ContentType), cancellationToken).ConfigureAwait(false);
-            var stored = await PrepareAsync(collectionId, doc.FileName, doc.ContentType, doc.ContentHash, doc.SizeBytes, previous, extraction, cancellationToken).ConfigureAwait(false);
+            var stored = await PrepareAsync(collectionId, doc.FileName, doc.ContentType, doc.RelativePath, doc.ContentHash, doc.SizeBytes, previous, extraction, cancellationToken).ConfigureAwait(false);
             await CommitAsync(stored, previous, cancellationToken).ConfigureAwait(false);
             return PublicDocument(stored.Document);
         }
@@ -539,7 +566,54 @@ public sealed class KnowledgeStore : IDisposable
         }
     }
 
-    private async Task<StoredDocument> PrepareAsync(string collectionId, string fileName, string? contentType,
+    public KnowledgeDocumentPreview PreviewDocument(string collectionId, string documentId, int version,
+        int maxCharacters = 32000, int chunkIndex = 0)
+    {
+        ValidateId(collectionId, nameof(collectionId)); ValidateId(documentId, nameof(documentId));
+        if (maxCharacters is < 1 or > 32000) throw new ArgumentOutOfRangeException(nameof(maxCharacters));
+        if (chunkIndex < 0) throw new ArgumentOutOfRangeException(nameof(chunkIndex));
+        lock (_sync)
+        {
+            ThrowIfDisposed();
+            var stored = RequireDocument(collectionId, documentId);
+            if (stored.Document.Version != version) throw new KnowledgeStaleReferenceException("This source version is stale.");
+            if (chunkIndex >= stored.Chunks.Length) throw new KeyNotFoundException("Knowledge chunk does not exist.");
+            var text = new StringBuilder();
+            bool truncated = false;
+            int? nextChunkIndex = null;
+            int emitted = 0;
+            StoredChunk? previous = null;
+            for (int index = chunkIndex; index < stored.Chunks.Length; index++)
+            {
+                var chunk = stored.Chunks[index];
+                if (chunk.Modality == "metadata") continue;
+                int overlap = previous is not null && previous.Location == chunk.Location && previous.Modality == chunk.Modality
+                    ? Math.Min(_options.ChunkOverlapCharacters, Math.Min(previous.Text.Length, chunk.Text.Length)) : 0;
+                if (overlap > 0 && !previous!.Text.AsSpan(previous.Text.Length - overlap).SequenceEqual(chunk.Text.AsSpan(0, overlap))) overlap = 0;
+                int separator = overlap == 0 && text.Length > 0 ? 1 : 0;
+                // End on a chunk boundary when another complete excerpt cannot fit.
+                // A caller choosing a smaller-than-chunk budget still gets a bounded
+                // first excerpt, and can reopen that chunk with the standard budget.
+                if (emitted > 0 && chunk.Text.Length - overlap + separator > maxCharacters - text.Length)
+                { truncated = true; nextChunkIndex = index; break; }
+                if (overlap == 0 && text.Length > 0)
+                {
+                    if (text.Length >= maxCharacters) { truncated = true; nextChunkIndex = index; break; }
+                    text.Append('\n');
+                }
+                int count = Math.Min(maxCharacters - text.Length, chunk.Text.Length - overlap);
+                if (count > 0 && count < chunk.Text.Length - overlap && char.IsHighSurrogate(chunk.Text[overlap + count - 1])) count--;
+                text.Append(chunk.Text.AsSpan(overlap, count));
+                emitted++;
+                if (count < chunk.Text.Length - overlap) { truncated = true; nextChunkIndex = index; break; }
+                previous = chunk;
+            }
+            return new(PublicDocument(stored.Document), text.ToString(), truncated, chunkIndex, stored.Chunks[chunkIndex].Location,
+                chunkIndex == 0 ? null : Math.Max(0, chunkIndex - Math.Max(1, emitted)), nextChunkIndex);
+        }
+    }
+
+    private async Task<StoredDocument> PrepareAsync(string collectionId, string fileName, string? contentType, string? relativePath,
         string hash, long size, StoredDocument? previous, KnowledgeExtraction extraction, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(extraction);
@@ -604,7 +678,7 @@ public sealed class KnowledgeStore : IDisposable
             Document = new KnowledgeDocument
             {
                 Id = previous?.Document.Id ?? Guid.NewGuid().ToString("N"), CollectionId = collectionId,
-                FileName = fileName, ContentType = contentType, ContentHash = hash, SizeBytes = size,
+                FileName = fileName, RelativePath = relativePath, ContentType = contentType, ContentHash = hash, SizeBytes = size,
                 Version = checked((previous?.Document.Version ?? 0) + 1), ChunkCount = chunks.Count, Status = status,
                 Warnings = extraction.Warnings.ToArray(), EmbeddingModelId = chunks.Any(c => c.Vector is not null) ? _embeddingModelId : null,
                 ExtractorId = extraction.ExtractorId,
@@ -714,7 +788,8 @@ public sealed class KnowledgeStore : IDisposable
             storedBytes = checked(storedBytes + doc.SizeBytes);
             if (_documents.Count >= _options.MaxDocuments || _chunks.Count + stored.Chunks.Length > _options.MaxTotalChunks || storedBytes > _options.MaxStoredBytes)
                 throw new KnowledgeLimitException("Stored knowledge exceeds configured capacity.");
-            if (_documentsByName.ContainsKey((doc.CollectionId, doc.FileName)))
+            ValidateRelativePath(doc.RelativePath, doc.FileName);
+            if (_documentsByName.ContainsKey((doc.CollectionId, DocumentName(doc))))
                 throw new InvalidDataException("Duplicate knowledge document name.");
             _documents.Add(doc.Id, stored); AddIndex(stored);
         }
@@ -731,7 +806,7 @@ public sealed class KnowledgeStore : IDisposable
     private void AddIndex(StoredDocument stored)
     {
         var document = stored.Document;
-        _documentsByName.Add((document.CollectionId, document.FileName), stored);
+        _documentsByName.Add((document.CollectionId, DocumentName(document)), stored);
         _storedBytes += document.SizeBytes;
         _objectReferences[document.ContentHash] = _objectReferences.GetValueOrDefault(document.ContentHash) + 1;
         if (!_collectionChunks.TryGetValue(document.CollectionId, out var collectionChunks))
@@ -756,7 +831,7 @@ public sealed class KnowledgeStore : IDisposable
     private void RemoveIndex(StoredDocument stored)
     {
         var document = stored.Document;
-        _documentsByName.Remove((document.CollectionId, document.FileName));
+        _documentsByName.Remove((document.CollectionId, DocumentName(document)));
         _storedBytes -= document.SizeBytes;
         int references = _objectReferences[document.ContentHash] - 1;
         if (references == 0) _objectReferences.Remove(document.ContentHash);
@@ -844,7 +919,7 @@ public sealed class KnowledgeStore : IDisposable
         return new KnowledgeSearchResult
         {
             Reference = chunk.Key, CollectionId = chunk.Document.CollectionId, DocumentId = chunk.Document.Id,
-            FileName = chunk.Document.FileName, Version = chunk.Document.Version, ChunkIndex = chunk.Index,
+            FileName = chunk.Document.FileName, RelativePath = chunk.Document.RelativePath, Version = chunk.Document.Version, ChunkIndex = chunk.Index,
             DocumentChunkCount = chunk.Document.ChunkCount,
             Text = chunk.Chunk.Text[..count], Location = chunk.Chunk.Location, Modality = chunk.Chunk.Modality,
             Score = score, Status = chunk.Document.Status, Truncated = count < chunk.Chunk.Text.Length,
@@ -884,6 +959,20 @@ public sealed class KnowledgeStore : IDisposable
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 512 || name is "." or ".." || name.Any(c => char.IsControl(c) || c is '/' or '\\'))
             throw new ArgumentException("A file name must contain 1–512 characters and no directory path or control characters.", nameof(name));
+    }
+    private static string DocumentName(KnowledgeDocument document) => document.RelativePath ?? document.FileName;
+
+    private static void ValidateRelativePath(string? path, string fileName)
+    {
+        if (path is null) return;
+        if (path.Length is 0 or > 2048)
+            throw new ArgumentException("Source paths must contain 1–2048 characters.", nameof(path));
+        string[] parts = path.Split('/');
+        if (path.Any(c => char.IsControl(c) || c == '\\')
+            || path.Length >= 2 && char.IsAsciiLetter(path[0]) && path[1] == ':'
+            || parts.Any(part => string.IsNullOrWhiteSpace(part) || part is "." or ".." || part.Length > 512)
+            || !string.Equals(parts[^1], fileName, StringComparison.Ordinal))
+            throw new ArgumentException("Source paths must be relative, contain no traversal, and end with the uploaded file name.", nameof(path));
     }
     private void ValidateSearchBounds(int limit, int chars)
     {
