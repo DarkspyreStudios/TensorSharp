@@ -36,11 +36,14 @@
     attachments: [],        // /api/upload responses
     maskEditing: false,
     skills: [],             // selected skill names
+    knowledgeCollections: [], // explicit scope for this conversation; empty searches nothing
     skillSelectionExplicit: false, // distinguishes untouched discovery from deselect-all
     catalogSkills: [],
     conversations: [],      // the saved chats, for the menu
     generating: false,
+    interrupted: false,
     abort: null,
+    readerVersion: 0,
     // The id of the generation the HOST is running for this conversation. It is not
     // the same thing as `abort`, and that is the whole point: aborting stops this
     // page reading, while the turn keeps going and can be attached to again.
@@ -55,6 +58,7 @@
     speech: '',            // BCP-47 for dictation; empty follows the device
     settings: null,
     native: false,         // true when the page is inside the app, not a browser
+    knowledgeDirectory: false, // host can choose and recursively index a folder
     dictation: false,      // native pickers can exist without a speech recogniser
     composerHint: t('page.composer.message'),
     netMsg: '',            // the host's own wording for a network refusal
@@ -444,7 +448,14 @@
     // They are the point of the turn far more often than the prose is.
     if (extra && extra.artifacts) extra.artifacts.forEach(function (f) { fileLine({ turn: turn, bubble: b }, f); });
     var view = { turn: turn, bubble: b, entry: entry };
+    if (role === 'assistant' && entry && entry.thinking) {
+      var reasoning = el('details', 'think');
+      reasoning.appendChild(el('summary', null, t('page.turn.reasoning')));
+      reasoning.appendChild(el('div', 'body', entry.thinking));
+      turn.insertBefore(reasoning, b);
+    }
     if (role === 'assistant' && extra && extra.stats) showTurnStats(view, extra.stats);
+    if (role === 'assistant' && entry && entry.knowledgeSources) showKnowledgeSources(view, entry.knowledgeSources, content);
     // What a picture was made from, and on the newest turn the other readings of its
     // request -- or, for a turn that asked instead of guessing, the readings it offered.
     if (entry && extra.imageUrl && entry.imagePlan) {
@@ -784,6 +795,7 @@
   }
 
   function paintComposerHint() {
+    if (state.generating) { text.placeholder = t('page.composer.steerHint'); return; }
     // An image model takes a description, or a photo and what to change about it.
     text.placeholder = makesVideo() ? videoPlaceholder(state.video)
       : makesImages()
@@ -945,6 +957,7 @@
   function openConversation(conversationId, options) {
     conversationOpening = true;
     detach();
+    state.interrupted = false;
     // A durable shared draft follows the composer between chats (its text already
     // does), so its marker can never outlive the image/file chip it represents and
     // acknowledge missing content on an unrelated send. Preserve the entire draft in
@@ -975,6 +988,9 @@
         : (!fresh && Array.isArray(s.skills) ? s.skills.slice() : defaultSkills());
       state.skillSelectionExplicit = !skillsOn() || state.skills.length > 0
         || (!fresh && s.skillsExplicit === true);
+      state.knowledgeCollections = Array.isArray(s.knowledgeCollections) ? s.knowledgeCollections.slice() : [];
+      paintKnowledgeCollections();
+      paintKnowledgeChips();
       paintSkillChips();
       if (!fresh) {
         renderMessages(msgs);
@@ -1290,16 +1306,28 @@
   function setGenerating(on) {
     state.generating = !!on;
     busy.className = on ? 'on' : '';
-    send.textContent = on ? '■' : '➤';
-    send.className = 'round ' + (on ? 'stop' : 'send');
+    paintSend();
     send.disabled = state.visionChecking || shareDiscarding || (!on && !state.model);
     paintChips();
     if (!on && shareDrainAgain && shareIntakeReady && !conversationOpening && !shareDiscarding)
       setTimeout(takePendingShare, 0);
   }
 
+  function paintSend() {
+    var stopping = state.generating && !text.value.trim() && !state.attachments.length;
+    send.textContent = stopping ? '■' : '➤';
+    send.className = 'round ' + (stopping ? 'stop' : 'send');
+    send.title = stopping ? t('page.composer.stop')
+      : state.generating ? t('page.composer.steer') : t('markup.composer.send');
+    send.setAttribute('aria-label', send.title);
+    if (state.generating) text.placeholder = t('page.composer.steerHint');
+    else paintComposerHint();
+  }
+
   function sendMessage() {
-    if (state.generating) { note('send-is-stop', state.turn); stop(); return; }
+    if (state.generating && !text.value.trim() && !state.attachments.length) {
+      note('send-is-stop', state.turn); stop(); return;
+    }
     if (pendingUploadCount) {
       notice(t('page.send.waitForUploads'));
       return;
@@ -1401,6 +1429,9 @@
   }
 
   function commitMessage(typed, atts, msg) {
+    var steering = state.generating || state.interrupted;
+    if (state.generating) retireResponse();
+    state.interrupted = false;
     // The turn above is no longer the newest, so it can no longer be answered another way.
     retireImageRedo();
     var userView = addTurn('user', typed, atts);
@@ -1416,6 +1447,7 @@
     state.history.push(msg);
 
     var body = chatBody();
+    if (steering) body.steer = true;
 
     // The host acknowledges these only after every request preflight passed and the
     // user turn was written to the durable conversation store. Until that point the
@@ -1430,6 +1462,29 @@
     });
   }
 
+  // Keep the visible fragment while a replacement is accepted. The host returns
+  // its complete saved prefix, including any tokens this reader had not received.
+  function retireResponse() {
+    var view = state.liveView;
+    if (view && view.partialEntry) {
+      state.history.push(view.partialEntry);
+      view.entry = view.partialEntry;
+      if (view.partialEntry.content) addCopy(view.turn, function () { return view.partialEntry.content; });
+    }
+    var old = state.abort;
+    state.abort = null;
+    state.readerVersion++;
+    state.resuming = false;
+    state.resumingSince = 0;
+    state.turn = null;
+    state.liveView = null;
+    cancelScheduledResume();
+    stopWatchdog();
+    recovery.sentDraft = null;
+    recovery.attempts = 0;
+    if (old) { try { old.abort(); } catch (e) {} }
+  }
+
   /** The /api/chat body for the history as it stands, with this chat's settings. */
   function chatBody() {
     var body = {
@@ -1441,6 +1496,7 @@
       messages: state.history.slice(),
       maxTokens: state.maxTokens,
       think: !!state.think,
+      knowledgeCollections: state.knowledgeCollections.slice(),
     };
     if (state.session) body.sessionId = state.session;
     if (!skillsOn()) body.skills_discovery = false;
@@ -1537,8 +1593,11 @@
    * generating for nobody. The Stop button has to say so out loud.
    */
   function stop() {
-    if (state.turn) {
-      post('/api/agent/turns/' + encodeURIComponent(state.turn) + '/stop')
+    var turn = state.turn;
+    retireResponse();
+    state.interrupted = true;
+    if (turn) {
+      post('/api/agent/turns/' + encodeURIComponent(turn) + '/stop')
         .catch(function (e) { notice(t('page.send.stopFailed', { error: (e && e.message) || e }), 'error'); });
       detach();
       return;
@@ -1550,10 +1609,12 @@
     // this conversation is generating.
     var conversation = state.conversation;
     detach();
+    var version = state.readerVersion;
     if (!conversation) return;
     fetch('/api/agent/turns?conversation=' + encodeURIComponent(conversation))
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (state.conversation !== conversation || state.readerVersion !== version) return;
         if (d && d.turn && d.turn.running) post('/api/agent/turns/' + encodeURIComponent(d.turn.id) + '/stop');
       })
       .catch(function () {});
@@ -1561,6 +1622,9 @@
 
   /** Stop READING. The turn carries on; this is what leaving a chat does. */
   function detach() {
+    state.readerVersion++;
+    state.resuming = false;
+    state.resumingSince = 0;
     if (state.abort) { try { state.abort.abort(); } catch (e) {} }
     state.abort = null;
     state.turn = null;
@@ -1707,7 +1771,9 @@
     if (view && view.answerSoFar) {
       // So the next request does not send a history with a hole where this answer
       // was and write that hole over the saved chat.
-      state.history.push({ role: 'assistant', content: view.answerSoFar });
+      var interrupted = { role: 'assistant', content: view.answerSoFar };
+      if (view.knowledgeSources && view.knowledgeSources.length) interrupted.knowledgeSources = view.knowledgeSources;
+      state.history.push(interrupted);
     } else if (view && view.turn && view.turn.parentNode) {
       // Nothing ever arrived in it; an empty bubble under the question says less than
       // the notice below does.
@@ -1794,14 +1860,15 @@
     // page has moved on -- so without this the previous chat's answer streams into the
     // one now on screen and is saved under it.
     var conversation = state.conversation;
+    var version = state.readerVersion;
     state.resuming = true;
     state.resumingSince = Date.now();
     note('resume-lookup', conversation);
     fetchTimed('/api/agent/turns?conversation=' + encodeURIComponent(conversation), 10000)
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (state.conversation !== conversation || state.readerVersion !== version) return;
         state.resuming = false;
-        if (state.conversation !== conversation) return;
         var t = d && d.turn;
         note('resume-found', t ? t.id + (t.running ? ' running' : ' finished') : 'nothing');
         recovery.attempts = 0;
@@ -1826,8 +1893,8 @@
         else if (state.generating) { progressDone(); setGenerating(false); }
       })
       .catch(function (e) {
+        if (state.conversation !== conversation || state.readerVersion !== version) return;
         state.resuming = false;
-        if (state.conversation !== conversation) return;
         note('resume-lookup-failed', (e && e.message) || e);
         if (state.turn || state.liveView || recovery.sentDraft) scheduleResume('the lookup failed');
         else if (state.generating) { progressDone(); setGenerating(false); }
@@ -1917,6 +1984,7 @@
     if (live && live.turn.parentNode) {
       live.bubble.innerHTML = '';
       live.answerSoFar = '';
+      showKnowledgeSources(live, []);
       if (live.stats) { live.stats.remove(); live.stats = null; }
       Array.prototype.slice.call(live.turn.querySelectorAll('.step, .think, .copy'))
         .forEach(function (n) { n.remove(); });
@@ -1940,6 +2008,7 @@
     progress(makesVideo() ? t('page.activity.filming') : makesImages() ? t('page.activity.drawing') : t('page.activity.thinking'));
 
     var ctrl = new AbortController();
+    ctrl.readerVersion = ++state.readerVersion;
     ctrl.awaitingHeaders = true;
     state.abort = ctrl;
     state.lastByteAt = Date.now();
@@ -1951,6 +2020,7 @@
       body: JSON.stringify(body),
       signal: ctrl.signal,
     }).then(null, function (e) { throw transportError(e); }).then(function (res) {
+      if (ctrl !== state.abort) return null;
       // The turn this stream is a view of. Held so the Stop button can stop the
       // model rather than merely stopping us listening to it.
       state.turn = res.headers.get('X-TensorAgent-Turn') || null;
@@ -1993,6 +2063,7 @@
     note('attach', id);
 
     var ctrl = new AbortController();
+    ctrl.readerVersion = ++state.readerVersion;
     state.abort = ctrl;
     state.lastByteAt = Date.now();
     armWatchdog();
@@ -2120,7 +2191,19 @@
     }
     function paint() {
       if (thinkingDirty && thinkBody) { thinkBody.textContent = thinking; thinkingDirty = false; }
-      if (answerDirty) { view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false; }
+      if (answerDirty) {
+        view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false;
+        if (view.knowledgeSourceCandidates) showKnowledgeSources(view, view.knowledgeSourceCandidates, answer);
+      }
+      var entry = { role: 'assistant', content: answer };
+      if (thinking) entry.thinking = thinking;
+      if (view.knowledgeSources && view.knowledgeSources.length) entry.knowledgeSources = view.knowledgeSources;
+      if (made.length) entry.artifacts = made.slice();
+      if (madeImage) { entry.imageUrl = madeImage; Object.assign(entry, madeFrom); }
+      if (madeChoices) entry.imageChoices = madeChoices;
+      if (madeVideo) entry.videoUrl = madeVideo;
+      if (madeAudio) entry.audioUrl = madeAudio;
+      view.partialEntry = answer || thinking || made.length || madeImage || madeVideo ? entry : null;
       if (stickBottom) toBottom();
     }
     /**
@@ -2136,7 +2219,7 @@
       fetchTimed('/api/agent/turns?conversation=' + encodeURIComponent(conversation), 10000)
         .then(function (r) { return r.json(); })
         .then(function (d) {
-          if (state.conversation !== conversation || state.abort) return;
+          if (state.conversation !== conversation || state.abort || ctrl.readerVersion !== state.readerVersion) return;
           var t = d && d.turn;
           // The host still has this turn -- running, or finished while the connection
           // was going away. Either way its replay is the whole answer and ends with the
@@ -2152,11 +2235,17 @@
           finish();
         })
         .catch(function () {
-          if (state.conversation !== conversation || state.abort) return;
+          if (state.conversation !== conversation || state.abort || ctrl.readerVersion !== state.readerVersion) return;
           scheduleResume('the stream ended before the answer did');
         });
     }
     function handle(f) {
+      if (Array.isArray(f.steeringMessages)) {
+        state.history = [];
+        chat.innerHTML = '';
+        renderMessages(f.steeringMessages);
+        chat.appendChild(view.turn);
+      }
       if (f.done === true) {
         terminal = true;
         stats = statsOf(f);
@@ -2192,6 +2281,7 @@
       // before starting it again, and treating it as "no frame" left the fragment on
       // screen with the fresh answer glued to the end of it.
       if (typeof f.replace === 'string') { answer = f.replace; answerDirty = true; }
+      if (Array.isArray(f.knowledgeSources)) showKnowledgeSources(view, f.knowledgeSources, answer);
       // The host has thrown away a dying engine and is answering again -- carrying
       // the text on screen on, or starting over. Said plainly, because the
       // alternative is an answer that visibly stalls or restarts for no reason the
@@ -2333,7 +2423,7 @@
       return v.sound;
     }
     function finish() {
-      if (ctrl && ctrl !== state.abort && state.abort) { note('reader-retired', 'finish'); return; }
+      if (ctrl && ctrl.readerVersion !== state.readerVersion) { note('reader-retired', 'finish'); return; }
       paint();
       note('finish', state.turn);
       stopWatchdog();
@@ -2351,6 +2441,7 @@
       // the turn ends; the page has to hold it too, because
       // the next request sends this array and the host saves what it is sent.
       var entry = { role: 'assistant', content: answer };
+      if (view.knowledgeSources && view.knowledgeSources.length) entry.knowledgeSources = view.knowledgeSources;
       if (stats) entry.stats = stats;
       if (thinking) entry.thinking = thinking;
       if (made.length) entry.artifacts = made;
@@ -2755,6 +2846,7 @@
       models.addEventListener('click', function () { openRoute('models'); });
       hint.appendChild(models); box.appendChild(hint);
     }
+    paintSend();
   }
 
   var uploadQueue = Promise.resolve();
@@ -2799,7 +2891,7 @@
   function closeSheets() {
     $('sheet-bg').classList.remove('on');
     var closingLoras = $('lora-sheet').classList.contains('on');
-    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
+    ['attach-sheet', 'skills-sheet', 'model-sheet', 'nav-sheet', 'skill-sheet', 'skill-add-sheet', 'lora-sheet', 'knowledge-sheet'].forEach(function (s) { $(s).classList.remove('on'); });
     $('lora-sheet').hidden = true;
     if (loraPoll) { clearInterval(loraPoll); loraPoll = null; }
     if (closingLoras && loraReturnFocus) { loraReturnFocus.focus(); loraReturnFocus = null; }
@@ -2904,6 +2996,7 @@
             skillsError(t('page.nav.skillsFailed', { error: (e && e.message) || e }));
           });
         }
+        if (sheet === 'knowledge-sheet') loadKnowledge().catch(knowledgeFailure);
         return;
       }
       openRoute(b.getAttribute('data-route'));
@@ -3276,6 +3369,1022 @@
   var cta = $('empty-cta');
   if (cta) cta.addEventListener('click', function () { openRoute('models'); });
 
+  // ---- knowledge library ---------------------------------------------------
+  // Browsing a library and attaching it to a chat are separate choices. Every
+  // request carries a captured scope; a slow response cannot populate another
+  // collection after the user switches. Source content is always rendered as text.
+  var knowledgeCatalog = [], knowledgeDocuments = [], knowledgeActive = null;
+  var knowledgeNextOffset = null, knowledgeDocumentsLoading = false;
+  var knowledgeOffset = 0, knowledgePageOffsets = [0], knowledgeTotal = 0, knowledgeCollectionTotal = 0;
+  var knowledgeSummary = null, knowledgeFilterTimer = null, knowledgeUploadProgress = '', knowledgeNativeUpload = null, knowledgeUploadResult = null;
+  var knowledgeCatalogVersion = 0, knowledgeDocumentVersion = 0;
+  var knowledgeSearchVersion = 0, knowledgeReadVersion = 0, knowledgeBusy = false;
+  var knowledgeChats = [], knowledgeChatSelected = Object.create(null), knowledgeChatLoading = false;
+  var knowledgeChatOffset = 0, knowledgeChatOffsets = [0], knowledgeChatNextOffset = null;
+  var knowledgeChatVersion = 0, knowledgeChatPickerVersion = 0, knowledgeChatFilterTimer = null;
+
+  function knowledgeError(message) {
+    var line = $('knowledge-error');
+    if (!line) return;
+    line.textContent = message || '';
+    line.style.display = message ? '' : 'none';
+  }
+  function knowledgeFailure(e) {
+    knowledgeError(t('page.knowledge.failed', { error: (e && e.message) || String(e) }));
+  }
+  function knowledgeRequest(url, method, body) {
+    var options = { method: method || 'GET' };
+    if (body instanceof FormData) options.body = body;
+    else if (body !== undefined) {
+      options.headers = { 'Content-Type': 'application/json' };
+      options.body = JSON.stringify(body);
+    }
+    // A create/upload is not automatically retried: an ambiguous transport
+    // failure may have committed it already. Refresh exposes the durable result.
+    return fetch(url, options).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok) {
+          var error = new Error(data.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : data.error || response.statusText);
+          error.code = data.code;
+          throw error;
+        }
+        return data;
+      });
+    });
+  }
+  function knowledgeCollectionUrl(id) { return '/api/knowledge/collections/' + encodeURIComponent(id); }
+  function knowledgeDocumentUrl(id, documentId) {
+    return knowledgeCollectionUrl(id) + '/documents/' + encodeURIComponent(documentId);
+  }
+  function knowledgeButton(parent, cls, label, action) {
+    var button = el('button', 'mini quiet ' + cls, label);
+    button.type = 'button';
+    button.addEventListener('click', action);
+    parent.appendChild(button);
+    return button;
+  }
+  function knowledgeDeleteButton(parent, name, action) {
+    var armed = false;
+    var button = knowledgeButton(parent, 'knowledge-delete', t('page.knowledge.remove'), function () {
+      if (knowledgeBusy) return;
+      if (!armed) {
+        armed = true;
+        button.textContent = t('page.knowledge.confirmRemove', { name: name });
+        cancel.hidden = false;
+      } else action();
+    });
+    button.disabled = knowledgeBusy;
+    var cancel = knowledgeButton(parent, 'knowledge-cancel', t('page.knowledge.cancel'), function () {
+      armed = false; button.textContent = t('page.knowledge.remove'); cancel.hidden = true;
+    });
+    cancel.hidden = true;
+  }
+  function paintKnowledgeChips() {
+    var box = $('knowledgechips');
+    if (!box) return;
+    box.textContent = '';
+    state.knowledgeCollections.forEach(function (id) {
+      var collection = knowledgeCatalog.filter(function (c) { return c.id === id; })[0];
+      var chip = el('button', 'skillchip', '📚 ' + (collection ? collection.name : id));
+      chip.type = 'button';
+      chip.setAttribute('aria-label', t('page.knowledge.open', { name: collection ? collection.name : id }));
+      chip.addEventListener('click', function () { openSheet('knowledge-sheet'); loadKnowledge().catch(knowledgeFailure); });
+      box.appendChild(chip);
+    });
+    paintKnowledgeScope();
+  }
+  function paintKnowledgeScope() {
+    var collection = knowledgeCatalog.filter(function (c) { return c.id === knowledgeActive; })[0];
+    $('knowledge-chat-scope').hidden = !collection;
+    $('knowledge-use-active').disabled = !collection;
+    var selected = !!collection && state.knowledgeCollections.indexOf(collection.id) >= 0;
+    $('knowledge-use-active').checked = selected;
+    $('knowledge-use-active-label').textContent = collection ? t('page.knowledge.use', { name: collection.name }) : '';
+    $('knowledge-scope-help').textContent = collection ? t(selected ? 'page.knowledge.inChat' : 'page.knowledge.notInChat') : '';
+  }
+  function setKnowledgeCollectionSelected(id, selected) {
+    if (selected && state.knowledgeCollections.indexOf(id) < 0 && state.knowledgeCollections.length >= 32) {
+      knowledgeError(t('page.knowledge.maxCollections'));
+      paintKnowledgeCollections();
+      return;
+    }
+    state.knowledgeCollections = state.knowledgeCollections.filter(function (existing) { return existing !== id; });
+    if (selected) state.knowledgeCollections.push(id);
+    Array.prototype.forEach.call($('knowledge-collections').querySelectorAll('.knowledge-collection'), function (row) {
+      row.querySelector('.knowledge-toggle').checked = state.knowledgeCollections.indexOf(row.getAttribute('data-collection')) >= 0;
+    });
+    paintKnowledgeChips();
+  }
+  function paintKnowledgeCollections() {
+    var list = $('knowledge-collections');
+    if (!list) return;
+    list.textContent = '';
+    var query = ($('knowledge-collection-filter').value || '').trim().toLocaleLowerCase();
+    $('knowledge-collection-count').textContent = tn('page.knowledge.collections', knowledgeCatalog.length);
+    if (!knowledgeCatalog.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.empty')));
+    var visible = knowledgeCatalog.filter(function (c) { return !query || c.name.toLocaleLowerCase().indexOf(query) >= 0; });
+    if (knowledgeCatalog.length && !visible.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.noCollections')));
+    visible.forEach(function (c) {
+      var row = el('div', 'knowledge-collection' + (knowledgeActive === c.id ? ' active' : ''));
+      row.setAttribute('data-collection', c.id);
+      var choice = el('label', 'knowledge-choice');
+      var box = el('input', 'knowledge-toggle');
+      box.type = 'checkbox';
+      box.checked = state.knowledgeCollections.indexOf(c.id) >= 0;
+      box.setAttribute('aria-label', t('page.knowledge.use', { name: c.name }));
+      box.addEventListener('change', function () {
+        setKnowledgeCollectionSelected(c.id, box.checked);
+      });
+      choice.appendChild(box);
+      var label = el('span', 'knowledge-collection-label');
+      label.appendChild(el('strong', '', c.name));
+      if (Number.isFinite(c.documentCount)) label.appendChild(el('span', 'hint-block', tn('page.knowledge.files', c.documentCount)));
+      choice.appendChild(label);
+      row.appendChild(choice);
+      var browse = knowledgeButton(row, 'knowledge-browse', t('page.knowledge.browse'), function () { selectKnowledgeCollection(c.id); });
+      browse.setAttribute('aria-pressed', knowledgeActive === c.id ? 'true' : 'false');
+      list.appendChild(row);
+    });
+    paintKnowledgeChips();
+  }
+  function knowledgeBusyControls() {
+    $('knowledge-create').disabled = knowledgeBusy;
+    $('knowledge-upload').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-file-input').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-upload-folder').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-add-chats').disabled = knowledgeBusy || !knowledgeActive;
+    $('knowledge-folder-input').disabled = knowledgeBusy || !knowledgeActive;
+    ['knowledge-file-query', 'knowledge-type', 'knowledge-sort'].forEach(function (id) { $(id).disabled = knowledgeBusy || !knowledgeActive; });
+    $('knowledge-upload-help').textContent = t(knowledgeActive ? 'page.knowledge.uploadHelp' : 'page.knowledge.uploadChooseCollection');
+    $('knowledge-search').disabled = !knowledgeActive;
+    var status = knowledgeBusy ? knowledgeUploadProgress || t('page.knowledge.working')
+      : knowledgeUploadResult && knowledgeUploadResult.collectionId === knowledgeActive ? knowledgeUploadResult.label : '';
+    if (knowledgeOcrPreparing) {
+      var setup = knowledgeOcrStatus || {}, progress = '';
+      if (Number.isFinite(setup.downloadedBytes) && Number.isFinite(setup.totalBytes) && setup.totalBytes > 0)
+        progress = Math.min(100, Math.max(0, Math.round(setup.downloadedBytes * 100 / setup.totalBytes))) + '%';
+      status = setup.state === 'downloading' ? t('page.knowledge.setupDownloading', { progress: progress })
+        : setup.state === 'installing' ? t('page.knowledge.setupInstalling') : t('page.knowledge.setupPreparing');
+    }
+    $('knowledge-status').textContent = status;
+    $('knowledge-ocr-retry').style.display = knowledgeOcrRetry && !knowledgeBusy ? '' : 'none';
+    $('knowledge-ocr-retry').disabled = knowledgeBusy;
+    paintKnowledgeChats();
+  }
+  var knowledgeOcrStatus = null, knowledgeOcrPreparing = false;
+  var knowledgeOcrRetry = null, knowledgeOcrPollVersion = 0;
+  function observeKnowledgePdf(action) {
+    knowledgeOcrPreparing = false; knowledgeOcrStatus = null; knowledgeBusyControls();
+    var polling = true, version = ++knowledgeOcrPollVersion;
+    function update(data) {
+      if (version === knowledgeOcrPollVersion && data) {
+        knowledgeOcrStatus = data.managed ? data.status : null;
+        knowledgeOcrPreparing = !!(knowledgeOcrStatus &&
+          (knowledgeOcrStatus.state === 'checking' || knowledgeOcrStatus.state === 'downloading' || knowledgeOcrStatus.state === 'installing'));
+        if (!data.managed) polling = false;
+        knowledgeBusyControls();
+      }
+      return data;
+    }
+    function poll() {
+      if (!polling || version !== knowledgeOcrPollVersion) return;
+      knowledgeRequest('/api/knowledge/ocr/status').then(update).catch(function () {}).then(function () {
+        if (polling && version === knowledgeOcrPollVersion) setTimeout(poll, 400);
+      });
+    }
+    function finish() {
+      polling = false;
+      if (version === knowledgeOcrPollVersion) {
+        knowledgeOcrPreparing = false; knowledgeOcrPollVersion++; knowledgeBusyControls();
+      }
+    }
+    // Upload first; only a page that needs OCR should prepare dependencies.
+    // Status reads are observational and never block text-only PDF ingestion.
+    var pending = Promise.resolve().then(action);
+    poll();
+    return pending.then(function (result) { finish(); return result; }, function (error) { finish(); throw error; });
+  }
+  function loadKnowledge() {
+    knowledgeError('');
+    var version = ++knowledgeCatalogVersion;
+    return knowledgeRequest('/api/knowledge/collections').then(function (d) {
+      if (version !== knowledgeCatalogVersion) return;
+      knowledgeCatalog = Array.isArray(d.collections) ? d.collections : [];
+      // A collection removed from another window or an older saved chat must not
+      // leave an invisible selection that the user cannot uncheck.
+      state.knowledgeCollections = state.knowledgeCollections.filter(function (id) {
+        return knowledgeCatalog.some(function (c) { return c.id === id; });
+      });
+      if (!knowledgeCatalog.some(function (c) { return c.id === knowledgeActive; }))
+        knowledgeActive = knowledgeCatalog.length ? knowledgeCatalog[0].id : null;
+      paintKnowledgeCollections();
+      return selectKnowledgeCollection(knowledgeActive);
+    });
+  }
+  function selectKnowledgeCollection(id) {
+    closeKnowledgeChats();
+    knowledgeActive = id;
+    knowledgeOcrRetry = null; knowledgeUploadResult = null;
+    knowledgeDocuments = []; knowledgeNextOffset = null; knowledgeDocumentsLoading = false;
+    knowledgeOffset = 0; knowledgePageOffsets = [0]; knowledgeTotal = 0; knowledgeCollectionTotal = 0; knowledgeSummary = null;
+    clearTimeout(knowledgeFilterTimer);
+    $('knowledge-file-query').value = ''; $('knowledge-type').value = 'all'; $('knowledge-sort').value = 'name';
+    knowledgeSearchVersion++;
+    knowledgeReadVersion++;
+    $('knowledge-results').textContent = '';
+    $('knowledge-read').textContent = '';
+    knowledgeError('');
+    paintKnowledgeCollections();
+    paintKnowledgeDocuments();
+    return loadKnowledgeDocuments();
+  }
+  function knowledgeDocumentFilters() {
+    return { query: ($('knowledge-file-query').value || '').trim(), type: $('knowledge-type').value || 'all', sort: $('knowledge-sort').value || 'name' };
+  }
+  function loadKnowledgeDocuments(pageOffset) {
+    if (pageOffset === true && (knowledgeDocumentsLoading || knowledgeNextOffset === null)) return Promise.resolve();
+    var id = knowledgeActive, offset = pageOffset === true ? knowledgeNextOffset : Number.isInteger(pageOffset) ? pageOffset : 0;
+    var filters = knowledgeDocumentFilters(), version = ++knowledgeDocumentVersion;
+    knowledgeDocuments = []; knowledgeNextOffset = null;
+    knowledgeDocumentsLoading = !!id;
+    paintKnowledgeDocuments();
+    if (!id) return Promise.resolve();
+    var parameters = [];
+    if (offset) { parameters.push('offset=' + offset); parameters.push('limit=100'); }
+    if (filters.query) parameters.push('q=' + encodeURIComponent(filters.query));
+    if (filters.type !== 'all') parameters.push('type=' + encodeURIComponent(filters.type));
+    if (filters.sort !== 'name') parameters.push('sort=' + encodeURIComponent(filters.sort));
+    var url = knowledgeCollectionUrl(id) + '/documents' + (parameters.length ? '?' + parameters.join('&') : '');
+    return knowledgeRequest(url).then(function (d) {
+      if (version !== knowledgeDocumentVersion || id !== knowledgeActive) return;
+      knowledgeDocuments = Array.isArray(d.documents) ? d.documents.slice(0, 100) : [];
+      knowledgeTotal = Number.isInteger(d.total) && d.total >= 0 ? d.total : knowledgeDocuments.length;
+      knowledgeCollectionTotal = Number.isInteger(d.collectionTotal) && d.collectionTotal >= 0 ? d.collectionTotal : knowledgeTotal;
+      knowledgeSummary = d.summary || null;
+      if (offset === 0) knowledgePageOffsets = [0];
+      else if (offset > knowledgeOffset) knowledgePageOffsets.push(offset);
+      else knowledgePageOffsets = knowledgePageOffsets.filter(function (value) { return value <= offset; });
+      knowledgeOffset = offset;
+      knowledgeNextOffset = Number.isInteger(d.nextOffset) && d.nextOffset > offset ? d.nextOffset : null;
+    }).catch(function (e) {
+      if (version === knowledgeDocumentVersion && id === knowledgeActive) knowledgeFailure(e);
+    }).then(function () {
+      if (version === knowledgeDocumentVersion && id === knowledgeActive) {
+        knowledgeDocumentsLoading = false;
+        paintKnowledgeDocuments();
+      }
+    });
+  }
+  function knowledgeBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes < 0) return '';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+  function paintKnowledgeSummary() {
+    var box = $('knowledge-summary'); box.textContent = '';
+    if (!knowledgeActive) return;
+    var summary = knowledgeSummary;
+    if (summary) {
+      [['documents', 'document', t('page.knowledge.documents')], ['media', 'media', t('page.knowledge.media')], ['datasets', 'dataset', t('page.knowledge.datasets')]].forEach(function (item) {
+        var button = knowledgeButton(box, 'knowledge-stat', item[2] + ' · ' + (summary[item[0]] || 0), function () {
+          $('knowledge-type').value = $('knowledge-type').value === item[1] ? 'all' : item[1];
+          return loadKnowledgeDocuments();
+        });
+        button.setAttribute('aria-pressed', $('knowledge-type').value === item[1] ? 'true' : 'false');
+        button.disabled = knowledgeBusy;
+      });
+      var status = t('page.knowledge.indexSummary', { ready: summary.ready || 0, partial: summary.partial || 0, metadata: summary.metadataOnly || 0 });
+      if (Number.isFinite(summary.sizeBytes)) status += ' · ' + knowledgeBytes(summary.sizeBytes);
+      box.appendChild(el('p', 'hint-block knowledge-index-summary', status));
+    }
+    $('knowledge-files-count').textContent = tn('page.knowledge.files', knowledgeCollectionTotal);
+    var start = knowledgeDocuments.length ? knowledgeOffset + 1 : 0, end = knowledgeOffset + knowledgeDocuments.length;
+    $('knowledge-page-count').textContent = t('page.knowledge.showingFiles', { start: start, end: end, total: knowledgeTotal });
+  }
+  function renameKnowledgeCollection(collection) {
+    var actions = $('knowledge-collection-actions'); actions.textContent = '';
+    var input = el('input', 'knowledge-rename-input'); input.type = 'text'; input.maxLength = 120; input.value = collection.name;
+    input.setAttribute('aria-label', t('page.knowledge.name')); actions.appendChild(input);
+    function save() {
+      var name = (input.value || '').trim();
+      if (!name) { knowledgeError(t('page.knowledge.nameRequired')); input.focus(); return; }
+      return mutateKnowledge(function () {
+        knowledgeCatalogVersion++;
+        return knowledgeRequest(knowledgeCollectionUrl(collection.id) + '/rename', 'POST', { name: name }).then(function (d) {
+          // A catalog fetched before this write committed cannot restore the old name.
+          knowledgeCatalogVersion++;
+          var renamed = d.collection;
+          if (renamed) knowledgeCatalog = knowledgeCatalog.map(function (c) { return c.id === renamed.id ? Object.assign({}, c, renamed) : c; });
+          paintKnowledgeCollections();
+        });
+      });
+    }
+    knowledgeButton(actions, 'knowledge-rename-save', t('page.knowledge.save'), save);
+    knowledgeButton(actions, 'knowledge-rename-cancel', t('page.knowledge.cancel'), paintKnowledgeDocuments);
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); save(); }
+      else if (e.key === 'Escape') { e.preventDefault(); paintKnowledgeDocuments(); }
+    });
+    input.focus();
+  }
+  // The host supplies source identities separately from model prose. Build these
+  // links only from validated identities, so a model-invented URL cannot become an
+  // authoritative citation. Keep the metadata with the turn across replay/save.
+  function knowledgeReferenceInAnswer(answer, reference) {
+    if (!reference) return false;
+    var offset = 0, at;
+    while ((at = answer.indexOf(reference, offset)) >= 0) {
+      var end = at + reference.length;
+      var starts = at === 0 || /[\s(\[<"'`（【“‘「『，。！？；：]/.test(answer.charAt(at - 1));
+      var ends = end === answer.length || /[\s)\]>"'`,;!，。！？；：）】”’」』]/.test(answer.charAt(end))
+        || (answer.charAt(end) === '.' && (end + 1 === answer.length || /\s/.test(answer.charAt(end + 1))));
+      if (starts && ends) return true;
+      offset = end;
+    }
+    return false;
+  }
+  function showKnowledgeSources(view, sources, answer) {
+    view.knowledgeSourceCandidates = Array.isArray(sources) ? sources : [];
+    answer = typeof answer === 'string' ? answer : (view.answerSoFar || '');
+    var seen = Object.create(null), safe = [];
+    view.knowledgeSourceCandidates.slice(0, 50).forEach(function (source) {
+      if (!source || !/^[a-zA-Z0-9_-]{1,128}$/.test(source.collectionId || '')
+        || !/^[a-zA-Z0-9_-]{1,128}$/.test(source.documentId || '')
+        || !Number.isInteger(source.version) || source.version <= 0
+        || typeof source.reference !== 'string' || source.reference.length > 1024) return;
+      var url = knowledgeDocumentUrl(source.collectionId, source.documentId) + '/source?version=' + encodeURIComponent(source.version);
+      var citedChunk = source.reference !== url && knowledgeReferenceInAnswer(answer, source.reference);
+      // Also filter older saved transcripts that recorded every search hit. A
+      // source name alone does not establish a citation or identify its version.
+      if ((!citedChunk && !knowledgeReferenceInAnswer(answer, url)) || seen[url]) return;
+      seen[url] = true;
+      safe.push({ reference: citedChunk ? source.reference : url, collectionId: source.collectionId,
+        documentId: source.documentId, fileName: String(source.fileName || '').slice(0, 500),
+        relativePath: typeof source.relativePath === 'string' ? source.relativePath.slice(0, 2000) : null,
+        version: source.version, chunkIndex: citedChunk ? source.chunkIndex : -1, location: citedChunk ? source.location : null,
+        modality: source.modality, status: source.status });
+    });
+    view.knowledgeSources = safe;
+    if (view.entry) {
+      if (safe.length) view.entry.knowledgeSources = safe;
+      else delete view.entry.knowledgeSources;
+    }
+    if (view.sourceBox) { view.sourceBox.remove(); view.sourceBox = null; }
+    if (!safe.length) return;
+    var box = el('div', 'knowledge-citations');
+    box.appendChild(el('div', 'hint-block', t('page.knowledge.sources')));
+    safe.forEach(function (source) {
+      var link = knowledgeSourceLink(box, source);
+      var location = knowledgeLocation(source.location);
+      link.textContent = '';
+      knowledgeSourceThumbnail(link, source);
+      link.appendChild(el('span', 'knowledge-source-label', (source.relativePath || source.fileName) + (location ? ' · ' + location : '')));
+      link.title = source.reference;
+    });
+    view.sourceBox = box;
+    view.turn.appendChild(box);
+  }
+  function knowledgeSourceLink(parent, doc) {
+    var link = el('a', 'mini quiet knowledge-source', t('page.knowledge.source'));
+    // Never trust a URL embedded in extracted text or a returned source title.
+    link.href = knowledgeDocumentUrl(doc.collectionId, doc.documentId || doc.id) + '/source?version=' + encodeURIComponent(doc.version);
+    link.addEventListener('click', function (event) {
+      if (event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      openKnowledgeSource(doc, link);
+    });
+    parent.appendChild(link);
+    return link;
+  }
+
+  // Open originals inside the app as well as a browser. Indexed text is always
+  // textContent; only the server's conservative media allowlist may be embedded.
+  var knowledgeSourceViewer = null, knowledgeSourceViewVersion = 0;
+  function closeKnowledgeSource() {
+    knowledgeSourceViewVersion++;
+    if (!knowledgeSourceViewer) return;
+    var previous = knowledgeSourceViewer;
+    knowledgeSourceViewer = null;
+    previous.overlay.querySelectorAll('audio, video').forEach(function (media) { media.pause(); });
+    previous.overlay.remove();
+    previous.background.forEach(function (item) { item.element.inert = item.inert; });
+    document.body.style.overflow = previous.overflow;
+    if (previous.returnFocus && previous.returnFocus.focus) previous.returnFocus.focus();
+  }
+  function knowledgeSourceIdentity(doc) {
+    var id = doc && (doc.documentId || doc.id);
+    if (!doc || !/^[a-zA-Z0-9_-]{1,128}$/.test(doc.collectionId || '')
+      || !/^[a-zA-Z0-9_-]{1,128}$/.test(id || '')
+      || !Number.isInteger(doc.version) || doc.version <= 0) return null;
+    return { collectionId: doc.collectionId, documentId: id, version: doc.version };
+  }
+  var knowledgeThumbnailPreviews = Object.create(null);
+  function knowledgeThumbnailKind(doc) {
+    var name = typeof doc.fileName === 'string' ? doc.fileName.toLowerCase() : '';
+    if (doc.modality === 'image' || /\.(png|jpe?g|gif|webp|bmp|tiff?|heic|heif|avif|svg)$/.test(name)) return 'image';
+    if (doc.modality === 'video' || /\.(mp4|mov|webm|mkv|avi)$/.test(name)) return 'video';
+    if (doc.modality === 'audio' || /\.(mp3|wav|m4a|aac|flac|ogg|opus)$/.test(name)) return 'audio';
+    return '';
+  }
+  function knowledgeSourceThumbnail(link, doc) {
+    var identity = knowledgeSourceIdentity(doc), kind = knowledgeThumbnailKind(doc);
+    if (!identity || !kind) return;
+    link.classList.add('knowledge-source-thumbnail');
+    var thumbnail = el('span', 'knowledge-thumbnail knowledge-thumbnail-placeholder', kind === 'audio' ? '♫' : kind === 'video' ? '▶' : '▧');
+    thumbnail.setAttribute('aria-hidden', 'true');
+    link.appendChild(thumbnail);
+    var base = knowledgeDocumentUrl(identity.collectionId, identity.documentId);
+    var previewUrl = base + '/preview?version=' + identity.version;
+    // Repeated citations and adjacent excerpts share one metadata request. The
+    // version is part of the key, so reindexing cannot reuse an older preview.
+    if (!knowledgeThumbnailPreviews[previewUrl]) {
+      var keys = Object.keys(knowledgeThumbnailPreviews);
+      if (keys.length >= 128) delete knowledgeThumbnailPreviews[keys[0]];
+      var pending = knowledgeRequest(previewUrl).catch(function () {
+        // A temporary disconnect should be retryable on the next search/replay.
+        // Do not remove a newer request if this one was evicted while pending.
+        if (knowledgeThumbnailPreviews[previewUrl] === pending) delete knowledgeThumbnailPreviews[previewUrl];
+        return null;
+      });
+      knowledgeThumbnailPreviews[previewUrl] = pending;
+    }
+    knowledgeThumbnailPreviews[previewUrl].then(function (preview) {
+      if (!preview || thumbnail.isConnected === false) return;
+      // Only the authenticated host can authorize an inline media type. Ignore
+      // URLs in extracted text, model output, and even returned metadata.
+      var type = preview.inlineContentType || '', media;
+      if (/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(type)) {
+        media = el('img', 'knowledge-thumbnail');
+        media.alt = ''; media.loading = 'lazy'; media.decoding = 'async';
+      } else if (/^video\/(mp4|quicktime|webm)$/.test(type)) {
+        media = el('video', 'knowledge-thumbnail');
+        media.muted = true; media.preload = 'metadata'; media.setAttribute('playsinline', '');
+        media.setAttribute('aria-hidden', 'true');
+        // Show the retrieved frame's timestamp when the excerpt names one.
+        var location = doc.location || {}, start = location.startSeconds != null ? location.startSeconds
+          : location.startMilliseconds != null ? location.startMilliseconds / 1000 : 0;
+        media.addEventListener('loadedmetadata', function () {
+          if (Number.isFinite(start) && start >= 0 && Number.isFinite(media.duration) && start < media.duration)
+            media.currentTime = start || Math.min(0.01, media.duration / 2);
+        });
+      } else return; // Audio and unsupported image formats retain a media icon.
+      media.addEventListener('error', function () {
+        if (media.parentNode === link) { link.insertBefore(thumbnail, media); media.remove(); }
+      });
+      media.src = base + '/source?version=' + identity.version + '&inline=1';
+      link.insertBefore(media, thumbnail); thumbnail.remove();
+    });
+  }
+  function openKnowledgeSource(doc, returnFocus) {
+    var identity = knowledgeSourceIdentity(doc);
+    if (!identity) return Promise.resolve();
+    closeKnowledgeSource();
+    var version = ++knowledgeSourceViewVersion;
+    var base = knowledgeDocumentUrl(identity.collectionId, identity.documentId);
+    var sourceUrl = base + '/source?version=' + identity.version;
+    var overlay = el('div', 'knowledge-source-viewer');
+    var dialog = el('section', 'knowledge-source-dialog');
+    dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-label', t('page.knowledge.sourceTitle'));
+    var header = el('div', 'knowledge-source-header');
+    var heading = el('div', 'knowledge-source-heading');
+    var title = el('strong', '', doc.relativePath || doc.fileName || t('page.knowledge.sourceTitle'));
+    var meta = el('div', 'hint-block', t('page.knowledge.sourceVersion', { number: identity.version }));
+    heading.appendChild(title); heading.appendChild(meta); header.appendChild(heading);
+    var actions = el('div', 'knowledge-actions');
+    var download = el('a', 'mini quiet', t('page.knowledge.sourceDownload'));
+    download.href = sourceUrl; download.setAttribute('download', doc.fileName || '');
+    download.addEventListener('click', function (event) {
+      if (!state.native) return;
+      event.preventDefault();
+      post('/api/agent/events', { type: 'open-knowledge-source', url: sourceUrl, name: doc.fileName || '' })
+        .catch(function (error) { content.textContent = t('page.knowledge.sourceUnavailable', { error: error.message || String(error) }); });
+    });
+    actions.appendChild(download);
+    var close = knowledgeButton(actions, '', t('page.knowledge.sourceClose'), closeKnowledgeSource);
+    header.appendChild(actions); dialog.appendChild(header);
+    var content = el('div', 'knowledge-source-content', t('page.knowledge.sourceLoading'));
+    content.setAttribute('aria-live', 'polite'); content.setAttribute('aria-busy', 'true');
+    dialog.appendChild(content); overlay.appendChild(dialog);
+    overlay.addEventListener('click', function (event) { if (event.target === overlay) closeKnowledgeSource(); });
+    knowledgeSourceViewer = { overlay: overlay, returnFocus: returnFocus || document.activeElement,
+      overflow: document.body.style.overflow || '', close: close, download: download,
+      background: Array.prototype.map.call(document.body.children, function (child) {
+        var item = { element: child, inert: child.inert }; child.inert = true; return item;
+      }) };
+    document.body.style.overflow = 'hidden'; document.body.appendChild(overlay); close.focus();
+    var previewRequestVersion = 0;
+    function loadPreview(chunkIndex) {
+      var requestVersion = ++previewRequestVersion;
+      content.setAttribute('aria-busy', 'true');
+      return knowledgeRequest(base + '/preview?version=' + identity.version + (chunkIndex > 0 ? '&chunkIndex=' + chunkIndex : '')).then(function (data) {
+        if (version !== knowledgeSourceViewVersion || requestVersion !== previewRequestVersion || !knowledgeSourceViewer) return;
+        content.querySelectorAll('audio, video').forEach(function (media) { media.pause(); });
+        content.textContent = ''; content.setAttribute('aria-busy', 'false');
+        var original = data.document || doc;
+        title.textContent = original.relativePath || original.fileName || title.textContent;
+        var sourceLocation = data.location || doc.location;
+        var location = knowledgeLocation(sourceLocation);
+        meta.textContent = t('page.knowledge.sourceVersion', { number: identity.version }) + (location ? ' · ' + location : '');
+        (original.warnings || []).forEach(function (warning) { content.appendChild(el('p', 'knowledge-warning', warning)); });
+        var type = data.inlineContentType || '', media = null;
+        if (/^image\/(png|jpeg|gif|webp|bmp|avif)$/.test(type)) {
+          media = el('img'); media.alt = original.fileName || title.textContent;
+        } else if (/^(audio|video)\/[a-z0-9.+-]+$/.test(type)) {
+          media = el(type.indexOf('audio/') === 0 ? 'audio' : 'video');
+          media.controls = true; media.preload = 'metadata';
+        } else if (type === 'application/pdf' && !state.native && window.navigator && (window.navigator.pdfViewerEnabled === true
+          || (window.navigator.pdfViewerEnabled === undefined && window.navigator.mimeTypes && window.navigator.mimeTypes['application/pdf']))) {
+          media = el('iframe'); media.title = original.fileName || t('page.knowledge.sourceTitle');
+        }
+        if (media) {
+          media.src = sourceUrl + '&inline=1' + (type === 'application/pdf' && sourceLocation && Number.isInteger(sourceLocation.page)
+            && sourceLocation.page > 0 ? '#page=' + sourceLocation.page : '');
+          if (/^(audio|video)\//.test(type) && sourceLocation) {
+            var seconds = sourceLocation.startSeconds != null ? sourceLocation.startSeconds : sourceLocation.startMilliseconds / 1000;
+            if (Number.isFinite(seconds) && seconds > 0) media.addEventListener('loadedmetadata', function () {
+              if (Number.isFinite(media.duration) && seconds < media.duration) media.currentTime = seconds;
+            });
+          }
+          if (type !== 'application/pdf') content.appendChild(media);
+        }
+        if (typeof data.text === 'string' && data.text.length) {
+          content.appendChild(el('p', 'hint-block', t('page.knowledge.sourceIndexedText')));
+          content.appendChild(el('pre', 'knowledge-source-text', data.text));
+        } else if (!media) content.appendChild(el('p', 'hint-block', t('page.knowledge.sourceNoText')));
+        if (data.truncated) content.appendChild(el('p', 'hint-block', t('page.knowledge.sourceTruncated')));
+        if (Number.isInteger(data.previousChunkIndex) || Number.isInteger(data.nextChunkIndex)) {
+          var pages = el('div', 'knowledge-actions');
+          function previewPage(index) {
+            if (!Number.isInteger(index) || index < 0) return;
+            close.focus(); return loadPreview(index);
+          }
+          if (Number.isInteger(data.previousChunkIndex) && data.previousChunkIndex >= 0)
+            knowledgeButton(pages, 'knowledge-source-previous', t('page.knowledge.sourcePrevious'), function () { return previewPage(data.previousChunkIndex); });
+          if (Number.isInteger(data.nextChunkIndex) && data.nextChunkIndex > chunkIndex)
+            knowledgeButton(pages, 'knowledge-source-next', t('page.knowledge.sourceNext'), function () { return previewPage(data.nextChunkIndex); });
+          content.appendChild(pages);
+        }
+        // Put the cited text first: WebViews can advertise PDF support while
+        // leaving an embedded original blank. Native originals use FilePresenter.
+        if (media && type === 'application/pdf') content.appendChild(media);
+        content.scrollTop = 0;
+      }).catch(function (error) {
+        if (version !== knowledgeSourceViewVersion || requestVersion !== previewRequestVersion || !knowledgeSourceViewer) return;
+        content.setAttribute('aria-busy', 'false');
+        content.textContent = t('page.knowledge.sourceUnavailable', { error: error.message || String(error) });
+      });
+    }
+    return loadPreview(Number.isInteger(doc.chunkIndex) && doc.chunkIndex > 0 ? doc.chunkIndex : 0);
+  }
+  document.addEventListener('keydown', function (event) {
+    if (!knowledgeSourceViewer) return;
+    if (event.key === 'Escape') { event.preventDefault(); closeKnowledgeSource(); return; }
+    if (event.key !== 'Tab') return;
+    var items = Array.prototype.filter.call(knowledgeSourceViewer.overlay.querySelectorAll('a, button, audio, video, iframe'),
+      function (item) { return !item.disabled && !item.hidden; });
+    var first = items[0], last = items[items.length - 1];
+    if (!first) return;
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  });
+  function paintKnowledgeDocuments() {
+    var list = $('knowledge-documents'), actions = $('knowledge-collection-actions'), pagination = $('knowledge-pagination');
+    list.textContent = ''; actions.textContent = ''; pagination.textContent = '';
+    var collection = knowledgeCatalog.filter(function (c) { return c.id === knowledgeActive; })[0];
+    $('knowledge-active-name').textContent = collection ? collection.name : '';
+    $('knowledge-files-count').textContent = ''; $('knowledge-page-count').textContent = '';
+    knowledgeBusyControls(); paintKnowledgeSummary();
+    if (!collection) return;
+    if (collection.description) list.appendChild(el('p', 'hint-block', collection.description));
+    var rename = knowledgeButton(actions, 'knowledge-rename', t('page.knowledge.rename'), function () { renameKnowledgeCollection(collection); });
+    rename.disabled = knowledgeBusy;
+    knowledgeDeleteButton(actions, collection.name, function () {
+      return mutateKnowledge(function () {
+        return knowledgeRequest(knowledgeCollectionUrl(collection.id), 'DELETE').then(function () {
+          state.knowledgeCollections = state.knowledgeCollections.filter(function (id) { return id !== collection.id; });
+          knowledgeCatalogVersion++;
+          return loadKnowledge();
+        });
+      });
+    });
+    if (!knowledgeDocuments.length && !knowledgeDocumentsLoading) {
+      var filters = knowledgeDocumentFilters();
+      list.appendChild(el('p', 'hint-block knowledge-empty', t(filters.query || filters.type !== 'all' ? 'page.knowledge.noFiles' : 'page.knowledge.documentsEmpty')));
+    }
+    knowledgeDocuments.forEach(function (doc) {
+      var row = el('div', 'knowledge-document');
+      row.setAttribute('data-document', doc.id);
+      var title = el('div', 'knowledge-document-heading');
+      title.appendChild(el('strong', '', doc.fileName));
+      var kind = doc.kind === 'media' || doc.kind === 'dataset' ? doc.kind : 'document';
+      title.appendChild(el('span', 'knowledge-kind', kind === 'media' ? t('page.knowledge.media') : kind === 'dataset' ? t('page.knowledge.dataset') : t('page.knowledge.document')));
+      row.appendChild(title);
+      if (doc.relativePath && doc.relativePath !== doc.fileName) row.appendChild(el('div', 'knowledge-path hint-block', doc.relativePath));
+      var status = doc.status === 'Ready' ? t('page.knowledge.ready')
+        : doc.status === 'MetadataOnly' ? t('page.knowledge.metadataOnly') : t('page.knowledge.partial');
+      var metadata = status + ' · ' + tn('page.knowledge.chunks', doc.chunkCount || 0), size = knowledgeBytes(doc.sizeBytes);
+      if (size) metadata += ' · ' + size;
+      row.appendChild(el('div', 'hint-block knowledge-document-meta', metadata));
+      if ((doc.warnings || []).length) {
+        var warnings = el('details', 'knowledge-warnings');
+        warnings.appendChild(el('summary', 'knowledge-warning', tn('page.knowledge.warnings', doc.warnings.length)));
+        doc.warnings.forEach(function (warning) { warnings.appendChild(el('p', 'knowledge-warning', warning)); });
+        row.appendChild(warnings);
+      }
+      var controls = el('div', 'knowledge-actions');
+      knowledgeSourceLink(controls, doc);
+      var manage = el('details', 'knowledge-manage'); manage.appendChild(el('summary', '', t('page.knowledge.manage')));
+      var manageActions = el('div', 'knowledge-actions');
+      var reindex = knowledgeButton(manageActions, 'knowledge-reindex', t('page.knowledge.reindex'), function () {
+        return mutateKnowledge(function () { return reindexKnowledgeDocument(doc); });
+      });
+      reindex.disabled = knowledgeBusy;
+      knowledgeDeleteButton(manageActions, doc.fileName, function () {
+        return mutateKnowledge(function () {
+          return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id), 'DELETE').then(function () {
+            if (knowledgeActive === doc.collectionId) {
+              knowledgeSearchVersion++; knowledgeReadVersion++;
+              $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+              return refreshKnowledgeCollection();
+            }
+          });
+        });
+      });
+      manage.appendChild(manageActions); controls.appendChild(manage);
+      row.appendChild(controls); list.appendChild(row);
+    });
+    if (knowledgeDocumentsLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.loading')));
+    if (knowledgeOffset > 0) {
+      var previous = knowledgeButton(pagination, 'knowledge-previous', t('page.knowledge.previousFiles'), function () {
+        return loadKnowledgeDocuments(knowledgePageOffsets.length > 1 ? knowledgePageOffsets[knowledgePageOffsets.length - 2] : 0);
+      });
+      previous.disabled = knowledgeBusy || knowledgeDocumentsLoading;
+    }
+    if (knowledgeNextOffset !== null) {
+      var more = knowledgeButton(pagination, 'knowledge-more', t('page.knowledge.nextFiles'), function () { return loadKnowledgeDocuments(true); });
+      more.disabled = knowledgeBusy || knowledgeDocumentsLoading;
+    }
+  }
+  // Import saved history through the host: it snapshots the transcript and copies
+  // attachments into the collection, using the same index as uploaded sources.
+  function closeKnowledgeChats() {
+    knowledgeChatVersion++; knowledgeChatPickerVersion++;
+    clearTimeout(knowledgeChatFilterTimer);
+    knowledgeChatLoading = false; knowledgeChats = [];
+    knowledgeChatSelected = Object.create(null);
+    $('knowledge-chat-picker').hidden = true;
+  }
+  function paintKnowledgeChats() {
+    var picker = $('knowledge-chat-picker');
+    if (picker.hidden) return;
+    var selected = Object.keys(knowledgeChatSelected);
+    $('knowledge-chat-count').textContent = t('page.knowledge.chatsSelected', { count: selected.length });
+    $('knowledge-chat-import').disabled = knowledgeBusy || !knowledgeActive || !selected.length;
+    $('knowledge-chat-query').disabled = knowledgeBusy;
+    var list = $('knowledge-chat-list'), pagination = $('knowledge-chat-pagination');
+    list.textContent = ''; pagination.textContent = '';
+    list.setAttribute('aria-busy', knowledgeChatLoading ? 'true' : 'false');
+    if (knowledgeChatLoading) list.appendChild(el('p', 'hint-block', t('page.knowledge.loading')));
+    else if (!knowledgeChats.length) list.appendChild(el('p', 'hint-block', t('page.knowledge.noChats')));
+    knowledgeChats.forEach(function (chat) {
+      if (!chat || !/^[a-fA-F0-9]{32}$/.test(chat.id || '')) return;
+      var row = el('label', 'knowledge-chat-row'); row.setAttribute('data-conversation', chat.id);
+      var choice = el('input', 'knowledge-chat-toggle'); choice.type = 'checkbox';
+      choice.checked = !!knowledgeChatSelected[chat.id]; choice.disabled = knowledgeBusy;
+      choice.setAttribute('aria-label', t('page.knowledge.selectChat', { name: chat.title || chat.id }));
+      choice.addEventListener('change', function () {
+        if (knowledgeBusy) { choice.checked = !!knowledgeChatSelected[chat.id]; return; }
+        if (choice.checked && !knowledgeChatSelected[chat.id] && Object.keys(knowledgeChatSelected).length >= 32) {
+          choice.checked = false; knowledgeError(t('page.knowledge.maxChats')); return;
+        }
+        if (choice.checked) knowledgeChatSelected[chat.id] = chat;
+        else delete knowledgeChatSelected[chat.id];
+        $('knowledge-chat-count').textContent = t('page.knowledge.chatsSelected', { count: Object.keys(knowledgeChatSelected).length });
+        $('knowledge-chat-import').disabled = !Object.keys(knowledgeChatSelected).length;
+      });
+      row.appendChild(choice);
+      var label = el('span', 'knowledge-chat-label');
+      label.appendChild(el('strong', '', chat.title || chat.id));
+      var metadata = tn('page.knowledge.chatMessages', chat.messageCount || 0);
+      var updated = new Date(chat.updatedAt);
+      if (Number.isFinite(updated.getTime())) metadata += ' · ' + updated.toLocaleDateString();
+      label.appendChild(el('span', 'hint-block knowledge-chat-meta', metadata));
+      row.appendChild(label); list.appendChild(row);
+    });
+    if (knowledgeChatOffset > 0) {
+      var previous = knowledgeButton(pagination, 'knowledge-chat-previous', t('page.knowledge.previousChats'), function () {
+        return loadKnowledgeChats(knowledgeChatOffsets.length > 1 ? knowledgeChatOffsets[knowledgeChatOffsets.length - 2] : 0);
+      });
+      previous.disabled = knowledgeBusy || knowledgeChatLoading;
+    }
+    if (knowledgeChatNextOffset !== null) {
+      var next = knowledgeButton(pagination, 'knowledge-chat-next', t('page.knowledge.nextChats'), function () {
+        return loadKnowledgeChats(knowledgeChatNextOffset);
+      });
+      next.disabled = knowledgeBusy || knowledgeChatLoading;
+    }
+  }
+  function loadKnowledgeChats(offset) {
+    if (!knowledgeActive || $('knowledge-chat-picker').hidden) return Promise.resolve();
+    var collectionId = knowledgeActive, version = ++knowledgeChatVersion;
+    offset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+    knowledgeChats = []; knowledgeChatNextOffset = null; knowledgeChatLoading = true;
+    paintKnowledgeChats();
+    var query = ($('knowledge-chat-query').value || '').trim();
+    var url = '/api/knowledge/chats?offset=' + offset + '&limit=100' + (query ? '&q=' + encodeURIComponent(query) : '');
+    return knowledgeRequest(url).then(function (data) {
+      if (version !== knowledgeChatVersion || knowledgeActive !== collectionId) return;
+      knowledgeChats = Array.isArray(data.chats) ? data.chats.slice(0, 100) : [];
+      if (offset === 0) knowledgeChatOffsets = [0];
+      else if (offset > knowledgeChatOffset) knowledgeChatOffsets.push(offset);
+      else knowledgeChatOffsets = knowledgeChatOffsets.filter(function (value) { return value <= offset; });
+      knowledgeChatOffset = offset;
+      knowledgeChatNextOffset = Number.isInteger(data.nextOffset) && data.nextOffset > offset ? data.nextOffset : null;
+    }).catch(function (error) {
+      if (version === knowledgeChatVersion && knowledgeActive === collectionId) knowledgeFailure(error);
+    }).then(function () {
+      if (version === knowledgeChatVersion && knowledgeActive === collectionId) {
+        knowledgeChatLoading = false; paintKnowledgeChats();
+      }
+    });
+  }
+  $('knowledge-add-chats').addEventListener('click', function () {
+    if (!knowledgeActive || knowledgeBusy) return;
+    closeKnowledgeChats(); knowledgeError('');
+    $('knowledge-chat-picker').hidden = false; $('knowledge-chat-query').value = '';
+    knowledgeChatOffset = 0; knowledgeChatOffsets = [0]; knowledgeChatNextOffset = null;
+    $('knowledge-chat-query').focus();
+    return loadKnowledgeChats(0);
+  });
+  $('knowledge-chat-close').addEventListener('click', closeKnowledgeChats);
+  $('knowledge-chat-query').addEventListener('input', function () {
+    if (knowledgeBusy) return;
+    clearTimeout(knowledgeChatFilterTimer); knowledgeChatVersion++;
+    knowledgeChats = []; knowledgeChatNextOffset = null; knowledgeChatLoading = true; paintKnowledgeChats();
+    knowledgeChatFilterTimer = setTimeout(function () { loadKnowledgeChats(0); }, 180);
+  });
+  $('knowledge-chat-import').addEventListener('click', function () {
+    var ids = Object.keys(knowledgeChatSelected), collectionId = knowledgeActive, pickerVersion = knowledgeChatPickerVersion;
+    if (!collectionId || knowledgeBusy || !ids.length) return;
+    return mutateKnowledge(function () {
+      knowledgeUploadProgress = t('page.knowledge.indexingChats'); knowledgeBusyControls();
+      return knowledgeRequest(knowledgeCollectionUrl(collectionId) + '/chats', 'POST', { conversationIds: ids }).then(function (data) {
+        var imported = Array.isArray(data.importedChats) ? data.importedChats : [], errors = Array.isArray(data.errors) ? data.errors : [];
+        if (pickerVersion === knowledgeChatPickerVersion) {
+          imported.forEach(function (chat) {
+            if (!errors.some(function (error) { return error.conversationId === chat.id; })) delete knowledgeChatSelected[chat.id];
+          });
+        }
+        if (knowledgeActive === collectionId) {
+          knowledgeSearchVersion++; knowledgeReadVersion++;
+          $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+          knowledgeUploadResult = { collectionId: collectionId,
+            label: t('page.knowledge.chatImportComplete', { added: imported.length, failed: errors.length }) };
+          if (errors.length) knowledgeError(errors.slice(0, 8).map(function (error) {
+            return (error.title || error.conversationId || '') + (error.fileName ? ' / ' + error.fileName : '') + ': ' + error.error;
+          }).join('\n') + (errors.length > 8 ? '\n' + t('page.knowledge.moreUploadFailures', { count: errors.length - 8 }) : ''));
+        }
+        return refreshKnowledgeCollection(collectionId);
+      }).catch(function (error) {
+        if (knowledgeActive === collectionId) throw error;
+      });
+    });
+  });
+  function refreshKnowledgeCollection(collectionId) {
+    var id = collectionId || knowledgeActive, version = ++knowledgeCatalogVersion;
+    return knowledgeRequest('/api/knowledge/collections').then(function (d) {
+      if (version !== knowledgeCatalogVersion) return;
+      knowledgeCatalog = Array.isArray(d.collections) ? d.collections : knowledgeCatalog;
+      paintKnowledgeCollections();
+      if (knowledgeActive === id) return loadKnowledgeDocuments();
+    });
+  }
+  function reindexKnowledgeDocument(doc) {
+    function send() { return knowledgeRequest(knowledgeDocumentUrl(doc.collectionId, doc.id) + '/reindex', 'POST', {}); }
+    var pending = /\.pdf$/i.test(doc.fileName || '') ? observeKnowledgePdf(send) : send();
+    return pending.then(function () {
+      if (knowledgeActive === doc.collectionId) {
+        knowledgeSearchVersion++; knowledgeReadVersion++;
+        $('knowledge-results').textContent = ''; $('knowledge-read').textContent = '';
+        return refreshKnowledgeCollection();
+      }
+    }, function (error) {
+      if (error.code === 'pdf_ocr_setup_failed' && knowledgeActive === doc.collectionId)
+        knowledgeOcrRetry = function () { return reindexKnowledgeDocument(doc); };
+      throw error;
+    });
+  }
+  function mutateKnowledge(action) {
+    if (knowledgeBusy) return Promise.resolve();
+    knowledgeOcrRetry = null; knowledgeUploadResult = null;
+    knowledgeBusy = true; knowledgeError(''); paintKnowledgeDocuments();
+    return Promise.resolve().then(action).catch(function (error) {
+      knowledgeFailure(error);
+    }).then(function () {
+      knowledgeBusy = false; knowledgeUploadProgress = ''; paintKnowledgeDocuments();
+    });
+  }
+  $('knowledge-ocr-retry').addEventListener('click', function () {
+    var action = knowledgeOcrRetry;
+    if (action) return mutateKnowledge(action);
+  });
+  function knowledgeLocation(location) {
+    if (!location) return '';
+    var parts = [];
+    if (location.label) parts.push(location.label);
+    else if (location.page != null) parts.push(t('page.knowledge.page', { number: location.page }));
+    if (location.section) parts.push(location.section);
+    if (location.sheet) parts.push(location.sheet);
+    if (location.row != null) parts.push(t('page.knowledge.row', { number: location.row }));
+    if (location.startLine != null) parts.push(t('page.knowledge.line', { number: location.startLine }));
+    var start = location.startSeconds != null ? location.startSeconds : location.startMilliseconds != null ? location.startMilliseconds / 1000 : null;
+    var end = location.endSeconds != null ? location.endSeconds : location.endMilliseconds != null ? location.endMilliseconds / 1000 : null;
+    if (start != null) parts.push(start + (end != null ? '–' + end : '') + ' s');
+    return parts.join(' · ');
+  }
+  function paintKnowledgeResults(box, results, expanded) {
+    box.textContent = '';
+    if (!results.length) box.appendChild(el('p', 'hint-block', t('page.knowledge.noResults')));
+    results.forEach(function (hit) {
+      var row = el('article', 'knowledge-result');
+      if (knowledgeSourceIdentity(hit) && knowledgeThumbnailKind(hit)) {
+        var thumbnailLink = knowledgeSourceLink(row, hit);
+        thumbnailLink.classList.add('knowledge-thumbnail-link');
+        thumbnailLink.textContent = '';
+        thumbnailLink.setAttribute('aria-label', t('page.knowledge.source') + ' · ' + (hit.relativePath || hit.fileName));
+        knowledgeSourceThumbnail(thumbnailLink, hit);
+      }
+      row.appendChild(el('strong', '', hit.fileName));
+      if (hit.relativePath && hit.relativePath !== hit.fileName) row.appendChild(el('div', 'knowledge-path hint-block', hit.relativePath));
+      row.appendChild(el('div', 'hint-block', knowledgeLocation(hit.location)));
+      row.appendChild(el('code', 'knowledge-reference', hit.reference));
+      row.appendChild(el('pre', 'knowledge-text', hit.text));
+      if (hit.truncated) row.appendChild(el('p', 'hint-block', t('page.knowledge.truncated')));
+      var actions = el('div', 'knowledge-actions');
+      knowledgeSourceLink(actions, hit);
+      if (!expanded) knowledgeButton(actions, 'knowledge-expand', t('page.knowledge.read'), function () { readKnowledge(hit); });
+      row.appendChild(actions); box.appendChild(row);
+    });
+  }
+  function readKnowledge(hit) {
+    var id = knowledgeActive, version = ++knowledgeReadVersion;
+    knowledgeError('');
+    $('knowledge-read').textContent = t('page.knowledge.loading');
+    return knowledgeRequest('/api/knowledge/read', 'POST', {
+      reference: hit.reference, collectionIds: [id], adjacentChunks: 1, maxCharacters: 12000
+    }).then(function (d) {
+      if (id !== knowledgeActive || version !== knowledgeReadVersion) return;
+      paintKnowledgeResults($('knowledge-read'), d.results || [], true);
+    }).catch(function (e) {
+      if (id === knowledgeActive && version === knowledgeReadVersion) { $('knowledge-read').textContent = ''; knowledgeFailure(e); }
+    });
+  }
+  $('knowledge-refresh').addEventListener('click', function () { loadKnowledge().catch(knowledgeFailure); });
+  $('knowledge-close').addEventListener('click', closeSheets);
+  $('knowledge-create').addEventListener('click', function () {
+    var name = ($('knowledge-name').value || '').trim();
+    if (!name) { knowledgeError(t('page.knowledge.nameRequired')); return; }
+    return mutateKnowledge(function () {
+      return knowledgeRequest('/api/knowledge/collections', 'POST', { name: name }).then(function (d) {
+        $('knowledge-name').value = '';
+        knowledgeActive = d.collection.id;
+        return loadKnowledge();
+      });
+    });
+  });
+  $('knowledge-upload').addEventListener('click', function () { if (knowledgeActive && !knowledgeBusy) $('knowledge-file-input').click(); });
+  $('knowledge-upload-folder').addEventListener('click', function () {
+    if (!knowledgeActive || knowledgeBusy) return;
+    if (!state.native || !state.knowledgeDirectory) { $('knowledge-folder-input').click(); return; }
+    var id = knowledgeActive, requestId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+    var finishNative;
+    var nativeFinished = new Promise(function (resolve) { finishNative = resolve; });
+    knowledgeNativeUpload = { collectionId: id, requestId: requestId, finish: finishNative };
+    knowledgeOcrRetry = null; knowledgeUploadResult = null; knowledgeBusy = true; knowledgeError('');
+    knowledgeUploadProgress = t('page.knowledge.folderScanning'); paintKnowledgeDocuments();
+    observeKnowledgePdf(function () {
+      return post('/api/agent/events', { type: 'pick-knowledge-directory', collectionId: id, requestId: requestId }).then(function () { return nativeFinished; });
+    }).catch(function (error) {
+      if (!knowledgeNativeUpload || knowledgeNativeUpload.requestId !== requestId) return;
+      knowledgeNativeUpload = null; knowledgeBusy = false; knowledgeUploadProgress = ''; paintKnowledgeDocuments(); knowledgeFailure(error);
+    });
+  });
+  function knowledgeDirectoryProgress(progress) {
+    if (!progress || !knowledgeNativeUpload || progress.requestId !== knowledgeNativeUpload.requestId
+      || progress.collectionId !== knowledgeNativeUpload.collectionId) return false;
+    knowledgeUploadProgress = progress.phase === 'scanning' ? t('page.knowledge.folderScanning')
+      : t('page.knowledge.uploadProgress', { completed: progress.completed || 0, total: progress.total || 0 });
+    knowledgeBusyControls();
+    if (!progress.done) return true;
+    var id = knowledgeNativeUpload.collectionId;
+    knowledgeNativeUpload.finish(); knowledgeNativeUpload = null;
+    if (!progress.cancelled) knowledgeUploadResult = { collectionId: id, label: t('page.knowledge.uploadComplete', { added: progress.imported || 0, failed: progress.failed || 0 }) };
+    var errors = (progress.errors || []).map(function (failure) { return failure.fileName + ': ' +
+      (failure.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : failure.error); });
+    if (progress.error) errors.push(progress.error);
+    if (Number.isInteger(progress.failed) && progress.failed > errors.length) errors.push(t('page.knowledge.moreUploadFailures', { count: progress.failed - errors.length }));
+    refreshKnowledgeCollection(id).catch(knowledgeFailure).then(function () {
+      knowledgeBusy = false; knowledgeUploadProgress = ''; paintKnowledgeDocuments();
+      if (knowledgeActive === id && errors.length) knowledgeError(errors.join('\n'));
+    });
+    return true;
+  }
+  function chooseKnowledgeFiles(e) {
+    var files = Array.prototype.slice.call(e.target.files || []), id = knowledgeActive;
+    e.target.value = '';
+    if (!files.length || !id || knowledgeBusy) return;
+    return mutateKnowledge(function () { return uploadKnowledgeFiles(id, files); });
+  }
+  $('knowledge-file-input').addEventListener('change', chooseKnowledgeFiles);
+  $('knowledge-folder-input').addEventListener('change', chooseKnowledgeFiles);
+  function uploadKnowledgeFiles(id, files) {
+    var batches = [], batch = [], bytes = 0, errors = [], retryFiles = [], completed = 0, imported = 0;
+    files.forEach(function (file) {
+      var size = Number.isFinite(file.size) ? file.size : 0;
+      if (size > 64 * 1024 * 1024) {
+        errors.push((file.webkitRelativePath || file.name) + ': ' + t('page.knowledge.fileTooLarge'));
+        completed++; return;
+      }
+      if (batch.length && (batch.length >= 16 || bytes + size > 120 * 1024 * 1024)) {
+        batches.push(batch); batch = []; bytes = 0;
+      }
+      batch.push(file); bytes += size;
+    });
+    if (batch.length) batches.push(batch);
+    function sendBatch(selected) {
+      knowledgeUploadProgress = t('page.knowledge.uploadProgress', { completed: completed, total: files.length });
+      knowledgeBusyControls();
+      function send() {
+        var form = new FormData();
+        selected.forEach(function (file, index) {
+          form.append('files', file, file.name);
+          // Multipart encodes quotes in filenames. Exact path metadata also preserves
+          // ordinary filenames without confusing a literal %22 with an escaped quote.
+          form.append('relativePath' + index, file.webkitRelativePath || file.name);
+        });
+        return knowledgeRequest(knowledgeCollectionUrl(id) + '/documents', 'POST', form);
+      }
+      var pending = selected.some(function (file) { return /\.pdf$/i.test(file.name || '') || file.type === 'application/pdf'; })
+        ? observeKnowledgePdf(send) : send();
+      return pending.then(function (d) {
+        imported += Array.isArray(d.documents) ? d.documents.length : 0;
+        (d.errors || []).forEach(function (failure) {
+          var file = Number.isInteger(failure.fileIndex) ? selected[failure.fileIndex] : null;
+          errors.push((file && (file.webkitRelativePath || file.name) || failure.fileName) + ': ' +
+            (failure.code === 'pdf_ocr_setup_failed' ? t('page.knowledge.setupFailed') : failure.error));
+          // Only a confirmed uncommitted input can be safely retried. Keep its full
+          // browser path with the original File, including duplicate basenames.
+          if (failure.code === 'pdf_ocr_setup_failed' && file) retryFiles.push(file);
+        });
+        completed += selected.length;
+      });
+    }
+    var pending = Promise.resolve();
+    batches.forEach(function (selected) { pending = pending.then(function () { return sendBatch(selected); }); });
+    return pending.catch(function (error) {
+      errors.push(t('page.knowledge.uploadStopped', { completed: completed, total: files.length, error: error.message || String(error) }));
+    }).then(function () {
+      knowledgeUploadResult = { collectionId: id, label: t('page.knowledge.uploadComplete', { added: imported, failed: Math.max(0, files.length - imported) }) };
+      if (knowledgeActive === id && retryFiles.length) knowledgeOcrRetry = function () { return uploadKnowledgeFiles(id, retryFiles); };
+      return refreshKnowledgeCollection(id).then(function () { if (knowledgeActive === id && errors.length) knowledgeError(errors.join('\n')); });
+    });
+  }
+  $('knowledge-collection-filter').addEventListener('input', paintKnowledgeCollections);
+  $('knowledge-use-active').addEventListener('change', function () {
+    if (knowledgeActive) setKnowledgeCollectionSelected(knowledgeActive, $('knowledge-use-active').checked);
+  });
+  $('knowledge-file-query').addEventListener('input', function () {
+    clearTimeout(knowledgeFilterTimer);
+    // Invalidate the in-flight page immediately, before the debounced request.
+    knowledgeDocumentVersion++;
+    knowledgeFilterTimer = setTimeout(function () { loadKnowledgeDocuments(); }, 250);
+  });
+  $('knowledge-file-query').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); clearTimeout(knowledgeFilterTimer); loadKnowledgeDocuments(); }
+  });
+  ['knowledge-type', 'knowledge-sort'].forEach(function (id) { $(id).addEventListener('change', function () {
+    clearTimeout(knowledgeFilterTimer); loadKnowledgeDocuments();
+  }); });
+  function searchKnowledge() {
+    var id = knowledgeActive, query = ($('knowledge-query').value || '').trim();
+    if (!id || !query) return;
+    var version = ++knowledgeSearchVersion;
+    knowledgeReadVersion++;
+    knowledgeError(''); $('knowledge-read').textContent = '';
+    $('knowledge-results').textContent = t('page.knowledge.loading');
+    return knowledgeRequest('/api/knowledge/search', 'POST', { query: query, collectionIds: [id], limit: 8, maxCharacters: 12000 }).then(function (d) {
+      if (id !== knowledgeActive || version !== knowledgeSearchVersion) return;
+      paintKnowledgeResults($('knowledge-results'), d.results || [], false);
+    }).catch(function (e) {
+      if (id === knowledgeActive && version === knowledgeSearchVersion) { $('knowledge-results').textContent = ''; knowledgeFailure(e); }
+    });
+  }
+  $('knowledge-search').addEventListener('click', searchKnowledge);
+  $('knowledge-query').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); searchKnowledge(); } });
+
   // ---- skills --------------------------------------------------------------
   //
   // Two switches, and they answer different questions. The one on each skill row is
@@ -3572,13 +4681,13 @@
     text.style.height = 'auto';
     text.style.height = Math.min(text.scrollHeight, window.innerHeight * 0.26) + 'px';
   }
-  text.addEventListener('input', autoGrow);
+  text.addEventListener('input', function () { autoGrow(); paintSend(); });
   text.addEventListener('keydown', function (e) {
     // Let Shift+Enter insert a newline and IME Enter finish composing text.
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    // The Send button becomes Stop during inference; Enter should never stop it.
-    if (!e.repeat && !state.generating) sendMessage();
+    // Enter submits guidance during inference. An empty draft leaves it running.
+    if (!e.repeat && (!state.generating || text.value.trim() || state.attachments.length)) sendMessage();
   });
   send.addEventListener('click', sendMessage);
   $('new').addEventListener('click', function () { openConversation(null); });
@@ -3790,6 +4899,7 @@
    */
   var hostCalls = {
     nativeReady: function (a) { window.TensorAgent.nativeReady(a); },
+    knowledgeDirectoryProgress: function (a) { knowledgeDirectoryProgress(a); },
     addAttachment: function (a) { window.TensorAgent.addAttachment(a); },
     insertText: function (a) { window.TensorAgent.insertText(a && a.text); },
     takeShare: function () { window.TensorAgent.takeShare(); },
@@ -3806,7 +4916,7 @@
     // Wait for mutations and send acceptance to settle. In particular a sent share
     // is still owned by the composer until the chat response's headers arrive.
     if ((state.abort && state.abort.awaitingHeaders) || state.visionChecking
-        || shareDiscarding || shareDrain || conversationOpening || pendingUploadCount || state.maskEditing)
+        || shareDiscarding || shareDrain || conversationOpening || pendingUploadCount || knowledgeBusy || state.maskEditing)
       return 'busy';
     try {
       window.sessionStorage.setItem(languageDraftKey, JSON.stringify({
@@ -3815,6 +4925,7 @@
         attachments: state.attachments,
         skills: state.skills,
         skillsExplicit: state.skillSelectionExplicit,
+        knowledgeCollections: state.knowledgeCollections,
         think: state.think,
         shareOrder: appliedShareOrder,
         shareParts: appliedShareParts,
@@ -3838,6 +4949,7 @@
       state.attachments = Array.isArray(draft.attachments) ? draft.attachments : [];
       state.skills = skillsOn() && Array.isArray(draft.skills) ? draft.skills : [];
       state.skillSelectionExplicit = draft.skillsExplicit === true;
+      state.knowledgeCollections = Array.isArray(draft.knowledgeCollections) ? draft.knowledgeCollections.slice() : [];
       state.think = draft.think === true;
       (Array.isArray(draft.shareOrder) ? draft.shareOrder : []).forEach(function (id) {
         rememberAppliedShare(id, draft.shareParts && draft.shareParts[id]);
@@ -3845,6 +4957,7 @@
       autoGrow();
       paintChips();
       paintSkillChips();
+      paintKnowledgeChips();
     } catch (e) {
       note('language-draft-restore-failed', (e && e.message) || e);
     }
@@ -3852,6 +4965,7 @@
 
   window.TensorAgent = {
     notice: notice,
+    knowledgeDirectoryProgress: knowledgeDirectoryProgress,
     prepareLanguageReload: prepareLanguageReload,
 
     /**
@@ -3972,6 +5086,7 @@
     /** Native pickers and dictation are separate capabilities on Windows. */
     nativeReady: function (capabilities) {
       state.native = true;
+      state.knowledgeDirectory = !!(capabilities && capabilities.knowledgeDirectory);
       state.dictation = !capabilities || capabilities.dictation !== false;
       state.composerHint = (capabilities && capabilities.composerHint) || t('page.composer.message');
       paintComposerHint();
@@ -4023,6 +5138,29 @@
     var slash = href.indexOf('/', scheme + 3);
     return slash < 0 ? href : href.slice(0, slash);
   }
+  function knowledgeSourceHref(node) {
+    for (var n = node; n && n !== document; n = n.parentNode) {
+      if (n.tagName !== 'A') continue;
+      if (n.getAttribute && n.getAttribute('download') !== null) return null;
+      var path = String((n.getAttribute && n.getAttribute('href')) || n.href || '');
+      if (path.charAt(0) !== '/') {
+        var origin = pageOrigin();
+        if (!origin || path.indexOf(origin + '/') !== 0) return null;
+        path = path.slice(origin.length);
+      }
+      var match = /^\/api\/knowledge\/collections\/([a-zA-Z0-9_-]{1,128})\/documents\/([a-zA-Z0-9_-]{1,128})\/source\?version=([1-9][0-9]*)(?:#.*)?$/.exec(path);
+      if (!match || !Number.isSafeInteger(Number(match[3]))) return null;
+      return { doc: { collectionId: match[1], documentId: match[2], version: Number(match[3]), fileName: n.textContent || '' }, link: n };
+    }
+    return null;
+  }
+  // Model-written Markdown source links use the same viewer as the source cards.
+  document.addEventListener('click', function (event) {
+    if (event.defaultPrevented || event.button || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    var hit = knowledgeSourceHref(event.target);
+    if (!hit) return;
+    event.preventDefault(); openKnowledgeSource(hit.doc, hit.link);
+  });
   function artifactPath(href) {
     var path = href;
     if (href.charAt(0) !== '/') {

@@ -166,6 +166,13 @@ namespace TensorSharp.Runtime.Scheduling
         /// <c>new TokenSampler()</c> allocations (~3 MB LOH at 262K vocab).
         /// Lazily initialized from <see cref="SamplingConfig"/>.</summary>
         internal TokenSampler? CachedSampler { get; private set; }
+        /// <summary>The model reopened reasoning after the bounded sampler
+        /// handoffs. The streaming host must end this request as thinking_budget.</summary>
+        public bool MessageThinkingBudgetExhausted => CachedSampler?.MessageThinkingBudgetExhausted == true;
+        /// <summary>Only report exhaustion after a streaming consumer has reached
+        /// its committed position; the engine may have queued later tokens already.</summary>
+        public bool MessageThinkingBudgetExhaustedAt(int observedOutputCount) =>
+            CachedSampler?.MessageThinkingBudgetExhaustedAt(observedOutputCount) == true;
 
         internal TokenSampler GetOrCreateSampler()
         {

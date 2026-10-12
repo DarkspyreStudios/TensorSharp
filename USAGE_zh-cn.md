@@ -13,6 +13,14 @@
 
 下载、curl、C#、检索质量与验证见[完整嵌入指南](docs/embeddings_zh-cn.md)。
 
+## 个人知识库
+
+`v2026.10.10` 之后的当前源码新增知识集合与回答调整功能；在包含这些改动的发布出现前需从源码构建。TensorAgent 的 **菜单 → 知识库** 提供文件、递归文件夹上传、已保存聊天快照、来源预览和集合选择。上传本身不会选择聊天集合，需选择 **在此聊天中使用**。所选来源提供有界检索与带引用的原文件链接，支持工具的智能体与子智能体使用同一范围。
+
+`TensorSharp.Server.Host` 在 `TS_KNOWLEDGE_DIRECTORY` 指向存储目录时启用相同的知识库，`/api/knowledge` 管理原文件、搜索、读取、重建索引和删除来源。支持的推理请求通过 `knowledgeCollections` 选择最多 32 个集合 ID：WebUI `/api/chat`、OpenAI `/v1/chat/completions` 与 `/v1/responses`，以及 Ollama `/api/chat/ollama` 与 `/api/generate`（仅检索，无智能体工具循环）。省略或空选择不会提供库内证据，无效选择会被拒绝。集合 ID 表示检索范围，远程部署仍需自己的认证与授权边界。
+
+文本、数据集、部分 Office 内容和已配置的本地 PDF OCR 在导入时无需聊天模型。图像与视频采样帧需要已加载的兼容视觉模型；音频可使用已加载的音频塔，或已配置的 `TS_JEV_TRANSCRIPTION_URL` 转录伴随服务。缺少相应能力时仅按元数据索引。默认使用 BM25，可选本地 GGUF 嵌入模型提供语义检索。CLI 尚无集合选择器或自动库内检索；单轮附件与独立嵌入服务是不同功能。配置、抽取限制、引用与完整原文件访问详见[知识库指南](docs/knowledge-system_zh-cn.md)及 [API 示例](TensorSharp.Server.Host/API_EXAMPLES_zh-cn.md#个人知识库)。
+
 ## 计算后端
 
 | 后端 | 参数 | 适合场景 | 说明 |
@@ -495,12 +503,15 @@ CLI 的配套投影器查找只认 `--mmproj` 一行列出的那些文件名，�
 
 每轮提示符前的状态行会汇总当前状态——模型、后端、架构、上下文长度、投影器、对话深度，以及为下一轮排队的附件数量（例如 `[turn 3 (2 attachments pending)]> `）。生成过程中按 Ctrl+C 可中断当前回复；在提示符处按 Ctrl+C 可退出。
 
+CLI、TensorAgent 或服务端 Web UI 正在推理或回答时，可以输入并发送另一个提示。新指令会中断当前回复，结合对话、部分输出和新提示继续。连续发送的指令会在恢复生成前完成串行清理。**停止**（CLI 中也可用 Ctrl+C）可单独中止而不发送指令；重定向的 CLI 输入仍按顺序完成各轮。
+
 会话控制：
 
 | 命令 | 说明 |
 |---|---|
 | `/help`、`/?` | 显示全部交互命令 |
 | `/exit`、`/quit` | 退出当前会话 |
+| `/cancel`、`/stop` | 中断当前回复，不发送新指令（`/stop <文本>` 仍用于添加停止序列） |
 | `/reset`、`/new` | 开启新对话：清空对话历史与附件；共享的系统/工具前缀仍保留在缓存中供复用 |
 | `/history` | 打印对话历史 |
 | `/save <文件>` | 将当前对话追加写入 UTF-8 文件 |
@@ -605,6 +616,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
 在浏览器中打开 `http://localhost:5000` —— 根地址即为聊天界面（`GET /health` 是存活检查接口）。Web 界面支持：
 
 - 多轮聊天
+- 推理或回答过程中可发送新指令中断并调整回复；**停止** 可单独中止而不发送消息
 - 每个浏览器 Tab 独立的会话：每个 Tab 拥有自己的对话历史；KV block 由推理引擎统一管理
 - 通过 `--model` 显式托管单个 GGUF 模型
 - 在需要时通过 `--mmproj` 显式托管多模态投影器
