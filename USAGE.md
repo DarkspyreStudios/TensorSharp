@@ -541,12 +541,15 @@ Once the CLI is launched with `--interactive` / `-i`, you can drive the running 
 
 The prompt header summarizes the current state on every turn — model, backend, architecture, context length, projector, conversation depth, and any attachments queued for the next turn (e.g. `[turn 3 (2 attachments pending)]> `). Press Ctrl+C while generating to interrupt the current reply; press Ctrl+C at the prompt to exit.
 
+You can type and submit another prompt while the CLI, TensorAgent, or the server Web UI is reasoning or answering. Submitting guidance interrupts the current response and starts a response using the conversation, partial output, and your new prompt. Rapid submissions are serialized before generation resumes. Stop (or Ctrl+C in the CLI) remains available to interrupt without submitting guidance. Redirected CLI input runs sequentially for scripted conversations.
+
 Conversation:
 
 | Command | Description |
 |---|---|
 | `/help`, `/?` | Show all interactive commands |
 | `/exit`, `/quit` | Leave the session |
+| `/cancel`, `/stop` | Interrupt the current response without sending guidance (`/stop <text>` still adds a stop sequence) |
 | `/reset`, `/new` | Start a new conversation: clears the history and attachments; the shared system/tool prefix stays cached for reuse |
 | `/history` | Print the conversation history |
 | `/save <file>` | Append the current transcript to a UTF-8 file |

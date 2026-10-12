@@ -2369,6 +2369,23 @@ namespace TensorSharp.Chat
                 chatSession = _sessions.DefaultSession;
             }
 
+            bool replaceActive = body.TryGetProperty("replaceActive", out var replaceProp)
+                && replaceProp.ValueKind == JsonValueKind.True;
+            if (replaceActive && chatSession.SharedAcrossConversations)
+                throw new WebUiRequestRejectedException(400,
+                    new { error = "replaceActive requires a dedicated sessionId." });
+
+            // A steering prompt may arrive before the closed HTTP connection's abort
+            // reaches the server. Cancel locally and wait for the preceding producer's
+            // transcript and tool cleanup before preparing the replacement prompt.
+            using WebUiTurnCoordinator.Lease turnLease = chatSession.SharedAcrossConversations
+                ? null : await chatSession.WebUiTurns.EnterAsync(replaceActive, cancellationToken);
+            cancellationToken = turnLease?.Token ?? cancellationToken;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (chatSession.IsDisposed)
+                throw new WebUiRequestRejectedException(404,
+                    new { error = $"Session '{chatSession.Id}' not found or has been disposed." });
+
             // Acquired before any attachment path is resolved or file is staged. A host
             // can therefore arbitrate a shared draft's Send-versus-Discard race without
             // either winner observing bytes the other has just deleted. `using` spans

@@ -41,7 +41,9 @@
     catalogSkills: [],
     conversations: [],      // the saved chats, for the menu
     generating: false,
+    interrupted: false,
     abort: null,
+    readerVersion: 0,
     // The id of the generation the HOST is running for this conversation. It is not
     // the same thing as `abort`, and that is the whole point: aborting stops this
     // page reading, while the turn keeps going and can be attached to again.
@@ -446,6 +448,12 @@
     // They are the point of the turn far more often than the prose is.
     if (extra && extra.artifacts) extra.artifacts.forEach(function (f) { fileLine({ turn: turn, bubble: b }, f); });
     var view = { turn: turn, bubble: b, entry: entry };
+    if (role === 'assistant' && entry && entry.thinking) {
+      var reasoning = el('details', 'think');
+      reasoning.appendChild(el('summary', null, t('page.turn.reasoning')));
+      reasoning.appendChild(el('div', 'body', entry.thinking));
+      turn.insertBefore(reasoning, b);
+    }
     if (role === 'assistant' && extra && extra.stats) showTurnStats(view, extra.stats);
     if (role === 'assistant' && entry && entry.knowledgeSources) showKnowledgeSources(view, entry.knowledgeSources, content);
     // What a picture was made from, and on the newest turn the other readings of its
@@ -787,6 +795,7 @@
   }
 
   function paintComposerHint() {
+    if (state.generating) { text.placeholder = t('page.composer.steerHint'); return; }
     // An image model takes a description, or a photo and what to change about it.
     text.placeholder = makesVideo() ? videoPlaceholder(state.video)
       : makesImages()
@@ -948,6 +957,7 @@
   function openConversation(conversationId, options) {
     conversationOpening = true;
     detach();
+    state.interrupted = false;
     // A durable shared draft follows the composer between chats (its text already
     // does), so its marker can never outlive the image/file chip it represents and
     // acknowledge missing content on an unrelated send. Preserve the entire draft in
@@ -1296,16 +1306,28 @@
   function setGenerating(on) {
     state.generating = !!on;
     busy.className = on ? 'on' : '';
-    send.textContent = on ? '■' : '➤';
-    send.className = 'round ' + (on ? 'stop' : 'send');
+    paintSend();
     send.disabled = state.visionChecking || shareDiscarding || (!on && !state.model);
     paintChips();
     if (!on && shareDrainAgain && shareIntakeReady && !conversationOpening && !shareDiscarding)
       setTimeout(takePendingShare, 0);
   }
 
+  function paintSend() {
+    var stopping = state.generating && !text.value.trim() && !state.attachments.length;
+    send.textContent = stopping ? '■' : '➤';
+    send.className = 'round ' + (stopping ? 'stop' : 'send');
+    send.title = stopping ? t('page.composer.stop')
+      : state.generating ? t('page.composer.steer') : t('markup.composer.send');
+    send.setAttribute('aria-label', send.title);
+    if (state.generating) text.placeholder = t('page.composer.steerHint');
+    else paintComposerHint();
+  }
+
   function sendMessage() {
-    if (state.generating) { note('send-is-stop', state.turn); stop(); return; }
+    if (state.generating && !text.value.trim() && !state.attachments.length) {
+      note('send-is-stop', state.turn); stop(); return;
+    }
     if (pendingUploadCount) {
       notice(t('page.send.waitForUploads'));
       return;
@@ -1407,6 +1429,9 @@
   }
 
   function commitMessage(typed, atts, msg) {
+    var steering = state.generating || state.interrupted;
+    if (state.generating) retireResponse();
+    state.interrupted = false;
     // The turn above is no longer the newest, so it can no longer be answered another way.
     retireImageRedo();
     var userView = addTurn('user', typed, atts);
@@ -1422,6 +1447,7 @@
     state.history.push(msg);
 
     var body = chatBody();
+    if (steering) body.steer = true;
 
     // The host acknowledges these only after every request preflight passed and the
     // user turn was written to the durable conversation store. Until that point the
@@ -1434,6 +1460,29 @@
       // request that never arrived: see resumeTurn.
       shareIds: body.shareIds,
     });
+  }
+
+  // Keep the visible fragment while a replacement is accepted. The host returns
+  // its complete saved prefix, including any tokens this reader had not received.
+  function retireResponse() {
+    var view = state.liveView;
+    if (view && view.partialEntry) {
+      state.history.push(view.partialEntry);
+      view.entry = view.partialEntry;
+      if (view.partialEntry.content) addCopy(view.turn, function () { return view.partialEntry.content; });
+    }
+    var old = state.abort;
+    state.abort = null;
+    state.readerVersion++;
+    state.resuming = false;
+    state.resumingSince = 0;
+    state.turn = null;
+    state.liveView = null;
+    cancelScheduledResume();
+    stopWatchdog();
+    recovery.sentDraft = null;
+    recovery.attempts = 0;
+    if (old) { try { old.abort(); } catch (e) {} }
   }
 
   /** The /api/chat body for the history as it stands, with this chat's settings. */
@@ -1544,8 +1593,11 @@
    * generating for nobody. The Stop button has to say so out loud.
    */
   function stop() {
-    if (state.turn) {
-      post('/api/agent/turns/' + encodeURIComponent(state.turn) + '/stop')
+    var turn = state.turn;
+    retireResponse();
+    state.interrupted = true;
+    if (turn) {
+      post('/api/agent/turns/' + encodeURIComponent(turn) + '/stop')
         .catch(function (e) { notice(t('page.send.stopFailed', { error: (e && e.message) || e }), 'error'); });
       detach();
       return;
@@ -1557,10 +1609,12 @@
     // this conversation is generating.
     var conversation = state.conversation;
     detach();
+    var version = state.readerVersion;
     if (!conversation) return;
     fetch('/api/agent/turns?conversation=' + encodeURIComponent(conversation))
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (state.conversation !== conversation || state.readerVersion !== version) return;
         if (d && d.turn && d.turn.running) post('/api/agent/turns/' + encodeURIComponent(d.turn.id) + '/stop');
       })
       .catch(function () {});
@@ -1568,6 +1622,9 @@
 
   /** Stop READING. The turn carries on; this is what leaving a chat does. */
   function detach() {
+    state.readerVersion++;
+    state.resuming = false;
+    state.resumingSince = 0;
     if (state.abort) { try { state.abort.abort(); } catch (e) {} }
     state.abort = null;
     state.turn = null;
@@ -1803,14 +1860,15 @@
     // page has moved on -- so without this the previous chat's answer streams into the
     // one now on screen and is saved under it.
     var conversation = state.conversation;
+    var version = state.readerVersion;
     state.resuming = true;
     state.resumingSince = Date.now();
     note('resume-lookup', conversation);
     fetchTimed('/api/agent/turns?conversation=' + encodeURIComponent(conversation), 10000)
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (state.conversation !== conversation || state.readerVersion !== version) return;
         state.resuming = false;
-        if (state.conversation !== conversation) return;
         var t = d && d.turn;
         note('resume-found', t ? t.id + (t.running ? ' running' : ' finished') : 'nothing');
         recovery.attempts = 0;
@@ -1835,8 +1893,8 @@
         else if (state.generating) { progressDone(); setGenerating(false); }
       })
       .catch(function (e) {
+        if (state.conversation !== conversation || state.readerVersion !== version) return;
         state.resuming = false;
-        if (state.conversation !== conversation) return;
         note('resume-lookup-failed', (e && e.message) || e);
         if (state.turn || state.liveView || recovery.sentDraft) scheduleResume('the lookup failed');
         else if (state.generating) { progressDone(); setGenerating(false); }
@@ -1950,6 +2008,7 @@
     progress(makesVideo() ? t('page.activity.filming') : makesImages() ? t('page.activity.drawing') : t('page.activity.thinking'));
 
     var ctrl = new AbortController();
+    ctrl.readerVersion = ++state.readerVersion;
     ctrl.awaitingHeaders = true;
     state.abort = ctrl;
     state.lastByteAt = Date.now();
@@ -1961,6 +2020,7 @@
       body: JSON.stringify(body),
       signal: ctrl.signal,
     }).then(null, function (e) { throw transportError(e); }).then(function (res) {
+      if (ctrl !== state.abort) return null;
       // The turn this stream is a view of. Held so the Stop button can stop the
       // model rather than merely stopping us listening to it.
       state.turn = res.headers.get('X-TensorAgent-Turn') || null;
@@ -2003,6 +2063,7 @@
     note('attach', id);
 
     var ctrl = new AbortController();
+    ctrl.readerVersion = ++state.readerVersion;
     state.abort = ctrl;
     state.lastByteAt = Date.now();
     armWatchdog();
@@ -2134,6 +2195,15 @@
         view.bubble.innerHTML = render(answer); view.answerSoFar = answer; answerDirty = false;
         if (view.knowledgeSourceCandidates) showKnowledgeSources(view, view.knowledgeSourceCandidates, answer);
       }
+      var entry = { role: 'assistant', content: answer };
+      if (thinking) entry.thinking = thinking;
+      if (view.knowledgeSources && view.knowledgeSources.length) entry.knowledgeSources = view.knowledgeSources;
+      if (made.length) entry.artifacts = made.slice();
+      if (madeImage) { entry.imageUrl = madeImage; Object.assign(entry, madeFrom); }
+      if (madeChoices) entry.imageChoices = madeChoices;
+      if (madeVideo) entry.videoUrl = madeVideo;
+      if (madeAudio) entry.audioUrl = madeAudio;
+      view.partialEntry = answer || thinking || made.length || madeImage || madeVideo ? entry : null;
       if (stickBottom) toBottom();
     }
     /**
@@ -2149,7 +2219,7 @@
       fetchTimed('/api/agent/turns?conversation=' + encodeURIComponent(conversation), 10000)
         .then(function (r) { return r.json(); })
         .then(function (d) {
-          if (state.conversation !== conversation || state.abort) return;
+          if (state.conversation !== conversation || state.abort || ctrl.readerVersion !== state.readerVersion) return;
           var t = d && d.turn;
           // The host still has this turn -- running, or finished while the connection
           // was going away. Either way its replay is the whole answer and ends with the
@@ -2165,11 +2235,17 @@
           finish();
         })
         .catch(function () {
-          if (state.conversation !== conversation || state.abort) return;
+          if (state.conversation !== conversation || state.abort || ctrl.readerVersion !== state.readerVersion) return;
           scheduleResume('the stream ended before the answer did');
         });
     }
     function handle(f) {
+      if (Array.isArray(f.steeringMessages)) {
+        state.history = [];
+        chat.innerHTML = '';
+        renderMessages(f.steeringMessages);
+        chat.appendChild(view.turn);
+      }
       if (f.done === true) {
         terminal = true;
         stats = statsOf(f);
@@ -2347,7 +2423,7 @@
       return v.sound;
     }
     function finish() {
-      if (ctrl && ctrl !== state.abort && state.abort) { note('reader-retired', 'finish'); return; }
+      if (ctrl && ctrl.readerVersion !== state.readerVersion) { note('reader-retired', 'finish'); return; }
       paint();
       note('finish', state.turn);
       stopWatchdog();
@@ -2770,6 +2846,7 @@
       models.addEventListener('click', function () { openRoute('models'); });
       hint.appendChild(models); box.appendChild(hint);
     }
+    paintSend();
   }
 
   var uploadQueue = Promise.resolve();
@@ -4604,13 +4681,13 @@
     text.style.height = 'auto';
     text.style.height = Math.min(text.scrollHeight, window.innerHeight * 0.26) + 'px';
   }
-  text.addEventListener('input', autoGrow);
+  text.addEventListener('input', function () { autoGrow(); paintSend(); });
   text.addEventListener('keydown', function (e) {
     // Let Shift+Enter insert a newline and IME Enter finish composing text.
     if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
-    // The Send button becomes Stop during inference; Enter should never stop it.
-    if (!e.repeat && !state.generating) sendMessage();
+    // Enter submits guidance during inference. An empty draft leaves it running.
+    if (!e.repeat && (!state.generating || text.value.trim() || state.attachments.length)) sendMessage();
   });
   send.addEventListener('click', sendMessage);
   $('new').addEventListener('click', function () { openConversation(null); });
