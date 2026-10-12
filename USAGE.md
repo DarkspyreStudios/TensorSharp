@@ -13,6 +13,37 @@ Host a BERT/XLM-R GGUF with `--model encoder.gguf --embeddings`. Select pure C# 
 
 Downloads, curl, C#, retrieval quality, and validation are in the [full embedding guide](docs/embeddings.md).
 
+## Personal knowledge library
+
+Current source after `v2026.10.10` adds knowledge collections and response
+steering. Use a source build until a release includes those changes. TensorAgent
+provides **Menu → Knowledge** for files, recursive folder uploads, saved-chat
+snapshots, source previews and collection selection. Uploading does not select a
+collection for chat; use **Use in this chat**. Selected sources supply bounded
+retrieval and cited original links, including to tool-capable agents and their
+subagents.
+
+`TensorSharp.Server.Host` enables the same library when
+`TS_KNOWLEDGE_DIRECTORY` names a store directory. Its `/api/knowledge` routes
+manage originals, search, read, reindex and delete sources. Supported inference
+requests select up to 32 collection IDs with `knowledgeCollections`:
+WebUI `/api/chat`, OpenAI `/v1/chat/completions` and `/v1/responses`, and Ollama
+`/api/chat/ollama` and `/api/generate` (retrieval without an agent loop).
+Missing or empty selection supplies no library evidence; invalid selections are
+rejected. Collection IDs are retrieval scope, so remote deployments still need
+their own authentication and authorization boundary.
+
+Text and dataset extraction, partial Office extraction and configured local PDF
+OCR work without a chat model during import. Images and sampled video require a compatible loaded vision model; audio uses
+a loaded audio tower or a configured `TS_JEV_TRANSCRIPTION_URL` companion.
+Without the required capability, files remain searchable by metadata.
+Retrieval defaults to BM25; optional local GGUF embeddings add semantic search.
+The CLI has no collection selector or automatic library retrieval; one-turn
+attachments and the standalone embedding service are separate features.
+See the [knowledge guide](docs/knowledge-system.md) and
+[API examples](TensorSharp.Server.Host/API_EXAMPLES.md#personal-knowledge-library)
+for setup, extraction limits, citations and complete-original access.
+
 ## Compute Backends
 
 | Backend | Flag | Best fit | Description |
@@ -658,6 +689,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
 Open `http://localhost:5000` in your browser — the root URL serves the chat UI (`GET /health` is the liveness endpoint). The web interface supports:
 
 - Multi-turn chat conversations
+- Send another instruction during reasoning or answering to interrupt and steer
+  the response; **Stop** interrupts without sending a message
 - Per-tab chat sessions: each browser tab owns its own tracked conversation history; KV blocks are owned by the inference engine
 - A single hosted GGUF selected explicitly with `--model`
 - An explicit hosted multimodal projector via `--mmproj` when needed

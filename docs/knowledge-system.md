@@ -1,9 +1,17 @@
 # Personal multimodal knowledge
 
+[English](knowledge-system.md) | [中文](knowledge-system_zh-cn.md)
+
 TensorSharp.Knowledge stores original files and searchable, cited representations
 of their contents. TensorAgent adds collection management, uploads, saved-chat imports, search, and
 per-chat selection. The same store and retrieval contracts serve the standalone
 TensorSharp server and agent tools.
+
+This guide describes current source support added after `v2026.10.10`; use a
+build containing these changes. TensorAgent provides the library management UI.
+The standalone server exposes management through `/api/knowledge` when configured;
+its bundled browser chat does not provide TensorAgent's Knowledge menu. The CLI
+has no collection-selection option. SDK callers can use the store directly.
 
 The default is local BM25 text retrieval. Optional GGUF embeddings add semantic
 retrieval; compatible loaded media models can derive text from images, audio, and
@@ -278,6 +286,13 @@ They are relative ranking signals, not calibrated relevance probabilities, and
 should not be compared across queries or collections. Dense search scans compatible
 vectors in the selected scope; there is no approximate nearest-neighbor index.
 
+Explicit requests to find an image, audio file or video prefer matching originals
+of that media type with matching query anchors. This avoids filling an image
+lookup with source-code mentions of the same name. It does not turn PDF OCR into
+an image source or infer a media type for every question about a format. Generated
+media descriptions and visible text remain partial evidence; inspect the original
+to verify details.
+
 Chat hosts can then apply one bounded LLM relevance pass to the first eight
 candidates, before clipping the evidence shown to the answering model. This pass
 is enabled by default when a chat model is loaded; `TS_KNOWLEDGE_RERANK=0` disables
@@ -322,8 +337,9 @@ derived indexes require additional disk and memory beyond source bytes.
 
 ## Inference and agent behavior
 
-Automatic retrieval and knowledge-tool integration apply to TensorAgent's WebUI
-`POST /api/chat` path and the standalone TensorSharp server's
+Automatic retrieval and knowledge-tool integration apply to the WebUI
+`POST /api/chat` path in TensorAgent and the configured standalone server, and to
+the standalone TensorSharp server's
 `POST /v1/chat/completions`, `POST /v1/responses`, and `POST /api/chat/ollama`
 adapters. Ollama `POST /api/generate` supports retrieval and citations without an
 agent tool loop. `/api/chat` remains the WebUI route; the Ollama chat route is
