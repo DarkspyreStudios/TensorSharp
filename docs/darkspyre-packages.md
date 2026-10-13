@@ -266,7 +266,9 @@ destination bytes. Both contiguous and strided copies use `Storage.EnsureHostRea
 Native-only pointer access remains asynchronous.
 
 Successful GGML CPU/Metal cleanup removes the exact owner's unscoped quarantine
-registration. Scope attachment or active effects refuse this completion path. CUDA
+registration. Storage construction also completes its unscoped registration when
+lease acquisition fails before allocating memory. Scope attachment or active effects
+refuse this completion path. CUDA
 and MLX owners retain their existing gated release contracts. The native runtime
 fixture checks host-copy results and registration cleanup with the selected backend;
 the quarantine fixture checks exact-owner and attached-scope refusal.

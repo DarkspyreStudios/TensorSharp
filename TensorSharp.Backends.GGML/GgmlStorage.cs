@@ -40,9 +40,9 @@ namespace TensorSharp.GGML
         {
             Context = context ?? throw new ArgumentNullException(nameof(context));
             registration = NativeQuarantineAuthority.Register(this, NativeOwnerRole.Storage);
-            runtimeLease = context.AcquireStorageLease(this, registration);
             try
             {
+                runtimeLease = context.AcquireStorageLease(this, registration);
                 buffer = context.MemoryPool.Allocate(ByteLength);
                 registration.ThrowIfQuarantined();
             }
@@ -57,14 +57,15 @@ namespace TensorSharp.GGML
                 {
                     try
                     {
-                        runtimeLease.CompleteRelease(this, registration);
+                        if (runtimeLease == null) registration.CompleteUnattachedRelease(this);
+                        else runtimeLease.CompleteRelease(this, registration);
                         released = true;
                         GC.SuppressFinalize(this);
                     }
                     catch (Exception cleanup)
                     {
                         cleanupFailure = new AggregateException(operation, cleanup);
-                        runtimeLease.RetainCleanupFailure(this, cleanupFailure);
+                        runtimeLease?.RetainCleanupFailure(this, cleanupFailure);
                         throw cleanupFailure;
                     }
                 }

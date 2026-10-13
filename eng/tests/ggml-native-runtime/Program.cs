@@ -176,6 +176,7 @@ try
     }
     Require(OwnerCount() == ownerBaseline, "Disposed workers and their context remove their ownership registrations.");
     Refused(() => new Tensor(allocator, DType.Float32, 1), "A disposed context cannot allocate storage.");
+    Require(OwnerCount() == ownerBaseline, $"Refused storage acquisition removes its registration: before={ownerBaseline}, after={OwnerCount()}.");
     using (GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model))
         Require(!GgmlNativeLoader.Shutdown().Released, "Model leases independently refuse teardown.");
     IntPtr allocation = GgmlBasicOps.AlignedAlloc(128);
