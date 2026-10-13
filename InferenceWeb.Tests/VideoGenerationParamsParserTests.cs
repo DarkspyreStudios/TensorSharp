@@ -9,6 +9,7 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Text.Json;
+using TensorSharp.Models.MiniMaxH3;
 using TensorSharp.Server.Hosting;
 using TensorSharp.Server.RequestParsers;
 
@@ -260,6 +261,63 @@ public class VideoGenerationParamsParserTests : IDisposable
         // Unset means "infer it from what the request supplies", which is what every
         // deployment offering more than one mode wants.
         Assert.Null(VideoGenerationParamsParser.Parse(doc.RootElement, options, out _).Mode);
+    }
+
+    [Theory]
+    [InlineData("i2v", "fl2v", MiniMaxH3Partition.FirstLastFrame, MiniMaxH3Mode.ImageToVideo)]
+    [InlineData("fl2v", "i2v", MiniMaxH3Partition.FirstLastFrame, MiniMaxH3Mode.FirstLastFrame)]
+    [InlineData("ref", "i2v", MiniMaxH3Partition.Reference, MiniMaxH3Mode.Reference)]
+    public void Parse_UploadedChatImages_UseRequestModeAndRetainNumericStartupDefaults(
+        string requestMode, string startupMode, MiniMaxH3Partition partition, MiniMaxH3Mode expectedMode)
+    {
+        var options = ServerOptionsBuilder.Build(
+            ["--video-mode", startupMode, "--video-frames", "144", "--fps", "24"], _baseDir);
+        string first = WriteUpload(options, "banner_1.png");
+        string last = WriteUpload(options, "last.png");
+        var payload = new Dictionary<string, object> { ["videoMode"] = requestMode };
+        if (requestMode == "ref")
+            payload["referenceImages"] = new[] { first };
+        else
+            payload["imagePath"] = first;
+        if (requestMode == "fl2v")
+            payload["endImage"] = last;
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(payload));
+
+        var parsed = VideoGenerationParamsParser.Parse(doc.RootElement, options, out string error);
+
+        Assert.Null(error);
+        Assert.Equal(requestMode, parsed.Mode);
+        Assert.Equal(144, parsed.Frames);
+        Assert.Equal(24, parsed.Fps);
+        Assert.Equal(expectedMode, MiniMaxH3ModeResolver.Resolve(parsed, partition));
+        if (requestMode == "ref")
+        {
+            Assert.Equal(Path.Combine(options.UploadDirectory, first), Assert.Single(parsed.ReferenceImagePaths));
+            Assert.Null(parsed.ImageBytes);
+        }
+        else
+        {
+            Assert.Equal(File.ReadAllBytes(Path.Combine(options.UploadDirectory, first)), parsed.ImageBytes);
+            Assert.Null(parsed.ImagePath); // The uploaded image is handed to the model as bytes.
+        }
+        if (requestMode == "fl2v")
+            Assert.Equal(Path.Combine(options.UploadDirectory, last), parsed.EndImagePath);
+    }
+
+    [Fact]
+    public void Parse_ExplicitApiMode_IsNotChangedToAccommodateAnIncompatibleCheckpoint()
+    {
+        var options = ServerOptionsBuilder.Build(["--video-mode", "ref"], _baseDir);
+        string first = WriteUpload(options, "banner_1.png");
+        using var doc = JsonDocument.Parse($$"""{"videoMode":"i2v","imagePath":"{{first}}"}""");
+
+        var parsed = VideoGenerationParamsParser.Parse(doc.RootElement, options, out string error);
+
+        Assert.Null(error);
+        Assert.Equal("i2v", parsed.Mode);
+        var rejection = Assert.Throws<InvalidOperationException>(
+            () => MiniMaxH3ModeResolver.Resolve(parsed, MiniMaxH3Partition.Reference));
+        Assert.Contains("FL2VA checkpoint", rejection.Message);
     }
 
     // Drop a file into the server's upload directory and return the bare name a

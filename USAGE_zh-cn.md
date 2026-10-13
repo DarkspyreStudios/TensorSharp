@@ -1259,15 +1259,18 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_ref2va_pruned-
 
 **在服务端，尺寸是启动参数。** 浏览器发送的是提示词，加上所托管检查点通过
 `/api/models` 声明支持的那些条件输入——首帧、末帧，或最多 `maxReferenceImages` 个
-参考——数值类参数一个都不发，因此每段视频都继承服务端默认值：
+参考——以及对应的 `videoMode`。上传图片会直接用于生成，无需在服务端命令行传入
+`--image` 或本地图片路径。数值类参数一个都不发，因此每段视频都继承服务端默认值：
 
 ```bash
 dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
   --video-width 640 --video-height 384 --video-steps 20 --video-frames 22 --port 5001
 ```
 
-`--video-mode` 可以为只提供一种模式的部署固定条件模式；不指定时每个请求按其
-自身携带的输入自动推断。
+`--video-mode` 为没有传入 `videoMode` 的请求设置默认模式；不指定时模型按请求
+自身携带的输入自动推断。Web 聊天和 TensorAgent 根据上传附件与所加载的检查点选择
+模式，附带图片时会覆盖这个启动默认值。Ref2VA 将图片用作新场景的参考；若要将上传
+图片作为首帧进行动画生成，请加载 `config/minimax-h3-fl2va.json`。
 
 不指定 `--video-width`/`--video-height` 时，每个请求会按上传图片的宽高比来，
 避免把 4:3 的照片拉成 16:9。

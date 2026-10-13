@@ -230,6 +230,10 @@ public static class VideoTurns
                 payload["referenceVideos"] = clips;
             if (sounds.Length > 0)
                 payload["referenceAudios"] = sounds;
+            // This turn decides how its attachments are used. An inherited startup
+            // mode (for example i2v) must not reinterpret a reference as a first frame.
+            if (count > 0)
+                payload["videoMode"] = "ref";
             return VideoRequest.For(payload);
         }
 
@@ -254,6 +258,8 @@ public static class VideoTurns
             payload["imagePath"] = photos[0];
         if (photos.Length > 1)
             payload["endImage"] = photos[1];
+        if (photos.Length > 0)
+            payload["videoMode"] = photos.Length > 1 ? "fl2v" : "i2v";
         return VideoRequest.For(payload);
     }
 

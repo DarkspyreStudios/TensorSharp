@@ -3013,7 +3013,9 @@ async function runVideoGenerate(userMsg, bubbleText, statsDiv, generation) {
   const caps = currentVideoCaps || {};
   // Stills only: imagePaths flattens an attached clip into its frames, and nine of
   // those are nine unrelated reference pictures rather than the one clip meant.
-  const stills = userMsg.stillImagePaths || userMsg.imagePaths || [];
+  const stills = userMsg.stillImagePaths || (userMsg.attachments
+    ? userMsg.attachments.filter(att => att.mediaType === 'image').map(att => att.file)
+    : userMsg.imagePaths || []);
   const clips = userMsg.videoFilePaths || [];
   const sounds = userMsg.audioPaths || [];
   const payload = { prompt: userMsg.content || '' };
@@ -3027,6 +3029,10 @@ async function runVideoGenerate(userMsg, bubbleText, statsDiv, generation) {
     if (refs.length) payload.referenceImages = refs;
     if (clips.length) payload.referenceVideos = clips;
     if (sounds.length) payload.referenceAudios = sounds;
+    // The UI has already chosen reference semantics from the loaded checkpoint.
+    // Carry that choice into this request so a startup --video-mode i2v cannot
+    // turn the attached references into an image-less keyframe request.
+    if (refs.length || clips.length || sounds.length) payload.videoMode = 'ref';
     const parts = [];
     if (refs.length) parts.push(refs.length + (refs.length === 1 ? ' image' : ' images'));
     if (clips.length) parts.push(clips.length + (clips.length === 1 ? ' clip' : ' clips'));
@@ -3034,9 +3040,11 @@ async function runVideoGenerate(userMsg, bubbleText, statsDiv, generation) {
     mode = parts.length ? 'Reference-to-Video \u00b7 ' + parts.join(' + ') : 'Text-to-Video';
   } else if (stills.length > 0) {
     payload.imagePath = stills[0];
+    payload.videoMode = 'i2v';
     mode = 'Image-to-Video';
     if (stills.length > 1 && caps.supportsEndImageConditioning) {
       payload.endImage = stills[1];
+      payload.videoMode = 'fl2v';
       mode = 'First-and-last-frame';
     }
     unused = stills.length - (payload.endImage ? 2 : 1);

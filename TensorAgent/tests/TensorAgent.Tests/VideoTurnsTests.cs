@@ -9,11 +9,21 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the BSD-3-Clause License for more details.
 
 using System.Runtime.CompilerServices;
+using System.Net;
+using System.Net.Http.Json;
+using System.Reflection;
 using System.Text.Json;
+using Microsoft.Extensions.Logging.Abstractions;
 using TensorAgent.Core.Hosting;
 using TensorAgent.Core.Sessions;
+using TensorSharp.AgentHost.Skills;
+using TensorSharp.Chat;
 using TensorSharp.Models.Video;
 using TensorSharp.Models.WanVideo;
+using TensorSharp.Models;
+using TensorSharp.Runtime;
+using TensorSharp.Server;
+using TensorSharp.Server.Hosting;
 
 namespace TensorAgent.Tests;
 
@@ -78,6 +88,7 @@ public sealed class VideoTurnsTests
         }), wan));
         Assert.Equal(21, payload["frames"]);
         Assert.Equal("fox.png", payload["imagePath"]);
+        Assert.Equal("i2v", payload["videoMode"]);
         Assert.False(payload.ContainsKey("steps"));
         Assert.NotNull(VideoTurns.Read(Body(new
         {
@@ -93,6 +104,7 @@ public sealed class VideoTurnsTests
             role = "user", content = "she turns and smiles", stillImagePaths = new[] { "a.png" },
         }), Keyframes));
         Assert.Equal("a.png", one["imagePath"]);
+        Assert.Equal("i2v", one["videoMode"]);
         Assert.False(one.ContainsKey("endImage"));
 
         Dictionary<string, object> two = Payload(VideoTurns.Read(Body(new
@@ -101,6 +113,7 @@ public sealed class VideoTurnsTests
         }), Keyframes));
         Assert.Equal("a.png", two["imagePath"]);
         Assert.Equal("b.png", two["endImage"]);
+        Assert.Equal("fl2v", two["videoMode"]);
     }
 
     [Fact]
@@ -145,7 +158,115 @@ public sealed class VideoTurnsTests
         Assert.Equal(new[] { "p1.png", "p2.png" }, payload["referenceImages"]);
         Assert.Equal(new[] { "clip.mp4" }, payload["referenceVideos"]);
         Assert.Equal(new[] { "song.wav" }, payload["referenceAudios"]);
+        Assert.Equal("ref", payload["videoMode"]);
         Assert.False(payload.ContainsKey("imagePath"), "a reference is not a first frame");
+    }
+
+    /// <summary>
+    /// An actual upload reaches the video model through the default chat route, without
+    /// a CLI image path. The startup mode deliberately conflicts with references and
+    /// pairs of keyframes: the newest message's attachments choose this turn's mode.
+    /// The stand-in captures the parameters before inference, so no weights or GPU are
+    /// required and this test does not claim to validate numerical video generation.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 1, "i2v")]
+    [InlineData(false, 2, "fl2v")]
+    [InlineData(true, 1, "ref")]
+    public async Task UploadedPhotosReachTheVideoModelThroughChat(bool references, int photoCount, string mode)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "video-upload-chat-" + Guid.NewGuid().ToString("N"));
+        string uploads = Path.Combine(root, "uploads");
+        Directory.CreateDirectory(uploads);
+        try
+        {
+            string gguf = Path.Combine(root, "stand-in.gguf");
+            using (var writer = new BinaryWriter(File.Create(gguf)))
+            {
+                // An empty, aligned GGUF is sufficient for the managed test model.
+                writer.Write(0x46554747u);
+                writer.Write(3u);
+                writer.Write(0UL);
+                writer.Write(0UL);
+                writer.Write(new byte[8]);
+            }
+            using var model = new CapturingVideoModel(gguf, references);
+            using var models = new ModelService();
+            FieldInfo modelField = models.LifecycleService.GetType().GetField("_model",
+                BindingFlags.Instance | BindingFlags.NonPublic)!;
+            modelField.SetValue(models.LifecycleService, model);
+            try
+            {
+                var options = new ServerHostingOptions(
+                    startupModelPath: gguf, startupMmProjPath: null, defaultBackend: "cpu",
+                    supportedBackends: new[] { new BackendOption("cpu", "CPU") },
+                    defaultMaxTokens: 256, maxTokensPinned: false,
+                    defaultVideoFrames: 144, defaultVideoFps: 0, defaultVideoWidth: 0,
+                    defaultVideoHeight: 0, defaultVideoSteps: 0, defaultVideoMode: "i2v",
+                    uploadDirectory: uploads, logDirectory: Path.Combine(root, "logs"),
+                    fileLoggingEnabled: false, samplingDefaults: null);
+                var chat = new WebUiChatService(models, new SessionManager(), options,
+                    new UploadStoragePolicy(uploads), new SkillRegistry(new SkillRegistryOptions()),
+                    codeRunner: null, workspaces: null, codeArtifacts: null, NullLoggerFactory.Instance);
+                using var server = new LoopbackServer(NullLogger.Instance);
+                server.MapWebUi(chat, uploads);
+                server.Start();
+                using var client = new HttpClient { BaseAddress = new Uri(server.BaseUrl) };
+                client.DefaultRequestHeaders.Add("Cookie", $"{LoopbackServer.TokenCookie}={server.Token}");
+
+                byte[] image = MediaFixtures.RedCircleOnWhitePng(32);
+                var files = new List<string>();
+                for (int i = 0; i < photoCount; i++)
+                {
+                    using var form = new MultipartFormDataContent();
+                    form.Add(new ByteArrayContent(image), "file", $"photo-{i}.png");
+                    using HttpResponseMessage upload = await client.PostAsync("/api/upload", form);
+                    Assert.Equal(HttpStatusCode.OK, upload.StatusCode);
+                    JsonElement attachment = await upload.Content.ReadFromJsonAsync<JsonElement>();
+                    Assert.Equal("image", attachment.GetProperty("mediaType").GetString());
+                    files.Add(attachment.GetProperty("file").GetString()!);
+                }
+
+                using HttpResponseMessage response = await client.PostAsJsonAsync("/api/chat", new
+                {
+                    messages = new[] { new
+                    {
+                        role = "user", content = "the camera follows the red circle",
+                        stillImagePaths = files, imagePaths = files,
+                    } },
+                });
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                string stream = await response.Content.ReadAsStringAsync();
+                // This marker confirms dispatch passed both turn shaping and the shared
+                // parser and reached the model, where the test deliberately stops.
+                Assert.Contains(CapturingVideoModel.Captured, stream);
+                Assert.DoesNotContain("needs a conditioning image", stream);
+                Assert.Equal("the camera follows the red circle", model.Prompt);
+                VideoGenerationParams parameters = Assert.IsType<VideoGenerationParams>(model.Parameters);
+                Assert.Equal(mode, parameters.Mode);
+                Assert.Equal(VideoTurns.DefaultFrames, parameters.Frames);
+                if (references)
+                {
+                    Assert.Null(parameters.ImageBytes);
+                    Assert.Equal(files.Select(file => Path.Combine(uploads, file)), parameters.ReferenceImagePaths);
+                    Assert.Equal(image, File.ReadAllBytes(Assert.Single(parameters.ReferenceImagePaths)));
+                }
+                else
+                {
+                    Assert.Equal(image, parameters.ImageBytes);
+                    Assert.Null(parameters.ReferenceImagePaths);
+                    Assert.Equal(photoCount > 1 ? Path.Combine(uploads, files[1]) : null, parameters.EndImagePath);
+                }
+            }
+            finally
+            {
+                modelField.SetValue(models.LifecycleService, null);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch (IOException) { }
+        }
     }
 
     [Fact]
@@ -388,5 +509,35 @@ public sealed class VideoTurnsTests
 
         public GeneratedVideo GenerateVideo(string prompt, VideoGenerationParams? p = null) =>
             throw new NotSupportedException("the request shaping under test never generates");
+    }
+
+    private sealed class CapturingVideoModel : ModelBase, IVideoGenerationModel
+    {
+        public const string Captured = "Video request captured before inference.";
+        public string? Prompt { get; private set; }
+        public VideoGenerationParams? Parameters { get; private set; }
+
+        public CapturingVideoModel(string path, bool references) : base(path, BackendType.Cpu)
+        {
+            Config = new ModelConfig { Architecture = "minimax-h3" };
+            SupportsReferenceConditioning = references;
+        }
+
+        public string VideoModelFamily => "minimax-h3";
+        public bool SupportsAudio => true;
+        public bool SupportsImageConditioning => true;
+        public bool SupportsEndImageConditioning => !SupportsReferenceConditioning;
+        public bool SupportsReferenceConditioning { get; }
+        public int MaxReferenceImages => SupportsReferenceConditioning ? 9 : 0;
+
+        public GeneratedVideo GenerateVideo(string prompt, VideoGenerationParams? parameters = null)
+        {
+            Prompt = prompt;
+            Parameters = parameters;
+            throw new NotSupportedException(Captured);
+        }
+
+        protected override float[] ForwardCore(int[] tokens) => throw new NotSupportedException();
+        protected override void ResetKVCacheCore() { }
     }
 }

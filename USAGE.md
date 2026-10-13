@@ -1405,16 +1405,21 @@ two runs meant to be compared need it set explicitly.
 
 **On the server, size is a startup flag.** The browser sends the prompt plus whatever
 conditioning the hosted checkpoint advertises — a first frame, a last frame, or up to
-`maxReferenceImages` references — and nothing numeric at all, so every clip inherits
-the server defaults:
+`maxReferenceImages` references — together with the matching `videoMode`. Uploaded
+images go directly into generation; no `--image` server argument or local image path
+is needed. The browser sends no numeric parameters, so every clip inherits the server
+defaults:
 
 ```bash
 dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
   --video-width 640 --video-height 384 --video-steps 20 --video-frames 22 --port 5001
 ```
 
-`--video-mode` pins the conditioning mode for a deployment that only offers one;
-omit it and each request's mode is inferred from what it supplies.
+`--video-mode` supplies a default for requests that omit `videoMode`; omit it and the
+model infers the mode from the supplied inputs. Web chat and TensorAgent choose the
+mode from uploaded attachments and the loaded checkpoint, overriding this startup
+default when an image is attached. Ref2VA uses images as references for a new scene;
+to animate the uploaded image as the first frame, load `config/minimax-h3-fl2va.json`.
 
 Omit `--video-width`/`--video-height` and each request takes its aspect ratio from
 the uploaded image, which avoids stretching a 4:3 photo into a 16:9 frame.
