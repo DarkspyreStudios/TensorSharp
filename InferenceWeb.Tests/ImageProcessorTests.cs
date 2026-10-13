@@ -45,11 +45,15 @@ public class ImageProcessorTests
         {
             var processor = new Gemma4ImageProcessor(patchSize: 1, nMerge: 1, minTokens: 1, maxTokens: 4);
             var (pixels, width, height) = processor.ProcessImage(path);
+            var fromBytes = processor.ProcessImage(Convert.FromBase64String(EmbeddedJpegBase64));
 
             Assert.Equal(2, width);
             Assert.Equal(2, height);
             Assert.Equal(12, pixels.Length);
             Assert.All(pixels, value => Assert.InRange(value, -1f, 1f));
+            Assert.Equal(width, fromBytes.width);
+            Assert.Equal(height, fromBytes.height);
+            Assert.Equal(pixels, fromBytes.pixels);
         }
         finally
         {

@@ -111,10 +111,17 @@ namespace TensorSharp.Models
         /// [-1,1] map. Returns pixel data and the actual canvas dimensions.
         /// </summary>
         public (float[] pixels, int width, int height) ProcessImage(string imagePath)
+            => ProcessImage(File.ReadAllBytes(imagePath));
+
+        /// <summary>
+        /// Processes encoded image bytes through the same sizing, resizing and normalization as a file input.
+        /// The caller retains the bytes; this method does not mutate them or create an intermediate file.
+        /// </summary>
+        public (float[] pixels, int width, int height) ProcessImage(byte[] imageBytes)
         {
-            byte[] fileBytes = File.ReadAllBytes(imagePath);
+            ArgumentNullException.ThrowIfNull(imageBytes);
             int origWidth, origHeight;
-            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(fileBytes, out origWidth, out origHeight);
+            byte[] rgba = ImageProcessorUtils.DecodeImageToRGBA(imageBytes, out origWidth, out origHeight);
 
             int alignSize = PatchSize * NMerge;
 

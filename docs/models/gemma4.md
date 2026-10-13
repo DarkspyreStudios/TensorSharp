@@ -361,6 +361,10 @@ Uses `tanh(logits / cap) * cap` when
 
 ### 4.9 Vision pipeline (images and video frames)
 
+`Gemma4ImageProcessor.ProcessImage` accepts a file path or encoded bytes. The path
+entry reads the file and delegates to the byte entry. Both inputs use the same
+decoder, sizing, resizing and normalization without intermediate files.
+
 `Gemma4ImageProcessor` uses `ImageProcessorUtils.ResizeRgbaToChannelFirstBicubic`
 for reference sizing. The shared helper composites RGBA over white, applies the
 antialiased cubic filter with 22-bit fixed-point coefficients, and rounds and clips
