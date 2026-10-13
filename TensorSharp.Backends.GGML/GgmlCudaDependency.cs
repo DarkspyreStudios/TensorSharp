@@ -66,6 +66,7 @@ public static partial class GgmlNativeLoader
                 using var effect = Registration.EnterEffect();
                 effect.CompleteSafeRelease(this);
             }
+            else Registration.CompleteUnattachedRelease(this);
             State = AcquisitionState.Released;
         }
     }
@@ -227,6 +228,7 @@ public static partial class GgmlNativeLoader
                 using var effect = registration.EnterEffect();
                 effect.CompleteSafeRelease(actualOwner);
             }
+            else registration.CompleteUnattachedRelease(actualOwner);
             Dispose();
         }
 

@@ -33,6 +33,7 @@ internal sealed class NativeOwnerRegistration
     internal void ThrowIfQuarantined() => NativeQuarantineAuthority.Check(this);
     internal NativeEffectLease EnterEffect() => NativeQuarantineAuthority.Enter(this);
     internal void CompleteSafeRelease() => NativeQuarantineAuthority.Complete(this);
+    internal void CompleteUnattachedRelease(object actualOwner) => NativeQuarantineAuthority.CompleteUnattached(this, actualOwner);
     internal NativeMlxCallbackCallLease EnterMlxCallbackCall(object actualOwner, NativeMlxCallbackCallKind kind)
         => NativeQuarantineAuthority.EnterMlxCallbackCall(this, actualOwner, kind);
     internal NativeMlxReleaseReservation ReserveMlxRelease(object actualOwner)
@@ -364,6 +365,20 @@ internal static partial class NativeQuarantineAuthority
         {
             var rw = (ReaderWriterLockSlim)s[6];
             if ((bool)lease.Frame[2]) rw.ExitWriteLock(); else rw.ExitReadLock();
+        }
+    }
+
+    internal static void CompleteUnattached(NativeOwnerRegistration r, object actualOwner)
+    {
+        lock (r.State[1])
+        {
+            ValidateRegistration(r);
+            if (!ReferenceEquals(actualOwner, r.Owner))
+                throw new InvalidOperationException("Native ownership requires the exact registered owner.");
+            if (((HashSet<string>)r.Cell[3]).Count != 0 || (int)r.Cell[7] != 0)
+                throw new InvalidOperationException("Unattached release requires an owner without scopes or active effects.");
+            ThrowFailure(r);
+            Owners(r.State).Remove((Guid)r.Cell[0]);
         }
     }
 

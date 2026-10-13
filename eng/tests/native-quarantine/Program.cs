@@ -28,6 +28,9 @@ switch (mode)
         Require(retained.Failed.All(w => w.IsAlive), "Failed actual foreign ownership was not retained.");
         Require(retained.Independent.All(w => !w.IsAlive), "Independent safe ownership did not collect.");
         break;
+    case "unattached-release":
+        using (var f = new Foreign(fixturePath)) f.Static("UnattachedRelease");
+        break;
     case "lease-negatives":
         using (var f = new Foreign(fixturePath)) f.Static("LeaseNegatives");
         break;

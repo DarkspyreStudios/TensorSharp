@@ -85,6 +85,30 @@ public sealed class Fixture
         }
     }
 
+    /// <summary>Checks exact-owner completion for unscoped resources and scope admission for attached resources.</summary>
+    public static void UnattachedRelease()
+    {
+        var owner = new Owner();
+        var registration = NativeQuarantineAuthority.Register(owner, NativeOwnerRole.Storage);
+        Refuses(() => registration.CompleteUnattachedRelease(new Owner()));
+        registration.ThrowIfQuarantined();
+        registration.CompleteUnattachedRelease(owner);
+        Refuses(registration.ThrowIfQuarantined);
+        Refuses(() => registration.CompleteUnattachedRelease(owner));
+        foreach (string kind in new[] { "cuda", "mlx" })
+        {
+            var attachedOwner = new Owner();
+            var attached = NativeQuarantineAuthority.Register(attachedOwner, NativeOwnerRole.Storage);
+            if (kind == "cuda") attached.AttachCudaPrimaryDevice(0);
+            else attached.AttachMlxSharedRuntime();
+            Refuses(() => attached.CompleteUnattachedRelease(attachedOwner));
+            using var reservation = kind == "mlx" ? attached.ReserveMlxRelease(attachedOwner) : null;
+            using var lease = reservation?.EnterEffect() ?? attached.EnterEffect();
+            Refuses(() => attached.CompleteUnattachedRelease(attachedOwner));
+            lease.CompleteSafeRelease(attachedOwner);
+        }
+    }
+
     public static void LeaseNegatives()
     {
         var a = new Owner(); var b = new Owner();

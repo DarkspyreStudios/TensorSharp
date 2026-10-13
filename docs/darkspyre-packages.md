@@ -261,6 +261,16 @@ load no native code. First import binding applies the native environment tunable
 
 ## Native runtime ownership
 
+GGML host copies drain pending device work before reading source bytes or overwriting
+destination bytes. Both contiguous and strided copies use `Storage.EnsureHostReadable`.
+Native-only pointer access remains asynchronous.
+
+Successful GGML CPU/Metal cleanup removes the exact owner's unscoped quarantine
+registration. Scope attachment or active effects refuse this completion path. CUDA
+and MLX owners retain their existing gated release contracts. The native runtime
+fixture checks host-copy results and registration cleanup with the selected backend;
+the quarantine fixture checks exact-owner and attached-scope refusal.
+
 CUDA cuBLAS handles register their actual owner before native acquisition. Known-context
 creation uses that context's device scope and explicit binding. Parameterless
 `CudaCublasHandle.Create()` uses the existing unresolved `cuda-primary/*` scope;

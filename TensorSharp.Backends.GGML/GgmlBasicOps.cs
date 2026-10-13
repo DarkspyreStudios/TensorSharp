@@ -4311,6 +4311,9 @@ namespace TensorSharp.GGML
                 return;
             }
 
+            // Both reading the source and overwriting the destination touch host memory.
+            src.Storage.EnsureHostReadable();
+            result.Storage.EnsureHostReadable();
             DType dtype = result.ElementType;
             byte* resultBuffer = (byte*)GetBufferStart(result);
             byte* srcBuffer = (byte*)GetBufferStart(src);

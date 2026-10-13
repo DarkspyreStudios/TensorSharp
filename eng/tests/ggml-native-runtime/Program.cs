@@ -112,7 +112,8 @@ try
         GgmlInitializationResult shared = await first;
         Require(ReferenceEquals(shared, await second), "Concurrent callers receive the same initialization result.");
         selected = shared.Selection;
-        Require(selected.Refusals.Single().Code == GgmlNativeRefusalCodes.NotSelected, "A different ABI plan is refused before loading.");
+        Require(selected.Refusals.Count == 1 && selected.Refusals[0].Code == GgmlNativeRefusalCodes.NotSelected,
+            "A different ABI plan is refused before loading: " + JsonSerializer.Serialize(selected));
     }
     Require(selected.State == GgmlNativeSelectionState.Loaded, "The requested real backend initializes after pre-load refusals.");
     Require(selected.Identity?.NativeAbi == GgmlNativeLoader.NativeAbi && selected.Identity.GgmlCommit == GgmlNativeLoader.GgmlCommit,
@@ -132,6 +133,7 @@ try
     for (int i = 0; i < 10 && foreign.IsAlive; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }
     Require(!foreign.IsAlive, "The BCL process-owner token does not pin a foreign collectible assembly.");
 
+    int ownerBaseline = OwnerCount();
     var context = new GgmlContext([0], backend);
     MethodInfo enter = typeof(GgmlNativeLoader).GetMethod("EnterNativeCall", BindingFlags.NonPublic | BindingFlags.Static)!;
     using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero, Type.Missing, Type.Missing])!)
@@ -154,7 +156,9 @@ try
         Require(values.SequenceEqual(new float[] { 6, 7, 8, 9 }), "A real GGML operation returns the expected tensor values on the requested backend.");
     }
     Require(!GgmlNativeLoader.Shutdown().Released, "An active context refuses shutdown even after its tensors are disposed.");
+    HostCopyChecks.Run(context);
     context.Dispose();
+    Require(OwnerCount() == ownerBaseline, "Disposed storage and contexts remove their ownership registrations.");
     using (var parallelContext = new GgmlContext([0], backend))
     using (var group = new GgmlTensorParallelGroup(parallelContext))
     using (var started = new ManualResetEventSlim())
@@ -170,12 +174,14 @@ try
         finally { finish.Set(); }
         await work;
     }
+    Require(OwnerCount() == ownerBaseline, "Disposed workers and their context remove their ownership registrations.");
     Refused(() => new Tensor(allocator, DType.Float32, 1), "A disposed context cannot allocate storage.");
     using (GgmlNativeLoader.AcquireLease(GgmlRuntimeResourceKind.Model))
         Require(!GgmlNativeLoader.Shutdown().Released, "Model leases independently refuse teardown.");
     IntPtr allocation = GgmlBasicOps.AlignedAlloc(128);
     Require(allocation != IntPtr.Zero && !GgmlNativeLoader.Shutdown().Released, "Owned native allocations independently refuse teardown.");
     GgmlBasicOps.AlignedFree(allocation);
+    Require(OwnerCount() == ownerBaseline, "Freed native handles remove their ownership registrations.");
     Refused(() => GgmlBasicOps.AlignedFree(allocation), "A freed native handle is not freed twice.");
     using ((IDisposable)enter.Invoke(null, [null, IntPtr.Zero, Type.Missing, Type.Missing])!)
         Require(!GgmlNativeLoader.Shutdown().Released, "An active native call independently refuses teardown.");
@@ -193,6 +199,13 @@ catch (Exception error)
 {
     Console.Error.WriteLine(error.ToString());
     return 1;
+}
+
+static int OwnerCount()
+{
+    var state = (object[])AppDomain.CurrentDomain.GetData("Darkspyre.TensorSharp.NativeQuarantine")!;
+    if (state == null) return 0;
+    lock (state[1]) return ((Dictionary<Guid, object[]>)state[4]).Count;
 }
 
 static void Require(bool condition, string message)
