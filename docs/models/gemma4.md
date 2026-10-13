@@ -361,6 +361,15 @@ Uses `tanh(logits / cap) * cap` when
 
 ### 4.9 Vision pipeline (images and video frames)
 
+`Gemma4ImageProcessor` uses `ImageProcessorUtils.ResizeRgbaToChannelFirstBicubic`
+for reference sizing. The shared helper composites RGBA over white, applies the
+antialiased cubic filter with 22-bit fixed-point coefficients, and rounds and clips
+both resize passes to RGB bytes. Normalization follows the vertical pass. The byte
+intermediate matches [Pillow 12.1.1 RGB resizing](https://github.com/python-pillow/Pillow/blob/12.1.1/src/libImaging/Resample.c)
+and prevents cubic overshoot from entering the next pass. Frozen Pillow samples in
+`ImageProcessorTests.BicubicResizeMatchesPillowRgb` cover downsampling, upsampling
+and an unchanged size. The letterboxed sizing path uses its existing bilinear helper.
+
 `Gemma4VisionEncoder` is a SigLIP-style ViT with 2D position embeddings,
 GELU-Tanh MLP, and a final linear projector to the LM hidden dim. Video frames
 are extracted from MP4 inputs using time-based sampling (one frame per second by

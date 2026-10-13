@@ -258,6 +258,8 @@ namespace TensorSharp.Models
         // per-output-pixel footprint and normalized weights, Catmull-Rom-style cubic with a=-0.5.
 
         private const double BicubicSupport = 2.0;
+        // Pillow RGB uses 22 fractional bits, leaving room for byte values and cubic overshoot.
+        private const int BicubicPrecisionBits = 22;
 
         private static double CubicFilter(double x)
         {
@@ -272,10 +274,10 @@ namespace TensorSharp.Models
         }
 
         /// <summary>
-        /// Precompute, for one axis, each output pixel's source window and normalized weights.
+        /// Precompute each output pixel's source window and Pillow RGB fixed-point weights.
         /// </summary>
         private static void BuildCubicWeights(int srcSize, int dstSize,
-            out int[] bounds, out double[] weights, out int windowSize)
+            out int[] bounds, out int[] weights, out int windowSize)
         {
             double scale = (double)srcSize / dstSize;
             double filterScale = Math.Max(1.0, scale);
@@ -283,28 +285,32 @@ namespace TensorSharp.Models
             windowSize = (int)Math.Ceiling(support) * 2 + 1;
 
             bounds = new int[dstSize * 2];
-            weights = new double[(long)dstSize * windowSize <= int.MaxValue ? dstSize * windowSize : 0];
+            weights = new int[(long)dstSize * windowSize <= int.MaxValue ? dstSize * windowSize : 0];
             if (weights.Length == 0)
                 throw new InvalidOperationException($"resize window too large for {srcSize}->{dstSize}.");
+            var kernel = new double[windowSize];
+            double inverseFilterScale = 1.0 / filterScale;
 
             for (int i = 0; i < dstSize; i++)
             {
                 double center = (i + 0.5) * scale;
-                int xmin = (int)Math.Max(0, Math.Floor(center - support + 0.5));
-                int xmax = (int)Math.Min(srcSize, Math.Ceiling(center + support + 0.5));
+                int xmin = Math.Max(0, (int)(center - support + 0.5));
+                int xmax = Math.Min(srcSize, (int)(center + support + 0.5));
                 int count = xmax - xmin;
 
                 double sum = 0;
                 int wBase = i * windowSize;
                 for (int k = 0; k < count; k++)
                 {
-                    double w = CubicFilter((xmin + k + 0.5 - center) / filterScale);
-                    weights[wBase + k] = w;
+                    double w = CubicFilter((xmin + k - center + 0.5) * inverseFilterScale);
+                    kernel[k] = w;
                     sum += w;
                 }
-                if (sum != 0)
-                    for (int k = 0; k < count; k++)
-                        weights[wBase + k] /= sum;
+                for (int k = 0; k < count; k++)
+                {
+                    double normalized = sum != 0 ? kernel[k] / sum : kernel[k];
+                    weights[wBase + k] = (int)Math.Round(normalized * (1 << BicubicPrecisionBits), MidpointRounding.AwayFromZero);
+                }
 
                 bounds[i * 2] = xmin;
                 bounds[i * 2 + 1] = count;
@@ -314,6 +320,8 @@ namespace TensorSharp.Models
         /// <summary>
         /// Antialiased bicubic resize of an RGBA buffer, compositing over white, into channel-first
         /// [C, H, W] normalized as <c>(pixel/255 - mean) / std</c>.
+        /// Both resize passes round and clip to bytes before normalization, matching Pillow RGB.
+        /// See Pillow 12.1.1 <c>src/libImaging/Resample.c</c>.
         ///
         /// The image is stretched to fill exactly <paramref name="dstW"/> x <paramref name="dstH"/>.
         /// It is deliberately NOT letterboxed: the Gemma-4 reference processor derives the target
@@ -325,11 +333,12 @@ namespace TensorSharp.Models
         internal static float[] ResizeRgbaToChannelFirstBicubic(
             byte[] rgba, int srcW, int srcH, int dstW, int dstH, float[] mean, float[] std)
         {
-            BuildCubicWeights(srcW, dstW, out int[] xBounds, out double[] xWeights, out int xWindow);
-            BuildCubicWeights(srcH, dstH, out int[] yBounds, out double[] yWeights, out int yWindow);
+            BuildCubicWeights(srcW, dstW, out int[] xBounds, out int[] xWeights, out int xWindow);
+            BuildCubicWeights(srcH, dstH, out int[] yBounds, out int[] yWeights, out int yWindow);
+            byte[] composited = CompositeOverWhite(rgba, srcW, srcH);
 
-            // Pass 1: horizontal, into a [3][srcH][dstW] intermediate held at full precision.
-            var horizontal = new float[3 * srcH * dstW];
+            // The byte intermediate clips overshoot before the vertical filter sees it.
+            var horizontal = new byte[3 * srcH * dstW];
             Parallel.For(0, srcH, sy =>
             {
                 long rowBase = (long)sy * srcW;
@@ -337,19 +346,20 @@ namespace TensorSharp.Models
                 {
                     int xmin = xBounds[dx * 2], count = xBounds[dx * 2 + 1];
                     int wBase = dx * xWindow;
-                    double r = 0, g = 0, b = 0;
+                    int r = 1 << (BicubicPrecisionBits - 1);
+                    int g = r, b = r;
                     for (int k = 0; k < count; k++)
                     {
-                        double w = xWeights[wBase + k];
+                        int w = xWeights[wBase + k];
                         int pixelBase = (int)((rowBase + xmin + k) * 4);
-                        r += w * CompositeChannel01(rgba, pixelBase, 0);
-                        g += w * CompositeChannel01(rgba, pixelBase, 1);
-                        b += w * CompositeChannel01(rgba, pixelBase, 2);
+                        r += w * composited[pixelBase];
+                        g += w * composited[pixelBase + 1];
+                        b += w * composited[pixelBase + 2];
                     }
                     int idx = sy * dstW + dx;
-                    horizontal[idx] = (float)r;
-                    horizontal[srcH * dstW + idx] = (float)g;
-                    horizontal[2 * srcH * dstW + idx] = (float)b;
+                    horizontal[idx] = ClipBicubicByte(r);
+                    horizontal[srcH * dstW + idx] = ClipBicubicByte(g);
+                    horizontal[2 * srcH * dstW + idx] = ClipBicubicByte(b);
                 }
             });
 
@@ -365,15 +375,19 @@ namespace TensorSharp.Models
                     for (int c = 0; c < 3; c++)
                     {
                         int plane = c * srcH * dstW;
-                        double acc = 0;
+                        int acc = 1 << (BicubicPrecisionBits - 1);
                         for (int k = 0; k < count; k++)
                             acc += yWeights[wBase + k] * horizontal[plane + (ymin + k) * dstW + dx];
-                        result[c * outPixels + dy * dstW + dx] = (float)((acc - mean[c]) / std[c]);
+                        float scaled = ClipBicubicByte(acc) / 255f;
+                        result[c * outPixels + dy * dstW + dx] = (scaled - mean[c]) / std[c];
                     }
                 }
             });
 
             return result;
         }
+
+        private static byte ClipBicubicByte(int accumulated) =>
+            (byte)Math.Clamp(accumulated >> BicubicPrecisionBits, 0, 255);
     }
 }

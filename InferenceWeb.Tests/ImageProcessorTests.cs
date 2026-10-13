@@ -4,6 +4,36 @@ namespace InferenceWeb.Tests;
 
 public class ImageProcessorTests
 {
+    /// <summary>Matches Pillow RGB bicubic samples, including clipping between the two resize passes.</summary>
+    [Theory]
+    [InlineData(7, 5, 4, 3, "ERZ8WBZ/phZ/7hZ8EX9/WH9/pn9/7n9/Eeh8WOh/puh/7uh8")]
+    [InlineData(3, 5, 8, 6, "AAAABAABLABxZADwmgDw0wBx+wAB/wAAAC3YBC3RLC2JZC03mi030y2J+y3R/y3YAGRgBGRiLGR8ZGSZmmSZ02R8+2Ri/2RgAJpgBJpiLJp8ZJqZmpqZ05p8+5pi/5pgANLYBNLRLNKJZNI3mtI309KJ+9LR/9LYAP8ABP8BLP9xZP/wmv/w0/9x+/8B//8A")]
+    [InlineData(7, 5, 7, 5, "AAAAKgD/VQAAfwD/qgAA1AD//wAAAD//Kj8AVT//fz8Aqj//1D8A/z//AH8AKn//VX8Af3//qn8A1H///38AAL//Kr8AVb//f78Aqr//1L8A/7//AP8AKv//Vf8Af///qv8A1P////8A")]
+    public void BicubicResizeMatchesPillowRgb(int width, int height, int targetWidth, int targetHeight, string expectedBase64)
+    {
+        byte[] rgba = new byte[width * height * 4];
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                int offset = (y * width + x) * 4;
+                rgba[offset] = (byte)(x * 255 / (width - 1));
+                rgba[offset + 1] = (byte)(y * 255 / (height - 1));
+                rgba[offset + 2] = (byte)(((x + y) % 2) * 255);
+                rgba[offset + 3] = 255;
+            }
+
+        // Frozen RGB output from Pillow 12.1.1 Image.resize(..., Resampling.BICUBIC).
+        // The red/green ramps and blue checker expose rounding, clipping and axis ordering.
+        byte[] expected = Convert.FromBase64String(expectedBase64);
+        float[] actual = ImageProcessorUtils.ResizeRgbaToChannelFirstBicubic(
+            rgba, width, height, targetWidth, targetHeight, [0, 0, 0], [1, 1, 1]);
+        int plane = targetWidth * targetHeight;
+        Assert.Equal(expected.Length, actual.Length);
+        for (int c = 0; c < 3; c++)
+            for (int i = 0; i < plane; i++)
+                Assert.Equal(expected[i * 3 + c] / 255f, actual[c * plane + i]);
+    }
+
     private const string EmbeddedJpegBase64 =
         "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD7V/Z2+C3w91v9n74ZajqPgTwzf6heeF9MuLm7utHt5JZ5XtImd3dkJZmJJJJySSTRRRXyOL/3ip/if5nwmO/3qr/il+bP/9k=";
 
