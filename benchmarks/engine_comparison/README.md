@@ -105,7 +105,7 @@ Point the harness at an alternate settings file with `--config other.json`
 ## Prerequisites
 
 - **Python 3.10+** with `requests`, `opencv-python` (video frame sampling). Both already present on the dev box.
-- **TensorSharp.Server** built: `TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll` (run with `dotnet`). Build with `dotnet build TensorSharp.Server.Host -c Release` if missing/stale.
+- **TensorSharp.Server** built: `TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll` (run with `dotnet`). Build with `dotnet build TensorSharp.Server.Host -c Release` if missing/stale.
 - **llama.cpp** server binary at `C:/Works/llama.cpp/build-cuda/bin/Release/llama-server.exe` (CUDA build).
   Non-CUDA backend columns use per-backend builds declared in the `backends` registry
   (e.g. a Vulkan build at `build-vulkan/.../llama-server.exe`, overridable via

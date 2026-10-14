@@ -132,7 +132,7 @@ Prompt-KV 缓存在 device-glue 后端启用；纯 CPU 路径会使用统一 for
 CLI 对应：
 
 ```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --backend ggml_metal \
   --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --diffusion-blocks 1
 ```
 

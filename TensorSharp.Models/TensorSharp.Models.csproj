@@ -7,12 +7,6 @@
          and lands in bin/net10.0-ios/ so the net10.0 output path stays untouched. -->
     <TargetFramework Condition="'$(TensorSharpIosTargets)' != 'true'">net10.0</TargetFramework>
     <TargetFrameworks Condition="'$(TensorSharpIosTargets)' == 'true'">net10.0;net10.0-ios</TargetFrameworks>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <!-- Appending the TFM for the ios target gives both bin\net10.0-ios\ and a separate
-         obj\...\net10.0-ios\ intermediate directory; without it the two targets would
-         overwrite each other's compile outputs. -->
-    <AppendTargetFrameworkToOutputPath Condition="'$(TargetFramework)' == 'net10.0-ios'">true</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <SupportedOSPlatformVersion Condition="'$(TargetFramework)' == 'net10.0-ios'">17.0</SupportedOSPlatformVersion>
     <IsPackable>true</IsPackable>
     <Nullable>annotations</Nullable>

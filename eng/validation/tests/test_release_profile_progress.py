@@ -31,7 +31,7 @@ class ProgressTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def lifecycle(self, codes, *, startup_error=None, stream=None):
-        app = self.root / 'TensorSharp.Server.Host/bin'
+        app = self.root / 'TensorSharp.Server.Host/bin/Release/net10.0'
         app.mkdir(parents=True)
         (app/'TensorSharp.Server.Host.dll').write_bytes(b'fake managed app')
         native = self.root/'libGgmlOps.so'

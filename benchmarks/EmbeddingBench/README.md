@@ -13,7 +13,7 @@ machine idle during measurement.
 python3 benchmarks/EmbeddingBench/embedding_bench.py \
   --model snowflake-arctic-embed-l-v2.0-q8_0 \
   --model-file /path/to/snowflake-arctic-embed-l-v2.0-q8_0.gguf \
-  --tensorsharp-command '["dotnet","TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll","--model","/path/to/snowflake-arctic-embed-l-v2.0-q8_0.gguf","--embeddings","--backend","ggml_metal","--embedding-threads","8","--host","127.0.0.1","--port","18380","--no-webui"]' \
+  --tensorsharp-command '["dotnet","TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll","--model","/path/to/snowflake-arctic-embed-l-v2.0-q8_0.gguf","--embeddings","--backend","ggml_metal","--embedding-threads","8","--host","127.0.0.1","--port","18380","--no-webui"]' \
   --llama-command '["/path/to/llama-server","--model","/path/to/snowflake-arctic-embed-l-v2.0-q8_0.gguf","--embeddings","--alias","snowflake-arctic-embed-l-v2.0-q8_0","--host","127.0.0.1","--port","18381","--ctx-size","262144","--batch-size","8192","--ubatch-size","8192","--parallel","32","--threads","8","--n-gpu-layers","99","--flash-attn","on"]' \
   --prewarm-seconds 10 --warmup 5 --repeats 20 --minimum-measure-seconds 1 \
   --keep-alive --require-performance --output /tmp/embedding-results

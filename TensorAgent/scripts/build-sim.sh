@@ -39,19 +39,14 @@ fi
 
 echo "==> dotnet $(dotnet --version): building TensorAgent.Maui (${CONFIGURATION}, iossimulator-arm64)"
 # TensorSharpIosTargets=true must be on the command line, not only in the app's own
-# csproj: it decides whether TensorSharp.Models builds a net10.0-ios slice at all, and
-# restore resolves the referenced project's target frameworks before a ProjectReference's
-# AdditionalProperties are applied. Without it, restore writes an assets file with no iOS
-# target and the build fails with NETSDK1005. Several referenced projects intentionally
-# share one output directory; embedding the independently built extension can otherwise
-# make two MSBuild nodes race while writing the same deps.json. Keep this single-node for
-# the same reason as build-device.sh.
+# csproj: it decides whether TensorSharp.Models builds a net10.0-ios slice at all, and a
+# csproj property does not flow to referenced projects. Without it, restore writes an
+# assets file with no iOS target and the build fails with NETSDK1005.
 dotnet build "${REPO_ROOT}/TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj" \
     -f net10.0-ios \
     -p:RuntimeIdentifier=iossimulator-arm64 \
     -c "${CONFIGURATION}" \
     -p:TensorSharpIosTargets=true \
-    -m:1 \
     -nologo
 
 APP="${REPO_ROOT}/TensorAgent/src/TensorAgent.Maui/bin/${CONFIGURATION}/net10.0-ios/iossimulator-arm64/TensorAgent.Maui.app"

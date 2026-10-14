@@ -1,8 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <PackageLicenseExpression>BSD-3-Clause AND Apache-2.0</PackageLicenseExpression>
     <Nullable>annotations</Nullable>

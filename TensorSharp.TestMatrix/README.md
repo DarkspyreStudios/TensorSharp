@@ -30,8 +30,9 @@ dotnet build TensorSharp.TestMatrix/TensorSharp.TestMatrix.csproj -c Release
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release   # required: subprocess driver target
 ```
 
-The runner needs a built `TensorSharp.Cli` binary; it auto-discovers it at
-`../TensorSharp.Cli/bin/TensorSharp.Cli` relative to its own bindir. Override
+The runner needs a built `TensorSharp.Cli` binary; it auto-discovers the
+`TensorSharp.Cli` build of its own configuration and target framework, for example
+`TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli` beside `TensorSharp.TestMatrix/bin/Release/net10.0/`. Override
 with `--cli-executable <path>` or `cli_executable` in the config.
 
 ## Running
@@ -194,13 +195,13 @@ Improvements and untracked cells are informational.
 
 ```bash
 # Compare against the committed baseline, fail PR on blocking regressions
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll --fail-on-regression
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll --fail-on-regression
 
 # Re-bless the baseline after a legitimate change (commit the diff yourself)
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll --update-baseline
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll --update-baseline
 
 # Compare against a specific baseline file (A/B against an older snapshot)
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll \
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll \
   --baseline ./oldbaseline.json --fail-on-regression
 ```
 

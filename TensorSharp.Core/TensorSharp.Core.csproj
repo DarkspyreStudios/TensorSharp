@@ -3,8 +3,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Library</OutputType>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <!-- Only the NuGet id is fork-branded. The assembly, namespaces, and project
          name stay TensorSharp.Core, so consumer `using` statements and upstream
@@ -15,7 +13,6 @@
     <PackageTags>$(TensorSharpPackageTags);core;ops;memory;device;cpu</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'ReleaseCpuOnly|AnyCPU'">
-    <OutputPath>bin\ReleaseCpuOnly\</OutputPath>
     <Optimize>true</Optimize>
     <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>

@@ -65,11 +65,6 @@ ARGS=(
   -c "${CONFIGURATION}"
   -p:TensorSharpIosTargets=true
   -p:TensorAgentShareExtension="${TENSORAGENT_SHARE_EXTENSION}"
-  # AdvUtils, TensorSharp.Runtime and a few siblings write one shared bin/ even
-  # though this graph reaches them under more than one property set. Parallel nodes
-  # can race on the same deps.json; a deterministic device artifact matters more than
-  # shaving a few seconds from deployment.
-  -m:1
   -nologo
 )
 if [[ "${SKIP_SIGNING:-0}" == "1" ]]; then
@@ -102,11 +97,8 @@ if [[ "${CLEAN:-0}" == "1" ]]; then
         -p:Configuration="${CONFIGURATION}" \
         -p:TensorSharpIosTargets=true \
         -p:TensorAgentShareExtension="${TENSORAGENT_SHARE_EXTENSION}" \
-        -m:1 \
         -nologo
     echo "==> Cleaning TensorAgent.Maui (${CONFIGURATION}, ios-arm64)"
-    # Several referenced projects share an output directory, so clean them on one
-    # MSBuild node for the same reason the documented build uses -m:1.
     dotnet clean "${ARGS[@]}"
 fi
 [[ "${NO_INCREMENTAL:-0}" == "1" ]] && ARGS+=( --no-incremental )

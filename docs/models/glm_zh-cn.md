@@ -191,12 +191,12 @@ CLI 与服务端都用 `--spec` 启用，无需下载任何额外文件：
 
 ```bash
 # CLI —— 单轮输入、chat REPL 或多轮 JSONL 运行
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --n-cpu-moe 20 --spec --chat
 
 # 服务端
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --n-cpu-moe 20 --spec
 ```

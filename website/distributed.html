@@ -59,17 +59,17 @@
   <h3 id="local">Local TP — one process, several GPUs</h3>
   <p>Local TP lives in a single process. On the direct <code>cuda</code> backend one thread issues commands to all GPUs in sequence and CUDA streams provide the real parallelism; AllReduce runs as peer-to-peer device copies plus an element-wise add kernel. On the GGML backends a rank worker pool drives the GPUs <em>concurrently</em> — a GGML op submits and synchronizes in one call, so a sequential rank loop would run the cards strictly one after another.</p>
   <pre data-lang="bash"><code># CLI — split the model across 2 GPUs
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2
 
 # Same on the GGML CUDA backend
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend ggml_cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend ggml_cuda --tp 2
 
 # Pick which physical GPUs the ranks map to
-TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model model.gguf --backend ggml_cuda --tp 2
 
 # Server — same flag (TENSORSHARP_TP_DEGREE=2 also works)
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model model.gguf --backend ggml_cuda --tp 2</code></pre>
   <p>Or put it in a <a href="cli.html#config">config file</a>:</p>
   <pre data-lang="json"><code>{ "model": "model.gguf", "backend": "cuda", "tp": 2 }</code></pre>
@@ -78,19 +78,19 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <p>Each node runs its own process over its own local GPUs and connects to every other node over TCP with a length-prefixed framing protocol. AllReduce is <strong>hierarchical</strong>: reduce locally over P2P inside each node, exchange over TCP between node representatives, then broadcast back down — so only <code>1/tp_local</code> of the data ever crosses the network.</p>
   <pre data-lang="bash"><code># 2 nodes x 2 GPUs each = global TP degree 4.
 # Node 0:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Node 1 — same peer list, different node ID:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"</code></pre>
   <p>The server can front such a cluster, but only as <strong>node 0</strong> — the driver that owns sampling and serves HTTP. Every other node runs a <code>TensorSharp.Cli</code> worker with the same model, backend, and peer list. The <code>TENSORSHARP_TP_*</code> environment variables work in place of the flags.</p>
   <pre data-lang="bash"><code># Node 0 — server / driver:
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
     --tp 2 --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Node 1 — CLI worker:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"</code></pre>
   <div class="callout warn"><div class="ic">⚠️</div><p>Every node must pass the <strong>same</strong> <code>--tp-peers</code> list, in the same order, and a <strong>unique</strong> <code>--tp-node-id</code> (0-based, indexing into that list). The port — <code>9500</code> in the examples — is not a default: choose one and make sure it is reachable between all nodes. Peer traffic is unauthenticated and unencrypted, so keep the cluster on a trusted private network.</p></div>
   <p>Nodes are usually started by hand a few seconds or minutes apart, so a node that comes up first keeps retrying its outbound connections for up to 120 seconds instead of failing on the first refused connection. Once the mesh is complete each node prints <code>[TcpCommunicator] Rank r/N connected to all peers.</code></p>
@@ -207,11 +207,11 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda
     <li><strong>Responses API store</strong> — the OpenAI Responses store becomes durable and shared instead of in-memory (<code>TS_RESPONSES_STORE_REDIS_URL</code>; <code>--redis-url</code> sets both at once).</li>
   </ul>
   <pre data-lang="bash"><code># Both tiers on one Redis
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
     --redis-url localhost:6379
 
 # KV cache only, 12-hour TTL
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
     --paged-kv-redis-url localhost:6379 --paged-kv-redis-ttl 720</code></pre>
 
   <h2 id="troubleshooting">Troubleshooting</h2>

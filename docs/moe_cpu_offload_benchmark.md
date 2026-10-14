@@ -688,7 +688,7 @@ MAX_CONTEXT=1024 TensorSharp.Cli --model <model.gguf> --backend ggml_cuda \
 llama-bench -m <model.gguf> -p 512 -n 128 -r 3 -ncmoe <N>
 
 # CLI capability sweep (models x backends x features)
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll --config <matrix.json> \
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll --config <matrix.json> \
     --features short_text,long_text,multi_turn,tools,image --env-vars none
 
 # speculative decoding

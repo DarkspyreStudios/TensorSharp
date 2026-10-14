@@ -268,16 +268,19 @@ public static class Program
             return Path.GetFullPath(cfg.CliExecutable);
         }
 
-        // Fall back to the conventional checkout layout: <repo>/TensorSharp.Cli/bin/TensorSharp.Cli
+        // Fall back to the checkout layout: the TensorSharp.Cli build of this runner's own configuration and
+        // target framework, <repo>/TensorSharp.Cli/bin/<configuration>/<tfm>/TensorSharp.Cli.
         string ext = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : "";
-        string baseDir = AppContext.BaseDirectory;
-        // Try ../../TensorSharp.Cli/bin/TensorSharp.Cli, then ../TensorSharp.Cli/bin/...
-        var candidates = new[]
+        var tfmDir = new DirectoryInfo(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+        DirectoryInfo? configurationDir = tfmDir.Parent;
+        DirectoryInfo? repoDir = configurationDir?.Parent?.Parent?.Parent;
+        var candidates = new List<string>();
+        if (configurationDir != null && repoDir != null)
         {
-            Path.Combine(baseDir, "..", "..", "TensorSharp.Cli", "bin", "TensorSharp.Cli" + ext),
-            Path.Combine(baseDir, "..", "TensorSharp.Cli", "bin", "TensorSharp.Cli" + ext),
-            "TensorSharp.Cli" + ext,
-        };
+            candidates.Add(Path.Combine(repoDir.FullName, "TensorSharp.Cli", "bin", configurationDir.Name, tfmDir.Name,
+                "TensorSharp.Cli" + ext));
+        }
+        candidates.Add("TensorSharp.Cli" + ext);
         foreach (string c in candidates)
         {
             string full = Path.GetFullPath(c);

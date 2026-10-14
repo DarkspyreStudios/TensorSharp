@@ -470,7 +470,7 @@ def main():
     parser.add_argument("--models-dir", type=Path, default=ROOT.parent/"models/qwen-image-2.1")
     for name in MODEL_NAMES:
         parser.add_argument("--"+name.replace("_", "-"), type=Path)
-    parser.add_argument("--cli", type=Path, default=ROOT/"TensorSharp.Cli/bin/TensorSharp.Cli.dll")
+    parser.add_argument("--cli", type=Path, default=ROOT/"TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll")
     parser.add_argument("--dotnet", default="dotnet")
     parser.add_argument("--sd-cli", type=Path, default=ROOT/"artifacts/qwen-image-2.1/sd-build/bin/sd-cli")
     parser.add_argument("--sd-repo", type=Path, default=ROOT.parent/"stable-diffusion.cpp")

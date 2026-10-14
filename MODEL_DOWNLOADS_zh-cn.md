@@ -120,7 +120,7 @@ python3 -m venv /tmp/dsv41-tools
     --repository deepseek-ai/DeepSeek-V4.1-Flash \
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
     --backend ggml_cuda --tp 8 --port 5000
@@ -147,7 +147,7 @@ prefill，并发请求只能串行。
 hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-Q8_K_XL/*" --local-dir models
 hf download bleysg/DeepSeek-V4-Flash-DSpark-drafter-GGUF DSpark-drafter-Q2K-Q8-0731.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf \
     --input prompt.txt --max-tokens 200 --temperature 0
@@ -163,7 +163,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
 # 实测配置为八张 46 GB A40，按层切分
 hf download unsloth/GLM-5.3-GGUF --include "UD-Q2_K_XL/*" --local-dir models
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf \
     --backend ggml_cuda --spec --port 5000
 ```
@@ -183,8 +183,8 @@ GLM 系列都会在构建模型之前被拒绝），而且会在每个 rank 上�
 hf download ggml-org/gemma-4-E4B-it-GGUF gemma-4-E4B-it-Q8_0.gguf --local-dir models
 hf download ggml-org/gemma-4-E4B-it-GGUF mmproj-gemma-4-E4B-it-Q8_0.gguf --local-dir models
 hf download AtomicChat/gemma-4-E4B-it-assistant-GGUF gemma-4-E4B-it-assistant.Q8_0.gguf --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/gemma-4-E4B-it-Q8_0.gguf --mmproj models/mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda --draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
 ```
 
 第三个下载与 `--draft-model` 参数可省略。
@@ -194,28 +194,28 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/ge
 ```bash
 hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
 hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda
 
 # 3.6 必须从保留 NextN 块的 -MTP- 仓库下载
 hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec
 ```
 
 **GPT OSS**（文本、始终思考、工具）：
 
 ```bash
 hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-MXFP4.gguf --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-MXFP4.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/gpt-oss-20b-MXFP4.gguf --backend ggml_cuda
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gpt-oss-20b-MXFP4.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/gpt-oss-20b-MXFP4.gguf --backend ggml_cuda
 ```
 
 **Nemotron-H**（文本、思维链、工具）：
 
 ```bash
 hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda
 ```
 
 图像输入请改用 Omni 发行版：从 [unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF](https://huggingface.co/unsloth/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-GGUF) 下载 `NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-UD-Q4_K_XL.gguf` 与 `mmproj-BF16.gguf`；除非加载了由 NVIDIA 检查点转换得到的音频配套 GGUF，音频输入会被拒绝：这些 GGUF 不带 Parakeet/FastConformer 音频塔（见 [nemotron_zh-cn.md §4.6-4.7](docs/models/nemotron_zh-cn.md)）。
@@ -226,7 +226,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nv
 架构由该键决定，与文件名无关。
 
 ```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/<your-hunyuan-dense>.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 ```
@@ -238,16 +238,16 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
 ```bash
 hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
 hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --input prompt.txt --max-tokens 300 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda
 ```
 
 **DiffusionGemma**（块文本扩散）：
 
 ```bash
 hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --max-tokens 256 --diffusion-steps 48 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --max-tokens 256 --diffusion-steps 48 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda
 ```
 
 （Web UI 会实时流式展示 DiffusionGemma 的去噪过程；兼容 API 只返回最终文本。）
@@ -278,7 +278,7 @@ dotnet run --project TensorSharp.Server.Host -c Release --no-build -- \
 hf download Abiray/Qwen-Image-2.1-GGUF qwen_image_2.1_Q4_K_M.gguf --local-dir models
 hf download Comfy-Org/Qwen-Image-2.1 vae/qwen_image_2.1_vae_bf16.safetensors --local-dir models
 hf download Qwen/Qwen3-VL-8B-Instruct-GGUF Qwen3VL-8B-Instruct-Q4_K_M.gguf mmproj-Qwen3VL-8B-Instruct-F16.gguf --local-dir models
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf --qwen-image-vae models/vae/qwen_image_2.1_vae_bf16.safetensors --qwen-image-vl models/Qwen3VL-8B-Instruct-Q4_K_M.gguf --qwen-image-mmproj models/mmproj-Qwen3VL-8B-Instruct-F16.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf --qwen-image-vae models/vae/qwen_image_2.1_vae_bf16.safetensors --qwen-image-vl models/Qwen3VL-8B-Instruct-Q4_K_M.gguf --qwen-image-mmproj models/mmproj-Qwen3VL-8B-Instruct-F16.gguf --backend ggml_cuda
 ```
 
 （在 Web UI 里，不带附件的提示词会生成图像；附加一张或多张图像即可编辑。省略设置时为 2048×2048、40 步 Euler、CFG 1；`--width 1024 --height 1024` 是更快的草图尺寸。详见 [qwenimage21_zh-cn.md](docs/models/qwenimage21_zh-cn.md)。）
@@ -318,14 +318,14 @@ hf download unsloth/MiniMax-H3-GGUF qwen3vl_32b_minimax_h3-Q4_K_M.gguf --local-d
 hf download Comfy-Org/MiniMax-H3 vae/minimax_h3_video_vae_fp16.safetensors --local-dir models
 hf download Comfy-Org/MiniMax-H3 vae/minimax_h3_audio_vae_fp32.safetensors --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_cuda \
     --video-text-encoder models/qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
     --video-vae models/vae/minimax_h3_video_vae_fp16.safetensors \
     --audio-vae models/vae/minimax_h3_audio_vae_fp32.safetensors \
     --prompt "a red fox trotting through falling snow, cinematic" \
     --output fox.mp4 --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_cuda \
     --video-text-encoder models/qwen3vl_32b_minimax_h3-Q4_K_M.gguf \
     --video-vae models/vae/minimax_h3_video_vae_fp16.safetensors \
@@ -373,12 +373,12 @@ hf download hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF Wan2_2-TI2V-5B-Turbo-Q8_0.gguf --lo
 hf download QuantStack/Wan2.2-TI2V-5B-GGUF VAE/Wan2.2_VAE.safetensors --local-dir models
 hf download city96/umt5-xxl-encoder-gguf umt5-xxl-encoder-Q8_0.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf --backend ggml_cuda \
     --video-vae models/VAE/Wan2.2_VAE.safetensors --video-text-encoder models/umt5-xxl-encoder-Q8_0.gguf \
     --prompt "a cute fluffy orange cat walking through a sunny garden with flowers" \
     --output cat.mp4 --width 832 --height 480 --video-frames 81
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf --backend ggml_cuda \
     --video-vae models/VAE/Wan2.2_VAE.safetensors --video-text-encoder models/umt5-xxl-encoder-Q8_0.gguf \
     --video-frames 121 --fps 24
@@ -400,7 +400,7 @@ hf download jayn7/WAN2.2-I2V_A14B-DISTILL-LIGHTX2V-4STEP-GGUF low_noise/wan2.2_i
 hf download QuantStack/Wan2.2-I2V-A14B-GGUF VAE/Wan2.1_VAE.safetensors --local-dir models
 hf download city96/umt5-xxl-encoder-gguf umt5-xxl-encoder-Q8_0.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/high_noise/wan2.2_i2v_A14b_high_noise_lightx2v_4step-Q4_K_M.gguf \
     --backend ggml_cuda --video-vae models/VAE/Wan2.1_VAE.safetensors \
     --video-text-encoder models/umt5-xxl-encoder-Q8_0.gguf \

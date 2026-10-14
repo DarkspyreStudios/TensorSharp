@@ -1,8 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Nullable>enable</Nullable>
     <Description>ASP.NET Core server package for TensorSharp with embedding and chat inference, web UI, and Ollama/OpenAI-compatible APIs.</Description>

@@ -172,7 +172,7 @@ def verify_model(model, target, port, threads, dotnet, context_boundaries=False)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=Path("TensorSharp.Server.Host/bin"))
+    parser.add_argument("--source", type=Path, default=Path("TensorSharp.Server.Host/bin/Release/net10.0"))
     parser.add_argument("--copy", type=Path, default=Path("/tmp/tensorsharp-embedding-managed-host"))
     parser.add_argument("--model", type=Path, action="append", required=True)
     parser.add_argument("--port", type=int, default=18383)

@@ -51,7 +51,7 @@ PRISM_URL=${PRISM_URL:-https://github.com/PrismML-Eng/llama.cpp}
 PRISM_COMMIT=${PRISM_COMMIT:-bdc23b56b4458b9f1655aec5287f3ab56ee8daaa}
 
 PARITY_DLL=$TS_ROOT/benchmarks/ParityHarness/bin/Release/net10.0/ParityHarness.dll
-SERVER_DLL=$TS_ROOT/TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll
+SERVER_DLL=$TS_ROOT/TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll
 BENCH_PY=$TS_ROOT/eng/validation/bonsai2-bench.py
 NATIVE_LIB=$TS_ROOT/TensorSharp.GGML.Native/build/libGgmlOps.so
 

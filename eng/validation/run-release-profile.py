@@ -130,7 +130,7 @@ def main():
     profile = json.loads(args.profile.read_text())
     args.output.mkdir(parents=True, exist_ok=True)
     repo = args.repo.resolve()
-    server = (args.server_assembly or repo / "TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll").resolve()
+    server = (args.server_assembly or repo / "TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll").resolve()
     url = f"http://127.0.0.1:{profile.get('port', 5100)}"
     command = [str(args.dotnet), str(server), "--model", profile["model"],
                "--backend", profile.get("backend", "ggml_cuda"), "--port", str(profile.get("port", 5100))]

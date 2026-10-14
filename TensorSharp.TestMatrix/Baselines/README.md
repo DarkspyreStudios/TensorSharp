@@ -78,7 +78,7 @@ or grows new cells. Refresh them deliberately:
 ### Locally
 
 ```bash
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll \
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll \
   --update-baseline \
   --model-dir /Users/ZhongkaiFu/work/model
 ```

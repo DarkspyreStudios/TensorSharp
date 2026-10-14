@@ -71,7 +71,7 @@ Baseline 会随着代码合理变快、变慢或新增 cell 而过期。请有�
 ### 本地
 
 ```bash
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll \
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll \
   --update-baseline \
   --model-dir /Users/ZhongkaiFu/work/model
 ```

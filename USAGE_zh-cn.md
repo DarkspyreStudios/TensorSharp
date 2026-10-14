@@ -41,8 +41,8 @@
 以替代（或补充）冗长的命令行：
 
 ```bash
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll       --config config/cli-basic.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll       --config config/cli-basic.json
 ```
 
 **命令行参数始终优先。** 先应用文件中的值，命令行上再次给出的参数会覆盖它们——因此可以在多台机器上
@@ -96,48 +96,48 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll       --config config/cli-basic.j
 效果相同。
 
 ```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --help
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --help
 ```
 
 ```bash
 # 文本推理
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_metal
 
 # Windows/Linux + NVIDIA GPU 文本推理
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_cuda
 
 # 交互式逐轮对话（REPL），支持 KV 缓存复用与斜杠命令
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal --interactive
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal --interactive
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
     --system "你是一名简洁的助手。" --temperature 0.7 --top-p 0.9 --think
 
 # 图像推理（Gemma 4，Qwen 3.5-family）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
 
 # 视频推理（Gemma 4）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --video clip.mp4 --backend ggml_metal
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --video clip.mp4 --backend ggml_metal
 
 # 音频推理（Gemma 4）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --audio speech.wav --backend ggml_metal
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --audio speech.wav --backend ggml_metal
 
 # PDF 文档输入：文字型 PDF 会提取文本层并内联进提示词；扫描型 PDF 会转成页面
 # 图像，需要视觉模型（--mmproj 或内置视觉编码器）。--input 提供针对文档的指令。
 echo "Summarize the key findings of this paper." > question.txt
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.pdf --input question.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.pdf --input question.txt \
     --max-tokens 300 --backend ggml_metal
 
 # DiffusionGemma 文本扩散生成
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
 # Qwen-Image-2.1：不带 --image 时生成图像，带 --image 时编辑图像（重复 --image
 # 可传入多张参考图）。该配置会自动下载 DiT、专用 2.1 VAE 以及 Qwen3-VL-8B 文本编码器
 # 与 mmproj。默认：2048x2048、40 步 Euler、CFG 1；出草图可用 --width 1024 --height 1024。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
     --prompt "A small orange cat beside a blue ceramic vase, soft daylight" --output generated.png
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json --image generated.png \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --config config/qwen-image-2.1.json --image generated.png \
     --prompt "Change the blue vase to a red vase. Preserve the cat, lighting and composition." --output edited.png
 
 # MiniMax-H3 带声音的视频生成（提示词 -> H.264 MP4，外加一个 32 kHz 立体声 .wav
@@ -147,7 +147,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.js
 # --video-vae / --audio-vae 指定）。H3 是 CFG 蒸馏模型：必须 `--cfg 1.0`，默认 20
 # 步，4-8 步是快速档。详见下文“音视频生成（MiniMax-H3）”与
 # docs/models/minimax-h3_zh-cn.md。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
     --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4 \
     --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
     --backend ggml_cuda
@@ -156,7 +156,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-
 # 帧；在 ref2va 检查点上，同一张图片是用于全新场景的身份参考（--ref-image，最多
 # 九个，另有 --ref-video / --ref-video-audio / --ref-audio）。含义不明确时用
 # --video-mode t2v|i2v|fl2v|ref 显式声明。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
     --image start.png --end-image end.png --video-mode fl2v \
     --prompt "a slow cinematic push-in" --output morph.mp4 \
     --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
@@ -164,7 +164,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-
 
 # 同一件事也可以交给随仓库提供的配置文件，首次运行会自动下载全部四个网络
 # （config/minimax-h3-ref2va.json 对应参考检查点）。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
     --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4
 
 # Wan 视频生成，仅视频（提示词 -> H.264 MP4）。UMT5-XXL 文本编码器 GGUF 与视频 VAE
@@ -172,76 +172,76 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.
 # Wan 2.1 T2V、Wan 2.2 TI2V-5B 与 Wan 2.2 A14B（两个专家）都会自动识别；
 # 步数蒸馏（Turbo / Lightning / FastWan）检查点同样自动识别——同一段视频只需
 # 4 次 DiT 前向而不是 100 次。详见下文“视频生成（Wan）”与 docs/models/wan_zh-cn.md。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
     --prompt "a lovely cat walking through a garden" --output cat.mp4 \
     --width 832 --height 480 --video-frames 49 --backend ggml_cuda \
     --diffusion-seed 7
 
 # Wan 2.2 图生视频：--image 提供首帧，提示词控制运动、镜头与场景变化
 # （TI2V-5B 或 I2V-A14B 检查点）。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
     --prompt "the cat runs toward the camera, cinematic tracking shot" \
     --image first_frame.png --output cat_run.mp4 --backend ggml_cuda
 
 # 思维链 / 推理模式
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal --think
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal --think
 
 # 工具调用
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --tools tools.json
 
 # Agent Skills（智能体技能）：注册一个技能目录，并为本次运行选中其中一个。前期只有
 # 每个技能的一行描述会占用上下文——SKILL.md 正文与所需的参考文件由模型通过内置的
 # skills_list / skills_read 工具按需自取，而这两个工具由 TensorSharp 在进程内应答。
 # --list-skills 打印注册表（名称、描述、文件、告警）后退出。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --skills-dir ~/skills --skill pdf
 
 # 使用采样参数
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42
 
 # DSpark 块级投机解码（DeepSeek V4）：--model 指向第一个分片，--draft-model 指向
 # DSpark 草稿器 GGUF。每个输出 token 仍然取自主干的某一行，因此贪心运行逐字节不变、
 # 带采样的运行同分布——下面的 --temperature 0 只是为了让对比完全一致。
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <DeepSeek-V4-Flash-...-00001-of-00005.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <DeepSeek-V4-Flash-...-00001-of-00005.gguf> \
     --backend ggml_cuda --draft-model <DSpark-drafter.gguf> \
     --input prompt.txt --max-tokens 200 --temperature 0
 
 # 批处理（JSONL）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input-jsonl requests.jsonl \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input-jsonl requests.jsonl \
     --output results.txt --backend ggml_metal
 
 # 多轮对话模拟（含 KV 缓存复用，模拟 Web UI 行为）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --multi-turn-jsonl chat.jsonl \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --multi-turn-jsonl chat.jsonl \
     --backend ggml_metal --max-tokens 200
 
 # 吞吐基准测试：N 次最优运行的 prefill 和 decode 计时
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --benchmark --bench-prefill 256 --bench-decode 128 --bench-runs 3
 
 # KV 缓存复用基准：在多轮对话中比较启用与禁用缓存的 prefill 时延
 # （以一个 8 轮的对话为例，对比有缓存与强制重置的 prefill 延迟差异）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --bench-kvcache --bench-kv-turns 4 --max-tokens 64
 
 # 仅查看渲染后的 prompt 和分词结果（不运行推理）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --dump-prompt
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --dump-prompt
 
 # 对目录下每个 *.gguf 文件，对比硬编码回退模板与 GGUF 内置 Jinja2 模板
 # （在适配新架构时尤其有用）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --test-templates ~/models
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --test-templates ~/models
 
 # 张量并行：在单个进程内把模型切分到 2 张 GPU 上
 # （--backend cuda、ggml_cuda 或 ggml_vulkan）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend cuda --tp 2
 
 # 分布式张量并行：2 节点 × 每节点 2 GPU（共 4 GPU）
 # 节点 0：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 # 节点 1：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 ```
 
@@ -479,10 +479,10 @@ CLI 只会自动识别少数旧式投影器文件名，而当前模型仓库经�
 
 ```bash
 # 通过 --model 指定要托管的模型
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal
 
 # Linux + NVIDIA GPU
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_cuda
 
 # 让模型生成的代码执行网页检索。联网必须单独显式开启；
 # --skills-allow-network 控制的是随技能提供的脚本，并非这些 shell 命令。
@@ -491,22 +491,22 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
     --code-exec-allow-install --code-exec-allow-network --max-tokens 256000
 
 # 多模态模型：同时显式指定投影器
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
 
 # MiniMax-H3：视频与它的 32 kHz 立体声音轨一起生成。尺寸、步数和帧数都是启动参数，
 # 因为 Web UI 自己不发送任何数值；640x384 是文档给出的起点。每次运行都会写出一个
 # .mp4 和一个旁挂的 .wav。详见下文“音视频生成（MiniMax-H3）”。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model ./models/minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_cuda \
     --video-width 640 --video-height 384 --video-steps 20 --video-frames 22
 
 # 同样的托管也可以直接用随仓库提供的配置文件（config/minimax-h3-ref2va.json 换成
 # 参考检查点；两者只有去噪器不同，其余三个网络不会重复下载）。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/minimax-h3-fl2va.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/minimax-h3-fl2va.json
 
 # Wan 视频生成，仅视频：当 Web UI 或 API 请求未提供自己的 frames / fps 时，
 # 默认以 24 fps 生成 121 帧（约五秒）。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/Wan2.2-TI2V-5B.gguf --backend ggml_cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/Wan2.2-TI2V-5B.gguf --backend ggml_cuda \
     --video-frames 121 --fps 24
 # TI2V-5B 原生面积下的 121 帧是 27k 个 DiT token，而自注意力对 token 数是平方级，
 # 因此在**基础**检查点上跑完 50 步在笔记本级 GPU 上需要数小时（实测 M5 Pro 约 3 小时
@@ -516,15 +516,15 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
 # 完整成本表见 docs/models/wan_zh-cn.md。
 
 # 配置服务端默认采样参数（仅在请求未自行覆盖时生效）
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1 \
     --presence-penalty 0.0 --frequency-penalty 0.0 --seed 42 \
     --stop "</s>" --stop "<|endoftext|>"
 
 # 用可复用的 JSON 文件读取以上全部参数（首次运行会自动下载模型）。
 # 示例见“配置文件”一节与 config/ 目录。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json --backend ggml_cpu
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json --backend ggml_cpu
 ```
 
 在浏览器中打开 `http://localhost:5000` —— 根地址即为聊天界面（`GET /health` 是存活检查接口）。Web 界面支持：
@@ -1118,12 +1118,12 @@ hf download hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF Wan2_2-TI2V-5B-Turbo-Q8_0.gguf --lo
 hf download QuantStack/Wan2.2-TI2V-5B-GGUF VAE/Wan2.2_VAE.safetensors --local-dir models
 hf download city96/umt5-xxl-encoder-gguf umt5-xxl-encoder-Q8_0.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
     --backend ggml_metal --image first_frame.png --output out.mp4 \
     --prompt "the cat runs toward the camera, cinematic tracking shot" \
     --video-frames 121 --fps 24
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
     --backend ggml_metal --video-frames 121 --fps 24
 ```
 
@@ -1398,10 +1398,10 @@ down），外加一份完整的复制权重（归一化层、词嵌入、LM head
 
 ```bash
 # CLI：2 GPU 张量并行
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2
 
 # 服务端：同样的参数（也可用 TENSORSHARP_TP_DEGREE=2 环境变量）
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model <model.gguf> --backend cuda --tp 2
 
 # 配置文件 JSON
@@ -1418,22 +1418,22 @@ P2P 归约，再由各节点代表之间走 TCP，最后广播回来——每次
 ```bash
 # 2 节点 × 每节点 2 GPU（共 4 GPU）
 # 节点 0：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # 节点 1：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # 以服务端作为集群前端：服务端必须是节点 0（负责采样并对外提供 HTTP 的 driver），
 # 其余每个节点都运行一个 TensorSharp.Cli worker，使用相同的模型、后端与 peer 列表。
 # TENSORSHARP_TP_* 环境变量同样可用。
 # 节点 0（服务端 / driver）：
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
     --tp 2 --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # 节点 1（CLI worker）：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda \
     --tp 2 --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # 配置文件 JSON（每个节点一份）
@@ -1473,10 +1473,10 @@ NCCL，否则用其 P2P 流水线）；小载荷则改在主机内存中归约�
 
 ```bash
 # GGML CUDA 后端上的 2 GPU
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_cuda --tp 2
 
 # 指定各 rank 对应的物理 GPU
-TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model <model.gguf> --backend ggml_cuda --tp 2
 ```
 
@@ -1556,11 +1556,11 @@ P2P 的设备启用 peer access，随后做一次往返自检：部分拓扑（�
 
 ```bash
 # 同时为 KV 缓存与 Responses API 启用 Redis
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
     --redis-url localhost:6379
 
 # 仅启用 KV 缓存层，TTL 设为 12 小时
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
     --paged-kv-redis-url localhost:6379 --paged-kv-redis-ttl 720
 ```
 

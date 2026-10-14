@@ -88,32 +88,32 @@ curl -s http://localhost:5000/v1/chat/completions \
 
 ```bash
 # 仅文本模型
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal
 
 # Windows/Linux + NVIDIA，Direct CUDA/cuBLAS 后端
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend cuda
 
 # Windows/Linux + NVIDIA，GGML CUDA 后端
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_cuda
 
 # Windows/Linux + AMD/Intel/NVIDIA GPU，GGML Vulkan 后端（多 GPU 主机用 --gpu-device 选择设备；见 --list-gpus）
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_vulkan --gpu-device 0
 
 # Apple Silicon，MLX 后端
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend mlx
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend mlx
 
 # 多模态模型（显式指定投影器）
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/gemma-4-E4B-it-Q8_0.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/gemma-4-E4B-it-Q8_0.gguf \
     --mmproj ~/work/model/mmproj-gemma-4-E4B-it-Q8_0.gguf --backend ggml_metal
 
 # DiffusionGemma 文本扩散模型
 DIFFUSION_STEPS=48 DIFFUSION_MAX_BATCH=2 \
-  dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_metal
+  dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_metal
 
 # 覆盖默认 token 预算（默认 20000）。它对每个端点都生效 —— Web UI、Ollama
 # 与 OpenAI —— 只要请求省略了 max_tokens / num_predict 就采用该值，并且会把
 # 要得更多的请求钳制到该值。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ~/work/model/Qwen3.5-9B-Q8_0.gguf --backend ggml_metal --max-tokens 4096
 ```
 
 API 默认监听 `http://localhost:5000`；Web UI 就在同一个根地址上提供。
@@ -123,10 +123,10 @@ API 默认监听 `http://localhost:5000`；Web UI 就在同一个根地址上提
 
 ```bash
 # macOS 注意：5000 端口已被 AirPlay 接收器占用，请换一个端口。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend ggml_metal --port 8080
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend ggml_metal --port 8080
 
 # 仅绑定环回地址，使服务无法被其他机器访问。
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --host 127.0.0.1 --port 8080
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --host 127.0.0.1 --port 8080
 ```
 
 推理必须在启动时提供 `--model`。只传 `--backend` 可以启动一个无模型的状态服务，
@@ -140,7 +140,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gg
 或更高版本，macOS 则使用系统自带的 Seatbelt 沙箱：
 
 ```bash
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model <model.gguf> --backend ggml_cpu --host 127.0.0.1 --code-exec
 ```
 

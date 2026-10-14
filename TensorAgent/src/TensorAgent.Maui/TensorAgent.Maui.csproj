@@ -33,20 +33,11 @@
     <TrimMode>partial</TrimMode>
     <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
 
-    <!-- GgmlOps is linked statically from the xcframework (NativeReference
-         below); the desktop CMake builds in the backend projects must not run
-         for an iOS head. These properties are also forwarded to the referenced
-         projects as global properties (AdditionalProperties on each
-         ProjectReference) because a plain csproj property never flows across a
-         ProjectReference on its own. -->
-    <TensorSharpSkipGgmlNative>true</TensorSharpSkipGgmlNative>
-    <TensorSharpSkipMlxNative>true</TensorSharpSkipMlxNative>
     <!-- TensorSharp.Models builds a net10.0-ios slice only when asked, because the
          desktop hosts must not pay for an iOS target they cannot use. That slice is
          where the AVFoundation/ImageIO media provider lives, which is what lets the
          app decode a HEIC photo straight off the camera. -->
     <TensorSharpIosTargets>true</TensorSharpIosTargets>
-    <TensorSharpNativeSkipProperties>TensorSharpSkipGgmlNative=true;TensorSharpSkipMlxNative=true;TensorSharpIosTargets=true</TensorSharpNativeSkipProperties>
 
     <!-- LLVM codegen for device Release builds so the AdvSimd/Vector128 paths in
          TensorSharp.Core get real vector code; ignored for the simulator. -->
@@ -223,15 +214,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../../TensorSharp.Core/TensorSharp.Core.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../../../TensorSharp.Runtime/TensorSharp.Runtime.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../../../TensorSharp.Runtime.Logging/TensorSharp.Runtime.Logging.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../../../TensorSharp.Models/TensorSharp.Models.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../../../TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../../../TensorSharp.AgentHost/TensorSharp.AgentHost.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../../../TensorSharp.Chat/TensorSharp.Chat.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../TensorAgent.Core/TensorAgent.Core.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
-    <ProjectReference Include="../TensorAgent.Sharing/TensorAgent.Sharing.csproj" AdditionalProperties="$(TensorSharpNativeSkipProperties)" />
+    <ProjectReference Include="../../../TensorSharp.Core/TensorSharp.Core.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Runtime/TensorSharp.Runtime.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Runtime.Logging/TensorSharp.Runtime.Logging.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Models/TensorSharp.Models.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Backends.GGML/TensorSharp.Backends.GGML.csproj" />
+    <ProjectReference Include="../../../TensorSharp.AgentHost/TensorSharp.AgentHost.csproj" />
+    <ProjectReference Include="../../../TensorSharp.Chat/TensorSharp.Chat.csproj" />
+    <ProjectReference Include="../TensorAgent.Core/TensorAgent.Core.csproj" />
+    <ProjectReference Include="../TensorAgent.Sharing/TensorAgent.Sharing.csproj" />
   </ItemGroup>
 
   <ItemGroup>

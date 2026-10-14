@@ -119,7 +119,7 @@ def main():
             ('managed-build', 'TensorSharp.Server.Host/TensorSharp.Server.Host.csproj'),
             ('managed-tests-build', 'InferenceWeb.Tests/InferenceWeb.Tests.csproj'),
             ('managed-benchmark-build', 'benchmarks/AgentTurnBench/AgentTurnBench.csproj'))]
-        app = repo / 'TensorSharp.Server.Host/bin'
+        app = repo / 'TensorSharp.Server.Host/bin/Release/net10.0'
         report['managed_assemblies'] = {x.name: sha(x) for x in sorted(app.glob('TensorSharp.*.dll'))}
         (out / 'managed-build.json').write_text(json.dumps({
             'status': 'failed' if any(managed_codes) else 'passed',

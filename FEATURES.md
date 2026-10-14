@@ -94,11 +94,11 @@ Speculative decoding is **off by default**. `--spec` (env `TS_SPEC=1`), on the s
 
 ```bash
 # Qwen 3.6 — use the -MTP- repository GGUF so the embedded NextN block is retained
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
     --spec --spec-draft 8 --spec-pmin 0.75
 
 # Gemma 4 — load the separate gemma4-assistant draft GGUF that matches the target
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
     --draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
 ```
 
@@ -513,7 +513,7 @@ Selecting skills:
 
 ```bash
 # CLI
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_metal --skills-dir ~/skills --skill pdf --input prompt.txt
 
 # Any chat API — /v1/chat/completions, /v1/responses, /api/chat/ollama (Ollama), /api/chat (Web UI)

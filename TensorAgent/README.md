@@ -353,8 +353,9 @@ dotnet build TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj \
 
 `TensorSharpIosTargets=true` must be on the command line rather than only in the
 csproj: it decides whether `TensorSharp.Models` builds a `net10.0-ios` slice at
-all, and restore resolves a referenced project's target frameworks before a
-`ProjectReference`'s `AdditionalProperties` are applied.
+all, and a csproj property does not flow to referenced projects. As a global
+property it reaches every project in the graph, so each project builds in one
+configuration.
 
 ## Layout
 

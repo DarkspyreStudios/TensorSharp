@@ -20,7 +20,7 @@ measured 2026-08-13 on one RTX PRO 6000 Blackwell with `Muse-Glimmer-30B-Q8_0`.
 # on the benchmark box
 MODEL=/workspace/models/muse-glimmer/Muse-Glimmer-30B-Q8_0.gguf
 DRAFT=/workspace/models/muse-glimmer/dflash-kquant.gguf
-CLI=/root/TensorSharp/TensorSharp.Cli/bin/TensorSharp.Cli
+CLI=/root/TensorSharp/TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli
 LLAMA=/root/llama.cpp/build/bin/llama-cli   # -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120 -DLLAMA_CURL=OFF
 # prompts in ./parity/ next to the script (q_text, q_512, q_2k, q_16k, q_32k, q_64k, q_128k + tpl_* copies)
 ```

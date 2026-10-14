@@ -523,11 +523,11 @@ bash TensorSharp.GGML.Native/build-linux.sh
 dotnet build -c Release
 
 # 2 GPUs in one process
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend cuda --interactive --max-tokens 20000 --tp 2
 
 # Same thing on the GGML CUDA backend (add TENSORSHARP_TP_DEVICES=0,2 to pick GPUs)
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_cuda --interactive --max-tokens 20000 --tp 2
 ```
 
@@ -536,10 +536,10 @@ list — 2 nodes × 2 GPUs gives a global TP degree of 4:
 
 ```bash
 # Node 0
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 # Node 1 (same peer list, different node ID)
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 ```
 
@@ -581,7 +581,7 @@ Current source supports **Snowflake Arctic Embed L v2.0** and **all-MiniLM-L6-v2
 ```bash
 curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
   https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/544f204f2eaa2d71361ffc74d6df7170285b286a/all-MiniLM-L6-v2-Q8_0.gguf
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
   --embeddings --backend cpu --host 127.0.0.1 --port 5001 --no-webui
 ```

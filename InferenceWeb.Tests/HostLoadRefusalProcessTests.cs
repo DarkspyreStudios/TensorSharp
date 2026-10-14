@@ -320,17 +320,20 @@ public class HostLoadRefusalProcessTests : IDisposable
     }
 
     /// <summary>
-    /// The host's own build output (both projects build into <c>&lt;project&gt;/bin/</c>),
-    /// not the copy beside the test assembly, whose deps.json is the test project's.
-    /// Both hosts are project references; a missing output is a failed prerequisite.
+    /// The host's own build output for the test's configuration and target framework
+    /// (<c>&lt;project&gt;/bin/&lt;configuration&gt;/&lt;tfm&gt;/</c>), not the copy beside the test
+    /// assembly, whose deps.json is the test project's. Both hosts are project references;
+    /// a missing output is a failed prerequisite.
     /// </summary>
     private static string HostAssembly(string project, string fileName)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        var tfmDir = new DirectoryInfo(Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory));
+        string configuration = tfmDir.Parent!.Name;
+        var dir = tfmDir;
         while (dir != null && !File.Exists(Path.Combine(dir.FullName, "TensorSharp.slnx")))
             dir = dir.Parent;
         Assert.NotNull(dir);
-        string path = Path.Combine(dir.FullName, project, "bin", fileName);
+        string path = Path.Combine(dir.FullName, project, "bin", configuration, tfmDir.Name, fileName);
         Assert.True(File.Exists(path), $"Required host build output not found: {path}");
         return path;
     }

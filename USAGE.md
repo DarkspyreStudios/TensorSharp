@@ -39,8 +39,8 @@ Both `TensorSharp.Cli` and `TensorSharp.Server` can read their options from a JS
 file passed with `--config`, instead of (or in addition to) a long command line:
 
 ```bash
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll       --config config/cli-basic.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll       --config config/cli-basic.json
 ```
 
 **Command-line options always win.** File values are applied first, then anything
@@ -102,50 +102,50 @@ before any logging or model machinery starts; `--help` (also `-h`, `-?`, `/?`)
 does the same.
 
 ```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --help
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --help
 ```
 
 ```bash
 # Text inference
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_metal
 
 # Text inference on Windows/Linux + NVIDIA GPU
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --output result.txt \
     --max-tokens 200 --backend ggml_cuda
 
 # Interactive turn-by-turn chat (REPL) with KV cache reuse and slash commands
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal --interactive
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal --interactive
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal -i \
     --system "You are a terse assistant." --temperature 0.7 --top-p 0.9 --think
 
 # Image inference (Gemma 4, Qwen 3.5-family)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --image photo.png --backend ggml_metal
 
 # Video inference (Gemma 4)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --video clip.mp4 --backend ggml_metal
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --video clip.mp4 --backend ggml_metal
 
 # Audio inference (Gemma 4)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --audio speech.wav --backend ggml_metal
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --audio speech.wav --backend ggml_metal
 
 # PDF document input: born-digital PDFs are text-extracted and inlined into the
 # prompt; scanned PDFs become page images and need a vision model (--mmproj or a
 # built-in vision encoder). --input provides the instruction over the document.
 echo "Summarize the key findings of this paper." > question.txt
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.pdf --input question.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --pdf paper.pdf --input question.txt \
     --max-tokens 300 --backend ggml_metal
 
 # DiffusionGemma text-diffusion generation
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <diffusion-gemma.gguf> --input prompt.txt --backend ggml_metal \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0
 
 # Qwen-Image-2.1: no --image generates an image, --image edits one (repeat --image
 # for multiple references). The config auto-downloads the DiT, the dedicated 2.1 VAE
 # and the Qwen3-VL-8B text encoder + mmproj. Defaults: 2048x2048, 40 Euler steps,
 # CFG 1; use --width 1024 --height 1024 for faster drafts.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --config config/qwen-image-2.1.json \
     --prompt "A small orange cat beside a blue ceramic vase, soft daylight" --output generated.png
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.json --image generated.png \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --config config/qwen-image-2.1.json --image generated.png \
     --prompt "Change the blue vase to a red vase. Preserve the cat, lighting and composition." --output edited.png
 
 # MiniMax-H3 video generation with sound (prompt -> H.264 MP4 plus a 32 kHz
@@ -156,7 +156,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/qwen-image-2.1.js
 # --audio-vae). H3 is CFG-distilled: --cfg 1.0 is required, and 4-8 steps is the
 # fast lane against a 20-step default. See "Video generation with audio
 # (MiniMax-H3)" below and docs/models/minimax-h3.md.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
     --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4 \
     --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
     --backend ggml_cuda
@@ -166,7 +166,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-
 # identity reference for a brand-new scene instead (--ref-image, repeatable up to
 # nine, plus --ref-video / --ref-video-audio / --ref-audio). --video-mode
 # t2v|i2v|fl2v|ref states which reading you meant when it is not obvious.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-Q4_K.gguf> \
     --image start.png --end-image end.png --video-mode fl2v \
     --prompt "a slow cinematic push-in" --output morph.mp4 \
     --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
@@ -174,7 +174,7 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <minimax_h3_fl2va_pruned-
 
 # The same run from a shipped config, which auto-downloads all four networks on
 # first use (config/minimax-h3-ref2va.json is the reference checkpoint).
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
     --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4
 
 # Wan video generation, video only (prompt -> H.264 MP4). The UMT5-XXL
@@ -184,22 +184,22 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.
 # (Turbo / Lightning / FastWan) checkpoints -- 4 DiT passes instead of 100 for
 # the same video. See the "Video generation (Wan)" section below and
 # docs/models/wan.md.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
     --prompt "a lovely cat walking through a garden" --output cat.mp4 \
     --width 832 --height 480 --video-frames 49 --backend ggml_cuda \
     --diffusion-seed 7
 
 # Wan 2.2 image-to-video: --image supplies the first frame; the prompt controls
 # motion, camera and scene changes (TI2V-5B or I2V-A14B checkpoints).
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <Wan2.2-TI2V-5B.gguf> \
     --prompt "the cat runs toward the camera, cinematic tracking shot" \
     --image first_frame.png --output cat_run.mp4 --backend ggml_cuda
 
 # Thinking / reasoning mode
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal --think
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal --think
 
 # Tool calling
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --tools tools.json
 
 # Agent Skills: register a directory of skills and select one for this run. Only
@@ -207,55 +207,55 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prom
 # SKILL.md body and any reference files it needs through built-in skills_list /
 # skills_read tools that TensorSharp answers in process. --list-skills prints the
 # registry (names, descriptions, files, warnings) and exits.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --skills-dir ~/skills --skill pdf
 
 # With sampling parameters
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.2 --seed 42
 
 # DSpark block speculative decoding (DeepSeek V4): point --model at the first shard
 # and --draft-model at the DSpark drafter GGUF. Every emitted token is still drawn
 # from a trunk row, so a greedy run stays byte-exact and a sampled one stays in
 # distribution -- --temperature 0 below just makes the comparison exact.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <DeepSeek-V4-Flash-...-00001-of-00005.gguf> \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <DeepSeek-V4-Flash-...-00001-of-00005.gguf> \
     --backend ggml_cuda --draft-model <DSpark-drafter.gguf> \
     --input prompt.txt --max-tokens 200 --temperature 0
 
 # Batch processing (JSONL)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input-jsonl requests.jsonl \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input-jsonl requests.jsonl \
     --output results.txt --backend ggml_metal
 
 # Multi-turn chat simulation with KV-cache reuse (mirrors the web UI behavior)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --multi-turn-jsonl chat.jsonl \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --multi-turn-jsonl chat.jsonl \
     --backend ggml_metal --max-tokens 200
 
 # Throughput benchmark: best-of-N prefill and decode timing
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --benchmark --bench-prefill 256 --bench-decode 128 --bench-runs 3
 
 # KV-cache reuse benchmark: measure prefill speedup across multiple chat turns
 # (compares with-cache vs forced-reset prefill latency for an 8-turn conversation)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_metal \
     --bench-kvcache --bench-kv-turns 4 --max-tokens 64
 
 # Inspect the rendered prompt and tokenization without running inference
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --dump-prompt
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --dump-prompt
 
 # Compare hardcoded fallback templates against GGUF Jinja2 templates for every
 # *.gguf file in a directory (useful when adding new architectures)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --test-templates ~/models
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --test-templates ~/models
 
 # Tensor parallelism: split a model across 2 GPUs in one process
 # (--backend cuda, ggml_cuda, or ggml_vulkan)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --input prompt.txt --backend cuda --tp 2
 
 # Distributed tensor parallelism: 2 nodes × 2 GPUs each (4 GPUs total)
 # Node 0:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 # Node 1:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 ```
 
@@ -512,10 +512,10 @@ Run these commands from the repository root after building:
 
 ```bash
 # Start the server with the exact hosted model
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal
 
 # Linux + NVIDIA GPU
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_cuda
 
 # Web research through model-authored code. Network access is deliberately a
 # separate opt-in; --skills-allow-network would control bundled skill scripts instead.
@@ -524,23 +524,23 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
     --code-exec-allow-install --code-exec-allow-network --max-tokens 256000
 
 # Multimodal models: host an explicit projector too
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda
 
 # MiniMax-H3: video and its 32 kHz stereo soundtrack generated together. Size,
 # steps and frame count are startup flags because the Web UI sends no numbers of
 # its own; 640x384 is the documented starting point. Each run writes an .mp4 plus
 # a sidecar .wav. See "Video generation with audio (MiniMax-H3)" below.
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model ./models/minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_cuda \
     --video-width 640 --video-height 384 --video-steps 20 --video-frames 22
 
 # The same host from a shipped config (config/minimax-h3-ref2va.json swaps in the
 # reference checkpoint; only the denoiser differs, so nothing re-downloads).
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/minimax-h3-fl2va.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/minimax-h3-fl2va.json
 
 # Wan video generation, video only: use 121 frames at 24 fps (about five seconds)
 # whenever the Web UI or an API request does not supply its own frames / fps value.
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/Wan2.2-TI2V-5B.gguf --backend ggml_cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/Wan2.2-TI2V-5B.gguf --backend ggml_cuda \
     --video-frames 121 --fps 24
 
 # 121 frames at the TI2V-5B native area is 27k DiT tokens, and self-attention is
@@ -553,15 +553,15 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
 
 # Configure server-wide default sampling parameters
 # (used whenever a request does not override the value itself)
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1 \
     --presence-penalty 0.0 --frequency-penalty 0.0 --seed 42 \
     --stop "</s>" --stop "<|endoftext|>"
 
 # Read all of the above from a reusable JSON file (auto-downloads the model on
 # first run). See the Configuration file section and config/ for examples.
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json --backend ggml_cpu
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json --backend ggml_cpu
 ```
 
 Open `http://localhost:5000` in your browser — the root URL serves the chat UI (`GET /health` is the liveness endpoint). The web interface supports:
@@ -1226,12 +1226,12 @@ hf download hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF Wan2_2-TI2V-5B-Turbo-Q8_0.gguf --lo
 hf download QuantStack/Wan2.2-TI2V-5B-GGUF VAE/Wan2.2_VAE.safetensors --local-dir models
 hf download city96/umt5-xxl-encoder-gguf umt5-xxl-encoder-Q8_0.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
     --backend ggml_metal --image first_frame.png --output out.mp4 \
     --prompt "the cat runs toward the camera, cinematic tracking shot" \
     --video-frames 121 --fps 24
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Wan2_2-TI2V-5B-Turbo-Q8_0.gguf \
     --backend ggml_metal --video-frames 121 --fps 24
 ```
 
@@ -1575,10 +1575,10 @@ reconverges the hidden state after each row-parallel projection.
 
 ```bash
 # CLI: 2-GPU tensor parallelism
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2
 
 # Server: same flag (TENSORSHARP_TP_DEGREE=2 env var also works)
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model <model.gguf> --backend cuda --tp 2
 
 # Config JSON
@@ -1596,11 +1596,11 @@ traffic to `1/tp_local` of the data per collective.
 ```bash
 # 2 nodes × 2 GPUs each (4 GPUs total)
 # Node 0:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Node 1:
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Server as the cluster front-end: the server must be node 0 (the driver that
@@ -1608,11 +1608,11 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 # with the same model, backend, and peer list. The TENSORSHARP_TP_* env vars
 # work as well.
 # Node 0 (server / driver):
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
     --tp 2 --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Node 1 (CLI worker):
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend cuda \
     --tp 2 --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # Config JSON (per node)
@@ -1655,10 +1655,10 @@ because GGML activations already live there.
 
 ```bash
 # 2 GPUs on the GGML CUDA backend
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model <model.gguf> --backend ggml_cuda --tp 2
 
 # Choose which physical GPUs the ranks map to
-TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model <model.gguf> --backend ggml_cuda --tp 2
 ```
 
@@ -1752,11 +1752,11 @@ store to Redis, enabling cross-session KV reuse and durable response storage:
 
 ```bash
 # Enable Redis for both KV cache and Responses API
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
     --redis-url localhost:6379
 
 # KV cache tier only, with a 12-hour TTL
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model <model.gguf> --backend cuda \
     --paged-kv-redis-url localhost:6379 --paged-kv-redis-ttl 720
 ```
 

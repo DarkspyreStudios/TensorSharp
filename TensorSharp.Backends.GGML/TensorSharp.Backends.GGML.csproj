@@ -4,15 +4,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Library</OutputType>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Nullable>disable</Nullable>
     <Description>GGML backend integration for TensorSharp: managed interop and versioned native selection. The GgmlOps native libraries ship in the per-RID Darkspyre.TensorSharp.Backends.GGML.Native.&lt;rid&gt; packages.</Description>
     <PackageTags>$(TensorSharpPackageTags);backend;ggml;metal;native;cuda</PackageTags>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'ReleaseCpuOnly|AnyCPU'">
-    <OutputPath>bin\ReleaseCpuOnly\</OutputPath>
     <Optimize>true</Optimize>
     <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>

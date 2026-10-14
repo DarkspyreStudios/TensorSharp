@@ -181,7 +181,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 MAX_CONTEXT=65536 \
   TS_DSV41_COMPACT_RAW_GATHER=0 KV_CACHE_DTYPE=f16 \
   TS_SCHED_MAX_RUNNING_SEQS=4 TS_SCHED_MAX_BATCHED_TOKENS=4096 \
   TS_SCHED_PREFILL_CHUNK=256 TS_SCHED_SOLO_PREFILL_CHUNK=8192 \
-  dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model /workspace/models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
   --backend ggml_cuda --tp 8 --port 5000
 ```
@@ -211,7 +211,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 MAX_CONTEXT=65536 \
   TS_DSV41_ENGRAM_WARM=1 TS_DSV41_ENGRAM_THREADS=16 TS_DSV4_PERF=1 \
   TS_SCHED_MAX_RUNNING_SEQS=4 TS_SCHED_MAX_BATCHED_TOKENS=4096 \
   TS_SCHED_PREFILL_CHUNK=1024 TS_SCHED_SOLO_PREFILL_CHUNK=1024 \
-  dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model /workspace/models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
   --mmproj /workspace/models/deepseek41-q2/deepseek41.vision.gguf \
   --backend ggml_cuda --tp 8 --n-cpu-moe 0 --cpu-moe-threads 32 \
@@ -886,7 +886,7 @@ the fused ops and the fixture-sized graph. A full-checkpoint CPU run has not
 been measured, so CPU/CUDA parity on the real weights is not established here.
 
 ```bash
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model /models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
   --backend ggml_cpu --port 5000
 ```

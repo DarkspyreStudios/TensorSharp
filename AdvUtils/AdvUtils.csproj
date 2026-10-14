@@ -2,8 +2,6 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Library</OutputType>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>false</IsPackable>
     <Nullable>disable</Nullable>
     <Description>Internal utility library for TensorSharp.</Description>

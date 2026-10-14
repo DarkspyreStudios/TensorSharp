@@ -59,17 +59,17 @@
   <h3 id="local">本地 TP —— 单进程，多张 GPU</h3>
   <p>本地 TP 运行在单个进程内。在 Direct <code>cuda</code> 后端上，由一个线程顺序向所有 GPU 下发命令，真正的并行由 CUDA stream 提供，AllReduce 通过点对点设备拷贝加逐元素加法内核完成。在 GGML 后端上，则由一个 rank 工作线程池<em>并发</em>驱动各张 GPU —— GGML 的一次算子调用同时完成提交与同步，顺序循环各 rank 会让显卡严格串行执行。</p>
   <pre data-lang="bash"><code># CLI —— 把模型切分到 2 张 GPU
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2
 
 # GGML CUDA 后端上同理
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend ggml_cuda --tp 2
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend ggml_cuda --tp 2
 
 # 指定各 rank 对应的物理 GPU
-TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+TENSORSHARP_TP_DEVICES=0,2 dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model model.gguf --backend ggml_cuda --tp 2
 
 # 服务端 —— 同样的参数（TENSORSHARP_TP_DEGREE=2 环境变量也可用）
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model model.gguf --backend ggml_cuda --tp 2</code></pre>
   <p>也可以写进<a href="cli_zh-cn.html#config">配置文件</a>：</p>
   <pre data-lang="json"><code>{ "model": "model.gguf", "backend": "cuda", "tp": 2 }</code></pre>
@@ -78,19 +78,19 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <p>每个节点在自己的本地 GPU 上运行独立进程，并通过带长度前缀的分帧协议与其他所有节点建立 TCP 连接。AllReduce 是<strong>分层</strong>的：先在节点内通过 P2P 做本地归约，再由各节点代表之间走 TCP 交换，最后逐层广播回去——因此只有 <code>1/tp_local</code> 的数据需要穿过网络。</p>
   <pre data-lang="bash"><code># 2 节点 × 每节点 2 GPU = 全局 TP 度 4
 # 节点 0：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # 节点 1 —— peer 列表相同，节点 ID 不同：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"</code></pre>
   <p>服务端可以作为这样一个集群的前端，但只能是<strong>节点 0</strong> —— 即负责采样并对外提供 HTTP 的 driver。其余每个节点都运行一个 <code>TensorSharp.Cli</code> worker，使用相同的模型、后端与 peer 列表。<code>TENSORSHARP_TP_*</code> 环境变量可以替代这些参数。</p>
   <pre data-lang="bash"><code># 节点 0 —— 服务端 / driver：
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
     --tp 2 --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 
 # 节点 1 —— CLI worker：
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model model.gguf --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"</code></pre>
   <div class="callout warn"><div class="ic">⚠️</div><p>所有节点必须传入<strong>完全相同</strong>的 <code>--tp-peers</code> 列表（顺序也要一致），并各自使用<strong>唯一</strong>的 <code>--tp-node-id</code>（0 起始，对应该列表中的下标）。示例中的端口 <code>9500</code> 不是默认值：请自行选定，并确保所有节点之间可达。节点间流量没有鉴权也没有加密，请把集群放在可信的内网中。</p></div>
   <p>节点通常由人工间隔数秒到数分钟启动，因此先起来的节点会持续重试对外连接（最长 120 秒），而不是在第一次连接被拒绝时就失败。网格建立完成后，每个节点会打印 <code>[TcpCommunicator] Rank r/N connected to all peers.</code>。</p>
@@ -203,11 +203,11 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model model.gguf --backend cuda
     <li><strong>Responses API 存储</strong>——OpenAI Responses 存储从内存变为持久化且共享（<code>TS_RESPONSES_STORE_REDIS_URL</code>；<code>--redis-url</code> 一次性设置这两项）。</li>
   </ul>
   <pre data-lang="bash"><code># 两个层共用一个 Redis
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
     --redis-url localhost:6379
 
 # 仅 KV 缓存，TTL 12 小时
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model model.gguf --backend cuda \
     --paged-kv-redis-url localhost:6379 --paged-kv-redis-ttl 720</code></pre>
 
   <h2 id="troubleshooting">故障排查</h2>

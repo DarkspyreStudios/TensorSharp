@@ -870,19 +870,19 @@ between working and appearing to work.
 
 ```bash
 # What is registered, where it came from, and any warnings.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --skills-dir ~/skills --list-skills
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --skills-dir ~/skills --list-skills
 
 # One-shot with a skill selected.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_metal --skills-dir ~/skills --skill pdf --input prompt.txt
 
 # Two skills, no discovery: the model sees exactly these and nothing else.
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_cuda --skills-dir ~/skills --skill pdf --skill xlsx \
     --skills-no-discovery --input prompt.txt
 
 # Interactive, with script execution enabled (your own machine, your own skills).
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_metal --skills-dir ~/skills --skills-allow-exec -i
 ```
 
@@ -1271,7 +1271,7 @@ own `skills/<skill>/SKILL.md` layout:
 
 ```bash
 git clone https://github.com/anthropics/skills.git ~/skills
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --skills-dir ~/skills --list-skills
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --skills-dir ~/skills --list-skills
 ```
 
 All 19 published skills plus the template load with **zero errors**. Two carry

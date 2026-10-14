@@ -1,8 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Description>Runtime services and contracts for TensorSharp GGUF inference: parsing, tokenization, prompt rendering, sampling, and output protocols.</Description>
     <PackageTags>$(TensorSharpPackageTags);runtime;tokenizer;sampling;prompt-template</PackageTags>

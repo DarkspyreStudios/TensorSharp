@@ -54,7 +54,7 @@ python3 -m venv /tmp/dsv41-tools
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
 # Served over eight GPUs — --tp here is a LAYER SPLIT, not tensor parallelism
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
     --backend ggml_cuda --tp 8 --port 5000</code></pre>
@@ -70,18 +70,18 @@ hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-Q8_K_XL/*" --local
 hf download bleysg/DeepSeek-V4-Flash-DSpark-drafter-GGUF DSpark-drafter-Q2K-Q8-0731.gguf --local-dir models
 
 # Plain decode — point --model at the FIRST shard
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # DSpark block speculative decoding (~1.3-1.4x decode; needs greedy sampling)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf \
     --input prompt.txt --max-tokens 200 --temperature 0
 
 # Served over HTTP, 4 GPUs, with speculation on
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --tp 4 --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>DSpark drafts a whole <em>block</em> of tokens per step and the trunk verifies the block in one batched forward, so greedy output is unchanged. On the CLI it needs a pure-argmax sampler (any temperature, top-k/p, or penalty turns it off); on the server every verify row is drawn with the request's own sampler, so it composes with any sampling settings. See <a href="advanced.html#dspark">DSpark speculative decoding</a>.</p>
@@ -92,22 +92,22 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 hf download unsloth/GLM-5.2-GGUF --include "UD-IQ2_XXS/*" --local-dir models
 
 # Layer split across every visible GPU — point --model at the FIRST shard
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # Thinking mode, interactive
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --interactive --think
 
 # Not enough VRAM? Keep the routed experts of the first N layers in system RAM
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --n-cpu-moe 30 --input prompt.txt --max-tokens 200
 
 # Served over HTTP
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda</code></pre>
   <p>The advertised 1M-token context is a <em>ceiling</em>, not a promise: 1M tokens of MLA cache is about 93 GiB, so once the weights land the loader asks the devices how much VRAM is actually free, sizes the context to what fits alongside one full prefill graph, and logs what it picked. On 3× RTX PRO 6000 with GLM-5.2 that is 342,272 tokens on the plain layer split, 646,400 with <code>--n-cpu-moe 30</code>, and 91,136 under <code>--tp 3</code> (every rank holds a full-length cache). Set <code>MAX_CONTEXT</code> to make a specific length a hard requirement instead — it is honoured if it fits and refused with the numbers if it does not.</p>
@@ -117,12 +117,12 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 hf download unsloth/GLM-5.3-GGUF --include "UD-Q2_K_XL/*" --local-dir models
 
 # Layer split across every visible GPU — point --model at the FIRST shard
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # NextN speculation — engaged on the default layer split only, so pass no --tp
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf \
     --backend ggml_cuda --spec</code></pre>
   <p>Measured on 8× A40 46 GB without NVLink, GLM-5.3 UD-Q2_K_XL, a 10,531-token prompt, 300 decode tokens, median of three, whole-layer placement: prefill <strong>251.6 t/s</strong>, decode <strong>20.48 t/s</strong> and a <strong>264 s</strong> load, against llama.cpp's 20.28 t/s decode and 753 s load on the same box — a decode tie with a <strong>2.9× faster load</strong> of a 236.4 GiB checkpoint. The honest gap is time to first token: 41.9 s against 29.0 s, about <strong>1.4× slower</strong> (that llama.cpp cell recorded no prompt-token count, so no prefill tok/s is reported for it). <code>--tp N</code> is accepted here but local / single-process only, and it has never been run on GLM-5.3: every rank would hold a full replicated KV cache, and the only recorded arithmetic is a non-fit — <code>--tp 8</code> wants 41.7 GiB per rank against 46 GB cards. <code>--tp-node-id</code> / <code>--tp-peers</code> are refused for the whole GLM family before the model is built. Both releases share the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/glm.md">GLM model card</a>.</p>
@@ -135,23 +135,23 @@ hf download unsloth/GLM-5.3-Flash-GGUF mmproj-BF16.gguf --local-dir models
 
 # Layer split across every visible GPU — point --model at the FIRST shard
 # (N is however many shards the quant directory you downloaded holds)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # Image understanding — the GLM-OCR ViT ships as mmproj-BF16.gguf
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --image photo.png --input question.txt \
     --max-tokens 300 --backend ggml_cuda
 
 # Not enough VRAM? Keep the routed experts of the first N layers in system RAM
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --backend ggml_cuda --n-cpu-moe 10 --input prompt.txt --max-tokens 200
 
 # Served over HTTP
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --backend ggml_cuda</code></pre>
   <p>What runs today: the layer split across every visible GPU when <code>--tp</code> is omitted, <code>--cpu-moe</code> / <code>--n-cpu-moe N</code> host-resident experts, per-sequence native slots for serving, and vision — <code>--image</code>, multi-image prompts and multi-turn image sessions, through the GLM-OCR ViT. On GGML GPU backends, <code>--tp N</code> selects native local/single-process tensor parallelism, as it does for GLM-5.2: KDA/MLA heads and routed-expert hidden rows are sharded, and KDA recurrent state is per-rank. With full sharding on one rank per local GPU, no CPU MoE or tracing, and native hyper-connection kernels, segmented rank-local graphs submit concurrently: routed-MoE partials reduce first, then every rank computes and adds its replicated shared expert locally before Sinkhorn hyper-connections; hyper-connections, pooled indexer, router, norms, dense layers and embedding remain unsharded and execute per rank, while output norm / LM head stay on rank 0. CPU MoE, tracing, partial sharding, oversubscription, or missing native hyper-connection kernels select the combined scheduler fallback, where the shared expert runs once on rank 0; <code>TS_GLM_TP_FUSED=0</code> forces that diagnostic fallback. The native TP path for both GLM-5.2 and GLM-5.3-Flash is local/single-process, not distributed or cross-node. <strong>Not yet</strong>: NextN/MTP speculation.</p>
@@ -162,13 +162,13 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
 hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
     --image photo.png --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
   <p>For Qwen 3.6 NextN speculative decoding, download the trunk from the <code>-MTP-</code> repo (the base repo's GGUFs strip the NextN block and silently fall back to standard decode) and start the <em>server</em> with <code>--spec</code> — the explicit opt-in, because the NextN drafter is embedded in the trunk checkpoint and loading it pages extra weights into VRAM:</p>
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
 
   <h3 id="qwen4exp">Qwen 3.8 Flash Next (hybrid MoE, text + image, thinking; no tool-call round trip)</h3>
   <p>A hybrid mixture-of-experts model whose GGUF architecture id is <code>qwen4exp</code>: GatedDeltaNet recurrent layers interleaved with full-attention layers (some behind Qwen Sparse Attention's indexer), a PLE n-gram embedding block, ×4 hyper-connection streams and a 512-expert MoE. 48 layers, hidden size 2560, 24 query / 2 KV heads at head_dim 256, a 248,320-token vocabulary, 10 of the 512 experts used per token, GDN on 36 of the 48 layers and PLE on layer 1. On the GGML backends the whole token runs as (almost) <strong>one graph</strong> — embedding, in-graph PLE, all 48 layers, the final mixer and the LM head — replayed from a shape-keyed cache of captured graphs. Vision rides the Qwen3.5-VL tower with (T,H,W) IMRoPE positions, so multi-image prompts and multi-turn image sessions both work, with KV reused across turns as long as the new prompt extends the cached prefix exactly (the GDN recurrence cannot rewind). Concurrent requests are served through per-sequence state holders — each request owns its attention KV and indexer caches, its GDN and PLE state — so switching between them is a reference swap. Thinking works and is always on.</p>
@@ -179,18 +179,18 @@ hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-BF16.gguf --local-dir models
 
 # Text — point --model at the FIRST shard
 # (N is however many shards the quant directory you downloaded holds)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 300
 
 # Image understanding
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --image photo.png --input question.txt \
     --max-tokens 300 --backend ggml_cuda
 
 # Two GPUs: --tp N runs a LAYER SPLIT here, not tensor parallelism
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --backend ggml_cuda --tp 2</code></pre>
   <p><code>--tp N</code> on <code>qwen4exp</code> is a <strong>layer split</strong>: each GPU holds a contiguous run of whole layers. Nothing is sharded, so it is not tensor parallelism — and it is the same (and only) multi-GPU mode llama.cpp offers this architecture, whose <code>-sm row</code> refuses to load it. Treat it as a capacity feature rather than a speed one. On 2× A100-80GB with Qwen3.8-Flash-Next-UD-Q2_K_XL (73.4 GiB) the greedy output is <strong>byte-identical</strong> between the 1-GPU and 2-GPU runs (same SHA-256), VRAM lands at 24.2 GB + 26.2 GB instead of the whole model on one card, and throughput is unchanged: prefill ~1520–1550 t/s and decode ~56 t/s either way. llama.cpp on the same box measures pp1536 1094 / tg128 61.2 on one GPU and 1200 / 61.5 on two with <code>-sm layer</code>, so it too gains about 10% prefill and nothing on decode. Startup prints which mode ran and the per-GPU layer/byte split; <code>TS_Q4E_LAYER_SPLIT=20,28</code> overrides the balance with explicit layer counts per GPU (llama.cpp's <code>--tensor-split</code> in spirit) and throws rather than silently ignoring a value it cannot honour — useful, because the automatic balance prices weights and cannot see the vision tower, which loads later and lands on GPU 0.</p>
@@ -199,34 +199,34 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <p>Two <code>Q1_0</code> files that share a name but not an architecture: <code>Bonsai-8B-Q1_0.gguf</code> is a dense Qwen 3 decoder (<code>qwen3</code>) and <code>Bonsai-27B-Q1_0.gguf</code> is a dense Qwen 3.5 hybrid with GatedDeltaNet layers (<code>qwen35</code>). Their GGUF metadata carries neither a publisher URL nor a license, so TensorSharp pins the exact bytes and SHA-256 rather than inventing either — there is nothing to <code>hf download</code>. Confirm you have the right to use a file before importing it; the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/bonsai.md" target="_blank" rel="noopener">Bonsai card</a> lists the pins.</p>
   <pre data-lang="bash"><code># Bonsai 8B on Apple Silicon
 MAX_CONTEXT=16384 KV_CACHE_DTYPE=f16 \
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model /path/to/Bonsai-8B-Q1_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model /path/to/Bonsai-8B-Q1_0.gguf \
     --backend ggml_metal --input prompt.txt --max-tokens 256 --temperature 0.5 --top-k 20 --top-p 0.85
 
 # Bonsai 27B; --think exposes its reasoning stream
 MAX_CONTEXT=32768 KV_CACHE_DTYPE=f16 \
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model /path/to/Bonsai-27B-Q1_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model /path/to/Bonsai-27B-Q1_0.gguf \
     --backend ggml_metal --input prompt.txt --max-tokens 256 --think</code></pre>
   <p><code>Q1_0</code> is GGML tensor type 41 — one F16 scale plus 128 one-bit signs per 128-value block, 1.125 bits/weight — recognized in the GGUF reader, the native bindings, and the managed fallback. Paired M5 Pro Metal runs against llama.cpp on the same file: 8B <strong>1.05× pp128</strong> and parity at tg128; 27B <strong>1.03× pp512</strong>, <strong>1.04× pp2048</strong>, and <strong>1.15× tg128</strong> against a thermally bracketed llama.cpp baseline. TensorAgent also lists both as import-only entries on iOS.</p>
 
   <h3 id="gptoss">GPT OSS (text, thinking always on, tools)</h3>
   <pre data-lang="bash"><code>hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-MXFP4.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-MXFP4.gguf --input prompt.txt --max-tokens 400 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/gpt-oss-20b-MXFP4.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gpt-oss-20b-MXFP4.gguf --input prompt.txt --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/gpt-oss-20b-MXFP4.gguf --backend ggml_cuda</code></pre>
 
   <h3 id="nemotron">Nemotron-H (text; image on the Omni distribution)</h3>
   <pre data-lang="bash"><code>hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt \
     --think --max-tokens 400 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda</code></pre>
   <p>For image input use the Nemotron 3 Nano Omni GGUF with its <code>mmproj-BF16.gguf</code> (table above). Audio inference is not functional — the required Parakeet audio mmproj is not shipped with the GGUF distribution.</p>
   <p><strong>Nemotron 3.5 Lightning 30B-A3B</strong> loads through the same <code>nemotron_h_moe</code> path — 23 Mamba-2 + 23 MoE + 6 attention layers, e.g. <code>NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MXFP4_MOE.gguf</code> (~17 GB) from <a href="https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF" target="_blank" rel="noopener">unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF</a>. It is the one Nemotron that takes a block drafter: NVIDIA's DSpark module, exported as a <code>dflash</code>-architecture GGUF and loaded with <code>--draft-model</code>, makes it the first recurrent (Mamba-2) trunk to run block speculative decoding. → <a href="advanced.html#dflash">how block drafting works</a></p>
 
   <h3 id="hunyuan-dense">Hunyuan Dense (text only, single device)</h3>
   <p>Tencent's dense Hunyuan decoders — the checkpoints declaring <code>general.architecture = hunyuan-dense</code>, such as the Hy-MT2 releases. Before the architecture was registered these official files failed at load: the loader fails closed on an unknown architecture rather than guessing a nearby graph. The text graph matches llama.cpp's <code>hunyuan-vl</code> text tower — RMSNorm, fused QKV, NeoX RoPE, then per-head Q/K RMSNorm, GQA and SwiGLU. <strong>QK-norm runs after RoPE</strong>, the opposite of Qwen 3.5; getting that order wrong yields fluent nonsense rather than a load error, so the norms are mandatory and a layer missing them throws.</p>
   <pre data-lang="bash"><code># Any GGUF whose general.architecture is hunyuan-dense — the file name is not what selects it
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/&lt;your-hunyuan-dense&gt;.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200</code></pre>
   <p>First cut: text only, single device, generic per-op path, no thinking channel and no tool parser. Extra GPUs stay idle and startup says so rather than leaving it to be inferred.</p>
@@ -235,32 +235,32 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
   <pre data-lang="bash"><code>hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
 hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
     --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
     --image photo.png --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
     --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda</code></pre>
 
   <h3 id="muse-glimmer">Muse-Glimmer (text + image, thinking, tools, DFlash drafting)</h3>
   <pre data-lang="bash"><code>hf download unsloth/Muse-Glimmer-30B-GGUF Muse-Glimmer-30B-UD-IQ2_XXS.gguf --local-dir models
 hf download unsloth/Muse-Glimmer-30B-GGUF mmproj-Muse-Glimmer-30B-Q8_0.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --input prompt.txt --max-tokens 256 --backend ggml_cuda
 # image understanding
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --mmproj models/mmproj-Muse-Glimmer-30B-Q8_0.gguf --image photo.png --input question.txt \
     --max-tokens 300 --backend ggml_cuda
 # DFlash speculative decoding (optional drafter GGUF from the same repo)
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --draft-model models/dflash-kquant.gguf --spec-draft 15 --input prompt.txt --backend ggml_cuda</code></pre>
 
   <h3 id="diffusiongemma">DiffusionGemma (block text diffusion)</h3>
   <pre data-lang="bash"><code>hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda</code></pre>
 
   <h2 id="multimodal">Multimodal support</h2>
   <div class="table-scroll">

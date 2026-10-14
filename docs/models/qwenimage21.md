@@ -121,7 +121,7 @@ pipeline shares mutable working state.
 Existing Unsloth downloads can be passed directly after rebuilding the host:
 
 ```bash
-TensorSharp.Server.Host/bin/TensorSharp.Server.Host \
+TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host \
   --model ~/work/models/qwen-image-2.1-unsloth/qwen-image-2.1-Q8_0.gguf \
   --qwen-image-vae ~/work/models/qwen-image-2.1-unsloth/qwen_image_2.1_vae_bf16.safetensors \
   --qwen-image-vl ~/work/models/qwen-image-2.1-unsloth/Qwen3-VL-8B-Instruct-Q4_K_M.gguf \

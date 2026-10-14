@@ -39,23 +39,23 @@ dotnet run --project TensorSharp.Server.Host -c Release --no-build -- --model mo
   <div class="callout warn"><div class="ic">🔐</div><p>The server has no built-in API-key authentication or TLS and binds every interface. Keep it behind a host firewall for local use, or put an authenticated HTTPS reverse proxy in front of it; do not expose port 5000 directly to an untrusted network.</p></div>
 
   <h3>Already-built source tree</h3>
-  <p>Run these commands from the repository root after building. They invoke <code>TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll</code>; that output directory also contains the copied native libraries and <code>wwwroot/</code>. The <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases page</a> also provides attached, self-contained CLI and server archives for supported platforms.</p>
+  <p>Run these commands from the repository root after building. They invoke <code>TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll</code>; that output directory also contains the copied native libraries and <code>wwwroot/</code>. The <a href="https://github.com/zhongkaifu/TensorSharp/releases" target="_blank" rel="noopener">Releases page</a> also provides attached, self-contained CLI and server archives for supported platforms.</p>
   <pre data-lang="bash"><code># Apple Silicon / Metal
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal
 
 # NVIDIA / GGML CUDA
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_cuda
 
 # AMD, Intel, or NVIDIA / Vulkan; inspect device indices first
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --list-gpus
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_vulkan --gpu-device 1
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --list-gpus
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_vulkan --gpu-device 1
 
 # Multimodal: the projector is always explicit
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --mmproj ./models/mmproj.gguf --backend ggml_cuda</code></pre>
 
   <h3>Server-wide default sampling</h3>
   <p>Defaults fill in any field a request omits. Out of the box they match Ollama: temperature <code>0.8</code>, top-k <code>40</code>, top-p <code>0.9</code>, min-p <code>0</code>, repeat penalty <code>1.1</code>, presence/frequency <code>0</code>, seed <code>-1</code>. A parameter you set explicitly also <em>overrides</em> the value a client sends for it — many chat clients (VS Code Copilot Chat among them) hardcode <code>temperature</code>/<code>top_p</code> into every request. Add <code>--sampling-precedence request</code> to hand that control back to clients.</p>
-  <pre data-lang="bash"><code>dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal \
+  <pre data-lang="bash"><code>dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model ./models/model.gguf --backend ggml_metal \
     --temperature 0.7 --top-p 0.9 --top-k 40 --repeat-penalty 1.1 \
     --presence-penalty 0.0 --frequency-penalty 0.0 --seed 42 \
     --stop "&lt;/s&gt;" --stop "&lt;|endoftext|&gt;"</code></pre>
@@ -82,12 +82,12 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model ./models/
   <h2 id="video">Video generation: what the UI sets, and what only the API sets</h2>
   <p>Host a video-generation model — MiniMax-H3 or Wan — and the Web UI turns into a video generator. The endpoints gate on the <code>IVideoGenerationModel</code> seam rather than on an architecture string, so anything else answers <code>400</code> with <code>The loaded model is not a video-generation model.</code> It is worth knowing exactly how little of the request the browser controls, because a video job can run for minutes or for hours and the browser gives you no way to change that mid-flight.</p>
   <pre data-lang="bash"><code># MiniMax-H3: the clip and its 32 kHz stereo soundtrack, denoised together in one latent
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model ./models/minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_cuda \
     --video-width 640 --video-height 384 --video-steps 20 --video-frames 22
 
 # Same geometry, the other checkpoint: identity/appearance references into a new scene
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model ./models/minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_cuda \
     --video-width 640 --video-height 384 --video-steps 20 --video-frames 22</code></pre>
   <p>FL2VA and Ref2VA are two checkpoints, not two settings: which one is loaded decides whether attached images are keyframes or references, and it is what <code>/api/models</code> reports to the browser. <code>config/minimax-h3-fl2va.json</code> and <code>config/minimax-h3-ref2va.json</code> carry the same geometry and download the denoiser, the shared Qwen3-VL-32B text encoder and both VAEs on first run — but not the tokenizer, which is not a flag: put <code>vocab.json</code> and <code>merges.txt</code> from the upstream <code>MiniMaxAI/MiniMax-H3</code> <code>processor/</code> folder beside the encoder, or point <code>TS_VIDEO_TOKENIZER</code> at the folder holding them.</p>
@@ -126,8 +126,8 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <h2 id="config">Configuration file (<code>--config</code>)</h2>
   <p>Instead of a long command line, pass a JSON file with <code>--config</code>. The <a href="cli.html">CLI</a> reads the same format. <strong>Command-line options always win</strong>—file values are applied first, then anything you also pass on the command line overrides them, so one file can be reused across hosts while you override just what differs. Repeat <code>--config</code> to layer files (later files win). Comments and trailing commas are allowed.</p>
   <pre data-lang="bash"><code># Read all options from a file; override just the backend for this host
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/server-basic.json --backend ggml_cpu</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --config config/server-basic.json --backend ggml_cpu</code></pre>
   <p>Keys are the same long option names below (with or without the leading <code>--</code>). A string/number becomes <code>--key value</code>, <code>true</code> becomes the bare switch <code>--key</code>, and an array becomes a repeated flag (e.g. <code>"stop": ["&lt;/s&gt;", "&lt;|eot|&gt;"]</code>).</p>
   <p><strong>Variables.</strong> Define shared values once under <code>"variables"</code> and reference them with <code>${name}</code> in any string value (an undefined name falls back to an environment variable of the same name). Declare as many roots as you need — models in different folders each get their own.</p>
   <p><strong>Auto-download.</strong> Any file option can be an object with a local <code>path</code> and one or more <code>urls</code>. If <code>path</code> is missing it downloads from the first working URL (mirrors tried in order), saves it there, and reuses it next time; progress prints to stderr, and an optional <code>sha256</code> verifies the file.</p>

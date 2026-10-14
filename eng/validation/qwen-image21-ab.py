@@ -9,9 +9,9 @@ bit-exact change, PSNR quantifies an intentional numerical one.
 
 Example (a baseline build against the current one, with the prefix cache on and off):
   python3 eng/validation/qwen-image21-ab.py --rounds 2 \\
-      --arm base=artifacts/baseline/TensorSharp.Cli/bin/TensorSharp.Cli.dll \\
-      --arm cache=TensorSharp.Cli/bin/TensorSharp.Cli.dll \\
-      --arm nocache=TensorSharp.Cli/bin/TensorSharp.Cli.dll,TS_QWEN21_PREFIX_CACHE=0 \\
+      --arm base=artifacts/baseline/TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \\
+      --arm cache=TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \\
+      --arm nocache=TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll,TS_QWEN21_PREFIX_CACHE=0 \\
       -- --mode edit --image ref.png --width 1024 --height 1024 --steps 40
 
 Arguments after `--` go to qwen-image21-bench.py unchanged (--engine and --cli are

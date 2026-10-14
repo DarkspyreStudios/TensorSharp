@@ -111,7 +111,7 @@ def main():
         if origin.is_file() and "__pycache__" not in origin.parts:
             copy(origin, Path(campaign) / origin.relative_to(source))
     copy(args.repo / "eng/validation/run-wsl-gemma-thinking.py", Path(campaign) / "run-wsl-gemma-thinking.py", run["runner_sha256"])
-    artifact_store = args.wsl_base / "repo/TensorSharp.Server.Host/bin/code-artifacts"
+    artifact_store = args.wsl_base / "repo/TensorSharp.Server.Host/bin/Release/net10.0/code-artifacts"
     references = {}
     for name, report in reports.items():
         for case in report["cases"]:

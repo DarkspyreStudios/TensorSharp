@@ -145,7 +145,7 @@ CPU path.
 The CLI maps this through:
 
 ```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --backend ggml_metal \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt --backend ggml_metal \
   --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --diffusion-blocks 1
 ```
 

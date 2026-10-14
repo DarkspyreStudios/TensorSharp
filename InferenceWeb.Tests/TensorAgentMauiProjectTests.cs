@@ -110,7 +110,6 @@ public class TensorAgentMauiProjectTests
             build.IndexOf("dotnet restore \"${REPO_ROOT}/TensorAgent/src/TensorAgent.Maui/TensorAgent.Maui.csproj\"", StringComparison.Ordinal) <
             build.IndexOf("dotnet clean \"${ARGS[@]}\"", StringComparison.Ordinal),
             "The device RID assets must be restored before the targeted clean resolves them.");
-        Assert.Contains("-m:1", build, StringComparison.Ordinal);
         Assert.Contains("dotnet clean \"${ARGS[@]}\"", build, StringComparison.Ordinal);
         Assert.True(
             build.IndexOf("dotnet clean \"${ARGS[@]}\"", StringComparison.Ordinal) <
@@ -121,15 +120,6 @@ public class TensorAgentMauiProjectTests
         Assert.Contains("xcrun devicectl --timeout \"${DEVICECTL_TIMEOUT}\" device install app", deploy,
             StringComparison.Ordinal);
         Assert.Contains("--device \"${DEVICE_ID}\" \"${APP}\"", deploy, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void SimulatorBuild_SerializesProjectsThatShareOutputFiles()
-    {
-        string script = File.ReadAllText(Path.Combine(ScriptsDir, "build-sim.sh"));
-
-        Assert.Contains("-m:1", script, StringComparison.Ordinal);
-        Assert.Contains("share one output directory", script, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -145,8 +135,6 @@ public class TensorAgentMauiProjectTests
         Assert.Equal("17.0", Property(doc, "SupportedOSPlatformVersion"));
         Assert.Equal("partial", Property(doc, "TrimMode"));
         Assert.Equal("true", Property(doc, "JsonSerializerIsReflectionEnabledByDefault"));
-        Assert.Equal("true", Property(doc, "TensorSharpSkipGgmlNative"));
-        Assert.Equal("true", Property(doc, "TensorSharpSkipMlxNative"));
     }
 
     [Fact]

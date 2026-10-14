@@ -27,8 +27,9 @@ dotnet build TensorSharp.TestMatrix/TensorSharp.TestMatrix.csproj -c Release
 dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release   # 必需：子进程驱动目标
 ```
 
-运行器需要已构建的 `TensorSharp.Cli`。默认会在自身输出目录的相对路径
-`../TensorSharp.Cli/bin/TensorSharp.Cli` 附近自动发现；也可以用
+运行器需要已构建的 `TensorSharp.Cli`。默认会自动发现与自身相同配置和目标框架的
+`TensorSharp.Cli` 构建，例如与 `TensorSharp.TestMatrix/bin/Release/net10.0/` 对应的
+`TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli`；也可以用
 `--cli-executable <path>` 或配置里的 `cli_executable` 覆盖。
 
 ## 运行
@@ -172,13 +173,13 @@ CI 上传的是报告文件；JSON 文件是后续与历史运行做 delta 分�
 
 ```bash
 # 与提交的 baseline 对比，并在阻断回归时失败
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll --fail-on-regression
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll --fail-on-regression
 
 # 合理变更后重新认可 baseline（diff 需自行提交）
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll --update-baseline
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll --update-baseline
 
 # 与指定 baseline 文件对比（例如和旧快照 A/B）
-dotnet TensorSharp.TestMatrix/bin/TensorSharp.TestMatrix.dll \
+dotnet TensorSharp.TestMatrix/bin/Release/net10.0/TensorSharp.TestMatrix.dll \
   --baseline ./oldbaseline.json --fail-on-regression
 ```
 

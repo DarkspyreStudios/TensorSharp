@@ -34,7 +34,7 @@ curl -fL --retry 3 -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
 ```bash
 bash TensorSharp.GGML.Native/build-macos.sh
 dotnet build TensorSharp.Server.Host -c Release
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model models/embeddings/snowflake-arctic-embed-l-v2.0-q8_0.gguf \
   --embeddings --backend ggml_metal --embedding-threads 8 \
   --host 127.0.0.1 --port 5000 --no-webui
@@ -58,7 +58,7 @@ C# API 默认使用纯 C# 后端；需要原生 CPU 时须显式指定：
 ```bash
 dotnet build TensorSharp.Server.Host -c Release \
   -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
   --embeddings --backend cpu --embedding-threads 8 \
   --host 127.0.0.1 --port 5000 --no-webui

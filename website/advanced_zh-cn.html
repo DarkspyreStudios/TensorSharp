@@ -76,12 +76,12 @@ dotnet run --project TensorSharp.Server.Host -c Release --no-build -- --model ge
   <p>DeepSeek V4 的 checkpoint 中随模型附带一个 <strong>DSpark</strong> 支持模块（"Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation"）：三个 DSV4 块读取主干的 hidden states，每步提议一整<strong>块</strong> token 而不是一个；一个 Markov 头让块内每个位置以其前一个 token 为条件；一个置信度头预测每个位置被接受的概率。主干随后用一次批量前向验证整块，只保留它自己的采样器本来也会产生的前缀。</p>
   <p>草稿器是一个<strong>独立的 GGUF</strong>，用 <code>--draft-model</code> 加载 —— 主干的所有 GGUF 转换都会丢掉 <code>mtp.*</code> 张量。预构建的草稿器列在仓库的 <code>MODEL_DOWNLOADS_zh-cn.md</code> 中，也可以用 <code>eng/dsv4-dspark-to-gguf.py</code> 从上游 safetensors checkpoint 自行转换（只需下载含 <code>mtp.*</code> 的三个分片）。</p>
   <pre data-lang="bash"><code># CLI —— 所有单序列路径（--input、--multi-turn-jsonl、--interactive）都会用到
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
     --backend ggml_cuda --draft-model DSpark-drafter-Q2K-Q8-0731.gguf \
     --input prompt.txt --max-tokens 200 --temperature 0
 
 # 服务端 —— 同一个草稿器参数；写出文件即启用投机
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model DeepSeek-V4-Flash-...-00001-of-00005.gguf \
     --backend ggml_cuda --tp 4 --draft-model DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>它可运行在<strong>两个 GPU 引擎</strong>上 —— <code>--backend cuda</code>（Direct CUDA）与 <code>--backend ggml_cuda</code>（原生 ggml）；<code>ggml_vulkan</code> 与 <code>cpu</code> 对该架构没有投机路径，配置了草稿器时会打印警告。在 ggml 上草稿器就是计算图里额外的三层，其 key ring 由主干图自己提交，因此投机不产生任何主机往返。CLI 上它需要纯 argmax 采样（任何 temperature、top-k/p 或重复惩罚都会将其关闭）；服务端每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。投机<strong>只服务单序列</strong> —— 一旦有第二个请求在途，DSV4 的 per-sequence slot 会以正常 decode 速度服务这一批。</p>
   <h4>实测（4×A40，DeepSeek-V4-Flash-0731 UD-Q8_K_XL，贪心）</h4>
@@ -101,7 +101,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model DeepSeek-
 
   <h2 id="dflash">DFlash / DFlash2 / DSpark 块级投机解码（Muse-Glimmer、Qwen 3.8、Nemotron 3.5 Lightning）</h2>
   <p>Muse-Glimmer 有自己的块级草稿模型 <strong>DFlash</strong>：一个独立的 5 层 GGUF（<code>general.architecture = dflash</code>），一次前向即提出整个投机窗口。它复用主干的 token embedding 与 LM head，维护自己的滑动窗口 KV 环，并按三步驱动——把主干在 <code>dflash.target_layers</code> 处的逐层输入残差<em>编码</em>成一行宽向量，将该行<em>注入</em>为每个草稿层的 K/V，然后把 <code>[anchor, MASK × (block−1)]</code> 送过 5 个块<em>起草</em>，并用主干的 LM head 打分。随后主干用一次批量前向完成验证。</p>
-  <pre data-lang="bash"><code>dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+  <pre data-lang="bash"><code>dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --backend ggml_cuda --draft-model dflash-kquant.gguf --spec-draft 15 \
     --input prompt.txt --max-tokens 256</code></pre>
   <p>两部分都是可被 CUDA 图捕获并重放的融合原生图：<code>TSGgml_DFlashInject</code> 与 <code>TSGgml_DFlashDraftBlock</code>，后者以设备端 <code>argmax</code> 收尾，因此 202048 宽的概率块无需经 PCIe 回传主机。验证以贪心方式对齐主干，因此输出与普通贪心 decode 一致。运行期的<strong>成本调控器</strong>会把投机与普通解码逐 token 计时对比，在投机确实更慢时暂停起草——这保证投机只会更快，但也意味着它需要生成数百个 token 才能稳定，因此很短的回答可能看不到收益。CLI 上不要传任何采样参数：<code>--top-k 1</code> 不满足 <code>SamplingConfig.IsGreedy</code>，会静默关闭整条投机路径。在单张 RTX PRO 6000 Blackwell 上与 llama.cpp 自带的 DFlash 实现对比（Q8_0、贪心、60 token 提示）：<strong>50.9 tok/s，对比 llama.cpp 的 45.5 与普通解码的 35.0</strong>。完整的上下文阶梯（包括 llama.cpp 领先的区间）见仓库中的 <code>docs/models/muse-glimmer.md</code> 卡片。</p>

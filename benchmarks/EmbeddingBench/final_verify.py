@@ -19,7 +19,7 @@ import xml.etree.ElementTree as ET
 
 
 PROJECT = "InferenceWeb.Tests/InferenceWeb.Tests.csproj"
-HOST = Path("TensorSharp.Server.Host/bin")
+HOST = Path("TensorSharp.Server.Host/bin/Release/net10.0")
 TEST_BIN = Path("InferenceWeb.Tests/bin/Release/net10.0")
 TEST_RESULTS = Path("InferenceWeb.Tests/TestResults")
 UNIT_FILTER = "Category!=Bench&Requires!=Models&Requires!=Cuda&Requires!=Mlx"

@@ -232,12 +232,12 @@ window that the trunk then verifies in a single batched forward. Enable it with
 
 ```bash
 # CLI — single-shot, chat REPL, or a multi-turn JSONL run
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --n-cpu-moe 20 --spec --chat
 
 # Server
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --n-cpu-moe 20 --spec
 ```

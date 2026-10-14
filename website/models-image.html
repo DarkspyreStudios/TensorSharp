@@ -47,7 +47,7 @@ dotnet run --project TensorSharp.Server.Host -c Release --no-build -- \
 hf download Comfy-Org/Qwen-Image-2.1 vae/qwen_image_2.1_vae_bf16.safetensors --local-dir models
 hf download Qwen/Qwen3-VL-8B-Instruct-GGUF Qwen3VL-8B-Instruct-Q4_K_M.gguf mmproj-Qwen3VL-8B-Instruct-F16.gguf --local-dir models
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/qwen_image_2.1_Q4_K_M.gguf \
     --qwen-image-vae models/vae/qwen_image_2.1_vae_bf16.safetensors \
     --qwen-image-vl models/Qwen3VL-8B-Instruct-Q4_K_M.gguf \
     --qwen-image-mmproj models/mmproj-Qwen3VL-8B-Instruct-F16.gguf \

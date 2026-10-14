@@ -68,7 +68,7 @@ dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release
 
 # Web application
 dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release</code></pre>
-  <p>The CLI binary lands in <code>TensorSharp.Cli/bin/...</code> and the server in <code>TensorSharp.Server.Host/bin/...</code>. For a CUDA- or Vulkan-enabled native build, manual native builds, or MLX, see <a href="backends.html#native-build">Building the native libraries</a>.</p>
+  <p>The CLI binary lands in <code>TensorSharp.Cli/bin/Release/net10.0/...</code> and the server in <code>TensorSharp.Server.Host/bin/Release/net10.0/...</code>. For a CUDA- or Vulkan-enabled native build, manual native builds, or MLX, see <a href="backends.html#native-build">Building the native libraries</a>.</p>
 
   <h2 id="download">3 · Download a model</h2>
   <p>For the quick start, download the recommended benchmark-verified <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q8_0.gguf file (7.48 GiB)</a> from the public <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a> repository. The lower-memory <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_K_M.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q4_K_M.gguf</a> lives in the same repository, and the <a href="models-downloads.html#downloads">Models</a> page lists other options.</p>

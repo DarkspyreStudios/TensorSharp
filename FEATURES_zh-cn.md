@@ -94,11 +94,11 @@ Muse-Glimmer 有自己的块级草稿模型 **DFlash**：一个独立的 5 层 G
 
 ```bash
 # Qwen 3.6 —— 使用 -MTP- 仓库 GGUF，确保主干保留内嵌 NextN 块
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda \
     --spec --spec-draft 8 --spec-pmin 0.75
 
 # Gemma 4 —— 加载与目标匹配的独立 gemma4-assistant 草稿 GGUF
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/gemma-4-E4B-it-Q8_0.gguf --backend ggml_cuda \
     --draft-model models/gemma-4-E4B-it-assistant.Q8_0.gguf
 ```
 
@@ -420,7 +420,7 @@ Responses API 存储（`TS_RESPONSES_STORE_REDIS_URL`）用于持久化响应。
 
 ```bash
 # CLI
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_metal --skills-dir ~/skills --skill pdf --input prompt.txt
 
 # 任意聊天 API —— /v1/chat/completions、/v1/responses、/api/chat/ollama（Ollama）、/api/chat（Web UI）

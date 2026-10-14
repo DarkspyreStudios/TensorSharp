@@ -105,11 +105,11 @@ bash TensorSharp.GGML.Native/build-linux.sh
 dotnet build -c Release
 
 # 单进程内使用 2 张 GPU
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend cuda --interactive --max-tokens 20000 --tp 2
 
 # 同样的用法也适用于 GGML CUDA 后端（可加 TENSORSHARP_TP_DEVICES=0,2 指定 GPU）
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
     --backend ggml_cuda --interactive --max-tokens 20000 --tp 2
 ```
 
@@ -117,10 +117,10 @@ TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf \
 
 ```bash
 # 节点 0
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
     --tp-node-id 0 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 # 节点 1（peer 列表相同，节点 ID 不同）
-TensorSharp.Cli/bin/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
+TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli --model models/gemma-4-E4B-it-Q8_0.gguf --backend cuda --tp 2 \
     --tp-node-id 1 --tp-peers "192.168.1.10:9500,192.168.1.11:9500"
 ```
 
@@ -152,7 +152,7 @@ dotnet run --project TensorSharp.Server.Host -c Release -- --help
 ```bash
 curl --create-dirs -fL -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
   https://huggingface.co/second-state/All-MiniLM-L6-v2-Embedding-GGUF/resolve/544f204f2eaa2d71361ffc74d6df7170285b286a/all-MiniLM-L6-v2-Q8_0.gguf
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
   --model models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
   --embeddings --backend cpu --host 127.0.0.1 --port 5001 --no-webui
 ```

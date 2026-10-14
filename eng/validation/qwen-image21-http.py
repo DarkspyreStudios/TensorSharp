@@ -104,7 +104,7 @@ def main():
     args = parser.parse_args()
     if args.size < 32 or args.size % 32:
         parser.error("--size must be a positive multiple of 32")
-    executable = ROOT / "TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll"
+    executable = ROOT / "TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll"
     command = ["dotnet", str(executable), "--config", "config/qwen-image-2.1.json",
                "--host", args.host, "--port", str(args.port)]
     if args.dit:

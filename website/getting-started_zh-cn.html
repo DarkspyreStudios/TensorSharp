@@ -68,7 +68,7 @@ dotnet build TensorSharp.Cli/TensorSharp.Cli.csproj -c Release
 
 # Web 应用
 dotnet build TensorSharp.Server.Host/TensorSharp.Server.Host.csproj -c Release</code></pre>
-  <p>CLI 二进制位于 <code>TensorSharp.Cli/bin/...</code>，服务器位于 <code>TensorSharp.Server.Host/bin/...</code>。如需启用 CUDA 或 Vulkan 的原生构建、手动原生构建或 MLX，见<a href="backends_zh-cn.html#native-build">构建原生库</a>。</p>
+  <p>CLI 二进制位于 <code>TensorSharp.Cli/bin/Release/net10.0/...</code>，服务器位于 <code>TensorSharp.Server.Host/bin/Release/net10.0/...</code>。如需启用 CUDA 或 Vulkan 的原生构建、手动原生构建或 MLX，见<a href="backends_zh-cn.html#native-build">构建原生库</a>。</p>
 
   <h2 id="download">3 · 下载模型</h2>
   <p>快速上手请从公开的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF" target="_blank" rel="noopener">ggml-org/gemma-4-E4B-it-GGUF</a> 仓库下载推荐的、经基准验证的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q8_0.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q8_0.gguf（7.48 GiB）</a>。同一仓库还提供更省内存的 <a href="https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/main/gemma-4-E4B-it-Q4_K_M.gguf" target="_blank" rel="noopener">gemma-4-E4B-it-Q4_K_M.gguf</a>，更多选项见<a href="models-downloads_zh-cn.html#downloads">模型</a>页。</p>

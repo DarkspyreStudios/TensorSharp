@@ -50,7 +50,7 @@ def require_hash(path, expected):
 
 
 def managed_hashes(repo):
-    return {path.name: sha(path) for path in sorted((repo / "TensorSharp.Server.Host/bin").glob("TensorSharp.*.dll"))}
+    return {path.name: sha(path) for path in sorted((repo / "TensorSharp.Server.Host/bin/Release/net10.0").glob("TensorSharp.*.dll"))}
 
 
 def normalized_cases(report):
@@ -70,7 +70,7 @@ def main():
     output = args.output or args.base / "gemma-e4b-agent-thinking"
     tools_root = output / "harness"
     build_manifest = args.base / "results/gemma-e4b-managed-followups-build/source-manifest.json"
-    native = repo / "TensorSharp.Server.Host/bin/libGgmlOps.so"
+    native = repo / "TensorSharp.Server.Host/bin/Release/net10.0/libGgmlOps.so"
     for name, expected in BASELINE_HASHES.items():
         require_hash(baseline / name, expected)
     require_hash(build_manifest, SOURCE_MANIFEST_HASH)
@@ -91,7 +91,7 @@ def main():
     for suite in profile["suites"]:
         suite[1] = str(tools_root / "eng/validation/validate-release-agent-workflows.py")
         suite.append("--thinking")
-    artifact_store = repo / "TensorSharp.Server.Host/bin/code-artifacts"
+    artifact_store = repo / "TensorSharp.Server.Host/bin/Release/net10.0/code-artifacts"
     plan = {"profile": profile, "baseline_hashes": BASELINE_HASHES, "source_manifest_sha256": SOURCE_MANIFEST_HASH,
             "harness_hashes": HARNESS_HASHES, "expected_managed_assemblies": original["managed_assemblies"],
             "expected_native_sha256": EXPECTED_NATIVE, "output": str(output),

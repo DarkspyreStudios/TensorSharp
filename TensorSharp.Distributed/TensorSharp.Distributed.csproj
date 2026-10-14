@@ -3,8 +3,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <OutputType>Library</OutputType>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Nullable>disable</Nullable>
     <Description>Peer-to-peer TCP distributed tensor parallelism for TensorSharp, enabling multi-node inference without external coordination services.</Description>

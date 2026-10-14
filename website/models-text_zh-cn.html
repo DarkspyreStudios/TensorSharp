@@ -54,7 +54,7 @@ python3 -m venv /tmp/dsv41-tools
     --revision dba1be0a40aa45a94ad051997016db3960a90277
 
 # 八卡服务 —— 这里的 --tp 是按层切分，不是张量并行
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/deepseek41-q2/DeepSeek-V4.1-Flash-Q2_K-00001-of-00007.gguf \
     --mmproj models/deepseek41-q2/deepseek41.vision.gguf \
     --backend ggml_cuda --tp 8 --port 5000</code></pre>
@@ -70,18 +70,18 @@ hf download unsloth/DeepSeek-V4-Flash-0731-GGUF --include "UD-Q8_K_XL/*" --local
 hf download bleysg/DeepSeek-V4-Flash-DSpark-drafter-GGUF DSpark-drafter-Q2K-Q8-0731.gguf --local-dir models
 
 # 普通 decode —— --model 指向第一个分片
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # DSpark 块级投机解码（decode 约 1.3-1.4×；需要贪心采样）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf \
     --input prompt.txt --max-tokens 200 --temperature 0
 
 # 通过 HTTP 服务，4 张 GPU，开启投机
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf \
     --backend ggml_cuda --tp 4 --draft-model models/DSpark-drafter-Q2K-Q8-0731.gguf</code></pre>
   <p>DSpark 每步起草一整<em>块</em> token，主干用一次批量前向验证整块，因此贪心输出保持不变。在 CLI 上它需要纯 argmax 采样（任何 temperature、top-k/p 或惩罚项都会将其关闭）；在服务端每一行验证都用该请求自己的采样器，因此可与任意采样设置组合。详见 <a href="advanced_zh-cn.html#dspark">DSpark 投机解码</a>。</p>
@@ -92,22 +92,22 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 hf download unsloth/GLM-5.2-GGUF --include "UD-IQ2_XXS/*" --local-dir models
 
 # 按层切分到所有可见 GPU —— --model 指向第一个分片
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # 交互式 + 思考模式
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --interactive --think
 
 # 显存不够？把前 N 层的路由专家留在系统内存里
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda --n-cpu-moe 30 --input prompt.txt --max-tokens 200
 
 # 以 HTTP 服务方式运行
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-IQ2_XXS/GLM-5.2-UD-IQ2_XXS-00001-of-00006.gguf \
     --backend ggml_cuda</code></pre>
   <p>自报的 1M 上下文是<em>上限</em>而非承诺：1M token 的 MLA 缓存约 93 GiB，所以权重落盘之后加载器会去问各设备实际还剩多少显存，按「缓存加一整个 prefill 计算图」能装下的大小定上下文，并把选中的值打印出来。在 3× RTX PRO 6000 上用 GLM-5.2 实测，按层切分是 342,272 token，<code>--n-cpu-moe 30</code> 是 646,400，<code>--tp 3</code> 是 91,136（每个 rank 都要各自持有一份全长缓存）。想把某个长度变成硬性要求，就设 <code>MAX_CONTEXT</code>——放得下就照办，放不下会带着数字直接报错。</p>
@@ -117,12 +117,12 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 hf download unsloth/GLM-5.3-GGUF --include "UD-Q2_K_XL/*" --local-dir models
 
 # 按层切分到所有可见 GPU —— --model 指向第一个分片
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # NextN 推测解码 —— 只在默认的按层切分下生效，所以不要传 --tp
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-UD-Q2_K_XL-00001-of-00007.gguf \
     --backend ggml_cuda --spec</code></pre>
   <p>实测：8× A40 46 GB（无 NVLink）、GLM-5.3 UD-Q2_K_XL、10,531 token 提示、输出 300 token、3 次取中位数、整层放置：prefill <strong>251.6 t/s</strong>、decode <strong>20.48 t/s</strong>、加载 <strong>264 秒</strong>；同一台机器上 llama.cpp 是 decode 20.28 t/s、加载 753 秒——decode 打平，而加载这份 236.4 GiB 的检查点<strong>快 2.9 倍</strong>。真正的差距在首 token 时延：41.9 秒对 29.0 秒，约<strong>慢 1.4 倍</strong>（那一格 llama.cpp 没有记录 prompt token 数，因此不给出它的 prefill tok/s）。<code>--tp N</code> 在这里可以传，但只支持本地单进程，而且从未在 GLM-5.3 上跑过：每个 rank 都要持有一份完整复制的 KV 缓存，唯一有记录的算术是一次装不下——<code>--tp 8</code> 每个 rank 需要 41.7 GiB，而卡只有 46 GB。<code>--tp-node-id</code> / <code>--tp-peers</code> 则对整个 GLM 家族在建模型之前就直接拒绝。两个版本共用同一份<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/glm_zh-cn.md">GLM 模型卡</a>。</p>
@@ -135,23 +135,23 @@ hf download unsloth/GLM-5.3-Flash-GGUF mmproj-BF16.gguf --local-dir models
 
 # 按层切分到所有可见 GPU —— --model 指向第一个分片
 # （N 取决于你下载的那个量化目录里有多少个分片）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200
 
 # 图像理解 —— GLM-OCR ViT 以 mmproj-BF16.gguf 形式发布
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --image photo.png --input question.txt \
     --max-tokens 300 --backend ggml_cuda
 
 # 显存不够？把前 N 层的路由专家留在系统内存里
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --backend ggml_cuda --n-cpu-moe 10 --input prompt.txt --max-tokens 200
 
 # 以 HTTP 服务方式运行
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/GLM-5.3-Flash-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --backend ggml_cuda</code></pre>
   <p>目前能跑的：不传 <code>--tp</code> 时按层切分到所有可见 GPU、<code>--cpu-moe</code> / <code>--n-cpu-moe N</code> 把专家放在主机内存、以服务形式运行时的原生按序列槽位，以及视觉——<code>--image</code>、多图提示与多轮图像会话，都走 GLM-OCR ViT。在 GGML GPU 后端上，传入 <code>--tp N</code> 与 GLM-5.2 一样选择仅支持本地单进程的原生张量并行：KDA / MLA head 与路由专家隐藏行切分，KDA 递归状态按 rank 持有。完整切分、每张本地 GPU 一个 rank、不启用 CPU MoE 或 tracing、且具备原生超连接内核时，按 rank 分段计算图会并发提交：路由 MoE 局部输出先归约，随后每个 rank 在本地计算并加入其复制的共享专家，再进入 Sinkhorn 超连接；超连接、池化 indexer、router、norm、稠密层与 embedding 保持不切分并按 rank 执行，output norm / LM head 留在 rank 0。CPU MoE、tracing、部分切分、超额 rank 或缺少原生超连接内核时选择组合调度器回退，其中共享专家只在 rank 0 运行一次；<code>TS_GLM_TP_FUSED=0</code> 可强制该诊断回退。GLM-5.2 与 GLM-5.3-Flash 的原生 TP 路径都只支持本地单进程，不支持分布式或跨节点。<strong>暂不支持</strong>：NextN/MTP 推测解码。</p>
@@ -162,13 +162,13 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.5-9B-GGUF Qwen3.5-9B-UD-Q4_K_XL.gguf --local-dir models
 hf download unsloth/Qwen3.5-9B-GGUF mmproj-F16.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf \
     --image photo.png --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.5-9B-UD-Q4_K_XL.gguf --mmproj models/mmproj-F16.gguf --backend ggml_cuda</code></pre>
   <p>Qwen 3.6 NextN 必须从保留该块的 <code>-MTP-</code> 仓库下载，并在<em>服务端</em>加入 <code>--spec</code> —— 该草稿头内嵌在主干 checkpoint 里，加载它要把额外权重调入显存，因此需要显式开启；基础仓库 GGUF 会剥离 NextN 块并回退到标准解码：</p>
   <pre data-lang="bash"><code>hf download unsloth/Qwen3.6-35B-A3B-MTP-GGUF Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --backend ggml_cuda --spec</code></pre>
 
   <h3 id="qwen4exp">Qwen 3.8 Flash Next（混合 MoE，文本 + 图像、思考；无法往返工具调用）</h3>
   <p>一个混合专家模型，GGUF 架构 id 为 <code>qwen4exp</code>：GatedDeltaNet 递归层与全注意力层交错（其中一部分还挂在 Qwen 稀疏注意力的索引器之后），一个 PLE n-gram 嵌入块，×4 的超连接流，以及 512 专家的 MoE。48 层，隐藏维度 2560，24 个 query 头 / 2 个 KV 头、head_dim 256，词表 248,320，每个 token 从 512 个专家里用 10 个，48 层中有 36 层带 GDN，PLE 在第 1 层。在各 ggml 后端上，整个 token（几乎）作为<strong>一张图</strong>跑完——嵌入、图内 PLE、全部 48 层、最后的混合器与 LM 头——并从按形状索引的已捕获图缓存中回放。视觉走 Qwen3.5-VL 塔，使用 (T,H,W) IMRoPE 位置，因此多图提示与多轮图像会话都可用；只要新提示恰好是缓存前缀的延长，跨轮的 KV 就会被复用（GDN 递归无法回退）。并发请求由按序列的状态持有者承载——每个请求拥有自己的注意力 KV 与索引器缓存、自己的 GDN 与 PLE 状态——因此请求之间的切换只是换一个引用。思考可用且始终开启。</p>
@@ -179,18 +179,18 @@ hf download unsloth/Qwen3.8-Flash-Next-GGUF mmproj-BF16.gguf --local-dir models
 
 # 纯文本 —— --model 指向第一个分片
 # （N 取决于你下载的那个量化目录里有多少个分片）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 300
 
 # 图像理解
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --image photo.png --input question.txt \
     --max-tokens 300 --backend ggml_cuda
 
 # 两张 GPU：这里的 --tp N 走的是按层切分，不是张量并行
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll \
     --model models/UD-Q2_K_XL/Qwen3.8-Flash-Next-UD-Q2_K_XL-00001-of-0000N.gguf \
     --mmproj models/mmproj-BF16.gguf --backend ggml_cuda --tp 2</code></pre>
   <p><code>qwen4exp</code> 上的 <code>--tp N</code> 是<strong>按层切分</strong>：每张 GPU 持有一段连续的完整层。它不切分任何权重，所以并不是张量并行——而且这也是 llama.cpp 为该架构提供的同一种（且唯一的）多卡模式，它的 <code>-sm row</code> 会直接拒绝加载这个模型。请把它当作容量特性而非速度特性。在 2× A100-80GB、Qwen3.8-Flash-Next-UD-Q2_K_XL（73.4 GiB）上：单卡与双卡的贪心输出<strong>逐字节相同</strong>（SHA-256 一致）；显存是 24.2 GB + 26.2 GB，而不是整个模型压在一张卡上；吞吐没有变化——两种跑法都是 prefill 约 1520–1550 t/s、decode 约 56 t/s。作为对照，llama.cpp 在同一台机器上单卡 pp1536 1094 / tg128 61.2，双卡 <code>-sm layer</code> 1200 / 61.5，同样是 prefill 涨约 10%、decode 不涨。启动时会打印实际走的是哪种模式，以及每张卡分到的层数与字节数；<code>TS_Q4E_LAYER_SPLIT=20,28</code> 可以用显式的每卡层数覆盖自动均衡（相当于 llama.cpp 的 <code>--tensor-split</code>），遇到无法满足的值会直接抛错而不是悄悄忽略——这很有用，因为自动均衡只按权重定价，看不到稍后才加载、并且会落在 GPU 0 上的视觉塔。</p>
@@ -199,34 +199,34 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   <p>两个名字相同但架构不同的 <code>Q1_0</code> 文件：<code>Bonsai-8B-Q1_0.gguf</code> 是稠密 Qwen 3 解码器（<code>qwen3</code>），<code>Bonsai-27B-Q1_0.gguf</code> 是带 GatedDeltaNet 层的稠密 Qwen 3.5 混合架构（<code>qwen35</code>）。它们的 GGUF 元数据里既没有发布方 URL 也没有 license，因此 TensorSharp 只钉住确切字节数与 SHA-256，而不替它们编造——没有可 <code>hf download</code> 的东西。导入前请确认你有权使用该文件；钉住的取值见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/bonsai_zh-cn.md" target="_blank" rel="noopener">Bonsai 卡片</a>。</p>
   <pre data-lang="bash"><code># Apple Silicon 上的 Bonsai 8B
 MAX_CONTEXT=16384 KV_CACHE_DTYPE=f16 \
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model /path/to/Bonsai-8B-Q1_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model /path/to/Bonsai-8B-Q1_0.gguf \
     --backend ggml_metal --input prompt.txt --max-tokens 256 --temperature 0.5 --top-k 20 --top-p 0.85
 
 # Bonsai 27B；--think 可显示它的推理流
 MAX_CONTEXT=32768 KV_CACHE_DTYPE=f16 \
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model /path/to/Bonsai-27B-Q1_0.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model /path/to/Bonsai-27B-Q1_0.gguf \
     --backend ggml_metal --input prompt.txt --max-tokens 256 --think</code></pre>
   <p><code>Q1_0</code> 是 GGML 张量类型 41——每 128 个值一块，存一个 F16 scale 加 128 个 1 bit 符号位，即每权重 1.125 bit——GGUF 读取器、原生绑定与托管回退路径都识别它。在 M5 Pro 上以同一文件与 llama.cpp 成对运行：8B <strong>pp128 为 1.05×</strong>、tg128 持平；27B 相对热漂移包夹后的 llama.cpp 基线为 <strong>pp512 1.03×</strong>、<strong>pp2048 1.04×</strong>、<strong>tg128 1.15×</strong>。TensorAgent 在 iOS 上也把两者列为仅导入条目。</p>
 
   <h3 id="gptoss">GPT OSS（文本、始终思考、工具）</h3>
   <pre data-lang="bash"><code>hf download ggml-org/gpt-oss-20b-GGUF gpt-oss-20b-MXFP4.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/gpt-oss-20b-MXFP4.gguf --input prompt.txt --max-tokens 400 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/gpt-oss-20b-MXFP4.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/gpt-oss-20b-MXFP4.gguf --input prompt.txt --max-tokens 400 --backend ggml_cuda
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/gpt-oss-20b-MXFP4.gguf --backend ggml_cuda</code></pre>
 
   <h3 id="nemotron">Nemotron-H（文本；Omni 分发支持图像）</h3>
   <pre data-lang="bash"><code>hf download bartowski/nvidia_Nemotron-H-8B-Reasoning-128K-GGUF nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --input prompt.txt \
     --think --max-tokens 400 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/nvidia_Nemotron-H-8B-Reasoning-128K-Q4_K_M.gguf --backend ggml_cuda</code></pre>
   <p>图像输入请改用上表 Nemotron 3 Nano Omni GGUF 与 <code>mmproj-BF16.gguf</code>。当前 GGUF 分发未附真实音频推理所需的 Parakeet audio mmproj。</p>
   <p><strong>Nemotron 3.5 Lightning 30B-A3B</strong> 走同一条 <code>nemotron_h_moe</code> 路径——23 层 Mamba-2 + 23 层 MoE + 6 层注意力，例如 <a href="https://huggingface.co/unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF" target="_blank" rel="noopener">unsloth/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-GGUF</a> 中的 <code>NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MXFP4_MOE.gguf</code>（约 17 GB）。它是唯一可挂块级草稿器的 Nemotron：NVIDIA 的 DSpark 模块以 <code>dflash</code> 架构 GGUF 导出，用 <code>--draft-model</code> 加载，使它成为第一个运行块级投机解码的递归（Mamba-2）主干。→ <a href="advanced_zh-cn.html#dflash">块级起草的原理</a></p>
 
   <h3 id="hunyuan-dense">Hunyuan Dense（仅文本，单设备）</h3>
   <p>腾讯的稠密 Hunyuan 解码器——即 <code>general.architecture</code> 为 <code>hunyuan-dense</code> 的检查点，例如 Hy-MT2 系列。在该架构注册之前，这些官方文件会在加载阶段失败：加载器遇到未知架构选择失败关闭，而不是猜一套相近的图。文本计算图与 llama.cpp 的 <code>hunyuan-vl</code> 文本塔一致——RMSNorm、融合 QKV、NeoX RoPE，然后是 per-head Q/K RMSNorm、GQA 与 SwiGLU。<strong>QK-norm 在 RoPE 之后</strong>，与 Qwen 3.5 相反；搞反了不会加载失败，只会产出流畅但错误的文本，所以这两个 norm 是必需的，缺失即抛异常。</p>
   <pre data-lang="bash"><code># 任何 general.architecture 为 hunyuan-dense 的 GGUF 都可以，选择依据不是文件名
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll \
     --model models/&lt;your-hunyuan-dense&gt;.gguf \
     --backend ggml_cuda --input prompt.txt --max-tokens 200</code></pre>
   <p>第一版：仅文本、单设备、走通用 per-op 路径，没有思考通道也没有工具解析器。多余的 GPU 会闲置，启动时会明说，而不用去猜。</p>
@@ -235,32 +235,32 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll \
   <pre data-lang="bash"><code>hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf --local-dir models
 hf download bartowski/mistralai_Mistral-Small-3.1-24B-Instruct-2503-GGUF mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
     --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf \
     --image photo.png --max-tokens 300 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/mistralai_Mistral-Small-3.1-24B-Instruct-2503-Q4_K_M.gguf \
     --mmproj models/mmproj-mistralai_Mistral-Small-3.1-24B-Instruct-2503-f16.gguf --backend ggml_cuda</code></pre>
 
   <h3 id="muse-glimmer">Muse-Glimmer（文本 + 图像、思维链、工具、DFlash 起草）</h3>
   <pre data-lang="bash"><code>hf download unsloth/Muse-Glimmer-30B-GGUF Muse-Glimmer-30B-UD-IQ2_XXS.gguf --local-dir models
 hf download unsloth/Muse-Glimmer-30B-GGUF mmproj-Muse-Glimmer-30B-Q8_0.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --input prompt.txt --max-tokens 256 --backend ggml_cuda
 # 图像理解
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --mmproj models/mmproj-Muse-Glimmer-30B-Q8_0.gguf --image photo.png --input question.txt \
     --max-tokens 300 --backend ggml_cuda
 # DFlash 投机解码（草稿 GGUF 可从同仓库下载）
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/Muse-Glimmer-30B-UD-IQ2_XXS.gguf \
     --draft-model models/dflash-kquant.gguf --spec-draft 15 --input prompt.txt --backend ggml_cuda</code></pre>
 
   <h3 id="diffusiongemma">DiffusionGemma（分块文本扩散）</h3>
   <pre data-lang="bash"><code>hf download unsloth/diffusiongemma-26B-A4B-it-GGUF diffusiongemma-26B-A4B-it-Q4_K_M.gguf --local-dir models
 
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
+dotnet TensorSharp.Cli/bin/Release/net10.0/TensorSharp.Cli.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --input prompt.txt \
     --max-tokens 256 --diffusion-steps 48 --diffusion-seed 0 --backend ggml_cuda
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda</code></pre>
+dotnet TensorSharp.Server.Host/bin/Release/net10.0/TensorSharp.Server.Host.dll --model models/diffusiongemma-26B-A4B-it-Q4_K_M.gguf --backend ggml_cuda</code></pre>
 
   <h2 id="multimodal">多模态支持</h2>
   <div class="table-scroll">

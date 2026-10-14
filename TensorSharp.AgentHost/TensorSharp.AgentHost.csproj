@@ -1,8 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <OutputPath>bin\</OutputPath>
     <IsPackable>true</IsPackable>
     <Description>Agentic layer for TensorSharp: Agent Skills (SKILL.md bundles, progressive disclosure, script execution) and code execution — a sandboxed shell tool plus a deterministic apply_patch editor, in the style of Codex and Claude Code — with OS sandboxing, per-session workspaces and dependency installation. Built on TensorSharp.Runtime.</Description>
     <PackageTags>$(TensorSharpPackageTags);agent;skills;code-execution;shell;apply-patch;sandbox;tools</PackageTags>

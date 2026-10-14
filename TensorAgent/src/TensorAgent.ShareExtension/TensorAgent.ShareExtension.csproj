@@ -80,8 +80,11 @@
 
   <ItemGroup>
     <!-- The envelope format and text composition contract shared with the app. No
-         transitive dependencies at all, by design. -->
-    <ProjectReference Include="../TensorAgent.Sharing/TensorAgent.Sharing.csproj" />
+         transitive dependencies at all, by design. The app embeds this extension with
+         CodesignProvision as a global property; removing it here keeps TensorAgent.Sharing
+         at the one build configuration the app also builds, so the two never write the same
+         output folder at once. -->
+    <ProjectReference Include="../TensorAgent.Sharing/TensorAgent.Sharing.csproj" GlobalPropertiesToRemove="CodesignProvision" />
     <TrimmerRootAssembly Include="TensorAgent.Sharing" />
   </ItemGroup>
 

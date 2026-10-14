@@ -4,8 +4,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-	  <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-	  <OutputPath>bin\</OutputPath>
 	  <IsPackable>true</IsPackable>
 	  <Description>ASP.NET Core server host package for TensorSharp with embedding and chat inference, web UI, and Ollama/OpenAI-compatible APIs.</Description>
 	  <PackageTags>$(TensorSharpPackageTags);server;host;aspnetcore;openai;ollama;embeddings;web</PackageTags>
