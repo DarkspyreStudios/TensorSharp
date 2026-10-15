@@ -353,6 +353,8 @@ namespace TensorSharp.Chat
                     supportsAudio = videoModel.SupportsAudio,
                     supportsImageConditioning = videoModel.SupportsImageConditioning,
                     supportsEndImageConditioning = videoModel.SupportsEndImageConditioning,
+                    supportsKeyframeConditioning = videoModel.SupportsKeyframeConditioning,
+                    defaultPreviewFrames = videoModel.DefaultPreviewFrames,
                     supportsReferenceConditioning = videoModel.SupportsReferenceConditioning,
                     maxReferenceImages = videoModel.MaxReferenceImages,
                 };
@@ -2000,6 +2002,7 @@ namespace TensorSharp.Chat
             if (string.IsNullOrWhiteSpace(prompt))
                 throw new WebUiRequestRejectedException(400, new { error = "prompt is required." });
             var p = VideoGenerationParamsParser.Parse(body, _options, out string imgError);
+            imgError ??= VideoImageConditionsError(videoModel, p);
             if (imgError != null)
                 throw new WebUiRequestRejectedException(400, new { error = imgError });
 
@@ -2050,6 +2053,9 @@ namespace TensorSharp.Chat
         {
             if (parameters == null) throw new ArgumentNullException(nameof(parameters));
             var videoModel = RequireVideoModel();
+            string conditioningError = VideoImageConditionsError(videoModel, parameters);
+            if (conditioningError != null)
+                throw new WebUiRequestRejectedException(400, new { error = conditioningError });
             if (!_uploads.HasQuotaHeadroom(out string quotaError))
                 throw new WebUiRequestRejectedException(507, new { error = quotaError });
             return GenerateVideoCoreAsync(videoModel, prompt ?? "", parameters);
@@ -2071,6 +2077,7 @@ namespace TensorSharp.Chat
                     lock (_videoGenLock)
                     {
                         var video = videoModel.GenerateVideo(prompt, p);
+                        p.CancellationToken.ThrowIfCancellationRequested();
                         string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
                             outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
                         return (video, codec, audioMuxed);
@@ -2099,11 +2106,23 @@ namespace TensorSharp.Chat
         private static bool IsVideoRequestRejection(Exception ex) =>
             ex is ArgumentException or InvalidOperationException or NotSupportedException;
 
+        private static string VideoImageConditionsError(
+            TensorSharp.Models.Video.IVideoGenerationModel model,
+            TensorSharp.Models.Video.VideoGenerationParams parameters)
+        {
+            if (parameters.ImageConditions is not { Count: > 0 }) return null;
+            if (!model.SupportsKeyframeConditioning)
+                return "The loaded video model does not accept image keyframes at arbitrary frame positions.";
+            if (model.MaxReferenceImages > 0 && parameters.ImageConditions.Count > model.MaxReferenceImages)
+                return $"The loaded video model accepts up to {model.MaxReferenceImages} image keyframes.";
+            return null;
+        }
+
         // Models that generate audio jointly with the video hand back a track alongside
         // the frames. It is always written as a sidecar WAV, which writes everywhere and
         // which a client can play or mux as it likes. Where the platform's encoder can
         // also put the track inside the MP4 (AVAssetWriter on Apple) it does that as well,
-        // and the reply says so; the desktop encoders write the frames alone.
+        // and the reply says so. Desktop FFmpeg also muxes the generated track.
         private string SaveAudioSidecar(TensorSharp.Models.Video.GeneratedVideoAudio audio, string videoName)
         {
             if (audio is not { ChannelCount: > 0, SampleCount: > 0 }) return null;
@@ -2143,6 +2162,8 @@ namespace TensorSharp.Chat
                 p = VideoGenerationParamsParser.Parse(body, _options, out string imgError);
                 if (imgError != null)
                     parseError = imgError;
+                else if (VideoImageConditionsError(videoModel, p) is string conditioningError)
+                    parseError = conditioningError;
                 else if (string.IsNullOrWhiteSpace(prompt))
                     parseError = "prompt is required.";
             }
@@ -2183,6 +2204,7 @@ namespace TensorSharp.Chat
                     {
                         // A request stopped while it waited behind another must not start.
                         ct.ThrowIfCancellationRequested();
+                        p.CancellationToken = ct;
                         int generatingThread = Environment.CurrentManagedThreadId;
                         p.OnStep = (step, total) =>
                         {
@@ -2206,6 +2228,7 @@ namespace TensorSharp.Chat
                             });
                         };
                         var video = videoModel.GenerateVideo(prompt, p);
+                        ct.ThrowIfCancellationRequested();
                         string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
                             outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
                         _uploads.RecordFile(outPath);

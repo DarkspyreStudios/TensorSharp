@@ -29,6 +29,7 @@
     <ReferenceNativeSymbol Include="TSGgml_AddIdF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AddmmBatchF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AddmmF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_AddmmF32PreciseMetal" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AddmmQuantBatchF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AddmmQuantF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_AlignedAlloc" SymbolType="Function" />
@@ -39,6 +40,7 @@
     <ReferenceNativeSymbol Include="TSGgml_BonsaiRegisterWeight" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_BonsaiUnregisterWeight" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_CanInitializeBackend" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_ClampF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearHostBufferCache" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_ClearOffloadableState" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Conv2dF32" SymbolType="Function" />
@@ -63,8 +65,15 @@
     <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionInfo" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv41VisionLoad" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_EmbeddingEncode" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_EmbeddingEncodeInputs" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_EmbeddingFree" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_EmbeddingLoad" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_EmbeddingTokenRows" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Gemma4AudioAttentionF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Gemma4AudioDepthwiseF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Gemma4AudioConformerBlockF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Gemma4AudioConformerStackF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Gemma4AudioSscpF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4CtxSize" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4DsparkBlockSize" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_Dsv4DsparkDraft" SymbolType="Function" />
@@ -95,6 +104,9 @@
     <ReferenceNativeSymbol Include="TSGgml_FusedFFNActProjectQuantF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FusedFFNSwiGLUQuantF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FusedGemma4VisionBlockF32" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_Gemma4VisionStackF32PreciseCuda" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_FusedGemma4VisionBlockF32PreciseMetal" SymbolType="Function" />
+    <ReferenceNativeSymbol Include="TSGgml_FusedGemma4VisionBlockF32PreciseCuda" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FusedMatMulQuantAddF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FusedOutProjFFNQuantF32" SymbolType="Function" />
     <ReferenceNativeSymbol Include="TSGgml_FusedOutProjNormRouterQuantF32" SymbolType="Function" />
