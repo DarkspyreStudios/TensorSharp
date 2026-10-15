@@ -35,6 +35,30 @@
     "reasons": []
   },
   {
+    "name": "grill-me",
+    "ok": true,
+    "kind": "instructions only",
+    "scripts": 0,
+    "reasons": [],
+    "validation": "portable instructions and bundled references; live model quality is recorded separately"
+  },
+  {
+    "name": "grill-with-docs",
+    "ok": true,
+    "kind": "instructions only",
+    "scripts": 0,
+    "reasons": [],
+    "validation": "portable instructions and bundled references; live model quality is recorded separately"
+  },
+  {
+    "name": "handoff",
+    "ok": true,
+    "kind": "instructions only",
+    "scripts": 0,
+    "reasons": [],
+    "validation": "portable instructions and bundled references; live model quality is recorded separately"
+  },
+  {
     "name": "internal-comms",
     "ok": true,
     "kind": "instructions only",
@@ -70,6 +94,14 @@
     "kind": "scripts",
     "scripts": 4,
     "reasons": []
+  },
+  {
+    "name": "tdd",
+    "ok": true,
+    "kind": "instructions only",
+    "scripts": 0,
+    "reasons": [],
+    "validation": "portable instructions and bundled references; live model quality is recorded separately"
   },
   {
     "name": "theme-factory",

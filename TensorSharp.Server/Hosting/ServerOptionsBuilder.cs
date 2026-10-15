@@ -76,8 +76,6 @@ public static class ServerOptionsBuilder
         int embeddingContextSize = ReadEmbeddingIntOption(args, "--embedding-context-size");
         if (embeddingsEnabled && string.IsNullOrWhiteSpace(startupModelPath))
             throw new ArgumentException("--embeddings requires --model.");
-        if (embeddingsEnabled && startupMmProjPath != null)
-            throw new ArgumentException("--embeddings does not support --mmproj.");
         if (!embeddingsEnabled && (embeddingThreads > 0 || embeddingContextSize > 0))
             throw new ArgumentException("--embedding-threads and --embedding-context-size require --embeddings.");
 
@@ -91,7 +89,7 @@ public static class ServerOptionsBuilder
         var supportedBackends = embeddingsEnabled && BackendCatalog.Canonicalize(requestedBackend) == "cpu"
             ? new[] { new BackendOption("cpu", "CPU (Pure C#)") }
             : BackendCatalogProbes.GetSupportedBackends()
-                .Where(backend => !embeddingsEnabled || backend.Value is "cpu" or "ggml_cpu" or "ggml_metal" or "ggml_cuda")
+                .Where(backend => !embeddingsEnabled || backend.Value is "cpu" or "ggml_cpu" or "ggml_metal" or "ggml_cuda" or "cuda" or "mlx")
                 .ToArray();
         string defaultBackend = BackendCatalog.ResolveDefaultBackend(requestedBackend, supportedBackends);
 

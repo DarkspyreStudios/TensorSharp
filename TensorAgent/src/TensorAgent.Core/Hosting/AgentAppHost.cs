@@ -279,7 +279,7 @@ public sealed class AgentAppHost : IDisposable
         Options = BuildOptions(paths, settings, backends);
         // The startup selection's card values, so the first message of a launch is
         // sampled the same way the tenth is (UseModel repoints these on every switch).
-        if (settings.SelectedModelId is { Length: > 0 } startupId && ModelCatalog.Find(startupId) is { } startupModel)
+        if (settings.SelectedModelId is { Length: > 0 } startupId && ModelCatalog.Find(startupId) is { IsAvailable: true } startupModel)
             Options.RepointSamplingDefaults(SamplingDefaultsFor(startupModel));
 
         // A diffusion entry is four files, not one: the DiT plus the companions the
@@ -287,7 +287,8 @@ public sealed class AgentAppHost : IDisposable
         // here — before anything can ask for a load — is what makes the catalog's file
         // list the whole story rather than a naming convention. See DiffusionCompanions.
         CatalogModel? selected = settings.SelectedModelId is { Length: > 0 } selectedId
-            ? ModelCatalog.Find(selectedId)
+            && ModelCatalog.Find(selectedId) is { IsAvailable: true } availableSelection
+            ? availableSelection
             : null;
         PublishCompanions(selected);
 
@@ -1983,6 +1984,12 @@ public sealed class AgentAppHost : IDisposable
             return;
         }
 
+        if (!model.IsAvailable)
+        {
+            SetModelLoad(ModelLoadState.Failed, model.UnavailableReason);
+            return;
+        }
+
         // A tier the picker would not offer this device is not one to load behind the
         // user's back either. Find() searches the WHOLE catalog while the Models list is
         // built from ForDevice(), so an entry that was offered when it was chosen -- or
@@ -2667,6 +2674,9 @@ public sealed class AgentAppHost : IDisposable
     public string UseModel(CatalogModel model, bool warmAfterwards)
     {
         ArgumentNullException.ThrowIfNull(model);
+        // Refuse before touching the selected id, current model or warm-up. An
+        // experimental catalog listing need not imply a generation implementation.
+        if (!model.IsAvailable) throw new NotSupportedException(model.UnavailableReason);
 
         // Whatever was being warmed belongs to weights that are about to be unmapped.
         // First, because the warm-up submits graphs and this is about to free the

@@ -55,7 +55,7 @@ namespace TensorSharp.Cli
                 // mean the same thing on both hosts, instead of being silently dropped.
                 args = CliUsage.NormalizeOptionSpellings(args);
             }
-            catch (Exception ex) when (ex is ArgumentException or FileNotFoundException)
+            catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or NotSupportedException)
             {
                 Console.Error.WriteLine("Configuration error: " + ex.Message);
                 Environment.ExitCode = HostExitCodes.ConfigurationError;
@@ -2292,15 +2292,14 @@ namespace TensorSharp.Cli
             }
             else
             {
-                codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(outputPath, video.Frames, video.Fps);
+                codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(outputPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
+                if (audioMuxed) Console.WriteLine("  Generated soundtrack included in the MP4.");
             }
             Console.WriteLine($"Saved {video.Frames[0].Width}x{video.Frames[0].Height} x {video.Frames.Length} frames " +
                 $"({codec}, {video.Fps} fps, seed {video.Seed}) to {outputPath} in {sw.Elapsed.TotalSeconds:F1}s");
 
-            // Models that generate audio jointly return a track alongside the frames. It is
-            // written as a sidecar WAV rather than muxed: muxing needs an encoder we cannot
-            // assume is installed, and a sidecar is trivially muxable later with
-            //   ffmpeg -i out.mp4 -i out.wav -c:v copy -c:a aac out_av.mp4
+            // Keep the original PCM alongside the encoded MP4, including when
+            // the platform's video writer cannot mux the soundtrack.
             if (video.Audio is { ChannelCount: > 0, SampleCount: > 0 })
             {
                 string wavPath = Path.ChangeExtension(outputPath, ".wav");

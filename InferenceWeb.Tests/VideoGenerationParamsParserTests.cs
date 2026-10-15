@@ -114,8 +114,74 @@ public class VideoGenerationParamsParserTests : IDisposable
         Assert.Null(parsed.ImageBytes);
     }
 
+    [Theory]
+    [InlineData(0L)]
+    [InlineData(42L)]
+    [InlineData(-1L)]
+    public void Parse_ExplicitSeedIncludesZeroForReproducibleGeneration(long seed)
+    {
+        using var doc = JsonDocument.Parse($$"""{"seed":{{seed}}}""");
+        var parsed = VideoGenerationParamsParser.Parse(doc.RootElement, BuildOptions(17, 24), out string error);
+        Assert.Null(error);
+        Assert.Equal(seed, parsed.Seed);
+    }
+
     // ---- model-agnostic fields added alongside the second video model ----------
     // Every one is accepted in camelCase (web UI) and snake_case (OpenAI-shaped route).
+
+    [Theory]
+    [InlineData("imageConditions", "imagePath", "frameIndex")]
+    [InlineData("image_conditions", "image_path", "frame_index")]
+    [InlineData("image_conditions", "image_path", "frame_idx")]
+    public void Parse_ImageKeyframesResolveUploadsAndRetainExactPositionsAndStrength(
+        string list, string image, string frame)
+    {
+        var options = BuildOptions(17, 24);
+        WriteUpload(options, "first.png");
+        WriteUpload(options, "last.png");
+        using var doc = JsonDocument.Parse($$"""{"{{list}}":[{"{{image}}":"first.png","{{frame}}":5,"strength":0.65},{"{{image}}":"last.png","{{frame}}":-1}]}""");
+        var parsed = VideoGenerationParamsParser.Parse(doc.RootElement, options, out string error);
+        Assert.Null(error);
+        Assert.Equal(new[] { 5, -1 }, parsed.ImageConditions.Select(c => c.FrameIndex));
+        Assert.Equal(.65f, parsed.ImageConditions[0].Strength);
+        Assert.Equal(1f, parsed.ImageConditions[1].Strength);
+        Assert.All(parsed.ImageConditions, c => Assert.True(File.Exists(c.ImagePath)));
+        Assert.Null(parsed.ImageBytes);
+    }
+
+    [Fact]
+    public void Parse_ImageKeyframesAcceptInlineDataUrls()
+    {
+        var options = BuildOptions(17, 24);
+        using var doc = JsonDocument.Parse("""{"imageConditions":[{"image":"data:image/png;base64,AQID","frameIndex":0,"strength":0}]}""");
+        var parsed = VideoGenerationParamsParser.Parse(doc.RootElement, options, out string error);
+        Assert.Null(error);
+        var condition = Assert.Single(parsed.ImageConditions);
+        Assert.Equal(new byte[] { 1, 2, 3 }, condition.ImageBytes);
+        Assert.Equal(0f, condition.Strength);
+    }
+
+    [Theory]
+    [InlineData("""{"imageConditions":{}}""")]
+    [InlineData("""{"imageConditions":[42]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID"}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID","frameIndex":-2}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID","frameIndex":0.5}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID","frameIndex":0,"strength":1.01}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID","frameIndex":0,"strength":-0.01}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID","frameIndex":0,"strength":1e99}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"invalid","frameIndex":0}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"","frameIndex":0}]}""")]
+    [InlineData("""{"imageConditions":[{"imagePath":"../../../etc/passwd","frameIndex":0}]}""")]
+    [InlineData("""{"imageConditions":[{"imagePath":"never-uploaded.png","frameIndex":0}]}""")]
+    [InlineData("""{"imageConditions":[{"image":"AQID","frameIndex":0},{"image":"AQID","frameIndex":0}]}""")]
+    public void Parse_InvalidImageKeyframesAreRejectedBeforeInference(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var parsed = VideoGenerationParamsParser.Parse(doc.RootElement, BuildOptions(17, 24), out string error);
+        Assert.NotNull(error);
+        Assert.Null(parsed.ImageConditions);
+    }
 
     [Fact]
     public void Parse_GenerateAudio_DefaultsToTrueAndAcceptsBothSpellings()
