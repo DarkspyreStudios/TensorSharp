@@ -64,6 +64,9 @@ public enum CatalogFileRole
     /// <summary>The second Wan A14B denoiser, loaded after the first expert's stage.
     /// This is an independent GGUF, not a shard of the primary weights.</summary>
     SecondaryWeights,
+    /// <summary>A two-stage video model's x2 latent upscaler (LTX 2.5), run between its
+    /// half-size and full-size denoising passes.</summary>
+    LatentUpscaler,
 }
 
 /// <summary>One downloadable artifact of a catalog entry.</summary>

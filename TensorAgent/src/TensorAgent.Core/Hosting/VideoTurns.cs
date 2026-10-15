@@ -236,10 +236,10 @@ public static class VideoTurns
             // The published distilled recipe must override generic video defaults.
             payload["steps"] = 8;
             payload["cfg"] = 1f;
-            payload["sampler"] = "euler";
+            payload["sampler"] = "euler_ancestral";
             payload["flowShift"] = 0f;
-            payload["width"] = 512;
-            payload["height"] = 512;
+            // Size is left to the model (1024x1024): LTX 2.5 samples its first pass at
+            // half the output size, and a 512x512 output smears hands and faces.
             payload["fps"] = 24;
             payload["videoMode"] = "t2va";
             payload["generateAudio"] = true;

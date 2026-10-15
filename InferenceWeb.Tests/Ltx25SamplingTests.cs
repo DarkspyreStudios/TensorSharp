@@ -71,6 +71,66 @@ public sealed class Ltx25SamplingTests
         Close(Values(root.GetProperty("initial_audio")), initialAudio);
     }
 
+    [Fact]
+    public void AncestralEulerMatchesPinnedOriginalLoopWithConditioningMasks()
+    {
+        using Stream stream = typeof(Ltx25SamplingTests).Assembly.GetManifestResourceStream(
+            "InferenceWeb.Tests.Fixtures.Ltx25.euler-ancestral-float32.json")!;
+        using JsonDocument fixture = JsonDocument.Parse(stream);
+        JsonElement root = fixture.RootElement;
+        Assert.Equal("be6d6d0a69d11a0a399c462ed92606692e5f8697", root.GetProperty("source_revision").GetString());
+        Assert.Equal(Ltx25Sampling.AncestralEta, root.GetProperty("eta").GetSingle());
+        Assert.Equal(Ltx25Sampling.AncestralNoiseScale, root.GetProperty("s_noise").GetSingle());
+        JsonElement[] steps = root.GetProperty("steps").EnumerateArray().ToArray();
+        float[] sigmas = Values(root.GetProperty("sigmas"));
+        Assert.Equal(Ltx25Scheduler.DistilledSigmas(), sigmas);
+        var initial = new Ltx25DenoiserInput
+        {
+            Video = Values(root.GetProperty("initial_video")), VideoTokens = root.GetProperty("video_tokens").GetInt32(),
+            Audio = Values(root.GetProperty("initial_audio")), AudioTokens = root.GetProperty("audio_tokens").GetInt32(),
+            VideoContext = [5f, 6f], VideoContextTokens = 1, AudioContext = [7f, 8f], AudioContextTokens = 1,
+            VideoPositions = Ltx25Geometry.VideoPositions(1, 1, 3, 24), AudioPositions = Ltx25Geometry.AudioPositions(2),
+            FrequencyPrecision = Ltx25FrequencyPrecision.Float64, VideoSigma = 1, AudioSigma = 1,
+            VideoDenoiseMask = Values(root.GetProperty("video_mask")), CleanVideo = Values(root.GetProperty("clean_video")),
+        };
+        int called = 0;
+        var drawn = new List<int>();
+        Ltx25SamplingOutput output = Ltx25Sampling.RunEulerAncestral(input =>
+        {
+            JsonElement step = steps[called];
+            // Each prediction sees exactly the original loop's latents, so every step is checked.
+            Close(Values(step.GetProperty("video")), input.Video);
+            Close(Values(step.GetProperty("audio")), input.Audio);
+            Assert.Equal(step.GetProperty("sigma").GetSingle(), input.VideoSigma);
+            float[] mask = Values(root.GetProperty("video_mask"));
+            Assert.Equal(mask.Select(value => value * input.VideoSigma).ToArray(), input.VideoTimesteps);
+            called++;
+            return new(Values(step.GetProperty("video_velocity")), Values(step.GetProperty("audio_velocity")), 2);
+        }, initial, sigmas, step =>
+        {
+            drawn.Add(step);
+            return new(Values(steps[step].GetProperty("video_noise")), Values(steps[step].GetProperty("audio_noise")));
+        });
+        Close(Values(root.GetProperty("final_video")), output.Video);
+        Close(Values(root.GetProperty("final_audio")), output.Audio);
+        Assert.Equal(8, called);
+        // Seven renoised steps; the terminal step returns X0 without drawing.
+        Assert.Equal(Enumerable.Range(0, 7), drawn);
+        // The strength-1 first frame stays exactly clean throughout.
+        Assert.Equal(Values(root.GetProperty("clean_video"))[..2], output.Video[..2]);
+    }
+
+    [Fact]
+    public void AncestralNoiseMustCoverBothStreams()
+    {
+        Assert.Throws<InvalidOperationException>(() => Ltx25Sampling.RunEulerAncestral(
+            _ => new([0f, 0f], [0f, 0f], 1), Input(), [1f, .5f, 0f], _ => new([0f], [0f, 0f])));
+        Assert.Throws<InvalidOperationException>(() => Ltx25Sampling.RunEulerAncestral(
+            _ => new([0f, 0f], [0f, 0f], 1), Input(), [1f, .5f, 0f], _ => new([0f, 0f], [0f, float.NaN])));
+        Assert.Throws<InvalidOperationException>(() => Ltx25Sampling.RunEulerAncestral(
+            _ => new([0f, 0f], [0f, 0f], 1), Input(), [1f, .5f, 0f], _ => null!));
+    }
+
     public static TheoryData<float[]> InvalidSchedules => new()
     {
         Array.Empty<float>(), new[] { 1f }, new[] { 1f, .5f }, new[] { 1f, .5f, .75f, 0f }, new[] { 1f, 0f, 0f },

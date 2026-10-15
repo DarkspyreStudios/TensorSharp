@@ -51,16 +51,18 @@ public sealed class Ltx25CatalogTests : IDisposable
         Assert.False(model.IsImageGenerator);
         Assert.Equal(48, model.MinDeviceMemoryGB);
         Assert.NotEmpty(model.Notes!);
-        Assert.Equal(43_768_634_132, model.TotalBytes);
-        Assert.Equal(4, model.Files.Count);
+        Assert.Equal(44_764_412_884, model.TotalBytes);
+        Assert.Equal(5, model.Files.Count);
         Assert.All(model.Files, file => Assert.False(file.Optional));
         Assert.Equal("0f51eb0d82b19bddbfb3b0371a65217844ea03750f27dd733528f22152e0e0d0", model.Weights.Sha256);
         Assert.Contains("/resolve/7b0c2025441f1bf12c18eac375ad21f5e3d3c9e0/", model.Weights.Url);
-        Assert.Equal(new[] { CatalogFileRole.TextEncoder, CatalogFileRole.Vae, CatalogFileRole.AudioVae },
+        Assert.Equal(new[] { CatalogFileRole.TextEncoder, CatalogFileRole.Vae, CatalogFileRole.AudioVae, CatalogFileRole.LatentUpscaler },
             model.Files.Skip(1).Select(file => file.Role));
         Assert.All(model.Files.Skip(1), file => Assert.Contains("/resolve/49b093a39c19169a8a81721dcc541e07e945232f/", file.Url));
         Assert.Contains("with-proj", model.Files.Single(file => file.Role == CatalogFileRole.TextEncoder).FileName);
         Assert.Contains("video-vae-conv", model.Files.Single(file => file.Role == CatalogFileRole.Vae).FileName);
+        // The two-stage recipe's x2 spatial (not temporal) latent upscaler.
+        Assert.Contains("spatial-upscaler-x2", model.Files.Single(file => file.Role == CatalogFileRole.LatentUpscaler).FileName);
         // The authentic custom Gemma file embeds its tokenizer assets.
         Assert.DoesNotContain(model.Files, file => file.Role == CatalogFileRole.Tokenizer);
     }
@@ -78,6 +80,7 @@ public sealed class Ltx25CatalogTests : IDisposable
         {
             (CatalogFileRole.Weights, "model"), (CatalogFileRole.TextEncoder, "video-text-encoder"),
             (CatalogFileRole.Vae, "video-vae"), (CatalogFileRole.AudioVae, "audio-vae"),
+            (CatalogFileRole.LatentUpscaler, "video-upscaler"),
         })
         {
             CatalogFile file = Entry.Files.Single(file => file.Role == role);
@@ -152,7 +155,7 @@ public sealed class Ltx25CatalogTests : IDisposable
     }
 
     [Fact]
-    public async Task AvailableFixtureDownloadsAllFourFilesAndPublishesThemBeforeActivation()
+    public async Task AvailableFixtureDownloadsAllFiveFilesAndPublishesThemBeforeActivation()
     {
         byte[] bytes=new byte[32];
         BitConverter.GetBytes(0x46554747u).CopyTo(bytes,0);
@@ -165,13 +168,13 @@ public sealed class Ltx25CatalogTests : IDisposable
         var service=new ModelService(NullLogger<ModelService>.Instance,(path,_,_,_)=>
         {
             loads++;loadedPath=path;
-            foreach(string variable in new[]{"TS_VIDEO_TEXT_ENCODER","TS_VIDEO_VAE","TS_VIDEO_AUDIO_VAE"})published[variable]=Environment.GetEnvironmentVariable(variable);
+            foreach(string variable in new[]{"TS_VIDEO_TEXT_ENCODER","TS_VIDEO_VAE","TS_VIDEO_AUDIO_VAE","TS_VIDEO_UPSCALER"})published[variable]=Environment.GetEnvironmentVariable(variable);
             throw new InvalidDataException("Fixture reached the model loader; production inference is covered by the real E2E probe.");
         });
         var paths=new AgentPaths(Path.Combine(_root,"data"),Path.Combine(_root,"cache")){DeviceMemoryGB=128};
         using var host=new AgentAppHost(paths,modelService:service,backends:[new BackendOption("cpu","CPU")]);
         await host.Models.DownloadAsync(model,null,CancellationToken.None);
-        Assert.Equal(4,files.Requests);
+        Assert.Equal(5,files.Requests);
         Assert.Equal(InstallState.Installed,host.Models.StateOf(model));
         foreach(var file in model.Files)Assert.Equal(bytes,File.ReadAllBytes(host.Models.PathFor(model,file)));
         var error=Assert.Throws<InvalidOperationException>(()=>host.UseModel(model,warmAfterwards:false));
@@ -181,6 +184,7 @@ public sealed class Ltx25CatalogTests : IDisposable
         Assert.Equal(host.Models.PathFor(model,model.Files.Single(f=>f.Role==CatalogFileRole.TextEncoder)),published["TS_VIDEO_TEXT_ENCODER"]);
         Assert.Equal(host.Models.PathFor(model,model.Files.Single(f=>f.Role==CatalogFileRole.Vae)),published["TS_VIDEO_VAE"]);
         Assert.Equal(host.Models.PathFor(model,model.Files.Single(f=>f.Role==CatalogFileRole.AudioVae)),published["TS_VIDEO_AUDIO_VAE"]);
+        Assert.Equal(host.Models.PathFor(model,model.Files.Single(f=>f.Role==CatalogFileRole.LatentUpscaler)),published["TS_VIDEO_UPSCALER"]);
         Assert.Null(Environment.GetEnvironmentVariable("TS_VIDEO_TOKENIZER"));
         DiffusionCompanions.Publish(null,host.Models);
         Assert.All(published.Keys,k=>Assert.Null(Environment.GetEnvironmentVariable(k)));
@@ -209,7 +213,7 @@ public sealed class Ltx25CatalogTests : IDisposable
         var store=new ModelStore(Path.Combine(_root,"models"));Directory.CreateDirectory(store.DirectoryFor(model));
         foreach(var file in model.Files)File.CreateSymbolicLink(store.PathFor(model,file),source);
         Assert.Equal(InstallState.Installed,store.StateOf(model));
-        Assert.Equal(3,DiffusionCompanions.Publish(model,store).Count);
+        Assert.Equal(4,DiffusionCompanions.Publish(model,store).Count);
     }
 
     [Fact]

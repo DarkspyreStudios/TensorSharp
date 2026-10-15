@@ -1545,13 +1545,18 @@ The distilled checkpoint accepts a first image (`imagePath`), a last image
 (`endImage`, including last-image-only generation), or multiple temporal image
 guides (`imageConditions`). Upload each image through `/api/upload` first.
 Each guide names an exact zero-based output frame and a strength in `[0,1]`;
-`frameIndex: -1` selects the final frame. For example:
+`frameIndex: -1` selects the final frame. `width` and `height` are the output
+size, in multiples of 64; omit them to use the server's `--video-width` /
+`--video-height` (1024 × 1024 in the shipped preset). Like the publisher's
+pipeline, the model samples eight steps at half that size, upscales the latent
+x2, and refines three steps at full size; `steps: 8` names that published
+schedule. For example:
 
 ```json
 {
   "prompt": "The woman smiles, then blows a kiss toward the camera.",
-  "width": 512, "height": 512, "frames": 17, "fps": 24,
-  "steps": 8, "cfg": 1, "sampler": "euler", "videoMode": "keyframes",
+  "width": 1024, "height": 1024, "frames": 17, "fps": 24,
+  "steps": 8, "cfg": 1, "sampler": "euler_ancestral", "videoMode": "keyframes",
   "imageConditions": [
     { "imagePath": "portrait.png", "frameIndex": 0, "strength": 1 },
     { "imagePath": "kiss.png", "frameIndex": -1, "strength": 0.8 }

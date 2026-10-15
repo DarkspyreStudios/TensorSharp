@@ -17,13 +17,20 @@ import sys
 REVISION = "be6d6d0a69d11a0a399c462ed92606692e5f8697"
 
 
-def write_gguf(path, state):
+# The published LTX 2.5 checkpoints declare both multipliers as 1000. The original
+# LTXModelConfigurator.from_metadata reads them from this config; constructing
+# LTXModel with keyword defaults would silently use av_ca_timestep_scale_multiplier=1.
+TRANSFORMER_CONFIG = {"timestep_scale_multiplier": 1000, "av_ca_timestep_scale_multiplier": 1000.0}
+
+
+def write_gguf(path, state, config):
     def string(value):
         data = value.encode()
         return struct.pack("<Q", len(data)) + data
 
-    header = bytearray(struct.pack("<IIQQ", 0x46554747, 3, len(state), 1))
+    header = bytearray(struct.pack("<IIQQ", 0x46554747, 3, len(state), 2))
     header += string("general.architecture") + struct.pack("<I", 8) + string("ltxv")
+    header += string("config") + struct.pack("<I", 8) + string(json.dumps(config))
     data = bytearray()
     for name, tensor in state.items():
         raw = tensor.contiguous().numpy().astype("<f4").tobytes()
@@ -61,6 +68,8 @@ def main():
                      audio_attention_head_dim=4, audio_in_channels=4, audio_out_channels=4,
                      audio_cross_attention_dim=8, apply_gated_attention=True, cross_attention_adaln=True,
                      ff_bias=False, audio_ff_bias=True, use_keyframes_abs_pos_embedding=True,
+                     timestep_scale_multiplier=TRANSFORMER_CONFIG["timestep_scale_multiplier"],
+                     av_ca_timestep_scale_multiplier=TRANSFORMER_CONFIG["av_ca_timestep_scale_multiplier"],
                      attention_ops=AttentionOps(attention, attention)).eval()
     with torch.no_grad():
         for name, parameter in model.named_parameters():
@@ -71,7 +80,7 @@ def main():
     # .gguf is globally ignored for downloaded model weights. The tiny required
     # checkpoint fixture uses .bin so it is retained by ordinary Git adds.
     checkpoint = args.output / "denoiser.bin"
-    write_gguf(checkpoint, model.state_dict())
+    write_gguf(checkpoint, model.state_dict(), {"transformer": TRANSFORMER_CONFIG})
 
     video = torch.randn(1, 4, 3)
     audio = torch.randn(1, 3, 4)
@@ -126,7 +135,8 @@ def main():
             rotary_samples.append(dict(stream=label, dim=dim, heads=32, precision=precision, indices=indices,
                                        cosine=cosine[indices].tolist(), sine=sine[indices].tolist()))
     result = dict(reference=dict(repository="https://github.com/Lightricks/LTX-2", revision=revision,
-                                 torch=torch.__version__, checkpointSha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest()),
+                                 torch=torch.__version__, checkpointSha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+                                 transformerConfig=TRANSFORMER_CONFIG),
                   cases=cases, rotarySamples=rotary_samples, timestepInputs=flat(times), timestepFeatures=flat(features))
     (args.output / "oracle.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(dict(checkpoint=str(checkpoint), tensors=len(model.state_dict()), cases=len(cases), revision=revision)))

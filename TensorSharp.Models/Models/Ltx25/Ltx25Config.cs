@@ -32,14 +32,68 @@ public sealed class Ltx25Config
     public const int TimestepDimension = 256;
     public const float NormEpsilon = 1e-6f;
     public const float TimestepMultiplier = 1000f;
-    public const float CrossGateMultiplier = 1f;
+    /// <summary>The value every published LTX 2.5 AV checkpoint declares for
+    /// <c>av_ca_timestep_scale_multiplier</c>, used when a GGUF carries no config.</summary>
+    public const float PublishedCrossGateMultiplier = 1000f;
+    private static int s_warnedMissingConfig;
+
+    /// <summary>Sigma scale for the main, prompt and AV scale/shift AdaLN inputs
+    /// (<c>timestep_scale_multiplier</c>).</summary>
+    public float TimestepScale { get; private init; } = TimestepMultiplier;
+
+    /// <summary>Sigma scale for the a2v/v2a cross-attention gate AdaLN input. The
+    /// original computes <c>sigma * timestep_scale_multiplier * (av_ca / timestep_scale_multiplier)</c>.</summary>
+    public float CrossGateTimestepScale { get; private init; } = PublishedCrossGateMultiplier;
 
     public static Ltx25Config FromGguf(GgufFile file)
-        => FromShapes(file.Tensors.ToDictionary(pair => pair.Key, pair => pair.Value.Shape, StringComparer.Ordinal));
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        string json = file.GetString("config");
+        if (json == null && System.Threading.Interlocked.Exchange(ref s_warnedMissingConfig, 1) == 0)
+            Console.WriteLine("  [ltx25] the denoiser GGUF has no 'config' metadata; using the published LTX 2.5 " +
+                "timestep multipliers (1000, cross-attention gate 1000). A checkpoint trained with other values would be mis-modulated.");
+        return FromShapes(file.Tensors.ToDictionary(pair => pair.Key, pair => pair.Value.Shape, StringComparer.Ordinal), json);
+    }
 
     /// <summary>Validate an AV checkpoint with nine-way modulation and gated
-    /// attention, the LTX 2.5 variant implemented by this denoiser.</summary>
-    public static Ltx25Config FromShapes(IReadOnlyDictionary<string, ulong[]> tensors)
+    /// attention, the LTX 2.5 variant implemented by this denoiser. A checkpoint
+    /// <paramref name="configJson"/> supplies the timestep multipliers exactly as the
+    /// original <c>LTXModelConfigurator.from_metadata</c> reads them, including its
+    /// per-key defaults; without one, the published LTX 2.5 values apply.</summary>
+    public static Ltx25Config FromShapes(IReadOnlyDictionary<string, ulong[]> tensors, string configJson = null)
+    {
+        var (timestepScale, crossGateScale) = Multipliers(configJson);
+        return FromGeometry(tensors, timestepScale, crossGateScale);
+    }
+
+    /// <summary>The original reads <c>config.transformer.timestep_scale_multiplier</c>
+    /// (default 1000) and <c>av_ca_timestep_scale_multiplier</c> (default 1).</summary>
+    internal static (float TimestepScale, float CrossGateScale) Multipliers(string configJson)
+    {
+        if (configJson == null) return (TimestepMultiplier, PublishedCrossGateMultiplier);
+        double timestep = 1000, crossGate = 1;
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(configJson);
+            if (document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("transformer", out var transformer) &&
+                transformer.ValueKind == System.Text.Json.JsonValueKind.Object)
+            {
+                if (transformer.TryGetProperty("timestep_scale_multiplier", out var value)) timestep = value.GetDouble();
+                if (transformer.TryGetProperty("av_ca_timestep_scale_multiplier", out value)) crossGate = value.GetDouble();
+            }
+        }
+        catch (Exception error) when (error is System.Text.Json.JsonException or InvalidOperationException or FormatException)
+        {
+            throw new InvalidDataException("The LTX denoiser 'config' metadata is not valid transformer JSON.", error);
+        }
+        if (!double.IsFinite(timestep) || timestep <= 0 || !double.IsFinite(crossGate) || crossGate <= 0)
+            throw new InvalidDataException("LTX timestep multipliers must be finite and positive.");
+        // sigma * tsm * (av_ca / tsm): the factor is a Python float, applied after the integer scale.
+        return ((float)timestep, (float)(timestep * (crossGate / timestep)));
+    }
+
+    private static Ltx25Config FromGeometry(IReadOnlyDictionary<string, ulong[]> tensors, float timestepScale, float crossGateScale)
     {
         ArgumentNullException.ThrowIfNull(tensors);
         string[] prefixes = ["", "model.diffusion_model."];
@@ -126,6 +180,7 @@ public sealed class Ltx25Config
             Prefix = p, VideoDim = v, AudioDim = a, VideoChannels = vc, AudioChannels = ac,
             VideoHeads = vh, AudioHeads = ah, Layers = layers, VideoContextDim = contextV, AudioContextDim = contextA,
             VideoFfnBias = vb, AudioFfnBias = ab, KeyframeEmbedding = keyframe,
+            TimestepScale = timestepScale, CrossGateTimestepScale = crossGateScale,
         };
     }
 }

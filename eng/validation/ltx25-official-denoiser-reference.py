@@ -157,6 +157,14 @@ def main():
     config = probe["config"]
     torch.set_num_threads(args.threads)
     attention = PytorchAttention([torch.nn.attention.SDPBackend.MATH])
+    reader = gguf.GGUFReader(probe["model"])
+    # Read the multipliers as LTXModelConfigurator.from_metadata does. The keyword
+    # default av_ca_timestep_scale_multiplier=1 differs from the published 1000.
+    field = reader.fields.get("config")
+    checkpoint_config = json.loads(bytes(field.parts[field.data[0]]).decode()) if field is not None else {}
+    transformer_config = checkpoint_config.get("transformer", {})
+    timestep_scale = transformer_config.get("timestep_scale_multiplier", 1000)
+    av_ca_timestep_scale = transformer_config.get("av_ca_timestep_scale_multiplier", 1)
     with torch.device("meta"):
         model = LTXModel(num_attention_heads=config["VideoHeads"], attention_head_dim=config["VideoHeadDim"],
                          in_channels=config["VideoChannels"], out_channels=config["VideoChannels"], num_layers=blocks,
@@ -167,8 +175,9 @@ def main():
                          apply_gated_attention=True, cross_attention_adaln=True,
                          ff_bias=config["VideoFfnBias"], audio_ff_bias=config["AudioFfnBias"],
                          use_keyframes_abs_pos_embedding=config["KeyframeEmbedding"],
+                         timestep_scale_multiplier=timestep_scale,
+                         av_ca_timestep_scale_multiplier=av_ca_timestep_scale,
                          attention_ops=AttentionOps(attention, attention)).eval()
-    reader = gguf.GGUFReader(probe["model"])
     tensors = {tensor.name: tensor for tensor in reader.tensors}
     prefix = config["Prefix"]
     constraints = memory_constraints()
@@ -249,6 +258,7 @@ def main():
                   reference_device="cpu", reference_threads=args.threads,
                   tool_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   executed_blocks=blocks, max_blocks=args.max_blocks, full_depth=full_depth,
+                  timestep_scale_multiplier=timestep_scale, av_ca_timestep_scale_multiplier=av_ca_timestep_scale,
                   dequantized_tensor_types=weight_stats["dequantized_tensor_types"], memory_constraints=constraints,
                   weight_residency_mode="one streamed block plus persistent non-block weights" if args.stream_block_weights else "all weights materialized",
                   weight_loading=weight_stats, reference_forward_includes_streamed_weight_loading=args.stream_block_weights,

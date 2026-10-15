@@ -62,7 +62,7 @@ namespace TensorSharp.Models.Video
         /// the guidance scale is 1.0, since no negative pass runs.</summary>
         public string NegativePrompt { get; set; }
 
-        /// <summary>Sampler name, e.g. "unipc" or "euler". null = the model's default.</summary>
+        /// <summary>Sampler name, e.g. "unipc", "euler" or LTX 2.5's "euler_ancestral". null = the model's default.</summary>
         public string Sampler { get; set; }
 
         /// <summary>Playback frame rate for the saved video. 0 = the model's default. Models

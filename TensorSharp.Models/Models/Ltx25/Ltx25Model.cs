@@ -19,6 +19,8 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
     internal string VideoVaePath { get; }
     internal string AudioVaePath { get; }
     internal string ReferenceLoraPath { get; }
+    /// <summary>The x2 spatial latent upscaler between the half- and full-size passes.</summary>
+    internal string LatentUpscalerPath { get; }
     internal IAllocator DirectAllocator => _allocator;
     private readonly object _generationLock = new();
     private readonly Dictionary<string, (Ltx25PromptEncoding Encoding, LinkedListNode<string> Node)> _promptCache = new(StringComparer.Ordinal);
@@ -28,6 +30,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
     private Ltx25VideoVaeDecoder _videoDecoder;
     private Ltx25VideoVaeEncoder _videoEncoder;
     private Ltx25AudioDecoder _audioDecoder;
+    private Ltx25LatentUpsampler _latentUpsampler;
     public long PromptCacheHits { get; private set; }
     private bool _disposed;
 
@@ -44,6 +47,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
             TextEncoderPath = Companion(directory, "TS_VIDEO_TEXT_ENCODER", "text_encoders", "gemma4-12b-with-proj-ltx-2.5-bf16.safetensors");
             VideoVaePath = Companion(directory, "TS_VIDEO_VAE", "vae", "ltx-2.5-video-vae-conv-bf16.safetensors");
             AudioVaePath = Companion(directory, "TS_VIDEO_AUDIO_VAE", "vae", "ltx-2.5-audio-vae-bf16.safetensors");
+            LatentUpscalerPath = Companion(directory, "TS_VIDEO_UPSCALER", "latent_upscale_models", LatentUpscalerFileName);
             string configuredReference = Environment.GetEnvironmentVariable("TS_LTX25_INGREDIENTS_LORA");
             if (!string.IsNullOrWhiteSpace(configuredReference))
             {
@@ -59,6 +63,8 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
         }
         catch { base.Dispose(); throw; }
     }
+
+    internal const string LatentUpscalerFileName = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors";
 
     // GGML option names remain usable by hosts whose device picker uses them;
     // this family executes its owned direct CUDA/MLX kernels, not a GGML graph.
@@ -135,20 +141,27 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
         return encoding;
     }
 
-    internal Ltx25SamplingOutput Sample(Ltx25DenoiserInput input, Action<int, int> onStep,
-        CancellationToken cancellationToken = default)
+    internal Ltx25SamplingOutput Sample(Ltx25DenoiserInput input, Ltx25GenerationSettings settings, Action<int, int> onStep,
+        CancellationToken cancellationToken = default, float[] sigmas = null,
+        long noiseSeedOffset = Ltx25GenerationSettings.AncestralNoiseSeedOffset)
     {
+        sigmas ??= Ltx25Scheduler.DistilledSigmas();
+        ArgumentNullException.ThrowIfNull(settings);
         // Preserve mapped weight/cache identities across requests. In particular,
         // rebuilding MLX's Q4_K affine representation for each video is expensive.
         // The serialized generation lock also protects this single device model.
         _denoiser ??= new Ltx25Denoiser(CheckpointPath, _allocator, ReferenceLoraPath);
         try
         {
-            return Ltx25Sampling.RunEuler(_denoiser, input, Ltx25Scheduler.DistilledSigmas(), (step, total) =>
+            void Progress(int step, int total)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 onStep?.Invoke(step, total);
-            }, cancellationToken);
+            }
+            return settings.Ancestral
+                ? Ltx25Sampling.RunEulerAncestral(_denoiser, input, sigmas,
+                    step => settings.AncestralNoise(step, input.Video.Length, input.Audio.Length, noiseSeedOffset), Progress, cancellationToken)
+                : Ltx25Sampling.RunEuler(_denoiser, input, sigmas, Progress, cancellationToken);
         }
         catch { DisposeOwned(ref _denoiser); throw; }
     }
@@ -159,6 +172,26 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
         var decoder = _videoDecoder ??= new Ltx25VideoVaeDecoder(VideoVaePath, _allocator);
         try { return decoder.Decode(latents, frames, height, width, cancellationToken); }
         catch { DisposeOwned(ref _videoDecoder); throw; }
+    }
+
+    /// <summary>Stage-1 to stage-2 spatial upsampling of channel-major normalized
+    /// [128,T,H,W] latents, normalized with the video VAE's per-channel statistics.</summary>
+    internal float[] UpsampleLatents(float[] latents, int frames, int height, int width, CancellationToken cancellationToken = default)
+    {
+        float[] mean, std;
+        using (var vae = new SafetensorsFile(VideoVaePath))
+        {
+            mean = vae.ReadFloat32("per_channel_statistics.mean-of-means");
+            std = vae.ReadFloat32("per_channel_statistics.std-of-means");
+        }
+        var upsampler = _latentUpsampler ??= new Ltx25LatentUpsampler(LatentUpscalerPath, _allocator);
+        try
+        {
+            if (upsampler.LatentChannels != 128 || mean.Length != 128 || std.Length != 128)
+                throw new InvalidDataException("The LTX 2.5 spatial upsampler and video VAE must use 128 latent channels.");
+            return upsampler.Upsample(latents, frames, height, width, mean, std, cancellationToken);
+        }
+        catch { DisposeOwned(ref _latentUpsampler); throw; }
     }
 
     internal float[] EncodeImage(float[] rgb, int height, int width, CancellationToken cancellationToken = default)
@@ -211,6 +244,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
             DisposeOwned(ref _videoDecoder);
             DisposeOwned(ref _videoEncoder);
             DisposeOwned(ref _audioDecoder);
+            DisposeOwned(ref _latentUpsampler);
             DisposeOwned(ref _denoiser);
             base.TrimIdleMemory();
             if (_allocator is MlxAllocator) MlxBackend.ClearCache();
@@ -246,6 +280,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
             DisposeOwned(ref _videoDecoder);
             DisposeOwned(ref _videoEncoder);
             DisposeOwned(ref _audioDecoder);
+            DisposeOwned(ref _latentUpsampler);
             DisposeOwned(ref _denoiser);
             base.Dispose();
         }

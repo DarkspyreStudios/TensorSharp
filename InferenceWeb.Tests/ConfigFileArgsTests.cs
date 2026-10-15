@@ -120,7 +120,7 @@ public class ConfigFileArgsTests : IDisposable
         "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj",
         // Which Qwen-Image-2.1 checkpoint the GGUF holds (QwenImageVariantFlag), same spelling on the CLI.
         "qwen-image-variant",
-        "video-vae", "video-text-encoder", "video-dit2", "audio-vae",
+        "video-vae", "video-text-encoder", "video-dit2", "audio-vae", "video-upscaler",
         "video-width", "video-height", "video-steps", "video-mode", "video-frames", "fps",
         "width", "height",
         // Qwen-Image-2.1 LoRA plug-ins (LoraCliFlags.Flags): applied by the companion
@@ -214,7 +214,7 @@ public class ConfigFileArgsTests : IDisposable
     {
         "model", "mmproj", "draft-model",
         "qwen-image-vae", "qwen-image-vl", "qwen-image-mmproj",
-        "video-vae", "video-text-encoder", "video-dit2", "audio-vae",
+        "video-vae", "video-text-encoder", "video-dit2", "audio-vae", "video-upscaler",
     };
 
     [Fact]

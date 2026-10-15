@@ -52,8 +52,9 @@ public sealed class Ltx25ImageConditioningTests
         Close(Values(fixture.GetProperty("noise")), input.Video);
     }
 
-    private static Ltx25GenerationSettings Settings() => Ltx25GenerationSettings.Resolve(new()
-        { Width = 32, Height = 32, Frames = 17, Seed = 42 });
+    // One 32x32 single-stage pass: the official fixture's 1x1 latent grid. Requests
+    // resolve to two stages at 64-pixel multiples; the conditioning math is per pass.
+    private static Ltx25GenerationSettings Settings() => new(32, 32, 17, 24, 1, 1, 3, 18, 42);
 
     private static Ltx25DenoiserInput Input(Ltx25GenerationSettings settings, int guides = 0)
     {
@@ -132,6 +133,32 @@ public sealed class Ltx25ImageConditioningTests
         Assert.Equal(17 / 24f, result.VideoPositions.Boundaries[25]);
         for (int i = 0; i < 128; ++i)
             Assert.Equal(3 + (original[3 * 128 + i] - 3) * .5f, result.Video[3 * 128 + i]);
+    }
+
+    [Fact]
+    public void RefinementPassNoisesGuidesFromTheirCleanLatentLikeGaussianNoiser()
+    {
+        // Stage two: GaussianNoiser lerps toward noise by the first refinement sigma
+        // after the conditionings, then lerps back toward the clean latent by the mask.
+        var settings = Settings();
+        var input = Input(settings, 1);
+        float[] raw = (float[])input.Video.Clone();
+        const float scale = Ltx25GenerationSettings.RefinementNoiseScale;
+        float[] prior = Enumerable.Range(0, 3 * 128).Select(i => (i % 7) * .25f).ToArray();
+        for (int i = 0; i < prior.Length; ++i) input.Video[i] = prior[i] + (raw[i] - prior[i]) * scale;
+        float[] noised = (float[])input.Video.Clone();
+        var first = Enumerable.Repeat(2f, 128).ToArray();
+        var middle = Enumerable.Repeat(3f, 128).ToArray();
+        var result = Ltx25ImageConditioning.Apply(input, settings, [new(first, 0, .75f), new(middle, 8, .5f)], raw, scale);
+        Assert.Equal(new[] { .25f, 1f, 1f, .5f }, result.VideoDenoiseMask);
+        for (int i = 0; i < 128; ++i)
+        {
+            Assert.Equal(2 + (raw[i] - 2) * (.25f * scale), result.Video[i]);
+            Assert.Equal(3 + (raw[3 * 128 + i] - 3) * (.5f * scale), result.Video[3 * 128 + i]);
+        }
+        Assert.Equal(noised.Skip(128).Take(2 * 128), result.Video.Skip(128).Take(2 * 128));
+        Assert.Throws<ArgumentException>(() => Ltx25ImageConditioning.Apply(input, settings, [new(first, 0)], raw, 1f));
+        Assert.Throws<ArgumentException>(() => Ltx25ImageConditioning.Apply(input, settings, [new(first, 0)], null, scale));
     }
 
     [Fact]

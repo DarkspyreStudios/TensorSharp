@@ -229,14 +229,14 @@ public sealed class Ltx25Denoiser : IDisposable
         try
         {
             string p = video ? "" : "audio_";
-            (state.Main, state.Embedded) = Ada(p + "adaln_single", timesteps, Ltx25Config.TimestepMultiplier);
-            (state.Prompt, var promptEmbedded) = Ada(p + "prompt_adaln_single", [sigma], Ltx25Config.TimestepMultiplier);
+            (state.Main, state.Embedded) = Ada(p + "adaln_single", timesteps, Config.TimestepScale);
+            (state.Prompt, var promptEmbedded) = Ada(p + "prompt_adaln_single", [sigma], Config.TimestepScale);
             promptEmbedded.Dispose();
             (state.CrossScaleShift, var crossEmbedded) = Ada("av_ca_" + (video ? "video" : "audio") + "_scale_shift_adaln_single",
-                timesteps, Ltx25Config.TimestepMultiplier);
+                timesteps, Config.TimestepScale);
             crossEmbedded.Dispose();
             (state.CrossGate, var gateEmbedded) = Ada("av_ca_" + (video ? "a2v" : "v2a") + "_gate_adaln_single",
-                [crossSigma], Ltx25Config.CrossGateMultiplier);
+                [crossSigma], Config.CrossGateTimestepScale);
             gateEmbedded.Dispose();
             return state;
         }

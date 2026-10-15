@@ -1402,13 +1402,16 @@ curl --fail-with-body http://localhost:5000/api/image-generate \
 
 Distilled 检查点支持首帧 `imagePath`、尾帧 `endImage`，以及指定时间位置和强度的
 多个图像关键帧 `imageConditions`。图像须先通过 `/api/upload` 上传，也可在每个
-关键帧对象的 `image` 中直接提供 base64 或 data URL。例如：
+关键帧对象的 `image` 中直接提供 base64 或 data URL。`width` 与 `height` 是输出尺寸，
+须为 64 的倍数；省略时使用服务器的 `--video-width` / `--video-height`（随附预设为
+1024 × 1024）。与发布方的流程一致，模型先以一半尺寸采样 8 步，再把潜变量放大 2 倍，
+最后以完整尺寸精修 3 步；`steps: 8` 指的就是这套已发布的步数安排。例如：
 
 ```json
 {
   "prompt": "请让图中的女人来个飞吻",
-  "width": 512, "height": 512, "frames": 17, "fps": 24,
-  "steps": 8, "cfg": 1, "sampler": "euler", "videoMode": "keyframes",
+  "width": 1024, "height": 1024, "frames": 17, "fps": 24,
+  "steps": 8, "cfg": 1, "sampler": "euler_ancestral", "videoMode": "keyframes",
   "imageConditions": [
     { "imagePath": "portrait.png", "frameIndex": 0, "strength": 1 },
     { "imagePath": "kiss.png", "frameIndex": -1, "strength": 0.8 }

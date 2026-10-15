@@ -31,7 +31,7 @@ var parameters = new VideoGenerationParams
 {
     Mode = mode!,
     Width = Number("width", identityMode ? 768 : 512), Height = Number("height", identityMode ? 448 : 512), Frames = Number("frames", identityMode ? 121 : 17),
-    Fps = Number("fps", 24), Steps = 8, CfgScale = 1, Sampler = "euler", Seed = long.Parse(options.GetValueOrDefault("seed", "42"), CultureInfo.InvariantCulture),
+    Fps = Number("fps", 24), Steps = 8, CfgScale = 1, Sampler = options.GetValueOrDefault("sampler", Ltx25GenerationSettings.AncestralSampler), Seed = long.Parse(options.GetValueOrDefault("seed", "42"), CultureInfo.InvariantCulture),
     GenerateAudio = options.GetValueOrDefault("audio", "1") == "1",
 };
 string prompt = options.GetValueOrDefault("prompt", "A red toy car drives slowly along a quiet road in warm afternoon light.");
@@ -71,9 +71,9 @@ if (parameters.ImageConditions != null)
 var report = new Dictionary<string, object?>
 {
     ["completed"] = false, ["created_utc"] = DateTimeOffset.UtcNow,
-    ["scope"] = "Real registered TensorSharp model: tokenization, Gemma conditioning, aggregation/connectors, full48-block eight-step AV Euler sampling, video VAE, audio VAE/vocoder/BWE and MP4 encoding. No TensorAgent or HTTP path in this probe.",
+    ["scope"] = "Real registered TensorSharp model: tokenization, Gemma conditioning, aggregation/connectors, full48-block eight-step AV Euler sampling (ancestral unless --sampler euler), video VAE, audio VAE/vocoder/BWE and MP4 encoding. No TensorAgent or HTTP path in this probe.",
     ["model"] = modelPath, ["backend_requested"] = backend.ToString(), ["prompt"] = prompt,
-    ["mode"] = mode, ["reference_inputs"] = referenceInputs, ["settings"] = Ltx25GenerationSettings.Resolve(parameters, supportsIdentityReferences: identityMode), ["sigmas"] = Ltx25Scheduler.DistilledSigmas(),
+    ["mode"] = mode, ["sampler"] = parameters.Sampler, ["reference_inputs"] = referenceInputs, ["settings"] = Ltx25GenerationSettings.Resolve(parameters, supportsIdentityReferences: identityMode), ["sigmas"] = Ltx25Scheduler.DistilledSigmas(),
     ["environment"] = new[] { "MLX_ENABLE_TF32", "TS_LTX25_CUDA_ATTN", "TS_LTX25_CUDA_TILE", "TS_LTX25_CUDA_REQUIRE_TILE",
         "TS_LTX25_MLX_BF16_GEMM", "TS_LTX25_CUDA_BF16_GEMM", "TS_LTX25_CUDA_SOURCE_UPLOAD", "TS_MLX_CACHE_LIMIT_MB", "TS_MLX_WIRED_LIMIT_MB",
         "TS_CUDA_QMM_F16GEMM_MIN_ROWS", "TS_LTX25_CUDA_F16_DEQUANT", "TS_LTX25_CUDA_PREFAULT", "TS_LTX25_CUDA_PREFAULT_WORKERS" }

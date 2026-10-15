@@ -18,14 +18,14 @@ internal static class Ltx25Pipeline
         var settings = Ltx25GenerationSettings.Resolve(parameters, model.SupportsReferenceConditioning);
         var timer = Stopwatch.StartNew();
         var phase = Stopwatch.StartNew();
-        int completed = 0;
+        int completed = 0, totalSteps = settings.TotalSteps;
         void Report(string name, string detail)
         {
             parameters.CancellationToken.ThrowIfCancellationRequested();
             Console.WriteLine($"  [ltx25] {name}: {detail}");
             parameters.OnProgress?.Invoke(new VideoGenerationProgress
             {
-                Phase = name, Detail = detail, Step = completed, TotalSteps = Ltx25GenerationSettings.Steps,
+                Phase = name, Detail = detail, Step = completed, TotalSteps = totalSteps,
                 ElapsedSeconds = timer.Elapsed.TotalSeconds,
             });
         }
@@ -42,10 +42,32 @@ internal static class Ltx25Pipeline
         try
         {
             bool identity = parameters.Mode == "ref";
+            bool twoStage = settings.TwoStage;
+            var first = twoStage ? settings.HalfResolution() : settings;
             var images = identity ? Array.Empty<VideoImageCondition>() : Ltx25ImageConditioning.Resolve(parameters, settings.Frames);
-            var encodedImages = new List<Ltx25EncodedImage>(images.Count);
+            var resolvedImages = images.Select(image => image.ResolveImage()).ToArray();
             float[] encodedReference = null;
             int identitySourceCount = 0;
+            // Progress phases follow the hosts' video contract (text-encode, denoise,
+            // vae-decode, ...): everything between the two passes reports as denoise, so
+            // the step count and ETA keep advancing. Timing lines keep the finer names.
+            List<Ltx25EncodedImage> EncodeImages(Ltx25GenerationSettings stage, string progressPhase, string timingPhase)
+            {
+                var encoded = new List<Ltx25EncodedImage>(images.Count);
+                if (images.Count == 0) return encoded;
+                Report(progressPhase, $"encoding {images.Count} temporal image guides at {stage.Width}x{stage.Height}");
+                for (int i = 0; i < images.Count; ++i)
+                {
+                    parameters.CancellationToken.ThrowIfCancellationRequested();
+                    RgbImage resized = TensorSharp.Models.QwenImage.ImageIO.ResizeCover(resolvedImages[i], stage.Width, stage.Height);
+                    encoded.Add(new(model.EncodeImage(resized.Pixels, stage.Height, stage.Width, parameters.CancellationToken),
+                        images[i].FrameIndex, images[i].Strength));
+                }
+                Trim();
+                EndPhase(timingPhase);
+                return encoded;
+            }
+            List<Ltx25EncodedImage> encodedImages = null;
             if (identity)
             {
                 var sources = Ltx25ReferenceConditioning.ResolveSources(parameters);
@@ -55,51 +77,75 @@ internal static class Ltx25Pipeline
                 encodedReference = model.EncodeStaticReferenceVideo(sheet.Pixels, settings.Frames, settings.Height, settings.Width, parameters.CancellationToken);
                 Trim(); EndPhase("reference-encode");
             }
-            else if (images.Count > 0)
-            {
-                Report("image-encode", $"encoding {images.Count} temporal image guides");
-                foreach (var image in images)
-                {
-                    parameters.CancellationToken.ThrowIfCancellationRequested();
-                    RgbImage resized = TensorSharp.Models.QwenImage.ImageIO.ResizeCover(image.ResolveImage(), settings.Width, settings.Height);
-                    encodedImages.Add(new(model.EncodeImage(resized.Pixels, settings.Height, settings.Width, parameters.CancellationToken),
-                        image.FrameIndex, image.Strength));
-                }
-                Trim();
-                EndPhase("image-encode");
-            }
+            else encodedImages = EncodeImages(first, "image-encode", "image-encode");
             Report("text-encode", "Gemma 4 and learned AV conditioning");
             Ltx25PromptEncoding conditioning = model.Conditioning(identity
                 ? Ltx25ReferencePrompt.Format(prompt, identitySourceCount) : prompt, parameters.CancellationToken);
             Trim();
             EndPhase("text-encode");
 
-            int guideTokens = identity ? settings.VideoTokens : checked(encodedImages.Count(image => image.FrameIndex != 0) * settings.LatentHeight * settings.LatentWidth);
-            var noise = settings.InitialNoise(guideTokens);
-            var input = new Ltx25DenoiserInput
+            // One denoising pass. The first draws all-noise latents; the refinement
+            // pass mixes the upsampled latent and stage-one audio with fresh noise.
+            Ltx25SamplingOutput RunStage(Ltx25GenerationSettings stage, List<Ltx25EncodedImage> stageImages, float[] sigmas,
+                long noiseSeedOffset, int stepOffset, string phaseName, float[] priorVideo, float[] priorAudio)
             {
-                Video = noise.Video, VideoTokens = checked(settings.VideoTokens + guideTokens),
-                Audio = noise.Audio, AudioTokens = settings.AudioTokens,
-                VideoContext = conditioning.VideoContext, VideoContextTokens = conditioning.Tokens,
-                AudioContext = conditioning.AudioContext, AudioContextTokens = conditioning.Tokens,
-                VideoPositions = Ltx25Geometry.VideoPositions(settings.LatentFrames, settings.LatentHeight, settings.LatentWidth, settings.Fps),
-                AudioPositions = Ltx25Geometry.AudioPositions(settings.AudioTokens),
-                VideoSigma = 1, AudioSigma = 1, FrequencyPrecision = Ltx25FrequencyPrecision.Float64,
-                KeyframeMask = Enumerable.Range(0, checked(settings.VideoTokens + guideTokens))
-                    .Select(token => token < settings.LatentHeight * settings.LatentWidth ? 1f : 0f).ToArray(),
-            };
-            input = identity ? Ltx25ReferenceConditioning.Apply(input, settings, encodedReference,
-                settings.LatentFrames, settings.LatentHeight, settings.LatentWidth) : Ltx25ImageConditioning.Apply(input, settings, encodedImages);
-            Report("denoise", $"{settings.VideoTokens} video + {guideTokens} guide, {settings.AudioTokens} audio, {conditioning.Tokens} prompt tokens");
-            Ltx25SamplingOutput latents = model.Sample(input, (step, total) =>
+                int guideTokens = identity ? stage.VideoTokens : checked(stageImages.Count(image => image.FrameIndex != 0) * stage.LatentHeight * stage.LatentWidth);
+                var noise = stage.InitialNoise(guideTokens, priorVideo == null ? 0UL : 1UL);
+                float[] video = noise.Video, audio = noise.Audio, rawNoise = null;
+                float noiseScale = 1;
+                if (priorVideo != null)
                 {
-                    completed = step;
-                    parameters.OnStep?.Invoke(step, total);
-                    Report("denoise", $"step {step}/{total}");
-                }, parameters.CancellationToken);
-            if (latents.BlocksPerStep != 48) throw new InvalidOperationException("LTX generation did not execute all transformer blocks.");
-            Trim();
-            EndPhase("denoise");
+                    noiseScale = sigmas[0];
+                    rawNoise = noise.Video;
+                    video = (float[])noise.Video.Clone();
+                    for (int i = 0; i < priorVideo.Length; ++i) video[i] = priorVideo[i] + (rawNoise[i] - priorVideo[i]) * noiseScale;
+                    audio = new float[priorAudio.Length];
+                    for (int i = 0; i < audio.Length; ++i) audio[i] = priorAudio[i] + (noise.Audio[i] - priorAudio[i]) * noiseScale;
+                }
+                var input = new Ltx25DenoiserInput
+                {
+                    Video = video, VideoTokens = checked(stage.VideoTokens + guideTokens),
+                    Audio = audio, AudioTokens = stage.AudioTokens,
+                    VideoContext = conditioning.VideoContext, VideoContextTokens = conditioning.Tokens,
+                    AudioContext = conditioning.AudioContext, AudioContextTokens = conditioning.Tokens,
+                    VideoPositions = Ltx25Geometry.VideoPositions(stage.LatentFrames, stage.LatentHeight, stage.LatentWidth, stage.Fps),
+                    AudioPositions = Ltx25Geometry.AudioPositions(stage.AudioTokens),
+                    VideoSigma = 1, AudioSigma = 1, FrequencyPrecision = Ltx25FrequencyPrecision.Float64,
+                    KeyframeMask = Enumerable.Range(0, checked(stage.VideoTokens + guideTokens))
+                        .Select(token => token < stage.LatentHeight * stage.LatentWidth ? 1f : 0f).ToArray(),
+                };
+                input = identity ? Ltx25ReferenceConditioning.Apply(input, stage, encodedReference,
+                    stage.LatentFrames, stage.LatentHeight, stage.LatentWidth)
+                    : Ltx25ImageConditioning.Apply(input, stage, stageImages, rawNoise, noiseScale);
+                Report("denoise", $"{(priorVideo == null ? twoStage ? "first pass" : "single pass" : "refinement pass")} at {stage.Width}x{stage.Height}: {stage.VideoTokens} video + {guideTokens} guide, {stage.AudioTokens} audio, {conditioning.Tokens} prompt tokens, " +
+                    (stage.Ancestral ? Ltx25GenerationSettings.AncestralSampler
+                        : $"{Ltx25GenerationSettings.EulerSampler} (requested; the publisher samples LTX 2.5 with {Ltx25GenerationSettings.AncestralSampler})"));
+                Ltx25SamplingOutput result = model.Sample(input, stage, (step, total) =>
+                    {
+                        completed = stepOffset + step;
+                        parameters.OnStep?.Invoke(completed, totalSteps);
+                        Report("denoise", $"step {completed}/{totalSteps}");
+                    }, parameters.CancellationToken, sigmas, noiseSeedOffset);
+                if (result.BlocksPerStep != 48) throw new InvalidOperationException("LTX generation did not execute all transformer blocks.");
+                Trim();
+                EndPhase(phaseName);
+                return result;
+            }
+
+            Ltx25SamplingOutput latents = RunStage(first, encodedImages, Ltx25Scheduler.DistilledSigmas(),
+                Ltx25GenerationSettings.AncestralNoiseSeedOffset, 0, "denoise", null, null);
+            if (twoStage)
+            {
+                Report("denoise", $"x2 latent upscale to {settings.Width}x{settings.Height}");
+                float[] firstLatents = Ltx25Geometry.UnpackVideo(latents.Video.AsSpan(0, checked(first.VideoTokens * 128)), first.VideoTokens, 128);
+                float[] upsampled = model.UpsampleLatents(firstLatents, first.LatentFrames, first.LatentHeight, first.LatentWidth, parameters.CancellationToken);
+                Trim();
+                EndPhase("upsample");
+                var refinementImages = EncodeImages(settings, "denoise", "refine-image-encode");
+                latents = RunStage(settings, refinementImages, Ltx25Scheduler.RefinementSigmas(),
+                    Ltx25GenerationSettings.AncestralStage2NoiseSeedOffset, Ltx25GenerationSettings.Steps, "refine",
+                    Ltx25Geometry.PackVideo(upsampled, settings.VideoTokens, 128), latents.Audio);
+            }
 
             Report("vae-decode", "convolutional video decoder");
             float[] pixels = model.DecodeVideo(Ltx25Geometry.UnpackVideo(latents.Video.AsSpan(0, checked(settings.VideoTokens * 128)), settings.VideoTokens, 128),

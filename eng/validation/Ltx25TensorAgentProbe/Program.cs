@@ -106,7 +106,7 @@ string? uploadedEnd=string.IsNullOrWhiteSpace(endImage)?null:await UploadImage(e
 var uploadedReferences=new List<string>();
 foreach(string image in referenceImages)uploadedReferences.Add(await UploadImage(image));
 var body=new Dictionary<string,object>{["prompt"]=prompt,["width"]=width,["height"]=height,["frames"]=frames,["fps"]=fps,
-    ["steps"]=8,["cfg"]=1,["sampler"]="euler",["flowShift"]=0,["seed"]=seed,["videoMode"]="t2va",["generateAudio"]=true};
+    ["steps"]=8,["cfg"]=1,["sampler"]="euler_ancestral",["flowShift"]=0,["seed"]=seed,["videoMode"]="t2va",["generateAudio"]=true};
 if(uploadedFirst!=null)body["imagePath"]=uploadedFirst;
 if(uploadedEnd!=null)body["endImage"]=uploadedEnd;
 if(uploadedReferences.Count>0){body["referenceImages"]=uploadedReferences;body["videoMode"]="keyframes";}

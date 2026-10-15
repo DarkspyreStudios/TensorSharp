@@ -332,17 +332,21 @@ Notes:
 
 [`ltx-2.5-distilled.json`](ltx-2.5-distilled.json) records the verified Q4_K_M
 distilled denoiser, the dedicated Gemma 4 text encoder with LTX projections, the
-convolutional video VAE and the audio VAE. All four files are pinned by commit and
-SHA-256, with a combined size of 43.77 GB. Paths use
-`${TENSORSHARP_MODELS:-../models}/ltx25`, including the upstream `text_encoders/`
-and `vae/` subfolders. The initial preview is 512 × 512, 17 frames at 24 fps.
+convolutional video VAE, the x2 spatial latent upscaler and the audio VAE. All five
+files are pinned by commit and SHA-256, with a combined size of 44.76 GB. Paths use
+`${TENSORSHARP_MODELS:-../models}/ltx25`, including the upstream `text_encoders/`,
+`vae/` and `latent_upscale_models/` subfolders. The preset's output is 1024 × 1024,
+17 frames at 24 fps.
 The native generation model runs the dedicated Gemma 4 encoder and AV connectors,
-the complete 48-block denoiser with the published eight Euler steps at CFG 1,
-the convolutional video decoder and the 48 kHz stereo audio decoder/vocoder.
+then the publisher's two-stage distilled recipe: the complete 48-block denoiser
+samples the published eight sigmas (ancestral Euler, CFG 1) at half the output size,
+the latent upscaler doubles it, and three refinement steps run at full size. The
+convolutional video decoder and the 48 kHz stereo audio decoder/vocoder finish.
 TensorAgent offers **Download** and **Use** for **LTX 2.5 Distilled** (Q4_K_M).
 The experimental catalog tier is 48 GB; this is not a measured minimum for every
-resolution or duration. Width and height must be multiples of 32, and frame
-counts must be `8k+1`. Image, end-frame and reference conditioning are unsupported.
+resolution or duration. Width and height must be multiples of 64 (each pass keeps
+the 32-pixel latent grid), and frame counts must be `8k+1`. First, last and
+multiple timed image keyframes are supported; see [LTX 2.5](../docs/models/ltx-2.5.md).
 
 ```sh
 dotnet run --project TensorSharp.Cli -- --config config/ltx-2.5-distilled.json \

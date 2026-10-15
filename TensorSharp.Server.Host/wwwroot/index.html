@@ -3103,8 +3103,11 @@ async function runVideoGenerate(userMsg, bubbleText, statsDiv, generation) {
       statsDiv.textContent = 'Unsupported input';
       return;
     }
-    Object.assign(payload, { width: 512, height: 512, frames: userMsg.videoFrames || 17, fps: 24,
-      steps: 8, cfg: 1, sampler: 'euler', flowShift: 0, videoMode: 't2va', generateAudio: true });
+    // No width/height: the server's --video-width/--video-height (the preset sets
+    // 1024x1024) or the model's own default applies. LTX 2.5 plans motion at half the
+    // output size, so a 512x512 output would plan hands and faces on a 256x256 grid.
+    Object.assign(payload, { frames: userMsg.videoFrames || 17, fps: 24,
+      steps: 8, cfg: 1, sampler: 'euler_ancestral', flowShift: 0, videoMode: 't2va', generateAudio: true });
   }
 
   if (caps.supportsKeyframeConditioning && userMsg.videoMode === 'ref') {

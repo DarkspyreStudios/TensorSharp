@@ -28,6 +28,10 @@ public static partial class ModelCatalog
             new CatalogFile(CatalogFileRole.AudioVae, "ltx-2.5-audio-vae-bf16.safetensors",
                 "https://huggingface.co/Lightricks/LTX-2.5/resolve/49b093a39c19169a8a81721dcc541e07e945232f/vae/ltx-2.5-audio-vae-bf16.safetensors",
                 364_866_540, "c52733d37f6a7fb7949c3dc0fb468c6cb2169e4d836983a73babb9f0d54837a5"),
+            // The publisher's two-stage recipe: half-size pass, x2 latent upscale, refinement.
+            new CatalogFile(CatalogFileRole.LatentUpscaler, "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+                "https://huggingface.co/Lightricks/LTX-2.5/resolve/49b093a39c19169a8a81721dcc541e07e945232f/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
+                995_778_752, "eb5a71fe4068ee87ccdb1c3aa635e547ca76bd2d30ae20ae889f2c325c0677e8"),
         },
         Modalities = CatalogModalities.Image | CatalogModalities.VideoOutput | CatalogModalities.AudioOutput,
         // Conservative device tier; initial full-generation validation uses short clips.

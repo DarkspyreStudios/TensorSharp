@@ -106,10 +106,12 @@ public sealed class VideoTurnsTests
         Assert.Equal(25, payload["frames"]);
         Assert.Equal(8, payload["steps"]);
         Assert.Equal(1f, payload["cfg"]);
-        Assert.Equal("euler", payload["sampler"]);
+        Assert.Equal("euler_ancestral", payload["sampler"]);
         Assert.Equal(0f, payload["flowShift"]);
-        Assert.Equal(512, payload["width"]);
-        Assert.Equal(512, payload["height"]);
+        // The two-stage model owns its output size (1024x1024): a 512x512 request
+        // would plan motion at 256x256.
+        Assert.False(payload.ContainsKey("width"));
+        Assert.False(payload.ContainsKey("height"));
         Assert.Equal(24, payload["fps"]);
         Assert.Equal("t2va", payload["videoMode"]);
         Assert.Equal(true, payload["generateAudio"]);
@@ -370,7 +372,8 @@ public sealed class VideoTurnsTests
                     Assert.Equal(8, parameters.Steps);
                     Assert.Equal(1f, parameters.CfgScale);
                     Assert.True(parameters.GenerateAudio);
-                    Assert.Equal(512, parameters.Width);
+                    Assert.Equal(0, parameters.Width);
+                    Assert.Equal(0, parameters.Height);
                 }
                 if (references)
                 {

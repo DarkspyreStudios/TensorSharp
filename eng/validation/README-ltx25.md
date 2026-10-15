@@ -5,21 +5,24 @@ The tools never patch SD.cpp or ggml sources.
 
 `Ltx25Model` is a registered native `IVideoGenerationModel`. Its text-to-video/
 audio path runs the authentic 48-layer Gemma 4 Unified encoder, V2 BF16 hidden-state
-aggregation, eight video/eight audio connector blocks, the complete 48-block AV
-denoiser over the published eight Euler steps, the convolutional video VAE and
-the stereo audio VAE/vocoder/bandwidth extension. CUDA and MLX are native GPU
+aggregation, eight video/eight audio connector blocks, the publisher's two-stage
+distilled recipe (the complete 48-block AV denoiser over the published eight sigmas
+with ancestral Euler at half the output size, the x2 spatial latent upscaler, then
+three refinement sigmas at full size), the convolutional video VAE and the stereo
+audio VAE/vocoder/bandwidth extension. Ingredients identity sheets keep one
+full-size pass. CUDA and MLX are native GPU
 paths; CPU component tests are separate coverage. Required independent tiny
 fixtures live in `InferenceWeb.Tests/Fixtures/Ltx25/` and are embedded in the test
 assembly. The pipeline supports first/last/timed image guides and optional
 Ingredients identity sheets with its separate adapter. Reference video/audio,
 retake/refinement, specialized control pipelines and multi-GPU remain unsupported.
 
-`config/ltx-2.5-distilled.json` pins four verified files and starts at 512×512,
-17 frames, 24 fps. TensorAgent enables Download/Use for
+`config/ltx-2.5-distilled.json` pins five verified files and starts at 1024×1024
+output (512×512 first pass), 17 frames, 24 fps. TensorAgent enables Download/Use for
 `ltx-2.5-distilled-q4km`. The conservative 48 GB catalog tier is not an established
 minimum for arbitrary shapes. Both downloaders support current-host Hugging Face
 credentials for gated official files; tokens never go to mirrors/CDN redirects.
-The preset/catalog test keeps all four names, URLs and hashes aligned.
+The preset/catalog test keeps all five names, URLs and hashes aligned.
 
 Prompt conditioning caches at most four final context pairs. The model retains
 its denoiser's mapped/device weight identity across requests to avoid repeated
@@ -550,13 +553,32 @@ ltx_python="$PWD/artifacts/ltx25/denoiser-oracle-env/bin/python"
 "$ltx_python" eng/validation/generate-ltx25-hidden-state-features.py \
   --source "$ltx_reference" \
   --output InferenceWeb.Tests/Fixtures/Ltx25/hidden-state-features.json
+
+# Imports ltx_pipelines, whose package imports need the reference's full
+# dependency set: torch/torchaudio/torchvision, av, colour-science (not the
+# unrelated PyPI "colour"), transformers<5.15, accelerate, scipy, OpenImageIO.
+# Use a separate venv such as artifacts/ltx25/sampling-oracle-env.
+artifacts/ltx25/sampling-oracle-env/bin/python eng/validation/ltx25-ancestral-sampling-reference.py \
+  --source "$ltx_reference" \
+  --output InferenceWeb.Tests/Fixtures/Ltx25/euler-ancestral-float32.json
 ```
 
 The tiny checkpoint covers the complete two-block AV graph, independent sigma
 and per-token timesteps, keyframe embedding, Float32/Float64 RoPE, coordinate
-changes and cache residency rebuilding. Sampling tests check original
+changes and cache residency rebuilding. Its GGUF declares the published
+`config.transformer` multipliers (`timestep_scale_multiplier` 1000,
+`av_ca_timestep_scale_multiplier` 1000), and the generator builds the official
+model with them. Constructing `LTXModel` with keyword defaults would silently
+use an a2v/v2a gate multiplier of 1, which is not what the pinned checkpoint
+declares; earlier fixtures and reference reports shared that assumption.
+`ltx25-official-denoiser-reference.py` likewise reads the multipliers from the
+probe's GGUF and records them in its report. Sampling tests check original
 `to_denoised`/`EulerDiffusionStep` Float32 arithmetic and reject unsupported
-conditioning. Synthetic fixtures do not establish pretrained video quality.
+conditioning. The ancestral fixture runs the unchanged
+`euler_ancestral_denoising_loop` over the eight distilled sigmas with recorded
+noise and clean, partial-strength and generated video tokens, so both
+`post_process_latent` points, the renoise and the noise-free terminal step are
+checked at every step. Synthetic fixtures do not establish pretrained video quality.
 
 The hidden-state fixture executes original normalization/rescaling functions
 and verbatim AST nodes for the standalone right-pad helpers, avoiding unrelated
@@ -579,6 +601,76 @@ connector geometry. Existing TensorSharp Gemma 4 generation returns last-token
 logits; an all-token/all-state extraction/import/tokenizer path and independent
 authentic-checkpoint parity remain necessary before these helpers can be wired
 into generation.
+
+## Face fidelity: sampler and cross-attention gate A/B
+
+The publisher's `DistilledPipeline` samples LTX 2.5+ checkpoints with ancestral
+Euler (eta 1), and the pinned checkpoint's config sets the a2v/v2a gate multiplier
+to 1000. TensorSharp now does both; `euler_ancestral` is the default sampler and
+`euler` remains an explicit deterministic diagnostic. Step noise is one Philox
+draw per step (word 0 = step index) keyed by seed + 10000, video tokens first and
+audio after; bit parity with Torch's generator is not claimed.
+
+To compare against the earlier behavior, build the end-to-end probe from the
+unmodified earlier commit in a separate worktree. Its pinned `euler` and
+default gate reproduce the old output. Then run the current probe with
+`--sampler euler` (gate fix only) and without it (both fixes), using identical
+model, image, prompt, geometry and seed. The current probe records `sampler` and
+`settings.Ancestral` in its report. For a one-block real-checkpoint check of the
+gate, run `Ltx25DenoiserProbe` and `ltx25-official-denoiser-reference.py` as
+described below; the reference report records the multipliers it used.
+
+The recorded Apple Silicon comparison (512×512, 97 frames, banner first frame,
+detailed Chinese prompt, seeds 42 and 7) reproduced the earlier distorted server
+sample bit for bit. With both fixes, faces stayed coherent through the gesture
+and kept their identity in later frames. The one-block MLX output matched the
+corrected official reference within relative L2 3.3e-6 (video) and 2.7e-6
+(audio). Framing experiments are summarized in `docs/models/ltx-2.5.md`
+(Clear faces). The visual conclusions come from two seeds and one subject. They
+are not a broad perceptual benchmark. Evidence is under `docs/validation/ltx25/face-fix/`.
+
+## Two-stage recipe and latent upscaler
+
+`Ltx25LatentUpsampler` ports the publisher's `LatentUpsampler` used between the
+half-size and full-size passes. `generate-ltx25-latent-upsampler-oracle.py` builds
+the tiny embedded fixture (`latent-upsampler-tiny.safetensors`,
+`latent-upsampler.json`: 16 latent / 64 mid channels, two channels per GroupNorm
+group, three frames for both temporal edges) with the unchanged original class.
+`Ltx25LatentUpsamplerTests` compares CPU, or MLX/CUDA through
+`TS_TEST_LTX25_VAE_BACKEND`, with it. For the actual checkpoint,
+`Ltx25LatentUpsamplerProbe` upsamples saved `[128,T,H,W]` latents and
+`ltx25-latent-upsampler-reference.py` runs the unchanged original on the same input:
+
+```sh
+dotnet build eng/validation/Ltx25LatentUpsamplerProbe -c Release -o artifacts/ltx25/upsampler-probe \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+MLX_ENABLE_TF32=0 TENSORSHARP_MLX_LIBRARY_DIR="$PWD/TensorSharp.Backends.MLX/Native/dist" \
+dotnet artifacts/ltx25/upsampler-probe/Ltx25LatentUpsamplerProbe.dll --backend mlx \
+  --upsampler "$ltx_models/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors" \
+  --vae "$ltx_models/vae/ltx-2.5-video-vae-conv-bf16.safetensors" \
+  --latents latents.f32 --output "$ltx_evidence/upsampler-mlx"
+"$ltx_python" eng/validation/ltx25-latent-upsampler-reference.py --source "$ltx_reference" \
+  --upsampler ... --vae ... --latents latents.f32 --probe "$ltx_evidence/upsampler-mlx" \
+  --output "$ltx_evidence/upsampler-mlx-reference.json"
+```
+
+`latents.f32` holds Float32 `[128,T,H,W]` with its shape in `latents.f32.json`
+(`{"shape": [128, T, H, W]}`). On the 512×512×97 first pass of the banner sample
+the MLX upsampler matched the original within relative L2 1.9e-5.
+`ltx25-decode-latents-reference.py` decodes such latents with either published
+decoder (`--vae` selects the diffusion or convolutional checkpoint) for decoder
+A/B comparisons. Without NATTEN or Triton the original falls back to eager tiled
+SDPA neighborhood attention, which takes about two minutes for 512×512×97 on MPS
+and over an hour for a full 1024×1024 clip. A temporal crop of the latents is not
+a fair decoder test: the crop's first latent frame is decoded as a one-frame causal
+latent.
+
+The hand-over-face comparison (banner, detailed Chinese prompt, seed 42) is
+summarized in `docs/models/ltx-2.5.md` (Clear faces and hands). The 1024×1024 run
+and the old 512×512 single pass share their first-pass noise and inputs, so it
+isolates the refinement. Back-to-back GPU runs throttled the M5 Pro by about 3.4×
+(18.4 s to 63 s per 512×512 step with identical output); rerun a baseline before
+attributing slowdowns to code.
 
 ## Actual-checkpoint probe and official reference
 

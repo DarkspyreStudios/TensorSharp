@@ -82,10 +82,36 @@ public sealed partial class Ltx25DenoiserTests
         Assert.Equal(3, config.VideoChannels); Assert.Equal(4, config.AudioChannels);
         Assert.False(config.VideoFfnBias); Assert.True(config.AudioFfnBias);
         Assert.True(config.KeyframeEmbedding);
+        // The fixture declares the published multipliers in its GGUF config, as the
+        // pinned checkpoint does; the a2v/v2a gate therefore sees sigma * 1000.
+        Assert.Equal(1000f, config.TimestepScale);
+        Assert.Equal(1000f, config.CrossGateTimestepScale);
         var shapes = file.Tensors.ToDictionary(pair => pair.Key, pair => pair.Value.Shape);
         shapes.Remove("transformer_blocks.1.audio_attn2.to_v.weight");
         Assert.Throws<InvalidDataException>(() => Ltx25Config.FromShapes(shapes));
     }
+
+    [Theory]
+    // The original LTXModelConfigurator.from_metadata defaults: 1000 and av_ca 1.
+    [InlineData("{}", 1000f, 1f)]
+    [InlineData("{\"transformer\":{}}", 1000f, 1f)]
+    [InlineData("{\"transformer\":{\"timestep_scale_multiplier\":1000,\"av_ca_timestep_scale_multiplier\":1000.0}}", 1000f, 1000f)]
+    [InlineData("{\"transformer\":{\"timestep_scale_multiplier\":500,\"av_ca_timestep_scale_multiplier\":250}}", 500f, 250f)]
+    // No config at all: the values every published LTX 2.5 checkpoint declares.
+    [InlineData(null, 1000f, 1000f)]
+    public void TimestepMultipliersFollowCheckpointConfig(string json, float timestep, float crossGate)
+    {
+        var (actualTimestep, actualCrossGate) = Ltx25Config.Multipliers(json);
+        Assert.Equal(timestep, actualTimestep);
+        Assert.Equal(crossGate, actualCrossGate);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{\"transformer\":{\"av_ca_timestep_scale_multiplier\":\"x\"}}")]
+    [InlineData("{\"transformer\":{\"timestep_scale_multiplier\":0}}")]
+    public void InvalidCheckpointConfigIsRejected(string json)
+        => Assert.Throws<InvalidDataException>(() => Ltx25Config.Multipliers(json));
 
     [Fact]
     public void TimestepFeaturesMatchOfficialCosineFirstEncoding()

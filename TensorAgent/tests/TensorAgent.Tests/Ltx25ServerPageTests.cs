@@ -73,9 +73,12 @@ public sealed class Ltx25ServerPageTests
             Assert.True(actual.GetProperty("routed").GetBoolean());
             if(media is "video" or "audio"){Assert.Empty(actual.GetProperty("calls").EnumerateArray());Assert.Equal("Unsupported input",actual.GetProperty("status").GetString());return;}
             var call=Assert.Single(actual.GetProperty("calls").EnumerateArray());Assert.Equal("/api/video-generate/stream",call.GetProperty("url").GetString());
-            var body=call.GetProperty("payload");Assert.Equal(media=="identity"?768:512,body.GetProperty("width").GetInt32());Assert.Equal(media=="identity"?448:512,body.GetProperty("height").GetInt32());
+            var body=call.GetProperty("payload");
+            // Identity sheets keep their trained 768x448; every other LTX request leaves the output size to the server/model.
+            if(media=="identity"){Assert.Equal(768,body.GetProperty("width").GetInt32());Assert.Equal(448,body.GetProperty("height").GetInt32());}
+            else{Assert.False(body.TryGetProperty("width",out _));Assert.False(body.TryGetProperty("height",out _));}
             Assert.Equal(media=="identity"?121:media=="longmultiple"?97:17,body.GetProperty("frames").GetInt32());Assert.Equal(24,body.GetProperty("fps").GetInt32());Assert.Equal(8,body.GetProperty("steps").GetInt32());
-            Assert.Equal(1,body.GetProperty("cfg").GetInt32());Assert.Equal(0,body.GetProperty("flowShift").GetInt32());Assert.Equal("euler",body.GetProperty("sampler").GetString());Assert.True(body.GetProperty("generateAudio").GetBoolean());
+            Assert.Equal(1,body.GetProperty("cfg").GetInt32());Assert.Equal(0,body.GetProperty("flowShift").GetInt32());Assert.Equal("euler_ancestral",body.GetProperty("sampler").GetString());Assert.True(body.GetProperty("generateAudio").GetBoolean());
             if(media is "none" or "identity_then_text")Assert.Equal("t2va",body.GetProperty("videoMode").GetString());
             if(media=="identity_then_text")
             {

@@ -63,13 +63,20 @@ public static class Ltx25ImageConditioning
     }
 
     /// <summary>Noise already includes storage for all appended guides. Audio is
-    /// unchanged. Encoded image storage is [channel,height,width], not token-major.</summary>
+    /// unchanged. Encoded image storage is [channel,height,width], not token-major.
+    /// A refinement pass supplies its token-major <paramref name="rawNoise"/> and
+    /// <paramref name="noiseScale"/>: like GaussianNoiser after the conditionings,
+    /// a guided token becomes clean + mask·scale·(noise − clean), while the other
+    /// tokens keep the caller's already noised latent.</summary>
     public static Ltx25DenoiserInput Apply(Ltx25DenoiserInput initial, Ltx25GenerationSettings settings,
-        IReadOnlyList<Ltx25EncodedImage> images)
+        IReadOnlyList<Ltx25EncodedImage> images, float[] rawNoise = null, float noiseScale = 1)
     {
         ArgumentNullException.ThrowIfNull(initial);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(images);
+        if (!float.IsFinite(noiseScale) || noiseScale < 0 || noiseScale > 1 || (rawNoise == null) != (noiseScale == 1) ||
+            rawNoise != null && rawNoise.Length != initial.Video.Length)
+            throw new ArgumentException("A refinement pass supplies its raw noise with a scale in [0,1).");
         if (images.Count == 0) return initial;
         int spatial = checked(settings.LatentHeight * settings.LatentWidth);
         int guides = images.Count(image => image.FrameIndex != 0);
@@ -104,7 +111,8 @@ public static class Ltx25ImageConditioning
                 for (int c = 0; c < 128; ++c)
                 {
                     int offset = token * 128 + c;
-                    video[offset] = clean[offset] + (video[offset] - clean[offset]) * denoise;
+                    float noise = rawNoise == null ? video[offset] : rawNoise[offset];
+                    video[offset] = clean[offset] + (noise - clean[offset]) * (denoise * noiseScale);
                 }
                 if (image.FrameIndex != 0)
                 {
