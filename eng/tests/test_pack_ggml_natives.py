@@ -31,6 +31,16 @@ class ArtifactPolicyTests(unittest.TestCase):
                       [{"rid": "osx-arm64", "variant": "cpu"}]):
             with self.subTest(items=items):
                 self.assertTrue(pack.check_mac_prerelease_matrix(items))
+    def test_linux_prerelease_needs_both_linux_baselines_and_only_linux_variants(self):
+        baselines = [{"rid": "linux-x64", "variant": "cpu"}, {"rid": "linux-arm64", "variant": "cpu"}]
+        self.assertEqual([], pack.check_linux_prerelease_matrix(baselines))
+        self.assertEqual([], pack.check_linux_prerelease_matrix(baselines + [{"rid": "linux-x64", "variant": "cuda13"}]))
+        self.assertTrue(pack.check_release_matrix(baselines))
+        for items in ([], baselines[:1], baselines * 2, baselines + [{"rid": "osx-arm64", "variant": "metal"}],
+                      baselines + [{"rid": "linux-x64", "variant": "metal"}]):
+            with self.subTest(items=items):
+                self.assertTrue(pack.check_linux_prerelease_matrix(items))
+
     def test_packaging_and_native_build_compute_the_same_abi(self):
         result = subprocess.run(["cmake", "-P", str(pack.REPO_ROOT / "eng" / "print-ggml-native-abi.cmake")],
                                 capture_output=True, text=True, check=True, timeout=30)
@@ -571,6 +581,12 @@ class StagingFilesystemTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as refused:
             self.run_cli("--validate-only", "--mac-prerelease", "--complete-release")
         self.assertEqual(2, refused.exception.code)
+
+    def test_linux_prerelease_cannot_be_combined_with_another_matrix_gate(self):
+        for other in ("--mac-prerelease", "--complete-release"):
+            with self.subTest(other=other), self.assertRaises(SystemExit) as refused:
+                self.run_cli("--validate-only", "--linux-prerelease", other)
+            self.assertEqual(2, refused.exception.code)
 
     def test_real_text_sibling_cannot_satisfy_a_claimed_bundled_dependency(self):
         suffix = ".dylib" if self.rid.startswith("osx-") else ".so"

@@ -73,8 +73,8 @@ Consumers build against this repository by source through
 [eng/SourceReferences.targets](../eng/SourceReferences.targets). A consumer that sets `TensorSharpSourceRoot` to a
 checkout imports it, and each managed `Darkspyre.TensorSharp.*` PackageReference becomes a ProjectReference to the
 project that builds that package: the project named for the id without `Darkspyre.`, and `TensorSharp.Core` for
-`Darkspyre.TensorSharp.Tensors`. The references set `TensorSharpSkipGgmlNative`, `TensorSharpSkipMlxNative` and
-`TensorSharpSkipCudaNative`, so a consumer build runs no native development build. A consumer that ships the GGML
+`Darkspyre.TensorSharp.Tensors`. The references carry no extra global properties, so each project builds once in a
+consumer build. The consumer build runs no native development build, because GGML, MLX and CUDA compilation is opt-in. A consumer that ships the GGML
 bridge takes it from the release native package `eng/build-ggml-natives.sh` and `eng/pack-ggml-natives.py
 --mac-prerelease` write to `artifacts/ggml-natives/<version>/dist`, which matches the managed build of the same
 commit. Without the property, consumers use the published packages.
@@ -175,9 +175,10 @@ upstream ggml or accelerator kernels. It does
 not qualify native lifecycle, target execution or GPU safety.
 
 The packer's explicit `--mac-prerelease` mode requires exactly one osx-arm64 Metal/CPU baseline.
-All artifact, ABI, profile, cache, dependency, component and relink checks remain required. The
-default output mode requires the complete twelve-artifact release matrix. `--complete-release`
-and `--mac-prerelease` cannot be combined. Partial staging validation alone does not authorize
+Its `--linux-prerelease` mode requires the linux-x64 and linux-arm64 CPU baselines once each and
+accepts only Linux variants besides them. All artifact, ABI, profile, cache, dependency, component
+and relink checks remain required. The default output mode requires the complete twelve-artifact
+release matrix. `--complete-release`, `--mac-prerelease` and `--linux-prerelease` cannot be combined. Partial staging validation alone does not authorize
 package output.
 
 ### Package Resolver Preflight

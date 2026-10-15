@@ -49,7 +49,11 @@ creating packages, archives, a manifest or an output directory.
 Usage:
   eng/pack-ggml-natives.py [--stage DIR] [--out DIR] [--managed-package NUPKG]
                            [--allow-oversized] [--developer-package-limit BYTES]
-                           [--validate-only]
+                           [--validate-only] [--complete-release | --mac-prerelease | --linux-prerelease]
+
+--mac-prerelease packages exactly the osx-arm64 Metal baseline. --linux-prerelease packages the
+linux-x64 and linux-arm64 CPU baselines and any staged Linux variants. Without either, output
+requires the complete release matrix.
 """
 
 import argparse
@@ -441,6 +445,16 @@ def check_mac_prerelease_matrix(artifacts):
     present = [(artifact["rid"], artifact["variant"]) for artifact in artifacts]
     if present != [("osx-arm64", "metal")]:
         return ["Mac prerelease requires exactly the osx-arm64/metal baseline; no other or duplicate artifacts"]
+    return []
+
+
+def check_linux_prerelease_matrix(artifacts):
+    present = [(artifact["rid"], artifact["variant"]) for artifact in artifacts]
+    linux = {(rid, variant) for rid, variants in VARIANTS.items() if rid.startswith("linux-") for variant in variants}
+    if (len(present) != len(set(present)) or not set(present) <= linux
+            or not {("linux-x64", "cpu"), ("linux-arm64", "cpu")} <= set(present)):
+        return ["Linux prerelease requires the linux-x64/cpu and linux-arm64/cpu baselines once each, "
+                "and accepts only Linux variants besides them"]
     return []
 
 
@@ -915,9 +929,11 @@ def main():
                         help="require the entire canonical release matrix during validation-only checks; this remains the default output gate")
     parser.add_argument("--mac-prerelease", action="store_true",
                         help="explicitly package only the single osx-arm64 Metal/CPU baseline; full release remains the default")
+    parser.add_argument("--linux-prerelease", action="store_true",
+                        help="explicitly package only the Linux CPU baselines and optional Linux variants; full release remains the default")
     args = parser.parse_args()
-    if args.complete_release and args.mac_prerelease:
-        parser.error("--mac-prerelease and --complete-release are mutually exclusive")
+    if sum((args.complete_release, args.mac_prerelease, args.linux_prerelease)) > 1:
+        parser.error("--complete-release, --mac-prerelease and --linux-prerelease are mutually exclusive")
 
     version = ET.parse(REPO_ROOT / "Directory.Build.props").findtext(".//TensorSharpVersion")
     if not version:
@@ -934,6 +950,8 @@ def main():
         staged, errors = collect_artifacts(stage, version, ggml_commit)
         if args.mac_prerelease:
             errors += check_mac_prerelease_matrix(staged)
+        elif args.linux_prerelease:
+            errors += check_linux_prerelease_matrix(staged)
         elif args.complete_release or not args.validate_only:
             errors += check_release_matrix(staged)
         managed = managed_package_record(args.managed_package, version) if args.managed_package else None
