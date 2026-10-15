@@ -2273,6 +2273,9 @@ function activityLabel(tool, phase) {
     case 'skills_list': return writing ? 'Preparing skill lookup…' : 'Checking skills…';
     case 'skills_read': return writing ? 'Preparing skill read…' : 'Reading skill file…';
     case 'skills_run':  return writing ? 'Preparing skill run…' : 'Running skill…';
+    case 'skills_search': return writing ? 'Preparing skill search…' : 'Searching community skills…';
+    case 'skills_inspect': return writing ? 'Preparing skill inspection…' : 'Inspecting skill requirements…';
+    case 'skills_install': return writing ? 'Preparing skill installation…' : 'Installing inspected skill…';
     case 'wait_agent':  return writing ? 'Preparing to wait for sub-agents…' : 'Waiting for sub-agents…';
     default: {
       const name = tool ? String(tool).replace(/_/g, ' ') : 'operation';
@@ -3407,6 +3410,9 @@ async function requestAssistantResponse() {
             if (reasoningOn) scrollChatToBottom();
           }
           if (data.skill_step) {
+            if (data.skill_step === 'skills_install' && data.ok === true) {
+              loadSkillsRoster();
+            }
             // Completion metadata is intentionally not rendered as a history.
             // Keep only user-facing output files; call execution is logged
             // by the server and the matching `finished` event clears live activity.

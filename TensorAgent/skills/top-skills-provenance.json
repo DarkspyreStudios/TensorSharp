@@ -8,8 +8,8 @@
       "repository": "vercel-labs/skills",
       "revision": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
       "license": "MIT",
-      "disposition": "excluded",
-      "reason": "Requires npx skills, recommends global installation, and cannot complete discovery/installation in the in-process mobile shell."
+      "disposition": "adapted and installed",
+      "reason": "Uses TensorSharp-owned native search, immutable revision inspection and managed installation instead of npx or global writes. Runtime compatibility is checked separately from installation; validation scope is recorded by the find-skills tests."
     },
     {
       "rank": 2,
@@ -284,6 +284,68 @@
         "earlier_failed_max_skill_rounds": 8,
         "earlier_model_at_24_rounds": "not validated",
         "other_models": "not validated"
+      }
+    },
+    {
+      "name": "find-skills",
+      "repository": "vercel-labs/skills",
+      "revision": "13e4063a1cf913f5606d57d42ab83a86f5001e04",
+      "path": "skills/find-skills",
+      "license": "MIT",
+      "adaptations": "Native skills_search, skills_inspect and skills_install; request-local activation; host-managed installation; explicit compatibility and execution validation boundaries.",
+      "upstream_files": [
+        {
+          "skill": "find-skills",
+          "file": "SKILL.md",
+          "sha256": "c00eeea0e13e74fe4a9d84ba0a8542205a1b736d65f13134fe1a6647eb14976f"
+        },
+        {
+          "skill": "find-skills",
+          "file": "LICENSE",
+          "sha256": "661142e53c313d2bb5e1b055f5c0a39001450ff1b5e27b89dc4bc7de9a6352ca"
+        }
+      ],
+      "integrated_files": {
+        "LICENSE.txt": "661142e53c313d2bb5e1b055f5c0a39001450ff1b5e27b89dc4bc7de9a6352ca",
+        "SKILL.md": "bd4085e197c2c107850b553008307bd29969190b57f3ba537f9da75abbc86686"
+      },
+      "workflow_validation": {
+        "date": "2026-10-15",
+        "sampled_model": "gemma-4-E4B-it-Q8_0",
+        "backend": "ggml_metal",
+        "platform": "macOS arm64",
+        "controlled_sampling": {
+          "temperature": 0,
+          "seed": 42
+        },
+        "runtime_validation": "Passed native search, immutable inspection, managed installation, same-request resource access and script execution against actual upstream packages.",
+        "controlled_model_samples": {
+          "TensorSharp.Server.Host": {
+            "frontend_design_html": "passed",
+            "skill_creator_helper_help": "passed"
+          },
+          "TensorAgent.AgentAppHost": {
+            "frontend_design_html": "failed strict semantic requirement: a styled anchor replaced the requested button element, despite successful search, inspect, install, read and artifact creation",
+            "skill_creator_helper_help": "passed"
+          },
+          "strict_passed": 3,
+          "total": 4
+        },
+        "additional_script_validation": "The separate live managed probe ran the unchanged anthropics/skills skill-creator aggregate_benchmark.py helper in the production macOS sandbox against six fixtures and verified generated JSON/Markdown aggregation outputs. Model script cases exercised --help only.",
+        "earlier_model_samples": "Earlier stochastic runs passed 1 of 4 strict task oracles; a separate server HTML retry with an explicit read reminder passed 1 of 1. These are retained separately from controlled samples.",
+        "tensoragent_regression": {
+          "passed": 315,
+          "skipped": 0,
+          "failed": 0,
+          "scope": "FindSkillsHostTests, SkillCatalogVisibilityTests, TopSkillsHostTests, WebUiPageTests and InProcessShellTests"
+        },
+        "evidence": "Generated reports and failure history are summarized in ignored artifacts/find-skills/summary.json; final TensorAgent regression log is in docs/validation/find-skills-tensoragent-tests.log.",
+        "limitations": [
+          "One observation per controlled task on one model/backend; no minimum model requirement or universal model-quality claim is established.",
+          "No physical iOS or Windows device, native TensorAgent GUI, or other platform/device coverage.",
+          "No universal marketplace compatibility claim: downloaded workflows retain their external tool, runtime and credential requirements.",
+          "Warm-cache and individual request timings are not concurrent throughput benchmarks."
+        ]
       }
     }
   ],

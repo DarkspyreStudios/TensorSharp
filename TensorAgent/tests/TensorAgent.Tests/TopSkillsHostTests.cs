@@ -28,7 +28,7 @@ public sealed class TopSkillsHostTests
                 ExecutionMode = execution,
             };
             using var host = new AgentAppHost(paths);
-            string[] imported = ["grill-me", "grill-with-docs", "tdd", "handoff"];
+            string[] imported = ["find-skills", "grill-me", "grill-with-docs", "tdd", "handoff"];
             foreach (string name in imported)
             {
                 Assert.True(host.Skills.TryGet(name, out Skill workflow));

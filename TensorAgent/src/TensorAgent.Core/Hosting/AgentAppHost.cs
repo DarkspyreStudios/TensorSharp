@@ -88,6 +88,10 @@ public sealed class AgentAppHost : IDisposable
     /// normal installer. Tests inject one to verify the complete model-command route
     /// without depending on the public package index.
     /// </param>
+    /// <param name="marketplace">
+    /// Native skill discovery client; null uses the shared client. Tests supply a
+    /// deterministic HTTP transport while exercising the same managed install path.
+    /// </param>
     public AgentAppHost(
         AgentPaths paths,
         string? webRoot = null,
@@ -97,7 +101,8 @@ public sealed class AgentAppHost : IDisposable
         int port = 0,
         IReadOnlyList<BackendOption>? backends = null,
         ModelService? modelService = null,
-        IInstallHook? installer = null)
+        IInstallHook? installer = null,
+        SkillMarketplace? marketplace = null)
     {
         Paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
@@ -241,6 +246,13 @@ public sealed class AgentAppHost : IDisposable
         {
             Roots = new[] { paths.BundledSkillsDirectory, paths.InstalledSkillsDirectory },
             InstallDirectory = paths.InstalledSkillsDirectory,
+            Marketplace = marketplace,
+            MarketplaceHostAllowed = host => new ExecutionPolicy(
+                AllowScripts: false, AllowNetwork: CodeExec.AllowNetwork,
+                WorkRoot: string.Empty, ReadableRoots: Array.Empty<string>(), TempRoot: string.Empty)
+            {
+                NetworkHosts = _embeddedBackend?.NetworkHosts ?? _desktopBackend?.NetworkHosts ?? Array.Empty<string>(),
+            }.IsHostAllowed(host),
             // Most of this app's skills ship INSIDE the bundle, which is read-only and
             // is rewritten by every install of the app. Deleting one therefore cannot
             // be done by deleting files: without this record the delete either failed

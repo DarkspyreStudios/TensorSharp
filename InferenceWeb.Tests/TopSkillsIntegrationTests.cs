@@ -43,7 +43,7 @@ public sealed class TopSkillsIntegrationTests
     }
 
     private static string Bundle => Path.Combine(Repository, "TensorAgent", "skills");
-    private static readonly string[] Imported = ["grill-me", "grill-with-docs", "tdd", "handoff"];
+    private static readonly string[] Imported = ["find-skills", "grill-me", "grill-with-docs", "tdd", "handoff"];
     private static SkillRegistry Registry() => new(new SkillRegistryOptions { Roots = [Bundle] });
     private static ServerHostingOptions Options(string directory) => ServerOptionsBuilder.Build(
         ["--backend", "ggml_cpu", "--no-multi-agent", "--skills-dir", Bundle], directory);
@@ -165,7 +165,7 @@ public sealed class TopSkillsIntegrationTests
         }
         // These stubs require external executables or mutate toolchain configuration;
         // a valid Markdown manifest alone is not a successful capability check.
-        foreach (string excluded in new[] { "find-skills", "agent-browser", "setup-matt-pocock-skills", "hyperframes-cli", "improve-codebase-architecture" })
+        foreach (string excluded in new[] { "agent-browser", "setup-matt-pocock-skills", "hyperframes-cli", "improve-codebase-architecture" })
             Assert.False(registry.TryGet(excluded, out _));
     }
 

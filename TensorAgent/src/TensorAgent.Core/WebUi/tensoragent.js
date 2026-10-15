@@ -695,6 +695,13 @@
       ok: f.ok !== false,
       files: f.files || null,
     };
+    // Chat installs update the same library as the Skills sheet. Refresh its
+    // cached roster immediately, preserving the user's explicit selection.
+    if (f.skill_step === 'skills_install' && f.ok === true) {
+      loadSkills().catch(function (error) {
+        skillsError(t('page.nav.skillsFailed', { error: (error && error.message) || error }));
+      });
+    }
   }
 
   function addCopy(turn, getText) {

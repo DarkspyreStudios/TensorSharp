@@ -5,7 +5,7 @@ when — a task needs it. The folder holds a `SKILL.md` written for the model
 rather than for a person, plus whatever scripts, reference documents and assets
 those instructions refer to. TensorSharp discovers such folders, advertises
 their one-line descriptions to the model, and lets the model pull the rest in
-mid-answer through two built-in tools that TensorSharp executes **itself**.
+mid-answer through built-in tools that TensorSharp executes **itself**.
 
 That last part is what makes the feature usable from an ordinary client. A
 caller sends `"skills": ["pdf"]` on a normal chat request and gets back a
@@ -44,6 +44,56 @@ Knowledge support and active response steering were added after `v2026.10.10`;
 use a source build until a release includes them.
 
 ## What a skill is
+
+### Discover and install community skills
+
+The bundled `find-skills` workflow adapts
+[Vercel's skill](https://github.com/vercel-labs/skills/tree/13e4063a1cf913f5606d57d42ab83a86f5001e04/skills/find-skills)
+to TensorSharp and TensorAgent. It uses shared .NET tools, so discovery and
+installation do not require `npx`, Node, Git or a child process on mobile.
+
+Enable Network in TensorAgent, or `--skills-allow-network` on the server, and ask
+for a skill or select `find-skills`. The tools are available only when that skill
+is reachable in the request; an explicit empty skill selection disables them.
+
+| Tool | Behavior |
+| --- | --- |
+| `skills_search(query, owner?)` | Searches skills.sh and returns package identifiers, sources, links and install counts. Successful searches are cached for five minutes with a bounded entry count. |
+| `skills_inspect(package)` | Downloads a public GitHub repository at an immutable commit and returns the selected skill's instructions, compatibility, license and file list. The entire response fits the request's read budget, with explicit truncation markers. No repository code is executed. |
+| `skills_install(package, revision?)` | Installs the exact package inspected in the same request into the host's writable skill registry. An optional revision must match the inspection. Existing skills are never overwritten. |
+
+Packages use `owner/repository@manifest-name`, for example
+`vercel-labs/agent-skills@vercel-react-best-practices`. Selection follows the
+manifest name even when the source folder has a different name. The complete
+skill subtree is copied unchanged, including scripts, references and assets.
+Only the installing request gains immediate access through `skills_read` and
+`skills_run`; unrelated active requests retain their original scope. Subsequent
+requests see the installed skill through normal registry discovery.
+
+Installation needs a writable `SkillRegistryOptions.InstallDirectory`. The
+server and TensorAgent configure this; the CLI's default registry remains
+read-only and offers search/inspection. Local `SkillsChatClient` delivery can
+opt in with `AllowSkillNetwork = true` and a writable registry. Network access
+alone does not enable script or code execution. Those use their existing host
+permissions and sandbox. A narrowed TensorAgent domain allow-list must allow
+`skills.sh` for search and `api.github.com` plus `codeload.github.com` for packages.
+
+The transport accepts public GitHub packages, bounds download/extraction sizes,
+rejects redirects, unsafe paths, links and ambiguous manifests, and retains at
+most two selected skill archives. Repositories exceeding those limits,
+private repositories, non-GitHub packages and unsupported runtime dependencies
+are reported as errors, not successful installations. Install counts do not
+prove quality. Inspect requirements, install only within the user's request,
+read the full installed instructions, perform the task, and validate its actual
+output. External CLI, browser, credential and device requirements can still make
+a discovered workflow unavailable on a particular host.
+
+Reusable live checks are in `eng/validation/FindSkillsProbe`; generated results
+belong in ignored `artifacts/find-skills/`. The probe distinguishes transport,
+resource/script execution and model-driven validation instead of treating an
+installation as proof that every ecosystem skill works.
+
+### Skill directory layout
 
 A skill is a directory whose name *is* the skill's name:
 
@@ -1462,7 +1512,7 @@ under phone context budgets.
 
 | Rank / candidate | Final disposition and measured coverage |
 | --- | --- |
-| 1 `find-skills` | Excluded: requires `npx skills` and recommends global installation, unavailable in the mobile in-process shell. |
+| 1 `find-skills` | Adapted: native shared search, inspection and pinned installation replace `npx` and global folders. See the discovery workflow and its validation limits above. |
 | 2 `grill-me` | Kept: first interview round passed on E2B; a real three-turn E4B interview incorporated answers, asked the next independent recovery/pairing questions, and finished with an agreed plan without implementation tools. |
 | 3 `grill-with-docs` | Kept with E4B/16K/24-round requirements: final delivery instructions passed twice, with a downloaded glossary preserving the agreed Order/15-minute Reservation definitions and a question about late payment. Earlier variants created the file but omitted its link. |
 | 4 `agent-browser` | Excluded: an external native CLI/Chrome/CDP stub; the CLI is unavailable in the mobile runtime. Existing desktop Playwright is preserved. |

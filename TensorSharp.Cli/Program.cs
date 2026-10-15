@@ -1440,7 +1440,8 @@ namespace TensorSharp.Cli
 
                     if (skillCaps.ToolsRendered)
                     {
-                        tools = SkillTools.Merge(tools, skillScriptsAllowed, out var shadowedTools);
+                        var marketplace = SkillMarketplaceSession.Create(skillRegistry, skillPlan.Reachable, skillOptions.AllowNetwork);
+                        tools = SkillTools.Merge(tools, skillScriptsAllowed, out var shadowedTools, marketplace);
                         foreach (string shadowed in shadowedTools)
                         {
                             _log.LogWarning(LogEventIds.HostConfiguration,
@@ -1451,6 +1452,7 @@ namespace TensorSharp.Cli
 
                         skillToolContext = new SkillToolContext(new List<Skill>(skillPlan.Reachable))
                         {
+                            Marketplace = marketplace,
                             ScriptRunner = skillScriptsAllowed
                                 ? new SkillScriptRunner(ToScriptRunnerOptions(
                                     skillOptions, codeWorkspace, codeRunner), _log)
