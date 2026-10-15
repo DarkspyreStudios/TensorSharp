@@ -388,6 +388,7 @@ namespace TensorSharp.Cli
             string videoDit2Path = null;
             string videoAudioVaePath = null;
             string videoUpscalerPath = null;
+            string videoDiffusionVaePath = null;
             string endImagePath = null;
             string videoMode = null;
             var refImagePaths = new List<string>();
@@ -446,6 +447,7 @@ namespace TensorSharp.Cli
                     case "--video-dit2": videoDit2Path = args[++i]; break;
                     case "--audio-vae": videoAudioVaePath = args[++i]; break;
                     case "--video-upscaler": videoUpscalerPath = args[++i]; break;
+                    case "--video-diffusion-vae": videoDiffusionVaePath = args[++i]; break;
                     case "--end-image": endImagePath = args[++i]; break;
                     case "--video-mode": videoMode = args[++i]; break;
                     case "--ref-image": refImagePaths.Add(args[++i]); break;
@@ -819,6 +821,7 @@ namespace TensorSharp.Cli
             ApplyVideoCompanionOverride("--video-dit2", videoDit2Path, "TS_VIDEO_DIT2");
             ApplyVideoCompanionOverride("--audio-vae", videoAudioVaePath, "TS_VIDEO_AUDIO_VAE");
             ApplyVideoCompanionOverride("--video-upscaler", videoUpscalerPath, "TS_VIDEO_UPSCALER");
+            ApplyVideoCompanionOverride("--video-diffusion-vae", videoDiffusionVaePath, "TS_VIDEO_DIFFUSION_VAE");
 
             // --qwen-image-variant declares which Qwen-Image-2.1 checkpoint the GGUF holds
             // (Turbo samples its own 8-step schedule); QwenImageModel reads it at load.

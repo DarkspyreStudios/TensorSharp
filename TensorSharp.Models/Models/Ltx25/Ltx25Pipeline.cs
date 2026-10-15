@@ -147,9 +147,9 @@ internal static class Ltx25Pipeline
                     Ltx25Geometry.PackVideo(upsampled, settings.VideoTokens, 128), latents.Audio);
             }
 
-            Report("vae-decode", "convolutional video decoder");
+            Report("vae-decode", model.UsesDiffusionDecoder ? "diffusion video decoder" : "convolutional video decoder");
             float[] pixels = model.DecodeVideo(Ltx25Geometry.UnpackVideo(latents.Video.AsSpan(0, checked(settings.VideoTokens * 128)), settings.VideoTokens, 128),
-                settings.LatentFrames, settings.LatentHeight, settings.LatentWidth, parameters.CancellationToken);
+                settings.LatentFrames, settings.LatentHeight, settings.LatentWidth, settings.Seed, parameters.CancellationToken);
             Trim();
             int frameSize = checked(settings.Width * settings.Height * 3);
             if (pixels.Length != checked(frameSize * settings.Frames)) throw new InvalidOperationException("LTX video decoder returned an unexpected frame geometry.");

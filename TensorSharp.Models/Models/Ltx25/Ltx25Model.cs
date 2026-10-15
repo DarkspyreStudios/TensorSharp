@@ -17,6 +17,11 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
     internal string CheckpointPath { get; }
     internal string TextEncoderPath { get; }
     internal string VideoVaePath { get; }
+    /// <summary>The publisher's diffusion video VAE when configured or installed beside
+    /// the model; it decodes on MLX and CPU. Null decodes with <see cref="VideoVaePath"/>.</summary>
+    internal string DiffusionVaePath { get; }
+    /// <summary>True when frames come from the diffusion decoder rather than the convolutional one.</summary>
+    internal bool UsesDiffusionDecoder => DiffusionVaePath != null;
     internal string AudioVaePath { get; }
     internal string ReferenceLoraPath { get; }
     /// <summary>The x2 spatial latent upscaler between the half- and full-size passes.</summary>
@@ -28,6 +33,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
     private Ltx25Denoiser _denoiser;
     private Ltx25PromptEncoder _promptEncoder;
     private Ltx25VideoVaeDecoder _videoDecoder;
+    private Ltx25DiffusionVideoDecoder _diffusionDecoder;
     private Ltx25VideoVaeEncoder _videoEncoder;
     private Ltx25AudioDecoder _audioDecoder;
     private Ltx25LatentUpsampler _latentUpsampler;
@@ -48,6 +54,9 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
             VideoVaePath = Companion(directory, "TS_VIDEO_VAE", "vae", "ltx-2.5-video-vae-conv-bf16.safetensors");
             AudioVaePath = Companion(directory, "TS_VIDEO_AUDIO_VAE", "vae", "ltx-2.5-audio-vae-bf16.safetensors");
             LatentUpscalerPath = Companion(directory, "TS_VIDEO_UPSCALER", "latent_upscale_models", LatentUpscalerFileName);
+            DiffusionVaePath = ResolveDiffusionVae(VideoVaePath, _allocator is CudaAllocator);
+            Console.WriteLine($"  [ltx25] video decoder: {(UsesDiffusionDecoder ? "diffusion" : "convolutional")} " +
+                $"({Path.GetFileName(DiffusionVaePath ?? VideoVaePath)})");
             string configuredReference = Environment.GetEnvironmentVariable("TS_LTX25_INGREDIENTS_LORA");
             if (!string.IsNullOrWhiteSpace(configuredReference))
             {
@@ -65,6 +74,34 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
     }
 
     internal const string LatentUpscalerFileName = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors";
+
+    /// <summary>The diffusion VAE when explicitly selected: TS_VIDEO_DIFFUSION_VAE, or
+    /// the video VAE itself when that is the diffusion checkpoint. It is never picked up
+    /// beside the denoiser: it renders cleaner but softer frames than the convolutional
+    /// default, so it is a choice, not an upgrade. CUDA has no neighborhood-attention
+    /// kernel and refuses it.</summary>
+    private static string ResolveDiffusionVae(string videoVae, bool cuda)
+    {
+        bool IsDiffusion(string path)
+        {
+            using var file = new SafetensorsFile(path);
+            return Ltx25DiffusionVaeConfig.IsDiffusionVae(file.Metadata);
+        }
+        string configured = Environment.GetEnvironmentVariable("TS_VIDEO_DIFFUSION_VAE");
+        string path;
+        if (IsDiffusion(videoVae)) path = videoVae;
+        else if (string.IsNullOrWhiteSpace(configured)) return null;
+        else
+        {
+            if (!File.Exists(configured)) throw new FileNotFoundException("The configured LTX diffusion video VAE does not exist.", configured);
+            path = Path.GetFullPath(configured);
+            if (!IsDiffusion(path)) throw new InvalidDataException($"'{path}' is not a CausalDiffusionVAE checkpoint.");
+        }
+        if (cuda)
+            throw new NotSupportedException("The LTX 2.5 diffusion video decoder runs on MLX and CPU. On CUDA, remove " +
+                "--video-diffusion-vae (TS_VIDEO_DIFFUSION_VAE) and use the convolutional ltx-2.5-video-vae-conv-bf16.safetensors as --video-vae.");
+        return path;
+    }
 
     // GGML option names remain usable by hosts whose device picker uses them;
     // this family executes its owned direct CUDA/MLX kernels, not a GGML graph.
@@ -166,9 +203,15 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
         catch { DisposeOwned(ref _denoiser); throw; }
     }
 
-    internal float[] DecodeVideo(float[] latents, int frames, int height, int width,
+    internal float[] DecodeVideo(float[] latents, int frames, int height, int width, long seed,
         CancellationToken cancellationToken = default)
     {
+        if (UsesDiffusionDecoder)
+        {
+            var diffusion = _diffusionDecoder ??= new Ltx25DiffusionVideoDecoder(DiffusionVaePath, _allocator);
+            try { return diffusion.Decode(latents, frames, height, width, seed, cancellationToken); }
+            catch { DisposeOwned(ref _diffusionDecoder); throw; }
+        }
         var decoder = _videoDecoder ??= new Ltx25VideoVaeDecoder(VideoVaePath, _allocator);
         try { return decoder.Decode(latents, frames, height, width, cancellationToken); }
         catch { DisposeOwned(ref _videoDecoder); throw; }
@@ -242,6 +285,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
             _promptCache.Clear(); _promptOrder.Clear();
             DisposeOwned(ref _promptEncoder);
             DisposeOwned(ref _videoDecoder);
+            DisposeOwned(ref _diffusionDecoder);
             DisposeOwned(ref _videoEncoder);
             DisposeOwned(ref _audioDecoder);
             DisposeOwned(ref _latentUpsampler);
@@ -278,6 +322,7 @@ public sealed class Ltx25Model : ModelBase, IVideoGenerationModel
             _promptOrder.Clear();
             DisposeOwned(ref _promptEncoder);
             DisposeOwned(ref _videoDecoder);
+            DisposeOwned(ref _diffusionDecoder);
             DisposeOwned(ref _videoEncoder);
             DisposeOwned(ref _audioDecoder);
             DisposeOwned(ref _latentUpsampler);

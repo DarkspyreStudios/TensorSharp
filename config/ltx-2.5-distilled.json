@@ -48,6 +48,10 @@
     "sha256": "685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d"
   },
 
+  // The publisher's diffusion video decoder (ltx-2.5-video-vae-bf16.safetensors) is
+  // opt-in through --video-diffusion-vae: cleaner, with less grain and flicker, but
+  // softer than this convolutional decoder on the preset's 1024x1024 output.
+
   "video-upscaler": {
     "path": "${ltxRoot}/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors",
     "urls": [ "${hf}/Lightricks/LTX-2.5/resolve/49b093a39c19169a8a81721dcc541e07e945232f/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors" ],

@@ -21,8 +21,8 @@ Manual installations can instead set `TS_VIDEO_TEXT_ENCODER`, `TS_VIDEO_VAE`,
 `TS_VIDEO_AUDIO_VAE` and `TS_VIDEO_UPSCALER` (CLI/server `--video-upscaler`); the
 upscaler otherwise loads from `latent_upscale_models/` beside the denoiser and is
 required. The custom encoder embeds its tokenizer; the ordinary Gemma
-4 checkpoint is not a substitute. Use the **conv** video VAE named in the preset,
-which differs from the publisher's diffusion decoder.
+4 checkpoint is not a substitute. Use the **conv** video VAE named in the preset.
+The publisher's diffusion decoder is optional; see [Video decoders](#video-decoders).
 
 ```sh
 TENSORSHARP_MODELS=/path/to/models MLX_ENABLE_TF32=0 \
@@ -144,8 +144,8 @@ Checks that ruled out other causes:
   4.2e-5 (video) and 1.9e-6 (audio). Earlier parity runs covered only 64×64×9.
 - **Decoder.** The publisher's diffusion decoder (`ltx-2.5-video-vae-bf16.safetensors`,
   a neighborhood-attention transformer) decoding the same 512×512 single-pass
-  latents is sharper in moving hair and texture but keeps the smear: the defect is
-  in the latents. TensorSharp continues to use the convolutional decoder.
+  latents keeps the smear: the defect is in the latents. See
+  [Video decoders](#video-decoders) for how the two decoders compare.
 
 For clear faces and hands:
 
@@ -161,11 +161,55 @@ For clear faces and hands:
    negative-prompt or guidance lever.
 
 Remaining differences from the publisher's highest-quality path: TensorSharp
-decodes with the convolutional VAE rather than the diffusion decoder, does not apply
-the publisher's CRF 18 image re-compression, and the preset denoiser is a third-party
+decodes with the convolutional VAE by default (the diffusion decoder is opt-in), does
+not apply the publisher's CRF 18 image re-compression, and the preset denoiser is a third-party
 Q4_K_M quantization (the GGUF publisher's own ComfyUI workflow uses the same file).
 Evidence is in `artifacts/ltx25/diffvae-diag/` and `docs/validation/ltx25/face-fix/`
 (local validation evidence, not committed).
+
+## Video decoders
+
+Lightricks publishes two decoders for the same latents. Both share one encoder:
+the encoder tensors and latent statistics in the two files are byte-identical.
+
+- **Convolutional** (`ltx-2.5-video-vae-conv-bf16.safetensors`, `--video-vae`): the
+  default on every backend.
+- **Diffusion** (`ltx-2.5-video-vae-bf16.safetensors`, `--video-diffusion-vae` or
+  `TS_VIDEO_DIFFUSION_VAE`): the publisher's `NADiffusionDecoder`, opt-in on MLX and
+  CPU. Four neighborhood-attention stages upsample the latent into a context volume.
+  A fifth, diffusion stage predicts the pixels in one step (the checkpoint's
+  `default_num_inference_steps` is 1) from seeded Gaussian pixel noise. CUDA has no
+  neighborhood-attention kernel and refuses it. The load line names the decoder in
+  use, for example `[ltx25] video decoder: diffusion (ltx-2.5-video-vae-bf16.safetensors)`.
+
+On the banner sample (two-stage 1024×1024×97, seed 42), both decoders were scored
+against the uploaded image, which conditions frame 0:
+
+| Measure | Convolutional | Diffusion |
+| --- | --- | --- |
+| Frame 0 PSNR / SSIM against the source | 33.4 dB / 0.930 | 30.2 dB / 0.915 |
+| Face edge energy (Laplacian variance; source 1.24e-2) | 1.37e-2 | 0.88e-2 |
+| Frame-to-frame flicker (temporal high-pass, 8-bit levels) | 1.62 | 1.41 |
+| MLX decode of 1024×1024×97 on an M5 Pro | 172 s, inside a thermally loaded generation | 99 s, standalone; MLX peak 17.2 GB |
+
+The diffusion decoder renders cleaner frames, with no fine grain in flat areas and
+less flicker, but it is softer: lashes, teeth and fabric edges lose about a third
+of the source's edge energy. The convolutional decoder stays the default for that
+reason. The 512×512 single pass shows the same: frame 0 is 27.7 dB against 26.9 dB, and
+the diffusion decoder has 30% less edge energy than the source. These are one
+subject and one seed; choose the diffusion decoder if grain or flicker matters more
+than edge detail. The extra 1.47 GB file is not part of the preset or the
+TensorAgent download.
+
+TensorSharp follows the original's default (`CHUNKED_EAGER`) untiled decode: the
+last latent frame is repeated twice for the trailing window and cropped again, and
+latents smaller than the windows are edge padded. Stage-five attention reproduces
+the original's width slabs, whose halos at the volume edges are edge-replicated
+with continuing rotary positions. Activations stay Float32 and BF16 weights widen
+exactly. Attention runs on one frame-sized tile of queries at a time against
+cached keys, so no full-volume attention operand exists. The MLX kernel stages
+each key row once per 8×8 query tile in threadgroup memory: the 1024×1024×97 decode
+went from 484 s (one thread per query) to 99 s, with outputs within 1.3e-7.
 
 ## First, last and multiple reference images
 

@@ -430,6 +430,11 @@ namespace TensorSharp.Server.Host.Hosting
                     "x2 latent upscaler for two-stage models (LTX 2.5: generate at half size, upscale, refine). " +
                     "Default: latent_upscale_models/ beside the model (TS_VIDEO_UPSCALER).",
                     "--video-upscaler ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"),
+                new OptionHelp("--video-diffusion-vae <path>",
+                    "Opt-in LTX 2.5 diffusion video decoder (ltx-2.5-video-vae-bf16.safetensors): cleaner, with less " +
+                    "grain and flicker, but softer than the default convolutional --video-vae. MLX and CPU only. " +
+                    "Default: off (TS_VIDEO_DIFFUSION_VAE).",
+                    "--video-diffusion-vae ltx-2.5-video-vae-bf16.safetensors"),
             }),
             ("Upload storage (the uploads/ directory next to the server binary)", new[]
             {

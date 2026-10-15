@@ -672,6 +672,44 @@ isolates the refinement. Back-to-back GPU runs throttled the M5 Pro by about 3.4
 (18.4 s to 63 s per 512×512 step with identical output); rerun a baseline before
 attributing slowdowns to code.
 
+## Diffusion video decoder
+
+`Ltx25DiffusionVideoDecoder` ports the publisher's opt-in `NADiffusionDecoder`
+(`ltx-2.5-video-vae-bf16.safetensors`, `--video-diffusion-vae`).
+`generate-ltx25-diffusion-vae-oracle.py` builds the tiny embedded fixture
+(`diffusion-vae-tiny.safetensors`, `diffusion-vae.json`/`.bin`) through the unchanged
+original configurator. It traces the stage-four input, the cropped context and the
+output of an edge-padded 2×1×2 latent with saved pixel noise.
+`Ltx25DiffusionVideoDecoderTests` compares CPU, or MLX through
+`TS_TEST_LTX25_VAE_BACKEND=mlx`, stage by stage within relative L2 2e-5. CUDA is
+refused and has no coverage.
+
+For the actual checkpoint, `ltx25-diffusion-vae-reference.py` decodes saved
+`[128,T,H,W]` latents with the original's untiled `_decode_pixels` and saves the pixel
+noise it drew. `Ltx25DiffusionVaeProbe --noise` decodes the same canvas:
+
+```sh
+dotnet build eng/validation/Ltx25DiffusionVaeProbe -c Release -o artifacts/ltx25/diffvae-probe \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+"$ltx_python" eng/validation/ltx25-diffusion-vae-reference.py --source "$ltx_reference" \
+  --vae "$ltx_models/vae/ltx-2.5-video-vae-bf16.safetensors" --latents latents.f32 \
+  --output "$ltx_evidence/diffvae-ref" --device mps --dtype float32 --seed 42
+MLX_ENABLE_TF32=0 TENSORSHARP_MLX_LIBRARY_DIR="$PWD/TensorSharp.Backends.MLX/Native/dist" \
+dotnet artifacts/ltx25/diffvae-probe/Ltx25DiffusionVaeProbe.dll --backend mlx \
+  --vae "$ltx_models/vae/ltx-2.5-video-vae-bf16.safetensors" --latents latents.f32 \
+  --noise "$ltx_evidence/diffvae-ref.noise.f32" --output "$ltx_evidence/diffvae-mlx"
+"$ltx_python" eng/validation/ltx25-diffusion-vae-reference.py ... --probe "$ltx_evidence/diffvae-mlx"
+```
+
+Without `--noise` the probe decodes from `--seed`, as generation does, and `--mp4`
+writes a video. MLX matched the original Float32 decode (MPS, eager SDPA fallback)
+within relative L2 9.3e-7 on the 512×512×97 banner first pass and 7.7e-7 on the
+top-left 512×512 crop of the two-stage 1024×1024×97 latents. The original needs more
+than 64 GB of MPS memory for the full 1024×1024×97 decode, so that size was checked
+by crop, and TensorSharp's whole-clip decode was compared between its two attention
+kernels (relative L2 1.3e-7). Decoder comparisons are summarized in
+`docs/models/ltx-2.5.md` (Video decoders): one subject and one seed.
+
 ## Actual-checkpoint probe and official reference
 
 ```sh
