@@ -37,9 +37,26 @@ namespace TensorSharp.Models.MiniMaxH3
         private H3Lin _finalAdaLn, _finalVideoOut, _finalAudioOut;
         private IntPtr _refinerFinalNorm, _finalNorm;
         private readonly float[] _curveTable;   // [grid][timeEmbedDim]
+        // Packed positions are constant across denoising steps. Keep an exact
+        // snapshot because callers may reuse and mutate their layout buffers.
+        // The derived tables remain private so public BuildRope callers still
+        // receive independently mutable arrays.
+        private sealed class RopeCacheEntry(float[] positions, float[] cos, float[] sin)
+        {
+            public readonly float[] Positions = positions;
+            public readonly float[] Cos = cos;
+            public readonly float[] Sin = sin;
+        }
+        private RopeCacheEntry _ropeCache;
         // Non-null on the backends with no ggml graph to call (BackendType.Cpu):
         // the same DiT expressed against the shared direct primitives.
         private readonly MiniMaxH3DirectDiT _direct;
+        // Stable tensor addresses let ggml-cuda replay successive denoising
+        // graphs. This is host metadata only, allocated lazily per CUDA DiT.
+        private const int NativeGraphArenaBytes = 32 * 1024 * 1024;
+        private readonly object _nativeGraphLock = new();
+        private readonly bool _useNativeGraphArena;
+        private IntPtr _nativeGraphArena;
         private bool _disposed;
 
         public MiniMaxH3Config Config { get; }
@@ -48,6 +65,7 @@ namespace TensorSharp.Models.MiniMaxH3
 
         public MiniMaxH3DiT(string ggufPath, BackendType backend, IAllocator allocator)
         {
+            _useNativeGraphArena = backend == BackendType.GgmlCuda;
             _gguf = new GgufFile(ggufPath);
             Config = MiniMaxH3Config.Detect(_gguf.Tensors);
             string p = Config.Prefix;
@@ -236,6 +254,26 @@ namespace TensorSharp.Models.MiniMaxH3
             return (cos, sin);
         }
 
+        internal (float[] Cos, float[] Sin) GetRopeForForward(float[] positions)
+        {
+            if (positions is null) throw new ArgumentNullException(nameof(positions));
+            var cached = System.Threading.Volatile.Read(ref _ropeCache);
+            if (cached != null &&
+                MemoryMarshal.AsBytes(positions.AsSpan()).SequenceEqual(
+                    MemoryMarshal.AsBytes(cached.Positions.AsSpan())))
+                return (cached.Cos, cached.Sin);
+
+            // Direct callers can prepare tables concurrently before backend
+            // worker dispatch. Build from the same snapshot stored as the key,
+            // then publish all three arrays with one release/acquire operation.
+            // Concurrent misses may duplicate work; readers always see a whole
+            // matching entry, without holding a monitor across worker dispatch.
+            var snapshot = (float[])positions.Clone();
+            var (cos, sin) = BuildRope(snapshot);
+            System.Threading.Volatile.Write(ref _ropeCache, new RopeCacheEntry(snapshot, cos, sin));
+            return (cos, sin);
+        }
+
         /// <summary>Patchify a video latent into transformer tokens.
         /// <paramref name="latent"/> is [T][H][W][C] with the channel axis contiguous;
         /// the result is [tokens][C * patchH * patchW] over the (t, h/2, w/2) grid.
@@ -318,146 +356,165 @@ namespace TensorSharp.Models.MiniMaxH3
             float audioShift = MiniMaxH3Scheduler.AudioShift,
             int blockLimit = 0)
         {
-            if (layout is null) throw new ArgumentNullException(nameof(layout));
-
-            // TS_H3_DIT_LAYERS truncates the trunk for BOTH the GGML and managed
-            // paths, which turns a velocity comparison into an error-vs-depth curve.
-            // A reimplementation that is merely less noisy than ggml shows a smooth
-            // curve; a real bug shows a step at the layer that introduces it.
-            if (int.TryParse(Environment.GetEnvironmentVariable("TS_H3_DIT_LAYERS"),
-                             out int layerOverride) && layerOverride > 0)
-                blockLimit = layerOverride;
-
-            var segments = new List<H3DitSegment>(layout.ModulationSpans.Count);
-            foreach (var span in layout.ModulationSpans)
-            {
-                // The block projection is viewed as [hidden, 18*nTimesteps]; a row
-                // timestep*3+modality maps to column base timestep*18 + modality*6.
-                int ts = span.Row / MiniMaxH3Modality.Count;
-                int modality = span.Row % MiniMaxH3Modality.Count;
-                segments.Add(new H3DitSegment
-                {
-                    Start = span.Start,
-                    End = span.End,
-                    Col = ts * (MiniMaxH3Modality.VectorsPerRow * MiniMaxH3Modality.Count)
-                          + modality * MiniMaxH3Modality.VectorsPerRow,
-                });
-            }
-            var segArray = segments.ToArray();
-
-            // Conditioning frames share the target's patch projection, so they are
-            // handed over as one buffer with the conditions first.
-            float[] videoInput = videoTokens;
-            if (conditionCount > 0)
-            {
-                if (conditionTokens is null)
-                    throw new ArgumentNullException(nameof(conditionTokens));
-                videoInput = new float[conditionTokens.Length + videoTokens.Length];
-                Array.Copy(conditionTokens, videoInput, conditionTokens.Length);
-                Array.Copy(videoTokens, 0, videoInput, conditionTokens.Length, videoTokens.Length);
-            }
-
-            float[] timeEmbed = TimeEmbedding(layout.Timesteps);
-            var (cos, sin) = BuildRope(layout.Positions);
-            var videoOut = new float[(long)videoCount * Config.VideoPatchDim];
-            var audioOut = new float[(long)audioCount * Config.AudioLatentChannels];
-
-            if (_direct != null)
-            {
-                // Pure-managed path: the identical graph, with no native call.
-                return _direct.Forward(
-                    videoInput, conditionCount, videoCount,
-                    audioLatent, audioCount,
-                    conditionAudioCount > 0 ? conditionAudio : null, conditionAudioCount,
-                    conditionChunks,
-                    textCount > 0 ? textHidden : null, textCount,
-                    timeEmbed, layout.Timesteps.Length,
-                    cos, sin,
-                    segArray,
-                    layout.TokenCount,
-                    layout.AudioSpan.Start, layout.VideoSpan.Start,
-                    layout.AudioSpan.Row * 2, layout.VideoSpan.Row * 2,
-                    -1f,
-                    -MiniMaxH3Scheduler.ShiftSlope(
-                        MiniMaxH3Scheduler.ClampSigma(sigma), videoShift, audioShift),
-                    blockLimit > 0 ? Math.Min(blockLimit, _blocks.Length) : _blocks.Length);
-            }
-
-            var pins = new List<GCHandle>();
-            IntPtr Pin(Array a)
-            {
-                var h = GCHandle.Alloc(a, GCHandleType.Pinned);
-                pins.Add(h);
-                return h.AddrOfPinnedObject();
-            }
+            bool nativeLockTaken = false;
             try
             {
-                var args = new H3DitForwardArgs
+                // Direct MLX execution dispatches synchronously to its worker.
+                // Holding this monitor during dispatch could block that worker
+                // on another Forward/Dispose call. Only ggml owns this arena.
+                if (_direct == null) System.Threading.Monitor.Enter(_nativeGraphLock, ref nativeLockTaken);
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (layout is null) throw new ArgumentNullException(nameof(layout));
+
+                // TS_H3_DIT_LAYERS truncates the trunk for BOTH the GGML and managed
+                // paths, which turns a velocity comparison into an error-vs-depth curve.
+                // A reimplementation that is merely less noisy than ggml shows a smooth
+                // curve; a real bug shows a step at the layer that introduces it.
+                if (int.TryParse(Environment.GetEnvironmentVariable("TS_H3_DIT_LAYERS"),
+                                 out int layerOverride) && layerOverride > 0)
+                    blockLimit = layerOverride;
+
+                var segments = new List<H3DitSegment>(layout.ModulationSpans.Count);
+                foreach (var span in layout.ModulationSpans)
                 {
-                    StructBytes = Marshal.SizeOf<H3DitForwardArgs>(),
-                    NumBlocks = blockLimit > 0 ? Math.Min(blockLimit, _blocks.Length) : _blocks.Length,
-                    NumRefinerBlocks = textCount > 0 ? _refiner.Length : 0,
-                    NumSegments = segArray.Length,
-                    VideoTokens = Pin(videoInput),
-                    AudioTokens = Pin(audioLatent),
-                    TextHidden = textCount > 0 ? Pin(textHidden) : IntPtr.Zero,
-                    TimeEmbed = Pin(timeEmbed),
-                    Cos = Pin(cos),
-                    Sin = Pin(sin),
-                    VideoOut = Pin(videoOut),
-                    AudioOut = Pin(audioOut),
-                    VideoPatchProj = _videoPatch,
-                    AudioPatchProj = _audioPatch,
-                    ConditionProj = _conditionProj,
-                    Refiner = _refinerPin.AddrOfPinnedObject(),
-                    RefinerFinalNorm = _refinerFinalNorm,
-                    Blocks = _blocksPin.AddrOfPinnedObject(),
-                    Segments = Pin(segArray),
-                    FinalNorm = _finalNorm,
-                    FinalAdaLn = _finalAdaLn,
-                    FinalVideoOut = _finalVideoOut,
-                    FinalAudioOut = _finalAudioOut,
-                    NTok = layout.TokenCount,
-                    TextCount = textCount,
-                    ConditionCount = conditionCount,
-                    ConditionAudio = conditionAudioCount > 0 && conditionAudio != null
-                        ? Pin(conditionAudio) : IntPtr.Zero,
-                    ConditionAudioCount = conditionAudioCount,
-                    CondChunks = conditionChunks is { Count: > 0 }
-                        ? Pin(ToArray(conditionChunks)) : IntPtr.Zero,
-                    NumCondChunks = conditionChunks?.Count ?? 0,
-                    AudioStart = layout.AudioSpan.Start,
-                    AudioCount = audioCount,
-                    VideoStart = layout.VideoSpan.Start,
-                    VideoCount = videoCount,
-                    // The final layer's projection emits only shift+scale and is
-                    // indexed by TIMESTEP row, not timestep*3+modality.
-                    AudioCol = layout.AudioSpan.Row * 2,
-                    VideoCol = layout.VideoSpan.Row * 2,
-                    Hidden = Config.HiddenSize,
-                    Heads = Config.NumAttentionHeads,
-                    HeadDim = Config.AttentionHeadDim,
-                    Inner = Config.AttentionInnerDim,
-                    Ffn = Config.FfnHiddenSize,
-                    RotDim = Config.RopeRotaryDim,
-                    TimeEmbedDim = Config.TimeEmbedDim,
-                    NTimesteps = layout.Timesteps.Length,
-                    VideoPatchDim = Config.VideoPatchDim,
-                    AudioChannels = Config.AudioLatentChannels,
-                    TextDim = Config.TextDim,
-                    Eps = Config.NormEps,
-                    VideoScale = -1f,
-                    AudioScale = -MiniMaxH3Scheduler.ShiftSlope(
-                        MiniMaxH3Scheduler.ClampSigma(sigma), videoShift, audioShift),
-                };
-                if (!GgmlBasicOps.TryMiniMaxH3DitForward(in args))
-                    throw new InvalidOperationException("MiniMax-H3 DiT forward failed.");
+                    // The block projection is viewed as [hidden, 18*nTimesteps]; a row
+                    // timestep*3+modality maps to column base timestep*18 + modality*6.
+                    int ts = span.Row / MiniMaxH3Modality.Count;
+                    int modality = span.Row % MiniMaxH3Modality.Count;
+                    segments.Add(new H3DitSegment
+                    {
+                        Start = span.Start,
+                        End = span.End,
+                        Col = ts * (MiniMaxH3Modality.VectorsPerRow * MiniMaxH3Modality.Count)
+                              + modality * MiniMaxH3Modality.VectorsPerRow,
+                    });
+                }
+                var segArray = segments.ToArray();
+
+                // Conditioning frames share the target's patch projection, so they are
+                // handed over as one buffer with the conditions first.
+                float[] videoInput = videoTokens;
+                if (conditionCount > 0)
+                {
+                    if (conditionTokens is null)
+                        throw new ArgumentNullException(nameof(conditionTokens));
+                    videoInput = new float[conditionTokens.Length + videoTokens.Length];
+                    Array.Copy(conditionTokens, videoInput, conditionTokens.Length);
+                    Array.Copy(videoTokens, 0, videoInput, conditionTokens.Length, videoTokens.Length);
+                }
+
+                float[] timeEmbed = TimeEmbedding(layout.Timesteps);
+                var (cos, sin) = GetRopeForForward(layout.Positions);
+
+                if (_direct != null)
+                {
+                    // Pure-managed path: the identical graph, with no native call.
+                    return _direct.Forward(
+                        videoInput, conditionCount, videoCount,
+                        audioLatent, audioCount,
+                        conditionAudioCount > 0 ? conditionAudio : null, conditionAudioCount,
+                        conditionChunks,
+                        textCount > 0 ? textHidden : null, textCount,
+                        timeEmbed, layout.Timesteps.Length,
+                        cos, sin,
+                        segArray,
+                        layout.TokenCount,
+                        layout.AudioSpan.Start, layout.VideoSpan.Start,
+                        layout.AudioSpan.Row * 2, layout.VideoSpan.Row * 2,
+                        -1f,
+                        -MiniMaxH3Scheduler.ShiftSlope(
+                            MiniMaxH3Scheduler.ClampSigma(sigma), videoShift, audioShift),
+                        blockLimit > 0 ? Math.Min(blockLimit, _blocks.Length) : _blocks.Length);
+                }
+
+                var videoOut = new float[(long)videoCount * Config.VideoPatchDim];
+                var audioOut = new float[(long)audioCount * Config.AudioLatentChannels];
+                var pins = new List<GCHandle>();
+                IntPtr Pin(Array a)
+                {
+                    var h = GCHandle.Alloc(a, GCHandleType.Pinned);
+                    pins.Add(h);
+                    return h.AddrOfPinnedObject();
+                }
+                try
+                {
+                    // ReleaseDeviceResidency and Dispose take the same per-model
+                    // lock, so the arena and resident weights outlive this call.
+                    if (_useNativeGraphArena && _nativeGraphArena == IntPtr.Zero)
+                        _nativeGraphArena = Marshal.AllocHGlobal(NativeGraphArenaBytes);
+                    var args = new H3DitForwardArgs
+                    {
+                        StructBytes = Marshal.SizeOf<H3DitForwardArgs>(),
+                        NumBlocks = blockLimit > 0 ? Math.Min(blockLimit, _blocks.Length) : _blocks.Length,
+                        NumRefinerBlocks = textCount > 0 ? _refiner.Length : 0,
+                        NumSegments = segArray.Length,
+                        VideoTokens = Pin(videoInput),
+                        AudioTokens = Pin(audioLatent),
+                        TextHidden = textCount > 0 ? Pin(textHidden) : IntPtr.Zero,
+                        TimeEmbed = Pin(timeEmbed),
+                        Cos = Pin(cos),
+                        Sin = Pin(sin),
+                        VideoOut = Pin(videoOut),
+                        AudioOut = Pin(audioOut),
+                        VideoPatchProj = _videoPatch,
+                        AudioPatchProj = _audioPatch,
+                        ConditionProj = _conditionProj,
+                        Refiner = _refinerPin.AddrOfPinnedObject(),
+                        RefinerFinalNorm = _refinerFinalNorm,
+                        Blocks = _blocksPin.AddrOfPinnedObject(),
+                        Segments = Pin(segArray),
+                        FinalNorm = _finalNorm,
+                        FinalAdaLn = _finalAdaLn,
+                        FinalVideoOut = _finalVideoOut,
+                        FinalAudioOut = _finalAudioOut,
+                        NTok = layout.TokenCount,
+                        TextCount = textCount,
+                        ConditionCount = conditionCount,
+                        ConditionAudio = conditionAudioCount > 0 && conditionAudio != null
+                            ? Pin(conditionAudio) : IntPtr.Zero,
+                        ConditionAudioCount = conditionAudioCount,
+                        CondChunks = conditionChunks is { Count: > 0 }
+                            ? Pin(ToArray(conditionChunks)) : IntPtr.Zero,
+                        NumCondChunks = conditionChunks?.Count ?? 0,
+                        AudioStart = layout.AudioSpan.Start,
+                        AudioCount = audioCount,
+                        VideoStart = layout.VideoSpan.Start,
+                        VideoCount = videoCount,
+                        // The final layer's projection emits only shift+scale and is
+                        // indexed by TIMESTEP row, not timestep*3+modality.
+                        AudioCol = layout.AudioSpan.Row * 2,
+                        VideoCol = layout.VideoSpan.Row * 2,
+                        Hidden = Config.HiddenSize,
+                        Heads = Config.NumAttentionHeads,
+                        HeadDim = Config.AttentionHeadDim,
+                        Inner = Config.AttentionInnerDim,
+                        Ffn = Config.FfnHiddenSize,
+                        RotDim = Config.RopeRotaryDim,
+                        TimeEmbedDim = Config.TimeEmbedDim,
+                        NTimesteps = layout.Timesteps.Length,
+                        VideoPatchDim = Config.VideoPatchDim,
+                        AudioChannels = Config.AudioLatentChannels,
+                        TextDim = Config.TextDim,
+                        Eps = Config.NormEps,
+                        VideoScale = -1f,
+                        AudioScale = -MiniMaxH3Scheduler.ShiftSlope(
+                            MiniMaxH3Scheduler.ClampSigma(sigma), videoShift, audioShift),
+                        GraphArena = _nativeGraphArena,
+                        GraphArenaBytes = _nativeGraphArena != IntPtr.Zero ? NativeGraphArenaBytes : 0UL,
+                    };
+                    if (!GgmlBasicOps.TryMiniMaxH3DitForward(in args))
+                        throw new InvalidOperationException("MiniMax-H3 DiT forward failed.");
+                }
+                finally
+                {
+                    foreach (var h in pins) if (h.IsAllocated) h.Free();
+                }
+                return (videoOut, audioOut);
             }
             finally
             {
-                foreach (var h in pins) if (h.IsAllocated) h.Free();
+                if (nativeLockTaken) System.Threading.Monitor.Exit(_nativeGraphLock);
             }
-            return (videoOut, audioOut);
         }
 
         /// <summary>Hand the DiT's device-resident weight copies back to the driver without
@@ -473,27 +530,51 @@ namespace TensorSharp.Models.MiniMaxH3
         /// claimed to do.</para></summary>
         public void ReleaseDeviceResidency()
         {
-            if (_disposed) return;
-            _direct?.ReleaseDeviceResidency();
-            foreach (IntPtr ptr in _bound)
-                if (ptr != IntPtr.Zero) GgmlBasicOps.InvalidateHostBuffer(ptr);
-            // _bound is deliberately NOT cleared: the pointers stay valid, Dispose still
-            // needs them, and a later Forward re-caches under the very same keys.
+            bool nativeLockTaken = false;
+            try
+            {
+                if (_direct == null) System.Threading.Monitor.Enter(_nativeGraphLock, ref nativeLockTaken);
+                if (_disposed) return;
+                _direct?.ReleaseDeviceResidency();
+                foreach (IntPtr ptr in _bound)
+                    if (ptr != IntPtr.Zero) GgmlBasicOps.InvalidateHostBuffer(ptr);
+                // _bound is deliberately NOT cleared: the pointers stay valid, Dispose still
+                // needs them, and a later Forward re-caches under the very same keys.
+            }
+            finally
+            {
+                if (nativeLockTaken) System.Threading.Monitor.Exit(_nativeGraphLock);
+            }
         }
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
-            _direct?.Dispose();
-            if (_blocksPin.IsAllocated) _blocksPin.Free();
-            if (_refinerPin.IsAllocated) _refinerPin.Free();
-            foreach (IntPtr ptr in _bound)
-                if (ptr != IntPtr.Zero) GgmlBasicOps.InvalidateHostBuffer(ptr);
-            _bound.Clear();
-            foreach (var h in _pins) if (h.IsAllocated) h.Free();
-            _pins.Clear();
-            _gguf?.Dispose();
+            bool nativeLockTaken = false;
+            try
+            {
+                if (_direct == null) System.Threading.Monitor.Enter(_nativeGraphLock, ref nativeLockTaken);
+                if (_disposed) return;
+                _disposed = true;
+                System.Threading.Volatile.Write(ref _ropeCache, null);
+                _direct?.Dispose();
+                if (_blocksPin.IsAllocated) _blocksPin.Free();
+                if (_refinerPin.IsAllocated) _refinerPin.Free();
+                foreach (IntPtr ptr in _bound)
+                    if (ptr != IntPtr.Zero) GgmlBasicOps.InvalidateHostBuffer(ptr);
+                _bound.Clear();
+                foreach (var h in _pins) if (h.IsAllocated) h.Free();
+                _pins.Clear();
+                _gguf?.Dispose();
+                if (_nativeGraphArena != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(_nativeGraphArena);
+                    _nativeGraphArena = IntPtr.Zero;
+                }
+            }
+            finally
+            {
+                if (nativeLockTaken) System.Threading.Monitor.Exit(_nativeGraphLock);
+            }
         }
     }
 }

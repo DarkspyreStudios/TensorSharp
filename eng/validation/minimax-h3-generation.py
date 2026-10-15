@@ -17,6 +17,7 @@ import signal
 import struct
 import subprocess
 import time
+from fractions import Fraction
 
 COMPONENTS = {
     "dit": "minimax_h3_fl2va_pruned-Q4_K.gguf",
@@ -117,7 +118,7 @@ def probe(path):
 
 def decode(path, media):
     command = ["ffmpeg", "-v", "error", "-i", str(path)]
-    command += (["-map", "0:v:0", "-vsync", "0", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"] if media == "video"
+    command += (["-map", "0:v:0", "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"] if media == "video"
                 else ["-map", "0:a:0", "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1"])
     process = subprocess.run(command, capture_output=True, timeout=120)
     if process.returncode:
@@ -133,6 +134,8 @@ def validate_media(path, args, engine):
     count = int(video.get("nb_read_frames", video.get("nb_frames", -1)))
     if (int(video["width"]), int(video["height"]), count) != (args.width, args.height, args.frames):
         raise RuntimeError(f"Unexpected video geometry: {video}")
+    if Fraction(video.get("avg_frame_rate", "0/1")) != args.fps:
+        raise RuntimeError(f"Unexpected video frame rate: {video.get('avg_frame_rate')}")
     audio_path = path.with_suffix(".wav")
     if not audio_path.is_file():
         audio_path = path

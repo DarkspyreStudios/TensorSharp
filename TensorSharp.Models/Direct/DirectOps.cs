@@ -277,7 +277,8 @@ namespace TensorSharp.Models.Direct
         }
 
         /// <summary>Load from a managed F32 array (weight [ne1, ne0] row-major, e.g. VAE safetensors).</summary>
-        public static DirectLinear FromFloats(DirectContext ctx, float[] weight, long ne0, long ne1, float[] bias, bool exactFloat32 = false)
+        public static DirectLinear FromFloats(DirectContext ctx, float[] weight, long ne0, long ne1, float[] bias,
+            bool exactFloat32 = false, bool mlxDeviceOnly = false)
         {
             Tensor biasT = bias != null ? ctx.Own(ctx.FromFloats(bias, bias.LongLength)) : null;
             if (ctx.IsCuda)
@@ -289,7 +290,12 @@ namespace TensorSharp.Models.Direct
                 return ctx.Track(new DirectLinear(ctx, host, host, 0 /*F32*/, ne0, ne1, bytes, biasT, false, exactFloat32: exactFloat32));
             }
             var lin = new DirectLinear(ctx, IntPtr.Zero, IntPtr.Zero, 0, ne0, ne1, 0, biasT, false);
-            lin._wCpu = ctx.Own(ctx.FromFloats(weight, ne1, ne0));
+            // H3's dense video decoder otherwise retains ~9.7 GB of duplicate
+            // host weights beside the identical F32 MLX arrays. Opt in only for
+            // these immutable weights; all existing callers retain their path.
+            lin._wCpu = ctx.Own(ctx.IsMlx && mlxDeviceOnly
+                ? MlxMiniMaxH3Ops.CreateFloat32Weight(ctx.MlxAllocator, weight, ne1, ne0)
+                : ctx.FromFloats(weight, ne1, ne0));
             lin._wCpuT = lin._wCpu.Transpose();
             return ctx.Track(lin);
         }

@@ -6,6 +6,136 @@ dirty or unavailable dependency checkouts. Put outputs in ignored `artifacts/`
 or `docs/validation/`. A structural media pass does not establish perceptual
 quality or benchmark parity.
 
+## 2026-10-15 performance and quality validation
+
+Evidence is under ignored `docs/validation/minimax-h3/performance-20261015/`.
+The main full-generation comparisons use FL2VA Q4_K, 640×384×22 at 24 fps,
+20 Euler steps, seed 42, CFG 1 and flow shift 12. Both frozen binaries use
+unchanged upstream ggml `3612c0af93f2cfc8f048295300a61187723b12ae`.
+The local host is an Apple M5 Pro with 48 GiB unified memory; the remote
+worker is an NVIDIA A40 with 46,068 MiB reported VRAM and CUDA 12.8.
+Two alternating rounds include loading, generation and codecs. OS caches
+remain uncontrolled; these are not warm-model service benchmarks.
+
+| Backend / host | Baseline median | Candidate median | Confirmed result |
+|---|---:|---:|---|
+| Native Metal / local | 151.246 s | 143.622 s | Exact decoded RGB/audio; 1.053×, 5.0% lower latency |
+| Native CUDA / VM | 68.028768 s | 67.173625 s | Exact decoded RGB/audio; 1.3% lower latency does not establish a meaningful gain |
+| Direct MLX / local, final candidate 6 | 143.264 s | 125.426 s | Exact decoded RGB/audio; 1.142×, 12.5% lower latency |
+| Direct CUDA / VM, equal precision | 220.456 s | 178.667 s | Exact decoded RGB/audio; 1.234×, 19.0% lower latency |
+
+The reports are `local-metal-final-ab/report.json`,
+`local-candidate6-mlx-ab/report.json`, `remote/final-remote-ggml-cuda-ab/report.json`
+and `remote/final-remote-cuda-ab/report.json`. Earlier Ref2VA single-pair runs
+showed large, opposing VAE timing swings. The completed candidate 6 Ref2VA
+comparison used image plus canonical audio, 256×160×5, eight steps and seed 44:
+82.037165 → 43.630105 s, 1.880× and 46.8% lower latency, with exact RGB/audio
+in both alternating pairs (`local-candidate6-reference-ab/report.json`).
+First/last-keyframe FL2VA at the same geometry/eight steps, seed 43, measured
+83.466 → 38.493 s with exact RGB/audio (`local-candidate6-keyframe-ab/report.json`);
+its single pair is diagnostic only and does not establish a repeatable gain.
+
+The implementation reduces repeated work and memory use:
+
+- Borrowed contiguous token-row views preserve source ownership and avoid
+  copies. Exact RoPE tables use a position snapshot with atomic publication
+  of the key, cosine and sine arrays for concurrent readers.
+- MLX packed modulation/gated residual kernels preserve expression order;
+  device SwiGLU avoids activation splitting/copies in DiT and the MLX VAE.
+- The MLX VAE uploads dense F32 weights directly into owned MLX arrays,
+  structurally avoiding 9,689,041,152 bytes (9.02 GiB) of duplicate retained
+  host weights for this decoder; this is not a measured peak-RSS reduction.
+  Host reads still materialize an exact copy when needed; precision is unchanged.
+- Direct CUDA text weights use bounded CPU prefaulting before first upload.
+  Native CUDA uses a per-model stable graph arena and cached weight bindings;
+  variable audio scaling stays in a separate exact ggml SCALE graph so the
+  main graph can be captured without changing floating-point semantics.
+
+An isolated MLX VAE comparison before the host-storage optimization measured
+0.4303285 → 0.4003488 s (1.075×), with exact output floats across six warm
+measurements per version in two reversed-order processes. It uses a fixed
+synthetic latent producing a 256×160×5 clip with production padding and excludes
+the pipeline. See `local-vae-isolate-summary.json`; this stage measurement
+predates candidate 6's host-storage optimization.
+
+The subsequent fixed-latent memory check preserved all output bytes and reduced
+median sampled warm process RSS from 23.048 to 14.024 GiB versus candidate 5.
+MLX active memory and allocator peak were effectively unchanged. This is sampled
+process residency, not peak unified/GPU memory; candidate 6 has one process and
+three warm runs. See `local-vae-memory-summary.json` for hashes and limitations.
+
+Final local candidate 7 passed 36 focused CPU/MLX tests and all nine component oracles
+on each of direct MLX and native Metal, with no skips. See
+`local-candidate7-mlx-oracles/report.json` and
+`local-candidate7-ggml-metal-oracles/report.json`. Its Ref2VA preservation pair
+also reproduced candidate 6's decoded RGB/audio exactly, and a complete 20-step
+native Metal pair reproduced the earlier benchmark candidate exactly. On the
+VM, final candidate 7 passed 29 focused tests, the default-precision full50
+gate, a complete 20-step direct CUDA preservation pair and a native CUDA
+first/last-keyframe pair. All nine component oracles on each of direct/native
+CUDA and the native exact-output graph-capture test also passed. Component
+DiT slices are not full-model coverage.
+
+The final-build preservation pairs are additional quality checks, not new
+two-round speed measurements. Reports are `local-candidate7-preservation/`,
+`local-candidate7-native-preservation/`, `remote/candidate7-cuda-preservation/`
+and `remote/candidate7-native-preservation/`; the final independent prediction
+comparison is `remote/candidate7-full50-default-comparison.json`.
+
+Independent all-50-block validation exposed TF32 activation rounding in large
+BF16-weight CUDA projections. Pedantic F32 is now the default; the historical
+approximation requires `TS_H3_CUDA_BF16_PEDANTIC=0`. With the default override
+unset, raw-prediction relative L2 errors improved as follows:
+
+| Full50 output | Previous default | Fixed default | Strict gate |
+|---|---:|---:|---:|
+| Audio | 0.0070538 | 0.0001258906 | ≤ 0.001: pass |
+| Video | 0.0046911 | 0.0000847537 | ≤ 0.001: pass |
+
+This is an independent PyTorch F32 oracle over a synthetic 19-token packed
+input at sigma one. `MiniMaxH3DitProbe`, `minimax-h3-full-dit-reference.py`
+and `minimax-h3-prediction-compare.py` use `--fixtures`, verify input/output
+hashes, and recompute all 50 blocks from raw inputs. They do not reuse the
+two-block expected outputs. This does not establish multi-step oracle or
+natural-media perceptual quality.
+
+Experimental batched attention passed the synthetic full50 check but **failed
+the complete-generation quality gate**: RGB PSNR 40.792195 dB was below 60 dB,
+and audio relative L2 0.01725139 exceeded 0.001. Its model opt-in was removed;
+the probe rejects obsolete `TS_H3_CUDA_BATCHED_ATTENTION` overrides. Only the
+standalone backend helper/tests/microprobe remain for research. The rejected
+model patch and failure record are archived as
+`rejected-cuda-batched-attention-model-optin.patch` and `.json` in the evidence
+directory. No kernel speedup from this experiment is a production speed claim.
+
+Reproduce a comparison with separately frozen CLI directories:
+
+```sh
+python3 eng/validation/minimax-h3-ab.py --backend ggml_metal \
+  --models /path/to/minimax-h3 --steps 20 --rounds 2 \
+  --baseline-cli /path/to/baseline/TensorSharp.Cli.dll \
+  --candidate-cli /path/to/candidate/TensorSharp.Cli.dll \
+  --expected-ggml-revision 3612c0af93f2cfc8f048295300a61187723b12ae \
+  --output docs/validation/minimax-h3/new-metal-ab
+```
+
+For direct CUDA use `--backend cuda --bf16-pedantic`: this explicitly applies
+the fixed precision policy to both binaries, including the older baseline.
+Label it an equal-precision comparison. The runner rejects inherited H3
+overrides and dirty ggml, checks geometry/step count and frozen binary hashes,
+and requires exact decoded RGB/audio. Failed, skipped or unfinished runs do
+not count as successful validation.
+
+Research references: [vLLM-Omni H3](https://github.com/vllm-project/vllm-omni/blob/main/vllm_omni/diffusion/models/minimax_h3/minimax_h3_transformer.py)
+for reusable RoPE and indexed modulation; [H3-Flash](https://github.com/fluxmatrix/h3-flash)
+for separating systems/fusion optimizations from approximate Turbo modes;
+[MLX array ownership](https://github.com/ml-explore/mlx/blob/main/mlx/array.h#L543)
+for copied F32 storage; and [cuBLAS strided batched GEMM](https://docs.nvidia.com/cuda/cublas/index.html#cublasgemmstridedbatchedex)
+for the experimental attention implementation. Their reported speeds are not
+TensorSharp benchmark results.
+
+## Earlier recorded validation
+
 The recorded 2026-10-13–14 evidence uses an M5 Pro with 48 GB locally and an A40
 remotely. ggml is unchanged at `3612c0af93f2cfc8f048295300a61187723b12ae`;
 the clean SD baseline is `d637cfb935feb2254898a8f1524046c958f3df80`, with pinned
@@ -49,7 +179,7 @@ CUDA toolkit and compile compatible PTX rather than using the committed sm120
 baseline:
 
 ```sh
-PATH=/usr/local/cuda/bin:$PATH dotnet build InferenceWeb.Tests/InferenceWeb.Tests.csproj \
+TENSORSHARP_GGML_NO_UPDATE=1 PATH=/usr/local/cuda/bin:$PATH dotnet build InferenceWeb.Tests/InferenceWeb.Tests.csproj \
   -c Release -p:CudaArch=compute_86
 ```
 

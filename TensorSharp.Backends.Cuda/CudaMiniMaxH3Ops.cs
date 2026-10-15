@@ -9,7 +9,10 @@ namespace TensorSharp.Cuda;
 public static class CudaMiniMaxH3Ops
 {
     private static readonly string LinearTraceFile=Environment.GetEnvironmentVariable("TS_H3_LINEAR_TRACE_FILE");
-    private static readonly bool Bf16PedanticDiagnostic=Environment.GetEnvironmentVariable("TS_H3_CUDA_BF16_PEDANTIC") == "1";
+    // BF16 weights do not justify rounding the F32 activations to TF32. That
+    // rounding in H3's condition projection accumulates across all 50 blocks.
+    // Keep the historical approximate mode only as an explicit diagnostic.
+    private static readonly bool Bf16Pedantic=Environment.GetEnvironmentVariable("TS_H3_CUDA_BF16_PEDANTIC") != "0";
     private static readonly string QuantBandMode=Environment.GetEnvironmentVariable("TS_H3_CUDA_F32_BANDS");
     private static void TraceLinear(string path,int storageType,int rows,int inner,int columns,int compute=0)
     {
@@ -95,7 +98,8 @@ public static class CudaMiniMaxH3Ops
 
     /// <summary>Mapped F16/BF16/F32 weights stay resident in their original storage.
     /// Only weight slices are converted; inputs/results retain F32 storage and range.
-    /// Small GEMMs use pedantic F32, large GEMMs explicitly select TF32 products.</summary>
+    /// BF16 weights use pedantic F32 by default, preserving activation precision.
+    /// Other dense weight types retain their existing GEMM policy.</summary>
     public static bool TryMappedDense(Tensor output,Tensor input,IntPtr host,int type,long inner,long columns,long bytes,
         int maximumConvertedWeightBytes=64<<20)
     {
@@ -143,11 +147,76 @@ public static class CudaMiniMaxH3Ops
         // CUDA12.8 cublas_api.h: 69 = COMPUTE_32F_PEDANTIC,
         // 77 = COMPUTE_32F_FAST_TF32. This choice is per-call; shared math mode
         // remains unchanged. TF32 retains F32's exponent range.
-        int compute=forcePedantic || (long)rows*inner*columns <= 16_000_000 || (storageType == 30 && Bf16PedanticDiagnostic) ? 69 : 77;
+        int compute=forcePedantic || (long)rows*inner*columns <= 16_000_000 || (storageType == 30 && Bf16Pedantic) ? 69 : 77;
         TraceLinear("dense F32 GEMM",storageType,rows,inner,columns,compute);
         CublasApi.cublasGemmEx(allocator.Blas.Handle,CublasApi.CUBLAS_OP_T,CublasApi.CUBLAS_OP_N,
             columns,rows,inner,ref alpha,weight,CublasApi.CUDA_R_32F,inner,input,CublasApi.CUDA_R_32F,inner,ref beta,
             output,CublasApi.CUDA_R_32F,outputStride,compute,CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+    }
+
+    /// <summary>Unmasked attention over token-major [sequence, heads*headDim]
+    /// tensors, using bounded score chunks and pedantic F32 batched GEMMs.
+    /// Q/K/V are consumed with their existing head strides, without head copies.
+    /// Full F32 products retain H3's activation range; reduction order differs
+    /// from streaming attention, so this remains a diagnostic candidate.</summary>
+    public static bool TryBatchedAttention(Tensor output, Tensor query, Tensor key, Tensor value,
+        int heads, int headDim, float scale, int maximumScoreBytes = 64 << 20, int maximumQueryRows = 0)
+    {
+        long width = (long)heads * headDim;
+        if (heads <= 0 || headDim <= 0 || width > int.MaxValue || !float.IsFinite(scale) || scale <= 0 ||
+            maximumScoreBytes <= 0 || maximumScoreBytes > (64 << 20) || maximumQueryRows < 0 ||
+            !CudaKernelOps.TryGetContiguousFloat(output, out var os, out var yp, out _) ||
+            !CudaKernelOps.TryGetContiguousFloat(query, out var qs, out var qp, out _) ||
+            !CudaKernelOps.TryGetContiguousFloat(key, out var ks, out var kp, out _) ||
+            !CudaKernelOps.TryGetContiguousFloat(value, out var vs, out var vp, out _) ||
+            output.DimensionCount != 2 || query.DimensionCount != 2 || key.DimensionCount != 2 || value.DimensionCount != 2 ||
+            output.Sizes[0] != query.Sizes[0] || key.Sizes[0] != value.Sizes[0] ||
+            query.Sizes[0] <= 0 || query.Sizes[0] > int.MaxValue || key.Sizes[0] <= 0 || key.Sizes[0] > int.MaxValue ||
+            output.Sizes[1] != width || query.Sizes[1] != width || key.Sizes[1] != width || value.Sizes[1] != width ||
+            !ReferenceEquals(os.AllocatorImpl, qs.AllocatorImpl) || !ReferenceEquals(os.AllocatorImpl, ks.AllocatorImpl) ||
+            !ReferenceEquals(os.AllocatorImpl, vs.AllocatorImpl) || ReferenceEquals(os, qs) || ReferenceEquals(os, ks) || ReferenceEquals(os, vs))
+            return false;
+        int sequences = checked((int)query.Sizes[0]), keys = checked((int)key.Sizes[0]), inner = checked((int)width);
+        long rowBytes = sizeof(float) * (long)heads * keys;
+        if (rowBytes > maximumScoreBytes) return false;
+        int chunk = (int)Math.Min(sequences, maximumScoreBytes / rowBytes);
+        if (maximumQueryRows > 0) chunk = Math.Min(chunk, maximumQueryRows);
+        var allocator = os.AllocatorImpl;
+        if (!CudaKernelOps.TryGetKernels(allocator, out _)) return false;
+        allocator.Context.MakeCurrent();
+        qs.EnsureDeviceCurrent(); ks.EnsureDeviceCurrent(); vs.EnsureDeviceCurrent();
+        // A contiguous output may be a subview of a larger host-dirty storage.
+        // Preserve its untouched prefix/suffix before marking the storage current.
+        os.EnsureDeviceCurrent();
+        allocator.Blas.SetStream(allocator.Stream.Handle);
+        const int pedanticFloat32 = 69; // CUBLAS_COMPUTE_32F_PEDANTIC, independent of shared math mode.
+        float zero = 0, one = 1;
+        for (int start = 0; start < sequences; start += chunk)
+        {
+            int rows = Math.Min(chunk, sequences - start);
+            using var scores = new Tensor(allocator, DType.Float32, checked(heads * rows), keys);
+            var ss = (CudaStorage)scores.Storage;
+            IntPtr sp = ss.DevicePtrAtElement(0);
+            // Each head's K is [headDim, keys] column-major with lda=inner;
+            // scores are [keys, rows] column-major, then flattened for softmax.
+            CublasApi.cublasGemmStridedBatchedEx(allocator.Blas.Handle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N,
+                keys, rows, headDim, ref scale, kp, CublasApi.CUDA_R_32F, inner, headDim,
+                new IntPtr(qp.ToInt64() + (long)start * inner * sizeof(float)), CublasApi.CUDA_R_32F, inner, headDim,
+                ref zero, sp, CublasApi.CUDA_R_32F, keys, (long)rows * keys, heads,
+                pedanticFloat32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+            ss.MarkDeviceModified();
+            if (!CudaKernelOps.TrySoftmax(scores, scores))
+                throw new NotSupportedException("H3 batched attention requires the CUDA F32 softmax kernel.");
+            // A head writes only its headDim elements in each token row. The
+            // interleaved C matrices share padding, never output elements.
+            CublasApi.cublasGemmStridedBatchedEx(allocator.Blas.Handle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N,
+                headDim, rows, keys, ref one, vp, CublasApi.CUDA_R_32F, inner, headDim,
+                sp, CublasApi.CUDA_R_32F, keys, (long)rows * keys,
+                ref zero, new IntPtr(yp.ToInt64() + (long)start * inner * sizeof(float)), CublasApi.CUDA_R_32F, inner, headDim,
+                heads, pedanticFloat32, CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+        }
+        os.MarkDeviceModified();
+        return true;
     }
 
     /// <summary>Copy F32 permutations of up to four dimensions on the device.</summary>

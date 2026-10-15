@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stream all H3 DiT blocks through an independent IEEE F32 PyTorch oracle.
 
-Uses exact SD public-callback projection inputs and evicts each block's
-dequantized weights. No upstream sources are modified. Timings are diagnostic.
+Uses exact SD public-callback projection inputs or existing synthetic fixture
+inputs, and evicts each block's dequantized weights. No upstream sources are
+modified. Timings are diagnostic.
 """
 import argparse
 import gc
@@ -27,7 +28,10 @@ def module(name, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gguf", required=True, type=Path)
-    parser.add_argument("--reference", required=True, type=Path)
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--reference", type=Path)
+    inputs.add_argument("--fixtures", type=Path,
+                        help="Raw synthetic DiT inputs and .shape files; run all 50 blocks at sigma one")
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
@@ -45,8 +49,8 @@ def main():
     source = root / "InferenceWeb.Tests/tools/minimax_h3_dit_oracle.py"
     oracle = module("h3_dit_oracle", source)
     metrics = module("h3_refiner_metrics", Path(__file__).with_name("minimax-h3-refiner-reference.py")).metrics
-    metadata = [json.loads(path.read_text()) for path in args.reference.glob("*.f32.json")]
-    nodes = {item["id"]: item for item in map(json.loads, (args.reference/"nodes.jsonl").read_text().splitlines())}
+    metadata = [json.loads(path.read_text()) for path in args.reference.glob("*.f32.json")] if args.reference else []
+    nodes = {item["id"]: item for item in map(json.loads, (args.reference/"nodes.jsonl").read_text().splitlines())} if args.reference else {}
     def ancestors(item):
         seen, pending = set(), [item]
         while pending:
@@ -59,6 +63,8 @@ def main():
                 if parent["id"] in nodes:
                     pending.append(nodes[parent["id"]])
     weights = oracle.Weights(str(args.gguf))
+    if "blocks.49.norm1.weight" not in weights or "blocks.50.norm1.weight" in weights:
+        raise ValueError("Require an actual 50-block checkpoint")
     resident = {}
     def get(name):
         if name not in resident:
@@ -81,13 +87,40 @@ def main():
         if not np.isfinite(values).all():
             raise ValueError("Nonfinite input")
         return torch.from_numpy(values).to(device), {"file": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
-    video, v_source = input_for("video_patch_proj.weight")
-    audio, a_source = input_for("audio_patch_proj.weight")
-    text, t_source = input_for("condition_proj.weight")
-    video_leaf = [item for item in metadata if item["file"].startswith("input-") and item["ne"][3] == 24]
-    if len(video_leaf) != 1:
-        raise ValueError("Require exactly one physical video input")
-    latent_w, latent_h, latent_t = video_leaf[0]["ne"][:3]
+    if args.fixtures:
+        identities = []
+        def fixture(name, rank):
+            path = args.fixtures / name
+            shape_path = path.with_suffix(path.suffix + ".shape")
+            shape = tuple(map(int, shape_path.read_text().strip().split(",")))
+            if len(shape) != rank or any(value <= 0 for value in shape):
+                raise ValueError("Invalid fixture shape: " + name)
+            values = np.fromfile(path, dtype="<f4")
+            if path.stat().st_size % 4 or values.size != np.prod(shape) or not np.isfinite(values).all():
+                raise ValueError("Invalid fixture contents: " + name)
+            identities.extend({"file": str(item), "sha256": hashlib.sha256(item.read_bytes()).hexdigest()}
+                              for item in (path, shape_path))
+            return values.reshape(shape)
+        video_raw = fixture("h3_dit_video_latent.bin", 4)
+        audio_raw = fixture("h3_dit_audio_latent.bin", 3)
+        text_raw = fixture("h3_dit_text_hidden.bin", 2)
+        latent_t, latent_h, latent_w, channels = video_raw.shape
+        if channels != 24 or latent_h % 2 or latent_w % 2 or audio_raw.shape[0] != 2 or audio_raw.shape[2] != 32:
+            raise ValueError("Unsupported fixture channels or spatial patch dimensions")
+        # Independently express the channel-major, patch-minor video ordering.
+        patches = video_raw.reshape(latent_t, latent_h//2, 2, latent_w//2, 2, 24)
+        patches = patches.transpose(0, 1, 3, 5, 2, 4).reshape(-1, 96).copy()
+        video, audio, text = [torch.from_numpy(values).to(device) for values in
+                              (patches, audio_raw.reshape(-1, 32), text_raw)]
+    else:
+        video, v_source = input_for("video_patch_proj.weight")
+        audio, a_source = input_for("audio_patch_proj.weight")
+        text, t_source = input_for("condition_proj.weight")
+        identities = [v_source, a_source, t_source]
+        video_leaf = [item for item in metadata if item["file"].startswith("input-") and item["ne"][3] == 24]
+        if len(video_leaf) != 1:
+            raise ValueError("Require exactly one physical video input")
+        latent_w, latent_h, latent_t = video_leaf[0]["ne"][:3]
     text_count, audio_frames = text.shape[0], audio.shape[0]//2
     hidden = get("video_patch_proj.weight").shape[0]
     head_dim = get("blocks.0.attn.q_norm.weight").numel()
@@ -96,22 +129,30 @@ def main():
     cfg = {"heads": heads, "head_dim": head_dim}
     pos, spans, timesteps, audio_span, video_span = oracle.build_layout(text_count, latent_t, latent_h, latent_w, audio_frames, 1.0)
     if len(pos) != video.shape[0]+audio.shape[0]+text.shape[0]:
-        raise ValueError("Packed layout does not match callback inputs")
+        raise ValueError("Packed layout does not match input tensors")
     cos, sin = oracle.build_rope(weights.get("rope.inv_freq"), pos, head_dim)
     cos, sin = cos.to(device), sin.to(device)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     snapshots = args.output.parent / (args.output.stem+"-snapshots")
     snapshots.mkdir(exist_ok=False)
-    report = {"scope": "Independent full50 F32 denoiser with identical SD callback inputs; diagnostic only",
+    report = {"scope": "Independent full50 F32 denoiser with " +
+              ("synthetic fixture inputs at sigma one" if args.fixtures else "identical SD callback inputs") + "; diagnostic only",
+              "inputMode": "synthetic-fixtures" if args.fixtures else "sd-callback", "sigma": 1,
               "torch": torch.__version__, "device": str(device), "tf32": False, "sdpa": "math F32",
               "model": str(args.gguf), "model_bytes": args.gguf.stat().st_size,
               "oracle_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
-              "inputs": [v_source, a_source, t_source], "tokens": len(pos), "boundaries": {}}
+              "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "latent_shape": [latent_t, latent_h, latent_w, 24], "audio_frames": audio_frames,
+              "inputs": identities, "tokens": len(pos), "boundaries": {}, "snapshotSha256": {},
+              "limitations": ["Numerical denoiser coverage; excludes text encoding, sampler loop, VAEs and perceptual quality",
+                              "Original two-block expected outputs are not reused"] if args.fixtures else []}
     def record(name, value, sd_item=None):
         values = value.detach().cpu().numpy().astype("<f4", copy=False)
         if not np.isfinite(values).all():
             raise ValueError(f"Nonfinite {name}")
-        values.tofile(snapshots/(name+".f32"))
+        snapshot = snapshots/(name+".f32")
+        values.tofile(snapshot)
+        report["snapshotSha256"][snapshot.name] = hashlib.sha256(snapshot.read_bytes()).hexdigest()
         result = {}
         candidate = args.candidate/(name+".f32")
         if candidate.is_file():
@@ -138,7 +179,7 @@ def main():
         audio = F.linear(audio, get("audio_patch_proj.weight"), get("audio_patch_proj.bias"))
         x = torch.cat([ctx, audio, video], dim=0)
         packed = [item for item in metadata if item["file"].startswith("packed-in-") and np.prod(item["ne"]) == x.numel()]
-        record("packed-in", x, min(packed, key=lambda item: item["id"]))
+        record("packed-in", x, min(packed, key=lambda item: item["id"]) if args.reference else None)
         del ctx, video, audio
         evict("token_refiner.")
         table = weights.get("adaln_t_table")
@@ -159,9 +200,9 @@ def main():
         for index in range(50):
             x = block(index, x)
             exact = [item for item in metadata if item["name"] == f"ggml_runner_cut:minimax_h3.blocks.{index}|hidden_states|"]
-            if len(exact) != 1:
+            if args.reference and len(exact) != 1:
                 raise ValueError(f"Require one exact block {index}")
-            record("block-"+str(index), x, exact[0])
+            record("block-"+str(index), x, exact[0] if args.reference else None)
             evict(f"blocks.{index}.")
         final = F.linear(time, get("final_layer.adaln_proj.linear.weight"), get("final_layer.adaln_proj.linear.bias")).reshape(-1, 2*hidden)
         h = oracle.modulate(oracle.rms_norm(x, get("final_layer.norm.weight"), 1e-5), final, [(s,e,row//oracle.MODALITIES) for s,e,row in spans], 0, 1, hidden)
@@ -170,9 +211,9 @@ def main():
             exact = [item for item in metadata if item["file"].startswith("final-") and item["op"] == "ADD" and
                      item["ne"][0] == output.shape[1] and
                      any("final_layer."+name+"_out.weight" in parent["name"] for parent in ancestors(item))]
-            if len(exact) != 1:
+            if args.reference and len(exact) != 1:
                 raise ValueError(f"Require one raw {name} output")
-            record("raw-"+name+"-output", output, exact[0])
+            record("raw-"+name+"-output", output, exact[0] if args.reference else None)
         del x, h, output, final, time, cos, sin
     resident.clear()
     weights.cache.clear()

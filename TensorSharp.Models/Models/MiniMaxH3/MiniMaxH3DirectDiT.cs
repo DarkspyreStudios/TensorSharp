@@ -140,7 +140,10 @@ namespace TensorSharp.Models.MiniMaxH3
         private static Tensor Rows(Tensor src, int from, int count)
         {
             using var view = src.Narrow(0, from, count);
-            return Ops.NewContiguous(view);
+            // Full rows of a contiguous matrix already have the required
+            // layout. Retain their storage until packing/norm finishes instead
+            // of allocating and copying another device buffer.
+            return Ops.AsContiguous(view);
         }
 
         private static Tensor Cols(Tensor src, int from, int count)
@@ -153,7 +156,7 @@ namespace TensorSharp.Models.MiniMaxH3
         private static Tensor ModRow(Tensor mods, int row)
         {
             using var view = mods.Narrow(0, row, 1);
-            using var c = Ops.NewContiguous(view);
+            using var c = Ops.AsContiguous(view);
             return c.View(mods.Sizes[1]);
         }
 
@@ -254,11 +257,27 @@ namespace TensorSharp.Models.MiniMaxH3
         {
             int ffn = _cfg.FfnHiddenSize;
             using Tensor gv = w.Fc1.Forward(h);
+            using Tensor act = ActivateMlp(_ctx, gv, ffn);
+            return w.Fc2.Forward(act);
+        }
+
+        internal static Tensor ActivateMlp(DirectContext context, Tensor gv, int ffn, bool fuseAccelerated = true)
+        {
+            // The device split kernel reads [gate | value] directly and keeps
+            // the same SiLU-then-multiply arithmetic. Avoid two full activation
+            // copies and the separate multiply pass over the large FFN width.
+            if (fuseAccelerated && context.IsAccelerated)
+                return Ops.SiLUMulSplit(null, gv, ffn);
+
             using Tensor gate = Cols(gv, 0, ffn);
             using Tensor val = Cols(gv, ffn, ffn);
-            using Tensor act = DirectOps.Silu(_ctx, gate);
-            Ops.Mul(act, act, val);
-            return w.Fc2.Forward(act);
+            Tensor act = DirectOps.Silu(context, gate);
+            try
+            {
+                Ops.Mul(act, act, val);
+                return act;
+            }
+            catch { act.Dispose(); throw; }
         }
 
         // ---- modulation over the packed sequence -----------------------------
@@ -266,6 +285,7 @@ namespace TensorSharp.Models.MiniMaxH3
         /// <summary>x = x * (1 + scale) + shift, one modulation row per segment.</summary>
         private void Modulate(Tensor h, Tensor mods, H3DitSegment[] segs, int shiftIdx, int scaleIdx)
         {
+            if (_tensorOps.TryModulatePacked(h, null, mods, segs, shiftIdx, scaleIdx, false)) return;
             foreach (var sg in segs)
             {
                 int n = sg.End - sg.Start;
@@ -279,6 +299,7 @@ namespace TensorSharp.Models.MiniMaxH3
         /// <summary>x += upd * gate, one gate row per segment.</summary>
         private void GatedResidual(Tensor x, Tensor upd, Tensor mods, H3DitSegment[] segs, int gateIdx)
         {
+            if (_tensorOps.TryModulatePacked(x, upd, mods, segs, gateIdx, gateIdx, true)) return;
             foreach (var sg in segs)
             {
                 int n = sg.End - sg.Start;

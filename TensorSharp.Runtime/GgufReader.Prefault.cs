@@ -25,6 +25,9 @@ public partial class GgufFile
     public void PrefaultFileCache() => PrefaultFileCache(null);
 
     public void PrefaultFileCache(Func<GgufTensorInfo, bool>? includeTensor)
+        => PrefaultFileCache(includeTensor, logProgress: true);
+
+    public void PrefaultFileCache(Func<GgufTensorInfo, bool>? includeTensor, bool logProgress)
     {
         // Phones only: Mac Catalyst reports itself as iOS but is a desktop process
         // with a desktop page cache, and warming it is what a desktop load wants.
@@ -131,7 +134,7 @@ public partial class GgufFile
         }
         PrefaultReadBytes = readBytes;
         PrefaultResidentBytes = residentBytes;
-        if (watch.Elapsed.TotalSeconds >= 1)
+        if (logProgress && watch.Elapsed.TotalSeconds >= 1)
             Console.WriteLine($"  Prefaulted GGUF page cache in {watch.Elapsed.TotalSeconds:F1}s with {threads} read streams: " +
                 $"{readBytes / 1073741824.0:F2} GiB read, {residentBytes / 1073741824.0:F2} GiB already resident");
     }
