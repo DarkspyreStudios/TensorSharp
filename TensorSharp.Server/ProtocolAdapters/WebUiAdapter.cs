@@ -462,6 +462,14 @@ public sealed class WebUiAdapter
     {
         var webUiLogger = _loggerFactory.CreateLogger("TensorSharp.Server.WebUI.Chat");
         var body = await JsonSerializer.DeserializeAsync<JsonElement>(ctx.Request.Body).ConfigureAwait(false);
+        if (body.TryGetProperty("studio", out _) && (!TensorSharp.Server.Endpoints.StudioEndpoints.ConnectionAllowed(ctx)
+            || !TensorSharp.Chat.Studio.StudioHostBoundary.AllowsMutation(
+            ctx.Request.Headers["X-TensorSharp-Studio"].ToString(), ctx.Request.Headers.Origin.ToString(), ctx.Request.Scheme, ctx.Request.Host.Value ?? "")))
+        {
+            ctx.Response.StatusCode = 403;
+            await ctx.Response.WriteAsJsonAsync(new { error = "Studio chat requires an allowed loopback connection (or explicit protected remote deployment), same-origin request, and X-TensorSharp-Studio: 1." });
+            return;
+        }
         using var generationCancel = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
 
         await WriteChatFramesAsync(ctx, _service.ChatStreamAsync(body, generationCancel.Token),

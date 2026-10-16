@@ -1265,6 +1265,9 @@ namespace TensorSharp.Chat
         /// </summary>
         public bool LoadedModelMakesImages => _svc.Model is TensorSharp.Models.QwenImage.QwenImageModel;
 
+        /// <summary>The host's authoritative persistent Studio service, shared by chat tools and manual editing.</summary>
+        public TensorSharp.Studio.StudioService Studio { get; set; }
+
         /// <summary>Whether the loaded model makes video clips (see <see cref="LoadedModelMakesImages"/>).</summary>
         public bool LoadedModelMakesVideo => LoadedVideoModel != null;
 
@@ -1977,6 +1980,9 @@ namespace TensorSharp.Chat
         /// </summary>
         public void EnsureVideoGenerationAvailable() => RequireVideoModel();
 
+        /// <summary>Fresh copies keep Studio's capability resolution from changing chat request defaults.</summary>
+        internal TensorSharp.Models.Video.VideoGenerationParams VideoDefaults => VideoGenerationParamsParser.CreateDefaults(_options);
+
         private TensorSharp.Models.Video.IVideoGenerationModel RequireVideoModel()
         {
             if (_svc.Model is not TensorSharp.Models.Video.IVideoGenerationModel videoModel)
@@ -2049,10 +2055,12 @@ namespace TensorSharp.Chat
         /// video model (400 otherwise) and the upload directory must have headroom
         /// (507); the model's own rejections propagate unwrapped so the caller can shape them.
         /// </summary>
-        public Task<VideoGenerationResult> GenerateVideoAsync(string prompt, TensorSharp.Models.Video.VideoGenerationParams parameters)
+        public Task<VideoGenerationResult> GenerateVideoAsync(string prompt, TensorSharp.Models.Video.VideoGenerationParams parameters, TensorSharp.Models.Video.IVideoGenerationModel expectedModel = null)
         {
             if (parameters == null) throw new ArgumentNullException(nameof(parameters));
             var videoModel = RequireVideoModel();
+            if (expectedModel != null && !ReferenceEquals(expectedModel, videoModel))
+                throw new InvalidOperationException("The selected video model changed before generation began.");
             string conditioningError = VideoImageConditionsError(videoModel, parameters);
             if (conditioningError != null)
                 throw new WebUiRequestRejectedException(400, new { error = conditioningError });
@@ -2076,11 +2084,28 @@ namespace TensorSharp.Chat
                 {
                     lock (_videoGenLock)
                     {
-                        var video = videoModel.GenerateVideo(prompt, p);
                         p.CancellationToken.ThrowIfCancellationRequested();
-                        string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
-                            outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
-                        return (video, codec, audioMuxed);
+                        if (!ReferenceEquals(videoModel, _svc.Model))
+                            throw new InvalidOperationException("The selected video model changed while generation was queued.");
+                        var owner = (ModelBase)videoModel;
+                        if (!owner.TryEnterUse())
+                            throw new InvalidOperationException("The video model is being unloaded; retry after loading it.");
+                        try
+                        {
+                            // Disposal uses the same lock after retiring the model. Keep it
+                            // alive through the entire native call, even beyond the drain timeout.
+                            lock (owner.GpuComputeLock)
+                            {
+                                if (owner.IsRetiring)
+                                    throw new InvalidOperationException("The selected video model is being unloaded.");
+                                var video = videoModel.GenerateVideo(prompt, p);
+                                p.CancellationToken.ThrowIfCancellationRequested();
+                                string codec = TensorSharp.Models.WanVideo.VideoIO.SaveMp4(
+                                    outPath, video.Frames, video.Fps, video.Audio, out bool audioMuxed);
+                                return (video, codec, audioMuxed);
+                            }
+                        }
+                        finally { owner.ExitUse(); }
                     }
                 });
             }
@@ -2430,6 +2455,9 @@ namespace TensorSharp.Chat
             if (!_svc.IsLoaded)
                 throw new WebUiRequestRejectedException(400, new { error = "No model loaded" });
 
+            if (body.TryGetProperty("studio", out _) && (LoadedModelMakesVideo || LoadedModelMakesImages || _svc.IsDiffusionModel))
+                throw new WebUiRequestRejectedException(400, new { error = "Studio conversation requires a text planning model. Select a chat model explicitly; the video model remains a generation model." });
+
             var messagesEl = body.GetProperty("messages");
             int maxTokens = _options.ResolveMaxTokens(
                 SamplingConfigParser.ReadRequestedMaxTokens(body, "maxTokens", "max_tokens"));
@@ -2557,7 +2585,8 @@ namespace TensorSharp.Chat
                 workspace: workspace,
                 captureProducedFiles: ScriptFileCapture(),
                 logger: webUiLogger,
-                multiAgent: SkillSelectionParser.ParseMultiAgent(body), knowledge: knowledge);
+                multiAgent: SkillSelectionParser.ParseMultiAgent(body), knowledge: knowledge,
+                studio: TensorSharp.Chat.Studio.StudioChatScope.Create(Studio, _svc, body, _options.UploadDirectory));
 
             if (unknownSkills.Count > 0)
             {

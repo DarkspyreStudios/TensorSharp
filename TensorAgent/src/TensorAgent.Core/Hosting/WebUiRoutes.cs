@@ -127,6 +127,8 @@ public static partial class WebUiRoutes
         server.MapPost("/api/chat", async (request, ct) =>
         {
             JsonElement body = await request.ReadJsonAsync(ct);
+            if (body.TryGetProperty("studio", out _) && !StudioAllowed(request))
+                return LoopbackResponse.Json(new { error = "Studio chat requires a same-origin request and X-TensorSharp-Studio: 1." }, 403);
             if (turns is null)
             {
                 return LoopbackResponse.Sse(

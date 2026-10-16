@@ -1,0 +1,124 @@
+/* Shared, dependency-free editor. Tokens inherit either host's current theme. */
+.ts-studio { --studio-bg: var(--bg, #11121b); --studio-panel: var(--surface, #1b1c28); --studio-border: var(--border, #36394c); --studio-text: var(--text, #eeeef5); --studio-muted: var(--muted, #aaaabd); --studio-accent: var(--accent, #8c91ff); position: fixed; inset: 0; z-index: 10000; display: flex; flex-direction: column; background: var(--studio-bg); color: var(--studio-text); font: 14px/1.5 system-ui, sans-serif; isolation: isolate; }
+.ts-studio[hidden] { display: none !important; }
+.ts-studio *, .ts-studio *::before, .ts-studio *::after { box-sizing: border-box; }
+.ts-studio button, .ts-studio input, .ts-studio select, .ts-studio textarea { font: inherit; color: inherit; }
+.ts-studio button, .ts-studio select, .ts-studio input:not([type=checkbox]):not([type=range]), .ts-studio textarea { border: 1px solid var(--studio-border); border-radius: 7px; background: var(--studio-panel); min-height: 36px; padding: 6px 10px; }
+.ts-studio button { cursor: pointer; }
+.ts-studio button:hover:not(:disabled), .ts-studio button[aria-pressed=true] { border-color: var(--studio-accent); background: color-mix(in srgb, var(--studio-accent) 17%, var(--studio-panel)); }
+.ts-studio button:disabled { cursor: not-allowed; opacity: .45; }
+.ts-studio :focus-visible, .ts-studio-open:focus-visible { outline: 2px solid var(--studio-accent, #8c91ff); outline-offset: 2px; }
+.ts-studio .ts-primary { background: var(--studio-accent); color: #10121c; border-color: transparent; font-weight: 650; }
+.ts-studio .ts-danger { color: #ffb5b5; }
+.ts-studio h2, .ts-studio h3, .ts-studio p { margin: 0; }
+.ts-studio h2 { font-size: 17px; }
+.ts-studio h3 { font-size: 14px; }
+.ts-studio-header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: max(10px, env(safe-area-inset-top)) 14px 10px; border-bottom: 1px solid var(--studio-border); }
+.ts-studio-header h2 { margin-right: 8px; white-space: nowrap; }
+.ts-studio-header select { width: min(250px, 35vw); }
+.ts-studio-header .ts-save-state { margin-left: auto; }
+.ts-studio .ts-save-state, .ts-studio .ts-hint, .ts-studio small { color: var(--studio-muted); font-size: 12px; }
+.ts-studio .ts-status { padding: 5px 14px; border-bottom: 1px solid var(--studio-border); min-height: 30px; font-size: 12px; }
+.ts-studio .ts-status[data-error=true] { color: #ffc9bf; background: #582d2d; }
+.ts-studio-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(190px, 245px) minmax(240px, 1fr) minmax(260px, 330px); grid-template-rows: minmax(250px, 1fr) minmax(180px, 31vh); }
+.ts-studio-section { min-width: 0; min-height: 0; padding: 12px; overflow: auto; }
+.ts-studio-library { border-right: 1px solid var(--studio-border); }
+.ts-studio-inspector { border-left: 1px solid var(--studio-border); }
+.ts-studio .ts-section-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.ts-studio .ts-section-heading h3 { margin-right: auto; }
+.ts-studio .ts-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.ts-studio .ts-stack { display: grid; gap: 10px; }
+.ts-studio .ts-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.ts-studio label.ts-field { display: grid; gap: 4px; min-width: 0; font-size: 12px; color: var(--studio-muted); }
+.ts-studio label.ts-field input, .ts-studio label.ts-field select, .ts-studio label.ts-field textarea { width: 100%; color: var(--studio-text); }
+.ts-studio textarea { min-height: 82px; resize: vertical; width: 100%; }
+.ts-studio .ts-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.ts-studio input[type=checkbox] { accent-color: var(--studio-accent); width: 17px; height: 17px; }
+.ts-studio input[type=range] { accent-color: var(--studio-accent); }
+.ts-studio .ts-empty { padding: 20px 6px; color: var(--studio-muted); font-size: 13px; }
+.ts-studio .ts-asset { border: 1px solid var(--studio-border); border-radius: 8px; padding: 9px; margin: 8px 0; overflow-wrap: anywhere; }
+.ts-studio .ts-asset header { display: block; background: none; border: 0; padding: 0; position: static; height: auto; }
+.ts-studio .ts-asset .ts-row { margin-top: 8px; }
+.ts-studio .ts-asset[data-missing=true] { border-color: #bd7950; }
+.ts-studio-preview { display: flex; flex-direction: column; overflow: hidden; gap: 8px; }
+.ts-studio .ts-monitor { flex: 1; min-height: 120px; display: flex; align-items: center; justify-content: center; background: #07070b; border-radius: 9px; overflow: hidden; position: relative; }
+.ts-studio .ts-monitor video { width: 100%; height: 100%; max-height: 48vh; object-fit: contain; }
+.ts-studio .ts-monitor p { padding: 24px; text-align: center; max-width: 480px; }
+.ts-studio .ts-playback { display: flex; gap: 8px; align-items: center; }
+.ts-studio .ts-playback input { flex: 1; min-width: 50px; }
+.ts-studio .ts-time { font: 12px ui-monospace, monospace; min-width: 95px; }
+.ts-studio .ts-shots { display: flex; gap: 7px; overflow-x: auto; min-height: 43px; }
+.ts-studio .ts-shot { flex: 0 0 auto; max-width: 150px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ts-studio .ts-tabbar { display: flex; gap: 5px; margin-bottom: 12px; position: sticky; top: -12px; background: var(--studio-bg); padding: 4px 0 8px; z-index: 1; }
+.ts-studio .ts-tabbar button { flex: 1; padding: 5px; }
+.ts-studio details { border-top: 1px solid var(--studio-border); padding-top: 9px; margin-top: 9px; }
+.ts-studio summary { cursor: pointer; margin-bottom: 9px; }
+.ts-studio .ts-provenance { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 180px; overflow: auto; }
+.ts-studio .ts-proposal { border: 1px solid var(--studio-accent); border-radius: 8px; padding: 10px; }
+.ts-studio .ts-proposal pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; max-height: 210px; overflow: auto; }
+.ts-studio .ts-job { padding: 8px 0; border-top: 1px solid var(--studio-border); overflow-wrap: anywhere; }
+.ts-studio .ts-job progress { width: 100%; height: 5px; accent-color: var(--studio-accent); }
+.ts-studio .ts-job a { color: var(--studio-accent); }
+.ts-studio-timeline { grid-column: 1 / -1; border-top: 1px solid var(--studio-border); display: flex; flex-direction: column; padding: 9px 12px max(9px, env(safe-area-inset-bottom)); overflow: hidden; }
+.ts-studio .ts-timeline-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.ts-studio .ts-timeline-toolbar h3 { margin-right: 8px; }
+.ts-studio .ts-timeline-toolbar button { min-height: 31px; font-size: 12px; padding: 4px 8px; }
+.ts-studio .ts-timeline-toolbar input[type=range] { width: 88px; }
+.ts-studio .ts-timeline-scroll { min-height: 0; overflow: auto; position: relative; flex: 1; overscroll-behavior: contain; }
+.ts-studio .ts-ruler-row, .ts-studio .ts-track-row { display: flex; width: max-content; min-width: 100%; position: relative; }
+.ts-studio .ts-track-label { flex: 0 0 150px; width: 150px; padding: 6px; border-right: 1px solid var(--studio-border); border-bottom: 1px solid var(--studio-border); background: var(--studio-panel); position: sticky; left: 0; z-index: 3; font-size: 12px; display: flex; align-items: center; gap: 4px; }
+.ts-studio .ts-track-label strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.ts-studio .ts-track-label button { padding: 2px 4px; min-height: 28px; font-size: 10px; }
+.ts-studio .ts-lane, .ts-studio .ts-ruler { position: relative; flex-shrink: 0; height: 53px; border-bottom: 1px solid var(--studio-border); background-image: linear-gradient(90deg, color-mix(in srgb, var(--studio-border) 45%, transparent) 1px, transparent 1px); }
+.ts-studio .ts-ruler { height: 25px; cursor: crosshair; }
+.ts-studio .ts-ruler-row .ts-track-label { font-size: 10px; height: 25px; }
+.ts-studio .ts-tick { position: absolute; top: 3px; font-size: 10px; color: var(--studio-muted); pointer-events: none; }
+.ts-studio .ts-clip { position: absolute; top: 5px; bottom: 5px; padding: 3px 8px !important; min-width: 14px; min-height: 0; text-align: left; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; background: #30436b; border-color: #547bb7; touch-action: none; user-select: none; }
+.ts-studio .ts-clip[data-kind=audio] { background: #244c42; border-color: #568c7b; }
+.ts-studio .ts-clip[data-kind=text] { background: #59416d; border-color: #9472b1; }
+.ts-studio .ts-clip[aria-pressed=true] { box-shadow: inset 0 0 0 2px var(--studio-accent); z-index: 1; }
+.ts-studio .ts-clip span { display: block; font-size: 10px; opacity: .8; }
+.ts-studio .ts-playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #ffd097; z-index: 2; pointer-events: none; }
+.ts-studio .ts-welcome { grid-column: 1 / -1; grid-row: 1 / -1; display: grid; place-content: center; gap: 14px; padding: 24px; text-align: center; }
+.ts-studio .ts-welcome p { max-width: 520px; color: var(--studio-muted); }
+.ts-studio-open, .ts-studio-chat-action { cursor: pointer; }
+.ts-studio-chat-action { display: block; margin: 6px 0 10px; border: 1px solid var(--border, #494b65); background: var(--surface, #252637); color: var(--text, #eee); border-radius: 6px; padding: 6px 10px; font: inherit; font-size: 12px; }
+.ts-studio .ts-mobile-tabs { display: none; }
+@media (max-width: 1000px) {
+  .ts-studio-workspace { grid-template-columns: minmax(155px, 200px) minmax(220px, 1fr); grid-template-rows: minmax(240px, 1fr) minmax(200px, 33vh); }
+  .ts-studio-inspector { position: absolute; top: 100px; bottom: 0; right: 0; width: min(340px, 88vw); background: var(--studio-bg); z-index: 6; box-shadow: -8px 0 24px #0005; }
+  .ts-studio-inspector[data-panel-hidden=true] { display: none; }
+  .ts-studio .ts-mobile-tabs { display: flex; gap: 5px; }
+  .ts-studio .ts-mobile-tabs button { font-size: 12px; min-height: 30px; }
+}
+@media (max-width: 620px) {
+  .ts-studio-header { padding: max(7px, env(safe-area-inset-top)) 8px 7px; gap: 5px; }
+  .ts-studio-header h2 { font-size: 15px; }
+  .ts-studio-header .ts-save-state { width: 100%; order: 3; margin: 0; }
+  .ts-studio-header select { flex: 1; width: 110px; }
+  .ts-studio-header button { min-height: 37px; padding: 5px 7px; }
+  .ts-studio-workspace { display: flex; flex-direction: column; }
+  .ts-studio-preview { flex: 1; min-height: 180px; padding: 8px; }
+  .ts-studio-library { position: absolute; top: 145px; bottom: 0; left: 0; width: min(300px, 88vw); z-index: 6; background: var(--studio-bg); box-shadow: 8px 0 24px #0005; }
+  .ts-studio-library[data-panel-hidden=true] { display: none; }
+  .ts-studio-inspector { top: 145px; }
+  .ts-studio-timeline { flex: 0 0 37%; padding: 7px 5px max(7px, env(safe-area-inset-bottom)); }
+  .ts-studio .ts-track-label { flex-basis: 112px; width: 112px; }
+  .ts-studio .ts-timeline-toolbar { gap: 4px; }
+  .ts-studio .ts-timeline-toolbar h3 { display: none; }
+  .ts-studio .ts-monitor video { max-height: 34vh; }
+  .ts-studio button { min-height: 40px; }
+}
+@media (prefers-reduced-motion: reduce) { .ts-studio * { scroll-behavior: auto !important; transition: none !important; } }
+.ts-studio .ts-thumbnail { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; object-fit: contain; border-radius: 5px; margin-bottom: 7px; background: #08090d; }
+.ts-studio .ts-thumbnail[hidden] { display: none; }
+.ts-studio .ts-waveform { display: block; width: 100%; height: 48px; margin-top: 7px; background: #101e1a; border-radius: 5px; }
+.ts-studio .ts-name-dialog { position: absolute; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: #0009; }
+.ts-studio .ts-name-dialog form { width: min(420px, 100%); background: var(--studio-bg); border: 1px solid var(--studio-border); border-radius: 12px; padding: 22px; box-shadow: 0 12px 50px #0006; }
+.ts-studio .ts-name-dialog .ts-row { justify-content: flex-end; }
+.ts-studio .ts-delete-content { width: min(460px, 100%); max-height: 100%; overflow: auto; overflow-wrap: anywhere; background: var(--studio-bg); border: 1px solid var(--studio-border); border-radius: 12px; padding: 22px; box-shadow: 0 12px 50px #0006; }
+.ts-studio .ts-delete-warning { border-left: 3px solid #d88d57; padding-left: 10px; }
+.ts-studio-workspace { position: relative; }
+.ts-studio .ts-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--studio-accent) 85%, white); color: #10121c; }
+@media (max-width: 1000px) { .ts-studio-inspector { top: 0; } }
+@media (max-width: 620px) { .ts-studio-library, .ts-studio-inspector { top: 0; } }

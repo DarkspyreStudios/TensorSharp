@@ -310,6 +310,14 @@ public sealed class AgentAppHost : IDisposable
             WebUiChatService.DefaultArtifactUriPrefix,
             skillRouter: TensorAgentSkillRouter.Route);
         Chat.Knowledge = Knowledge;
+        Studio = new TensorSharp.Studio.StudioService(Path.Combine(Paths.DataRoot, "studio-projects"),
+            new TensorSharp.Chat.Studio.NativeStudioGenerationAdapter(ModelService, Chat, async ct =>
+            {
+                await WaitWhileAModelLoadsAsync(ct).ConfigureAwait(false);
+                await StopWarmingThePrefixCacheAndWaitAsync().ConfigureAwait(false);
+                await WaitForTheAppToBeInFrontAsync(ct).ConfigureAwait(false);
+            }, Compute), TensorSharp.Chat.Studio.StudioHostOptions.Create(Options.UploadMaxFileBytes));
+        Chat.Studio = Studio;
         ImagePlanner = ImageTurns.Planner.For(Chat, Options.UploadDirectory);
 
         // The share contract stays platform-neutral. On iOS the path points into the
@@ -404,6 +412,7 @@ public sealed class AgentAppHost : IDisposable
         // Without this the model's "here is your PDF" link 404s: the runner emits
         // /api/code/artifacts/... and nothing served it. See MapCodeArtifacts.
         Server.MapCodeArtifacts(Artifacts);
+        Server.MapStudio(Studio, Options.UploadDirectory);
         Server.MapAgent(
             Catalog, Models, Conversations, Settings, DescribeEngine, RaisePageEvent, Downloads,
             onSettingsChanged: ApplySettings, describeModel: DescribeModelState, shares: Shares,
@@ -438,6 +447,7 @@ public sealed class AgentAppHost : IDisposable
     public UploadStoragePolicy Uploads { get; }
     public ServerHostingOptions Options { get; }
     public WebUiChatService Chat { get; }
+    public TensorSharp.Studio.StudioService Studio { get; }
     /// <summary>Durable personal sources and their retrieval index, separate from temporary chat uploads.</summary>
     public KnowledgeStore Knowledge { get; }
     /// <summary>Verified app-private PDF tools and language data, prepared lazily on supported desktop hosts.</summary>
@@ -3370,6 +3380,7 @@ public sealed class AgentAppHost : IDisposable
         // the weights being unmapped underneath it.
         Turns.StopAll();
         Close(Server);
+        Studio.DisposeAsync().AsTask().GetAwaiter().GetResult();
         // Before the engine wait, because a download holds a socket and a file handle
         // and has nothing to do with the model: making a five-second transfer teardown
         // wait behind a generation would be for no reason.

@@ -499,6 +499,13 @@ differ from those by at most 2 levels in 3% of pixels without plug-ins and 5 lev
 pixels with Viggle Turbo and Film Stills: Mono's LLVM code generation rounds some arithmetic
 differently, plug-ins or not.
 
+**Video Studio.** Open the shared Studio from chat or beside a video artifact to
+keep imported/generated assets in an editable project. The timeline, reviewed
+agent proposals, undo/redo, packages and background jobs share the WebUX Studio
+implementation. Desktop composition uses operator-installed FFmpeg; mobile
+subprocess export is gated. See the [user guide](../docs/video-studio.md) and
+[actual validation and limitations](../docs/video-studio-validation.md).
+
 **Videos.** With MiniMax-H3 loaded, a message describes a short clip, and an attached
 photo is its first frame (two photos, its first and last); with MiniMax-H3 References,
 the photos, clips and recordings attached, up to nine together, are the people, things,

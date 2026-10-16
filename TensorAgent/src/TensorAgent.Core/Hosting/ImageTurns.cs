@@ -79,8 +79,11 @@ public static partial class ImageTurns
     {
         ArgumentNullException.ThrowIfNull(chat);
         ArgumentNullException.ThrowIfNull(planner);
-        return chat.LoadedModelMakesImages ? StreamAsync(chat, body, planner, cancellationToken, prepare)
-            : chat.LoadedModelMakesVideo ? VideoTurns.StreamAsync(chat, body, cancellationToken)
+        // Studio messages are editing instructions, never prompts for implicit media generation.
+        // ChatStreamAsync validates the selected planner and rejects loaded diffusion models.
+        bool studio = body.ValueKind == JsonValueKind.Object && body.TryGetProperty("studio", out _);
+        return !studio && chat.LoadedModelMakesImages ? StreamAsync(chat, body, planner, cancellationToken, prepare)
+            : !studio && chat.LoadedModelMakesVideo ? VideoTurns.StreamAsync(chat, body, cancellationToken)
             : chat.ChatStreamAsync(body, cancellationToken);
     }
 

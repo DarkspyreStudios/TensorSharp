@@ -386,6 +386,8 @@ builder.Services.AddTensorSharpRequestLogging(options =>
 
 // One adapter per protocol; instances are stateless and free to share between requests.
 builder.Services.AddSingleton<WebUiAdapter>();
+builder.Services.AddVideoStudio(Environment.GetEnvironmentVariable("TS_STUDIO_DIRECTORY")
+    ?? Path.Combine(baseDirectory, "studio-projects"));
 builder.Services.AddSingleton<OllamaAdapter>();
 builder.Services.AddSingleton<OpenAIChatAdapter>();
 // Responses API store: use Redis when TS_RESPONSES_STORE_REDIS_URL is set,
@@ -627,6 +629,9 @@ if (hostingOptions.SkillsEnabled)
 if (codeExecOptions.Enabled)
     app.MapCodeArtifactEndpoints();
 app.MapWebUiEndpoints();
+app.MapVideoStudio();
+// Instantiate the shared owner before chat requests can bind Studio tools.
+_ = app.Services.GetRequiredService<TensorSharp.Studio.StudioService>();
 app.MapOllamaEndpoints();
 app.MapOpenAIEndpoints();
 

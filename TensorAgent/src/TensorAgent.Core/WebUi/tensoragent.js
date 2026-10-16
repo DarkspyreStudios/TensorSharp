@@ -5291,6 +5291,27 @@
     post('/api/agent/events', { type: 'open-file', url: hit.url, name: hit.name });
   });
 
+  // A WebView's target="_blank" handling differs by platform: a web link can
+  // replace the conversation or open nothing at all. Ask the app to show its own
+  // browser popup, leaving this page and its composer alive underneath it.
+  document.addEventListener('click', function (ev) {
+    if (!state.native || ev.defaultPrevented || ev.button) return;
+    for (var n = ev.target; n && n !== document; n = n.parentNode) {
+      if (n.tagName !== 'A') continue;
+      if (n.getAttribute && n.getAttribute('download') !== null) return;
+      var href = String((n.getAttribute && n.getAttribute('href')) || n.href || '').trim();
+      if (!href || href.charAt(0) === '#' || artifactPath(href) || knowledgeSourceHref(n)) return;
+      // The browser resolves the property against the document's base URL, so
+      // relative and protocol-relative hyperlinks work too. Only web pages belong
+      // in this viewer; mail and other application links keep their usual handling.
+      var url = String(n.href || href);
+      if (!/^https?:\/\//i.test(url)) return;
+      ev.preventDefault();
+      post('/api/agent/events', { type: 'open-link', url: url, name: n.textContent || '' });
+      return;
+    }
+  });
+
   // The page heals itself, without needing the app to tell it to. Opening any other
   // screen takes this WebView out of the window, and WebKit suspends a content process
   // whose view is not in one -- so the reader stops mid-answer and the page is told
