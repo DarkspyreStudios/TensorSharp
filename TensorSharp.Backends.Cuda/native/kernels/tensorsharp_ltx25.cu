@@ -5,6 +5,60 @@
 #include <cuda_fp16.h>
 #include <stdint.h>
 
+// Match Ltx25PromptMath.Bf16 bit for bit, including its handling of signed
+// zero, subnormals, infinities and NaN payloads. These boundaries are part of
+// Gemma's trained arithmetic, not a change of activation precision.
+__device__ __forceinline__ float ltx_round_bf16(float value) {
+    uint32_t bits = __float_as_uint(value);
+    if ((bits & 0x7f800000u) != 0x7f800000u)
+        bits += 0x7fffu + ((bits >> 16) & 1u);
+    return __uint_as_float(bits & 0xffff0000u);
+}
+
+extern "C" __global__ void ts_ltx25_round_bf16(float* values, int count) {
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < (size_t)count) values[i] = ltx_round_bf16(values[i]);
+}
+
+// The primary ts_unary_f32 sigmoid is 1 / (1 + expf(-x)), followed by
+// separate factor-two and attention-product kernels. Keep all three rounding
+// boundaries, including gradual underflow and the usual NaN/Inf propagation.
+// One warp owns a token/head and evaluates sigmoid once, then broadcasts it
+// without materializing the full [tokens, heads, head_dim] gate tensor.
+extern "C" __global__ void ts_ltx25_apply_head_gates_f32(float* attention,
+    const float* logits, int token_heads, int head_dim) {
+    const int head = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (head >= token_heads) return;
+    float gate = 0.0f;
+    if (lane == 0) {
+        const float sigmoid = __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-logits[head])));
+        gate = __fmul_rn(sigmoid, 2.0f);
+    }
+    gate = __shfl_sync(0xffffffff, gate, 0);
+    const size_t start = (size_t)head * head_dim;
+    for (int channel = lane; channel < head_dim; channel += 32)
+        attention[start + channel] = __fmul_rn(attention[start + channel], gate);
+}
+
+// Trigonometric tables are computed by the same host MathF operations as the
+// reference and shared across heads. Explicit rounded multiplies/adds prevent
+// contraction across the BF16 boundaries regardless of compiler flags.
+extern "C" __global__ void ts_ltx25_gemma_rope_bf16(float* values,
+    const float* cosine, const float* sine, int tokens, int heads, int dim, int rotated) {
+    const size_t pair = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (pair >= (size_t)tokens * heads * rotated) return;
+    const int frequency = pair % rotated;
+    const size_t token_head = pair / rotated;
+    const size_t phase = (token_head / heads) * rotated + frequency;
+    const size_t a = token_head * dim + frequency, b = a + dim / 2;
+    const float x = values[a], y = values[b], c = cosine[phase], s = sine[phase];
+    values[a] = ltx_round_bf16(__fsub_rn(ltx_round_bf16(__fmul_rn(x, c)),
+                                       ltx_round_bf16(__fmul_rn(y, s))));
+    values[b] = ltx_round_bf16(__fadd_rn(ltx_round_bf16(__fmul_rn(y, c)),
+                                       ltx_round_bf16(__fmul_rn(x, s))));
+}
+
 __device__ __forceinline__ int ltx_scale_k4(const uint8_t* s, int i) {
     return i < 4 ? s[i] & 63 : (s[i + 4] & 15) | ((s[i - 4] >> 6) << 4);
 }

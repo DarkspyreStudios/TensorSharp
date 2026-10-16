@@ -18,9 +18,15 @@ string checkpoint = Path.GetFullPath(Required("encoder")), output = Path.GetFull
 string stage = options.GetValueOrDefault("stage", "full"), prompt = options.GetValueOrDefault("prompt", "A red ball rolls across a wooden table.");
 if (stage is not ("tokenizer" or "hidden" or "features" or "full")) throw new ArgumentException("Invalid stage.");
 string[]? cudaRounds = options.TryGetValue("cuda-bf16-rounds", out string? roundsValue) ? roundsValue.Split(',') : null;
+string[]? deviceMathRounds = options.TryGetValue("device-math-rounds", out string? mathRoundsValue) ? mathRoundsValue.Split(',') : null;
+if (cudaRounds != null && deviceMathRounds != null)
+    throw new ArgumentException("--cuda-bf16-rounds and --device-math-rounds cannot be combined.");
 if (cudaRounds != null && (stage != "full" || options.GetValueOrDefault("backend")?.ToUpperInvariant() != "CUDA" ||
     cudaRounds.Length == 0 || cudaRounds.Any(value => value is not ("0" or "1"))))
     throw new ArgumentException("--cuda-bf16-rounds requires CUDA full stage and comma-separated 0/1 modes.");
+if (deviceMathRounds != null && (stage != "full" || options.GetValueOrDefault("backend")?.ToUpperInvariant() is not ("CUDA" or "MLX") ||
+    deviceMathRounds.Length == 0 || deviceMathRounds.Any(value => value is not ("0" or "1"))))
+    throw new ArgumentException("--device-math-rounds requires CUDA or MLX full stage and comma-separated 0/1 modes.");
 bool prefault = options.GetValueOrDefault("prefault", "0") == "1";
 if (File.Exists(output)) throw new IOException("Refusing to replace report.");
 Directory.CreateDirectory(Path.GetDirectoryName(output)!);
@@ -29,17 +35,19 @@ var report = new Dictionary<string, object?> { ["completed"] = false, ["stage"] 
     ["created_utc"] = DateTimeOffset.UtcNow, ["backend"] = options.GetValueOrDefault("backend", "CPU"),
     ["MLX_ENABLE_TF32"] = Environment.GetEnvironmentVariable("MLX_ENABLE_TF32"),
     ["TS_LTX25_MLX_BF16_GEMM"] = Environment.GetEnvironmentVariable("TS_LTX25_MLX_BF16_GEMM"),
+    ["TS_MLX_Q5K_REPACK"] = Environment.GetEnvironmentVariable("TS_MLX_Q5K_REPACK"),
+    ["TS_LTX25_DEVICE_PROMPT_MATH"] = Environment.GetEnvironmentVariable("TS_LTX25_DEVICE_PROMPT_MATH"),
     ["TS_LTX25_CUDA_BF16_GEMM"] = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_BF16_GEMM"),
     ["TS_LTX25_CUDA_PREFAULT"] = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_PREFAULT"),
     ["TS_LTX25_CUDA_PREFAULT_WORKERS"] = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_PREFAULT_WORKERS"),
     ["scope"] = "Native prompt conditioning only; excludes denoising, VAEs and media output." };
 void Save() => File.WriteAllText(output, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }) + "\n");
-object Store(string suffix, float[] values)
+StoredTensor Store(string suffix, float[] values)
 {
     if (values.Any(value => !float.IsFinite(value))) throw new ArithmeticException("Nonfinite prompt output.");
     byte[] bytes = new byte[checked(values.Length * 4)]; Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
     string path = output + "." + suffix + ".f32"; if (File.Exists(path)) throw new IOException("Refusing to replace array.");
-    File.WriteAllBytes(path, bytes); return new { path, elements = values.Length, sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) };
+    File.WriteAllBytes(path, bytes); return new(path, values.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)));
 }
 try
 {
@@ -81,7 +89,7 @@ try
             }
             if (stage == "full")
             {
-                if (cudaRounds == null)
+                if (cudaRounds == null && deviceMathRounds == null)
                 {
                     var result = encoder.Encode(prompt); timer.Stop(); report["tokens"] = result.Tokens;
                     report["video_context"] = Store("video_context", result.VideoContext);
@@ -91,21 +99,31 @@ try
                 }
                 else
                 {
-                    string? previous = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_BF16_GEMM");
+                    string variable = deviceMathRounds == null ? "TS_LTX25_CUDA_BF16_GEMM" : "TS_LTX25_DEVICE_PROMPT_MATH";
+                    string[] modes = deviceMathRounds ?? cudaRounds!;
+                    string? previous = Environment.GetEnvironmentVariable(variable);
                     var rounds = new List<object>();
+                    (string Video, string Audio)? firstHashes = null;
                     double prefaultMs = timer.Elapsed.TotalMilliseconds;
                     try
                     {
-                        for (int round = 0; round < cudaRounds.Length; ++round)
+                        for (int round = 0; round < modes.Length; ++round)
                         {
-                            Environment.SetEnvironmentVariable("TS_LTX25_CUDA_BF16_GEMM", cudaRounds[round]);
+                            Environment.SetEnvironmentVariable(variable, modes[round]);
                             long count = encoder.CudaBf16Projections;
                             long read = encoder.CudaPrefaultReadBytes, resident = encoder.CudaPrefaultResidentBytes,
                                 ranges = encoder.CudaPrefaultRanges;
                             double mappedPrefaultElapsed = encoder.CudaPrefaultMilliseconds;
                             var roundTimer = Stopwatch.StartNew();
                             var result = encoder.Encode(prompt); roundTimer.Stop();
-                            rounds.Add(new { round, cuda_bf16 = cudaRounds[round], tokens = result.Tokens,
+                            StoredTensor video = Store("round_" + round + "_video_context", result.VideoContext);
+                            StoredTensor audio = Store("round_" + round + "_audio_context", result.AudioContext);
+                            firstHashes ??= (video.sha256, audio.sha256);
+                            bool exact = firstHashes.Value == (video.sha256, audio.sha256);
+                            rounds.Add(new { round, cuda_bf16 = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_BF16_GEMM"),
+                                device_math = Environment.GetEnvironmentVariable("TS_LTX25_DEVICE_PROMPT_MATH"),
+                                prompt_math_path = deviceMathRounds == null ? null : modes[round] == "0" ? "host" : "device_requested",
+                                tokens = result.Tokens,
                                 elapsed_ms = roundTimer.Elapsed.TotalMilliseconds + (round == 0 ? prefaultMs : 0),
                                 prefault_ms = round == 0 ? prefaultMs : 0,
                                 phases_ms = new { gemma = encoder.LastGemmaMilliseconds,
@@ -116,17 +134,23 @@ try
                                     ranges = encoder.CudaPrefaultRanges - ranges,
                                     elapsed_ms = encoder.CudaPrefaultMilliseconds - mappedPrefaultElapsed,
                                     failure = encoder.CudaPrefaultFailure },
-                                video_context = Store("round_" + round + "_video_context", result.VideoContext),
-                                audio_context = Store("round_" + round + "_audio_context", result.AudioContext) });
+                                video_context = video, audio_context = audio,
+                                bitwise_equal_to_first_round = exact });
                             report["rounds"] = rounds;
+                            report["rounds_variable"] = variable;
+                            report["rounds_modes"] = modes;
                             report["elapsed_ms"] = timer.Elapsed.TotalMilliseconds;
                             Save();
-                            Console.WriteLine($"Completed round {round}: BF16={cudaRounds[round]}, {roundTimer.Elapsed.TotalMilliseconds:F3}ms");
+                            Console.WriteLine($"Completed round {round}: {variable}={modes[round]}, {roundTimer.Elapsed.TotalMilliseconds:F3}ms, bitwise_equal_to_first={exact}");
+                            if (deviceMathRounds != null && !exact)
+                                throw new InvalidOperationException("Device prompt math changed the exact video/audio conditioning bytes.");
                         }
                     }
-                    finally { Environment.SetEnvironmentVariable("TS_LTX25_CUDA_BF16_GEMM", previous); }
+                    finally { Environment.SetEnvironmentVariable(variable, previous); }
                     timer.Stop(); report["rounds"] = rounds;
                     report["rounds_scope"] = "Repeated Encode on one encoder; per-round timings exclude saved arrays. First includes optional prefault; total elapsed also includes array exports.";
+                    if (deviceMathRounds != null)
+                        report["device_math_scope"] = "0 uses host Gemma RoPE and CUDA BF16 rounding; 1 requests device kernels. MLX BF16 rounding is unchanged in both. Strict native-kernel tests establish dispatch separately; an old CUDA module can fall back. Every completed round requires bitwise-identical full video/audio contexts.";
                 }
             }
             else
@@ -144,7 +168,7 @@ try
                     foreach (string stream in new[] { "video", "audio" })
                     {
                         int dimension = checked((int)gguf.Tensors[stream + "_embeddings_connector.learnable_registers"].Shape[0]);
-                        var value = (float[])typeof(Ltx25PromptEncoder).GetMethod("Aggregate", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(encoder, [features, dimension, stream])!;
+                        var value = (float[])typeof(Ltx25PromptEncoder).GetMethod("Aggregate", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(encoder, [features, dimension, stream, CancellationToken.None])!;
                         report[stream + "_aggregate"] = Store(stream + "_aggregate", value);
                     }
                 }
@@ -169,3 +193,5 @@ try
     report["completed"] = true; Save(); Console.WriteLine(JsonSerializer.Serialize(report));
 }
 catch (Exception error) { report["error"] = error.ToString(); Save(); throw; }
+
+sealed record StoredTensor(string path, int elements, string sha256);

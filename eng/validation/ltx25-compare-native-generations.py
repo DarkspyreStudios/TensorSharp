@@ -47,7 +47,14 @@ def main():
         for start in range(0,arrays[0].size,1<<20):
             old,new=[np.asarray(v[start:start+(1<<20)],dtype=np.float64) for v in arrays]
             if not np.isfinite(old).all() or not np.isfinite(new).all():raise ValueError('Nonfinite RGB')
-            delta=new-old;square+=float(delta@delta);reference_square+=float(old@old);maximum=max(maximum,float(np.abs(delta).max()));count+=old.size
+            # Avoid BLAS vector-dot implementations: some macOS builds report
+            # spurious floating-point warnings for finite bounded RGB. Both
+            # products and reductions stay in float64, including large F32
+            # inputs whose squares would overflow in their original dtype.
+            delta=new-old
+            square+=float(np.sum(np.square(delta),dtype=np.float64))
+            reference_square+=float(np.sum(np.square(old),dtype=np.float64))
+            maximum=max(maximum,float(np.abs(delta).max()));count+=old.size
         mse=square/count
         if x['audio_samples']!=y['audio_samples']:raise ValueError('Raw audio sample counts differ')
         audio=[]

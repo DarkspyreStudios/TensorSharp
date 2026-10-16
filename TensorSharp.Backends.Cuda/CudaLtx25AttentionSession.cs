@@ -13,6 +13,9 @@ public sealed class CudaLtx25AttentionSession : IDisposable
     private readonly CudaAllocator _allocator;
     private readonly object _sync = new();
     private Tensor _scores;
+    private CudaModule _headGateModule;
+    private IntPtr _headGate;
+    private bool _headGateLoadAttempted;
     private bool _disposed;
     public const int ComputeType = 69; // CUBLAS_COMPUTE_32F_PEDANTIC
     // This bounds the live score tensor; allocator pooling may retain backing
@@ -20,6 +23,8 @@ public sealed class CudaLtx25AttentionSession : IDisposable
     public long ScoreBudgetBytes { get; }
     public long ScoreCapacityBytes => (_scores?.ElementCount() ?? 0) * sizeof(float);
     public long ExecutedAttentions { get; private set; }
+    public long ExecutedHeadGates { get; private set; }
+    public string HeadGateModulePath { get; private set; }
     public int LastQueryTileRows { get; private set; }
     public int LastHeadTileCount { get; private set; }
 
@@ -29,6 +34,50 @@ public sealed class CudaLtx25AttentionSession : IDisposable
         if (scoreBudgetBytes < sizeof(float) || scoreBudgetBytes > (256L << 20))
             throw new ArgumentOutOfRangeException(nameof(scoreBudgetBytes));
         ScoreBudgetBytes = scoreBudgetBytes;
+    }
+
+    /// <summary>Multiply token-major attention by 2*sigmoid(logits[token,head])
+    /// in place, using the original Float32 arithmetic boundaries. Unsupported
+    /// tensors or older optional PTX return false without mutating either input.</summary>
+    public unsafe bool TryApplyHeadGates(Tensor attention, Tensor logits, int heads, int headDim)
+    {
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (heads is < 1 or > 128 || headDim is < 1 or > 1024 ||
+                attention == null || logits == null || attention.DimensionCount != 2 || logits.DimensionCount != 2 ||
+                attention.Sizes[0] < 1 || attention.Sizes[1] != (long)heads * headDim ||
+                logits.Sizes[0] != attention.Sizes[0] || logits.Sizes[1] != heads ||
+                !CudaKernelOps.TryGetContiguousFloat(attention, out var xs, out var x, out _) ||
+                !CudaKernelOps.TryGetContiguousFloat(logits, out var ls, out var l, out int tokenHeads) ||
+                !ReferenceEquals(xs.AllocatorImpl, _allocator) || !ReferenceEquals(ls.AllocatorImpl, _allocator) ||
+                ReferenceEquals(xs, ls)) return false;
+            _allocator.Context.MakeCurrent();
+            if (!_headGateLoadAttempted)
+            {
+                _headGateLoadAttempted = true;
+                HeadGateModulePath = CudaKernels.LocatePtxPath("tensorsharp_ltx25.ptx");
+                if (HeadGateModulePath != null)
+                {
+                    try
+                    {
+                        _headGateModule = CudaModule.LoadFromFile(HeadGateModulePath);
+                        _headGate = _headGateModule.GetFunction("ts_ltx25_apply_head_gates_f32");
+                    }
+                    catch
+                    {
+                        _headGateModule?.Dispose(); _headGateModule = null; _headGate = IntPtr.Zero;
+                    }
+                }
+            }
+            if (_headGate == IntPtr.Zero) return false;
+            xs.EnsureDeviceCurrent(); ls.EnsureDeviceCurrent();
+            void** args = stackalloc void*[4] { &x, &l, &tokenHeads, &headDim };
+            CudaDriverApi.cuLaunchKernel(_headGate, checked((uint)(((long)tokenHeads + 7) / 8)), 1, 1,
+                256, 1, 1, 0, _allocator.Stream.Handle, (IntPtr)args, IntPtr.Zero).ThrowOnError();
+            xs.MarkDeviceModified(); ExecutedHeadGates++;
+            return true;
+        }
     }
 
     /// <summary>Returns false before dispatch for unsupported shapes, aliases,
@@ -148,6 +197,11 @@ public sealed class CudaLtx25AttentionSession : IDisposable
             if (_disposed) return;
             _disposed = true;
             ReleaseScores();
+            if (_headGateModule != null)
+            {
+                _allocator.Context.MakeCurrent(); _allocator.Stream.Synchronize();
+                _headGateModule.Dispose(); _headGateModule = null; _headGate = IntPtr.Zero;
+            }
         }
     }
 }

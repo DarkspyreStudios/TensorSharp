@@ -42,7 +42,7 @@ var report = new Dictionary<string, object?>
         ? "diagnostic_synchronized_phases" : "synchronized_output_readbacks",
     ["environment"] = new[] { "MLX_ENABLE_TF32", "TS_LTX25_FUSED_ROPE", "TS_WAN_DIRECT_FUSED_ATTN",
         "TS_LTX25_STAGE_TIMING", "TS_CUDA_QMM_F16GEMM_MIN_ROWS", "TS_LTX25_CUDA_TILE", "TS_LTX25_CUDA_REQUIRE_TILE", "TS_LTX25_CUDA_ATTN",
-        "TS_LTX25_CUDA_F16_DEQUANT", "TS_LTX25_CUDA_PREFAULT" }
+        "TS_LTX25_CUDA_F16_DEQUANT", "TS_LTX25_CUDA_PREFAULT", "TS_LTX25_CUDA_FUSED_HEAD_GATE", "TS_MLX_Q5K_REPACK" }
         .ToDictionary(name => name, Environment.GetEnvironmentVariable),
     ["scope"] = schedule == "forward"
         ? "AV denoiser Forward with deterministic synthetic projected contexts/latents, synchronized by both output readbacks. Excludes tokenizer, Gemma4, connectors, sampler, VAEs, codecs, HTTP and TensorAgent. This is not end-to-end generation or a quality proof."
@@ -157,6 +157,7 @@ try
         report["maximum_repeat_difference"] = maximumRepeatDifference;
         report["optimized_cuda_projections"] = denoiser.OptimizedCudaProjections;
         report["optimized_cuda_attentions"] = denoiser.OptimizedCudaAttentions;
+        report["optimized_cuda_head_gates"] = denoiser.OptimizedCudaHeadGates;
         report["cuda_attention_workspace_bytes"] = denoiser.CudaAttentionWorkspaceBytes;
         report["optimized_cuda_f16_projections"] = denoiser.OptimizedCudaF16Projections;
         report["optimized_cuda_f16_dequantizations"] = denoiser.OptimizedCudaF16Dequantizations;

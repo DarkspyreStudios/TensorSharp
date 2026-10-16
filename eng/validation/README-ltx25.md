@@ -101,6 +101,138 @@ SD.cpp stays unmodified. Pixel/audio differences are descriptive and do not
 establish a broad perceptual quality ranking. First requests include model loading
 and JIT work; repeated prompts use each implementation's conditioning cache.
 
+## Exact prompt math and alternating benchmarks
+
+Gemma prompt conditioning retains its existing BF16 boundaries. CUDA can round
+activations on the device, and CUDA/MLX can apply split-half Gemma RoPE without
+reading the activation back to the CPU. The host still computes each rotary
+cosine/sine with the original `MathF` operations and BF16 rounding, once per
+token/frequency and shared across heads. Device kernels round each multiply and
+sum in the original order; unrotated channels remain unchanged. This does not
+lower precision, reduce prompt tokens, skip layers or change the conditioning
+cache. MLX's existing BF16 rounding path is unchanged.
+
+`TS_LTX25_DEVICE_PROMPT_MATH=0` selects the host control for Gemma RoPE and CUDA
+BF16 rounding. Unset or `1` requests the device paths. An older optional
+`tensorsharp_ltx25.ptx` that lacks either prompt export keeps the host fallback;
+successful generation alone therefore does not establish native dispatch. The
+new native tests assert that dispatch returned true, then compare every output
+bit against the host arithmetic, including full/partial rotary geometry,
+offset views and untouched guards. CUDA rounding tests cover ties, signed zero,
+subnormals, infinities and NaN bit patterns. Missing GPUs remain skipped coverage.
+
+Build tests first; on CUDA install and verify the intended PTX **after** the
+build with `ltx25-deploy-cuda-modules.py` as described below. Run only the native
+filter for the device actually available:
+
+```sh
+dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj -c Release \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true \
+  --filter 'FullyQualifiedName~Ltx25PromptMathTests.Cpu|FullyQualifiedName~CpuStorageBulkElementIoTests|FullyQualifiedName~TensorApiTests'
+
+MLX_ENABLE_TF32=0 TS_TEST_LTX25_BACKEND=mlx \
+  dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj -c Release --no-build \
+  --filter 'FullyQualifiedName~Ltx25PromptMathTests.Mlx|FullyQualifiedName~Ltx25PromptEncoderTests'
+
+TS_TEST_LTX25_BACKEND=cuda \
+  dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj -c Release --no-build \
+  --filter 'FullyQualifiedName~Ltx25PromptMathTests.Cuda|FullyQualifiedName~Ltx25PromptEncoderTests'
+```
+
+The offset-view tests also cover the general CPU storage correction: bulk
+Float32/Int32 reads honor nested view offsets and reject out-of-storage ranges.
+This is independent of LTX and has direct `CpuStorageBulkElementIoTests` coverage.
+
+`Ltx25PromptProbe --device-math-rounds` alternates host/device requests on one
+encoder instance. It supports `CUDA` or `MLX` with `--stage full` and cannot be
+combined with the existing `--cuda-bf16-rounds` GEMM experiment. Every round saves
+full video/audio contexts, their hashes, elapsed time and Gemma/aggregation/
+connector phases. Device-math rounds fail if either context differs bitwise
+from the first round. The report says `device_requested` rather than claiming
+native dispatch; use the strict tests and matching module hashes above to
+establish dispatch.
+
+```sh
+dotnet publish eng/validation/Ltx25PromptProbe -c Release \
+  -o artifacts/ltx25/prompt-math-probe \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+
+MLX_ENABLE_TF32=0 TENSORSHARP_MLX_LIBRARY_DIR="$PWD/TensorSharp.Backends.MLX/Native/dist" \
+dotnet artifacts/ltx25/prompt-math-probe/Ltx25PromptProbe.dll \
+  --encoder "$TEXT_ENCODER" --model "$DENOISER" --backend MLX --stage full \
+  --prompt "A red ball rolls across a wooden table." \
+  --device-math-rounds 0,1,1,0,0,1 --output "$NEW_PROMPT_REPORT"
+```
+
+For CUDA, select `--backend CUDA` and deploy verified compatible PTX into the
+published output before running. The first round includes first-use loading/JIT
+and any explicit prefault work; report it separately from subsequent rounds.
+Per-round timings exclude saved-array export, while total elapsed includes it.
+Repeated `Encode` bypasses the model's final prompt cache and is a prompt
+component measurement, not end-to-end generation throughput. Require separately
+matched complete-generation RGB and stereo PCM comparisons, full media decoding
+and visual inspection before making any quality or overall-speed claim.
+
+## Exact CUDA head gating
+
+CUDA denoiser head gating computes the existing `2 * sigmoid(logit)` once per
+token/head and multiplies its channels in place, preserving the separate Float32
+rounding boundaries. This avoids the expanded gate tensor and several launches.
+`TS_LTX25_CUDA_FUSED_HEAD_GATE=0` restores the separate operations. An older
+optional LTX PTX module without the gate export retains the original fallback;
+the `OptimizedCudaHeadGates` counter records successful native dispatches.
+
+`Ltx25CudaHeadGateTests` requires bitwise equality to the original device
+operations for offset views, special values and 131,072 varied finite logits.
+`Ltx25DenoiserTests.FusedHeadGatesExactlyPreserveCompleteOfficialGraph` compares
+complete tiny official graphs with fusion off/on. Run both filters on CUDA
+with verified compatible PTX. Component parity must still be followed by matched
+complete-generation RGB/stereo comparisons and media validation.
+
+## Lossless MLX Q5_K loading
+
+MLX's Q5_K loader preserves every five-bit quant and the established F16
+scale/bias bytes while packing eight quants directly into five output bytes.
+It assigns every output byte, avoiding the former whole-buffer clear, and
+processes independent rows with at most eight CPU workers for sufficiently
+large matrices. The later exact F32 scale/bias preparation is unchanged. This
+changes checkpoint loading work, not quantization, activation precision or
+matmul arithmetic. Q6_K continues to use its existing raw representation.
+
+`TS_MLX_Q5K_REPACK=0` keeps the original scalar Q5_K converter, including its
+zero-fill pass. Unset or `1` selects the optimized converter. The choice is read
+when a weight is first converted; cached weights must be released before an
+alternating comparison can exercise both converters. Separate fresh processes
+are appropriate for complete-generation controls, with file residency and
+first-use compilation reported independently.
+
+`MlxQ5KRepackTests` independently constructs logical quant values and encodes
+the GGML fields, then compares all packed bytes, F16 scale/bias bits, source
+immutability and output guards for serial and parallel sizes. Its native tests
+force production converter modes `0,1,0` with cache eviction between calls and
+require bitwise-identical full matmul/gather outputs for both the ordinary
+activation policy and explicit F32 preservation. Existing MLX K-quant tests and
+LTX official tiny fixtures cover the consuming operations separately.
+
+```sh
+MLX_ENABLE_TF32=0 TS_TEST_LTX25_BACKEND=mlx \
+dotnet test InferenceWeb.Tests/InferenceWeb.Tests.csproj -c Release \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true \
+  --filter 'FullyQualifiedName~MlxQ5KRepackTests|FullyQualifiedName~MlxBackendTests.MlxQuantizedMatmul|FullyQualifiedName~MlxBackendTests.MlxQuantizedRows|FullyQualifiedName~Ltx25PromptEncoderTests|FullyQualifiedName~Ltx25DenoiserTests'
+
+dotnet build eng/validation/MlxQ5KPackProbe -c Release
+dotnet eng/validation/MlxQ5KPackProbe/bin/Release/net10.0/MlxQ5KPackProbe.dll 7 \
+  > "$NEW_Q5_REPACK_REPORT"
+```
+
+The CPU-only microbenchmark checks exact packed/affine bytes and alternates
+the original converter, optimized serial converter and bounded parallel
+converter over representative LTX matrix shapes. It records every timing and
+median, includes the original converter's required zeroing, and excludes
+allocation, file paging, device upload, F32 parameter preparation and inference.
+Its speedup is not an end-to-end speedup. Complete-generation comparisons must
+still require exact RGB/PCM outputs and independent media validation.
+
 ## Convolutional video decoder
 
 `Ltx25VideoVaeDecoder(path, allocator)` loads the convolutional checkpoint's
@@ -1020,3 +1152,31 @@ and runs only for cold Linux weight ranges; device-resident weights keep the
 existing cache. This one mixed-residency A40/storage pair does not establish a
 universal speedup, and 70.507 seconds still trails the recorded SD.cpp fresh
 56.67 seconds. The default is unchanged; no further loader trials were used.
+
+### Rectangular attention experiment: rejected after full generation
+
+`Ltx25AttentionProbe` compares the existing streaming attention path with the
+existing pedantic Float32 batched attention session for representative video/text
+and audio/video shapes. It uses deterministic inputs, separate warmups, alternating
+synchronized samples, CUDA-event and wall timings, output hashes, and maximum
+error/RMSE/relative L2 checks. Both measured paths allocate their output; input
+upload, first initialization, projection, sampling, decoding, and export are
+excluded. Build without rebuilding upstream native dependencies:
+
+```bash
+dotnet build eng/validation/Ltx25AttentionProbe -c Release \
+  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
+# Deploy and verify device-compatible PTX as described above before execution.
+dotnet eng/validation/Ltx25AttentionProbe/bin/Release/net10.0/Ltx25AttentionProbe.dll \
+  --warmup 2 --repeats 7 --output docs/validation/ltx25/attention-component.json
+```
+
+An experiment extended the batched dispatch to additional rectangular attention
+shapes. It retained full dense Float32 attention but changed reduction order.
+Component numerical tests passed, yet matched remote end-to-end generations
+failed the RGB and stereo PCM equivalence checks. Disabling only this extension
+restored bitwise RGB and both PCM channels in all three tested cases while device
+prompt math and fused head gating remained enabled. The extension and its selector
+were removed; production attention routing is unchanged. The probe remains a
+reusable investigation tool. Its component tolerances and timings do not establish
+full-generation parity, perceptual quality, or an accepted model speedup.

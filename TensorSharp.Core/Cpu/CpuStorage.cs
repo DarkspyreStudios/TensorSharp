@@ -45,7 +45,8 @@ namespace TensorSharp.Cpu
             {
                 if (ElementType == DType.Int32)
                 {
-                    int* p = ((int*)buffer.ToPointer());
+                    ValidateReadRange(index, length);
+                    int* p = ((int*)buffer.ToPointer()) + index;
                     int[] array = new int[length];
 
                     for (int i = 0; i < length; i++)
@@ -98,7 +99,8 @@ namespace TensorSharp.Cpu
             {
                 if (ElementType == DType.Float32)
                 {
-                    float* p = ((float*)buffer.ToPointer());
+                    ValidateReadRange(index, length);
+                    float* p = ((float*)buffer.ToPointer()) + index;
                     float[] array = new float[length];
 
                     for (int i = 0; i < length; i++)
@@ -143,6 +145,12 @@ namespace TensorSharp.Cpu
                     throw new NotSupportedException("Element type " + ElementType + " not supported");
                 }
             }
+        }
+
+        private void ValidateReadRange(long index, int length)
+        {
+            if (index < 0 || length < 0 || index > ElementCount - length)
+                throw new ArgumentOutOfRangeException(nameof(index), "Read exceeds CPU storage bounds.");
         }
 
         public override void SetElementsAsInt(long index, int[] value)
