@@ -8,15 +8,15 @@
 
 **TensorSharp 是在本地运行 GGUF 模型的 .NET 10 推理引擎。** 在 Windows、macOS 或 Linux 上，通过 CLI、浏览器聊天或兼容 Ollama/OpenAI 的 API 使用，也可直接集成到自己的 .NET 应用中。可选择纯托管 C# CPU 内核或原生 CUDA、Metal、Vulkan 后端，具体支持取决于模型。
 
-当前源码涵盖文本与推理、多模态输入、嵌入、图像生成与编辑、带音频的视频、个人知识库，以及带代码工具的 Agent Skills。TensorSharp 也为 iPhone、iPad、Mac 和 Windows 上的本地应用 [TensorAgent](TensorAgent/README.md) 提供引擎。可直接从下文开始，或查看[项目状态](docs/PROJECT_STATUS_zh-cn.md)中的能力与验证限制；知识库与生成中追加指令在 `v2026.10.10` 标签之后加入，需要包含这些改动的构建。
+当前源码涵盖文本与推理、多模态输入、嵌入、图像生成与编辑、带音频的视频、个人知识库，以及带代码工具的 Agent Skills。TensorSharp 也为 iPhone、iPad、Mac 和 Windows 上的本地应用 [TensorAgent](TensorAgent/README.md) 提供引擎。可直接从下文开始，或查看[项目状态](docs/PROJECT_STATUS_zh-cn.md)中的能力与验证限制；LTX 2.5、EmbeddingGemma 2 与原生技能发现需要 `v2026.10.11` 标签之后的源码构建。
 
 ## 亮点功能
 
 - **本地模型，多种入口。** 同一引擎用于 CLI、浏览器聊天及兼容 Ollama/OpenAI 的 API，支持纯托管 CPU 与原生加速后端。
 - **文本与多模态模型。** 支持稠密与 MoE GGUF 模型、推理、图像 / 音频输入和文档问答。各模型家族的能力见[支持的模型](docs/supported_models_zh-cn.md)。
-- **嵌入与媒体生成。** [文本 / 代码嵌入](docs/embeddings_zh-cn.md)、[Qwen-Image-2.1 及其 8 步 Turbo 变体](docs/models/qwenimage21_zh-cn.md) 图像生成与蒙版编辑，以及包括 [MiniMax-H3 音视频](docs/models/minimax-h3_zh-cn.md)在内的视频模型。
+- **嵌入与媒体生成。** [EmbeddingGemma 2](docs/embeddings_zh-cn.md) 提供文本 / 代码嵌入及可选的图像、音频和视频输入；[Qwen-Image-2.1 与 Turbo](docs/models/qwenimage21_zh-cn.md) 支持图像生成与蒙版编辑；[LTX 2.5 Distilled](docs/models/ltx-2.5_zh-cn.md)（48 kHz）与 [MiniMax-H3](docs/models/minimax-h3_zh-cn.md)（32 kHz）支持视频与立体声音频联合生成。
 - **高效服务。** 连续批处理与分页、Radix 前缀共享 KV 缓存默认开启；支持的模型还可使用投机解码与多 GPU 放置。详见[功能说明](FEATURES_zh-cn.md)。
-- **Agent Skills 与代码工具。** `TensorSharp.AgentHost` 提供文件、shell 和文档工作流。服务端与 TensorAgent 聊天还支持[有界子智能体委派](docs/multi_agent.md)（英文），子智能体拥有私有工作区并默认只读。
+- **Agent Skills 与代码工具。** `TensorSharp.AgentHost` 提供文件、shell 和文档工作流。[17 个随附技能](docs/agent_skills.md)（英文）涵盖研究、文档、TDD、设计访谈与交接；开启联网后，`find-skills` 可搜索、检查并安装更多技能。服务端与 TensorAgent 聊天还支持[有界子智能体委派](docs/multi_agent.md)（英文），子智能体拥有私有工作区并默认只读。
 - **个人知识库。** [上传文件或嵌套目录，导入已保存聊天及其附件和产物](docs/knowledge-system_zh-cn.md)。按聊天选择集合，检索带页码 / 行号 / 时间位置的引用片段、预览原件，或让代码智能体打开完整数据集。默认使用本地 BM25，可选 GGUF 嵌入提供语义搜索；兼容的媒体模型可索引图像、音频和采样视频。提取状态与警告显示覆盖边界。
 - **生成中追加指令。** CLI、服务端 Web UI 和 TensorAgent 在推理或回答时都可提交新指令；后续回答使用对话、已有部分输出与新指导。仍可单独停止当前生成。
 - **有记录的性能对比。** 与 `llama.cpp` 的测试使用相同 GGUF 文件和硬件，结果对应所测的模型、后端及工作负载。详见[性能数据](docs/benchmarks_zh-cn.md)。
@@ -81,12 +81,12 @@ dotnet run --project TensorSharp.Server.Host -c Release -p:TensorSharpSkipMlxNat
 
 - **文本、推理与多模态 LLM：** [DeepSeek V4 Flash](docs/models/deepseek4_zh-cn.md) / [V4.1 Flash](docs/models/deepseek41_zh-cn.md)、[GLM 5.x](docs/models/glm_zh-cn.md)、[Gemma 4](docs/models/gemma4_zh-cn.md)、[Qwen 3.5 / 3.6 / 3.8 27B](docs/models/qwen35_zh-cn.md)、[Qwen 3.8 Flash Next](docs/models/qwen38-flash-next_zh-cn.md)、[Bonsai2](docs/models/bonsai2_zh-cn.md)（Qwen 家族）、[GPT OSS](docs/models/gptoss_zh-cn.md)、[Nemotron-H](docs/models/nemotron_zh-cn.md)、[Mistral 3](docs/models/mistral3_zh-cn.md)、[Hunyuan Dense](docs/models/hunyuan-dense_zh-cn.md) 与 [Muse-Glimmer](docs/models/muse-glimmer_zh-cn.md)。
 - **文本扩散：** [DiffusionGemma](docs/models/diffusiongemma_zh-cn.md)，包含 `/v1/systemone` 上的 [Jev 类型化判定](docs/models/jev_zh-cn.md)（支持文本、图像、上传文档、抽样视频帧，以及通过已配置 ASR 配套服务得到的语音转录）。
-- **图像生成/编辑与视频生成：** [Qwen-Image-2.1](docs/models/qwenimage21_zh-cn.md)、[MiniMax-H3（视频 + 立体声音频）](docs/models/minimax-h3_zh-cn.md) 与 [Wan 2.1 / 2.2](docs/models/wan_zh-cn.md)。
-- **文本与代码嵌入：** BERT / XLM-R 编码器——[Snowflake Arctic Embed L v2.0 与 all-MiniLM-L6-v2](docs/embeddings_zh-cn.md)。
+- **图像生成/编辑与视频生成：** [Qwen-Image-2.1](docs/models/qwenimage21_zh-cn.md)、[LTX 2.5 Distilled（视频 + 48 kHz 立体声音频）](docs/models/ltx-2.5_zh-cn.md)、[MiniMax-H3（视频 + 立体声音频）](docs/models/minimax-h3_zh-cn.md) 与 [Wan 2.1 / 2.2](docs/models/wan_zh-cn.md)。
+- **嵌入：** [EmbeddingGemma 2](docs/embeddings_zh-cn.md)，包括文本 / 代码及可选的图像、音频、视频输入；以及 Snowflake Arctic Embed L v2.0、all-MiniLM-L6-v2 等 BERT / XLM-R 编码器。
 
 各模型的后端、模态、功能支持与验证覆盖范围不同，详见[支持的模型](docs/supported_models_zh-cn.md)各表、[模型卡片](docs/models/README_zh-cn.md)及[嵌入指南](docs/embeddings_zh-cn.md)。
 
-TensorAgent 当前目录包含 38 个条目，按可搜索的模型家族分组，并支持内存档位与已下载过滤；其中包括 4 位和 8 位 Qwen-Image-2.1 Turbo，以及十四款图像 LoRA 插件。扩展目录包含实验性条目，其内存档位与应用 / 设备行为尚未全部实测。Qwen3.8 Flash Next 使用 SSD 支持的权重路径；Q2 包已在 48 GB Mac 上测量，IQ1_M 另有 Windows 目录宿主验证。多 GPU 的 `--layer-split` 与 `--tp` 是独立选项，支持范围和性能取决于架构与量化格式。验证范围见 [TensorAgent 说明](TensorAgent/README.md#what-has-not-been-verified)（英文）与模型卡片。更新后的 Release Binaries 工作流会在新发布中提供桌面安装包，历史发布可能不包含这些资源。
+TensorAgent 当前目录包含 39 个条目，按可搜索的模型家族分组，并支持内存档位与已下载过滤；其中包括实验性 48 GB 内存档位的 LTX 2.5 Distilled、4 位和 8 位 Qwen-Image-2.1 Turbo，以及十四款图像 LoRA 插件。扩展目录包含实验性条目，其内存档位与应用 / 设备行为尚未全部实测。Qwen3.8 Flash Next 使用 SSD 支持的权重路径；Q2 包已在 48 GB Mac 上测量，IQ1_M 另有 Windows 目录宿主验证。多 GPU 的 `--layer-split` 与 `--tp` 是独立选项，支持范围和性能取决于架构与量化格式。验证范围见 [TensorAgent 说明](TensorAgent/README.md#what-has-not-been-verified)（英文）与模型卡片。更新后的 Release Binaries 工作流会在新发布中提供桌面安装包，历史发布可能不包含这些资源。
 
 ## 实际运行效果
 

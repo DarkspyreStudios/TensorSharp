@@ -8,8 +8,8 @@ tools, including a reusable personal knowledge library. You do not need to build
 TensorSharp or install the .NET SDK to use the desktop packages. Model weights
 are downloaded separately inside the app.
 
-The knowledge library and response steering below describe current source after
-the `v2026.10.10` tag. Use a source build until a release containing those changes
+The knowledge library, response steering, LTX 2.5 and native skill discovery below
+describe current source after the `v2026.10.10` tag. Use a source build until a release containing those changes
 is published; the existence of a Desktop package does not imply it includes them.
 
 **[Download TensorAgent Desktop — latest release](https://github.com/zhongkaifu/TensorSharp/releases/latest)**
@@ -182,6 +182,23 @@ switch off gives you plain chat without the skills roster. A request such as
 `Create a short Word document with a packing checklist and give me the file`
 needs code execution and the required tools described below.
 
+The desktop source bundle now contains 17 packs. Recent additions include
+`find-skills`, `grill-me`, `grill-with-docs`, `tdd` and `handoff`. The longer
+interview/document, TDD and handoff workflows need sufficient model capacity
+and context; their tested profile is Gemma 4 E4B, 16K context and 24 tool rounds.
+See the [skill audit](agent_skills.md#audited-skillssh-bundle) for actual coverage.
+
+**Find and install a skill.** Enable **Settings → Sandbox → Allow network access**,
+keep skills enabled, and ask `Find, install and use a skill for this task` or
+select `find-skills`. Native tools search skills.sh, inspect a public GitHub
+package and its immutable revision, then install the inspected package without
+Node.js, npm or Git. The installing request can immediately read the new skill.
+An explicit empty skill selection disables discovery. Installation does not
+prepare dependencies: running the installed workflow still needs its tools,
+code permissions and credentials. The Skills sheet also accepts ZIP files and
+ZIP/list URLs. [Discovery details and validation limits](agent_skills.md#discover-and-install-community-skills)
+include the sampled model-output failures; installation alone is not a task pass.
+
 **Make or edit an image.** On a machine with the required memory, download and
 **Use Qwen-Image 2.1**. Describe the picture in the composer, or attach a photo and
 describe the change. Select a region with the image editor when you want a masked
@@ -195,7 +212,14 @@ both downloads them once; it offers only the style plug-ins validated on it.
 
 **Make a video.** Download and **Use MiniMax-H3**, then describe a short clip or
 attach a starting photo. **MiniMax-H3 References** accepts reference photos, clips
-and recordings. These are large desktop-memory workloads. Mac media generation
+and recordings. **LTX 2.5 Distilled** adds text/image-to-video with 48 kHz stereo
+audio and image keyframes. It is experimental, needs the 48 GB system RAM tier
+and 44.76 GB of pinned files, and official companions require approved Hugging
+Face access. Its default is a short 17-frame preview; with image guides attached,
+the composer offers longer clips and per-image frame position/strength. Timeline
+keyframes work with the catalog entry; identity references require a separate
+IC-LoRA checkpoint. Read the [LTX 2.5 guide](models/ltx-2.5.md) for setup and
+measured quality limits. These are large desktop-memory workloads. Mac media generation
 has recorded app measurements; Windows image/audio/video generation has not been
 verified. See the [model and validation details](../TensorAgent/README.md#what-has-not-been-verified).
 
@@ -251,7 +275,7 @@ Open **☰ → Settings → Sandbox**:
 |---|---|
 | **Run code** | Allows shell commands and skill scripts. On by default; turn it off for chat without program execution. |
 | **Run without a sandbox** (Windows) | Required for Windows program execution, off by default. Programs can access files and network resources available to your Windows account. Enable it only if you accept that access. |
-| **Allow network access** | Allows network access for code tools, off by default. Enable for research or package downloads when needed. It does not control model downloads. Windows unconfined programs have no enforced file or socket boundary. |
+| **Allow network access** | Allows native skill discovery/downloads and network access for code tools, off by default. Enable for research or package downloads when needed. It does not control model downloads. Windows unconfined programs have no enforced file or socket boundary. |
 | **Sub-agents** | Lets the model delegate parts of a request to helper conversations on the same model. On by default; turn it off to reduce concurrent work and memory use. |
 
 On macOS, TensorSharp confines child processes with its Seatbelt profile: they

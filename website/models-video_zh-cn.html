@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>视频生成 — TensorSharp 维基</title>
-  <meta name="description" content="MiniMax-H3 在同一个打包潜变量里同时生成视频与原生 32 kHz 立体声音频——首尾帧、参考图、参考片段与参考音轨；Wan 2.1 / 2.2 只生成视频。下载、运行示例，以及决定端到端耗时的设置。">
+  <meta name="description" content="LTX 2.5 Distilled 与 MiniMax-H3 联合音视频、Wan 视频：固定文件、两阶段配方、参考条件、后端与实际验证范围。">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,11 +16,25 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index_zh-cn.html">首页</a> › <a href="models_zh-cn.html">支持的模型</a> › 视频生成</div>
   <h1>视频生成</h1>
-  <p class="lede">两个家族：<strong>MiniMax-H3</strong> 在生成视频的同时生成原生立体声音轨，<strong>Wan 2.1 / 2.2</strong> 只生成视频。本页包含下载、运行示例，以及决定端到端耗时的设置。</p>
+  <p class="lede">三个视频家族：<strong>LTX 2.5 Distilled</strong> 联合生成视频与 48 kHz 立体声，<strong>MiniMax-H3</strong> 联合生成视频与 32 kHz 立体声，<strong>Wan 2.1 / 2.2</strong> 生成视频。下面说明当前实现、文件、配方与实际验证范围。</p>
   <div class="callout note"><div class="ic">💡</div><p>这些命令遵循与文本模型示例相同的约定：Hugging Face CLI、从仓库根目录源码构建，并把 <code>--backend</code> 换成与你硬件匹配的值。参见<a href="models-text_zh-cn.html#download-run">按家族下载与运行</a>。</p></div>
 
+  <h2 id="ltx-25">LTX 2.5 Distilled（视频与 48 kHz 立体声）</h2>
+  <p>当前源码实现完整两阶段蒸馏管线：专用 48 层 Gemma 4 Unified 编码器、音视频连接器、联合去噪器、视频 VAE 与音频 VAE/声码器。先以输出尺寸的一半运行 8 个发布方指定的 ancestral Euler 步，随后用必需的 2 倍潜变量放大器放大，再以完整尺寸精修 3 步；CFG 固定为 1。<code>steps: 8</code> 指第一阶段的固定调度。显式 <code>--sampler euler</code> 仅用于确定性诊断。</p>
+  <p><code>config/ltx-2.5-distilled.json</code> 固定五个文件的提交与 SHA-256，共 44,764,412,884 字节。官方伴随文件需要先获得 Hugging Face 访问许可，并设置 <code>HF_TOKEN</code>、<code>HUGGING_FACE_HUB_TOKEN</code> 或 HF CLI 令牌缓存。专用编码器内嵌分词器；普通 Gemma 4 检查点不能替代。默认使用卷积视频 VAE。</p>
+  <pre data-lang="bash"><code>TENSORSHARP_MODELS=/path/to/models MLX_ENABLE_TF32=0 \
+dotnet run --project TensorSharp.Cli -- \
+  --config config/ltx-2.5-distilled.json --backend mlx \
+  --prompt "A red toy car drives along a quiet road in warm afternoon light." \
+  --diffusion-seed 42 --output ltx25.mp4</code></pre>
+  <p>默认输出 <strong>1024×1024、17 帧、24 fps</strong>；宽高必须是 64 的倍数，帧数遵循 <code>8k+1</code>。TensorAgent 的 <strong>LTX 2.5 Distilled — Q4_K_M + BF16</strong> 实验条目使用保守的 48 GB 档位，Download 下载五个文件，Use 激活模型；这不是已证明的最低内存，也不保证任意尺寸和时长。</p>
+  <p><code>cuda</code> / <code>ggml_cuda</code> 使用 TensorSharp 的直接 CUDA 执行器，<code>mlx</code> / <code>ggml_metal</code> 使用 MLX，<code>cpu</code> / <code>ggml_cpu</code> 使用直接 CPU 实现；不支持 Vulkan 与多 GPU。Apple 进程启动时设置 <code>MLX_ENABLE_TF32=0</code> 可保持 Float32 质量路径；Mac 应用在启动时设置这个默认值。桌面 MP4 音轨需要 FFmpeg 或 <code>TS_FFMPEG</code>，同时保留原始 48 kHz 立体声 WAV；Mac 应用使用 AVFoundation。</p>
+  <h3 id="ltx-25-conditioning">时间引导与身份参考</h3>
+  <p>支持首帧、尾帧、首尾帧与位于指定输出帧位置的多张图像。普通 <code>referenceImages</code> 列表会被当作均匀分布的时间关键帧；一张图像固定第零帧。<code>videoMode: "ref"</code> 则需要可选的 Ingredients IC-LoRA，把人物、道具或场景作为身份参考，并保留一次完整尺寸生成；其训练预览为 768×448×121。参考视频/音频、retake、专门控制管线、HDR/EXR 与多 GPU 尚不可用。</p>
+  <p><code>--video-upscaler</code> / <code>TS_VIDEO_UPSCALER</code> 指定放大器；可选 <code>--video-diffusion-vae</code> 选择颗粒/闪烁更少但较柔和的扩散解码器，仅支持 MLX/CPU，CUDA 会拒绝。实际 CUDA、MLX 与 Mac Catalyst 短片验证、数值参考与局限详见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/ltx-2.5_zh-cn.md">模型卡</a>与<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/eng/validation/README-ltx25.md">复现指南</a>。组件测试、旧版单阶段耗时与成功导出均不能证明当前两阶段管线的通用质量或性能对等。</p>
+
   <h2 id="minimax-h3">MiniMax-H3（提示词 → 视频<em>带音频</em>）</h2>
-  <p>H3 在<strong>同一个</strong>打包潜变量里对视频和 32&nbsp;kHz 立体声音频一起去噪，所以音轨是模型输出的一部分，而不是事后配上去的。它是 CFG 蒸馏模型，必须用 <code>--cfg 1.0</code>，4–8 步是常用工作点（默认 20 步）。在 M5 Pro 上用 <code>ggml_metal</code>、22 帧、8 步、同一随机种子实测：256×256 比 <code>stable-diffusion.cpp</code> 快 <strong>2.4×</strong>（49.3 s → <strong>20.9 s</strong>），640×384 快 <strong>1.7×</strong>（108.5 s → <strong>63.1 s</strong>）。那是 Apple 芯片；在显存吃紧的 16 GB RTX 3080 Laptop 上，同一组对比的结论正好相反，其中的原因值得先看一眼——见<a href="#h3-speed">两台机器上的速度</a>。需要四个网络，来自两个仓库，外加第三个仓库里的分词器：</p>
+  <p>H3 把视频与 <strong>32 kHz 立体声</strong>作为一条打包潜变量联合去噪。FL2VA 支持文本、图生视频与首尾帧，Ref2VA 支持身份参考。检查点经过 CFG 蒸馏，要求 <code>--cfg 1.0</code>；默认 20 步，4–8 步适合快速预览。当前性能与精度以 <a href="#h3-speed">2026-10-15 验证</a>为准；旧的 Metal 与 16 GB 笔记本速度倍数已被替代。需要以下四个网络，以及分词器文件：</p>
   <pre data-lang="bash"><code># 去噪器 + 文本编码器
 hf download unsloth/MiniMax-H3-GGUF minimax_h3_fl2va_pruned-Q4_K.gguf --local-dir models
 hf download unsloth/MiniMax-H3-GGUF qwen3vl_32b_minimax_h3-Q4_K_M.gguf --local-dir models
@@ -94,56 +108,24 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model models/minimax_h3_ref2va_
   <p>参考<em>片段</em>是 H3 最昂贵的输入：22 帧 448×320 的参考会在输出本身所需的 1680 个 token 之外再加 980 个条件 token，而且 VAE 还得先把这 22 帧全部编码——在 M5 Pro 上实测，编码 14 s，之后每个去噪步约 9 s，而不带参考时只要 5 s。语言模型以 2 fps、每次两帧的方式看这段片段；去噪器则以潜变量的形式看到全部内容。</p>
 
   <h3 id="h3-length">长度、尺寸，以及长片段的上限</h3>
-  <p>宽高向<strong>上</strong>取整到 32 的倍数。帧数向上对齐到 <code>17k+5</code> 网格——5、22、39、56、73、90……——这来自视频 VAE 的时间分块，而不是随意选定的；fps 无论请求写什么都固定为 24。任意网格长度的片段都能正确解码：VAE 每次跑 5 个潜变量帧、带 2 帧前瞻，并对接缝做交叉淡化。反过来，一次性解码长片段会让细节被逐渐冲淡——对着条件照片测量，第 0 帧的相关度从 22 帧时的 0.97 掉到 90 帧时的 0.86——所以分块是正确性要求，而不是优化。只想要画面时用 <code>--no-audio</code> 跳过音频解码，省下音频 VAE 的时间与内存。</p>
+  <p>宽高向<strong>上</strong>取整到 32 的倍数。帧数向上对齐到 <code>17k+5</code> 网格——5、22、39、56、73、90……——这来自视频 VAE 的时间分块，而不是随意选定的；fps 无论请求写什么都固定为 24。VAE 实现了跨该网格的分块解码：VAE 每次跑 5 个潜变量帧、带 2 帧前瞻，并对接缝做交叉淡化。反过来，一次性解码长片段会让细节被逐渐冲淡——对着条件照片测量，第 0 帧的相关度从 22 帧时的 0.97 掉到 90 帧时的 0.86——所以分块是正确性要求，而不是优化。只想要画面时用 <code>--no-audio</code> 跳过音频解码，省下音频 VAE 的时间与内存。</p>
   <div class="callout warn"><div class="ic">⚠️</div><p><strong>长片段过去会整片全黑。</strong>H3 在一条不加掩码的打包序列上做双向注意力，因此它的 key 数量就是整段片段——22 帧是 2364 个 token，107 帧是 8646——而所有上游 ggml flash attention 内核都把 softmax 分子保持在 FP16，只留三个比特的余量。107 帧的片段在第一个去噪步就溢出成 NaN，回来时每个像素全黑、每个音频采样被削平，而同一条请求在 73 帧下却完全正常。现在 <code>h3_attend</code> 会按 key 数量取一个 2 的幂预先缩放 V，并在输出上还原——由于注意力对 V 是线性的，这一步是精确的；采样器也不再保存已经发散的片段，而是让请求失败并指出是哪一步，不再写出一个全黑文件。设 <code>TS_H3_TRACE=1</code> 可打印每一步的潜变量与速度幅值。</p></div>
-  <div class="callout note"><div class="ic">💡</div><p>CLI 和服务端把音频写成 MP4 旁边的 <code>.wav</code> 独立文件，而不是混流进去，因为混流需要一个未必装了的编码器；用 <code>ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4</code> 合并。TensorAgent Mac 应用同样写出这个 <code>.wav</code>，并且因为 Apple 的编码器能混流，还会把音轨作为 AAC 轨道写进 MP4。完整说明见 <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/minimax-h3_zh-cn.md">MiniMax-H3 模型卡</a>。</p></div>
+  <div class="callout note"><div class="ic">💡</div><p>音频导出保留独立 <code>.wav</code>。MP4 是否含音轨取决于导出提供器：FFmpeg 或 Apple AVFoundation 路径可以混入音轨；其他路径可能返回视频与单独 WAV。可检查路由的 <code>audioMuxed</code>，或用 <code>ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4</code> 合并。分块解码与有限输出不能证明长片段感知质量。详见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/models/minimax-h3_zh-cn.md">模型卡</a>。</p></div>
 
-  <h3 id="h3-speed">两台机器上的速度</h3>
-  <p>与 <code>stable-diffusion.cpp</code> 的这组对比——22 帧、8 步、同一随机种子、两个引擎加载同一份权重——在跑过的两台机器上结论不同，而两组数字都值得保留：</p>
-  <div class="table-scroll">
-  <table>
-    <thead><tr><th>22 帧、8 步、同一随机种子</th><th>256×256</th><th>640×384</th></tr></thead>
-    <tbody>
-      <tr><td><strong>M5 Pro</strong>，<code>ggml_metal</code></td><td>sd.cpp 49.3 s → TensorSharp <strong>20.9 s</strong>（快 2.4×）</td><td>sd.cpp 108.5 s → TensorSharp <strong>63.1 s</strong>（快 1.7×）</td></tr>
-      <tr><td><strong>RTX 3080 Laptop 16 GB</strong>，<code>ggml_cuda</code>，三次取最好</td><td>sd.cpp <strong>37.8 s</strong>，TensorSharp 43.6 s（sd.cpp 快 1.15×）</td><td>sd.cpp <strong>59.8 s</strong>，TensorSharp 63.7 s（sd.cpp 快 1.07×）</td></tr>
-    </tbody>
-  </table>
-  </div>
-  <p>按<em>单个去噪步</em>算，在这台 CUDA 机器上 TensorSharp 依然更快——3.325 s 对 3.338 s，由 8 步与 16 步的斜率求得——所以 640×384 上落后的那 3.9 s 全在固定的启动开销上，而其中约 3 s 根本不是推理：TensorSharp 编码 H.264，而 <code>stable-diffusion.cpp</code> 把 MJPEG+PCM 写进 AVI；此外还有 .NET 进程启动对原生二进制的差距。两台机器结论相反，是因为 3080 这台刻意很紧张——16 384 MiB 显存、31.7 GB 内存，对着一套约 35.5 GB 的模型文件，权重装不下、页缓存也装不下，于是在一分钟量级的运行里启动开销占了主导。那台机器上的显存峰值，TensorSharp 是 15 780 MiB，<code>stable-diffusion.cpp</code> 是 12 035 MiB，后者用的是 <code>--auto-fit --stream-layers --diffusion-fa --rng cpu</code>；它默认的 <code>--offload-to-cpu</code> 路径在这台机器上根本跑不了这个模型，因为它要把 17.7 GB 锁进只有 12.3 GB 空闲的内存里。</p>
-  <p><strong>在装不下整个模型的显卡上，现在有两件事会自动发生。</strong>其一，当去噪器与视频 VAE 放不下时，去噪器的设备驻留会在视频 VAE 加载<em>之前</em>先交还：已经跑完的 10.6 GB 去噪器加上 5.2 GB 的 VAE，在 16 GB 卡上是 15.8 GB，而 WDDM 不会让这次分配失败——它会悄悄用主机内存兜住溢出部分，于是整个解码都以 PCIe 的速度跑。解码期间的显存峰值从 16 041 MiB 降到约 5 600 MiB，在 640×384 上值 <strong>22 s</strong>。其二，去噪器文件现在会被顺序读一遍，并与它自己的上传流水化：权重是以指针形式绑定到 mmap 的 GGUF 上的，所以第一次上传原本会<em>在</em>主机到设备的拷贝<em>内部</em>把每一页从磁盘缺页读进来——0.91 GB/s，正是驱动最糟的情形，而页面驻留后是 5.97 GB/s。第一个去噪步 14.87 s → 约 10.2 s。两者合起来，让这台 RTX 3080 Laptop 在 640×384 上从 89.0 s 降到 <strong>63.7 s</strong>，在 256×256 上从 67.2 s 降到 <strong>43.6 s</strong>；prefault 开与关的输出逐字节相同。两者的判据并不相同——释放常驻看的是实测空闲显存，预读看的是空闲主存——各自在对应资源充裕时自动让路，因此资源够用的机器行为完全不变。</p>
-  <div class="table-scroll">
-  <table>
-    <thead><tr><th>环境变量</th><th>默认值</th><th>作用</th></tr></thead>
-    <tbody>
-      <tr><td><code>TS_H3_PHASE</code></td><td>关</td><td><code>1</code> 打印分阶段耗时——编码器打开 / 主干 / 拆卸、prefault、每一个去噪步、VAE 打开 / 解码。想看时间在自己硬件上究竟花在哪里，就用它。</td></tr>
-      <tr><td><code>TS_H3_PREFAULT</code></td><td><code>3</code></td><td>去噪器 prefault：<code>0</code> 关，<code>1</code> 串行，<code>2</code> 与文本条件重叠，<code>3</code> 与上传流水化。</td></tr>
-      <tr><td><code>TS_H3_PREFAULT_THREADS</code></td><td><code>1</code></td><td>prefault 使用的读取流数量。</td></tr>
-      <tr><td><code>TS_H3_TE_GROUP</code></td><td>关</td><td>取 <em>n</em> 时，把 50 层的文本编码器主干按每 <em>n</em> 层分组运行，每组跑完就释放其设备副本。</td></tr>
-      <tr><td><code>TS_H3_KEEP_RESIDENT</code></td><td>关</td><td>取 <code>1</code> 时，在 Metal 上让去噪器和两个 VAE 在两段片段之间保持常驻，即旧行为。默认会在每段片段的文本编码器运行前释放它们：在 M5 Pro 上的 TensorAgent Mac 应用里，这让 wired 内存峰值保持在 19.1 GB 而不是 33.3 GB，代价是文本条件阶段多约 1.3 秒。独立显卡不受影响。</td></tr>
-    </tbody>
-  </table>
-  </div>
-  <div class="callout note"><div class="ic">💡</div><p><strong>试过并被否掉的做法</strong>，同样在这台 RTX 3080 Laptop 上实测，免得有人再走一遍。文本编码器分层分组确实消掉了编码器自己的溢出（峰值 16 041 → 12 981 MiB），而且逐位相同，但它<strong>慢 3 s</strong>：这段主干是对十个 token 的提示词做一次性 prefill，每个权重只读一次，溢出的约 1.3 GB 只需过一次 PCIe，而分组仍然要搬完全部 17 GB，还额外增加分配/失效的开销——因此默认关闭，放在 <code>TS_H3_TE_GROUP</code> 后面。把 prefault 与文本条件重叠（<code>TS_H3_PREFAULT=2</code>）比与上传流水化更差，因为编码器自己的 17 GB 也要过同一个页缓存，会把刚放进去的页挤掉。多流 prefault 在这里同样是负收益——640×384 三次取最好：1 个流 63.9 s、4 个流 64.9 s、16 个流 66.6 s，仅编码器拆卸一项就从 2.2 s 涨到 4.0 s——因为它不像加载器自己的预热那样独占机器，而是与它正在预热的工作并发。给<em>视频 VAE</em> 做 prefault 是纯亏：多花 1.9 s 读取，解码却没有变化（9.4 s 对 9.1 s），因为那个 VAE 是算力瓶颈而不是缺页瓶颈。关掉 CUDA graph 没有区别（65.6 s 对 65.8 s），<code>TS_GGML_ASYNC_COMPUTE=1</code> 也没有（67.4 s 对 66.2 s），它管的是图提交而不是权重上传。用 <code>ffmpeg</code> 替换系统的 H.264 编码器则更慢，98.2 s。</p></div>
+  <h3 id="h3-speed">2026-10-15：当前性能与精度</h3>
+  <p>以下是同一精度下的版本前后对照，并非对 stable-diffusion.cpp 的速度倍数。FL2VA Q4_K，640×384×22、24 fps、20 Euler 步、种子 42、CFG 1、flow shift 12；两轮交替运行，包含加载、生成与编码。M5 Pro 为 48 GiB 统一内存，A40 为 46,068 MiB 显存/CUDA 12.8；OS 缓存未受控，不是热模型服务基准。两边均使用未修改的上游 ggml <code>3612c0af93f2cfc8f048295300a61187723b12ae</code>。</p>
+  <div class="table-scroll"><table><thead><tr><th>后端/主机</th><th>基线中位数</th><th>候选中位数</th><th>结论</th></tr></thead><tbody>
+    <tr><td>M5 Pro 原生 Metal</td><td>151.246 s</td><td>143.622 s</td><td>延迟降低 5.0%</td></tr>
+    <tr><td>M5 Pro 直接 MLX</td><td>143.264 s</td><td>125.426 s</td><td>延迟降低 12.5%</td></tr>
+    <tr><td>A40 原生 CUDA</td><td>68.029 s</td><td>67.174 s</td><td>1.3% 差异不足以证明有意义的增益</td></tr>
+    <tr><td>A40 直接 CUDA，同精度</td><td>220.456 s</td><td>178.667 s</td><td>延迟降低 19.0%</td></tr>
+  </tbody></table></div>
+  <p>所有完整比较的解码 RGB 与音频完全一致。优化减少重复 RoPE/切片/调制工作，缓存原生 CUDA 图绑定，并让 MLX VAE 直接持有 F32 权重。固定潜变量检查中，采样的热进程 RSS 中位数 23.048 → 14.024 GiB；这不是峰值统一/GPU 内存的降低测量。</p>
+  <p>直接 CUDA 的 BF16 权重投影现在默认采用 pedantic F32，<code>TS_H3_CUDA_BF16_PEDANTIC=0</code> 才会恢复旧近似。独立 PyTorch F32 全 50 层合成参考中，音频/视频相对 L2 误差为 0.000125891 / 0.000084754，均通过 0.001 门限；这不是自然媒体的多步感知质量验证。实验性批量注意力未通过完整生成质量门限，模型开关已移除。</p>
+  <p>最终构建另有 CPU/MLX 与远端 CUDA 聚焦测试、四条 GPU 通道各九个组件参考检查及完整生成保真对照；这些保真对照不增加速度样本。<code>TS_H3_PHASE=1</code> 打印阶段耗时，<code>TS_H3_TRACE=1</code> 打印潜变量诊断。完整条件、结果和被拒绝的实验见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/eng/validation/README-minimax-h3.md">复现指南</a>。</p>
 
-  <h3 id="h3-cpu">纯 C# 的 CPU 路径</h3>
-  <p><code>--backend cpu</code> 让 H3 <strong>完全不用 ggml</strong> 跑起来，走的是 <code>MiniMaxH3Direct{DiT, TextEncoder, VideoVae, AudioVae, VisionEncoder, VideoVaeEncoder3D, AudioVaeEncoder}</code>，底层是与 Wan 网络共用的 <code>Direct{Context, Linear, Ops}</code> 原语——H3 是唯一一个还没有纯托管 CPU 路径的视频模型。所有条件模式都可用：<strong>t2v、i2v、fl2v，以及参考图像、参考片段与参考音轨</strong>。一切都在主机上以 F32 运行，因此它是为了正确性、可移植性和没有加速卡的机器，而不是为了速度。</p>
-  <p>在完全相同的输入下与 GGML 路径对比——256×160、5 帧、单步、固定 <code>--diffusion-seed</code>。表中的<em>对照组</em>是 GGML 跟<strong>它自己</strong>比：它自己的 flash 内核对上显式 softmax 回退（<code>TS_H3_NO_FLASH=1</code>）——正是它让其余数字变得可读。</p>
-  <div class="table-scroll">
-  <table>
-    <thead><tr><th>路径</th><th>托管 vs GGML（余弦）</th><th>对照组（余弦）</th><th>成片 PSNR</th></tr></thead>
-    <tbody>
-      <tr><td>单独的文本编码器（64 层，32B Q4_K_M）</td><td>0.99999899</td><td>—</td><td>—</td></tr>
-      <tr><td>t2v</td><td>0.998740</td><td>0.997032</td><td>31.95 dB（对照组 28.17 dB）</td></tr>
-      <tr><td>i2v（3-D VAE 编码）</td><td>0.999897</td><td>—</td><td>34.87 dB</td></tr>
-      <tr><td>参考音频（音频 VAE 编码）</td><td>0.999410</td><td>—</td><td>35.27 dB</td></tr>
-      <tr><td>参考图像（视觉塔）</td><td>0.998554</td><td>0.999275</td><td>28.80 dB（对照组 30.80 dB）</td></tr>
-      <tr><td>单独的视觉塔输出</td><td>0.999919</td><td>0.999952</td><td>—</td></tr>
-    </tbody>
-  </table>
-  </div>
-  <p>读懂这张表：t2v、i2v 与参考音频跟 GGML 的一致程度，比 GGML 自己两个注意力内核之间的一致程度<em>还高</em>。<strong>视觉塔是例外</strong>——它的残差大约是<strong>对照组的 1.4 倍</strong>，而不是低于对照组。在 737k 个元素上余弦达到 0.9999，说明这座塔在结构上是对的，但残差目前没有解释；关掉 flash 反而让一致性<em>更差</em>，所以 F16 的 K/V 转换并不是原因。这不能算“对齐”；在把对精度敏感的参考图像条件交给托管路径之前，值得先知道这一点。</p>
-  <p>DiT 与 GGML 并非逐位相同，也不可能相同，因为去噪器会放大极小的差异。<code>TS_H3_DIT_LAYERS</code> 会在<em>两条</em>路径上同时截断主干，把对比变成一条曲线：前 25 层两者的差异约为 1e-5，之后开始放大，而且是<strong>非单调</strong>的——深度 40 处为 1.15e-3，44 处为 1.5e-4，50 处为 1.26e-3。正是这个形状排除了 bug：如果某一层引入了错误，那么它之后的每个深度上曲线都不会下降。</p>
-  <p>同一段片子上，它对 <code>ggml_cpu</code> 的速度是互有胜负而非一律更慢：t2v 69 s 对 14 s，i2v 70 s 对 176 s，参考音频 63 s 对 71 s，参考图像 112 s 对 20 s。视觉塔是托管路径上最贵的一段。<code>TS_H3_DUMP_TE</code>、<code>TS_H3_DUMP_VEL_V</code>、<code>TS_H3_DUMP_VEL_A</code> 与 <code>TS_H3_DUMP_VIS</code> 会把这些张量写到磁盘，以便在一次前向上对比两条路径——不要改用成片对比，因为采样器会把第一步的差异放大。另外注意：<code>--seed</code> 是<em>采样</em>种子，视频生成的噪声取自 <code>--diffusion-seed</code>，不固定它就对比两次运行，实际上是在对比不同的噪声。</p>
+  <h3 id="h3-cpu">后端与验证范围</h3>
+  <p>六个后端有独立执行路径：<code>ggml_metal</code>、<code>ggml_cuda</code>、<code>ggml_cpu</code> 使用 TensorSharp 原生 ggml 集成，<code>mlx</code>、<code>cuda</code>、<code>cpu</code> 使用直接实现。纯 C# CPU 支持文本、首尾帧与参考图像/视频/音频，无需 ggml；完整检查点吞吐仍受限于主机资源。合成组件、技术冒烟和成功写出文件不构成所有模式的感知质量验证；图像与音频参考的具体门限见模型卡。视频噪声种子使用 <code>--diffusion-seed</code>。</p>
 
   <h3 id="h3-server">部署到服务端</h3>
   <p>在服务端，尺寸是<strong>启动参数</strong>，因为浏览器不会自己发尺寸：<code>--video-width 640 --video-height 384 --video-steps 20</code> 是文档给出的起点（<code>--width</code> / <code>--height</code> 是别名；只给其中一个时，H3 会从条件图像的宽高比推出另一个）。<code>--video-mode</code> 用于给只提供一种模式的部署固定条件模式；不写它，则每条请求各自推断，通常这才是你想要的。<code>--video-frames</code>、<code>--fps</code>、<code>--video-vae</code>、<code>--video-text-encoder</code> 与 <code>--audio-vae</code> 补齐其余部分。服务端完全没有 <code>--cfg</code>，这也是随仓库提供的配置既不设步数也不设引导的原因。</p>

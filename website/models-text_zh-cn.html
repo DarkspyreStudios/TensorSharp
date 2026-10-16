@@ -18,7 +18,7 @@
   <h1>文本与 LLM 模型</h1>
   <p class="lede">每种文本架构的下载与运行命令，随后按家族说明图像、音频与 PDF 输入、思考模式以及工具调用能力。</p>
 
-  <p><strong>新增句向量编码器：</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2，通过 <code>--embeddings</code> 与兼容 OpenAI/Ollama 的 API。 <a href="embeddings_zh-cn.html">嵌入模型、支持的后端与验证 →</a></p>
+  <p><strong>嵌入模型：</strong> Snowflake Arctic Embed L v2.0、MiniLM，以及支持文本与可选图像/音频/视频输入的 EmbeddingGemma 2。通过 <code>--embeddings</code> 提供兼容 OpenAI/Ollama 的向量 API；后端支持依模型而定。<a href="embeddings_zh-cn.html">模型、API 与验证范围 →</a></p>
 
   <h2 id="download-run">下载并运行</h2>
   <p>运行构建命令前，请先<a href="getting-started_zh-cn.html#install-dotnet">按平台安装并验证 .NET 10 SDK</a>。第一个代码块是已验证的 Gemma 4 E4B 快速上手。所有代码块都使用 Hugging Face CLI（<code>pip install -U huggingface_hub</code>）；其后的各家族代码块假定已完成完整源码构建。从仓库根目录运行。CLI 的一次性文本提示从 <code>--input</code> 指定的文件读取（先把问题写入 <code>prompt.txt</code>——<code>--prompt</code> 只用于图像与视频生成模型）。按硬件把 <code>--backend</code> 换成 <code>ggml_metal</code>、<code>ggml_vulkan</code> 或 <code>ggml_cpu</code>（CLI 默认后端为 <code>ggml_cpu</code>）。</p>

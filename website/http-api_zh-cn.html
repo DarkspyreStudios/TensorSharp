@@ -35,7 +35,7 @@
   <div class="callout warn"><div class="ic">🔒</div><p>服务没有 API Key 身份验证或内置 TLS，并监听 <code>0.0.0.0:5000</code>。只应在可信网络中使用，或在前方部署带身份验证与 TLS 的反向代理。</p></div>
 
   <h2 id="embeddings">嵌入服务</h2>
-  <p>使用 <code>--model encoder.gguf --embeddings</code>，托管 Snowflake Arctic Embed L v2.0 或 MiniLM。 <code>POST /v1/embeddings</code>、<code>POST /api/embed</code> 返回归一化向量；后端为纯 C# <code>cpu</code> 与原生 <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>。<a href="embeddings_zh-cn.html">下载、API、截断规则与检索质量 →</a></p>
+  <p>使用 <code>--model encoder.gguf --embeddings</code> 托管 Snowflake、MiniLM 或 EmbeddingGemma 2。<code>POST /v1/embeddings</code> 与 <code>POST /api/embed</code> 返回归一化向量；EmbeddingGemma 2 配合 <code>--mmproj</code> 还支持图像/音频/视频与混合内容序列。后端与验证范围依模型而定。 <a href="embeddings_zh-cn.html">配方、API 与验证 →</a></p>
 
   <h2 id="quick-call">服务启动后的快速调用</h2>
   <p>服务器快速开始托管 <code>gemma-4-E4B-it-Q8_0.gguf</code>。在第二个终端中粘贴：</p>
@@ -283,6 +283,8 @@ curl -N -X POST http://localhost:5000/api/chat \
   <pre data-lang="json"><code>"multi_agent": false</code></pre>
   <p>只有 JSON <code>false</code> 会起作用：它为该请求关闭委派。服务端以 <code>--no-multi-agent</code>（或 <code>TS_NO_MULTI_AGENT</code>）启动时，请求无法把它打开，也不能提高任何 <code>--agents-*</code> 上限。→ <a href="agentic_zh-cn.html#sub-agents">角色与上限</a></p>
 
+  <p>社区技能发现通过 <code>find-skills</code> 的 <code>skills_search</code>、<code>skills_inspect</code> 与 <code>skills_install</code> 工具完成，需要技能网络权限；不是独立的 HTTP 安装端点。服务端/应用可安装，默认 CLI 只读并提供搜索/检查。 <a href="agentic_zh-cn.html#find-skills">条件与当前技能包 →</a></p>
+
   <h3 id="skills-manage">管理技能注册表</h3>
   <p>同一份数据有两种形态：只读、偏 OpenAI 风格的 <code>/v1/skills</code>，以及 Web UI 的 <code>/api/skills</code>——后者额外提供加载错误、单文件读取、上传与删除。</p>
   <div class="table-scroll">
@@ -391,8 +393,10 @@ data: {"tool_progress":"finished","tool":"shell","text":null,"seconds":2.4,"deta
 
   <p><strong>蒙版编辑。</strong>Multipart 的 <code>/api/image-edit</code> 接收一个 <code>mask</code> 文件。JSON 与 <code>/api/image-edit/stream</code> 先通过 <code>/api/upload</code> 上传源图和蒙版，再用返回的文件名填写 <code>imagePaths</code> 与 <code>maskPath</code>。可选字段为 <code>maskMode</code>（<code>grayscale</code> 白色编辑，或 <code>alpha</code> 透明像素编辑）、<code>maskInvert</code>、<code>maskFeather</code>（0–1024）、<code>maskCrop</code> 与 <code>maskCropPadding</code>（0–16384，默认 64）。蒙版必须与第一张参考图同尺寸；结果和预览均保留该画布与保护像素。蒙版需要输入图和 Qwen-Image-2.1，生成接口会拒绝蒙版，没有蒙版时也拒绝蒙版选项。<a href="models-image_zh-cn.html#mask-editing">选区工作流与限制 →</a></p>
 
+  <p><strong>LTX 2.5:</strong> 使用 <code>--config config/ltx-2.5-distilled.json</code>；NVIDIA 用 <code>cuda</code>/<code>ggml_cuda</code>，Apple 用 <code>mlx</code>/<code>ggml_metal</code>（实际为 MLX），CPU 别名选择直接 CPU。默认 1024×1024×17、24 fps，宽高为 64 倍数、帧数 <code>8k+1</code>；8 步半尺寸加 3 步精修，CFG 1。 <a href="models-video_zh-cn.html#ltx-25">五文件、音频、条件与限制 →</a></p>
+
   <h3 id="video-api">视频生成（<code>/api/video-generate</code> · <code>/api/video-generate/stream</code> · <code>/v1/videos/generations</code>）</h3>
-  <p>当托管的模型能生成视频时可用 —— MiniMax-H3，或只生成视频的 Wan。判定依据是 <code>IVideoGenerationModel</code> 接缝而不是架构字符串，因此其他模型会返回 <code>400</code> 与 <code>The loaded model is not a video-generation model.</code>。模型自己拒绝的请求 —— 用 Ref2VA 的输入去跑 FL2VA 权重、在同一个请求体里同时给关键帧与具名参考、模式缺少必需输入 —— 在 <code>/api/video-generate</code> 上以 <code>400</code> 返回模型自己的报错信息，而不是笼统的 500；在流式接口上则以终止帧 <code>{"done": true, "error": …}</code> 返回同一条信息。三个接口共用同一个解析器，因此字段完全一致；视频生成在进程内串行执行。</p>
+  <p>当托管的模型能生成视频时可用 —— LTX 2.5 与 MiniMax-H3 联合生成音视频，Wan 只生成视频。判定依据是 <code>IVideoGenerationModel</code> 接缝而不是架构字符串，因此其他模型会返回 <code>400</code> 与 <code>The loaded model is not a video-generation model.</code>。模型自己拒绝的请求 —— 用 Ref2VA 的输入去跑 FL2VA 权重、在同一个请求体里同时给关键帧与具名参考、模式缺少必需输入 —— 在 <code>/api/video-generate</code> 上以 <code>400</code> 返回模型自己的报错信息，而不是笼统的 500；在流式接口上则以终止帧 <code>{"done": true, "error": …}</code> 返回同一条信息。三个接口共用同一个解析器，因此字段完全一致；视频生成在进程内串行执行。</p>
   <pre data-lang="bash"><code># MiniMax-H3：提示词 -> MP4，外加一同生成的 32 kHz 立体声 WAV
 curl -s http://localhost:5000/api/video-generate \
   -H "Content-Type: application/json" \
@@ -404,13 +408,14 @@ curl -s http://localhost:5000/api/video-generate \
       }'</code></pre>
   <pre data-lang="json"><code>{ "ok": true, "url": "/uploads/video-8f3c….mp4", "audioUrl": "/uploads/video-8f3c….wav",
   "width": 640, "height": 384, "frames": 22, "fps": 24,
-  "seed": 42, "codec": "h264", "elapsedSeconds": 63.1 }</code></pre>
+  "seed": 42, "codec": "h264", "elapsedSeconds": 100.0 }</code></pre>
   <p>请求字段（camelCase）：<code>prompt</code>（必填）、<code>width</code>、<code>height</code>、<code>frames</code>、<code>steps</code>、<code>cfg</code>、<code>cfg2</code>、<code>seed</code>、<code>fps</code>、<code>flowShift</code>、<code>negativePrompt</code>、<code>sampler</code>、<code>cfgCacheStride</code>、<code>videoMode</code>（<code>t2v</code> / <code>i2v</code> / <code>fl2v</code> / <code>ref</code>）、<code>generateAudio</code>、<code>imagePath</code>、<code>image</code>、<code>endImage</code>、<code>referenceImages</code>、<code>referenceVideos</code>、<code>referenceAudios</code>、<code>referenceVideoAudios</code>。其中为音视频联合生成与参考条件新增的七个字段同时接受 snake_case —— <code>video_mode</code>、<code>generate_audio</code>、<code>end_image</code>、<code>reference_images</code>、<code>reference_videos</code>、<code>reference_audios</code>、<code>reference_video_audios</code> —— 两种写法同时出现时 camelCase 优先；其余字段只接受 camelCase。</p>
-  <p><code>image</code> 是内联 base64 形式（允许带 <code>data:…;base64,</code> 前缀）。<code>imagePath</code>、<code>endImage</code> 以及每一个 <code>reference*</code> 条目都必须指向 <code>/api/upload</code> 之前返回过的文件，并被限制在上传目录之内 —— 目录之外的路径会被拒绝，报错形如 <code>referenceImages entries must reference previously uploaded files.</code>。<code>referenceVideoAudios</code> 与 <code>referenceVideos</code> <em>按下标</em>配对：第 <em>i</em> 项就是第 <em>i</em> 段片段的音轨。当模型没有产出音轨时 <code>audioUrl</code> 为 <code>null</code> —— 音频以旁挂 WAV 写出，而不是混流进 MP4。</p>
+  <p><code>image</code> 是内联 base64 形式（允许带 <code>data:…;base64,</code> 前缀）。<code>imagePath</code>、<code>endImage</code> 以及每一个 <code>reference*</code> 条目都必须指向 <code>/api/upload</code> 之前返回过的文件，并被限制在上传目录之内 —— 目录之外的路径会被拒绝，报错形如 <code>referenceImages entries must reference previously uploaded files.</code>。<code>referenceVideoAudios</code> 与 <code>referenceVideos</code> <em>按下标</em>配对：第 <em>i</em> 项就是第 <em>i</em> 段片段的音轨。当模型没有产出音轨时 <code>audioUrl</code> 为 <code>null</code> —— 保留独立 WAV；FFmpeg 与 Apple AVFoundation 路径可混入音轨，其他导出提供器可能返回分离音轨。</p>
   <p><code>POST /api/video-generate/stream</code> 接收相同请求体，并以 SSE 流式返回：每个心跳是 <code>{"videoGen": true, "step": i, "total": N, "phase": …, "detail": …, "elapsedSeconds": …, "etaSeconds": …}</code>，最后是终止帧 <code>{"done": true, "url": …, "audioUrl": …, "width": …, "height": …, "frames": …, "fps": …, "seed": …, "codec": …, "elapsedSeconds": …}</code> —— 或者 <code>{"done": true, "error": …}</code>。</p>
   <p><code>POST /v1/videos/generations</code> 是同一任务的 OpenAI images 风格封装。在上述字段之外，它还接受 <code>"size": "832x480"</code>（会拆成 width/height）、<code>negative_prompt</code>，以及取值 <code>"url"</code> 或 <code>"b64_json"</code> 的 <code>response_format</code>，返回 <code>{ created, data: [{ url, b64_json }], audio_url, width, height, frames, fps, seed, codec, elapsed_seconds }</code>，MP4 由 <code>/uploads/</code> 提供。</p>
-  <p><code>GET /api/models</code> 是客户端在构造请求之前了解托管视频模型能接受什么的入口：除模型列表外，它还会返回一个 <code>video</code> 对象，包含 <code>family</code>（<code>"minimax-h3"</code> 或 <code>"wan"</code>）、<code>supportsAudio</code>、<code>supportsImageConditioning</code>、<code>supportsEndImageConditioning</code>、<code>supportsReferenceConditioning</code> 与 <code>maxReferenceImages</code>（MiniMax-H3 Ref2VA 上为 9）—— 对所有非视频模型则为 <code>null</code>。内置网页界面读的正是这一块，用来决定该提供哪些附件控件 —— 首帧、尾帧，或数量被 <code>maxReferenceImages</code> 限住的参考图 —— 而不是去匹配架构名字符串；完全拿不到这一块时（较旧的服务端，或不上报能力的模型），它会退回到一直以来那种单张图像的请求形式。</p>
+  <p><code>GET /api/models</code> 是客户端在构造请求之前了解托管视频模型能接受什么的入口：除模型列表外，它还会返回一个 <code>video</code> 对象，包含 <code>family</code>（<code>"ltx-2.5"</code>、<code>"minimax-h3"</code> 或 <code>"wan"</code>）、<code>supportsAudio</code>、<code>supportsImageConditioning</code>、<code>supportsEndImageConditioning</code>、<code>supportsReferenceConditioning</code> 与 <code>maxReferenceImages</code>（MiniMax-H3 Ref2VA 上为 9）—— 对所有非视频模型则为 <code>null</code>。内置网页界面读的正是这一块，用来决定该提供哪些附件控件 —— 首帧、尾帧，或数量被 <code>maxReferenceImages</code> 限住的参考图 —— 而不是去匹配架构名字符串；完全拿不到这一块时（较旧的服务端，或不上报能力的模型），它会退回到一直以来那种单张图像的请求形式。</p>
 
+  <p>LTX 2.5 还接受 <code>imageConditions</code>（别名 <code>image_conditions</code>）：数组中每项提供 <code>imagePath</code>（已上传文件）或内联 base64 <code>image</code>、<code>frameIndex</code>（非负数，或 -1 表示末帧）与可选 <code>strength</code>（0–1）。帧位置不可重复；这种列表用于时间引导，<code>videoMode: "ref"</code> 的 Ingredients 身份参考是另一条契约。</p>
   <h2 id="sampling">7 · 采样参数</h2>
   <h4>Ollama 风格（在 <code>options</code> 对象内）</h4>
   <p>下表默认值用于请求省略字段时，可通过服务端参数 / <code>TENSORSHARP_*</code> 环境变量配置（见<a href="server_zh-cn.html#options">服务端参数</a>）。</p>

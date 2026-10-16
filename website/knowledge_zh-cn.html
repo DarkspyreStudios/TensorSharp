@@ -75,6 +75,7 @@ dotnet run --project TensorSharp.Server.Host -- \
   <p>仓库包含存储/提取器、宿主集成、范围/引用、聊天导入、浏览器界面、OCR 和真实模型测试及探针。测试存在、fixture 测试和包构建不代表所有提取器、编解码器、模型或设备均已验证。跳过/不可用场景仍未验证。小规模干净媒体与合成扫描页是正确性诊断，不是通用回答质量、OCR 准确率或吞吐基准。</p>
   <p>参见<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/knowledge-system_zh-cn.md" target="_blank" rel="noopener">完整知识库设计与配置指南</a>及<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/eng/validation/knowledge/README.md" target="_blank" rel="noopener">验证流程与平台限制</a>。回答的事实正确性须另行对照原文件检查，不能用引用检查替代。</p>
   <div class="content-footer"><a href="tensoragent_zh-cn.html">← TensorAgent 桌面版</a><a href="http-api_zh-cn.html#knowledge">知识库 HTTP API →</a></div>
+  <p>EmbeddingGemma 2 的知识库提供器仍索引提取文本；HTTP 的多模态嵌入不会自动把知识库变为原生媒体向量索引。未设置查询/文档前缀时自动使用 <code>task: search result | query: </code> 与 <code>title: none | text: </code>；显式空变量关闭相应前缀。</p>
 </main>
 </body>
 </html>

@@ -2,7 +2,7 @@
 
 [English](embeddings.md) | [中文](embeddings_zh-cn.md)
 
-TensorSharp 通过 `TensorSharp.Server` 与 `TensorSharp.Server.Host` 托管 GGUF BERT / XLM-RoBERTa 句向量编码器。包与归档反映各自发布标签，较早的版本不一定包含这项功能。它回应了[讨论 #183](https://github.com/zhongkaifu/TensorSharp/discussions/183)中把代码向量存入 SQLite、按语义检索代码的需求。
+TensorSharp 通过 `TensorSharp.Server` 与 `TensorSharp.Server.Host` 托管 GGUF BERT / XLM-RoBERTa、Nomic BERT 和 EmbeddingGemma 2 编码器。包与归档反映各自发布标签，较早的版本不一定包含这项功能。它回应了[讨论 #183](https://github.com/zhongkaifu/TensorSharp/discussions/183)中把代码向量存入 SQLite、按语义检索代码的需求。
 
 ## 个人知识库的嵌入检索
 
@@ -20,6 +20,7 @@ TensorSharp 通过 `TensorSharp.Server` 与 `TensorSharp.Server.Host` 托管 GGU
 |---|---|---:|---:|---|
 | Snowflake Arctic Embed L v2.0 | `snowflake-arctic-embed-l-v2.0-q8_0.gguf` | 1024 | 8192 | CLS |
 | all-MiniLM-L6-v2 | `all-MiniLM-L6-v2-Q8_0.gguf` | 384 | 此 GGUF 为 512 | 均值 |
+| EmbeddingGemma 2 | `embeddinggemma-2-Q8_0.gguf` 或 `embeddinggemma-2-BF16.gguf` | 768（MRL：512、256、128） | 8192 | 均值 + 学习投影 |
 
 下载验证使用的固定修订版：
 
@@ -33,9 +34,110 @@ curl -fL --retry 3 -o models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf \
 
 两者均采用 Apache-2.0 模型许可证；Snowflake 文件约 635 MB，MiniLM 约 25 MB。验证清单 `docs/validation/embeddings-2026-09/models.json`（本地验证记录，未提交到 Git）记录了校验和与 GGUF 元数据。
 
-当前支持范围是 `general.architecture=bert`，且具备受支持的分词器与池化元数据的 GGUF。解码器嵌入模型、重排序器、稀疏向量和多向量检索属于其他功能。
+当前支持的编码器架构键为 `bert`、`nomic-bert` 和 `gemma-embedding2`，并要求受支持的分词器与池化元数据。重排序器、稀疏向量和多向量检索属于其他功能。
 
 也可使用包含固定下载与启动参数的 [`config/embedding-snowflake.json`](../config/embedding-snowflake.json) 或 [`config/embedding-minilm.json`](../config/embedding-minilm.json)。宿主配置加载器下载指定修订版并验证 SHA-256。
+
+## EmbeddingGemma 2 的当前状态
+
+EmbeddingGemma 2 支持纯 C# `cpu`、直接 `mlx` / `cuda`，以及
+`ggml_cpu` / `ggml_metal` / `ggml_cuda`。Vulkan 嵌入尚未实现。
+默认窗口为 8192 token；GGUF 中的 262144 旋转位置范围不扩大服务窗口。
+文本编码器有 512 个隐藏通道，经均值池化及学习投影输出 768 维向量，
+也支持 512、256、128 维 Matryoshka 截取并重新归一化。
+这些能力晚于 `v2026.10.10`，需使用包含相应改动的源码构建或发布包。
+
+固定模型与可选媒体投影器下载如下：
+
+```bash
+mkdir -p models
+curl -fL --retry 3 -o models/embeddinggemma-2-Q8_0.gguf \
+  https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/embeddinggemma-2-Q8_0.gguf
+curl -fL --retry 3 -o models/embeddinggemma-2-mmproj-Q8_0.gguf \
+  https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/mmproj-Q8_0.gguf
+dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
+  --model models/embeddinggemma-2-Q8_0.gguf --embeddings --backend ggml_metal \
+  --mmproj models/embeddinggemma-2-mmproj-Q8_0.gguf \
+  --host 127.0.0.1 --port 5000 --no-webui
+```
+
+纯文本服务可省略 `--mmproj`；[`config/embeddinggemma2.json`](../config/embeddinggemma2.json)
+提供下载修订与 SHA-256 固定的原生 CPU 文本配置。
+查询通常使用 `task: search result | query: `，无标题文档使用
+`title: none | text: `，有标题文档使用 `title: {title} | text: {content}`。
+代码查询使用 `task: code retrieval | query: `，问答查询使用
+`task: question answering | query: `；对称句子相似度为两端都加
+`task: sentence similarity | query: `。HTTP API 保留调用方传入的文本，
+不自动选择任务前缀。知识库提供器在环境变量未设置时选择搜索/文档默认前缀，
+显式空值则禁用对应前缀。查询与文档必须使用相同维数。
+
+### 图像、音频与视频嵌入
+
+加载投影器后，`/v1/embeddings` 与 `/api/embed` 均接受一个
+`{"content": [...]}` 对象或此类对象的数组。每个对象按内容顺序生成一个完整序列向量：
+
+```json
+{
+  "model": "embeddinggemma-2-Q8_0",
+  "input": [{"content": [
+    {"type": "text", "text": "Waterproof running shoes. "},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+  ]}],
+  "dimensions": 256
+}
+```
+
+媒体通过 base64 data URI 提交；音频形式为
+`{"type":"input_audio","input_audio":{"data":"...","format":"wav"}}`，
+还支持 `mp3`、`ogg` 和 `flac`；视频形式为
+`{"type":"input_video","input_video":{"url":"data:video/mp4;base64,..."}}`，
+也支持 WebM。图像使用保持纵横比的双三次预处理，目标为 280 个软 token；
+视频以 1 fps、最多 32 帧采样，每帧目标 140 个软 token，实际数量取决于图像几何。
+音频解码为单声道 16 kHz，由 Gemma 4 音频塔编码。
+所有文本、特殊 token 与媒体软 token 共用 8192-token 窗口。
+超限媒体序列直接拒绝，Ollama 文本截断选项不截断媒体。
+视频及托管音频解码器以外的格式需要系统媒体编解码器。
+
+本地文件可通过 `EmbeddingGemma2MultimodalEncoder.Load` 与
+`EmbeddingGemma2InputPart.Text/Image/Audio/Video` 使用，媒体塔可选择加载。
+包装器只插入一次 BOS/EOS 与媒体分隔符；文本行乘以 sqrt(512)，媒体行不重复缩放。
+须使用显式媒体部分，不能把裸媒体分隔符当作文件输入。
+完整 C# 示例见[英文指南](embeddings.md#openai-compatible-api)。
+
+### 实现、精度与实际验证边界
+
+24 层双向编码器按五个局部注意力层、一个全局层循环，局部窗口左右各 512 token。
+TensorSharp 自有图、原生内核与设备集成实现这些行为；上游 ggml 保持原样。
+验证使用未修改的 ggml 修订 `3612c0af93f2cfc8f048295300a61187723b12ae`。
+
+隐藏状态保持 F32，不能将全模型降为 F16。原生 GGML CPU 为已验证的 Q8
+模型学习投影和 BF16 矩阵预展开 F32，词表保持压缩；这增加常驻内存。
+直接 CUDA 的学习投影与池化使用每次调用限定的 pedantic F32 精度，
+不改变共享 cuBLAS 全局模式。MLX 对证明安全的形状使用有界混合精度，
+其他路径保持各自的精度策略。实验开关的通过不能代替默认路径验证。
+音频默认使用 HF 的 `log(mel + .001)`，非 16 kHz 输入使用自有带限 sinc 重采样；
+显式 `llama_clamp` 是另一项受控比较，不能据此声称默认前端等价。
+
+独立 NumPy 检查包含八个精确文本序列和完整 8192-token 序列。
+最新 CPU/CUDA 完整默认 HF 数值参照覆盖七类纯文本/图像/音频/视频/混合输入，
+经过两个 API，保留余弦至少 `.9999`、最大分量误差不超过 `.002` 的原始门槛。
+Mac CPU 另用独立 Apple 解码应用确认所测四帧字节一致，再通过完整模型检查；
+两个应用仍共享 Apple 编解码器，先前 FFmpeg 字节差异失败记录继续保留。
+完整音频向量与音频塔分别验证，塔输出通过不能代替池化后完整向量通过。
+原生 CPU 的 1500 对 STS-B 开发集回归覆盖全部四个维数；合成媒体不代表
+完整多模态检索或排行榜质量。
+
+当前默认 CPU 的受控七类媒体延迟在两个引擎顺序下均满足原有 5% 余量，
+但原始跨引擎数值报告在 llama.cpp 与独立参照不一致处仍然失败。
+完整 CPU 文本及 GPU 多模态延迟对等仍未达成；旧 MLX/直接 CUDA 计时
+早于后续精度修复，不能用于证明当前执行器性能。
+协议检查还覆盖无效媒体、MRL/base64、临时文件清理与正常服务退出。
+模型/设备不可用而跳过的测试不计为通过。
+
+完整各后端、各轮次和可选算子条件见[英文验证记录](embeddings.md#embeddinggemma-2-implementation-and-validation)，
+可复用工具位于 [`eng/validation/EmbeddingGemma2Probe`](../eng/validation/EmbeddingGemma2Probe/README.md)
+与[音频验证指南](../eng/validation/EmbeddingGemma2AudioProbe/README.md)。
+生成记录保留在被忽略的 `docs/validation/` 或 `artifacts/`，不提交到 Git。
 
 ## 启动嵌入服务
 
@@ -50,7 +152,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
   --host 127.0.0.1 --port 5000 --no-webui
 ```
 
-使用 `cpu` 运行 100% 纯 C# 推理，无需原生推理库；使用 `ggml_cpu` 运行原生 CPU 内核；构建时启用 CUDA 后可用 `ggml_cuda`。实际测试的硬件与性能范围见验证报告 `docs/validation/embeddings-2026-09/README.md`（本地验证记录，未提交到 Git）。直接 `cuda`、MLX 和 Vulkan 的嵌入路径尚未实现。
+使用 `cpu` 运行 100% 纯 C# 推理，无需原生推理库；使用 `ggml_cpu` 运行原生 CPU 内核；构建时启用 CUDA 后可用 `ggml_cuda`。实际测试的硬件与性能范围见验证报告 `docs/validation/embeddings-2026-09/README.md`（本地验证记录，未提交到 Git）。直接 `cuda` 与 MLX 嵌入执行当前支持 EmbeddingGemma 2；Vulkan 嵌入尚未实现。
 
 `--embedding-context-size N` 缩小每条输入的上限；`0` 使用模型元数据。每个进程常驻一个编码器；应用同时需要聊天和嵌入时，在不同端口启动两个服务。启用 `--embeddings` 后，对生成类路由（`/v1/chat/completions`、`/v1/responses`、`/v1/systemone`、`/v1/videos/generations`、`/api/generate`、`/api/chat`、`/api/chat/ollama`、`/api/models/load`，以及 `/api/image-generate`、`/api/image-edit`、`/api/video-generate` 与它们的 `/stream` 形式）的 POST 请求返回 HTTP 400 `This server hosts an embedding model. Use /v1/embeddings or /api/embed.`。显式指定本机没有的 `--backend` 时，启动以退出码 2 结束，并打印 `error: model load refused: Backend 'X' is not supported on this machine.`。
 
@@ -61,7 +163,9 @@ C# API 默认使用纯 C# 后端；需要原生 CPU 时须显式指定：
 | `cpu` | `CPU`（默认） | 100% 纯 C# CPU |
 | `ggml_cpu` | `GGML_CPU` | 原生 GGML CPU |
 | `ggml_metal` | `METAL` 或 `GGML_METAL` | 原生 GGML Metal |
-| `ggml_cuda` | `CUDA` 或 `GGML_CUDA` | 原生 GGML CUDA |
+| `ggml_cuda` | `GGML_CUDA` | 原生 GGML CUDA |
+| `cuda` | `CUDA` | 直接 CUDA（EmbeddingGemma 2） |
+| `mlx` | `MLX` | MLX（EmbeddingGemma 2） |
 
 以下命令构建并运行纯 C# CPU 宿主，不构建原生推理库：
 
@@ -89,7 +193,7 @@ curl http://127.0.0.1:5000/v1/embeddings \
 
 响应为 OpenAI `list`，含按输入顺序编号的 `embedding` 对象与 `usage`（`prompt_tokens`、`total_tokens`）。向量作 L2 归一化。`input` 接受一个字符串、字符串数组、一个整数 token 数组或多个整数 token 数组。token 数组必须已包含本模型所需的特殊 token，ID 必须来自本模型的分词器。
 
-`encoding_format` 为 `float`（默认）或 `base64`（小端 float32）。`dimensions` 截取向量前若干维并重新归一化。Snowflake 经过 Matryoshka 训练，支持缩减到 256 维；对没有此训练的模型任意缩减维数可能降低检索质量。
+`encoding_format` 为 `float`（默认）或 `base64`（小端 float32）。`dimensions` 截取向量前若干维并重新归一化。Snowflake 经过 Matryoshka 训练，支持缩减到 256 维；EmbeddingGemma 2 支持 512、256、128 维；对没有此训练的模型任意缩减维数可能降低检索质量。
 
 OpenAI 超长输入会被拒绝；空输入、混合类型、未知模型名、非法 token ID 与不支持的编码格式也会报错。每次请求最多 2048 条输入，总计最多 262144 个输入 token。嵌入及模型信息查询的 JSON 请求体上限为 16 MiB，包括 chunked 传输；超限返回 HTTP 413。
 
@@ -147,9 +251,9 @@ EmbeddingBatchResult result = await model.EmbedAsync(new[] { "read a file", "ope
 float[] vector = result.Embeddings[0];
 ```
 
-`Backend = "CPU"` 使用托管 BERT/XLM-R 编码器，与原生后端共享分词、池化、归一化及 API 约定，不加载原生推理库。需要原生 CPU 内核时，使用 `Backend = "GGML_CPU"`。
+`Backend = "CPU"` 使用托管编码器，与原生后端共享分词、池化、归一化及 API 约定，不加载原生推理库。需要原生 CPU 内核时，使用 `Backend = "GGML_CPU"`。
 
-### 托管 CPU 执行
+### BERT/XLM-R 的托管 CPU 执行
 
 每个模型拥有一个常驻工作线程池，按配置提供包含调用线程在内的计算线程数（`Threads = 0` 选择四个线程）。token 与位置向量读取、投影、激活量化、注意力、归一化和 GELU 共用该池。工作线程短暂自旋后休眠，等待新任务；释放模型会停止并等待这些线程退出。嵌入运算不初始化全局共享 CPU 池，也不通过 .NET 线程池调度并行循环。
 
@@ -165,7 +269,7 @@ x86 托管路径通过 [`TensorComputePrimitives`](../TensorSharp.Core/TensorCom
 
 无原生推理库宿主检查（`docs/validation/embeddings-2026-09/managed-native-free.json`，本地验证记录，未提交到 Git；可用 `benchmarks/EmbeddingBench/native_free_smoke.py` 重新运行）删除宿主中的自定义原生资源后运行两个下载模型，并在推理后检查实际加载的库。
 
-### 原生 GGML 执行
+### BERT/XLM-R 的原生 GGML 执行
 
 原生后端使用 TensorSharp 自己的 GGML 集成，量化权重常驻并复用完整编码器图；加载时合并量化 Q/K/V 投影，保留 GGUF 权重原始字节。注意力为双向。GPU 将不同长度的序列打包为一次前向，通过分块对角掩码隔离各序列；等长序列使用独立批维。原生 CPU 将投影 token 紧凑打包，注意力序列则独立 padding，以保持数值稳定。结果恢复到输入顺序；CLS 池化跳过末层未参与输出的前馈行，均值池化排除 padding。原生 CPU 注意力保持 float32 K/V 与对齐形状。短注意力序列直接读取 K/V 视图；注意力长度不少于 1024 时，将每个 head 的 K/V 连续打包一次，仍保持 F32 精度。执行计划与图内存一起缓存。模型图状态串行访问；取消在原生批次之间及在途设备计算完成后检查。
 

@@ -5,8 +5,8 @@
 
 A local AI app for **iPhone, iPad, Mac and Windows**. TensorAgent runs TensorSharp
 in the app process for text and reasoning, multimodal questions, agentic code and
-document work, **Qwen-Image 2.1 image generation and editing**, and MiniMax-H3 short
-video with audio. Choose a model for the task and use the same composer, saved chats
+document work, **Qwen-Image 2.1 image generation and editing**, and **MiniMax-H3
+and LTX 2.5 video generation with audio**. Choose a model for the task and use the same composer, saved chats
 and artifact links. Image edits support painted selections, protected pixels,
 original/result comparison and fourteen optional LoRA plug-ins. The interface is
 available in [eight languages](#languages).
@@ -49,13 +49,16 @@ setup and your first chat. The updated Release Binaries workflow publishes Deskt
 DMG/PKG/ZIP and MSI/ZIP assets; historical releases may lack them. iPhone/iPad still
 use the [source-build instructions](#build-and-run).
 
-Knowledge and response steering were added after the `v2026.10.10` tag; use a
-source build or a package that contains those changes.
+Knowledge, response steering, LTX 2.5 and native skill discovery describe current
+source after the `v2026.10.10` tag; use a source build or a package that contains
+those changes.
 
-**Model and validation scope.** The 38 catalog entries start at the 12 GB system
+**Model and validation scope.** The 39 catalog entries start at the 12 GB system
 RAM tier, with larger models requiring higher tiers. Qwen3.8 Flash Next has an
 experimental UD-IQ1_M entry from 32 GB and a UD-Q2_K_XL entry from 48 GB,
-both with SSD-backed weights and optional vision and draft companions. These eligibility tiers describe physical system RAM,
+both with SSD-backed weights and optional vision and draft companions. LTX 2.5
+Distilled is experimental at the 48 GB tier, with 44.76 GB of pinned downloads
+and publisher-approved access required for its official companions. These eligibility tiers describe physical system RAM,
 including unified memory on Apple devices; storage size and GPU VRAM are separate.
 Image/video generation has been measured in the Mac app, with no recorded
 iOS media generation or Windows image/audio/video generation. The physical-phone run recorded
@@ -249,9 +252,10 @@ identically. The main things the desktop page has that are not here: the phone
 page draws no sub-agent progress panel (it ignores the `agents` field of
 tool-progress frames, and only names the sub-agent tools in words — "Starting
 sub-agent", "Waiting for sub-agents", "Messaging sub-agent", "Stopping sub-agent",
-"Checking sub-agents", or "Preparing …" while the call is being written), and it has
-no image or video controls of its own: with Qwen-Image 2.1 or MiniMax-H3 loaded, the
-message itself asks for a picture or a clip, through `/api/chat` (`ImageTurns`,
+"Checking sub-agents", or "Preparing …" while the call is being written). Image and
+video requests use the same composer: load Qwen-Image 2.1, MiniMax-H3 or LTX 2.5,
+then describe the result or attach guidance. LTX image guides expose clip-length,
+frame-position and strength controls. Media requests run through `/api/chat` (`ImageTurns`,
 `VideoTurns`; see "Pictures" and "Videos" below). So `/api/image-edit` and
 `/api/video-generate` are bound, but nothing on the page calls them, and
 `/api/image-generate`, the route the desktop page uses for text-to-image, is not bound
@@ -278,7 +282,10 @@ time, its transformer at four bits or, closer to full precision, eight (with the
 text encoder either way); and the
 two MiniMax-H3 entries, one model in two checkpoints, make short videos with their own
 soundtrack, one from a description or a starting photo, the other around the photos,
-clips and recordings it is given. Qwen3.8 Flash Next, a 125B mixture of experts (about 6B
+clips and recordings it is given. **LTX 2.5 Distilled** adds text/image-to-video with
+48 kHz stereo audio, first/last frames and multiple image keyframes; its experimental
+48 GB entry includes the custom Gemma 4 prompt encoder and two-stage upscale recipe.
+Qwen3.8 Flash Next, a 125B mixture of experts (about 6B
 active per token), has two catalog quantizations. UD-Q2_K_XL starts at the
 48 GB system RAM tier; in the recorded Mac run the engine kept 18.3 GB of its 78.9 GB
 package resident and read the rest from SSD as tokens needed it. UD-IQ1_M starts at an
@@ -303,6 +310,7 @@ See [The desktop's larger models](#the-desktops-larger-models) for the historica
 | Qwen-Image 2.1 Turbo (Q8_0) | text or a photo in, a picture out, in 8 steps | download: 7,591,554,784-byte DiT, plus the same three companions | 32 GB | `AtomicChat/Qwen-Image-2.1-Turbo-GGUF` + the Qwen-Image 2.1 companions |
 | MiniMax-H3 (Q4_K) | text, or one or two photos as the first and last frames, in; a video with its soundtrack out | download: 11,420,663,904-byte denoiser + 18,218,065,024-byte Qwen3-VL-32B text encoder + 5,207,808,496-byte video VAE + 605,254,808-byte audio VAE + 2,776,833-byte `vocab.json`, 1,671,839-byte `merges.txt` and 11,003-byte `tokenizer_config.json` | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
 | MiniMax-H3 References (Q4_K) | text with up to nine photos, clips and recordings to feature in; a video with its soundtrack out | download: 11,381,096,544-byte denoiser, plus the same four companions as MiniMax-H3 (six files, 24.0 GB), linked from it when it is installed rather than downloaded again | 32 GB | `unsloth/MiniMax-H3-GGUF` + `MiniMaxAI/MiniMax-H3` (tokenizer files) |
+| LTX 2.5 Distilled (Q4_K_M + BF16) | text or image keyframes in; video with 48 kHz stereo audio out | five pinned files, 44,764,412,884 bytes (44.76 GB): denoiser, custom Gemma 4 12B prompt encoder, video/audio VAEs and x2 latent upscaler; official companions require approved Hugging Face access | 48 GB, experimental | `Abiray/LTX-2.5-Distilled-GGUF` + `Lightricks/LTX-2.5` |
 
 Additional entries in [ModelCatalog.Extended.cs](src/TensorAgent.Core/Catalog/ModelCatalog.Extended.cs)
 cover Gemma 4 26B/31B, Qwen 3.5/3.6, GPT-OSS, DeepSeek V4/V4.1 Flash,
@@ -500,8 +508,8 @@ of 20 · about X min left", "Developing the frames…", "Adding the sound…", "
 video…"), then plays the clip inline and looped, with its sound (an AAC track inside the
 MP4), and the clip stays in the saved chat. What a checkpoint cannot use is refused before
 the model starts, in the app's words: a clip or a recording on the keyframes entry names
-MiniMax-H3 References, and a document is refused rather than read as the script. There is
-no size, length or step setting; the app asks for 640x384 (or that area at the photo's
+MiniMax-H3 References, and a document is refused rather than read as the script. For
+MiniMax-H3, the app asks for 640x384 (or that area at the photo's
 shape, 608x416 for a 3:2 photo), 22 frames (0.92 s at 24 fps) and the model's own 20
 steps, as the shipped `config/minimax-h3-*.json` do. On an M5 Pro the app made a clip
 from words in 150.0-152.9 s, one from a photo in 216.5-223 s and one around a reference
@@ -512,6 +520,19 @@ in the scene, so say who or what is in the shot: a description that said only "t
 subject of the picture" produced a garden with nobody in it. The denoisers' license, the
 MiniMax H3 Community License, excludes the EU, the UK, the Republic of Korea and the US
 from its territory, as both entries' notes say; the Qwen3-VL text encoder is Apache-2.0.
+
+**LTX 2.5.** The experimental **LTX 2.5 Distilled** entry uses the same composer,
+saved chat and inline video/audio result. Its default preview is 17 frames at 24 fps,
+with 1024×1024 output, eight ancestral Euler steps at half resolution, x2 latent
+upscaling and three refinement steps at CFG 1. Attach a first image, first/last
+images, or up to sixteen keyframes. With image guides attached, the composer offers
+preview, 1.4 s, 4 s and 5 s lengths plus each image's frame position and strength.
+These images guide moments in the clip. Identity references require a separate
+IC-LoRA checkpoint; video/audio adapters also require separate weights and are not
+included in the catalog entry. Read the [LTX 2.5 guide](../docs/models/ltx-2.5.md)
+for conditioning limits, startup recipes, recorded app-route checks and the latest
+measured CLI quality and performance. Existing MiniMax app timings above do not measure LTX or the latest
+MiniMax engine changes.
 
 **Many chats, kept, and one tap away.** The Web UI holds its history in the page and
 nowhere else, which is fine for a desktop tab and useless on a phone that is suspended
@@ -1091,7 +1112,7 @@ questions, code and document work, or short video with audio.</sub>
 | Engine | `GgmlOps.xcframework`, linked statically | `libGgmlOps.dylib` from `build-macos.sh`, in `Contents/MonoBundle` | `GgmlOps.dll` from `build-windows.ps1`, beside the executable |
 | Backends offered | Metal (CPU in the simulator) | Metal, then CPU | CUDA or Vulkan when the engine has it and the machine can run it, then CPU |
 | Code execution | in-process shell, embedded CPython 3.13, JavaScriptCore | real `bash`, `python3`, `node` and `npm` processes, each confined by Seatbelt to the chat's folder | real processes, which Windows cannot confine; offered only after **Run without a sandbox** is turned on in Settings |
-| Skills | the ten `verdicts.json` passes | all twelve | all twelve |
+| Skills | 15 packs admitted by the static `verdicts.json` checks | all 17 source packs; task dependencies still apply | all 17 source packs; task dependencies still apply |
 | Engine budget | measured against jetsam (`EngineMemoryPolicy`) | the engine's defaults | the engine's defaults |
 | First-launch settings | K/V cache Q4, 2,048-token replies, 120 s per command | K/V cache Q8, 8,192-token replies, 300 s (`AppSettings.DesktopDefaults`) | as the Mac |
 | Leaving the screen | the GPU is handed back and the turn waits | the turn carries on; App Nap is held off while the model works | the turn carries on; sleep and power throttling are held off |
@@ -1459,7 +1480,7 @@ ever read (see the [model card](../docs/models/qwen38-flash-next.md#larger-than-
 ```
 TensorAgent/
   scripts/          build, run and verify; prepare-python.sh; verify-skills.py
-  skills/           the twelve skills (ten go into the app bundle), plus verdicts.json saying which can run on iOS and why
+  skills/           17 source packs (15 bundled on iOS), plus static runtime verdicts and provenance
   python-runtime/   staged CPython (not in git; produced by prepare-python.sh)
   src/TensorAgent.Core/
     Catalog/        the model list, the store, install state
@@ -1759,22 +1780,29 @@ not exist puts the user one tap from a load that fails.
 
 ## Skills
 
-`scripts/verify-skills.py` judges which skills can run on the phone, by parsing every
+`scripts/verify-skills.py` checks static phone-runtime compatibility by parsing every
 Python script and resolving each import against the staged interpreter, and by checking
 every `.sh` / `.bash` script for the Node package managers and bundlers (npm, npx, pnpm,
 yarn, parcel, vite) the in-app shell does not have. It refuses anything reaching for a
-capability iOS does not have, and `skills/verdicts.json` records a verdict for each of
-the twelve directories under `skills/`. Ten pass. Two fail, both on shell scripts:
+capability iOS does not have. The current shared source has **17 skills**;
+`skills/verdicts.json` admits **15** for the in-process runtime and excludes two:
 `playwright`, whose only script execs `npx` to drive a Chromium (it was added for the
 desktop-hosted agent; see "Native execution when hosted on desktop" above), and
 `web-artifacts-builder`, whose two scripts install and run pnpm, npm and parcel.
 
-The MAUI project excludes both by name, so **the app bundle carries ten skills**;
+The MAUI mobile project excludes both by name, so **iOS bundles 15 skills**;
 `TensorAgentMauiProjectTests` keeps that exclusion list equal to the failing verdicts
-in both directions. The repository's `skills/` directory keeps all twelve, because it
+in both directions. The repository's `skills/` directory keeps all 17, because it
 is also the skill root of the desktop hosts — the server's
 `--skills-dir TensorAgent/skills` and the desktop TensorAgent host's
-`--skills TensorAgent/skills` — where both can run.
+`--skills TensorAgent/skills` — where their external runtime dependencies can be installed.
+
+These are static runtime checks, not end-to-end workflow passes. The newest packs
+are `find-skills`, `grill-me`, `grill-with-docs`, `tdd` and `handoff`. The last
+three audited workflows were qualified with Gemma 4 E4B, 16K context and 24 tool
+rounds; smaller models and lower budgets had retained failures. See the
+[audit and actual model coverage](../docs/agent_skills.md#audited-skillssh-bundle)
+for provenance, dependencies, sampling and failed candidates.
 
 The skills that cannot run on the phone, and what blocks each (three more upstream
 ones — `academy-guide`, `discernment-nudge`, `brand-guidelines` — pass the checker and
@@ -1810,7 +1838,7 @@ only when the request matches it, so it cannot bias the turns that do not.
 **The switch.** The skills sheet carries a master toggle above the list. Off is not
 "nothing is ticked": `ServerHostingOptions.SkillsEnabled` makes the request planner
 build no skill plan at all, so no skill is declared to the model and none is reachable.
-That is what the switch is for — every bundled skill (ten) announces itself in every
+That is what the switch is for — every available bundled skill announces itself in every
 prompt, which on a phone is thousands of tokens on every turn of every chat, and a user
 who wants a plain assistant should be able to have one. It removes skills only: the code
 tools stay while "Run code" is on, and the sub-agent tools follow the separate
@@ -2143,13 +2171,11 @@ stale rows in Gemma 4's sliding-window cache
 ### Every conversation shape, on Metal
 
 `benchmarks/TensorAgentTtftBench` starts the real app host on the Mac with the phone's
-settings (catalog context and K/V budget, 1024-token solo prefill chunks, every
-bundled skill — thirteen when the tables below were measured, a different set from
-the twelve in `TensorAgent/skills` today (the bench reads that directory; the app
-bundle carries ten of them): three were unbundled and `market-data` added the next
-day, and `playwright` later; the tool block has changed as well: the five sub-agent tools
-(2026-09-24) and `apply_patch` in place of `edit_file` (2026-09-18) are declared now
-and were not then), loads a catalog model on Metal the way tapping "Use" does, and
+settings: catalog context and K/V budget, 1024-token solo prefill chunks and the
+bundled skill roster. The tables below used thirteen packs; today's source has 17,
+of which 15 are bundled on iOS. Skill imports/removals and later tool declarations
+have changed the prompt, so these historical timings do not measure the current
+roster. The benchmark loads a catalog model on Metal the way tapping "Use" does and
 drives `/api/chat` exactly as the page does through every shape a conversation takes. It
 prints, for each turn, the first-token time, the prompt size, how much of it the KV
 cache served, and — next to any turn that reused nothing — the engine's own line

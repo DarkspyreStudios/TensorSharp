@@ -346,14 +346,20 @@ TensorAgent offers **Download** and **Use** for **LTX 2.5 Distilled** (Q4_K_M).
 The experimental catalog tier is 48 GB; this is not a measured minimum for every
 resolution or duration. Width and height must be multiples of 64 (each pass keeps
 the 32-pixel latent grid), and frame counts must be `8k+1`. First, last and
-multiple timed image keyframes are supported; see [LTX 2.5](../docs/models/ltx-2.5.md).
+multiple timed image keyframes are supported. Optional Ingredients IC-LoRA adds
+identity/appearance references with `videoMode: "ref"`; install it under `loras/`
+beside the model or set `TS_LTX25_INGREDIENTS_LORA`. Its separate single-pass
+recipe uses a trained 768×448×121 preview. See [LTX 2.5](../docs/models/ltx-2.5.md)
+for setup, the optional diffusion video decoder, measured coverage and limits.
 
 ```sh
 dotnet run --project TensorSharp.Cli -- --config config/ltx-2.5-distilled.json \
   --backend mlx --prompt "A red toy car drives slowly along a quiet road." --output ltx25.mp4
 ```
 
-Use `--backend ggml_cuda` on NVIDIA GPUs. On Apple Silicon, launch with
+Use `--backend cuda` or `ggml_cuda` on NVIDIA GPUs. `mlx` / `ggml_metal`
+route to MLX, and `cpu` / `ggml_cpu` to direct CPU; Vulkan and multi-GPU are
+unsupported. On Apple Silicon, launch with
 `MLX_ENABLE_TF32=0` to preserve Float32 denoiser/VAE precision, including when
 switching from another MLX model in an existing process. The LTX model sets that
 default before its own first MLX operation; MLX caches the setting process-wide.

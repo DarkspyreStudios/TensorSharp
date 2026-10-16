@@ -170,6 +170,9 @@ Console.WriteLine($"Saved {edited.Width}x{edited.Height} edited image.");</code>
   <p><strong>局部编辑：</strong>在 <code>EditImage()</code> 之前设置 <code>p.Mask = ImageIO.Load("selection.png", preserveAlpha: true)</code>，并按需设置 <code>MaskMode</code>、<code>MaskInvert</code>、<code>MaskFeather</code>、<code>MaskCrop</code> 与 <code>MaskCropPadding</code>。<code>QwenImageMaskMode.Grayscale</code>（默认）中白色表示编辑；<code>Alpha</code> 使用透明度。蒙版匹配第一张输入图，结果保留其画布与保护像素。<a href="models-image_zh-cn.html#mask-editing">蒙版语义 →</a></p>
   <p><strong>保持源图尺寸：</strong>设置 <code>p.KeepSourceSize = true</code>，编辑结果即为第一张输入图的精确宽高，采样面积约为图片自身面积，至少 1 百万像素、至多 <code>TargetArea</code>（或自动面积）。它不能与 <code>Width</code>/<code>Height</code> 同时使用，<code>GenerateImage()</code> 也不接受它。</p>
 
+  <h2 id="video-models">音视频与嵌入模型</h2>
+  <p>LTX 2.5 通过注册的 <code>Ltx25Model</code> 实现 <code>IVideoGenerationModel</code>，MiniMax-H3 与 Wan 使用同一视频接口；参数按模型契约校验。LTX 默认完整两阶段配方与 48 kHz 立体声。嵌入文本使用 <code>EmbeddingModel.Load</code>，EmbeddingGemma 2 媒体使用 <code>EmbeddingGemma2MultimodalEncoder</code> 与有序输入部分。 <a href="models-video_zh-cn.html#ltx-25">LTX 2.5</a> · <a href="embeddings_zh-cn.html#csharp">嵌入集成</a></p>
+
   <h2 id="sampling">SamplingConfig</h2>
   <p>采样旋钮与 CLI 参数及 API 选项一一对应。默认值与 Ollama 一致。</p>
   <div class="table-scroll">

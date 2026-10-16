@@ -5,7 +5,7 @@
 
 ## 嵌入服务
 
-使用 `--model encoder.gguf --embeddings` 托管 BERT/XLM-R GGUF。后端为纯 C# `cpu` 或原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`，每个进程常驻一个编码器；聊天服务使用另一个端口。`--embedding-threads N` 配置 `cpu` 与 `ggml_cpu` 的 CPU 执行线程；`--embedding-context-size N` 缩小每条输入的 token 上限（默认即模型上下文长度）。两者都只接受正整数。
+使用 `--model encoder.gguf --embeddings` 托管支持的 GGUF 编码器。BERT / XLM-R 支持纯 C# `cpu` 与原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`；EmbeddingGemma 2 还支持直接 `cuda`、`mlx`，添加 `--mmproj projector.gguf` 可启用媒体输入。每个进程常驻一个编码器，聊天服务使用另一端口。`--embedding-threads N` 控制 CPU 线程，`--embedding-context-size N` 降低单项输入限制（EmbeddingGemma 2 默认 8192 token）；两个参数都接受正整数。
 
 - OpenAI：`POST /v1/embeddings`，字符串或 token ID 的单条/批量输入，`encoding_format` 为 `float` / `base64`，可选 `dimensions`。
 - Ollama：`POST /api/embed`，字符串或字符串数组；`truncate` 默认 `true`。
@@ -13,9 +13,11 @@
 
 下载、curl、C#、检索质量与验证见[完整嵌入指南](docs/embeddings_zh-cn.md)。
 
+EmbeddingGemma 2 加载投影器后，两个嵌入端点也接受有序媒体 content 对象。超长媒体输入会被拒绝，不会按文本规则截断。原生技能发现需当前请求可达 `find-skills` 并开启 `--skills-allow-network`；搜索、检查和固定版本安装本身不执行 shell 或安装脚本。详见 [Agent Skills（英文）](docs/agent_skills.md)。
+
 ## 个人知识库
 
-`v2026.10.10` 之后的当前源码新增知识集合与回答调整功能；在包含这些改动的发布出现前需从源码构建。TensorAgent 的 **菜单 → 知识库** 提供文件、递归文件夹上传、已保存聊天快照、来源预览和集合选择。上传本身不会选择聊天集合，需选择 **在此聊天中使用**。所选来源提供有界检索与带引用的原文件链接，支持工具的智能体与子智能体使用同一范围。
+`v2026.10.11` 源码已包含知识集合与回答调整；LTX 2.5、EmbeddingGemma 2 与原生技能发现需要更新的源码。TensorAgent 的 **菜单 → 知识库** 提供文件、递归文件夹上传、已保存聊天快照、来源预览和集合选择。上传本身不会选择聊天集合，需选择 **在此聊天中使用**。所选来源提供有界检索与带引用的原文件链接，支持工具的智能体与子智能体使用同一范围。
 
 `TensorSharp.Server.Host` 在 `TS_KNOWLEDGE_DIRECTORY` 指向存储目录时启用相同的知识库，`/api/knowledge` 管理原文件、搜索、读取、重建索引和删除来源。支持的推理请求通过 `knowledgeCollections` 选择最多 32 个集合 ID：WebUI `/api/chat`、OpenAI `/v1/chat/completions` 与 `/v1/responses`，以及 Ollama `/api/chat/ollama` 与 `/api/generate`（仅检索，无智能体工具循环）。省略或空选择不会提供库内证据，无效选择会被拒绝。集合 ID 表示检索范围，远程部署仍需自己的认证与授权边界。
 
@@ -348,10 +350,10 @@ dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model <model.gguf> --backend cu
 | `--skills-allow-exec` | 允许模型通过 `skills_run` 运行选中技能自带的脚本。**默认关闭；开启后应把每个脚本都当作不受信任代码。**TensorSharp 仅调用已知解释器（`.py`、`.js`/`.mjs`、`.sh`、`.bash`），不经过 shell，并会清理环境、限制运行时间与输出、以只读方式挂载技能目录；工作目录是当前 Web/CLI 会话或 OpenAI/Ollama 请求的工作区（未开启代码执行时则是单次调用 scratch 目录）。默认的 `--skills-sandbox required` 会增加操作系统隔离，无法隔离时拒绝执行；除非另传 `--skills-allow-network`，否则网络仍被禁止。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
 | `--skills-max-rounds <n>` | 模型在必须作答前可以取用技能内容——或运行、查看并修正代码——的次数，范围 1-64（默认：`8`；开启 `--code-exec` 时为 `24`，因为写程序、运行它并按回溯修正它比读文件需要更多轮次；此处显式设定的值一律按原样使用）。每一轮都是一次完整生成，因此这一项限制的是那种反复把文件名叫错的模型所能造成的开销。预算用尽时会在对话里告知模型，让它用已读到的内容作答，并说明已经完成了哪些部分。环境变量：`TS_SKILLS_MAX_ROUNDS`。 |
 | `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有安全沙箱的宿主机上拒绝运行；`preferred` 表示显式接受较弱隔离；`off` 只保留解释器、环境、时限与输出限制。macOS 使用 `sandbox-exec`；Linux 要求 `bwrap` 0.12.0 或更高版本（旧版存在已知的沙箱搭建阶段符号链接逃逸）。Windows Job Object 只能限制进程树，不能限制文件系统或网络，因此 `required` 会拒绝，必须显式选 `preferred` 才接受这种较弱隔离。环境变量：`TS_SKILLS_SANDBOX`。 |
-| `--skills-allow-network` | 允许沙箱内的技能脚本联网。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
+| `--skills-allow-network` | 允许沙箱内的技能脚本联网；当前请求可达 `find-skills` 时，也启用原生 `skills_search` / `skills_inspect`，可写注册表还提供 `skills_install`。发现与安装本身不需要脚本执行权限。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
 | `--code-exec` | 向模型提供 `shell`、`read_file`、`write_file` 与 `apply_patch` 四个工具。`shell` 在操作系统沙箱中执行命令与测试，返回退出码与合并后的 stdout/stderr。参数：`command`（必填）、`workdir`（只对这一次调用生效）、`timeout_ms`，以及 `run_in_background`——后台作业的结果会给出一个日志文件名。文件操作使用专门的文件工具：`read_file`（`path`、`offset`、`limit`）显示文件的当前内容，行号渲染为 `   42 \| text`；再次读取未改动的文件时只会说明它未改动，而不重复内容。`write_file`（`path`、`content`）仅用于新建文件；修改已有文件一律使用 `apply_patch`，从单个文件的一行修改到跨多个文件的改动都是如此，它还能在一次原子调用中新建、删除和重命名文件。在它的 `patch` 参数中发送 `*** Begin Patch` / `*** End Patch` 信封，更新使用 `*** Update File:` 段与带锚点的 hunk。它也可以通过 `shell` 里的 `apply_patch` heredoc 调用，宿主会拦截它而不是当作命令执行。先读取相关文件内容，再发送最小的补丁；不要通过 shell 命令或 `write_file` 重写已有文件。补丁匹配遵循参考 V4A 应用器：先精确匹配，再忽略行尾空白，再忽略行首与行尾空白，仍不匹配则失败。四个工具在内部 Agent 轮次中共享同一工作区：Web/CLI 按聊天会话保留；每个 OpenAI Chat、OpenAI Responses 或 Ollama HTTP 请求则获得一个私有工作区，响应结束后删除。只有没有提供工作区的底层直接调用者才只会得到 `shell`。所有内置工具均由宿主进程内应答，不会交回 API 客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
 | `--code-exec-allow-install` | 允许模型把 pip / npm 包装进当前 Web/CLI 会话或 HTTP 请求工作区，让后续命令与技能脚本在该工作区寿命内都能 import；需要 `--code-exec`。这项权限**不会**把套接字交给模型生成的命令。宿主会从识别到的安装命令中读出工具名与包名、完成校验，再用自己构造的参数向量代为安装，只接受预编译 wheel 并禁止安装脚本（`--only-binary=:all:` / `--ignore-scripts`）；随后用 `true` 或 `false` 替换原安装命令，保留 `&&`、`\|\|`、管道和循环的语义。在 `pip install x && python y.py` 中，`y.py` 遵循命令的联网策略：默认离线，只有另行传入 `--code-exec-allow-network` 才可不受限地访问主机网络。会改变软件源的参数（如 `--index-url`、`-i`、`--find-links`、`--registry`）、URL 依赖以及宿主无法代为执行的安装器（`uv`、`poetry`、`gem`、`cargo`、`go`）都会被拒绝；`-r requirements.txt` 会逐行读取并校验。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
-| `--code-exec-allow-network` | 给予每一条模型生成的命令不受限的宿主 IP 网络访问；生成的代码可以解析 DNS、抓取 URL、跟随重定向、调用远程 API、访问局域网/回环服务并打开 IP 监听套接字。**默认关闭**，且需要 `--code-exec`。macOS 与 Linux 上的写入及主目录读取约束仍保持生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。其他宿主可读文件及 IP 服务因而可能被访问并外传；远程提示词注入与不可信下载也是额外风险。只有不含凭据的宿主 HTTP/SOCKS 代理设置会在此模式下传入。宿主会把不超过 16 MiB 的自定义 CA 包只读取一次，并仅将验证过的公开证书复制到每会话只读快照，因此源路径及其相邻数据不会暴露；认证代理需使用宿主侧无凭据转发器。包名与安装域名允许列表只约束宿主识别并代办的安装；不受限的生成代码仍可直接抓取或执行制品。它与装包权限、以及只控制 `skills_run` 的 `--skills-allow-network` 相互独立。Windows 仍须传入 `--code-exec-unconfined`。环境变量：`TS_CODE_EXEC_ALLOW_NETWORK`（非 `0` 即视为开启）。 |
+| `--code-exec-allow-network` | 给予每一条模型生成的命令不受限的宿主 IP 网络访问；生成的代码可以解析 DNS、抓取 URL、跟随重定向、调用远程 API、访问局域网/回环服务并打开 IP 监听套接字。**默认关闭**，且需要 `--code-exec`。macOS 与 Linux 上的写入及主目录读取约束仍保持生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。其他宿主可读文件及 IP 服务因而可能被访问并外传；远程提示词注入与不可信下载也是额外风险。只有不含凭据的宿主 HTTP/SOCKS 代理设置会在此模式下传入。宿主会把不超过 16 MiB 的自定义 CA 包只读取一次，并仅将验证过的公开证书复制到每会话只读快照，因此源路径及其相邻数据不会暴露；认证代理需使用宿主侧无凭据转发器。包名与安装域名允许列表只约束宿主识别并代办的安装；不受限的生成代码仍可直接抓取或执行制品。它与装包权限、以及控制技能脚本与原生技能发现的 `--skills-allow-network` 相互独立。Windows 仍须传入 `--code-exec-unconfined`。环境变量：`TS_CODE_EXEC_ALLOW_NETWORK`（非 `0` 即视为开启）。 |
 | `--code-exec-packages <list>` | 把安装限制在这些包名之内，逗号分隔；其余一律拒绝，并告诉模型允许哪些名字（默认：留空，即不限包名——且无论如何单次安装最多 16 个包）。匹配的是去掉版本后的裸名字，因此模型钉住的版本（`numpy==2.1.0`）仍然匹配名单里的 `numpy`。工具接口变成 shell 时它曾被退休，因为模型自己敲 `pip install` 时，可以用包名白名单看不见的方式写出同一个请求；如今它回来了，因为安装重新由**宿主**执行：宿主是把包名从模型的命令里读出来，而不是去运行那条命令，安装器的参数向量由宿主自己拼出，所以无论请求写成 `pip`、`pip3`、`python -m pip` 还是一个 requirements 文件，这份名单都同样生效。只有配合 `--code-exec-allow-install` 才有意义。启用 `--code-exec-allow-network` 后，该名单不是安全边界：生成代码可绕过宿主安装器，直接抓取或执行制品。 |
 | `--code-exec-install-index <url>` | 让宿主代办的安装使用运维者指定的软件包索引，而不是安装器默认源；模型自己写出的 `--index-url` 仍会被拒绝。索引主机会自动加入安装出口允许列表；镜像若从另一个主机下载文件，还需把该主机列入 `--code-exec-install-domains`。需要 `--code-exec-allow-install`。默认：未设置。环境变量：`TS_CODE_EXEC_INSTALL_INDEX`。 |
 | `--code-exec-install-domains <list>` | **宿主代为执行的装包操作**可以到达的主机，逗号分隔，可用精确名称或 `*.suffix` 通配（默认：`pypi.org,files.pythonhosted.org,registry.npmjs.org`；空值关闭钉选）。macOS Seatbelt 能把安装器钉在单个 loopback 端口上，因此它必须走一次性的 CONNECT 代理且只能访问这些主机；bubblewrap 无法钉住端口，Linux 则依赖宿主构造的参数向量、默认软件源与只装 wheel 的策略。传入 `--code-exec-allow-network` 后，普通生成命令获得的是不受限主机网络访问，不受此安装域名列表约束。环境变量：`TS_CODE_EXEC_INSTALL_DOMAINS`。 |
@@ -386,7 +388,7 @@ macOS 与 Linux 上的写入及主目录读取约束仍然生效。Linux 还通�
 Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS
 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象
 套接字以及 `/run` 之外的路径名套接字。生成代码仍可外传其能读取的其他宿主数据。
-它与只控制 `skills_run` 的 `--skills-allow-network` 相互独立；
+它与控制技能脚本与原生技能发现的 `--skills-allow-network` 相互独立；
 `--code-exec-allow-install` 也不会隐式打开命令网络。安装仍由宿主亲自执行——命令行
 会被拆成各个简单命令（引号与 heredoc 正文都被正确对待），每一条被
 识别出来的安装命令都会被读出工具名与包名，再由宿主用自己拼出的参数向量去调用
@@ -434,7 +436,7 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--test-chunked-prefill` | 运行分块 prefill 正确性检查（对比分块与非分块 logits） |
 | `--correct-prefill <N>` | `--test-chunked-prefill` 使用的 prompt 长度 |
 | `--correct-decode <N>` | `--test-chunked-prefill` 使用的 decode 长度 |
-| `--diffusion-steps <N>` | DiffusionGemma 每个 block 的去噪步数（默认：48）。对 Qwen-Image-2.1 则是 FlowMatch-Euler 步数——省略时自动选择（40，或 `--lora` 插件采样配方中的步数；Qwen-Image-2.1-Turbo 为 8，也只接受 8）。 |
+| `--diffusion-steps <N>` | DiffusionGemma 每个 block 的去噪步数（默认：48）。对 Qwen-Image-2.1 则是 FlowMatch-Euler 步数——省略时自动选择（40，或 `--lora` 插件采样配方中的步数；Qwen-Image-2.1-Turbo 为 8，也只接受 8）。 LTX 2.5 只接受 8 步（另加 3 步精修），CFG 固定为 1。 |
 | `--diffusion-seed <N>` | 扩散路径的噪声种子：DiffusionGemma 的确定性采样器与 Qwen-Image-2.1（默认：0），以及视频生成（Wan、MiniMax-H3）——视频不传时每次运行都会取一个新的随机种子。决定一段视频长什么样的是这个种子，`--seed` 是文本采样种子，对它没有影响。Qwen-Image-2.1 的图像由种子和尺寸决定；编辑的噪声还取决于 `--image` 传入的图片，因此用画出某张图的种子去编辑它，不会从它自己的噪声重新开始（[种子与编辑](docs/models/qwenimage21_zh-cn.md#种子与编辑)）。 |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas 数量。`0` 表示根据 `--max-tokens` 与模型 canvas 长度推导。 |
 | `--image <path>` | Qwen-Image-2.1 编辑用的输入图像（也是多模态聊天的图像输入）；重复该参数可传入多张参考图。每个 `--image` 都是一张参考图，按命令行顺序在提示词之前标记为 `<image1>`、`<image2>`……，提示词可以用这些标记指代图片。不带 `--image` 时，Qwen-Image-2.1 DiT 改为根据提示词生成图像。 |
@@ -456,27 +458,27 @@ Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离�
 | `--qwen-image-lora` / `--offload-cpu` | **已移除，启动时（包括作为配置文件键时）直接拒绝。** 两者只服务于早期的 Qwen-Image-Edit 流水线。`--qwen-image-lora` 由上面的 `--lora` 取代；`--offload-cpu` 没有替代项，因为 Qwen-Image-2.1 的 DiT 权重始终常驻。 |
 | `--penalty-last-n` | **已移除，启动时（包括作为配置文件键时）直接拒绝**（退出码 1，`Configuration error: --penalty-last-n was removed: …`）。它是 CLI 独有的重复惩罚窗口名：请改用 `--repeat-last-n <N>`，即两个宿主与请求字段 `repeat_last_n` 共用的拼写。 |
 | `--paged-kv` / `--no-paged-kv` / `--paged-kv-*` / `--paged-bench*` | **已移除，两个宿主在启动时（包括作为配置文件键时）都会直接拒绝。** 它们配置的是独立分页 KV 缓存（RAM / SSD / Redis 块层与块量化），只有 `--paged-bench` 构建过它。请求 KV 状态由引擎持有，跨请求的提示词复用由引擎的 radix 前缀缓存提供，默认开启（`--no-prefix-cache` 关闭）。该缓存读取的 `TS_KV_PAGED_CACHE`、`TS_KV_BLOCK_SIZE`、`TS_KV_CACHE_MAX_RAM_MB`、`TS_KV_CACHE_SSD_DIR`、`TS_KV_CACHE_MAX_SSD_MB`、`TS_KV_PAGED_QUANT_BITS`、`TS_KV_CACHE_REDIS_URL` 与 `TS_KV_CACHE_REDIS_TTL_MINUTES` 变量同样会在启动时被拒绝。 |
-| `--width <px>` / `--height <px>` | Qwen-Image-2.1 与视频生成的输出尺寸。默认 `0` —— 自动（Qwen-Image-2.1：生成为 2048×2048，编辑则取与第一张参考图宽高比一致、面积大致相同的尺寸——在纯 C# 的 `cpu` 后端上为 1024×1024（1 百万像素）——显式尺寸须为 32 的倍数；MiniMax-H3：640×384，有条件图时按该面积取图片宽高比，并向上取整到 32 的倍数；Wan：按输入图的宽高比取模型原生面积，TI2V-5B 为 1280×704，其余为 832×480）。 |
-| `--video-frames <N>` | 视频帧数，会对齐到模型自己的时间网格（Wan 为 `4k+1`；MiniMax-H3 为 `17k+5` —— 5、22、39、56、73、90…）。默认：33；Wan2.2-TI2V 为 49，MiniMax-H3 为 22。`1` 生成一张静态图（配合 `--output out.png`）。 |
-| `--fps <N>` | 保存的 MP4 的播放帧率（默认：16；Wan2.2-TI2V 为 24）。以固定帧率训练的模型（MiniMax-H3，24 fps）会覆盖任何其他取值。 |
+| `--width <px>` / `--height <px>` | Qwen-Image-2.1 与视频生成的输出尺寸。默认 `0` —— 自动（Qwen-Image-2.1：生成为 2048×2048，编辑则取与第一张参考图宽高比一致、面积大致相同的尺寸——在纯 C# 的 `cpu` 后端上为 1024×1024（1 百万像素）——显式尺寸须为 32 的倍数；MiniMax-H3：640×384，有条件图时按该面积取图片宽高比，并向上取整到 32 的倍数；Wan：按输入图的宽高比取模型原生面积，TI2V-5B 为 1280×704，其余为 832×480）。 LTX 2.5 视频默认输出 1024×1024，宽高必须为 64 的正整数倍；见下文两阶段配方。 |
+| `--video-frames <N>` | 视频帧数，会对齐到模型自己的时间网格（Wan 为 `4k+1`；MiniMax-H3 为 `17k+5` —— 5、22、39、56、73、90…）。默认：33；Wan2.2-TI2V 为 49，MiniMax-H3 为 22。`1` 生成一张静态图（配合 `--output out.png`）。 LTX 2.5 默认 17 帧，必须为 `8k+1`；无效请求不会自动对齐。 |
+| `--fps <N>` | 保存的 MP4 的播放帧率（默认：16；Wan2.2-TI2V 为 24）。以固定帧率训练的模型（MiniMax-H3，24 fps）会覆盖任何其他取值。 LTX 2.5 默认为 24 fps。 |
 | `--flow-shift <F>` | FlowMatch 时间步 shift（默认：模型官方配方 —— Wan 2.2 为 5.0，A14B T2V 为 12.0，Wan 2.1 为 8.0/3.0/5.0，MiniMax-H3 为 12.0）。在带联合音频流的模型上，该 shift 只作用于视频流。 |
 | `--sampler <name>` | 采样器：`unipc`（Wan 官方采样器，Wan 默认）或 `euler`。LTX 2.5 默认使用发布方配方 `euler_ancestral`；在 LTX 上 `euler` 仅作为确定性 Euler 诊断选项。MiniMax-H3 走自己的 flow-match 调度，不读取它。 |
 | `--negative-prompt <text>` | 负向提示词（默认：模型官方的负向提示词）。在 `--cfg 1.0` 下不生效，因为不跑无条件分支——所以对只接受 `--cfg 1.0` 的 MiniMax-H3 完全没有作用。 |
 | _（步数蒸馏检查点）_ | 按 DiT 文件名自动识别（`Turbo`、`distill`、`Lightning`、`lightx2v`、`FastWan`、`-dmd`，或显式的 `…-4steps-…` / `…8step…`，N 取 1–16）：管线切换到该步数并关闭引导，把官方 50 步 × CFG 配方的 100 次 DiT 前向变成 4 次。这是整个 TensorSharp 里最大的提速手段——详见下文 **[视频生成（Wan）](#视频生成wan)**。`--diffusion-steps` / `--cfg` 可覆盖它。 |
 | `--cfg-cache-stride <N>` | Wan 引导缓存：每 `N` 步只跑一次无条件 CFG 前向，其余步复用缓存的引导方向（默认关闭——每步都跑两次前向）。`2` 约快 1.30×，`3` 约快 1.43×；属于近似，需要严格对齐参考样本时请关闭。在 `--cfg 1.0` 下不起作用，因此对 MiniMax-H3 无效。 |
-| `--video-vae <path>` | 覆盖解析到的视频 VAE（`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`；MiniMax-H3 用 `minimax_h3_video_vae_fp16.safetensors`）。环境变量：`TS_VIDEO_VAE`。 |
-| `--video-text-encoder <path>` | 覆盖解析到的文本编码器 GGUF（Wan 用 UMT5-XXL，MiniMax-H3 用 Qwen3-VL-32B）。环境变量：`TS_VIDEO_TEXT_ENCODER`。 |
+| `--video-vae <path>` | 覆盖解析到的视频 VAE（`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`；MiniMax-H3 用 `minimax_h3_video_vae_fp16.safetensors`）。环境变量：`TS_VIDEO_VAE`。 LTX 2.5 需要预设的卷积视频 VAE；扩散解码器使用独立参数。 |
+| `--video-text-encoder <path>` | 覆盖解析到的文本编码器（LTX 2.5 用专用 Gemma 4 safetensors；Wan 用 UMT5-XXL GGUF；MiniMax-H3 用 Qwen3-VL-32B GGUF）。环境变量：`TS_VIDEO_TEXT_ENCODER`。 |
 | `--video-dit2 <path>` | 双专家模型的第二个扩散专家（Wan 2.2 A14B 的 high/low-noise 搭档）。两者同目录时按文件名自动解析。环境变量：`TS_VIDEO_DIT2`。 |
 | `--audio-vae <path>` | 与视频联合生成音轨的模型所用的音频 VAE（`minimax_h3_audio_vae_fp32.safetensors`）。不提供时该类模型仍能出图，只是没有音频。环境变量：`TS_VIDEO_AUDIO_VAE`。 |
 | `--video-upscaler <path>` | 两阶段视频模型所用的 2 倍潜变量放大器：LTX 2.5 先以输出尺寸的一半生成，再用 `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` 放大潜变量，最后以完整尺寸精修。默认：模型同目录的 `latent_upscale_models/`。环境变量：`TS_VIDEO_UPSCALER`。 |
 | `--video-diffusion-vae <path>` | 可选的 LTX 2.5 扩散视频解码器（`ltx-2.5-video-vae-bf16.safetensors`）：颗粒和闪烁更少、画面更干净，但比默认的卷积 `--video-vae` 更柔和。仅支持 MLX 和 CPU；CUDA 会拒绝。默认：关闭。环境变量：`TS_VIDEO_DIFFUSION_VAE`。 |
 | `--video-mode <mode>` | 在有多种条件模式的模型上，指定所传图片的含义。默认：按所传内容自动推断。MiniMax-H3 支持 `t2v`（纯文本）、`i2v`（图片**就是**第一帧，并让它动起来）、`fl2v`（首帧与末帧）、`ref`（图片是用于**全新**场景的身份/外观参考）。`i2v`/`fl2v` 需要 FL2VA 检查点，`ref` 需要 Ref2VA——它们是两个独立文件而不是开关，要错了会直接报错并指出该加载的另一个文件。 |
-| `--end-image <file>` | 末帧条件图，适用于支持该能力的模型（MiniMax-H3 的首尾帧模式）。与 `--image` 一起使用时，片段会被引导为从首帧开始、到末帧结束。 |
+| `--end-image <file>` | 末帧条件图，适用于支持该能力的模型（MiniMax-H3 的首尾帧模式）。与 `--image` 一起使用时，片段会被引导为从首帧开始、到末帧结束。 LTX 2.5 也支持尾帧与带时间位置的图像引导。 |
 | `--ref-image <file>` | 参考图，用于参考条件模型（MiniMax-H3 Ref2VA）：主体特征保留下来，而机位、背景和构图由提示词决定。最多可重复传入 9 次；在提示词中按 `<Picture 1>`、`<Picture 2>`… 引用。参考图只会被**缩小**并保持自身宽高比，输出尺寸仍由 `--width`/`--height` 决定。 |
 | `--ref-video <path>` | 参考视频片段——可以是视频**文件**，也可以是帧目录；两种都会被重采样到模型自己的 24 fps 与画布。可重复传入；在提示词中按 `<Video 1>`、`<Video 2>`… 引用。 |
 | `--ref-video-audio <file>` | 与**相同位置**的 `--ref-video` 配对的音轨：第一个配第一个，依此类推。之所以与 `--ref-video` 分开，是因为容器里的音轨无法通过帧解码器读取；想要一段无声的参考片段就不传它。支持 WAV、MP3 或 Ogg。 |
 | `--ref-audio <file>` | 参考音频片段。可重复传入；在提示词中按 `<Audio 1>`、`<Audio 2>`… 引用。会被重采样到音频 VAE 的 32 kHz 立体声，并截断到生成片段的时长。 |
-| `--no-audio` | 对与视频联合生成音轨的模型（MiniMax-H3）跳过音频解码，省下音频 VAE 的时间与显存。纯视频模型会忽略该开关。 |
+| `--no-audio` | 对与视频联合生成音轨的模型（LTX 2.5、MiniMax-H3）跳过音频解码，省下音频 VAE 的时间与显存。纯视频模型会忽略该开关。 |
 | `--wan-vae` / `--wan-te` / `--wan-dit2` / `--video-te` | **已移除，两个宿主在启动时（包括作为配置文件键时）都会直接拒绝。** 请改用 `--video-vae`、`--video-text-encoder` 与 `--video-dit2`。`TS_WAN_VAE`、`TS_WAN_TE` 与 `TS_WAN_DIT2` 变量同样会被拒绝：所有视频模型都读取 `TS_VIDEO_VAE`、`TS_VIDEO_TEXT_ENCODER` 与 `TS_VIDEO_DIT2`。 |
 | `--test` | 运行内置的分词器、ChatML 模板与 Ollama 对比测试 |
 | `--test-templates <dir>` | 对 `<dir>` 下的每个 *.gguf 校验硬编码模板与 GGUF Jinja2 模板的一致性 |
@@ -673,7 +675,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/s
 | `--skills-allow-exec` | 允许 `skills_run`。**默认关闭。在共享服务器上，这就是一个远程代码执行入口**——技能是别人上传的内容，而决定要不要运行其中某个脚本的，是一个正在读同一个人写的 Markdown 的模型。脚本只经已知解释器直接运行，不经过 shell；工作目录是当前 Web 会话或私有 OpenAI/Ollama 请求工作区（未开启代码执行时为单次调用 scratch 目录），技能目录只读。默认的 required 沙箱在无法提供安全操作系统隔离时拒绝执行。环境变量：`TS_SKILLS_ALLOW_EXEC`（非 `0` 即视为开启）。 |
 | `--skills-max-rounds <n>` | 模型在必须作答前可以取用技能内容——或运行、查看并修正代码——的次数，范围 1-64（默认：`8`；开启 `--code-exec` 时为 `24`；此处显式设定的值按原样使用）。每一轮都是一次完整生成。环境变量：`TS_SKILLS_MAX_ROUNDS`。 |
 | `--skills-sandbox <off\|preferred\|required>` | 对技能脚本要求多强的操作系统级隔离。`required`（默认）在没有安全沙箱的宿主机上拒绝运行；`preferred` 表示显式接受较弱隔离；`off` 只保留解释器、环境、时限与输出限制。macOS 使用 `sandbox-exec`；Linux 要求 `bwrap` 0.12.0 或更高版本。Windows Job Object 只能限制进程树，因此 `required` 会拒绝，必须显式选 `preferred` 才接受较弱隔离。环境变量：`TS_SKILLS_SANDBOX`。 |
-| `--skills-allow-network` | 允许沙箱内的技能脚本联网。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
+| `--skills-allow-network` | 允许沙箱内的技能脚本联网；当前请求可达 `find-skills` 时，也启用原生 `skills_search` / `skills_inspect`，可写注册表还提供 `skills_install`。发现与安装本身不需要脚本执行权限。默认禁止。环境变量：`TS_SKILLS_ALLOW_NETWORK`。 |
 | `--code-exec` | 向模型提供 `shell`、`read_file`、`write_file` 与 `apply_patch` 工具。`shell` 执行真正的命令行并返回退出码与合并后的 stdout/stderr；`write_file` 仅用于新建文件，已有单个或多个文件的所有修改都使用 `apply_patch`。Web UI 每个聊天会话保留一个工作区；每个 OpenAI Chat、OpenAI Responses 与 Ollama HTTP 请求则在其内部工具轮次间使用一个私有工作区，并在响应结束后删除。macOS / Linux 上命令必须在操作系统沙箱内运行；隔离不可用时，除非运维者显式设置 `--code-exec-unconfined`，服务端会拒绝执行。Windows 始终需要这个逃生开关。联网默认另行禁止，只能用 `--code-exec-allow-network` 开启。所有内置工具都由宿主在进程内应答，不会返回给 API 客户端。默认关闭。环境变量：`TS_CODE_EXEC`（非 `0` 即视为开启）。 |
 | `--code-exec-allow-install` | 允许模型把 pip / npm 包装进当前 Web 会话或 HTTP 请求工作区；需要 `--code-exec`。这项权限**不会**给模型生成的命令套接字。TensorSharp 读取并校验识别到的安装命令，用宿主构造的参数向量执行只装 wheel / 禁止脚本的安装，再把 `true` 或 `false` 代回命令行。后续生成的代码仍然离线，除非另行传入 `--code-exec-allow-network`。环境变量：`TS_CODE_EXEC_ALLOW_INSTALL`。 |
 | `--code-exec-allow-network` | 给予每一条模型生成的命令不受限的宿主 IP 网络访问；生成的代码可以解析 DNS、抓取 URL、跟随重定向、调用远程 API、访问局域网/回环服务并打开 IP 监听套接字。**默认关闭**，且需要 `--code-exec`。macOS 与 Linux 上的写入及主目录读取约束仍保持生效。Linux 还通过 PID 命名空间约束后代进程；macOS 子进程会继承 Seatbelt，普通进程组也会被清理，但主动脱离进程组的子进程可能在请求结束后继续运行，每次工具结果都会明确报告这一限制。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。其他宿主可读文件及 IP 服务因而可能被访问并外传；远程提示词注入与不可信下载也是额外风险。只有不含凭据的宿主 HTTP/SOCKS 代理设置会在此模式下传入。宿主会把不超过 16 MiB 的自定义 CA 包只读取一次，并仅将验证过的公开证书复制到每会话只读快照，因此源路径及其相邻数据不会暴露；认证代理需使用宿主侧无凭据转发器。包名与安装域名允许列表只约束宿主识别并代办的安装；不受限的生成代码仍可直接抓取或执行制品。它与 `--code-exec-allow-install`、`--skills-allow-network` 都相互独立。Windows 仍须传入 `--code-exec-unconfined`。环境变量：`TS_CODE_EXEC_ALLOW_NETWORK`（非 `0` 即视为开启）。 |
@@ -702,8 +704,7 @@ shell 调用仍是全新的受限进程；不要依赖 virtualenv 激活状态�
 都会明确报告这一限制。macOS 仍拒绝常见的 `/private/tmp/com.apple.launchd*` 路径套接字（但保留系统运行时所需的 Mach lookup 与 DNS 必需的精确 mDNSResponder 路径套接字），Linux 仍隐藏常见的 `/run` 端点，但本地
 Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录内的 Unix IPC，Linux
 的宿主网络命名空间可能暴露抽象套接字以及 `/run` 之外的路径名套接字。其他宿主
-可读数据可能被外传。`--skills-allow-network` 只控制
-`skills_run`，与它相互独立；装包权限同样不会打开 shell 网络。安装仍由宿主亲自
+可读数据可能被外传。`--skills-allow-network` 控制技能脚本与原生技能发现，与它相互独立；装包权限同样不会打开 shell 网络。安装仍由宿主亲自
 执行——宿主从每一条被识别出来的安装命令里读出工具名与包名，用自己拼出的参数
 向量去调用安装器，再把
 那条命令在命令行里替换掉——装成功换成 `true`，装失败换成 `false`——于是模型写在
@@ -721,19 +722,19 @@ Unix IPC 并非完整隔离边界：macOS 为兼容性保留共享临时目录�
 |---|---|
 | `--video-width <px>` | Web UI 或 API 请求未提供 `width` 时，视频生成使用的默认输出宽度；别名 `--width`。这是**服务端最主要的质量杠杆**，因为 Web UI 自己不发送尺寸——不设置的话每段视频都会用模型默认值生成。MiniMax-H3 的推荐起点是 `640`（配合 `--video-height 384`）。会向上取整到模型的网格。 |
 | `--video-height <px>` | 请求未提供 `height` 时的默认输出高度；别名 `--height`。只给出宽高之一时，MiniMax-H3 会按条件图片的宽高比推出另一个，这样 4:3 的照片就不会被拉成 16:9。 |
-| `--video-steps <N>` | 请求未提供 `steps` 时的默认去噪步数——分辨率之后最重要的质量/时间取舍。MiniMax-H3 自身默认 `20`；`4`–`8` 是快速工作点，`16`–`24` 明显更干净，超过 30 提升有限。 |
+| `--video-steps <N>` | 请求未提供 `steps` 时的默认去噪步数——分辨率之后最重要的质量/时间取舍。MiniMax-H3 自身默认 `20`；`4`–`8` 是快速工作点，`16`–`24` 明显更干净，超过 30 提升有限。 LTX 2.5 只接受首阶段 8 步，随后另做 3 步精修。 |
 | `--video-mode <mode>` | 请求未提供 `videoMode` 时的默认条件模式：`t2v`（纯文本）、`i2v`（图片是第一帧并让它动起来）、`fl2v`（同时钉住首帧**与**末帧）、`ref`（图片是用于全新场景的身份/外观参考）。不设置时每个请求按其自身携带的输入推断，通常这就是你想要的；只提供一种模式的部署才需要固定它。 |
-| `--video-frames <N>` | Web UI 或 API 请求未提供 `frames` 时，视频生成使用的默认输出帧数。会对齐到模型自己的时间网格——Wan 为 `4k+1`，其中以 24 fps 生成 `121` 帧约为五秒；MiniMax-H3 为 `17k+5`。未指定此参数时沿用模型回退值：通常为 `33`，Wan 2.2 TI2V-5B 为 `49`，MiniMax-H3 为 `22`。请求中显式提供的 `frames` 会覆盖此默认值。 |
-| `--fps <N>` | Web UI 或 API 请求未提供 `fps` 时，生成的 MP4 使用的默认播放帧率。未指定此参数时沿用模型回退值：通常为 `16` fps，Wan 2.2 TI2V-5B 为 `24` fps。请求中显式提供的 `fps` 会覆盖此默认值；仅改变 FPS 会改变播放速度，而不会改变生成的帧数。以固定帧率训练的模型（MiniMax-H3，24 fps）会覆盖任何其他取值。 |
-| `--video-vae <path>` | 覆盖解析到的视频 VAE（`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`；MiniMax-H3 用 `minimax_h3_video_vae_fp16.safetensors`）。默认：在 DiT 同目录扫描，包含 `VAE/` 子目录。环境变量：`TS_VIDEO_VAE`。 |
-| `--video-text-encoder <path>` | 覆盖解析到的文本编码器 GGUF（Wan 用 UMT5-XXL，MiniMax-H3 用 Qwen3-VL-32B）。环境变量：`TS_VIDEO_TEXT_ENCODER`。 |
+| `--video-frames <N>` | Web UI 或 API 请求未提供 `frames` 时，视频生成使用的默认输出帧数。会对齐到模型自己的时间网格——Wan 为 `4k+1`，其中以 24 fps 生成 `121` 帧约为五秒；MiniMax-H3 为 `17k+5`。未指定此参数时沿用模型回退值：通常为 `33`，Wan 2.2 TI2V-5B 为 `49`，MiniMax-H3 为 `22`。请求中显式提供的 `frames` 会覆盖此默认值。 LTX 2.5 默认 17 帧，必须为 `8k+1`；无效请求不会自动对齐。 |
+| `--fps <N>` | Web UI 或 API 请求未提供 `fps` 时，生成的 MP4 使用的默认播放帧率。未指定此参数时沿用模型回退值：通常为 `16` fps，Wan 2.2 TI2V-5B 为 `24` fps。请求中显式提供的 `fps` 会覆盖此默认值；仅改变 FPS 会改变播放速度，而不会改变生成的帧数。以固定帧率训练的模型（MiniMax-H3，24 fps）会覆盖任何其他取值。 LTX 2.5 默认为 24 fps。 |
+| `--video-vae <path>` | 覆盖解析到的视频 VAE（`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`；MiniMax-H3 用 `minimax_h3_video_vae_fp16.safetensors`）。默认：在 DiT 同目录扫描，包含 `VAE/` 子目录。环境变量：`TS_VIDEO_VAE`。 LTX 2.5 需要预设的卷积视频 VAE；扩散解码器使用独立参数。 |
+| `--video-text-encoder <path>` | 覆盖解析到的文本编码器（LTX 2.5 用专用 Gemma 4 safetensors；Wan 用 UMT5-XXL GGUF；MiniMax-H3 用 Qwen3-VL-32B GGUF）。环境变量：`TS_VIDEO_TEXT_ENCODER`。 |
 | `--video-dit2 <path>` | 双专家模型的第二个扩散专家（Wan 2.2 A14B 中与 `--model` 配对的 high/low-noise 搭档）。两者同目录时按文件名自动解析。环境变量：`TS_VIDEO_DIT2`。 |
 | `--audio-vae <path>` | 与视频联合生成音轨的模型所用的音频 VAE（`minimax_h3_audio_vae_fp32.safetensors`）。不提供时该类模型仍能出图，只是没有音频。环境变量：`TS_VIDEO_AUDIO_VAE`。 |
 | `--video-upscaler <path>` | 两阶段视频模型所用的 2 倍潜变量放大器：LTX 2.5 先以输出尺寸的一半生成，再用 `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors` 放大潜变量，最后以完整尺寸精修。默认：模型同目录的 `latent_upscale_models/`。环境变量：`TS_VIDEO_UPSCALER`。 |
 | `--video-diffusion-vae <path>` | 可选的 LTX 2.5 扩散视频解码器（`ltx-2.5-video-vae-bf16.safetensors`）：颗粒和闪烁更少、画面更干净，但比默认的卷积 `--video-vae` 更柔和。仅支持 MLX 和 CPU；CUDA 会拒绝。默认：关闭。环境变量：`TS_VIDEO_DIFFUSION_VAE`。 |
 | `--qwen-image-vae <path>` / `--qwen-image-vl <path>` / `--qwen-image-mmproj <path>` | 覆盖服务端原本在 DiT GGUF 旁找到的 Qwen-Image-2.1 伴随文件：VAE、Qwen3-VL-8B 文本编码器及其视觉投影器（编辑时需要）。启动时检查。环境变量：`TS_QWEN_IMAGE_VAE`、`TS_QWEN_IMAGE_TE`、`TS_QWEN_IMAGE_MMPROJ`。 |
 | `--qwen-image-variant <base\|turbo>` | DiT GGUF 是哪一个 Qwen-Image-2.1 检查点，拼写与含义同 CLI：`turbo` 默认按 Turbo 的 8 步调度、CFG 1 采样（请求的 `steps` 只能是 8），并拒绝步数蒸馏 `--lora` 插件。作用于服务端加载的每个 Qwen-Image 模型；其他模型照常加载、不使用它，服务端会记录一条警告，与 `--lora` 相同。默认：不声明——文件名含单词 `turbo` 时按 Turbo 处理，加载时会打印这一假定。启动时检查。环境变量：`TS_QWEN_IMAGE_VARIANT`。 |
-| `--width <px>` / `--height <px>` | 图像请求既未指定尺寸也未指定面积时（Web UI 从不指定）Qwen-Image-2.1 的默认输出尺寸；请求自己设置了宽高或目标面积时保留它自己的几何设置。默认尺寸需要两个值都给出。不是 32 倍数的边会向下取整到 32 的倍数（最小 32），并打印一次 `[qwen-image] WARNING`；只给出一边、或值无法解析或为负数时，默认尺寸会被忽略（同样只警告一次），继续使用自动尺寸（2048×2048 面积；`cpu` 后端上为 1024×1024）。Qwen-Image 服务端在这两种情况下都会在启动时警告，但不会拒绝启动。请求本身设置的宽高仍必须是 32 的正整数倍。环境变量：`TS_QWEN_IMAGE_WIDTH` / `TS_QWEN_IMAGE_HEIGHT`。它们同时也是 `--video-width` / `--video-height` 的别名。 |
+| `--width <px>` / `--height <px>` | 图像请求既未指定尺寸也未指定面积时（Web UI 从不指定）Qwen-Image-2.1 的默认输出尺寸；请求自己设置了宽高或目标面积时保留它自己的几何设置。默认尺寸需要两个值都给出。不是 32 倍数的边会向下取整到 32 的倍数（最小 32），并打印一次 `[qwen-image] WARNING`；只给出一边、或值无法解析或为负数时，默认尺寸会被忽略（同样只警告一次），继续使用自动尺寸（2048×2048 面积；`cpu` 后端上为 1024×1024）。Qwen-Image 服务端在这两种情况下都会在启动时警告，但不会拒绝启动。请求本身设置的宽高仍必须是 32 的正整数倍。环境变量：`TS_QWEN_IMAGE_WIDTH` / `TS_QWEN_IMAGE_HEIGHT`。它们同时也是 `--video-width` / `--video-height` 的别名。 LTX 2.5 视频默认输出 1024×1024，宽高必须为 64 的正整数倍；见下文两阶段配方。 |
 | `--lora <path>` / `--lora-scale <f>` / `--lora-config <path>` | Qwen-Image-2.1 LoRA 插件，拼写与绑定规则都与 CLI 相同（重复 `--lora` 可叠加；强度与配置绑定到前一个 `--lora`）。文件在启动时检查，这组插件作用于每个图像请求；请求中的 `steps` / `cfg` 仍会覆盖插件的采样配方。其他模型会忽略它们（启动日志会说明这些插件只作用于 Qwen-Image-2.1 模型）。见 [Qwen-Image-2.1 LoRA 插件](#qwen-image-21-lora-插件)。 |
 | `--qwen-image-lora` / `--offload-cpu` | **已移除，启动时（包括作为配置文件键时）直接拒绝。** 两者只服务于早期的 Qwen-Image-Edit 流水线。`--qwen-image-lora` 由上面的 `--lora` 取代；`--offload-cpu` 没有替代项，因为 Qwen-Image-2.1 的 DiT 权重始终常驻。 |
 | `--temperature <f>` | 采样温度（`0` = 贪心） |
@@ -1081,261 +1082,108 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/q
 `--tp N` 兼容。格式、打包方式、张量并行与限制的详细说明见
 [Qwen-Image-2.1 卡片](docs/models/qwenimage21_zh-cn.md#lora-插件)。
 
+## 音视频生成（LTX 2.5 Distilled）
+
+LTX 2.5 从文本、首尾帧或带时间位置的图像关键帧联合生成视频与 48 kHz 立体声音频。
+使用固定版本与哈希的五文件预设（44.76 GB）；官方伴随文件需要获批 Hugging Face
+访问权限，并配置 `HF_TOKEN`、`HUGGING_FACE_HUB_TOKEN` 或 Hugging Face CLI token 缓存。
+
+```bash
+# NVIDIA；Apple Silicon 改用 --backend mlx，并在启动时设置 MLX_ENABLE_TF32=0。
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend cuda \
+  --prompt "A red toy car drives slowly along a quiet road." \
+  --diffusion-seed 42 --output ltx25.mp4
+
+# 添加首帧；--end-image 还可引导尾帧。
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend mlx \
+  --image portrait.png --prompt "The person smiles and waves at the camera." \
+  --diffusion-seed 42 --output wave.mp4
+
+# 用相同预设启动浏览器界面与视频 API。
+dotnet run --project TensorSharp.Server.Host -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend ggml_cuda
+```
+
+预设默认 **1024×1024、17 帧、24 fps**。宽高表示输出尺寸，必须为 64 的倍数；
+帧数须符合 `8k+1`。两阶段配方先以半尺寸做八步 `euler_ancestral`，通过必需的
+2 倍潜变量放大器后，再以完整尺寸精修三步，CFG 为 1。`--diffusion-steps 8`
+指已发布的首阶段步数；任意步数、guidance 和 flow-shift 设置会被拒绝。
+确定性的 `--sampler euler` 仅用于诊断。实验性 48 GB 目录档位是起点，
+并非所有分辨率与时长都已证明的最低内存需求。
+
+`cuda` / `ggml_cuda` 使用 CUDA 执行器；`mlx` / `ggml_metal` 使用 MLX；
+`cpu` / `ggml_cpu` 使用直接 CPU 执行器。不支持 Vulkan 与多 GPU。
+可选的 `--video-diffusion-vae` 仅支持 MLX / CPU，默认使用卷积 VAE；
+`--video-upscaler` 可覆盖必需的潜变量放大器。
+桌面端 MP4 音轨封装需要 `PATH` 或 `TS_FFMPEG` 中的 FFmpeg；CLI 也保存原始 WAV。
+TensorAgent 的 Mac 应用使用 AVFoundation。
+
+视频 API 接受 `imageConditions`，每项含 `imagePath` 或内联 `image`、
+`frameIndex`（从零开始；`-1` 表示末帧）与 `[0,1]` 的 `strength`。
+有序 `referenceImages` 默认是时间线引导；`videoMode: "ref"` 则选择需要独立
+Ingredients IC-LoRA 的身份参考模式。尚不支持视频 / 音频参考和 retake。
+完整设置、实测范围与性能限制见 [LTX 模型卡片](docs/models/ltx-2.5_zh-cn.md)和
+[API 示例](TensorSharp.Server.Host/API_EXAMPLES_zh-cn.md)。
+
 ## 音视频生成（MiniMax-H3）
 
-MiniMax-H3 **同时生成视频与原生 32 kHz 立体声音轨**——一个扩散 Transformer 在同一条
-token 序列上对打包好的“视频+音频”潜变量一起去噪，因此音频是模型输出的一部分，而不是
-事后配上去的。最长 15 秒、24 fps。它是 CFG 蒸馏模型，因此必须用 `--cfg 1.0`；管线默认
-20 步去噪，4–8 步是快速工作点。在 M5 Pro / Metal、22 帧、8 步、相同随机种子下实测：
-256×256 比 stable-diffusion.cpp 快 2.4×（49.3 s → **20.9 s**），640×384 快 1.7×
-（108.5 s → **63.1 s**）。
+MiniMax-H3 联合生成视频与原生 32 kHz 立体声音频。两个检查点接受不同条件：
 
-这个对比取决于硬件，在显存吃紧的卡上会反过来。在 16 GB 的 RTX 3080 Laptop / CUDA 上
-（同样 22 帧、8 步、三次取最好），端到端反而是 stable-diffusion.cpp 更快：256×256 快
-1.15×（37.8 s 对 43.6 s），640×384 快 1.07×（59.8 s 对 63.7 s）。但按**单去噪步**算，
-TensorSharp 在这张卡上依然领先（按 8 步与 16 步的斜率折算为 3.325 s 对 3.338 s）；输的
-是固定的启动开销，而且剩下 3.9 s 差距里约有 3 s 根本不是推理——一头是 H.264 编码
-（stable-diffusion.cpp 写的是 AVI 里的 MJPEG+PCM），另一头是 .NET 进程启动对上原生
-可执行文件。那台机器只有 16 GB 显存与 31.7 GB 内存，要面对约 35.5 GB 的模型集合，权重和
-页缓存都塞不下，于是启动开销主导了墙钟时间；显存峰值 TensorSharp 为 15 780 MiB，
-stable-diffusion.cpp 为 12 035 MiB（整卡 16 384 MiB）。stable-diffusion.cpp 用的是
-`--auto-fit --stream-layers --diffusion-fa --rng cpu`，因为它默认的 `--offload-to-cpu`
-路径在这台机器上根本跑不动这个模型——它要把 17.7 GB 钉进只剩 12.3 GB 的内存里。
+| 检查点 / 配置 | 输入 |
+|---|---|
+| `minimax_h3_fl2va_pruned-Q4_K.gguf` / `config/minimax-h3-fl2va.json` | 文本（`t2v`）、首帧（`i2v`）、首尾帧（`fl2v`） |
+| `minimax_h3_ref2va_pruned-Q4_K.gguf` / `config/minimax-h3-ref2va.json` | 文本或身份 / 外观参考（`ref`），含图像、视频与音频参考 |
 
-需要四个网络——两个去噪器之一，加上三个共用的伴随文件。它们依次加载、依次释放，
-因此显存峰值取其中最大者，而不是四者之和：
-
-| 角色 | 文件 | 大小 |
-| --- | --- | --- |
-| 去噪器——关键帧（`t2v` / `i2v` / `fl2v`） | `minimax_h3_fl2va_pruned-Q4_K.gguf` | 10.64 GiB |
-| 去噪器——参考（`t2v` / `ref`） | `minimax_h3_ref2va_pruned-Q4_K.gguf` | 10.60 GiB |
-| 文本编码器（Qwen3-VL-32B，50 层） | `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` | 16.97 GiB |
-| 视频 VAE（空间 16× / 时间 4×） | `minimax_h3_video_vae_fp16.safetensors` | 5.21 GB |
-| 音频 VAE（32 kHz 立体声） | `minimax_h3_audio_vae_fp32.safetensors` | 0.61 GB |
-
-加载的是哪个去噪器，是按**文件名**判断的：名字里带 `ref2va` 的走参考检查点，其余
-一律走首尾帧检查点——所以改名或重新量化时必须保留 `ref2va` 这几个字。
-
-伴随文件与去噪器同目录时会自动解析，否则用 `--video-text-encoder`、`--video-vae`、
-`--audio-vae` 指定。不给音频 VAE 仍然能出视频，只是没有声音——`--no-audio` 也一样，
-它跳过音频解码来省下时间与显存；在 Ref2VA 上，`--ref-audio` 走的正是同一个 VAE 的
-编码器，所以去掉它连参考音轨也一并失去。文本编码器**不带分词器**，
-需要把 [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor)
-的 `vocab.json` 与 `merges.txt` 放在它旁边（或设置 `TS_VIDEO_TOKENIZER`）。
-
-**16 GB 的卡上会看到什么。** 一旦这套权重装不下，有两件事会起作用。其一，只要去噪器
-与视频 VAE 放不进同一块显存，去噪器的设备驻留会在 VAE 加载**之前**先交还——否则一个
-已经用完的 10.6 GB 去噪器会和 5.2 GB 的 VAE 一起挤在 16 GB 的卡上，而 WDDM 并不会让
-这次分配失败，它会用共享主机内存兜住溢出部分，于是整个解码都跑在 PCIe 的速度上（解码
-期间显存峰值 16 041 MiB → 约 5 600 MiB，在 640×384 上值 22 秒）。其二，权重是以指针形式
-绑定到 mmap 的 GGUF 上的，因此去噪器文件会在第一次上传之前被顺序读一遍——在文本主干
-产出隐藏状态的那一刻就开始读，并且与上传流水线并行、而不是在上传前 join，因为一边拷贝
-一边缺页的 H2D 在这张卡上实测只有 0.91 GB/s，而页面已驻留时是 5.97 GB/s。两者合起来，
-640×384 在 16 GB 的 RTX 3080 Laptop 上从 89.0 s 降到 63.7 s（256×256：67.2 s →
-43.6 s），开关前后输出逐字节一致。交还驻留以实测空闲显存为门槛，预读则以空闲物理内存
-为门槛。内存不够时预读会直接让路并照常继续；它会打印 `denoiser prefault skipped (not enough free RAM)`，但**仅在 `TS_H3_PHASE=1` 下可见**——默认设置下跳过是静默的。
-因此两边都宽裕的机器上行为与之前完全一样。设 `TS_H3_PHASE=1` 会打印分阶段耗时——编码器
-打开 / 主干 / 拆卸、预读、每一个去噪步、VAE 打开 / 解码——在自己的卡上正是从这里看时间
-花在了哪。
-
-随仓库提供的两个配置文件把四个网络全部写了进去，这正是它们能在首次运行时自动下载到
-`${modelRoot}`（FL2VA 一套约 35.5 GB，Ref2VA 约 35.4 GB）并在之后复用的原因。两者只有
-去噪器不同，所以跑完一个之后再跑另一个，只会下载它自己的 DiT：
+两个配置均固定去噪器、Qwen3-VL-32B 文本编码器、视频 VAE 与音频 VAE。
+编码器还需[模型卡片](docs/models/minimax-h3_zh-cn.md)中 processor 修订版本的
+`vocab.json`、`merges.txt` 与 `tokenizer_config.json`。
+去噪器文件名需保留 `fl2va` / `ref2va`。伴随文件可用 `--video-text-encoder`、
+`--video-vae`、`--audio-vae` 和 `TS_VIDEO_TOKENIZER` 指定。
+TensorAgent 随固定的模型文件下载分词器。
 
 ```bash
-# 关键帧：文生视频、图生视频、首尾帧
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
-  --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4
+# 首帧被动画化；提示词描述其动作。
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/minimax-h3-fl2va.json --backend ggml_metal \
+  --image portrait.png --video-mode i2v --prompt "The person smiles and waves." \
+  --width 640 --height 384 --video-frames 22 --diffusion-steps 20 \
+  --cfg 1 --diffusion-seed 42 --output wave.mp4
 
-# 参考：同一主体，全新场景
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-ref2va.json \
-  --ref-image person.png --ref-image jacket.png \
-  --prompt "she walks through a night market, neon reflections" --output market.mp4
-
-# 两个文件同样可以直接托管服务端
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/minimax-h3-fl2va.json
+# Ref2VA 用参考身份生成新场景。
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/minimax-h3-ref2va.json --backend ggml_cuda \
+  --video-mode ref --ref-image portrait.png \
+  --prompt "<Picture 1> walks through a sunlit garden." \
+  --width 640 --height 384 --video-frames 22 --diffusion-seed 42 --output garden.mp4
 ```
 
-两个配置都固定了 `"backend": "ggml_cuda"` 以及 640×384 × 22 帧 / 24 fps；命令行上的
-`--backend ggml_metal` 会覆盖后端。它们都没有设置步数与引导，因为两个宿主对步数的写法
-不同（CLI 是 `--diffusion-steps`，服务端是 `--video-steps`），而服务端根本没有 `--cfg`
-参数——于是模型自身的默认值生效。
+省略 `--image` / `--video-mode` 即文生视频；FL2VA 在首帧之外添加 `--end-image`
+即可首尾帧生成。Ref2VA 接受最多九个 `--ref-image`，以及 `--ref-video`、
+`--ref-audio` 与按索引配对的 `--ref-video-audio`；提示词使用 `<Picture 1>`、
+`<Video 1>`、`<Audio 1>` 占位。检查点、模式或输入不兼容时会报错，避免静默忽略条件。
 
-**文生视频。** 输出 `fox.mp4` 和带音轨的 `fox.wav`：
+CFG 固定为 **1**；默认 **20 步**，4–8 步以质量换速度。宽高向上对齐到 32 的倍数；
+帧数对齐到 `17k+5` 网格（5、22、39……），播放固定 24 fps。
+这些是输入约束；长片段的感知质量尚未确立。`--no-audio` 跳过音频解码，
+仍运行训练时的联合 AV 去噪器。CLI 在 MP4 旁写 WAV；是否封装音轨取决于导出器。
+可手工合并：`ffmpeg -i wave.mp4 -i wave.wav -c:v copy -c:a aac wave_with_audio.mp4`。
 
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --prompt "a red fox trotting through falling snow, cinematic" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
-  --output fox.mp4
-```
+已实现 `ggml_metal`、`mlx`、`ggml_cuda`、`cuda`、`ggml_cpu` 与纯 C# `cpu`，
+不支持多 GPU。文本精修、音频 carrier drift 与最终缩放修正后，旧的生成对比
+（包括 Metal 2.4× / 1.7×）已失效。最新同精度改动前后测试
+（640×384×22、20 步）中，完整进程时间在 Metal 降低 5.0%、MLX 降低 12.5%、
+直接 CUDA 降低 19.0%；原生 CUDA 无明显收益。小样本包含加载 / 导出，
+文件缓存状态未受控，不能建立普遍加速或跨引擎性能持平的结论；修正后的 CPU 完整生成配对仍待完成。
+实际组件、设备验证与性能边界见[当前覆盖与精度说明](docs/models/minimax-h3_zh-cn.md)。
 
-**图生视频——让照片动起来。** 图片成为**第一帧**，提示词决定后续动作：
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --image portrait.jpg \
-  --prompt "the person turns toward the camera and smiles, subtle handheld motion" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
-  --output animated.mp4
-```
-
-**首尾帧。** 两端钉住，模型补出中间的运动：
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --image start.png --end-image end.png --prompt "a slow cinematic push-in" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
-  --output morph.mp4
-```
-
-**模式选择。** 一张图对 H3 有两种完全不同的含义，且使用不同的检查点。
-不指定时自动推断，`--video-mode` 用于显式声明。
-
-| 你想要什么 | `--video-mode` | 检查点 |
-| --- | --- | --- |
-| “让这张照片动起来” | `i2v` | `minimax_h3_fl2va_pruned-*` |
-| “从照片 A 变到照片 B” | `fl2v` | `minimax_h3_fl2va_pruned-*` |
-| “用这个人物，生成全新场景” | `ref` | `minimax_h3_ref2va_pruned-*` |
-| “参考这个产品/人物，但换机位、背景和构图” | `ref` | `minimax_h3_ref2va_pruned-*` |
-| 只有文本 | `t2v` | 都可以 |
-
-无法解释成同一件事的组合会被直接拒绝并指名原因，而不是只兑现一半：在 FL2VA 上用
-`ref`、在 Ref2VA 上传关键帧、`i2v` 却没有图片、`fl2v` 却没有 `--image` 和/或
-`--end-image`、`ref` 却没有任何可参考的输入、`t2v` 却传了图片，以及关键帧与具名参考
-同时出现——一段“看起来像是照做了”的视频才是更糟糕的失败。每条报错都会指出该加载的
-检查点或该去掉的参数。
-
-参考条件保留主体、其余全部重来——机位、背景和构图都由提示词决定，第一帧完全
-不必与参考图相似：
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --ref-image person.jpg --ref-image bottle.png \
-  --prompt "she holds the bottle up to the light on a rooftop at golden hour, slow orbit" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 20 --cfg 1.0 \
-  --output rooftop.mp4
-```
-
-最多九张 `--ref-image`。参考图只会被缩小并保持自身宽高比，输出画布仍然由
-`--width`/`--height` 决定。在 Ref2VA 检查点上，普通的 `--image` 同样会被当作参考图，
-因此只会“上传一张图”的客户端无需改动即可使用。
-
-参考也可以是**视频片段**（`--ref-video`，视频文件或帧目录）或**音频**
-（`--ref-audio`）。视频自带的声音用 `--ref-video-audio` 按位置配对单独给出，
-因为容器里的音轨无法通过帧解码器读取：
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --ref-video walk.mp4 --ref-video-audio walk.wav \
-  --prompt "the same woman walks along a beach at sunset, wide shot" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 20 --cfg 1.0 \
-  --output beach.mp4
-```
-
-参考视频是 H3 最昂贵的输入——22 帧 448x320 的参考会在输出所需的 1680 个 token 之外
-再加 980 个条件 token，编码本身还要约 14 秒。它会被重采样到 24 fps、对齐到 17k+5
-网格，并以 2 fps 呈现给语言模型。
-
-**参考不是免费的，而且真正咬人的是第二笔开销。** 在去噪器内部它是线性且便宜的：
-一张 640×384 的参考是 240 个 token，在 RTX 3080 Laptop 上，640×384 的 22 帧片段
-每一步去噪从「无参考」的 4.37 s 涨到「八张参考」的 9.38 s——每张参考每步约 626 ms，
-从一张到八张都是这个斜率。真正翻车的是 Qwen3-VL 那一趟：每张参考会往提示词里加
-约 250 个视觉占位 token，并要过完整 50 层预填充，于是两张参考是 548 token 的提示词、
-八张是 2086 token，文本条件耗时从约 65 s 涨到约 447 s，而整个 8 步去噪也才约 75 s。
-超过大约四张参考之后，跑的就是编码器而不是去噪器了——先想着减少参考、换更好的参考，
-再想着减步数。九张的上限是 TensorSharp 自己定的：打包后的序列是不加掩码整体注意的，
-它的长度既是时间预算也是数值预算。另外记得在提示词里写清楚画面里是谁——参考图提供的
-是身份，镜头内容仍然要靠提示词描述，否则会得到一段渲染得很好、但主体缺席的画面。
-
-**质量。** 有两个设置起决定性作用：
-
-| 参数 | 默认值 | 作用 |
-| --- | --- | --- |
-| `--width` / `--height` | 640×384；有图时按该面积取图片宽高比 | **影响最大。** 人脸需要像素——256×256 下无论其他参数怎么调都会糊、都会变形。 |
-| `--diffusion-steps` | 20 | 消除运动主体周围的彩色边缘。8 步是快速档，约 20 步干净，超过 30 提升有限。 |
-| `--diffusion-seed` | 随机 | 有些种子构图更好，最省事的重试手段。 |
-| 量化等级 | — | 显存允许就用 `-Q8_0` 去噪器而不是 `-Q4_K`。 |
-
-`--cfg` 不是质量参数（H3 只接受 1.0），`--negative-prompt` 也不起作用，因为没有无条件分支。
-注意这里的种子是 `--diffusion-seed` 而不是 `--seed`：`--seed` 是文本采样种子，不影响视频；
-而不传 `--diffusion-seed` 时每次运行都会取一个新的随机种子——所以要做对照的两次运行必须显式设置它。
-
-**在服务端，尺寸是启动参数。** 浏览器发送的是提示词，加上所托管检查点通过
-`/api/models` 声明支持的那些条件输入——首帧、末帧，或最多 `maxReferenceImages` 个
-参考——以及对应的 `videoMode`。上传图片会直接用于生成，无需在服务端命令行传入
-`--image` 或本地图片路径。数值类参数一个都不发，因此每段视频都继承服务端默认值：
-
-```bash
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --video-width 640 --video-height 384 --video-steps 20 --video-frames 22 --port 5001
-```
-
-`--video-mode` 为没有传入 `videoMode` 的请求设置默认模式；不指定时模型按请求
-自身携带的输入自动推断。Web 聊天和 TensorAgent 根据上传附件与所加载的检查点选择
-模式，附带图片时会覆盖这个启动默认值。Ref2VA 将图片用作新场景的参考；若要将上传
-图片作为首帧进行动画生成，请加载 `config/minimax-h3-fl2va.json`。
-
-不指定 `--video-width`/`--video-height` 时，每个请求会按上传图片的宽高比来，
-避免把 4:3 的照片拉成 16:9。
-
-**HTTP 接口。** 有三个端点生成视频，且都禁用了请求超时：`POST /api/video-generate`、
-`POST /api/video-generate/stream`（同样的请求体，改用 SSE，逐步推送
-`{ videoGen, step, total, phase, detail, elapsedSeconds, etaSeconds }`，最后以
-`{ done: true, … }` 结束），以及 OpenAI 形态的 `POST /v1/videos/generations`。三者共用
-同一个解析器，因此同一份请求体到处都能用：`prompt`（必填）、`width`、`height`、
-`frames`、`steps`、`cfg`、`cfg2`、`seed`、`fps`、`flowShift`、`negativePrompt`、
-`sampler`、`cfgCacheStride`、`videoMode`、`generateAudio`、`imagePath`（或内联 base64
-的 `image`）、`endImage`、`referenceImages`、`referenceVideos`、`referenceAudios` 与
-`referenceVideoAudios`——最后一个按**下标**与 `referenceVideos` 配对。为音视频联合生成
-与参考条件新增的字段同时接受下划线写法（`video_mode`、`generate_audio`、`end_image`、
-`reference_images`……），两种都给时以驼峰为准；更早的字段只认驼峰。所有路径字段都必须
-指向此前通过 `/api/upload` 上传的文件，并被限制在上传目录之内。
-
-`/api/video-generate` 返回
-`{ ok, url, audioUrl, width, height, frames, fps, seed, codec, elapsedSeconds }`，模型
-没有生成音轨时 `audioUrl` 为 null；`/v1/videos/generations` 还接受 `"832x480"` 形式的
-`size`、`negative_prompt` 与 `response_format`（`url` 或 `b64_json`），返回
-`{ created, data: [{ url, b64_json }], audio_url, width, height, frames, fps, seed,
-codec, elapsed_seconds }`。凡是模型自己能解释清楚的请求错误——模式与检查点不匹配、
-模式缺少必需输入、关键帧与参考同时出现——都会以 400 带上模型自己的报错信息返回，而
-不是笼统的 500；托管的模型本身不生成视频时，返回
-`The loaded model is not a video-generation model.`
-
-托管的模型能生成视频时，`GET /api/models` 会带上一个 `video` 对象（否则为 `null`），
-客户端据此就能知道该提供什么，而不必去匹配架构字符串：`family`（`minimax-h3`）、
-`supportsAudio`（解析到音频 VAE 后为 true）、`supportsImageConditioning`、
-`supportsEndImageConditioning`（仅 FL2VA）、`supportsReferenceConditioning` 与
-`maxReferenceImages`（Ref2VA 上为 9）。Web UI 正是读这几个字段来决定要不要提供末帧或
-参考图。
-
-**尺寸。** 宽高向上取整到 32 的倍数；帧数向上对齐到 `17k+5` 网格
-（5、22、39、56、73、90……），fps 固定为 24，因此片段最长 15 秒。任意网格长度都能
-正确解码——视频 VAE 每次跑 5 个潜变量帧、带 2 帧前瞻，并对接缝做交叉淡化。反过来，
-一次性解码长片段会让细节被逐渐冲淡（对着条件照片测量，第 0 帧的相关度从 22 帧的
-0.97 掉到 90 帧的 0.86），所以分块是正确性要求，而不是优化。
-
-**长片段一旦发散，宁可报错也不会存盘。** H3 是对整段片段做双向注意的，因此 key 的
-数量*就是*片段本身——22 帧是 2364 个打包 token，107 帧是 8646 个——而一个发散的
-flow-matching 速度场解码出来的文件，长度、帧率、音轨时长全都对，只是每个像素都是黑的、
-每个音频采样都被削平。所以遇到非有限的速度场时，管线会让整个请求失败并指出是第几步
-出的问题，而不是把那个文件写出来。设 `TS_H3_TRACE=1` 可以打印每一步的潜变量与速度场
-幅值：absmax 通常在真正变成无穷之前若干步就已经离开了正常区间。
-
-**音频**写成独立的 `.wav`，因为封装进 MP4 需要一个未必安装的编码器。合并：
-
-```bash
-ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4
-```
-
-**`--backend cpu` 上完全不用 ggml 也能跑完整条流程。** 提示词编码、去噪、视频 VAE 解码
-与音频声码器都有纯 C# 实现，视觉塔、因果 3-D 视频 VAE 编码器与音频 VAE 编码器同样如此——
-因此 `t2v`、`i2v`、`fl2v` 以及参考图 / 参考视频 / 参考音频在那里都能用。所有计算都在主机上
-以 F32 进行，所以它面向的是正确性、可移植性和没有加速器的机器，而不是速度：256x160x5f 的
-单步 `t2v` 实测 69 秒，`ggml_cpu` 为 14 秒；而同一个 `i2v` 实测 70 秒，`ggml_cpu` 为 176 秒（单次采样，不要过度解读这个方向）。
-它与 GGML 路径的一致性，以及唯一一个残差大于 GGML 自身内部差异的阶段（视觉塔），都记在模型卡片里。
-
-完整说明见 [docs/models/minimax-h3_zh-cn.md](docs/models/minimax-h3_zh-cn.md)。
+三个共用端点为 `/api/video-generate`、`/api/video-generate/stream` 与
+`/v1/videos/generations`。宿主配置接受 `--video-width`、`--video-height`、
+`--video-steps`、`--video-frames` 与 `--fps` 作为请求默认值。
+`GET /api/models` 声明当前检查点的条件能力。Web 聊天与 TensorAgent 根据附件选择
+模式；Ref2VA 中上传的图片作为身份参考，要让它作为首帧动起来需加载 FL2VA。
+字段、上传路径与响应见 [API 示例](TensorSharp.Server.Host/API_EXAMPLES_zh-cn.md)。
 
 ## 视频生成（Wan）
 

@@ -176,12 +176,18 @@ TensorAgent 的知识管理菜单，使用 `/api/knowledge` 管理集合。
 | `TS_KNOWLEDGE_DIRECTORY` | 独立服务端资料库目录；不设置则不启用 |
 | `TS_KNOWLEDGE_EMBEDDING_MODEL` | 可选句向量 GGUF；不设置则仅使用文本检索 |
 | `TS_KNOWLEDGE_EMBEDDING_BACKEND` | 编码器后端，默认 `CPU` |
-| `TS_KNOWLEDGE_QUERY_PREFIX` / `TS_KNOWLEDGE_DOCUMENT_PREFIX` | 模型要求的查询/文档前缀，默认空 |
+| `TS_KNOWLEDGE_QUERY_PREFIX` / `TS_KNOWLEDGE_DOCUMENT_PREFIX` | 模型要求的查询/文档前缀；EmbeddingGemma 2 未设置时使用其检索默认值，其他架构默认空；显式空值禁用前缀 |
 | `TS_KNOWLEDGE_RERANK` | `0` 关闭有界模型相关性排序 |
 | `TS_KNOWLEDGE_PDF_OCR` | `auto`、`apple`、`tesseract` 或 `none`；`none` 保留可选择文本 |
 | `TS_KNOWLEDGE_PDFTOPPM_PATH` / `TS_KNOWLEDGE_TESSERACT_PATH` | 自定义工具绝对路径 |
 | `TS_KNOWLEDGE_TESSDATA_DIRECTORY` | 自定义 Tesseract 语言数据目录 |
 | `TS_KNOWLEDGE_OCR_LANGUAGES` | 托管默认 `eng+chi_sim`；繁体可用 `eng+chi_tra` |
+
+EmbeddingGemma 2 在前缀变量未设置时自动使用
+`task: search result | query: ` 和 `title: none | text: `；显式空值会禁用对应前缀。
+其他架构有需要时仍须设置自己的检索前缀。更换模型或前缀后需重新索引。
+此提供器嵌入抽取后的文本；EmbeddingGemma 2 独立 HTTP API 的图像/音频/视频
+能力不表示知识库已使用原生联合媒体向量。模型与服务配置见[嵌入指南](embeddings_zh-cn.md)。
 
 显式设置工具路径或语言数据目录会退出托管安装。
 更改提取配置后重启宿主并重新索引已有来源。

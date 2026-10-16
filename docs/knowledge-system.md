@@ -478,12 +478,17 @@ Optional embedding configuration, set before starting the host:
 ```sh
 export TS_KNOWLEDGE_EMBEDDING_MODEL=/absolute/path/to/embedding-model.gguf
 export TS_KNOWLEDGE_EMBEDDING_BACKEND=CPU
-export TS_KNOWLEDGE_QUERY_PREFIX=''
-export TS_KNOWLEDGE_DOCUMENT_PREFIX=''
 ```
 
-Choose a supported sentence-embedding GGUF and use the prefixes required by that
-model. Omit the embedding model variable for lexical retrieval. Media processing
+Choose a supported [sentence-embedding GGUF](embeddings.md) and use its required
+prefixes. With EmbeddingGemma 2, omitted `TS_KNOWLEDGE_QUERY_PREFIX` and
+`TS_KNOWLEDGE_DOCUMENT_PREFIX` select `task: search result | query: ` and
+`title: none | text: ` automatically; an explicitly empty value disables the
+corresponding prefix. Other architectures keep empty defaults, so set their
+retrieval prefixes explicitly when required. The provider embeds extracted text;
+EmbeddingGemma 2's separate HTTP image/audio/video API does not turn this library
+into a native joint-media vector index. Reindex after changing model or prefixes.
+Omit the embedding model variable for lexical retrieval. Media processing
 uses the currently loaded compatible model; upload does not choose or download
 one. A configured transcription companion is an external service and receives
 the recording as part of the user's explicitly configured workflow.

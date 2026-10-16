@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Embedding Models & Semantic Search — TensorSharp Wiki</title>
-  <meta name="description" content="Turn text and code into vectors for semantic search and RAG. TensorSharp runs GGUF BERT / XLM-R encoders locally and serves embeddings through OpenAI- and Ollama-compatible HTTP APIs. This feature is in current source; older release archives may not include it.">
+  <meta name="description" content="Snowflake, MiniLM and EmbeddingGemma 2 text/image/audio/video embeddings: local backends, OpenAI/Ollama APIs, input contracts and measured validation.">
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="assets/style.css">
   <script>try{var t=localStorage.getItem('ts-theme')||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');document.documentElement.classList.toggle('dark',t==='dark');}catch(e){}</script>
@@ -16,51 +16,46 @@
 <main class="content" id="content">
   <div class="breadcrumb"><a href="index.html">Home</a> › Embedding Models & Semantic Search</div>
   <h1>Embedding Models & Semantic Search</h1>
-  <p class="lede">Turn text and code into vectors for semantic search and RAG. TensorSharp runs GGUF BERT / XLM-R encoders locally and serves embeddings through OpenAI- and Ollama-compatible HTTP APIs. This feature is in current source; older release archives may not include it.</p>
-  <p>For a reusable library, <a href="knowledge.html">personal knowledge bases</a> combine retained originals, extraction, BM25 and optional GGUF vectors, with TensorAgent per-chat scope and citations. The default needs no embedding model.</p>
-
+  <p class="lede">Generate normalized vectors locally through OpenAI- and Ollama-compatible APIs. Snowflake Arctic Embed and MiniLM encode text/code; EmbeddingGemma 2 also combines text, images, audio and video into one vector. This page describes current source; older release archives may not include these features.</p>
   <h2 id="models">Models</h2>
-  <div class="table-scroll"><table>
-    <thead><tr><th>Model</th><th>Dimensions</th><th>GGUF token limit</th><th>Pooling</th></tr></thead>
-    <tbody>
-      <tr><td>Snowflake Arctic Embed L v2.0 Q8_0</td><td>1024</td><td>8192</td><td>CLS</td></tr>
-      <tr><td>all-MiniLM-L6-v2 Q8_0</td><td>384</td><td>512</td><td>Mean</td></tr>
-    </tbody>
-  </table></div>
-  <p>Pinned downloads, checksums, and the complete protocol: <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/embeddings.md">embedding guide</a> · <a href="models-downloads.html">model downloads</a>.</p>
+  <div class="table-scroll"><table><thead><tr><th>Model</th><th>Output dimensions</th><th>Input window</th><th>Pooling</th></tr></thead><tbody>
+    <tr><td>Snowflake Arctic Embed L v2.0 Q8_0</td><td>1024</td><td>8192</td><td>CLS</td></tr>
+    <tr><td>all-MiniLM-L6-v2 Q8_0</td><td>384</td><td>512 in this GGUF</td><td>Mean</td></tr>
+    <tr><td>EmbeddingGemma 2 Q8_0 / BF16</td><td>768; MRL 512 / 256 / 128</td><td>8192 including special/media tokens</td><td>Mean + learned projection</td></tr>
+  </tbody></table></div>
+  <p>Supported architecture keys are <code>bert</code>, <code>nomic-bert</code> and <code>gemma-embedding2</code>; Vulkan embedding execution is unimplemented. The BERT/XLM-R path supports pure C# <code>cpu</code> and native <code>ggml_cpu</code> / <code>ggml_metal</code> / <code>ggml_cuda</code>. EmbeddingGemma 2 additionally implements direct <code>mlx</code> and <code>cuda</code>, for six backends. Implementation availability does not establish all-six-backend multimodal quality or performance parity.</p>
   <h2 id="start">Start the service</h2>
-  <p>Embedding execution supports 100% pure C# <code>cpu</code>, plus native <code>ggml_cpu</code>, <code>ggml_metal</code>, and <code>ggml_cuda</code>. Pure C# execution needs no native inference library; native execution requires the corresponding backend build. Each process keeps one encoder resident; a chat service uses a separate port.</p>
-  <pre data-lang="bash"><code>dotnet build TensorSharp.Server.Host -c Release \
-  -p:TensorSharpSkipGgmlNative=true -p:TensorSharpSkipMlxNative=true
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
-  --model models/embeddings/snowflake-arctic-embed-l-v2.0-q8_0.gguf \
-  --embeddings --backend cpu --embedding-threads 8 \
-  --host 127.0.0.1 --port 5000 --no-webui</code></pre>
-  <p><code>--embedding-context-size N</code> reduces the per-input token limit; 0 uses model metadata. <code>/v1/models</code>, <code>/api/tags</code>, <code>/api/show</code> report the hosted model and its embedding capability. An embedding server does not generate: a POST to <code>/v1/chat/completions</code>, <code>/v1/responses</code>, <code>/v1/systemone</code>, <code>/v1/videos/generations</code>, <code>/api/generate</code>, <code>/api/chat</code>, <code>/api/chat/ollama</code>, <code>/api/models/load</code>, or <code>/api/image-generate</code>, <code>/api/image-edit</code> and <code>/api/video-generate</code> (and their <code>/stream</code> forms) returns HTTP 400 pointing at <code>/v1/embeddings</code> or <code>/api/embed</code>. An explicit <code>--backend</code> the machine does not have exits 2 with <code>error: model load refused: …</code>. <code>--embeddings</code> also requires <code>--model</code> and rejects <code>--mmproj</code>.</p>
-  <h2 id="api">HTTP APIs</h2>
-  <pre data-lang="bash"><code>curl http://127.0.0.1:5000/v1/embeddings \
-  -H &#x27;Content-Type: application/json&#x27; \
-  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;input&quot;:[&quot;query: read a file&quot;,&quot;def read_file(path): return open(path).read()&quot;],&quot;dimensions&quot;:256}&#x27;
-
-curl http://127.0.0.1:5000/api/embed \
-  -H &#x27;Content-Type: application/json&#x27; \
-  -d &#x27;{&quot;model&quot;:&quot;snowflake-arctic-embed-l-v2.0-q8_0&quot;,&quot;input&quot;:[&quot;query: read a file&quot;,&quot;open a document&quot;],&quot;truncate&quot;:false}&#x27;</code></pre>
-  <p>OpenAI <code>input</code> accepts a string, a string array, one token-ID array, or an array of token-ID arrays; token inputs must already include this model’s special tokens. <code>encoding_format</code> is <code>float</code> or <code>base64</code> (little-endian float32). Responses include indices, vectors, and token usage. A request accepts up to 2048 inputs and 262144 total tokens. Embedding and model-show JSON bodies are limited to 16 MiB; oversized bodies return HTTP 413.</p>
-  <p>OpenAI rejects inputs beyond the context limit. Ollama <code>/api/embed</code> accepts a string or string array; <code>truncate</code> defaults to <code>true</code> and preserves the final special token, while <code>false</code> rejects overflow. Its response contains <code>embeddings</code>, nanosecond timings, and <code>prompt_eval_count</code>.</p>
-  <p>Concurrent callers are grouped from requests already waiting, in FIFO order, up to 64 sequences and 4096 tokens per encoder call. The first request starts immediately; there is no batching delay. Larger whole requests run alone. Each caller retains its own result order and options; canceling one caller does not cancel healthy callers. See the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/embeddings.md#concurrent-requests">request scheduling contract</a>.</p>
-  <h2 id="quality">Retrieval quality and performance</h2>
-  <p>Prefix Snowflake queries with <code>query: </code> and leave documents unprefixed. Vectors have unit L2 norm, so a dot product gives cosine similarity. <code>dimensions</code> crops the vector and normalizes it again; Snowflake’s Matryoshka training supports reduction to 256 dimensions, while arbitrary reductions on other models can lower quality. MiniLM’s upstream default sentence length is shorter than this GGUF’s 512-position capacity. Chunk code at function/class boundaries and rebuild the index when changing models or chunking.</p>
-  <p>Both implementations use full bidirectional attention and model-declared pooling. Each pure C# model owns a persistent worker pool; ARM Q8 projections use four-token × four-output signed-dot SIMD tiles. Managed FP32 attention transposes keys, computes four queries with adjacent keys in SIMD lanes, and packs values into channel tiles (four channels on ARM) for fused multiply-add. Portable vector-width and four-query dot-product fallbacks cover other processors and head sizes; padded key strides cover tails; the long path uses 64-query × 128-key tiles with ARM four-query × sixteen-output SIMD reuse and online FP32 softmax and bounded per-head scratch. Short and fallback paths keep four temporary score rows. The native executor packs heterogeneous GPU batches with sequence-isolating masks, packs CPU projections with independently padded attention, and reuses graphs.</p>
-  <p>Tokenization is checked against independent HuggingFace and llama.cpp references, including multilingual Unicode; the full guide records upstream differences. The native-free host check removes custom native assets and inspects loaded libraries after inference. The managed x86 path has guarded AVX/AVX2/AVX-512 support; the four-query × sixteen-column kernel is ARM-specific. Current timing evidence covers Apple Silicon, with x86 performance unmeasured. Performance conclusions come from measurements on identical GGUFs, hardware, and requests.</p>
-  <p>Validation results and limitations: <code>docs/validation/embeddings-2026-09/README.md</code> (local validation evidence, not committed) · <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/benchmarks/EmbeddingBench/README.md">Reproduce the HTTP benchmark</a></p>
+  <p>Each process keeps one embedding encoder resident; host chat separately on another port. <code>config/embeddinggemma2.json</code> supplies a checksum-pinned native CPU text recipe:</p>
+  <pre data-lang="bash"><code>dotnet run --project TensorSharp.Server.Host -- \
+  --config config/embeddinggemma2.json --host 127.0.0.1 --port 5000 --no-webui</code></pre>
+  <p>EmbeddingGemma 2 image/audio/video needs the matching media projector; omit <code>--mmproj</code> for text-only loading. Download the pinned files:</p>
+  <pre data-lang="bash"><code>mkdir -p models/embeddings
+curl -fL --retry 3 -o models/embeddings/embeddinggemma-2-Q8_0.gguf \
+  https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/embeddinggemma-2-Q8_0.gguf
+curl -fL --retry 3 -o models/embeddings/embeddinggemma-2-mmproj-Q8_0.gguf \
+  https://huggingface.co/unsloth/embeddinggemma-2-GGUF/resolve/031f0d4b35536f69ab3509d4893c923264fcf253/mmproj-Q8_0.gguf
+dotnet run --project TensorSharp.Server.Host -- \
+  --model models/embeddings/embeddinggemma-2-Q8_0.gguf --embeddings --backend ggml_metal \
+  --mmproj models/embeddings/embeddinggemma-2-mmproj-Q8_0.gguf --no-webui</code></pre>
+  <h2 id="api">HTTP APIs and multimodal sequences</h2>
+  <p><code>POST /v1/embeddings</code> accepts strings, string arrays and token-ID arrays; token inputs must include the model's special tokens. <code>encoding_format</code> is <code>float</code> or little-endian Float32 <code>base64</code>. <code>POST /api/embed</code> accepts strings/arrays and defaults text <code>truncate</code> to true; OpenAI rejects overflow. With an EmbeddingGemma 2 projector loaded, both endpoints also accept one <code>{"content":[...]}</code> object or an array of these objects; each preserves part order and returns one vector for the complete sequence:</p>
+  <pre data-lang="json"><code>{
+  "model": "embeddinggemma-2-Q8_0",
+  "input": [{"content": [
+    {"type": "text", "text": "Waterproof running shoes. "},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+  ]}],
+  "dimensions": 256
+}</code></pre>
+  <p>Media uses base64 data URIs. Audio is <code>{"type":"input_audio","input_audio":{"data":"...","format":"wav"}}</code> (also MP3/OGG/FLAC); video is <code>{"type":"input_video","input_video":{"url":"data:video/mp4;base64,..."}}</code> (also WebM). Video samples 1 fps up to 32 frames; image preprocessing follows the HF aspect-preserving 280-soft-token target. Audio decodes to mono 16 kHz. Actual media tokens share the same 8192-token window. Oversized media is rejected, not cut by the text truncation option; host codecs also constrain formats.</p>
+  <p>A request accepts up to 2048 inputs and 262144 total tokens. Embedding/model-show JSON bodies are limited to 16 MiB (HTTP 413 above that), including encoded media. <code>--embedding-context-size N</code> lowers the per-input limit; 0 uses the model default. Embedding processes reject generation endpoints; <code>/v1/models</code>, <code>/api/tags</code> and <code>/api/show</code> report their capabilities.</p>
+  <h2 id="quality">Retrieval contracts and measured scope</h2>
+  <p>EmbeddingGemma 2 search queries use <code>task: search result | query: </code> and untitled documents use <code>title: none | text: </code>; code retrieval and sentence similarity have their own task prefixes. The API preserves caller text without adding prefixes. <code>dimensions</code> crops then L2-normalizes; queries and documents must use the same model and dimensions. Snowflake queries use <code>query: </code> and documents remain unprefixed.</p>
+  <p>Current Q8 text evidence uses an M5 Pro/48 GiB, identical model/input bytes and sequential steady-state HTTP runs, excluding model loading: all 16 native Metal scenarios beat llama.cpp; MLX met the 5% latency margin in all 16. Independent NumPy checks cover eight exact token sequences and 8192 tokens; the first 200 STS-B development pairs were checked at four dimensions. This is a subset regression, not a full retrieval evaluation.</p>
+  <p>Default-HF media checks cover seven synthetic cases through both APIs, 22 malformed requests, temporary-file cleanup, shutdown and an independent complete pooled-audio oracle. Controlled llama.cpp media comparisons align image/video preprocessing and audio mel floor; default preprocessing differs. Controlled Metal passed seven numerical comparisons but only text met the 5% latency margin; complete direct CPU/CUDA comparisons also contain failed or slower cases. Text and component results do not establish six-backend multimodal parity.</p>
+  <p>These runs use unchanged ggml <code>3612c0af93f2cfc8f048295300a61187723b12ae</code>. Missing models/devices are explicit skips, not passes. See the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/embeddings.md">full embedding guide</a> and <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/benchmarks/EmbeddingBench/README.md">reproduction tools</a> for pinned assets, numerical gates, failed reports and performance limits. Generated evidence stays in ignored <code>docs/validation/</code>.</p>
   <h2 id="csharp">C# integration</h2>
-  <p><code>Backend = &quot;CPU&quot;</code> is the default pure C# encoder. Use <code>&quot;GGML_CPU&quot;</code> for native CPU execution, <code>&quot;METAL&quot;</code> for native Metal, or <code>&quot;CUDA&quot;</code> for native CUDA.</p>
-  <pre data-lang="csharp"><code>using TensorSharp.Models.Embeddings;
-
-using var model = EmbeddingModel.Load(&quot;models/embeddings/all-MiniLM-L6-v2-Q8_0.gguf&quot;,
-    new EmbeddingModelOptions { Backend = &quot;CPU&quot;, Threads = 8 });
-EmbeddingBatchResult batch = await model.EmbedAsync(new[] { &quot;read a file&quot;, &quot;open a document&quot; });
-float[] vector = batch.Embeddings[0];</code></pre>
+  <p>Text uses <code>EmbeddingModel.Load</code>; multimodal input uses <code>EmbeddingGemma2MultimodalEncoder.Load(textGguf, projectorGguf, options)</code> with <code>EmbeddingGemma2InputPart.Text/Image/Audio/Video</code> for local inputs. <code>CPU</code> selects pure C#; other names are <code>GGML_CPU</code>, <code>METAL</code>, <code>CUDA</code>, <code>MLX</code> and <code>GGML_CUDA</code>; see the guide for their mappings.</p>
 </main>
 </body>
 </html>

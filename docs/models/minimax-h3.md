@@ -1,5 +1,7 @@
 # MiniMax-H3
 
+[English](minimax-h3.md) | [中文](minimax-h3_zh-cn.md)
+
 MiniMax-H3 generates video and native 32 kHz stereo audio in one packed diffusion
 sequence. TensorSharp exposes it through `MiniMaxH3Model.GenerateVideo`, the CLI
 and the video HTTP routes. FL2VA handles text and keyframes; Ref2VA handles text
@@ -24,7 +26,25 @@ validation case.
 
 ## Current validation
 
-Validation recorded on 2026-10-13–14 uses an Apple M5 Pro with 48 GB for the local
+The latest 2026-10-15 preservation checks use unchanged upstream ggml
+`3612c0af93f2cfc8f048295300a61187723b12ae`, an Apple M5 Pro with 48 GiB and an
+NVIDIA A40 with 46,068 MiB VRAM. Final candidate 7 passed 36 focused CPU/MLX
+tests locally and 29 focused tests remotely; all nine component oracles on each
+of direct MLX, native Metal, direct CUDA and native CUDA passed without skips.
+Full-generation preservation pairs reproduced decoded RGB and stereo audio
+exactly on those four GPU routes, including native CUDA first/last-keyframe and
+MLX image-plus-canonical-audio Ref2VA cases. The independent synthetic all-50-block
+CUDA F32 gate passes with relative L2 `0.0001258906` (audio) and `0.0000847537`
+(video). This is a separate 19-token sigma-one input, not a multi-step or
+natural-media quality oracle. CPU whole-generation pairs remain pending.
+
+The [validation workflow](../../eng/validation/README-minimax-h3.md) records the
+latest evidence and older comparisons separately. The following detailed
+cross-engine checks were recorded on 2026-10-13–14 and are historical coverage;
+the latest before/after performance measurements appear under
+[Performance and precision](#performance-and-precision).
+
+The earlier validation uses an Apple M5 Pro with 48 GB for the local
 Metal/MLX lanes and an NVIDIA A40 with about 46 GB VRAM for the remote CUDA/CPU
 lanes. The remote worker has about 46.5 GB RAM and a 7.65-core CPU quota; CPU
 runs use eight threads.
@@ -37,7 +57,7 @@ stable-diffusion.cpp baseline is
 were hash-verified from `unsloth/MiniMax-H3-GGUF` revision
 `d629413c2e5b51b38c453668b75ca3b06ca92703`.
 
-| Backend | Actual current component coverage | Whole-generation coverage |
+| Backend | Recorded 2026-10-13–14 component coverage | Whole-generation coverage |
 |---|---|---|
 | `ggml_metal` | Corrected DiT oracle 1/1, zero skips; other unchanged component gates exercised | Matched 640×384×22, eight-step generation and sampled-frame inspection completed |
 | `mlx` | Final 39-case device/cache/pipeline suite, post-repacking text/DiT oracles and three final reader/VAE oracles; zero skips | Final matched eight-step generation; RGB and WAV bit-identical across optimization versions; I2V technical smoke completed |
@@ -112,6 +132,39 @@ separately trained eight-step FastH3 checkpoints must not be conflated.
 
 ## Performance and precision
 
+The latest before/after comparison uses FL2VA Q4_K, 640×384×22 at 24 fps,
+20 Euler steps, seed 42, CFG 1 and shift 12. Two alternating rounds include
+model loading, generation and codecs. Both frozen binaries use the unchanged
+ggml revision above; file/JIT caches remain uncontrolled.
+
+| Backend / host | Baseline median | Candidate median | Preserved output / scope |
+|---|---:|---:|---|
+| M5 Pro `ggml_metal` | 151.246 s | 143.622 s | Exact RGB/audio; 5.0% lower latency |
+| M5 Pro `mlx` | 143.264 s | 125.426 s | Exact RGB/audio; 12.5% lower latency |
+| A40 `ggml_cuda` | 68.029 s | 67.174 s | Exact RGB/audio; 1.3% does not establish a meaningful gain |
+| A40 `cuda`, equal precision | 220.456 s | 178.667 s | Exact RGB/audio; 19.0% lower latency |
+
+The direct CUDA comparison explicitly applies pedantic BF16-weight projection
+math to both versions. It does not compare the candidate's stricter default
+against the old approximate default. Final-build preservation pairs are
+additional quality checks, not new two-round speed measurements. Ref2VA with
+one image and canonical audio at 256×160×5/eight steps improved from 82.037 to
+43.630 s across two alternating pairs with exact RGB/audio; this synthetic
+case does not establish natural-reference quality or long-clip throughput.
+
+The changes avoid repeated token-row copies and RoPE construction, fuse exact
+MLX modulation/residual and SwiGLU operations, and cache native CUDA graph
+storage and weight bindings. MLX VAE F32 weights upload directly to owned
+device arrays, avoiding 9.02 GiB of duplicate retained host weights for this
+decoder. A fixed-latent check reduced sampled warm process RSS from 23.048 to
+14.024 GiB with identical output; this is sampled process residency rather
+than peak unified/device memory. See the
+[validation workflow](../../eng/validation/README-minimax-h3.md) for frozen
+binary reports, coverage and reproduction commands.
+
+The earlier cross-engine measurements below use different schedules or binaries
+and must not be combined with the new before/after table.
+
 Actual new-process measurements include loading and output encoding. They do
 not control the OS file cache or establish warm-model service latency.
 
@@ -156,8 +209,17 @@ device residency; converted scratch is capped at 64 MiB. Inputs and outputs
 retain F32 range, and the near-cancellation regression also checks default
 dispatch. `TS_H3_CUDA_F32_BANDS=0` restores the original F32 kernels;
 `1` or `tf32` explicitly selects approximate TF32 products for large matrices.
-Other model dispatch and the shared cuBLAS math mode are unchanged. Mapped dense
-projections retain their previous size-dependent precision policy.
+Other model dispatch and the shared cuBLAS math mode are unchanged. BF16 dense
+weight projections now also use pedantic F32 by default; set
+`TS_H3_CUDA_BF16_PEDANTIC=0` only to diagnose the historical TF32 approximation.
+On the separate 19-token synthetic full50 case, this change reduced relative L2
+from `0.0070538` to `0.0001258906` for audio and from `0.0046911` to
+`0.0000847537` for video, both below the strict `0.001` gate.
+
+An experimental batched-attention model route passed that synthetic component
+gate but failed complete-generation RGB/audio equivalence. Its model opt-in
+was removed, and the probe rejects obsolete `TS_H3_CUDA_BATCHED_ATTENTION`
+overrides. Standalone helper tests and timings are research evidence only.
 
 On an exclusive A40, identical 118-token inputs through the same frozen full50
 probe gave these actual trace-free forwards, with bit-identical repeats per mode:
@@ -516,7 +578,7 @@ but a track that is spectrally plausible and merely wrong.
 |---|---|
 | `TS_H3_CUDA_F32_BANDS` | Direct CUDA H3 quantized projections: default pedantic F32 bands; `0` selects legacy F32 kernels, `1`/`tf32` opts into approximate large TF32 products |
 | `TS_H3_CUDA_MAPPED_VAE_WEIGHTS=1` | Opt-in direct CUDA mapped F16 VAE weights; cold/warm tradeoff above |
-| `TS_H3_CUDA_BF16_PEDANTIC=1` | Diagnostic pedantic compute for H3 BF16 dense projections |
+| `TS_H3_CUDA_BF16_PEDANTIC` | Pedantic F32 for H3 BF16 dense projections by default; `0` restores the historical TF32 approximation |
 | `TS_H3_PHASE=1` | Stage timings including text, denoiser and VAEs |
 | `TS_H3_TRACE=1` | Latent/velocity magnitude diagnostics |
 | `TS_H3_DIT_TRACE_DIR` / `TS_H3_LINEAR_TRACE_FILE` | Synchronizing boundary/projection diagnostics; exclude from formal timings |
@@ -524,7 +586,7 @@ but a track that is spectrally plausible and merely wrong.
 | `TS_H3_PREFAULT_THREADS` | Prefault streams; default 1 |
 | `TS_H3_TE_GROUP` | Optional grouped native text-encoder trunk; off by default |
 | `TS_H3_KEEP_RESIDENT=1` | Optional Metal residency policy between clips |
-| `TS_H3_UPLOAD_PREFAULT` | Native CUDA bulk page-prefault policy: automatic half-memory/cgroup guard; `0` disables, `1` forces. Final default validation is pending above |
+| `TS_H3_UPLOAD_PREFAULT` | Native CUDA bulk page-prefault policy: automatic half-memory/cgroup guard; `0` disables, `1` forces; final default coverage is recorded above |
 | `TS_H3_UPLOAD_WORKERS` | Native bulk-prefault workers (1–8, default 8); distinct from the pipeline's denoiser file-read streams |
 | `TS_H3_UPLOAD_PROFILE=1` | Native weight-upload and graph-compute diagnostics; record separately from trace-free performance runs |
 

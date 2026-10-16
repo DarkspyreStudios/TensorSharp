@@ -43,8 +43,10 @@ TensorSharp loads models in GGUF format. Below are verified Hugging Face repos f
 | Qwen-Image-2.1 | Qwen3-VL-8B text encoder (required) | `Qwen3VL-8B-Instruct-Q4_K_M.gguf` from [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) — place next to the DiT or set `--qwen-image-vl` / `TS_QWEN_IMAGE_TE` |
 | Qwen-Image-2.1 | Vision encoder for editing | `mmproj-Qwen3VL-8B-Instruct-F16.gguf` from the same Qwen3-VL repository — place next to the DiT or set `--qwen-image-mmproj` / `TS_QWEN_IMAGE_MMPROJ` |
 | Qwen-Image-2.1-Turbo | Diffusion transformer, 8-step distillation (the `--model` GGUF) | [AtomicChat/Qwen-Image-2.1-Turbo-GGUF](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-GGUF) — `Qwen-Image-2.1-Turbo-AD-Q4_K.gguf` (4.20 GB), or `Qwen-Image-2.1-Turbo-Q8_0.gguf` (7.59 GB), the transformer closest to full precision (with the same Q4_K_M text encoder). [`config/qwen-image-2.1-turbo.json`](config/qwen-image-2.1-turbo.json) downloads AD-Q4_K with a pinned revision and SHA-256 into `qwen-image-2.1/` under the models root, with the VAE, text encoder and mmproj listed above under their published file names, so a folder that already holds them fetches only the transformer. The GGUF has no metadata, so the config declares the checkpoint (`--qwen-image-variant turbo`). See [qwenimage21.md](docs/models/qwenimage21.md#qwen-image-21-turbo) |
-| Qwen-Image-2.1 | LoRA plug-ins (optional) | Twelve plug-ins in [`config/lora/`](config/lora/), loaded with `--lora`; each downloads its `.safetensors` from Hugging Face with a pinned revision and SHA-256 on first use, into `qwen-image-2.1/loras/` under the model root (Fun-Acc also fetches the `pdd_config.json` it forwards). Step-distillation adapters (Viggle Turbo, Pruna 8/5-step, Alibaba PAI Fun-Acc 4-step) and style / editing LoRAs; several are non-commercial. See [USAGE.md](USAGE.md#qwen-image-21-lora-plug-ins) |
-| MiniMax-H3 audio+video | denoiser (the `--model` GGUF) | **Two separate checkpoints, not settings** — which one you load decides what conditioning it accepts. [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF): `minimax_h3_fl2va_pruned-Q4_K.gguf` (10.64 GiB) for text / image-to-video / first-and-last-frame, or `minimax_h3_ref2va_pruned-Q4_K.gguf` (10.60 GiB) for identity/appearance references. Also Q8_0 (19.97 GiB) down to Q2_K (6.26 GiB). H3 is CFG-distilled: **CFG must be 1.0** (the default); the current default is 20 steps, with 4–8-step runs trading quality for speed. The GGUFs carry **no metadata at all**, so TensorSharp identifies them by their tensors, and the partition off the file name — keep `fl2va` / `ref2va` in it if you rename or requantize. Both checkpoints share the three networks below, so adding the second one later costs only its own ~10.6 GiB. TensorAgent's desktop catalog (32 GB tier) downloads the whole hash-pinned set itself, tokenizer included, as two entries, `minimax-h3-fl2va-q4k` and `minimax-h3-ref2va-q4k`; whichever is installed second links the 24.0 GB of shared files instead of downloading them again and fetches only its denoiser. See [minimax-h3.md](docs/models/minimax-h3.md#in-the-tensoragent-mac-app) |
+| Qwen-Image-2.1 | LoRA plug-ins (optional) | Fourteen plug-ins in [`config/lora/`](config/lora/), loaded with `--lora`; each downloads its `.safetensors` from Hugging Face with a pinned revision and SHA-256 on first use, into `qwen-image-2.1/loras/` under the model root (Fun-Acc also fetches the `pdd_config.json` it forwards). Step-distillation adapters (Viggle Turbo, Pruna 8/5-step, Alibaba PAI Fun-Acc 4-step) and style / editing LoRAs; several are non-commercial. See [USAGE.md](USAGE.md#qwen-image-21-lora-plug-ins) |
+| LTX 2.5 Distilled | Video + 48 kHz stereo audio | [`config/ltx-2.5-distilled.json`](config/ltx-2.5-distilled.json) pins all five files (44.76 GB): Q4_K_M denoiser, dedicated Gemma 4 BF16 encoder/projections, convolutional video VAE, x2 latent upscaler and audio VAE. Official companions require approved Hugging Face access and a token. The experimental TensorAgent tier is 48 GB; default preview is 1024×1024×17 at 24 fps, with an 8+3-step two-stage ancestral Euler recipe. Optional Ingredients IC-LoRA and diffusion video decoder are separate downloads. See [LTX 2.5](docs/models/ltx-2.5.md). |
+| EmbeddingGemma 2 | Text/code and optional media embeddings | [`config/embeddinggemma2.json`](config/embeddinggemma2.json) pins the Q8_0 text model at Unsloth revision `031f0d4b35536f69ab3509d4893c923264fcf253`; optional `mmproj-Q8_0.gguf` from the same revision enables image/audio/video inputs. Host with `--embeddings`; output is 768 dimensions (MRL: 512/256/128), default input window 8192 tokens. Six backends are implemented; Vulkan is unavailable. See [Embeddings](docs/embeddings.md) for commands and coverage. |
+| MiniMax-H3 audio+video | denoiser (the `--model` GGUF) | **Two separate checkpoints, not settings** — which one you load decides what conditioning it accepts. [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF): `minimax_h3_fl2va_pruned-Q4_K.gguf` (10.64 GiB) for text / image-to-video / first-and-last-frame, or `minimax_h3_ref2va_pruned-Q4_K.gguf` (10.60 GiB) for identity/appearance references. Also Q8_0 (19.97 GiB) down to Q2_K (6.26 GiB). H3 is CFG-distilled: **CFG must be 1.0** (the default); the current default is 20 steps, with 4–8-step runs trading quality for speed. The GGUFs carry **no metadata at all**, so TensorSharp identifies them by their tensors, and the partition off the file name — keep `fl2va` / `ref2va` in it if you rename or requantize. Both checkpoints share the three networks below, so adding the second one later costs only its own ~10.6 GiB. TensorAgent's desktop catalog (32 GB tier) downloads the whole hash-pinned set itself, tokenizer included, as two entries, `minimax-h3-fl2va-q4k` and `minimax-h3-ref2va-q4k`; whichever is installed second links the 24.0 GB of shared files instead of downloading them again and fetches only its denoiser. See [minimax-h3.md](docs/models/minimax-h3.md#files) |
 | MiniMax-H3 audio+video | Qwen3-VL-32B text encoder (required) | Same repo: `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` (16.97 GiB), or `-Q2_K_M.gguf` (12.20 GiB) to pair with the two smallest denoisers. Truncated to 50 layers with the final norm removed. Freed before the denoise starts. **It ships no tokenizer** — also download `vocab.json`, `merges.txt` and `tokenizer_config.json` from [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor) and put them beside it (or set `TS_VIDEO_TOKENIZER`) |
 | MiniMax-H3 audio+video | `vocab.json` + `merges.txt` + `tokenizer_config.json` (required) | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor), `processor/` (4.46 MB together) — the Qwen2 byte-level BPE vocabulary and merges the encoder GGUF omits, plus `tokenizer_config.json`, the only file that defines `<\|vision_start\|>`, `<\|image_pad\|>` and `<\|vision_end\|>`. Text-to-video runs without it, and so do references that are all sound recordings; a keyframe, or a photo or clip reference, is refused before the vision tower runs (without it the picture used to be placed over the wrong prompt positions and quietly ignored). The one thing a config cannot auto-download for you (auto-download fills in options that are flags; the tokenizer is not one), though TensorAgent's catalog fetches all three. `curl -L -o models/vocab.json https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/42ed227ee7df40d41602854ae760620d6eb651fe/processor/vocab.json` and the same for `merges.txt` and `tokenizer_config.json` |
 | MiniMax-H3 audio+video | video VAE (required) | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/vae) — `minimax_h3_video_vae_fp16.safetensors` (5.21 GB). 16x spatial / 4x temporal, with a pure-transformer decoder. Place next to the denoiser or set `--video-vae` |
@@ -332,7 +334,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model models/qw
 
 (In the Web UI, a prompt without an attachment generates an image; attach one or more images to edit. Omitted settings select 2048×2048 (1024×1024 on pure-C# `cpu`), 40 Euler steps and CFG 1; `--width 1024 --height 1024` is the faster draft size, and on the server `--width` / `--height` given together change that default. See [qwenimage21.md](docs/models/qwenimage21.md).)
 
-Step-distillation LoRA plug-ins (optional) cut the 40 steps to 4–8. Drop `--diffusion-steps 40 --cfg 1` from the CLI commands above and add `--lora config/lora/qwen-image-2.1-viggle-turbo.json` (6 steps by default, CFG 1) or `--lora config/lora/qwen-image-2.1-pruna-8step.json` (8 steps): the adapter downloads on first use and its recipe supplies the steps and CFG. An explicit `--diffusion-steps` / `--cfg` overrides the recipe, and a step count the recipe has no schedule for is refused. The server takes the same `--lora` at startup. All twelve plug-ins are listed in [config/README.md](config/README.md#qwen-image-21-lora-plug-ins-lora).
+Step-distillation LoRA plug-ins (optional) cut the 40 steps to 4–8. Drop `--diffusion-steps 40 --cfg 1` from the CLI commands above and add `--lora config/lora/qwen-image-2.1-viggle-turbo.json` (6 steps by default, CFG 1) or `--lora config/lora/qwen-image-2.1-pruna-8step.json` (8 steps): the adapter downloads on first use and its recipe supplies the steps and CFG. An explicit `--diffusion-steps` / `--cfg` overrides the recipe, and a step count the recipe has no schedule for is refused. The server takes the same `--lora` at startup. All fourteen plug-ins are listed in [config/README.md](config/README.md#qwen-image-21-lora-plug-ins-lora).
 
 **Qwen-Image-2.1-Turbo** — the same model distilled to 8 steps at CFG 1 ([AtomicChat/Qwen-Image-2.1-Turbo-GGUF](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-GGUF)). Its config downloads only the 4.20 GB AD-Q4_K transformer when the Qwen-Image-2.1 files are already in `qwen-image-2.1/`, and declares the checkpoint, so Turbo samples its published 8-step schedule; other step counts and step-distillation LoRA plug-ins are refused:
 
@@ -344,6 +346,17 @@ dotnet run --project TensorSharp.Cli -c Release --no-build -- \
 ```
 
 To fetch it yourself: `hf download AtomicChat/Qwen-Image-2.1-Turbo-GGUF Qwen-Image-2.1-Turbo-AD-Q4_K.gguf --local-dir models`, then pass the companions as above and add `--qwen-image-variant turbo`. See [the Turbo section](docs/models/qwenimage21.md#qwen-image-21-turbo).
+
+**LTX 2.5 Distilled** — the config downloads all five pinned assets after publisher access is approved. On NVIDIA use `cuda` or `ggml_cuda`; on Apple Silicon use `mlx` and launch with `MLX_ENABLE_TF32=0`.
+
+```bash
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend ggml_cuda \
+  --prompt "A red toy car drives slowly along a quiet road." \
+  --diffusion-seed 42 --output ltx25.mp4
+```
+
+The preset includes the required upscaler and uses the current two-stage recipe. See the [model card](docs/models/ltx-2.5.md) for authentication, image guides, decoder options and measured limits.
 
 **MiniMax-H3 audio+video generation** — prompt (+ optional keyframes or references) → H.264 MP4 **and native 32 kHz stereo audio, generated together in one packed latent** ([unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF))
 
@@ -402,15 +415,14 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
     --video-width 640 --video-height 384 --video-steps 20 --video-frames 22
 ```
 
-That CLI run writes `fox.mp4` **and `fox.wav`**: the soundtrack is a sidecar, never muxed in,
-because muxing needs an encoder that may not be installed. Put them together with
+That CLI run writes `fox.mp4` **and `fox.wav`**: the original soundtrack is saved as a WAV;
+MP4 audio muxing depends on the export provider and available encoder. Put them together with
 `ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4`. With everything in one folder the three
 companion flags can be dropped: the denoiser's directory and its parent are scanned recursively,
 subfolders included. Drop the audio VAE, or pass `--no-audio`, and you still get video — just silent.
 
 H3 is CFG-distilled, so **`--cfg 1.0` is required** and anything higher is refused outright; the
-pipeline's own default is 20 steps and 4-8 is the fast operating point, at the cost of some
-chromatic fringing around moving subjects that is gone by ~20. Width and height round up to a
+pipeline's own default is 20 steps and 4-8 is the fast operating point, at the cost of quality; broader perceptual evaluation remains unestablished. Width and height round up to a
 multiple of 32, the frame count snaps to the `17k+5` grid (5, 22, 39, 56, 73, 90 …) and fps is
 pinned to 24 whatever you ask for. On the server the step count is spelled `--video-steps` and
 there is no `--cfg` at all, which is why the shipped configs set neither.
@@ -418,9 +430,10 @@ there is no `--cfg` at all, which is why the shipped configs set neither.
 For conditioning, `--image first.png` animates that picture as the first frame; adding
 `--end-image last.png --video-mode fl2v` interpolates between the two; and on the Ref2VA checkpoint
 `--ref-image` (repeatable, up to nine), `--ref-video`, `--ref-video-audio` and `--ref-audio` carry
-identity and appearance into a new scene instead. Measured on an M5 Pro over Metal at 22 frames and
-8 steps with the same seed, H3 runs **2.4x** faster than stable-diffusion.cpp at 256×256
-(49.3 s → 20.9 s) and **1.7x** at 640×384 (108.5 s → 63.1 s). See
+identity and appearance into a new scene instead. Corrected text refinement and AV sampling
+supersede the old 2.4×/1.7× Metal comparisons. The latest equal-precision before/after runs
+measured improvements on Metal, MLX and direct CUDA, with no meaningful native CUDA gain;
+loading, codecs, uncontrolled file-cache state and limited samples constrain those results. See
 [docs/models/minimax-h3.md](docs/models/minimax-h3.md).
 
 **Wan video generation** — prompt (+ optional first-frame image) → H.264 MP4, video only; needs the DiT + video VAE + UMT5-XXL text encoder ([hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF))

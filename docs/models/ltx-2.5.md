@@ -1,5 +1,7 @@
 # LTX 2.5 Distilled
 
+[English](ltx-2.5.md) | [中文](ltx-2.5_zh-cn.md)
+
 TensorSharp implements native text-to-video and image-conditioned video with jointly
 generated 48 kHz stereo audio for the LTX 2.5 Distilled checkpoint. The experimental TensorAgent entry is
 **LTX 2.5 Distilled — Q4_K_M + BF16**; Download installs all five pinned files,
@@ -362,6 +364,31 @@ while keeping subsequent uncached prompts bounded.
 
 ## Validation
 
+### Latest exact performance work
+
+Current source runs Gemma prompt BF16 rounding and split-half RoPE on CUDA/MLX
+devices while retaining the original host-computed trigonometric values and
+arithmetic order. `TS_LTX25_DEVICE_PROMPT_MATH=0` selects the host control.
+CUDA also fuses the existing per-head `2 * sigmoid(logit)` gating without
+changing Float32 rounding boundaries (`TS_LTX25_CUDA_FUSED_HEAD_GATE=0` selects
+the separate operations). Lossless MLX Q5_K loading packs rows directly with
+bounded CPU parallelism; `TS_MLX_Q5K_REPACK=0` retains the scalar control.
+These changes preserve quantized weights, BF16 activation boundaries and the
+complete generation recipe. Component tests require native dispatch and exact
+outputs; older optional PTX can fall back to the host path, so generation alone
+does not prove dispatch.
+
+An experiment extending CUDA batched attention to extra rectangular shapes
+passed component checks but failed complete-generation RGB and stereo PCM
+equivalence. That extension and its selector were removed. With only the
+accepted prompt math and head-gating changes active, all three tested remote
+generation cases again produced bitwise-identical RGB and both PCM channels.
+Component timing and packer microbenchmarks are not overall model speed claims;
+the [validation workflow](../../eng/validation/README-ltx25.md) defines the
+separate numerical, media and timing gates. Skipped GPUs do not count as coverage.
+
+### Recorded model and application coverage
+
 Reusable tools and commands are described in
 [`eng/validation/README-ltx25.md`](../../eng/validation/README-ltx25.md). Independent
 fixtures and actual-weight checks compare prompt stages, video decoder stages and
@@ -392,8 +419,10 @@ Silicon and an NVIDIA A40. The trained 512×512 image encoder matches the
 unchanged official Float32 latent reference within relative L2 error `4.2e-6`
 on both GPUs. These numerical checks establish encoder fidelity, while
 full-generation samples separately establish media and application integration.
-Warm same-prompt image generation is faster than the measured SD.cpp baseline;
-fresh-process CUDA loading remains slower in the measured comparison. Apple
+The following historical timing samples use the earlier 512×512 single-pass
+recipe, before the ancestral-sampler/two-stage fixes; they do not benchmark the
+current default. Warm same-prompt image generation was faster than the measured
+SD.cpp baseline, while fresh-process CUDA loading remained slower. Apple
 Silicon 17-frame first-image generation took 126.85 seconds first and 39.81
 seconds repeated, versus SD.cpp's 221.34 and 160.63 seconds. A40 measurements
 were 90.47/12.22 seconds versus SD.cpp's 56.67/43.43 seconds. These are measured

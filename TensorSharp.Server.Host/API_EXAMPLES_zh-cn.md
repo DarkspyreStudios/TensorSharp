@@ -28,7 +28,7 @@ curl http://127.0.0.1:5000/api/embed -H 'Content-Type: application/json' \
 
 ## 个人知识库
 
-本功能与回答调整对应 `v2026.10.10` 标签之后的源码；在包含这些改动的发布出现前需从源码构建。启动聊天服务前启用持久知识库，并替换以下路径与后端：
+`v2026.10.11` 源码已包含本功能与回答调整；LTX 2.5、EmbeddingGemma 2 与原生技能发现需要更新的源码。启动聊天服务前启用持久知识库，并替换以下路径与后端：
 
 ```bash
 export TS_KNOWLEDGE_DIRECTORY=/absolute/path/to/library
@@ -1426,10 +1426,13 @@ Distilled 检查点支持首帧 `imagePath`、尾帧 `endImage`，以及指定�
 和 `maxReferenceImages`。Web UI 与 TensorAgent 默认将一张图作为首帧、两张图作为
 首尾帧，三张及以上等距排列在时间线上；每张图也提供帧位置与强度控件。
 
-这些图像用于引导视频时间线。Ingredients 身份参考、视频转视频、retake 及音频参考
-适配器需要另外的模型权重，Distilled 检查点未启用它们。LTX 的 `referenceImages`
-别名同样表示按顺序排列的时间线图像引导。模型文件及验证限制见
-[LTX 2.5](../docs/models/ltx-2.5.md)。
+这些图像用于引导视频时间线。可选 Ingredients IC-LoRA 提供身份 / 外观参考：
+放在模型旁的 `loras/`，或以 `TS_LTX25_INGREDIENTS_LORA` 指定。
+通过 `videoMode: "ref"` 与 `referenceImages` 选择独立的单阶段配方
+（训练预览为 768×448×121、24 fps）；不使用 `ref` 时，`referenceImages`
+仍是有序的时间线图像引导。提供身份工作流前应检查 `/api/models.video`。
+视频 / 音频参考与 retake 仍不可用。适配器设置、模型文件与验证限制见
+[LTX 2.5](../docs/models/ltx-2.5_zh-cn.md)。
 
 #### MiniMax-H3 —— 视频**与**原生 32 kHz 立体声音频
 
@@ -1468,14 +1471,14 @@ curl -X POST http://localhost:5000/api/video-generate \
  "codec": "h264", "elapsedSeconds": 63.1}
 ```
 
-（该 640×384 / 22 帧 / 8 步配置在 M5 Pro 上以 Metal 实测生成耗时 63.1 秒 —— 比
-stable-diffusion.cpp 在其最佳配置下快 1.7×；256×256 下是 20.9 秒对 49.3 秒，
-2.4×。）
+上面的 `elapsedSeconds` 仅用于展示响应格式，并非当前基准。H3 文本精修与 AV
+采样修正后，旧的 2.4× / 1.7× 速度结论已失效。同精度测量、缓存限制与真实设备
+覆盖见[当前覆盖及性能记录](../docs/models/minimax-h3_zh-cn.md)。
 
 `audioUrl`（OpenAI 形态路由上叫 `audio_url`）在模型没有产出音轨时为 `null` ——
 仅视频模型、没有解析到音频 VAE 的 H3 运行，或者请求里写了
-`"generateAudio": false`。音轨从不混流进 MP4：混流需要一个无法假定存在的编码器，
-而 WAV 总是能写出来，客户端可以自己混流。
+`"generateAudio": false`。原始音轨保存为 WAV。MP4 音轨封装取决于导出器与可用的编码器
+（桌面端 FFmpeg，Mac 应用 AVFoundation）；`audioMuxed` 表示 MP4 是否包含该音轨。
 
 **一张图像意味着什么，取决于检查点。** `videoMode` 取 `t2v`、`i2v`（图像就是首
 帧，并被赋予动作）、`fl2v`（首帧和尾帧）或 `ref`（为新场景提供身份与外观参考）；

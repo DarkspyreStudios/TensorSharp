@@ -41,13 +41,13 @@
       </a>
       <a class="home-feature" href="models-image_zh-cn.html">
         <h3>图像与视频生成</h3>
-        <p>用 Qwen-Image 2.1 与 8 步 Turbo 生成和编辑图像，支持蒙版编辑与兼容的 LoRA 插件。用 MiniMax-H3 或 Wan 生成视频；MiniMax-H3 还可生成立体声音频。</p>
+        <p>用 Qwen-Image 2.1 与 8 步 Turbo 生成和编辑图像，支持蒙版编辑与兼容的 LoRA 插件。用 LTX 2.5 或 MiniMax-H3 联合生成视频与立体声音频，或用 Wan 生成视频。</p>
         <span class="home-card-link">浏览媒体模型 →</span>
       </a>
       <a class="home-feature" href="knowledge_zh-cn.html"><h3>个人知识库</h3><p>把文件、文件夹与已保存聊天导入本地集合，检索文档、OCR 与媒体派生文本，并在回答中追溯引用来源。</p><span class="home-card-link">建立可复用资料库 →</span></a>
       <a class="home-feature" href="embeddings_zh-cn.html">
         <h3>用于搜索与检索的嵌入</h3>
-        <p>运行 GGUF BERT/XLM-R 句子编码器，包括 Arctic Embed 与 MiniLM，并通过兼容 OpenAI、Ollama 的嵌入 API 批量调用。</p>
+        <p>通过兼容 OpenAI/Ollama 的 API 运行 Arctic Embed、MiniLM，以及支持文本/图像/音频/视频的 EmbeddingGemma 2。</p>
         <span class="home-card-link">使用嵌入模型 →</span>
       </a>
       <a class="home-feature" href="agentic_zh-cn.html">
@@ -165,13 +165,15 @@
       <h3>图像与视频生成</h3>
       <ul class="model-links">
         <li><a href="models-image_zh-cn.html#qwen-image-21">Qwen-Image-2.1</a></li>
+        <li><a href="models-video_zh-cn.html#ltx-25">LTX 2.5 Distilled</a></li>
         <li><a href="models-video_zh-cn.html#minimax-h3">MiniMax-H3</a></li>
         <li><a href="models-video_zh-cn.html#wan">Wan 2.1 / 2.2</a></li>
       </ul>
     </div>
     <div class="model-group">
-      <h3>嵌入模型 · BERT / XLM-R</h3>
+      <h3>嵌入模型 · 文本与多模态</h3>
       <ul class="model-links">
+        <li><a href="embeddings_zh-cn.html">EmbeddingGemma 2</a></li>
         <li><a href="embeddings_zh-cn.html">Snowflake Arctic Embed L v2.0</a></li>
         <li><a href="embeddings_zh-cn.html">all-MiniLM-L6-v2</a></li>
       </ul>

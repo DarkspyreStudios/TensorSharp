@@ -149,9 +149,16 @@ curl http://127.0.0.1:5001/v1/embeddings -H 'Content-Type: application/json' \
 
 使用 `cpu` 运行 100% 纯 C# 推理，无需原生推理库；或选择原生 GGML 的 `ggml_cpu`、`ggml_metal`、`ggml_cuda`。聊天与嵌入服务分别运行。完整的 Snowflake 下载、批处理、维数缩减、C# API、分词与性能验证见[嵌入指南](embeddings_zh-cn.md)。
 
+## 新视频、嵌入与技能工作流
+
+- [LTX 2.5 Distilled](models/ltx-2.5_zh-cn.md)：五文件预设共 44.76 GB，需要获批发布方访问权限。实验性 48 GB 档位默认使用 1024×1024×17 帧与 8+3 步两阶段配方，联合生成 48 kHz 立体声音频。
+- [MiniMax-H3](models/minimax-h3_zh-cn.md)：首帧动画选择 FL2VA，身份参考选择 Ref2VA。二者均生成 32 kHz 立体声音频；当前精度与基准说明取代旧速度结论。
+- [EmbeddingGemma 2](embeddings_zh-cn.md)：使用 `--embeddings`，媒体输入另加 `--mmproj`。已实现六个后端，任务前缀、维数与测试限制随模型而异。
+- [Agent Skills](agent_skills.md)（英文）：桌面 CLI / 服务端随附 17 个技能。`find-skills` 可达且开启 `--skills-allow-network` 时，原生工具可搜索、检查、按固定版本安装并在同一请求中使用；运行脚本仍需执行权限与依赖。
+
 ## 将文件复用为知识库
 
-`v2026.10.10` 标签之后的当前源码新增个人知识集合与回答调整功能；在包含这些改动的发布出现前需从源码构建。在 TensorAgent 打开 **☰ → 知识库**，创建集合后上传文件或文件夹，或通过 **添加聊天** 导入已保存对话、可用附件和生成文件的快照。检查每个来源的抽取状态，再选择 **在此聊天中使用** 后提问；上传本身不会选择集合。回答中的引用可打开保留的原文件及相关片段。
+`v2026.10.11` 源码已包含个人知识集合与回答调整；LTX 2.5、EmbeddingGemma 2 与原生技能发现需要更新的源码，选择发布前请查看[项目状态](PROJECT_STATUS_zh-cn.md)。在 TensorAgent 打开 **☰ → 知识库**，创建集合后上传文件或文件夹，或通过 **添加聊天** 导入已保存对话、可用附件和生成文件的快照。检查每个来源的抽取状态，再选择 **在此聊天中使用** 后提问；上传本身不会选择集合。回答中的引用可打开保留的原文件及相关片段。
 
 知识库支持文本、代码、数据集、部分 Office 内容和本地 PDF OCR。图像与视频采样帧需要已加载的兼容视觉模型；音频可使用已加载的音频塔或已配置的 `TS_JEV_TRANSCRIPTION_URL` 转录伴随服务。能力变化后可对原文件 **重新索引**。默认使用 BM25 检索，可选 GGUF 嵌入模型提供语义检索。覆盖范围、限制与引用详见[知识库指南](knowledge-system_zh-cn.md)。
 
@@ -168,7 +175,7 @@ dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll \
 
 ## 选择后端
 
-后端支持取决于模型架构。嵌入模型支持纯 C# `cpu` 与原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`；其他模型的限制见[状态矩阵](PROJECT_STATUS_zh-cn.md#状态矩阵)。
+后端支持取决于模型架构。嵌入模型支持纯 C# `cpu` 与原生 `ggml_cpu`、`ggml_metal`、`ggml_cuda`；EmbeddingGemma 2 还支持直接 `cuda` 与 `mlx`；其他模型的限制见[状态矩阵](PROJECT_STATUS_zh-cn.md#状态矩阵)。
 
 | 你的硬件 | 推荐后端 | 标志 | 说明 |
 |---|---|---|---|

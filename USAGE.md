@@ -8,15 +8,17 @@
 Host a supported GGUF encoder with `--model encoder.gguf --embeddings`. BERT/XLM-R support pure C# `cpu` or native `ggml_cpu`, `ggml_metal`, and `ggml_cuda`; EmbeddingGemma 2 also supports direct `cuda` and `mlx`. Add `--mmproj projector.gguf` for EmbeddingGemma 2 media inputs. Each process keeps one encoder resident, and a chat service uses a separate port. `--embedding-threads N` configures CPU execution on `cpu` and `ggml_cpu`; `--embedding-context-size N` reduces the per-input token limit (EmbeddingGemma 2 defaults to its published 8192-token window). Both take positive integers only.
 
 - OpenAI: `POST /v1/embeddings`, single/batched strings or token IDs, `encoding_format` of `float` / `base64`, optional `dimensions`.
-- Ollama: `POST /api/embed`, a string or string array; `truncate` defaults to `true`.
-- Vectors preserve input order and have unit L2 norm. OpenAI rejects overlong inputs; Ollama truncation preserves the final special token.
+- Ollama: `POST /api/embed`, a string or string array; `truncate` defaults to `true` for text. Both endpoints also accept ordered media content objects with an EmbeddingGemma 2 projector; overlong media inputs are rejected.
+- Vectors preserve input order and have unit L2 norm. OpenAI rejects overlong inputs; Ollama text truncation preserves the final special token.
 
 Downloads, curl, C#, retrieval quality, and validation are in the [full embedding guide](docs/embeddings.md).
 
+Native skill discovery is available when `find-skills` is reachable and `--skills-allow-network` is enabled. `skills_search`, `skills_inspect` and, for writable registries, `skills_install` search and install an inspected revision without running a shell or setup script. See [Agent Skills](docs/agent_skills.md).
+
 ## Personal knowledge library
 
-Current source after `v2026.10.10` adds knowledge collections and response
-steering. Use a source build until a release includes those changes. TensorAgent
+The `v2026.10.11` source includes knowledge collections and response steering.
+LTX 2.5, EmbeddingGemma 2 and native skill discovery need newer source. TensorAgent
 provides **Menu → Knowledge** for files, recursive folder uploads, saved-chat
 snapshots, source previews and collection selection. Uploading does not select a
 collection for chat; use **Use in this chat**. Selected sources supply bounded
@@ -400,7 +402,7 @@ quietly. Measured on gemma-4-26B-A4B (`--cpu-moe`, peak VRAM): `ggml_cuda`
 | `--skills-allow-exec` | Allow the model to run a selected skill's bundled scripts through `skills_run`. **Off by default; treat every enabled script as untrusted code.** TensorSharp launches only known interpreters (`.py`, `.js`/`.mjs`, `.sh`, `.bash`) without a shell, scrubs the environment, bounds runtime and output, mounts the selected skill read-only, and runs in the active Web/CLI session or OpenAI/Ollama request workspace (or per-call scratch when code execution is off). The default `--skills-sandbox required` adds OS confinement and refuses execution when it is unavailable; network remains denied unless `--skills-allow-network` is also set. Env: `TS_SKILLS_ALLOW_EXEC` (anything but `0` counts as on). |
 | `--skills-max-rounds <n>` | How many times the model may fetch skill content - or run, read and fix code - before it must answer, 1-64 (default: `8`, or `24` when `--code-exec` is on, because writing a file, running it and fixing the traceback takes more steps than reading files; a value set here is used as given either way). Each round is a full generation, so this bounds the cost of a model that keeps mis-naming a file. When the budget runs out the model is told so in the conversation, answers from what it read, and says what it did finish. Env: `TS_SKILLS_MAX_ROUNDS`. |
 | `--skills-sandbox <off\|preferred\|required>` | How hard to insist on OS isolation for a skill's scripts. `required` (the default) refuses to run them on a host with no safe sandbox rather than running them unconfined; `preferred` explicitly accepts weaker isolation; `off` keeps only the runner's interpreter, environment, time and output limits. macOS uses `sandbox-exec`; Linux requires `bwrap` 0.12.0 or newer (older releases have a known setup-time symlink escape). Windows Job Objects bound only the process tree, not filesystem or network access, so `required` refuses there and `preferred` is the explicit weaker-isolation opt-in. Env: `TS_SKILLS_SANDBOX`. |
-| `--skills-allow-network` | Let a sandboxed skill script reach the network. Denied by default. Env: `TS_SKILLS_ALLOW_NETWORK`. |
+| `--skills-allow-network` | Let a sandboxed skill script reach the network. When `find-skills` is reachable, also enables native `skills_search` / `skills_inspect` and `skills_install` for a writable registry; discovery does not need script execution. Denied by default. Env: `TS_SKILLS_ALLOW_NETWORK`. |
 | `--code-exec` | Offer the model four tools: `shell`, `read_file`, `write_file`, and `apply_patch`. `shell` runs commands and tests in an OS sandbox and returns the exit code and merged stdout/stderr. Arguments: `command` (required), `workdir` (that one call only), `timeout_ms`, and `run_in_background` for a background job whose result names a log file. File work uses the dedicated file tools: `read_file` (`path`, `offset`, `limit`) shows current file contents with line numbers rendered `   42 \| text`, and re-reading an unchanged file says so instead of repeating it. `write_file` (`path`, `content`) is reserved for creating new files. Use `apply_patch` for every modification to an existing file, from a single-line edit in one file to changes across multiple files; it also supports creating, deleting, and renaming files in one atomic call. Send the `*** Begin Patch` / `*** End Patch` envelope in its `patch` argument, with `*** Update File:` sections and anchored hunks for updates. It is also reachable through an `apply_patch` heredoc in `shell`, which the host intercepts instead of executing as a command. Read the relevant file contents first and send the smallest patch; do not rewrite existing files through shell commands or `write_file`. The patch matcher follows the reference V4A applier: exact match, then trailing-whitespace-insensitive, then leading-and-trailing-insensitive, then fail. All four tools share a Web/CLI session workspace or an isolated OpenAI/Ollama request workspace across its internal rounds. Only direct callers that provide no workspace receive the shell alone. Every tool is answered in process; none is handed back to the client. Off by default. Env: `TS_CODE_EXEC` (anything but `0` counts as on). |
 | `--code-exec-allow-install` | Let the model install the packages it needs (pip / npm) into the active Web/CLI-session or HTTP-request workspace, so later commands — and skill scripts — can import them within that workspace's lifetime; requires `--code-exec`. This permission does **not** give a model-authored command network access. The host reads each recognised install for its tool and package names, validates them, and performs the install itself with an argument vector it built, wheels only (`--only-binary=:all:` / `--ignore-scripts`). It substitutes that command with `true` or `false`, preserving `&&`, `\|\|`, pipelines and loops; in `pip install x && python y.py`, `y.py` follows the command network policy (offline by default, unrestricted only with `--code-exec-allow-network`). Source-changing options such as `--index-url`, `-i`, `--find-links`, `--registry`, URL requirements, and installers the host cannot perform (`uv`, `poetry`, `gem`, `cargo`, `go`) are refused; `-r requirements.txt` is read and validated line by line. Env: `TS_CODE_EXEC_ALLOW_INSTALL`. |
 | `--code-exec-allow-network` | Give every model-authored command unrestricted host IP-network access: generated code can resolve DNS, fetch URLs, follow redirects, call remote APIs, reach LAN/loopback services and open IP listening sockets. **Off by default** and requires `--code-exec`. Write and home-read confinement remain active on macOS and Linux. Linux additionally bounds descendants with a PID namespace. On macOS, children inherit Seatbelt and ordinary process groups are stopped, but a deliberately detached child can outlive the request; every result reports that gap. macOS denies common `/private/tmp/com.apple.launchd*` pathname sockets while permitting runtime-required Mach lookup and the exact mDNSResponder pathname socket required for DNS, and Linux hides common `/run` endpoints, but this is not a complete local Unix-IPC boundary: macOS retains shared-temporary-directory Unix IPC for compatibility, and Linux's host network namespace may expose abstract sockets and pathname sockets outside `/run`. Other host-readable files and IP services may therefore be reached and exfiltrated; remote prompt injection and untrusted downloads are additional risks. Credential-free host HTTP/SOCKS proxy settings are passed only in this mode. Configured custom-CA bundles up to 16 MiB are read once; only validated public certificates are copied into a read-only per-session snapshot, so the host source path and adjacent data are not exposed. Authenticated proxies need a credential-free host-side forwarder. Package/install-domain allow-lists constrain only the recognised host installer; unrestricted generated code can fetch or execute artifacts directly. This is independent of package installs and of `--skills-allow-network`, which controls `skills_run`. On Windows, `--code-exec-unconfined` is still required. Env: `TS_CODE_EXEC_ALLOW_NETWORK` (anything but `0` counts as on). |
@@ -447,7 +449,7 @@ hides common `/run` endpoints, but this is not a complete local Unix-IPC boundar
 macOS retains shared-temporary-directory Unix IPC for compatibility, and Linux's
 host network namespace may expose abstract sockets and pathname sockets outside
 `/run`. It is
-independent of `--skills-allow-network`, which applies only to `skills_run`.
+independent of `--skills-allow-network`, which controls skill scripts and native skill discovery.
 `--code-exec-allow-install` also does not imply command networking: the host
 performs recognised installs itself — the
 line is split into its simple commands (quoting and heredoc bodies respected),
@@ -499,8 +501,8 @@ script gets that error instead of watching a setting be ignored.
 | `--test-chunked-prefill` | Run the chunked-prefill correctness check (compares chunked vs non-chunked logits) |
 | `--correct-prefill <N>` | Prompt length used by `--test-chunked-prefill` |
 | `--correct-decode <N>` | Decode length used by `--test-chunked-prefill` |
-| `--diffusion-steps <N>` | DiffusionGemma denoising steps per block (default: 48). For Qwen-Image-2.1, the FlowMatch-Euler step count — omit for auto (40, or the step count of a `--lora` plug-in's sampling recipe; Qwen-Image-2.1-Turbo runs 8, the only count it takes). |
-| `--diffusion-seed <N>` | Noise seed for the diffusion paths: DiffusionGemma's deterministic sampler and Qwen-Image-2.1 (default: 0), and video generation (Wan, MiniMax-H3), where leaving it out draws a fresh random seed each run. This is the seed that decides what a clip looks like — `--seed` is the text sampling seed and does not affect it. A Qwen-Image-2.1 picture depends on the seed and its size; an edit's noise also depends on its `--image` pictures, so editing a picture at the seed it was drawn with does not restart from its own noise ([seeds and edits](docs/models/qwenimage21.md#seeds-and-edits)). |
+| `--diffusion-steps <N>` | DiffusionGemma denoising steps per block (default: 48). For Qwen-Image-2.1, the FlowMatch-Euler step count — omit for auto (40, or the step count of a `--lora` plug-in's sampling recipe; Qwen-Image-2.1-Turbo runs 8, the only count it takes). LTX 2.5 accepts only 8 (plus 3 refinement steps); CFG is fixed at 1. |
+| `--diffusion-seed <N>` | Noise seed for the diffusion paths: DiffusionGemma's deterministic sampler and Qwen-Image-2.1 (default: 0), and video generation (LTX 2.5, Wan, MiniMax-H3), where leaving it out draws a fresh random seed each run. This is the seed that decides what a clip looks like — `--seed` is the text sampling seed and does not affect it. A Qwen-Image-2.1 picture depends on the seed and its size; an edit's noise also depends on its `--image` pictures, so editing a picture at the seed it was drawn with does not restart from its own noise ([seeds and edits](docs/models/qwenimage21.md#seeds-and-edits)). |
 | `--diffusion-blocks <N>` | DiffusionGemma block-autoregressive canvas count. `0` derives the count from `--max-tokens` and the model canvas length. |
 | `--image <path>` | Input image for Qwen-Image-2.1 editing (also the image input for multimodal chat); repeat it for multiple references. Every `--image` is a reference, tagged `<image1>`, `<image2>`, … in command-line order ahead of the prompt, so the prompt can name a picture by its tag. Without `--image`, a Qwen-Image-2.1 DiT generates an image from the prompt instead. |
 | `--mask <path>` | Qwen-Image-2.1 mask at the first input image's exact dimensions. Requires `--image`; additional images remain references. Preserves source dimensions and unselected decoded RGBA pixels. See [Masked image editing](#masked-image-editing). |
@@ -521,27 +523,27 @@ script gets that error instead of watching a setting be ignored.
 | `--qwen-image-lora` / `--offload-cpu` | **Removed and rejected at startup, including as config-file keys.** Both served only the earlier Qwen-Image-Edit pipeline. `--qwen-image-lora` is replaced by `--lora` above; `--offload-cpu` has no replacement, because Qwen-Image-2.1 keeps its DiT weights resident. |
 | `--penalty-last-n` | **Removed and rejected at startup, including as a config-file key** (exit code 1, `Configuration error: --penalty-last-n was removed: …`). It was the CLI-only name of the repeat-penalty window: use `--repeat-last-n <N>`, the spelling both hosts and the `repeat_last_n` request field use. |
 | `--paged-kv` / `--no-paged-kv` / `--paged-kv-*` / `--paged-bench*` | **Removed and rejected at startup on both hosts, including as config-file keys.** They configured the standalone paged KV cache (RAM / SSD / Redis block tiers and block quantization), which only `--paged-bench` ever built. Request KV state is engine-owned, and prompt reuse across requests is the engine's radix prefix cache, on by default (`--no-prefix-cache` turns it off). The `TS_KV_PAGED_CACHE`, `TS_KV_BLOCK_SIZE`, `TS_KV_CACHE_MAX_RAM_MB`, `TS_KV_CACHE_SSD_DIR`, `TS_KV_CACHE_MAX_SSD_MB`, `TS_KV_PAGED_QUANT_BITS`, `TS_KV_CACHE_REDIS_URL` and `TS_KV_CACHE_REDIS_TTL_MINUTES` variables that cache read are refused at startup too. |
-| `--width <px>` / `--height <px>` | Output size for Qwen-Image-2.1 and video generation. Default: `0` — auto (Qwen-Image-2.1: 2048×2048 for generation, or about that area at the first reference's aspect ratio for editing — 1024×1024 (1 MP) on the pure-C# `cpu` backend — and explicit sizes must be multiples of 32; MiniMax-H3: 640×384, or that area at the conditioning image's aspect ratio, rounded up to a multiple of 32; Wan: the model's native area at the input image's aspect ratio, 1280×704 for TI2V-5B and 832×480 otherwise). |
-| `--video-frames <N>` | Video frame count, snapped to the model's temporal grid (`4k+1` for Wan; `17k+5` for MiniMax-H3 — 5, 22, 39, 56, 73, 90 …). Default: 33; 49 for Wan2.2-TI2V, 22 for MiniMax-H3. `1` generates a still image where the model supports it (use `--output out.png`). |
-| `--fps <N>` | Playback frame rate of the saved MP4 (default: 16; 24 for Wan2.2-TI2V). Models trained at a fixed rate (MiniMax-H3, 24 fps) override any other value. |
+| `--width <px>` / `--height <px>` | Output size for Qwen-Image-2.1 and video generation. Default: `0` — auto (Qwen-Image-2.1: 2048×2048 for generation, or about that area at the first reference's aspect ratio for editing — 1024×1024 (1 MP) on the pure-C# `cpu` backend — and explicit sizes must be multiples of 32; MiniMax-H3: 640×384, or that area at the conditioning image's aspect ratio, rounded up to a multiple of 32; Wan: the model's native area at the input image's aspect ratio, 1280×704 for TI2V-5B and 832×480 otherwise). LTX 2.5 video defaults to 1024×1024 output with both sides positive multiples of 64; see its two-stage recipe below. |
+| `--video-frames <N>` | Video frame count, snapped to the model's temporal grid (`4k+1` for Wan; `17k+5` for MiniMax-H3 — 5, 22, 39, 56, 73, 90 …). Default: 33; 49 for Wan2.2-TI2V, 22 for MiniMax-H3. `1` generates a still image where the model supports it (use `--output out.png`). LTX 2.5 defaults to 17 and requires `8k+1` frames; it does not snap an invalid request. |
+| `--fps <N>` | Playback frame rate of the saved MP4 (default: 16; 24 for Wan2.2-TI2V). Models trained at a fixed rate (MiniMax-H3, 24 fps) override any other value. LTX 2.5 defaults to 24 fps. |
 | `--flow-shift <F>` | FlowMatch timestep shift (default: the model's official recipe — 5.0 for Wan 2.2, 12.0 for A14B T2V, 8.0/3.0/5.0 for Wan 2.1, 12.0 for MiniMax-H3). On models with a joint audio stream this shifts the video stream only. |
 | `--sampler <name>` | Sampler: `unipc` (the official Wan sampler, default for Wan) or `euler`. LTX 2.5 defaults to `euler_ancestral`, the publisher's recipe; `euler` selects deterministic Euler there as a diagnostic. MiniMax-H3 runs its own flow-match schedule and does not read it. |
 | `--negative-prompt <text>` | Negative prompt for classifier-free guidance (default: the model's official negative prompt). Unused at `--cfg 1.0`, where no negative pass runs — so it does nothing at all on MiniMax-H3, which only accepts `--cfg 1.0`. |
 | _(step-distilled checkpoints)_ | Auto-detected from the DiT file name (`Turbo`, `distill`, `Lightning`, `lightx2v`, `FastWan`, `-dmd`, or an explicit `…-4steps-…` / `…8step…` for 1–16): the pipeline switches to that step count with guidance off, turning the official 50-step × CFG recipe's 100 DiT passes into 4. This is the single biggest speed lever anywhere in TensorSharp — see **[Video generation (Wan)](#video-generation-wan)** below. `--diffusion-steps` / `--cfg` override it. |
 | `--cfg-cache-stride <N>` | Wan guidance cache: run the unconditional CFG pass on one step in `N` and reuse the cached guidance direction in between (default off — every step runs both passes). `2` ≈ 1.30x faster, `3` ≈ 1.43x; approximate, so leave it off when matching a reference sample matters. No effect at `--cfg 1.0`, and therefore none on MiniMax-H3. |
-| `--video-vae <path>` | Override the resolved video VAE (`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`; `minimax_h3_video_vae_fp16.safetensors` for MiniMax-H3). Env: `TS_VIDEO_VAE`. |
-| `--video-text-encoder <path>` | Override the resolved text-encoder GGUF (UMT5-XXL for Wan, Qwen3-VL-32B for MiniMax-H3). Env: `TS_VIDEO_TEXT_ENCODER`. |
+| `--video-vae <path>` | Override the resolved video VAE (`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`; `minimax_h3_video_vae_fp16.safetensors` for MiniMax-H3). Env: `TS_VIDEO_VAE`. LTX 2.5 requires the preset convolutional video VAE; its diffusion decoder uses a separate flag. |
+| `--video-text-encoder <path>` | Override the resolved text encoder (dedicated Gemma 4 safetensors for LTX 2.5; UMT5-XXL GGUF for Wan; Qwen3-VL-32B GGUF for MiniMax-H3). Env: `TS_VIDEO_TEXT_ENCODER`. |
 | `--video-dit2 <path>` | Second diffusion expert on dual-expert models (Wan 2.2 A14B's high/low-noise partner). Auto-resolved by name when the pair is co-located. Env: `TS_VIDEO_DIT2`. |
 | `--audio-vae <path>` | Audio VAE for models that generate an audio track jointly with the video (`minimax_h3_audio_vae_fp32.safetensors`). Without it such a model still produces video, just no audio. Env: `TS_VIDEO_AUDIO_VAE`. |
 | `--video-upscaler <path>` | x2 latent upscaler for two-stage video models: LTX 2.5 generates at half the output size, upscales the latent with `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors`, then refines at full size. Default: `latent_upscale_models/` beside the model. Env: `TS_VIDEO_UPSCALER`. |
 | `--video-diffusion-vae <path>` | Opt-in LTX 2.5 diffusion video decoder (`ltx-2.5-video-vae-bf16.safetensors`): cleaner, with less grain and flicker, but softer than the default convolutional `--video-vae`. MLX and CPU only; CUDA refuses it. Default: off. Env: `TS_VIDEO_DIFFUSION_VAE`. |
 | `--video-mode <mode>` | How to read the images you pass, on models with more than one conditioning mode. Default: inferred from what you supply. MiniMax-H3 accepts `t2v` (text only), `i2v` (the image **is** the first frame and gets animated), `fl2v` (first and last frame) and `ref` (the images are identity/appearance references for a **new** scene). `i2v`/`fl2v` need the FL2VA checkpoint and `ref` needs Ref2VA — separate files, not settings, and asking for the wrong one fails with the name of the other. |
-| `--end-image <file>` | Last-frame conditioning image, on models that accept one (MiniMax-H3 first/last-frame mode). Combined with `--image` the clip is steered to start and end on the two frames. |
+| `--end-image <file>` | Last-frame conditioning image, on models that accept one (MiniMax-H3 first/last-frame mode). Combined with `--image` the clip is steered to start and end on the two frames. LTX 2.5 also supports a last frame and timed image guides. |
 | `--ref-image <file>` | Reference image for reference-conditioned models (MiniMax-H3 Ref2VA): the subject carries over while camera, background and composition come from the prompt. Repeatable up to 9; referred to in the prompt as `<Picture 1>`, `<Picture 2>`, … References are only ever scaled **down** and keep their own aspect ratio, so the output size still comes from `--width`/`--height`. |
 | `--ref-video <path>` | Reference video clip — a video **file** or a directory of frames, either way resampled onto the model's own 24 fps and canvas. Repeatable; referred to as `<Video 1>`, `<Video 2>`, … |
 | `--ref-video-audio <file>` | Soundtrack for the `--ref-video` at the **same position**: the first pairs with the first, and so on. Separate from `--ref-video` because a container's audio track is not readable through the frame decoder; omit it for a silent reference clip. WAV, MP3 or Ogg. |
 | `--ref-audio <file>` | Reference audio clip. Repeatable; referred to as `<Audio 1>`, `<Audio 2>`, … Resampled to the audio VAE's 32 kHz stereo and truncated to the generated clip's duration. |
-| `--no-audio` | Skip audio decoding on models that generate an audio track jointly with the video (MiniMax-H3), saving the audio VAE's time and memory. Ignored by video-only models. |
+| `--no-audio` | Skip audio decoding on models that generate an audio track jointly with the video (LTX 2.5, MiniMax-H3), saving the audio VAE's time and memory. Ignored by video-only models. |
 | `--wan-vae` / `--wan-te` / `--wan-dit2` / `--video-te` | **Removed and rejected at startup on both hosts, including as config-file keys.** Use `--video-vae`, `--video-text-encoder` and `--video-dit2`. The `TS_WAN_VAE`, `TS_WAN_TE` and `TS_WAN_DIT2` variables are refused too: every video model reads `TS_VIDEO_VAE`, `TS_VIDEO_TEXT_ENCODER` and `TS_VIDEO_DIT2`. |
 | `--tp <N>` | Tensor-parallel degree: shard weights within layers over N local GPUs (default `1`). Requires a supported architecture and GPU backend. Mutually exclusive with `--layer-split`; unsupported requests fail at startup. Env: `TENSORSHARP_TP_DEGREE`. |
 | `--layer-split <N>` | Local GPU count for whole-layer placement on supported architectures. Mutually exclusive with `--tp`, `--tp-node-id`, and `--tp-peers`; single-node only. Env: `TENSORSHARP_LAYER_SPLIT_DEGREE`. |
@@ -744,7 +746,7 @@ Running `TensorSharp.Server.Host` (`dotnet TensorSharp.Server.Host/bin/TensorSha
 | `--skills-allow-exec` | Allow `skills_run`. **Off by default. On a shared server this is a remote code execution primitive** — a skill is content somebody uploaded, and the decision to run one of its scripts is made by a model reading that same person's Markdown. Scripts use only known interpreters without a shell, run from the current Web session or private OpenAI/Ollama request workspace (or per-call scratch without code execution), and see the skill itself read-only. The default required sandbox refuses execution when safe OS confinement is unavailable. Env: `TS_SKILLS_ALLOW_EXEC` (anything but `0` counts as on). |
 | `--skills-max-rounds <n>` | How many times the model may fetch skill content - or run, read and fix code - before it must answer, 1-64 (default: `8`, or `24` when `--code-exec` is on; a value set here is used as given). Each round is a full generation. Env: `TS_SKILLS_MAX_ROUNDS`. |
 | `--skills-sandbox <off\|preferred\|required>` | How hard to insist on OS isolation for a skill's scripts. `required` (the default) refuses to run them on a host with no safe sandbox rather than running them unconfined; `preferred` explicitly accepts weaker isolation; `off` keeps only the runner's interpreter, environment, time and output limits. macOS uses `sandbox-exec`; Linux requires `bwrap` 0.12.0 or newer. Windows Job Objects bound only the process tree, so `required` refuses there and `preferred` is the explicit weaker-isolation opt-in. Env: `TS_SKILLS_SANDBOX`. |
-| `--skills-allow-network` | Let a sandboxed skill script reach the network. Denied by default. Env: `TS_SKILLS_ALLOW_NETWORK`. |
+| `--skills-allow-network` | Let a sandboxed skill script reach the network. When `find-skills` is reachable, also enables native `skills_search` / `skills_inspect` and `skills_install` for a writable registry; discovery does not need script execution. Denied by default. Env: `TS_SKILLS_ALLOW_NETWORK`. |
 | `--code-exec` | Offer the model the `shell`, `read_file`, `write_file` and `apply_patch` tools. `shell` runs a real command line and returns its exit code plus merged stdout/stderr; use `write_file` to create new files and `apply_patch` for every modification to one or multiple existing files. Web UI keeps one workspace per chat session. Every OpenAI Chat, OpenAI Responses, and Ollama HTTP request gets a private workspace across its internal tool rounds and that workspace is deleted after the response. Commands run in a required OS sandbox on macOS/Linux, and the server refuses to run them if confinement is unavailable unless the operator explicitly sets `--code-exec-unconfined`; Windows always needs that escape hatch. Network is denied independently by default and enabled only by `--code-exec-allow-network`. All built-in tools are answered in process rather than returned to the API client. Off by default. Env: `TS_CODE_EXEC` (anything but `0` counts as on). |
 | `--code-exec-allow-install` | Let the model install pip/npm packages into the active Web-session or HTTP-request workspace; requires `--code-exec`. This permission does **not** give model-authored commands a socket. TensorSharp reads recognised install commands, validates package names, performs wheels-only / scripts-disabled installs with a host-built argument vector, and substitutes `true` or `false` back into the command line. Later generated code remains offline unless `--code-exec-allow-network` is separately set. Env: `TS_CODE_EXEC_ALLOW_INSTALL`. |
 | `--code-exec-allow-network` | Give every model-authored command unrestricted host IP-network access: generated code can resolve DNS, fetch URLs, follow redirects, call remote APIs, reach LAN/loopback services and open IP listening sockets. **Off by default** and requires `--code-exec`. Write and home-read confinement remain active on macOS and Linux. Linux additionally bounds descendants with a PID namespace. On macOS, children inherit Seatbelt and ordinary process groups are stopped, but a deliberately detached child can outlive the request; every result reports that gap. macOS denies common `/private/tmp/com.apple.launchd*` pathname sockets while permitting runtime-required Mach lookup and the exact mDNSResponder pathname socket required for DNS, and Linux hides common `/run` endpoints, but this is not a complete local Unix-IPC boundary: macOS retains shared-temporary-directory Unix IPC for compatibility, and Linux's host network namespace may expose abstract sockets and pathname sockets outside `/run`. Other host-readable files and IP services may therefore be reached and exfiltrated; remote prompt injection and untrusted downloads are additional risks. Credential-free host HTTP/SOCKS proxy settings are passed only in this mode. Configured custom-CA bundles up to 16 MiB are read once; only validated public certificates are copied into a read-only per-session snapshot, so the host source path and adjacent data are not exposed. Authenticated proxies need a credential-free host-side forwarder. Package/install-domain allow-lists constrain only the recognised host installer; unrestricted generated code can fetch or execute artifacts directly. This is independent of `--code-exec-allow-install` and `--skills-allow-network`. On Windows, `--code-exec-unconfined` is still required. Env: `TS_CODE_EXEC_ALLOW_NETWORK` (anything but `0` counts as on). |
@@ -779,7 +781,7 @@ common `/private/tmp/com.apple.launchd*` pathname sockets while permitting runti
 retains shared-temporary-directory Unix IPC for compatibility, and Linux's host
 network namespace may expose abstract sockets and pathname sockets outside
 `/run`. Generated code can send other host-readable data away.
-`--skills-allow-network` is separate and applies only to `skills_run`.
+`--skills-allow-network` is separate and controls skill scripts and native skill discovery.
 Package-install permission also does not grant shell network access;
 the host performs recognised installs itself — it reads the tool and package
 names out of each recognised install, runs the installer with an argument vector
@@ -802,19 +804,19 @@ of quietly losing a setting.
 |---|---|
 | `--video-width <px>` | Default output width for video generation when a Web UI or API request omits `width`; alias `--width`. **The main quality lever on the server**, because the Web UI sends no size of its own — without it every clip comes out at the model default. `640` (with `--video-height 384`) is the documented starting point for MiniMax-H3. Rounded up to the model's grid. |
 | `--video-height <px>` | Default output height when a request omits `height`; alias `--height`. If only one of the two is given, MiniMax-H3 takes the other from the conditioning image's aspect ratio, which is what stops a 4:3 photo being stretched into a 16:9 frame. |
-| `--video-steps <N>` | Default denoising steps when a request omits `steps` — the quality/time trade-off after resolution. MiniMax-H3's own default is `20`; `4`–`8` is the fast operating point, `16`–`24` is visibly cleaner, past ~30 gains little. |
+| `--video-steps <N>` | Default denoising steps when a request omits `steps` — the quality/time trade-off after resolution. MiniMax-H3's own default is `20`; `4`–`8` is the fast operating point, `16`–`24` is visibly cleaner, past ~30 gains little. LTX 2.5 accepts only 8 as the first-pass schedule, followed by 3 refinement steps. |
 | `--video-mode <mode>` | Default conditioning mode when a request omits `videoMode`: `t2v` (text only), `i2v` (the image is the first frame and is animated), `fl2v` (first **and** last frame pinned) or `ref` (the images are identity/appearance references for a new scene). Omit it and each request's mode is inferred from what it supplies, which is usually what you want; pin it for a deployment that only offers one. |
-| `--video-frames <N>` | Default output frame count for video generation when a Web UI or API request omits `frames`. Snapped to the model's temporal grid — `4k+1` for Wan, where `121` frames at 24 fps is about five seconds; `17k+5` for MiniMax-H3. Without this flag, the model default is `33` (`49` for Wan 2.2 TI2V, `22` for MiniMax-H3). An explicit request `frames` value overrides this default. |
-| `--fps <N>` | Default playback frame rate for the generated MP4 when a Web UI or API request omits `fps`. Without this flag, the model default is `16` fps (`24` for Wan 2.2 TI2V). An explicit request `fps` value overrides this default; changing only FPS changes playback speed rather than the generated frame count. Models trained at a fixed rate (MiniMax-H3, 24 fps) override any other value. |
-| `--video-vae <path>` | Override the resolved video VAE (`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`; `minimax_h3_video_vae_fp16.safetensors` for MiniMax-H3). Default: a same-directory scan next to the DiT, `VAE/` subfolders included. Env: `TS_VIDEO_VAE`. |
-| `--video-text-encoder <path>` | Override the resolved text-encoder GGUF (UMT5-XXL for Wan, Qwen3-VL-32B for MiniMax-H3). Env: `TS_VIDEO_TEXT_ENCODER`. |
+| `--video-frames <N>` | Default output frame count for video generation when a Web UI or API request omits `frames`. Snapped to the model's temporal grid — `4k+1` for Wan, where `121` frames at 24 fps is about five seconds; `17k+5` for MiniMax-H3. Without this flag, the model default is `33` (`49` for Wan 2.2 TI2V, `22` for MiniMax-H3). An explicit request `frames` value overrides this default. LTX 2.5 defaults to 17 and requires `8k+1` frames; it does not snap an invalid request. |
+| `--fps <N>` | Default playback frame rate for the generated MP4 when a Web UI or API request omits `fps`. Without this flag, the model default is `16` fps (`24` for Wan 2.2 TI2V). An explicit request `fps` value overrides this default; changing only FPS changes playback speed rather than the generated frame count. Models trained at a fixed rate (MiniMax-H3, 24 fps) override any other value. LTX 2.5 defaults to 24 fps. |
+| `--video-vae <path>` | Override the resolved video VAE (`wan_2.1_vae.safetensors` / `Wan2.2_VAE.safetensors`; `minimax_h3_video_vae_fp16.safetensors` for MiniMax-H3). Default: a same-directory scan next to the DiT, `VAE/` subfolders included. Env: `TS_VIDEO_VAE`. LTX 2.5 requires the preset convolutional video VAE; its diffusion decoder uses a separate flag. |
+| `--video-text-encoder <path>` | Override the resolved text encoder (dedicated Gemma 4 safetensors for LTX 2.5; UMT5-XXL GGUF for Wan; Qwen3-VL-32B GGUF for MiniMax-H3). Env: `TS_VIDEO_TEXT_ENCODER`. |
 | `--video-dit2 <path>` | Second diffusion expert on dual-expert models (Wan 2.2 A14B's high/low-noise partner of `--model`). Auto-resolved by name when the pair is co-located. Env: `TS_VIDEO_DIT2`. |
 | `--audio-vae <path>` | Audio VAE for models that generate an audio track jointly with the video (`minimax_h3_audio_vae_fp32.safetensors`). Without it such a model still runs and produces video, just no audio. Env: `TS_VIDEO_AUDIO_VAE`. |
 | `--video-upscaler <path>` | x2 latent upscaler for two-stage video models: LTX 2.5 generates at half the output size, upscales the latent with `ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors`, then refines at full size. Default: `latent_upscale_models/` beside the model. Env: `TS_VIDEO_UPSCALER`. |
 | `--video-diffusion-vae <path>` | Opt-in LTX 2.5 diffusion video decoder (`ltx-2.5-video-vae-bf16.safetensors`): cleaner, with less grain and flicker, but softer than the default convolutional `--video-vae`. MLX and CPU only; CUDA refuses it. Default: off. Env: `TS_VIDEO_DIFFUSION_VAE`. |
 | `--qwen-image-vae <path>` / `--qwen-image-vl <path>` / `--qwen-image-mmproj <path>` | Override the Qwen-Image-2.1 companions the server otherwise finds next to the DiT GGUF: the VAE, the Qwen3-VL-8B text encoder and its vision projector (needed for editing). Checked at startup. Env: `TS_QWEN_IMAGE_VAE`, `TS_QWEN_IMAGE_TE`, `TS_QWEN_IMAGE_MMPROJ`. |
 | `--qwen-image-variant <base\|turbo>` | Which Qwen-Image-2.1 checkpoint the DiT GGUF holds, same spelling and meaning as on the CLI: `turbo` samples Turbo's 8-step schedule at CFG 1 by default (a request's `steps` may only be 8) and refuses step-distillation `--lora` plug-ins. Applies to every Qwen-Image model the server loads; another model loads without it and the server logs a warning, as for `--lora`. Default: none — a file name containing the word `turbo` is assumed to be Turbo and the load says so. Checked at startup. Env: `TS_QWEN_IMAGE_VARIANT`. |
-| `--width <px>` / `--height <px>` | Default Qwen-Image-2.1 output size for an image request that names neither a size nor an area (the Web UI sends none); a request that sets its own width/height or target area keeps its own geometry. The default needs both values. A side that is not a multiple of 32 is rounded down to one (never below 32) with a one-time `[qwen-image] WARNING`; with only one side given, or an unparsable or negative value, the default is ignored with a one-time warning and the automatic size (a 2048×2048 area; 1024×1024 on the `cpu` backend) stays. A Qwen-Image server also warns at startup in either case; nothing is refused. A width/height set in the request itself must still be a positive multiple of 32. Env: `TS_QWEN_IMAGE_WIDTH` / `TS_QWEN_IMAGE_HEIGHT`. They are also aliases of `--video-width` / `--video-height`. |
+| `--width <px>` / `--height <px>` | Default Qwen-Image-2.1 output size for an image request that names neither a size nor an area (the Web UI sends none); a request that sets its own width/height or target area keeps its own geometry. The default needs both values. A side that is not a multiple of 32 is rounded down to one (never below 32) with a one-time `[qwen-image] WARNING`; with only one side given, or an unparsable or negative value, the default is ignored with a one-time warning and the automatic size (a 2048×2048 area; 1024×1024 on the `cpu` backend) stays. A Qwen-Image server also warns at startup in either case; nothing is refused. A width/height set in the request itself must still be a positive multiple of 32. Env: `TS_QWEN_IMAGE_WIDTH` / `TS_QWEN_IMAGE_HEIGHT`. They are also aliases of `--video-width` / `--video-height`. LTX 2.5 video defaults to 1024×1024 output with both sides positive multiples of 64; see its two-stage recipe below. |
 | `--lora <path>` / `--lora-scale <f>` / `--lora-config <path>` | Qwen-Image-2.1 LoRA plug-ins, same spelling and binding rules as on the CLI (repeat `--lora` to stack; scale and config bind to the preceding `--lora`). The files are checked at startup, and the set applies to every image request; a request's `steps` / `cfg` still override a plug-in's sampling recipe. Other models ignore them (the startup log says the plug-ins apply to Qwen-Image-2.1 models only). See [Qwen-Image-2.1 LoRA plug-ins](#qwen-image-21-lora-plug-ins). |
 | `--qwen-image-lora` / `--offload-cpu` | **Removed and rejected at startup, including as config-file keys.** Both served only the earlier Qwen-Image-Edit pipeline. `--qwen-image-lora` is replaced by `--lora` above; `--offload-cpu` has no replacement, because Qwen-Image-2.1 keeps its DiT weights resident. |
 | `--temperature <f>` | Sampling temperature (`0` = greedy) |
@@ -1197,307 +1199,122 @@ Q8_0 or Q4 weights rounds most of it away. It works on `ggml_metal`, `ggml_cuda`
 [Qwen-Image-2.1 card](docs/models/qwenimage21.md#lora-plug-ins) covers the formats,
 the packing, tensor parallelism and the limitations in detail.
 
+## Video generation with audio (LTX 2.5 Distilled)
+
+LTX 2.5 jointly generates video and 48 kHz stereo audio from text, a first/last
+frame, or timed image keyframes. Use the pinned five-file preset (44.76 GB);
+its official companions require approved Hugging Face access and `HF_TOKEN`,
+`HUGGING_FACE_HUB_TOKEN` or the Hugging Face CLI token cache.
+
+```bash
+# NVIDIA; override --backend mlx on Apple Silicon (launch with MLX_ENABLE_TF32=0).
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend cuda \
+  --prompt "A red toy car drives slowly along a quiet road." \
+  --diffusion-seed 42 --output ltx25.mp4
+
+# Add a first frame; --end-image can also guide the final frame.
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend mlx \
+  --image portrait.png --prompt "The person smiles and waves at the camera." \
+  --diffusion-seed 42 --output wave.mp4
+
+# Host the same preset with the browser UI and video APIs.
+dotnet run --project TensorSharp.Server.Host -c Release -- \
+  --config config/ltx-2.5-distilled.json --backend ggml_cuda
+```
+
+The preset defaults to **1024×1024, 17 frames, 24 fps**. Width/height are output
+sizes and must be multiples of 64; frames must follow `8k+1`. The two-stage recipe
+uses eight `euler_ancestral` steps at half size, the required x2 latent upscaler,
+then three refinement steps at full size, all at CFG 1. `--diffusion-steps 8`
+names that published first-pass schedule; arbitrary step/guidance/flow-shift
+settings are rejected. Deterministic `--sampler euler` is a diagnostic override.
+The experimental 48 GB catalog tier is a starting point, not a proven minimum
+for every resolution or duration.
+
+`cuda`/`ggml_cuda` use the CUDA executor; `mlx`/`ggml_metal` use MLX;
+`cpu`/`ggml_cpu` use the direct CPU executor. Vulkan and multi-GPU are unsupported.
+The optional `--video-diffusion-vae` runs on MLX/CPU; the convolutional VAE is
+the default. `--video-upscaler` overrides the required spatial upscaler.
+Desktop MP4 audio muxing requires FFmpeg (`PATH` or `TS_FFMPEG`); the CLI also
+writes the original WAV. TensorAgent on Mac uses AVFoundation.
+
+The video APIs accept `imageConditions` entries with `imagePath` or inline `image`,
+`frameIndex` (zero-based; `-1` is the last frame), and `strength` in `[0,1]`.
+Ordered `referenceImages` are timeline guides unless `videoMode: "ref"` selects
+the separate optional Ingredients IC-LoRA for identity references. Video/audio
+references and retake are unavailable. See the [LTX model card](docs/models/ltx-2.5.md)
+and [API examples](TensorSharp.Server.Host/API_EXAMPLES.md#video-generation-apivideo-generate-v1videosgenerations)
+for setup, request bodies, measured coverage and benchmark limits.
+
 ## Video generation with audio (MiniMax-H3)
 
-MiniMax-H3 generates video **and a native 32 kHz stereo soundtrack together** — one
-diffusion transformer denoises a packed video+audio latent in a single token sequence,
-so the audio is part of the model output rather than something dubbed on afterwards.
-Up to 15 s at 24 fps. It is CFG-distilled, so `--cfg 1.0` is required; the pipeline
-defaults to 20 denoising steps and 4–8 is the fast operating point. Measured on an
-M5 Pro with Metal at 22 frames, 8 steps and an identical seed, it runs 2.4× faster
-than stable-diffusion.cpp at 256×256 (49.3 s → **20.9 s**) and 1.7× at 640×384
-(108.5 s → **63.1 s**).
+MiniMax-H3 jointly generates video and native 32 kHz stereo audio. The two
+checkpoints have different conditioning contracts:
 
-That comparison is hardware-dependent, and on a memory-starved card it inverts. On a
-16 GB RTX 3080 Laptop with CUDA — same 22 frames, 8 steps, best of three —
-stable-diffusion.cpp finishes first end to end: 1.15× at 256×256 (37.8 s against
-43.6 s) and 1.07× at 640×384 (59.8 s against 63.7 s). Per **denoise step** TensorSharp
-is still ahead on that card (3.325 s against 3.338 s by the 8-vs-16-step slope); what
-it loses is fixed setup cost, and roughly 3 s of the residual 3.9 s is not inference at
-all — H.264 encoding, where stable-diffusion.cpp writes MJPEG+PCM into an AVI, plus
-.NET process startup against a native binary. That machine holds 16 GB of VRAM and
-31.7 GB of RAM against a ~35.5 GB model set, so neither the weights nor the page cache
-fit and setup dominates the wall clock; peak VRAM was 15 780 MiB against
-stable-diffusion.cpp's 12 035 MiB on a 16 384 MiB card. stable-diffusion.cpp ran with
-`--auto-fit --stream-layers --diffusion-fa --rng cpu`, because its default
-`--offload-to-cpu` path cannot run this model there at all — it tries to pin 17.7 GB
-into 12.3 GB of free RAM.
+| Checkpoint/config | Inputs |
+|---|---|
+| `minimax_h3_fl2va_pruned-Q4_K.gguf` / `config/minimax-h3-fl2va.json` | Text (`t2v`), first frame (`i2v`), first and last frame (`fl2v`) |
+| `minimax_h3_ref2va_pruned-Q4_K.gguf` / `config/minimax-h3-ref2va.json` | Text or identity/appearance references (`ref`), including image, video and audio references |
 
-Four networks are needed — one of the two denoisers plus three shared companions.
-Each is loaded and released in turn, so peak VRAM is the largest of them rather than
-their sum:
-
-| Role | File | Size |
-| --- | --- | --- |
-| Denoiser — keyframes (`t2v` / `i2v` / `fl2v`) | `minimax_h3_fl2va_pruned-Q4_K.gguf` | 10.64 GiB |
-| Denoiser — references (`t2v` / `ref`) | `minimax_h3_ref2va_pruned-Q4_K.gguf` | 10.60 GiB |
-| Text encoder (Qwen3-VL-32B, 50 layers) | `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` | 16.97 GiB |
-| Video VAE (16× spatial / 4× temporal) | `minimax_h3_video_vae_fp16.safetensors` | 5.21 GB |
-| Audio VAE (32 kHz stereo) | `minimax_h3_audio_vae_fp32.safetensors` | 0.61 GB |
-
-Which denoiser is loaded is read off the **file name**: one containing `ref2va` selects
-the reference checkpoint, anything else the first/last-frame one — so a rename or a
-requantization has to keep `ref2va` in the name.
-
-Companions resolve automatically when they sit next to the denoiser; otherwise name
-them with `--video-text-encoder`, `--video-vae` and `--audio-vae`. Leave the audio VAE
-out and you still get video, just silent — as does `--no-audio`, which skips the audio
-decode to save its time and memory; on Ref2VA that same VAE's encoder is what a
-`--ref-audio` goes through, so dropping it costs reference soundtracks as well as the
-generated one. The text encoder ships **no tokenizer**, so
-`vocab.json` and `merges.txt` from
-[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/processor)
-must be beside it (or point `TS_VIDEO_TOKENIZER` at them).
-
-**What a 16 GB card does with them.** Two behaviours matter once the set stops fitting.
-The denoiser's device residency is handed back **before** the video VAE loads, whenever
-the two would not fit together — otherwise a finished 10.6 GB denoiser sits beside a
-5.2 GB VAE on a 16 GB card, and WDDM does not fail that allocation, it backs the
-overflow with shared host memory and the whole decode runs at PCIe speed (peak VRAM
-during decode 16 041 MiB → ~5 600 MiB, worth 22 s at 640×384). And because weights are
-bound as pointers into the mmapped GGUF, the denoiser file is read through once before
-its first upload — started as soon as the text trunk produces its hidden states, and
-pipelined with the upload rather than joined before it, since an H2D copy that faults
-its pages in as it goes measures 0.91 GB/s on this card against 5.97 GB/s once the
-pages are resident. Together, 640×384 went from 89.0 s to 63.7 s on a 16 GB RTX 3080
-Laptop (256×256: 67.2 s → 43.6 s), output byte-identical either way. The release is
-gated on measured free VRAM and the prefault on free host RAM. When the prefault stands
-down it simply carries on; it says so with
-`denoiser prefault skipped (not enough free RAM)`, but only under `TS_H3_PHASE=1` — on
-default settings a skip is silent. A machine with room for both keeps the previous
-behaviour exactly.
-`TS_H3_PHASE=1` prints the per-stage breakdown — encoder open / trunk / teardown, the
-prefault, every denoise step, VAE open / decode — which is where those seconds show up
-on your own card.
-
-The two shipped configs name all four networks, which is what lets them auto-download
-into `${modelRoot}` on the first run (~35.5 GB, or ~35.4 GB for the Ref2VA set) and be
-reused after. Only the denoiser differs between them, so running the second one
-downloads nothing but its own DiT:
+Both configs pin a denoiser, Qwen3-VL-32B text encoder, video VAE and audio VAE.
+The text encoder also needs `vocab.json`, `merges.txt` and `tokenizer_config.json`
+from the processor revision linked in the [model card](docs/models/minimax-h3.md).
+Keep `fl2va`/`ref2va` in the denoiser filename. Companion overrides are
+`--video-text-encoder`, `--video-vae`, `--audio-vae` and `TS_VIDEO_TOKENIZER`.
+TensorAgent downloads the tokenizer with the pinned model files.
 
 ```bash
-# Keyframes: text-to-video, image-to-video, first-and-last-frame
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-fl2va.json \
-  --prompt "a red fox trotting through falling snow, cinematic" --output fox.mp4
+# A first frame is animated; the prompt describes its motion.
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/minimax-h3-fl2va.json --backend ggml_metal \
+  --image portrait.png --video-mode i2v --prompt "The person smiles and waves." \
+  --width 640 --height 384 --video-frames 22 --diffusion-steps 20 \
+  --cfg 1 --diffusion-seed 42 --output wave.mp4
 
-# References: same subject, brand-new scene
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --config config/minimax-h3-ref2va.json \
-  --ref-image person.png --ref-image jacket.png \
-  --prompt "she walks through a night market, neon reflections" --output market.mp4
-
-# Either file also hosts the server
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --config config/minimax-h3-fl2va.json
+# Ref2VA creates a new scene using the referenced identity.
+dotnet run --project TensorSharp.Cli -c Release -- \
+  --config config/minimax-h3-ref2va.json --backend ggml_cuda \
+  --video-mode ref --ref-image portrait.png \
+  --prompt "<Picture 1> walks through a sunlit garden." \
+  --width 640 --height 384 --video-frames 22 --diffusion-seed 42 --output garden.mp4
 ```
 
-Both configs pin `"backend": "ggml_cuda"` and `640×384 × 22` frames at 24 fps;
-`--backend ggml_metal` on the command line overrides the backend. Neither sets steps
-or guidance, because the two hosts spell steps differently (`--diffusion-steps` on the
-CLI, `--video-steps` on the server) and the server takes no `--cfg` at all — so the
-model's own defaults apply.
+Omit `--image`/`--video-mode` for text-to-video. Add `--end-image` with a first
+frame for FL2VA. Ref2VA accepts up to nine `--ref-image` inputs, plus `--ref-video`,
+`--ref-audio` and index-paired `--ref-video-audio`; prompt placeholders are
+`<Picture 1>`, `<Video 1>` and `<Audio 1>`. Incompatible checkpoint/mode/input
+combinations fail rather than silently dropping conditioning.
 
-**Text to video.** Writes `fox.mp4` plus `fox.wav` with the generated soundtrack:
+CFG is fixed at **1**; the default is **20 steps**, while 4–8 trades quality for
+speed. Width/height round up to multiples of 32; frames round up to the `17k+5`
+grid (5, 22, 39, …). Playback is fixed at 24 fps.
+These limits are input contracts; long-clip perceptual quality is not established.
+`--no-audio` skips audio decoding but retains the trained joint AV denoiser.
+The CLI writes a WAV beside the MP4; audio muxing depends on the export provider.
+For example: `ffmpeg -i wave.mp4 -i wave.wav -c:v copy -c:a aac wave_with_audio.mp4`.
 
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --prompt "a red fox trotting through falling snow, cinematic" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
-  --output fox.mp4
-```
+The implemented backends are `ggml_metal`, `mlx`, `ggml_cuda`, `cuda`, `ggml_cpu`
+and pure C# `cpu`; multi-GPU is unsupported. Corrected text refinement, audio
+carrier drift and final scaling supersede older generation comparisons, including
+the 2.4×/1.7× Metal claims. The latest equal-precision before/after 20-step, 640×384×22 runs reduced
+whole-process time by 5.0% on Metal, 12.5% on MLX and 19.0% on direct CUDA;
+native CUDA had no meaningful gain. Samples include loading/export and
+uncontrolled file-cache state, so they establish neither universal speedups
+nor general cross-engine parity; CPU
+whole-generation comparisons after the corrections remain pending. Consult the
+[current coverage and precision notes](docs/models/minimax-h3.md) for the actual
+fixtures, device runs and performance limits.
 
-**Image to video — animate a photo.** The image becomes the FIRST FRAME and the
-prompt drives what happens next:
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --image portrait.jpg \
-  --prompt "the person turns toward the camera and smiles, subtle handheld motion" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
-  --output animated.mp4
-```
-
-**First and last frame.** Both ends are pinned and the model fills in the motion:
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --image start.png --end-image end.png --prompt "a slow cinematic push-in" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 8 --cfg 1.0 \
-  --output morph.mp4
-```
-
-**Picking the mode.** An image means two different things to H3, and they use
-different checkpoints. The mode is inferred from what you pass; `--video-mode` states
-it explicitly.
-
-| What you want | `--video-mode` | Checkpoint |
-| --- | --- | --- |
-| "animate this photo" | `i2v` | `minimax_h3_fl2va_pruned-*` |
-| "go from photo A to photo B" | `fl2v` | `minimax_h3_fl2va_pruned-*` |
-| "use this person, brand-new scene" | `ref` | `minimax_h3_ref2va_pruned-*` |
-| "reference this product, new angle and background" | `ref` | `minimax_h3_ref2va_pruned-*` |
-| text only | `t2v` | either |
-
-Combinations that cannot mean one thing are refused up front, by name, rather than
-half-honoured: `ref` on the FL2VA checkpoint, keyframes on Ref2VA, `i2v` without an
-image, `fl2v` without `--image` and/or `--end-image`, `ref` with nothing to reference,
-`t2v` with images supplied, and keyframes together with named references — a clip that
-comes back looking like the request was honoured is the worse failure. Each message
-names the checkpoint to load or the flag to drop.
-
-Reference conditioning keeps the subject and changes everything else — camera,
-background and composition come from the prompt, and the first frame need not
-resemble the reference at all:
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --ref-image person.jpg --ref-image bottle.png \
-  --prompt "she holds the bottle up to the light on a rooftop at golden hour, slow orbit" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 20 --cfg 1.0 \
-  --output rooftop.mp4
-```
-
-Up to nine `--ref-image`s. They are only ever scaled down and keep their own aspect
-ratio, so the output canvas still comes from `--width`/`--height`. A plain `--image`
-on the Ref2VA checkpoint is treated as a reference too, so clients that only attach
-"an image" work unchanged.
-
-A reference can also be a **clip** (`--ref-video`, a video file or a directory of
-frames) or a **soundtrack** (`--ref-audio`). A clip's own audio goes in separately
-with `--ref-video-audio`, paired by position, because a container's audio track is
-not readable through the frame decoder:
-
-```bash
-dotnet TensorSharp.Cli/bin/TensorSharp.Cli.dll --model minimax_h3_ref2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --ref-video walk.mp4 --ref-video-audio walk.wav \
-  --prompt "the same woman walks along a beach at sunset, wide shot" \
-  --width 640 --height 384 --video-frames 22 --diffusion-steps 20 --cfg 1.0 \
-  --output beach.mp4
-```
-
-A reference clip is the most expensive input H3 takes — a 22-frame 448x320 one adds
-980 conditioning tokens on top of the 1680 the output needs, plus about 14 s to
-encode. It is resampled to 24 fps, pulled onto the 17k+5 grid, and shown to the
-language model at 2 fps.
-
-**References are not free, and the second cost is the one that bites.** Inside the
-denoiser they are linear and cheap: a 640×384 reference is 240 tokens, and on an RTX
-3080 Laptop a 22-frame 640×384 step goes from 4.37 s with no references to 9.38 s with
-eight — ~626 ms per reference per step, flat from one to eight. The Qwen3-VL pass is
-where it turns: each reference adds ~250 vision placeholder tokens to the prompt and
-all 50 layers prefill them, so two references make a 548-token prompt and eight make a
-2086-token one, and text conditioning grows from ~65 s to ~447 s while the whole 8-step
-denoise still costs ~75 s. Past roughly four references the encoder, not the denoiser,
-is the run — reach for fewer, better references before reaching for fewer steps. The
-nine-reference cap is TensorSharp's own: the packed sequence is attended over unmasked,
-so its length is a numeric budget as well as a time one. Say who is in frame, too — the
-reference supplies the identity, but the prompt still has to describe the shot, or the
-scene comes back well rendered with the subject missing.
-
-**Quality.** Two settings dominate:
-
-| Lever | Default | What it does |
-| --- | --- | --- |
-| `--width` / `--height` | 640×384, or the image's aspect at that area | **Biggest factor.** Faces need pixels — at 256×256 they come back blurry and malformed whatever else you set. |
-| `--diffusion-steps` | 20 | Removes coloured fringing around moving subjects. 8 is the fast lane, ~20 clean, past ~30 gains little. |
-| `--diffusion-seed` | random | Some seeds compose better; cheapest retry. |
-| model quant | — | `-Q8_0` denoiser over `-Q4_K` if memory allows. |
-
-`--cfg` is not a quality lever (H3 only accepts 1.0) and `--negative-prompt` does
-nothing, because there is no unconditional pass. Note that the seed here is
-`--diffusion-seed`, not `--seed`: `--seed` is the text sampling seed and leaves the
-clip alone, and without `--diffusion-seed` every run draws a fresh random one — so
-two runs meant to be compared need it set explicitly.
-
-**On the server, size is a startup flag.** The browser sends the prompt plus whatever
-conditioning the hosted checkpoint advertises — a first frame, a last frame, or up to
-`maxReferenceImages` references — together with the matching `videoMode`. Uploaded
-images go directly into generation; no `--image` server argument or local image path
-is needed. The browser sends no numeric parameters, so every clip inherits the server
-defaults:
-
-```bash
-dotnet TensorSharp.Server.Host/bin/TensorSharp.Server.Host.dll --model minimax_h3_fl2va_pruned-Q4_K.gguf --backend ggml_metal \
-  --video-width 640 --video-height 384 --video-steps 20 --video-frames 22 --port 5001
-```
-
-`--video-mode` supplies a default for requests that omit `videoMode`; omit it and the
-model infers the mode from the supplied inputs. Web chat and TensorAgent choose the
-mode from uploaded attachments and the loaded checkpoint, overriding this startup
-default when an image is attached. Ref2VA uses images as references for a new scene;
-to animate the uploaded image as the first frame, load `config/minimax-h3-fl2va.json`.
-
-Omit `--video-width`/`--video-height` and each request takes its aspect ratio from
-the uploaded image, which avoids stretching a 4:3 photo into a 16:9 frame.
-
-**The HTTP surface.** Three endpoints generate video, all registered with the request
-timeout disabled: `POST /api/video-generate`, `POST /api/video-generate/stream` (the
-same body over SSE, ticking `{ videoGen, step, total, phase, detail, elapsedSeconds,
-etaSeconds }` and ending on `{ done: true, … }`) and the OpenAI-shaped
-`POST /v1/videos/generations`. All three share one parser, so one body works
-everywhere: `prompt` (required), `width`, `height`, `frames`, `steps`, `cfg`, `cfg2`,
-`seed`, `fps`, `flowShift`, `negativePrompt`, `sampler`, `cfgCacheStride`, `videoMode`,
-`generateAudio`, `imagePath` (or inline base64 `image`), `endImage`, `referenceImages`,
-`referenceVideos`, `referenceAudios` and `referenceVideoAudios` — the last paired **by
-index** with `referenceVideos`. The fields added for joint audio-video and reference
-conditioning also accept a snake_case spelling (`video_mode`, `generate_audio`,
-`end_image`, `reference_images`, …), camelCase winning if both are sent; the older
-fields are camelCase only. Every path field must name a file previously uploaded
-through `/api/upload` and is confined to the upload directory.
-
-`/api/video-generate` answers
-`{ ok, url, audioUrl, width, height, frames, fps, seed, codec, elapsedSeconds }`, with
-`audioUrl` null when the model generated no track; `/v1/videos/generations` also takes
-`size` as `"832x480"`, `negative_prompt` and `response_format` (`url` or `b64_json`)
-and answers `{ created, data: [{ url, b64_json }], audio_url, width, height, frames,
-fps, seed, codec, elapsed_seconds }`. A request the model can explain — the wrong
-checkpoint for the mode, a mode without its inputs, keyframes and references together —
-comes back as a 400 carrying the model's own message instead of a generic 500, and a
-host whose model does not generate video answers `The loaded model is not a
-video-generation model.`
-
-`GET /api/models` carries a `video` object whenever the hosted model generates video
-and `null` otherwise, which is how a client learns what to offer without pattern-matching
-an architecture string: `family` (`minimax-h3`), `supportsAudio` (true once an audio VAE
-resolved), `supportsImageConditioning`, `supportsEndImageConditioning` (FL2VA only),
-`supportsReferenceConditioning` and `maxReferenceImages` (9, on Ref2VA). The Web UI
-reads exactly those fields to decide whether to attach a last frame or references.
-
-**Sizes.** Width and height round up to a multiple of 32; the frame count rounds up
-onto the `17k+5` grid (5, 22, 39, 56, 73, 90 …) and fps is pinned to 24, giving up to
-15 s of clip. Any grid length decodes correctly — the video VAE runs 5 latent frames
-at a time with a 2-frame look-ahead and cross-fades the seams. Decoding a long clip in
-one call instead washes detail out progressively (measured against the conditioning
-photo, frame 0 falls from 0.97 correlation at 22 frames to 0.86 at 90), so the chunking
-is a correctness requirement rather than an optimization.
-
-**When a long clip diverges it fails instead of saving.** H3 attends bidirectionally
-over the whole clip, so the key count *is* the clip — 2364 packed tokens at 22 frames,
-8646 at 107 — and a diverged flow-matching velocity would decode to a file that looks
-right in every property except that every pixel is black and every audio sample is
-clamped. A non-finite velocity therefore fails the request, naming the step it appeared
-at, rather than writing that file. Set `TS_H3_TRACE=1` to print the latent and velocity
-magnitudes for every step; the absmax leaves its normal range several steps before it
-reaches infinity.
-
-**Audio** is written as a sidecar `.wav` rather than muxed, because muxing needs an
-encoder that may not be installed. Combine them with:
-
-```bash
-ffmpeg -i fox.mp4 -i fox.wav -c:v copy -c:a aac fox_with_audio.mp4
-```
-
-**`--backend cpu` runs the whole thing with no ggml.** Prompt encoding, denoising,
-video VAE decode and the audio vocoder all have pure-C# implementations, and so do the
-vision tower, the causal 3-D video VAE encoder and the audio VAE encoder — so `t2v`,
-`i2v`, `fl2v` and reference images, clips and soundtracks all work there. Everything
-runs at F32 on the host, so it is for correctness, portability and machines with no
-accelerator rather than for speed; a 256x160x5f single-step `t2v` measured 69 s against
-14 s on `ggml_cpu`, while the same `i2v` measured 70 s against 176 s (a single
-sample -- do not read too much into that direction). Agreement with
-the GGML path and the one stage whose residual is larger than GGML's own internal
-spread (the vision tower) are written up in the model card.
-
-Full detail, including the architecture and the verification numbers:
-[docs/models/minimax-h3.md](docs/models/minimax-h3.md).
+The shared endpoints are `/api/video-generate`, `/api/video-generate/stream` and
+`/v1/videos/generations`. Host configs accept `--video-width`, `--video-height`,
+`--video-steps`, `--video-frames` and `--fps` as request defaults. `GET /api/models`
+advertises the loaded checkpoint's conditioning capabilities. Web chat and
+TensorAgent choose the mode from the attachments; uploading a picture to Ref2VA
+uses it as an identity reference. Load FL2VA to animate it as the first frame.
+See [API examples](TensorSharp.Server.Host/API_EXAMPLES.md#video-generation-apivideo-generate-v1videosgenerations)
+for fields, upload paths and responses.
 
 ## Video generation (Wan)
 
