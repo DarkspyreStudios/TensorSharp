@@ -27,6 +27,7 @@
 | Muse-Glimmer | [Muse-Glimmer-30B](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF)（+ mmproj） | ✅ / — / — | ✅ | ✅ | [muse-glimmer](models/muse-glimmer_zh-cn.md) |
 | Qwen-Image-2.1 | [Qwen-Image-2.1 GGUF](https://huggingface.co/Abiray/Qwen-Image-2.1-GGUF)（DiT + 专用 2.1 VAE + Qwen3-VL-8B）；Unsloth 不带元数据的 Q8_0 DiT 也可加载，靠张量表识别（图像编辑需用 `--qwen-image-mmproj` 指定其 `mmproj-BF16.gguf`） | 🖼️ 文本→图像、参考图编辑与遮罩局部编辑；RGBA；LoRA 插件（`--lora`，含 4–8 步蒸馏） | — | — | [qwenimage21](models/qwenimage21_zh-cn.md) |
 | MiniMax-H3 音视频 | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF)（去噪器 + Qwen3-VL-32B 文本编码器）+ [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)（视频 VAE + 音频 VAE） | 🎬🔊 文本→视频、图像→视频、首尾帧、参考（图像/片段/音轨）→视频，**带立体声音频** | — | — | [minimax-h3](models/minimax-h3_zh-cn.md) |
+| LTX 2.5 Distilled（实验性） | [Abiray/LTX-2.5-Distilled-GGUF](https://huggingface.co/Abiray/LTX-2.5-Distilled-GGUF) + 专用 [Lightricks/LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) 编码器、VAEs 与 x2 潜变量上采样器 | 🎬🔊 文本/图像→视频 + 48 kHz 立体声音频；两阶段流程，CUDA/MLX 路径 | — | — | [ltx-2.5](models/ltx-2.5_zh-cn.md) |
 | Wan 2.1 / 2.2 视频 | [Wan2.2-TI2V-5B](https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF)（另有 [T2V-A14B](https://huggingface.co/QuantStack/Wan2.2-T2V-A14B-GGUF)、[I2V-A14B](https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF)、[Wan2.1-T2V-14B](https://huggingface.co/city96/Wan2.1-T2V-14B-gguf)）+ UMT5-XXL + 视频 VAE · 快速路径：[TI2V-5B-Turbo](https://huggingface.co/hum-ma/Wan2.2-TI2V-5B-Turbo-GGUF)（4 步，DiT 前向次数减少 25×） | 🎬 文本→视频、图像→视频 | — | — | [wan](models/wan_zh-cn.md) |
 
 ## 支持的模型架构
@@ -34,6 +35,7 @@
 | 架构 | GGUF 架构标识 | 示例模型 | 多模态 | 思维链 | 工具调用 | MTP 投机 | 卡片 |
 |---|---|---|---|---|---|---|---|
 | BERT / XLM-R 嵌入 | `bert` | Snowflake Arctic Embed L v2.0、all-MiniLM-L6-v2 | 文本 → 向量 | — | — | — | [嵌入指南](embeddings_zh-cn.md) |
+| EmbeddingGemma 2 | `gemma-embedding2` | Q8_0 / BF16 文本 GGUF，可选 Gemma 4 媒体投影器 | 文本/代码；配 `--mmproj` 的图像、音频、抽样视频；8192 token，归一化 768/512/256/128 维；六条后端路径实现，设备验证与待完成性能范围见指南 | — | — | — | [嵌入指南](embeddings_zh-cn.md) |
 | DeepSeek V4.1 Flash | `deepseek41` | DeepSeek-V4.1-Flash（40 层，384 个路由专家 top-6 加一个共享专家，四条残差流与延迟 hyper-connection 混合，Engram n-gram 特征，声明 1M 上下文） | 文本；配合准备好的视觉伴随文件（`--mmproj`）支持图像与视频，音频请求被拒绝 | 支持 | 支持（带空格的 DSML，受语法约束） | 实验性：可在 `ggml_cuda`/`ggml_cpu` 上通过 `--draft-model` 加载 `deepseek41-dspark` 草稿模型；训练模型已在 `ggml_cuda` 双 GPU 按层切分下通过初步文本/图像 HTTP 检查；尚不构成通用质量或吞吐验证（V4 的草稿模型会被拒绝） | [deepseek41](models/deepseek41_zh-cn.md) |
 | DeepSeek V4 Flash | `deepseek4` | DeepSeek-V4-Flash（284B MoE，256 专家，压缩稀疏注意力，1M 上下文） | 仅文本 | 支持 | 支持（DSML） | 支持（DSpark 块级草稿，独立 GGUF） | [deepseek4](models/deepseek4_zh-cn.md) |
 | GLM 5.x | `glm-dsa`、`glm_dsa`、`glm5next` | GLM-5.2（744B-A40B MoE，256 专家，MLA + DeepSeek 稀疏注意力，1M 上下文）、[GLM-5.3](models/glm_zh-cn.md#glm-53glm-dsa)（与 5.2 完全相同的 79 层 `glm-dsa` 形态——78 层主干加 1 个 NextN，256 个路由专家 top-8 外加 1 个共享专家，带 lightning indexer 的 MLA，rope base 8e6——因此直接走 GLM-5.2 的加载路径，既不需要新代码也不需要新开关；仅文本）、GLM-5.3-Flash（320B MoE，288 专家，KDA 线性注意力 + NoPE MLA 与池化索引器） | 仅文本（5.2 与 5.3）、图像（5.3-Flash） | 支持 | 支持（XML 工具调用） | GLM-5.2 与 GLM-5.3 支持（内嵌 NextN 块；5.3 上投机在单设备或显式 `--layer-split N` 模式下生效，不启用张量并行） | [glm](models/glm_zh-cn.md) |
@@ -49,6 +51,7 @@
 | DiffusionGemma | `diffusion-gemma`、`diffusion_gemma` | diffusion-gemma 文本扩散 GGUF | 聊天支持图像；[Jev](models/jev_zh-cn.md) 还支持文档、抽样视频帧和已配置 ASR 配套服务的语音转录 | 不支持（提示中不启用） | 不支持（会被拒绝） | — | [diffusiongemma](models/diffusiongemma_zh-cn.md) |
 | Qwen-Image-2.1 | `qwen_image`、`qwen-image`（通过张量键识别 2.1；更早的 Qwen-Image / Edit-2511 checkpoint 会在加载时被拒绝） | Qwen-Image-2.1 DiT GGUF（+ 专用 2.1 VAE 与 Qwen3-VL-8B） | 文本→图像、参考图编辑与遮罩局部编辑，RGBA 输出；GGML 与纯 C# `cpu` 路径；LoRA 插件；前缀 KV 缓存默认开启；DiT 张量并行（`--tp`，GGML CUDA/Vulkan；Vulkan 上实测双卡比单卡更慢） | 不支持 | 不支持 | — | [qwenimage21](models/qwenimage21_zh-cn.md) |
 | MiniMax-H3 | `minimax-h3`、`minimax_h3`（官方发布的 GGUF 完全没有元数据，因此靠张量表识别） | MiniMax-H3 FL2VA / Ref2VA（193 亿参数的打包音视频 DiT + Qwen3-VL-32B 文本编码器、视频 VAE、音频 VAE） | 视频输出 **+ 32 kHz 立体声音频**（文本→视频、图像→视频、首尾帧、参考→视频） | 不支持 | 不支持 | — | [minimax-h3](models/minimax-h3_zh-cn.md) |
+| LTX 2.5 Distilled | `ltx-2.5`、`ltx`、`ltxv`、`ltx2`、`ltx-2`、`ltx_2_5`；无元数据时按张量识别 | 完整 48 块 AV 去噪器 + 专用 Gemma 4 编码器/投影 + x2 潜变量上采样器 + 卷积视频/音频 VAEs | 文本/图像→视频 + 48 kHz 立体声音频；半尺寸八步 ancestral Euler、x2 上采样、全尺寸三步细化，CFG 1；首尾/定时关键帧和可选 Ingredients 身份参考；实验性 | 不支持 | 不支持 | — | [ltx-2.5](models/ltx-2.5_zh-cn.md) |
 | Wan 视频 | `wan`、`wan2.1`、`wan2.2` | Wan 2.1 T2V 1.3B/14B、Wan 2.2 TI2V-5B、Wan 2.2 A14B T2V/I2V（双专家） | 视频输出（文本→视频、图像→视频） | 不支持 | 不支持 | — | [wan](models/wan_zh-cn.md) |
 
 各架构的端到端文档（前向图、组件、参数、prefill/decode 优化）见[按模型架构卡片](models/README_zh-cn.md)。

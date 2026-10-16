@@ -18,7 +18,7 @@
   <h1>Using TensorSharp from C#</h1>
   <p class="lede">TensorSharp is a real .NET library, not just an executable. Reference its projects from a source checkout and drive inference directly from your own code when you do not want an HTTP hop.</p>
 
-  <p><strong>Sentence encoders:</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2, with pure C# CPU and native GGML CPU/Metal/CUDA execution, served through <code>--embeddings</code> and OpenAI/Ollama embedding APIs. <a href="embeddings.html">Embedding models, supported backends, and validation →</a></p>
+  <p><strong>Embedding models:</strong> Snowflake Arctic Embed L v2.0, MiniLM, and EmbeddingGemma 2 with text and optional image/audio/video input. Serve normalized vectors through <code>--embeddings</code> and OpenAI/Ollama APIs; backend support depends on the encoder. <a href="embeddings.html">Models, APIs, and validation →</a></p>
 
   <h2 id="packages">Project and package boundaries</h2>
   <p>The repository is split along publishable package boundaries. The source tree's publish set is <strong>fourteen</strong> packages — every row below — verified by <code>eng/verify-packages.ps1</code>, which gates the release workflow.</p>
@@ -169,6 +169,9 @@ Console.WriteLine($"Saved {edited.Width}x{edited.Height} edited image.");</code>
 
   <p><strong>Local edits:</strong> set <code>p.Mask = ImageIO.Load("selection.png", preserveAlpha: true)</code>, then <code>MaskMode</code>, <code>MaskInvert</code>, <code>MaskFeather</code>, <code>MaskCrop</code> and <code>MaskCropPadding</code> as needed before <code>EditImage()</code>. <code>QwenImageMaskMode.Grayscale</code> (default) uses white to edit; <code>Alpha</code> uses transparency. The mask matches the first input image, and the result retains its canvas and protected pixels. <a href="models-image.html#mask-editing">Mask semantics →</a></p>
   <p><strong>Keeping the source size:</strong> set <code>p.KeepSourceSize = true</code> for an edit that returns the first input image's exact width and height, sampled at about the image's own area, at least 1 megapixel and at most <code>TargetArea</code> (or the automatic area). It cannot be combined with <code>Width</code>/<code>Height</code>, and <code>GenerateImage()</code> refuses it.</p>
+
+  <h2 id="video-models">Audio/video and embedding models</h2>
+  <p>Registered <code>Ltx25Model</code> implements <code>IVideoGenerationModel</code>, the video seam also used by MiniMax-H3 and Wan; requests are validated against each model contract. LTX defaults to the complete two-stage recipe and 48 kHz stereo. Embedding text uses <code>EmbeddingModel.Load</code>; EmbeddingGemma 2 media uses <code>EmbeddingGemma2MultimodalEncoder</code> with ordered input parts. <a href="models-video.html#ltx-25">LTX 2.5</a> · <a href="embeddings.html#csharp">Embedding integration</a></p>
 
   <h2 id="sampling">SamplingConfig</h2>
   <p>The sampling knobs map one-to-one to the CLI flags and API options. Defaults match Ollama.</p>

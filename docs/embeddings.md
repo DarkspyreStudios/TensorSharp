@@ -8,6 +8,27 @@ their own release tags; older releases may not include this support. It addresse
 [discussion #183](https://github.com/zhongkaifu/TensorSharp/discussions/183),
 including semantic search over source code stored in SQLite.
 
+## Current EmbeddingGemma 2 status
+
+EmbeddingGemma 2 is implemented for text and, with its optional projector,
+ordered image/audio/video content. It exposes 768-dimensional vectors and
+renormalized 512/256/128-dimensional Matryoshka outputs within an 8192-token
+window. The six execution paths are `cpu`, `mlx`, `cuda`, `ggml_cpu`,
+`ggml_metal` and `ggml_cuda`; Vulkan embeddings are unavailable.
+Use [`config/embeddinggemma2.json`](../config/embeddinggemma2.json) for a
+checksum-pinned native CPU text service or add `--mmproj` for media.
+This support is newer than `v2026.10.10`; use a build containing the changes.
+
+The [implementation and validation record](#embeddinggemma-2-implementation-and-validation)
+below separates independent full-model numerical checks, protocol/lifecycle
+checks and paired timings. Current CPU text and GPU multimodal latency parity
+with llama.cpp remain unachieved. The latest controlled CPU media timings meet
+the original margin in all seven cases in both orders, while original
+cross-engine numerical reports remain failed where llama.cpp differs from the
+independently checked vectors. Synthetic inputs and STS-B regression do not
+establish broad retrieval quality. Historical timings retain their original
+precision policies and do not qualify later executor changes.
+
 ## Embeddings for personal knowledge
 
 The [personal knowledge store](knowledge-system.md) has BM25 retrieval by default

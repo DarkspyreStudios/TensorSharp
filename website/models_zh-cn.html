@@ -19,16 +19,16 @@
   <p class="lede">TensorSharp 加载 GGUF 格式的模型，并从文件的 <code>general.architecture</code> 元数据自动识别架构——MiniMax-H3 与不带元数据的 Qwen-Image-2.1 GGUF（如 Unsloth 的 Q8_0）是例外，它们完全没有元数据，只能靠张量表来识别。选择适合你硬件的量化（低内存用 <code>Q4_K_M</code>，更高质量用 <code>Q8_0</code>）。</p>
   <div class="callout note"><div class="ic">📘</div><p><strong>Gemma 4 E4B 是《From Tensors to Tokens》采用的示例模型。</strong>配套图书提供从张量基础到多模态推理的连贯构建过程；这组参考页面则提供最新下载与能力细节。<a href="book_zh-cn.html">了解本书 →</a></p></div>
 
-  <p><strong>新增句向量编码器：</strong> Snowflake Arctic Embed L v2.0 / all-MiniLM-L6-v2，通过 <code>--embeddings</code> 与兼容 OpenAI/Ollama 的 API。 <a href="embeddings_zh-cn.html">嵌入模型、支持的后端与验证 →</a></p>
+  <p><strong>嵌入模型：</strong> Snowflake Arctic Embed L v2.0、MiniLM，以及支持文本与可选图像/音频/视频输入的 EmbeddingGemma 2。通过 <code>--embeddings</code> 提供兼容 OpenAI/Ollama 的向量 API；后端支持依模型而定。<a href="embeddings_zh-cn.html">模型、API 与验证范围 →</a></p>
 
   <h2 id="browse">浏览模型参考</h2>
   <p>完整参考分为五个页面。如果你已经确定要用哪个模型，从"模型下载"开始；如果还在挑选，从对应的分类页面开始。</p>
   <div class="card-grid">
-    <a class="card" href="embeddings_zh-cn.html"><div class="ic">🔎</div><h3>嵌入模型与语义检索</h3><p>Snowflake 与 MiniLM：文本/代码向量、API 与检索质量。</p></a>
+    <a class="card" href="embeddings_zh-cn.html"><div class="ic">🔎</div><h3>嵌入模型与语义检索</h3><p>Snowflake、MiniLM 与 EmbeddingGemma 2：文本和多模态向量、API 与检索质量。</p></a>
     <a class="card" href="models-downloads_zh-cn.html"><div class="ic">⬇️</div><h3>模型下载</h3><p>所有 GGUF，以及各家族所需的投影器、VAE、编码器与草稿模型。</p></a>
     <a class="card" href="models-text_zh-cn.html"><div class="ic">🧠</div><h3>文本与 LLM 模型</h3><p>支持的模型家族及其运行示例，加上多模态输入、思考模式与工具调用。</p></a>
     <a class="card" href="models-image_zh-cn.html"><div class="ic">🖼️</div><h3>图像生成</h3><p>Qwen-Image-2.1 文生图与图像编辑，以及它的默认值和草图设置。</p></a>
-    <a class="card" href="models-video_zh-cn.html"><div class="ic">🎬</div><h3>视频生成</h3><p>MiniMax-H3 带原生立体声音频，以及 Wan 2.1 / 2.2 与那个把数小时变成几分钟的蒸馏检查点。</p></a>
+    <a class="card" href="models-video_zh-cn.html"><div class="ic">🎬</div><h3>视频生成</h3><p>LTX 2.5 与 MiniMax-H3 联合生成视频与立体声；Wan 2.1 / 2.2 生成视频。</p></a>
   </div>
 
   <h2 id="table">支持的架构</h2>
@@ -50,6 +50,7 @@
       <tr><td><strong>Bonsai2 27B</strong></td><td><code>qwen35</code>，外加 <code>prism.hadamard.*</code> 元数据与 PQ2_0 / PTQ1_0 张量</td><td><code>Ternary-Bonsai-2-27B-PQ2_0.gguf</code> / <code>-PTQ1_0.gguf</code>（稠密 Qwen 3.5 混合架构，48 层 GatedDeltaNet + 16 层全注意力）。权重在加载时无损转码为 GGML Q2_0，并应用 PRISM 的带符号 Hadamard 变换；仅支持单设备 GGML 后端（<code>cpu</code>、<code>cuda</code>、<code>mlx</code> 与 <code>--tp</code> 均被拒绝）。仅在 Metal（M5 Pro）上验证过</td><td>配合伴随 mmproj 支持图像</td><td class="yes">支持</td><td class="yes">支持</td><td class="no">—</td></tr>
       <tr><td><strong>DiffusionGemma</strong></td><td><code>diffusion-gemma</code>、<code>diffusion_gemma</code></td><td>diffusion-gemma 文本扩散 GGUF；同时提供 Jev 类型化决策端点 <code>POST /v1/systemone</code></td><td>图像（聊天与 Jev 决策），视觉塔即 Gemma 4 的视觉塔，可从 mmproj GGUF 或上游 <code>model-00011-of-00011.safetensors</code> 分片加载；音频与视频会被拒绝</td><td class="no">否（提示词不开启思考；模型自发写出的思考块只有在 <code>think: true</code> 时才作为推理内容返回）</td><td class="no">否（带工具的请求会被拒绝）</td><td class="no">—</td></tr>
       <tr><td><strong>Qwen-Image-2.1</strong></td><td><code>qwen_image</code>、<code>qwen-image</code>（无元数据的 GGUF 靠张量表识别）</td><td>Qwen-Image-2.1 DiT（+ 专用 2.1 VAE 与 Qwen3-VL-8B 伴随文件）</td><td>文本 → 图像与图像编辑（RGBA）；LoRA 插件</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
+      <tr><td><strong>LTX 2.5 Distilled</strong></td><td><code>ltx-2.5</code></td><td>Q4_K_M 去噪器、专用 Gemma 4 编码器/投影、卷积视频 VAE、2 倍潜变量放大器与音频 VAE；实验性</td><td>文本/首尾帧/定时图像 → 视频与 48 kHz 立体声；可选 Ingredients 身份参考适配器</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>MiniMax-H3</strong></td><td><code>minimax-h3</code>、<code>minimax_h3</code></td><td>MiniMax-H3 FL2VA / Ref2VA 去噪器（+ Qwen3-VL-32B 文本编码器、视频 VAE 与音频 VAE 伴随文件）。公开的 GGUF 没有任何元数据，靠张量表识别</td><td>视频输出 <strong>+ 32 kHz 立体声音频</strong>（文本 → 视频、图像 → 视频、首尾帧、参考 → 视频）</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
       <tr><td><strong>Wan 视频</strong></td><td><code>wan</code>、<code>wan2.1</code>、<code>wan2.2</code></td><td>Wan 2.1 T2V 1.3B/14B、Wan 2.2 TI2V-5B、Wan 2.2 A14B T2V/I2V（两个 14B 专家）（+ UMT5-XXL 与视频 VAE 伴随文件）</td><td>视频输出（文本 → 视频、图像 → 视频）</td><td class="no">否</td><td class="no">否</td><td class="no">—</td></tr>
     </tbody>
@@ -58,12 +59,12 @@
   <p class="page-foot-note">各模型的详细架构卡（前向图、组件、参数，以及 TensorSharp 如何优化 prefill/decode）位于仓库的 <code>docs/models/</code> 下。</p>
 
   <h2 id="fast-lane">哪个更快——每个家族最关键的那一项设置</h2>
-  <p>每个模型家族都有一项主导端到端耗时的设置。两个视频家族最容易被忽略，而且被忽略的点还不一样：MiniMax-H3 出厂即经 CFG 蒸馏，杠杆是你要多少步、多少像素，而不是去换哪个文件；而在 Wan 上，你下载的是哪个检查点，直接决定一段 5 秒 720p 视频是跑三个半小时还是十七分钟——而且不需要加任何参数。</p>
+  <p>视频家族使用不同配方：LTX 2.5 Distilled 固定采用半尺寸 8 步与放大后 3 步精修；MiniMax-H3 使用 CFG 1，步数、尺寸与参考数量影响成本；Wan 的步数蒸馏检查点会在加载时自动识别。各家族的实测范围见下表与模型卡。</p>
   <div class="table-scroll">
   <table>
     <thead><tr><th>家族</th><th>快车道</th><th>实测效果</th></tr></thead>
     <tbody>
-      <tr><td><strong>MiniMax-H3</strong></td><td><strong>它本身就经过 CFG 蒸馏</strong>——没有更快的文件可换。用 <code>--cfg 1.0</code> 跑 <strong>4–8 步</strong>（默认 20 步），把省下的时间花在 <code>--width</code> / <code>--height</code> 上</td><td>M5 Pro / <code>ggml_metal</code>、22 帧、8 步、相同种子，对比 <code>stable-diffusion.cpp</code>：256×256 <strong>49.3 s → 20.9 s</strong>（快 2.4×），640×384 <strong>108.5 s → 63.1 s</strong>（快 1.7×）。步数买到的是质量而不只是时间——同一条 640×384 图生视频请求，8 步 79 s、运动的手周围有彩色边缘，24 步 212 s、干净</td></tr>
+      <tr><td><strong>MiniMax-H3</strong></td><td><strong>它本身就经过 CFG 蒸馏</strong>——没有更快的文件可换。用 <code>--cfg 1.0</code> 跑 <strong>4–8 步</strong>（默认 20 步），把省下的时间花在 <code>--width</code> / <code>--height</code> 上</td><td>2026-10-15，同精度前后对照：M5 Pro MLX 143.264 → 125.426 s，A40 直接 CUDA 220.456 → 178.667 s，解码 RGB/音频完全一致。640×384×22、20 步；包含加载与编码，非热模型服务基准。<a href="benchmarks_zh-cn.html#minimax-h3">完整条件 →</a></td></tr>
       <tr><td><strong>Wan 视频</strong></td><td><strong>加载步数蒸馏检查点</strong>——DiT 文件名中含 <code>Turbo</code>、<code>distill</code>、<code>Lightning</code>、<code>lightx2v</code>、<code>FastWan</code>、<code>-dmd</code> 或 <code>…-4steps-…</code> 即被自动识别，无需任何参数</td><td><strong>100 次 DiT 前向 → 4 次</strong>，关闭引导。同一条 1088×832×121 帧图生视频请求，M5 Pro / <code>ggml_metal</code>：<strong>约 3 小时 30 分 → 17 分 30 秒</strong></td></tr>
       <tr><td>Wan 视频</td><td><code>--cfg-cache-stride 2</code> / <code>3</code>——仅适用于未蒸馏的基础检查点</td><td>50 步下 1.30× / 1.43×（100 次前向只跑 77 / 70 次）。属于近似方法；在本就无引导的蒸馏检查点上没有意义</td></tr>
       <tr><td>Qwen-Image-2.1</td><td>加载<strong>步数蒸馏 LoRA 插件</strong>（<code>--lora config/lora/qwen-image-2.1-viggle-turbo.json</code> 以及其他随附的 4–8 步配方），出草图时再用 <code>--width 1024 --height 1024</code>——默认的 CFG 1 本身就是每步一次 Transformer 预测</td><td>1K 正方形的潜在图像 token 数只有 2K 默认值的四分之一。M5 Pro（<code>ggml_metal</code>、Q4_K_M）：1024×1024、默认 40 步整体耗时 327.6 s（启用前缀 KV 缓存之前为 330.5 s；生成从该缓存获益很少）；1024×1024、Viggle Turbo 的 6 步整体耗时 54.5 s（每步 7.94 s）。更早的一次运行中，2048×2048、25 步用时 1548.7 s。图像编辑从默认开启的前缀 KV 缓存中获益最多：M5 Pro 上 1024² 每步快 1.73–2.91×</td></tr>
@@ -79,7 +80,7 @@
   </table>
   </div>
   <p class="page-foot-note">工具支持同时要求会声明工具的提示词渲染器与匹配的结构化输出解析器。Qwen 3.8 Flash Next（<code>qwen4exp</code>）通过 Qwen 3.5 解析器返回结构化调用，因此调用者定义的工具、Agent Skills 工具、代码执行工具，以及服务端的<a href="agentic_zh-cn.html#sub-agents">子智能体委派</a>都会提供给它。Mistral 3 与 Hunyuan Dense 既不渲染工具声明也不渲染工具结果，DiffusionGemma 不渲染工具声明且会拒绝带工具的请求，因此这三个家族既不会获得上述任何工具，也不参与子智能体委派。</p>
-  <p class="page-foot-note">MiniMax-H3、Wan、DiffusionGemma 与 Hunyuan Dense 拒绝多 GPU 模式。Qwen 3.8 Flash Next 支持符合量化条件的本地 GGML CUDA TP 与 <code>--layer-split N</code>；DeepSeek V4 使用整层放置。GLM 支持两种显式本地模式；Qwen-Image 仅支持扩散 Transformer 的本地张量并行。DeepSeek V4.1 支持 <code>--layer-split N</code> 与实验性 routed-MoE <code>--tp N</code>。</p>
+  <p class="page-foot-note">LTX 2.5、MiniMax-H3、Wan、DiffusionGemma 与 Hunyuan Dense 拒绝多 GPU 模式。Qwen 3.8 Flash Next 支持符合量化条件的本地 GGML CUDA TP 与 <code>--layer-split N</code>；DeepSeek V4 使用整层放置。GLM 支持两种显式本地模式；Qwen-Image 仅支持扩散 Transformer 的本地张量并行。DeepSeek V4.1 支持 <code>--layer-split N</code> 与实验性 routed-MoE <code>--tp N</code>。</p>
 
   <div class="content-footer">
     <a href="backends_zh-cn.html">← 计算后端</a>

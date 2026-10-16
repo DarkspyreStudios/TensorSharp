@@ -28,8 +28,8 @@ See the [embedding guide](../docs/embeddings.md) for all fields, token-ID inputs
 
 ## Personal knowledge library
 
-This feature and response steering describe source after the `v2026.10.10` tag;
-use a source build until a release includes them. Enable a persistent library
+The `v2026.10.11` source includes this feature and response steering;
+LTX 2.5, EmbeddingGemma 2 and native skill discovery require newer source. Enable a persistent library
 before starting the chat server (replace the paths and backend for your host):
 
 ```bash
@@ -1574,11 +1574,14 @@ Each attached photo also has a frame-position and strength control.
 For a last-frame-only request, omit `videoMode` or select `keyframes`;
 `fl2v` requires both first and last frames.
 
-These images guide moments in the video. Ingredients identity references,
-video-to-video, retake, and audio reference adapters require their own model
-weights and are not enabled by the distilled checkpoint. LTX's
-`referenceImages` alias means ordered timeline guides rather than identity
-references. See [LTX 2.5](../docs/models/ltx-2.5.md) for checkpoint details and
+These images guide moments in the video. The optional Ingredients IC-LoRA adds
+identity/appearance references when installed under `loras/` beside the model or
+selected with `TS_LTX25_INGREDIENTS_LORA`. Use `videoMode: "ref"` and
+`referenceImages` for that separate single-pass recipe (trained preview:
+768×448×121 at 24 fps); without `ref`, `referenceImages` remain ordered timeline
+guides. Inspect `/api/models.video` before offering the identity workflow.
+Video/audio references and retake remain unavailable. See
+[LTX 2.5](../docs/models/ltx-2.5.md) for adapter setup, checkpoint details and
 validation limits.
 
 #### MiniMax-H3 — video **and** native 32 kHz stereo audio
@@ -1621,15 +1624,16 @@ curl -X POST http://localhost:5000/api/video-generate \
  "codec": "h264", "elapsedSeconds": 63.1}
 ```
 
-(That 640×384 / 22-frame / 8-step configuration measured 63.1 s of generation on an
-M5 Pro under Metal — 1.7× faster than stable-diffusion.cpp at its best-performing
-configuration; at 256×256 it is 20.9 s against 49.3 s, 2.4×.)
+`elapsedSeconds` above illustrates the response shape; it is not a current
+benchmark. Corrected H3 text refinement and AV sampling supersede the older
+2.4×/1.7× speed claims. See the [current coverage and performance record](../docs/models/minimax-h3.md)
+for equal-precision measurements, cache limitations and actual device coverage.
 
 `audioUrl` (`audio_url` on the OpenAI-shaped route) is `null` when the model
 produced no track — a video-only model, an H3 run with no audio VAE resolved, or
-one that sent `"generateAudio": false`. The track is never muxed into the MP4:
-muxing needs an encoder that cannot be assumed present, whereas a WAV always
-writes and the client can mux it itself.
+one that sent `"generateAudio": false`. The original track is saved as a WAV. MP4 audio muxing depends on the export
+provider and an available encoder (FFmpeg on desktop, or AVFoundation in the
+Mac app); `audioMuxed` reports whether the MP4 includes it.
 
 **What an image means depends on the checkpoint.** `videoMode` is `t2v`, `i2v`
 (the image IS the first frame and gets animated), `fl2v` (first and last frame) or

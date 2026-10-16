@@ -6,6 +6,12 @@ TensorSharp setup and account-handoff guidance. Its wrapper pins
 `@playwright/cli@0.1.21` and prefers npm's cache to avoid repeated registry checks.
 There is no browser bridge, special tool, or skill-name dispatch in the runtime.
 
+The native [`find-skills` workflow](agent_skills.md#discover-and-install-community-skills)
+can search, inspect and install community packages without Node, npm or Git.
+Executing Playwright still needs the browser/Node runtime described below.
+The mobile bundle excludes Playwright; installing a browser skill does not add
+a browser execution capability to iOS.
+
 ## Desktop server
 
 Run a tool-capable local model with skill scripts, shell commands, package

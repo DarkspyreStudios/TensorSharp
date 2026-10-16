@@ -73,7 +73,7 @@
   <p>同一个 <code>AgentAppHost</code> 也能运行在 macOS、Linux 与 Windows 上。在这些平台上，<code>AgentExecutionMode.Auto</code>（或 <code>Process</code>）会以原生进程、在桌面 OS 沙箱中运行命令与技能脚本，而不是使用内嵌运行时。设置了 <code>networkHosts</code> 白名单时，这一桌面后端会拒绝需要联网的启动，而不是放宽它无法强制执行的访问范围。</p>
   <h3 id="desktop">Mac 与 Windows 上的 TensorAgent</h3>
   <p><a href="tensoragent_zh-cn.html#install-macos">macOS 安装</a> · <a href="tensoragent_zh-cn.html#install-windows">Windows 安装</a> · <a href="tensoragent_zh-cn.html#first-run">选择第一个模型</a> · <a href="tensoragent_zh-cn.html#tools">配置代码与浏览器工具</a></p>
-  <p>同一个项目构建 Mac Catalyst 与 Windows WinUI 桌面 TensorAgent，共享页面、会话、技能与可搜索的模型家族目录。当前目录共 38 个条目，包含较大的 Gemma/Qwen、Muse-Glimmer、GPT OSS、Nemotron、Mistral、Hunyuan、DiffusionGemma、DeepSeek 与 GLM，以及 Qwen-Image 2.1/Turbo 和两个 MiniMax-H3 检查点。系统内存档位决定是否可加载，新增条目大多仍为实验性；元数据、哈希与容量检查不能证明所有模型/设备推理通过。Qwen-Image 2.1 Turbo 提供 AD-Q4_K（24 GB）与 Q8_0（32 GB）两种固定 8 步条目。Qwen3.8 Flash Next 提供 48 GB 的 UD-Q2_K_XL 和实验性 32 GB UD-IQ1_M 条目，使用映射 n-gram/专家权重按需读取；实际性能取决于内存、GPU 与 SSD。</p>
+  <p>同一个项目构建 Mac Catalyst 与 Windows WinUI 桌面 TensorAgent，共享页面、会话、技能与可搜索的模型家族目录。当前目录共 39 个条目，包含较大的 Gemma/Qwen、Muse-Glimmer、GPT OSS、Nemotron、Mistral、Hunyuan、DiffusionGemma、DeepSeek 与 GLM，以及 Qwen-Image 2.1/Turbo、LTX 2.5 Distilled 和两个 MiniMax-H3 检查点。系统内存档位决定是否可加载，新增条目大多仍为实验性；元数据、哈希与容量检查不能证明所有模型/设备推理通过。Qwen-Image 2.1 Turbo 提供 AD-Q4_K（24 GB）与 Q8_0（32 GB）两种固定 8 步条目。Qwen3.8 Flash Next 提供 48 GB 的 UD-Q2_K_XL 和实验性 32 GB UD-IQ1_M 条目，使用映射 n-gram/专家权重按需读取；实际性能取决于内存、GPU 与 SSD。</p>
   <p>桌面使用 <code>GgmlOps</code>（Mac 为 <code>ggml_metal</code>，Windows 按构建/设备能力选择后端）。代码与浏览器技能运行真实进程；Mac 使用 Seatbelt，Windows 需启用<strong>不使用沙箱运行</strong>。后台窗口中的生成继续运行，工作期间阻止 App Nap 与闲置睡眠。缓存按目录预算分配，lean-cache 条目采用保守分配；较早一次 Qwen3.8 27B 测量中，应用内存从 18.8 GB 降到 8.8 GB。在 M5 Pro / Gemma 4 E2B 上，Mac 应用的解码速度与同一份 CoreCLR 宿主代码相差不到 3%，首 token 约晚 60 毫秒；这是特定模型/设备的测量。2026-10-01 的 Windows x64 / RTX 3080 Laptop Debug 与 Release 检查覆盖特定聊天、文件、代码、合成视觉、取消与恢复，不覆盖目录下载、原生选择器、音视频生成、所有模型/后端或长时间运行。确切记录见 TensorAgent README。</p>
   <figure class="page-shot">
     <img src="assets/screenshots/tensoragent-mac.png" alt="Mac 上的 TensorAgent：Qwen-Image 2.1 将 TensorSharp 横幅背景改为深蓝色星空并保留文字，结果下方提供比较原图和再次编辑按钮" width="3018" height="1900" loading="lazy">
@@ -103,9 +103,19 @@
   </table>
   </div>
   <p>正常元数据块约使用上下文窗口的 2%，并限制在大约 1,024–10,000 token。旧版“把所有选中技能正文预先内联”的行为默认关闭。无法携带并解析工具声明的模型家族没有机会调用 <code>skills_read</code>，因此 TensorSharp 会在有界回退预算内直接内联所选技能正文，同时不再宣传根本无法加载的技能。</p>
-  <p>内置技能工具是 <code>skills_list</code> 与 <code>skills_read</code>。只有传入 <code>--skills-allow-exec</code> 才会出现第三个工具 <code>skills_run</code>。技能脚本默认不允许运行，并且始终与模型生成代码的执行权限分开控制。</p>
+  <p>基础技能工具是 <code>skills_list</code> 与 <code>skills_read</code>。传入 <code>--skills-allow-exec</code> 后还会提供 <code>skills_run</code>；原生发现/安装工具有单独条件，见下文。技能脚本默认不允许运行，并且始终与模型生成代码的执行权限分开控制。</p>
   <h3 id="skill-roots">技能从哪里来</h3>
   <p><code>--skills-dir</code>（可重复）或 <code>TS_SKILLS_DIR</code> 显式指定技能根目录。两者都未给出时，CLI 与服务端会从当前工作目录向上直到 Git 仓库根目录，依次查找每个已存在的 <code>.agents/skills</code> 目录（离得最近的优先；不在仓库内时只检查当前工作目录），另外还有二进制文件旁边的 <code>skills</code> 目录（不存在时自动创建）。CLI 最后才查找这个目录。在服务端，它同时是上传目录，因此总会被扫描，而且最先扫描：同名时上传的技能优先；即使用 <code>--skills-dir</code> 或 <code>TS_SKILLS_DIR</code> 替换了 <code>.agents/skills</code> 默认根，它也仍在列表中。个人或全局技能目录绝不会被隐式导入。</p>
+
+  <h3 id="find-skills">发现、检查并安装社区技能</h3>
+  <p>内置 <code>find-skills</code> 使用共享 .NET 工具搜索 skills.sh、检查公开 GitHub 包，并安装检查过的固定提交；发现/安装不需要 Node、Git 或子进程。TensorAgent 开启 <strong>Network</strong>，服务端设置 <code>--skills-allow-network</code>；当前请求还必须能访问 <code>find-skills</code>。显式空技能选择会关闭这些工具。</p>
+  <div class="table-scroll"><table><thead><tr><th>工具</th><th>行为</th></tr></thead><tbody>
+    <tr><td><code>skills_search(query, owner?)</code></td><td>返回包标识、来源、链接与安装次数；安装次数不证明质量。</td></tr>
+    <tr><td><code>skills_inspect(package)</code></td><td>获取固定提交的说明、兼容性、许可与文件清单，不执行仓库代码。</td></tr>
+    <tr><td><code>skills_install(package, revision?)</code></td><td>仅安装同请求检查过的提交，不覆盖同名技能；需要宿主的可写安装目录。</td></tr>
+  </tbody></table></div>
+  <p>包名使用 <code>owner/repository@manifest-name</code>。服务端与 TensorAgent 配置可写注册表；CLI 默认只读，提供搜索/检查。安装请求立即获得新技能，其他活跃请求保留原范围；后续请求再通过普通发现获得它。安装本身不授予代码/脚本执行权限，外部依赖仍可能不可用。</p>
+  <p>当前共享包共 <strong>17</strong> 个，新增 <code>find-skills</code>、<code>grill-me</code>、<code>grill-with-docs</code>、<code>tdd</code> 与 <code>handoff</code>。静态兼容性检查判定 15 个适合进程内移动宿主；<code>playwright</code> 与 <code>web-artifacts-builder</code> 不进入移动目录。静态判定与成功安装都不是模型任务质量证明：Gemma 4 E4B Q8 的受控 macOS Metal 工作流为 3/4 完整任务通过，一个 HTML 按钮语义失败；没有原生 GUI、Windows 或真实 iOS 的全工作流结论。<a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/agent_skills.md">协议、审计来源与验证限制 →</a></p>
 
   <h2 id="code-tools">四个代码工具，默认关闭</h2>
   <p><code>--code-exec</code> 会加入一套补丁优先的代码工作面。它不要求安装技能；仅安装或选中技能也不会自动开启它。</p>

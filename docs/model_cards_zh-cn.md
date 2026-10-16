@@ -24,6 +24,8 @@
 
 | 架构 | GGUF 架构标识 | 功能 | 中文卡片 | English card |
 |---|---|---|---|---|
+| EmbeddingGemma 2 | `gemma-embedding2` | 8192-token 双向嵌入；文本/代码及配套投影器上的图像、音频、抽样视频；768/512/256/128 维，六条 CPU/GPU 路径实现，质量与性能范围分别记录 | [嵌入指南](embeddings_zh-cn.md) | [Embedding guide](embeddings.md) |
+| BERT / XLM-R 嵌入 | `bert` | Snowflake Arctic Embed L v2.0 与 MiniLM 的文本句向量；独立 `--embeddings` 服务与 OpenAI/Ollama API | [嵌入指南](embeddings_zh-cn.md) | [Embedding guide](embeddings.md) |
 | DeepSeek V4 Flash | `deepseek4` | 带压缩注意力的稀疏 MoE 文本模型；通过独立 `--draft-model` GGUF 支持 DSpark 块级投机解码 | [models/deepseek4_zh-cn.md](models/deepseek4_zh-cn.md) | [models/deepseek4.md](models/deepseek4.md) |
 | DeepSeek V4.1 Flash | `deepseek41` | 运行在专用原生 V4.1 计算图上的稀疏 MoE 文本模型，Engram 表直接从 GGUF 读取，可选图像/视频视觉伴随文件；服务后端是 `ggml_cuda`，`ggml_cpu` 与 `cpu` 是正确性路径；可通过 `--draft-model` 加载实验性的 `deepseek41-dspark` 草稿器 | [models/deepseek41_zh-cn.md](models/deepseek41_zh-cn.md) | [models/deepseek41.md](models/deepseek41.md) |
 | GLM 5.x | `glm-dsa`、`glm_dsa`、`glm5next` | 带 MLA 与 DSA lightning indexer 的 MoE 文本模型（GLM-5.2、GLM-5.3），可用 `--spec` 启用内嵌 NextN 起草；GLM-5.3-Flash（`glm5next`）是 KDA/MLA 混合架构，支持图像输入 | [models/glm_zh-cn.md](models/glm_zh-cn.md) | [models/glm.md](models/glm.md) |
@@ -39,6 +41,7 @@
 | Muse-Glimmer | `muse-glimmer`、`muse_glimmer` | 交错滑动窗口的文本 + 图像对话，支持思维链与 ATEM 工具调用；通过独立 `--draft-model` GGUF 支持 DFlash / DFlash2 块级投机解码 | [models/muse-glimmer_zh-cn.md](models/muse-glimmer_zh-cn.md) | [models/muse-glimmer.md](models/muse-glimmer.md) |
 | Qwen-Image-2.1 | `qwen_image`、`qwen-image` | 文生图、参考图编辑与遮罩局部编辑；Qwen3-VL-8B 编码器与专用 2.1 VAE；不合并的 LoRA 插件、默认启用的前缀 KV 缓存，以及 GGML CUDA / Vulkan 上的扩散 Transformer 张量并行；也可在纯 C# 的 `cpu` 后端上运行 | [models/qwenimage21_zh-cn.md](models/qwenimage21_zh-cn.md) | [models/qwenimage21.md](models/qwenimage21.md) |
 | MiniMax-H3 | `minimax-h3`、`minimax_h3` | **音视频联合生成**——提示词（可选关键帧或参考图）→ 视频 **+ 原生 32 kHz 立体声音频**，由同一个扩散 Transformer 在一份打包潜变量里一起生成；支持文生视频、图生视频（照片作为首帧）、首尾帧、参考生视频，全部使用 CFG-free 的 `--cfg 1.0`，默认 20 步，也可选择 4–8 步以权衡速度和质量 | [models/minimax-h3_zh-cn.md](models/minimax-h3_zh-cn.md) | [models/minimax-h3.md](models/minimax-h3.md) |
+| LTX 2.5 Distilled（实验性） | `ltx-2.5`（含别名与张量识别） | 文本/图像→视频 + 48 kHz 立体声音频；半尺寸八步 ancestral Euler、x2 潜变量上采样、全尺寸三步细化，CFG 1；首尾/定时关键帧与可选 Ingredients 身份参考 | [models/ltx-2.5_zh-cn.md](models/ltx-2.5_zh-cn.md) | [models/ltx-2.5.md](models/ltx-2.5.md) |
 | Wan 视频 | `wan`、`wan2.1`、`wan2.2` | **视频生成，仅视频**——提示词（可选首帧图）→ H.264 MP4，涵盖 Wan 2.1 T2V 与 Wan 2.2 TI2V-5B / A14B；换用步数蒸馏检查点可把 100 次 DiT 前向的官方配方降到 4 次 | [models/wan_zh-cn.md](models/wan_zh-cn.md) | [models/wan.md](models/wan.md) |
 
 每张卡片会把工程师或研究员从“从未听说过这个模型”带到“可以解释它的前向计算图，

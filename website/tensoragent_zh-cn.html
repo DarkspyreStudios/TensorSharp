@@ -87,14 +87,14 @@ Get-FileHash .\tensoragent-desktop-V-win-x64-cpu.msi -Algorithm SHA256</code></p
   <p>推理在本机运行。首次下载模型需要联网；必要文件齐全后，普通聊天可以离线使用。<strong>允许访问网络</strong>控制模型运行的代码与软件包安装，不会阻止应用下载你主动请求的模型。</p>
 
   <h3 id="catalog">浏览模型目录</h3>
-  <p>当前目录有 38 个条目，可按模型名称、家族、量化或输入能力搜索，并使用<strong>全部、兼容、已下载</strong>筛选；家族分组可展开，正在下载的条目保持可见。新增条目包括较大的 Gemma/Qwen、GPT OSS、Nemotron、Mistral、Hunyuan、DiffusionGemma、DeepSeek 与 GLM 检查点；许多仍标为实验性。条目有固定版本下载与哈希校验，但目录元数据检查不等于在每台设备上完成推理验证。以条目显示的系统内存档位、输入能力与模型卡为准；较大条目可能需要远超普通电脑的内存。</p>
+  <p>当前目录有 39 个条目，可按模型名称、家族、量化或输入能力搜索，并使用<strong>全部、兼容、已下载</strong>筛选；家族分组可展开，正在下载的条目保持可见。新增条目包括较大的 Gemma/Qwen、GPT OSS、Nemotron、Mistral、Hunyuan、DiffusionGemma、DeepSeek 与 GLM 检查点；许多仍标为实验性。条目有固定版本下载与哈希校验，但目录元数据检查不等于在每台设备上完成推理验证。以条目显示的系统内存档位、输入能力与模型卡为准；较大条目可能需要远超普通电脑的内存。</p>
   <h3 id="steering">生成时引导回答</h3>
   <p>回答尚未完成时，可在输入框输入并发送新的指令。当前生成会中断，已经产生的回答保留在聊天中，然后按新指令生成；宿主先等待旧生成清理完成。输入框为空时，发送按钮显示<strong>停止</strong>；有新内容时显示引导操作。引导不能撤销已经执行的工具动作。</p>
   <h2 id="daily-use">5 · 使用照片、文件、图片和视频</h2>
   <ul>
     <li><strong>询问照片或文件：</strong>选择 <strong>+ → 照片</strong>或<strong>文件</strong>，附上内容，并说明需求。加载的模型必须支持该输入。视觉模型缺少可选投影器时，选择<strong>模型 → 添加视觉</strong>，完成后点击<strong>启用视觉</strong>。<strong>设置 → 下载 → 包含可选文件</strong>会在后续下载中包含投影器及可用的草稿头。</li>
     <li><strong>生成图片：</strong>加载 <strong>Qwen-Image 2.1</strong> 或 <strong>Qwen-Image 2.1 Turbo</strong> 后描述图片。Turbo 使用固定 8 步、CFG 1 配方，AD-Q4_K 为 24 GB 档位，Q8_0 为 32 GB 档位，并复用基础版的编码器/VAE 文件；它不接受步数蒸馏 LoRA。编辑照片时附上照片并说明修改；缩略图旁的<strong>选择区域</strong>可涂选要改的部分。完成后可<strong>比较原图</strong>或<strong>再次编辑</strong>。<strong>模型 → LoRA 插件</strong>可另行下载兼容插件：基础版共十四个，Turbo 为四个风格/编辑插件。见<a href="models-image_zh-cn.html#mask-editing">图片编辑指南</a>。</li>
-    <li><strong>生成视频：</strong>加载适用的 <strong>MiniMax-H3</strong> 目录条目，描述短视频，并使用该条目支持的附件。视频需要 GPU 后端，CPU 发行包没有视频回退路径。已记录的 Windows 桌面应用验证不包含音视频生成。见<a href="models-video_zh-cn.html#minimax-h3">视频模型要求与限制</a>。</li>
+    <li><strong>生成视频：</strong>选择 LTX 2.5 Distilled 或对应 MiniMax-H3 条目，并按模型能力附图。LTX 使用 48 GB 实验档位，官方伴随文件需要获得访问许可。应用视频生成需要 GPU；Windows 媒体生成仍不在现有桌面验证范围。<a href="models-video_zh-cn.html">配方与限制 →</a></li>
     <li><strong>保留结果：</strong>打开生成文件的链接，保存或复制到自己的文件夹。聊天保留文字记录，但生成文件和上传附件位于应用缓存；清理缓存或移除应用前，请另存重要文件。</li>
   </ul>
 
@@ -114,6 +114,9 @@ Get-FileHash .\tensoragent-desktop-V-win-x64-cpu.msi -Algorithm SHA256</code></p
   </table>
   </div>
   <p>使用支持工具的聊天模型，尝试<em>“把这些开销整理成 CSV，用 Python 检查合计。”</em>应直接附上输入文件，而不是期待 Mac 沙盒命令读取无关文件夹。浏览器任务需要启用相应设置，然后可以说<em>“使用 Playwright 技能访问 example.com 并总结页面。”</em>首次使用可能下载 npm 软件包与浏览器。自动化浏览器使用独立会话，不会继承日常浏览器的登录状态。见<a href="agentic_zh-cn.html#playwright">浏览器配置与技能限制</a>。</p>
+
+  <h3 id="find-skills">发现新技能</h3>
+  <p>在设置中开启 <strong>Network</strong>，让 <code>find-skills</code> 可用于聊天，再要求查找所需能力。模型先搜索、检查包说明与兼容性，再安装该请求检查过的提交。安装不执行仓库代码，也不覆盖现有技能；运行脚本仍需要现有执行权限与依赖。新增 <code>grill-me</code>、<code>grill-with-docs</code>、<code>tdd</code> 与 <code>handoff</code>；共享包共 17 个。 <a href="agentic_zh-cn.html#find-skills">宿主条件与验证 →</a></p>
 
   <h2 id="update-uninstall">7 · 更新、备份或卸载</h2>
   <p><strong>更新：</strong>退出 TensorAgent，从<a href="https://github.com/zhongkaifu/TensorSharp/releases/latest" target="_blank" rel="noopener">最新发行版</a>下载匹配平台的新版，校验后重新安装。Mac 替换应用程序文件夹中的应用；Windows 运行新的 MSI；ZIP 版请解压到新文件夹并使用新副本。更新由用户手动执行。模型、设置和聊天存储在安装目录之外。</p>

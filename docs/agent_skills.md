@@ -23,6 +23,20 @@ request still carries the five coordination tools with `--no-skills` and without
 `--code-exec`. The operator grants
 execution surfaces at startup; there is no interactive per-command approval queue.
 
+## Current bundled workflows
+
+The shared source now contains **17 skill packs**, including native `find-skills`
+discovery and the audited `grill-me`, `grill-with-docs`, `tdd` and `handoff`
+workflows. Desktop CLI/server/TensorAgent hosts distribute the full set; iOS
+excludes `playwright` and `web-artifacts-builder`, leaving 15 packs admitted by
+static runtime checks. An admitted pack still needs separate model and task
+validation. The longer `grill-with-docs`, `tdd` and `handoff` workflows were tested
+with Gemma 4 E4B, 16K context and 24 tool rounds; smaller profiles had retained
+failures. See [discovery and installation](#discover-and-install-community-skills)
+and the [audit](#audited-skillssh-bundle) for setup, provenance and actual coverage.
+These current-source additions postdate `v2026.10.10`; release packages follow
+their own tags.
+
 ## Skills with personal knowledge
 
 Current source also provides [personal knowledge collections](knowledge-system.md)
@@ -40,8 +54,9 @@ as complete data. Ordinary retrieval ends at its evidence and call limits, or
 after an approved complete-document snapshot; code and artifact tools can still
 finish the requested deliverable. Subagents inherit the selected collections and
 request thinking-token limit, with separate conversations and workspaces.
-Knowledge support and active response steering were added after `v2026.10.10`;
-use a source build until a release includes them.
+The `v2026.10.11` source includes knowledge support and active response steering.
+The expanded skill bundle and native community discovery/installation require
+newer source; packages and archives reflect their own release tags.
 
 ## What a skill is
 
@@ -92,6 +107,17 @@ Reusable live checks are in `eng/validation/FindSkillsProbe`; generated results
 belong in ignored `artifacts/find-skills/`. The probe distinguishes transport,
 resource/script execution and model-driven validation instead of treating an
 installation as proof that every ecosystem skill works.
+
+The recorded real-model exercise used Gemma 4 E4B Q8_0 on macOS/Metal,
+temperature 0 and seed 42, through both the standalone server and actual
+`AgentAppHost`. Search/inspect/install/read and an upstream helper's `--help`
+completed, but only three of four controlled full tasks passed: TensorAgent's
+HTML artifact used a styled link where the task required a button. The separate
+managed probe checked the helper's artifact-producing aggregation path. Earlier
+stochastic output failures remain recorded. These are individual workflow samples,
+with no native GUI, Windows or physical-iOS validation, and no general marketplace
+compatibility or speed claim. See the [probe guide](../eng/validation/FindSkillsProbe/README.md)
+for reproducible commands and scope.
 
 ### Skill directory layout
 

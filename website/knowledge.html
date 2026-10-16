@@ -75,6 +75,7 @@ dotnet run --project TensorSharp.Server.Host -- \
   <p>The repository includes store/extractor, host integration, scope/citation, chat import, browser UI, OCR and live-model tests and probes. Test presence, fixture tests and package builds do not certify every extractor, codec, model or device. Skipped/unavailable scenarios are unvalidated. Small clean media and synthetic scans are correctness diagnostics, not general answer-quality, OCR-accuracy or throughput benchmarks.</p>
   <p>See the <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/docs/knowledge-system.md" target="_blank" rel="noopener">full knowledge design and configuration guide</a> and <a href="https://github.com/zhongkaifu/TensorSharp/blob/main/eng/validation/knowledge/README.md" target="_blank" rel="noopener">validation procedures and platform limitations</a>. Review generated answers against originals separately from citation checks.</p>
   <div class="content-footer"><a href="tensoragent.html">← TensorAgent Desktop</a><a href="http-api.html#knowledge">Knowledge HTTP API →</a></div>
+  <p>The EmbeddingGemma 2 knowledge provider still indexes extracted text; multimodal HTTP embeddings do not turn the knowledge store into a native media-vector index. Unset query/document prefixes select <code>task: search result | query: </code> and <code>title: none | text: </code>; an explicitly empty variable disables that prefix.</p>
 </main>
 </body>
 </html>
