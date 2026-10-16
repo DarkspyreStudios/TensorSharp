@@ -1074,6 +1074,10 @@ public struct H3DitForwardArgs
     public float Eps;
     public float VideoScale;
     public float AudioScale;
+    /// <summary>Optional caller-owned stable graph metadata, used only by CUDA.
+    /// The caller serializes use and retains it until the native call returns.</summary>
+    public IntPtr GraphArena;
+    public ulong GraphArenaBytes;
 }
 
 /// <summary>A 2-D convolution kernel in ggml order [KW, KH, IC, OC].

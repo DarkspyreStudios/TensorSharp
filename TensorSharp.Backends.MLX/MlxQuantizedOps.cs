@@ -1633,41 +1633,47 @@ namespace TensorSharp.MLX
                 throw new ArgumentException($"Q5_K raw buffer is too small: expected at least {expectedBytes} bytes, got {rawBytes}.", nameof(rawBytes));
 
             int groupsPerRow = superBlocksPerRow * 8;
-            using var staging = new AffineStaging(checked(outDim * superBlocksPerRow * 160), checked(outDim * groupsPerRow));
+            bool fastRepack = Environment.GetEnvironmentVariable("TS_MLX_Q5K_REPACK") != "0";
+            using var staging = new AffineStaging(checked(outDim * superBlocksPerRow * 160), checked(outDim * groupsPerRow), zeroPacked: !fastRepack);
             byte* packedWeights = staging.Packed;
             System.Half* scales = staging.Scales;
             System.Half* biases = staging.Biases;
-            byte[] values = new byte[32];
-
-            byte* src = (byte*)hostData.ToPointer();
-            for (int row = 0; row < outDim; row++)
+            if (fastRepack)
+                MlxQ5KRepack.Pack(hostData, (IntPtr)packedWeights, (IntPtr)scales, (IntPtr)biases, inDim, outDim);
+            else
             {
-                for (int sb = 0; sb < superBlocksPerRow; sb++)
-                {
-                    byte* block = src + ((long)row * superBlocksPerRow + sb) * Q5_KBlockBytes;
-                    float d = (float)BitConverter.UInt16BitsToHalf((ushort)(block[0] | (block[1] << 8)));
-                    float min = (float)BitConverter.UInt16BitsToHalf((ushort)(block[2] | (block[3] << 8)));
-                    byte* packedScales = block + 4;
-                    byte* qh = block + 4 + KScaleSize;
-                    byte* ql = qh + QK_K / 8;
-                    for (int group = 0; group < 8; group++)
-                    {
-                        GetScaleMinK4(group, packedScales, out byte scaleByte, out byte minByte);
-                        int pairIndex = group / 2;
-                        bool highNibble = (group & 1) != 0;
-                        byte* qlGroup = ql + pairIndex * 32;
-                        for (int i = 0; i < 32; i++)
-                        {
-                            int lo4 = highNibble ? qlGroup[i] >> 4 : qlGroup[i] & 0x0F;
-                            int bit5 = (qh[i] >> group) & 1;
-                            values[i] = (byte)(lo4 | (bit5 << 4));
-                        }
+                byte[] values = new byte[32];
 
-                        int scaleIndex = row * groupsPerRow + sb * 8 + group;
-                        scales[scaleIndex] = (System.Half)(d * scaleByte);
-                        biases[scaleIndex] = (System.Half)(-min * minByte);
-                        long dstOffset = (long)row * superBlocksPerRow * 160 + sb * 160 + group * 20;
-                        PackUnsignedBits(values, MlxAffineQ5Bits, packedWeights, dstOffset);
+                byte* src = (byte*)hostData.ToPointer();
+                for (int row = 0; row < outDim; row++)
+                {
+                    for (int sb = 0; sb < superBlocksPerRow; sb++)
+                    {
+                        byte* block = src + ((long)row * superBlocksPerRow + sb) * Q5_KBlockBytes;
+                        float d = (float)BitConverter.UInt16BitsToHalf((ushort)(block[0] | (block[1] << 8)));
+                        float min = (float)BitConverter.UInt16BitsToHalf((ushort)(block[2] | (block[3] << 8)));
+                        byte* packedScales = block + 4;
+                        byte* qh = block + 4 + KScaleSize;
+                        byte* ql = qh + QK_K / 8;
+                        for (int group = 0; group < 8; group++)
+                        {
+                            GetScaleMinK4(group, packedScales, out byte scaleByte, out byte minByte);
+                            int pairIndex = group / 2;
+                            bool highNibble = (group & 1) != 0;
+                            byte* qlGroup = ql + pairIndex * 32;
+                            for (int i = 0; i < 32; i++)
+                            {
+                                int lo4 = highNibble ? qlGroup[i] >> 4 : qlGroup[i] & 0x0F;
+                                int bit5 = (qh[i] >> group) & 1;
+                                values[i] = (byte)(lo4 | (bit5 << 4));
+                            }
+
+                            int scaleIndex = row * groupsPerRow + sb * 8 + group;
+                            scales[scaleIndex] = (System.Half)(d * scaleByte);
+                            biases[scaleIndex] = (System.Half)(-min * minByte);
+                            long dstOffset = (long)row * superBlocksPerRow * 160 + sb * 160 + group * 20;
+                            PackUnsignedBits(values, MlxAffineQ5Bits, packedWeights, dstOffset);
+                        }
                     }
                 }
             }

@@ -76,7 +76,7 @@ var report = new Dictionary<string, object?>
     ["mode"] = mode, ["sampler"] = parameters.Sampler, ["reference_inputs"] = referenceInputs, ["settings"] = Ltx25GenerationSettings.Resolve(parameters, supportsIdentityReferences: identityMode), ["sigmas"] = Ltx25Scheduler.DistilledSigmas(),
     ["environment"] = new[] { "MLX_ENABLE_TF32", "TS_LTX25_CUDA_ATTN", "TS_LTX25_CUDA_TILE", "TS_LTX25_CUDA_REQUIRE_TILE",
         "TS_LTX25_MLX_BF16_GEMM", "TS_LTX25_CUDA_BF16_GEMM", "TS_LTX25_CUDA_SOURCE_UPLOAD", "TS_MLX_CACHE_LIMIT_MB", "TS_MLX_WIRED_LIMIT_MB",
-        "TS_CUDA_QMM_F16GEMM_MIN_ROWS", "TS_LTX25_CUDA_F16_DEQUANT", "TS_LTX25_CUDA_PREFAULT", "TS_LTX25_CUDA_PREFAULT_WORKERS" }
+        "TS_CUDA_QMM_F16GEMM_MIN_ROWS", "TS_LTX25_CUDA_F16_DEQUANT", "TS_LTX25_CUDA_PREFAULT", "TS_LTX25_CUDA_PREFAULT_WORKERS", "TS_LTX25_DEVICE_PROMPT_MATH", "TS_LTX25_CUDA_FUSED_HEAD_GATE", "TS_MLX_Q5K_REPACK" }
         .ToDictionary(name => name, Environment.GetEnvironmentVariable),
     ["timing_scope"] = "Model factory separately; each generation includes sequential phase weight loading/release, excludes codec time. Cached file pages and native/JIT caches may be warm. Neither cold filesystem nor always-resident weight latency is established.",
 };
@@ -122,6 +122,7 @@ try
         Ltx25Denoiser? InspectDenoiser() => typeof(Ltx25Model)
             .GetField("_denoiser", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(videoModel) as Ltx25Denoiser;
         long cudaAttentionsBefore = InspectDenoiser()?.OptimizedCudaAttentions ?? 0;
+        long cudaHeadGatesBefore = InspectDenoiser()?.OptimizedCudaHeadGates ?? 0;
         object? InspectCudaIoComponent(string field)
         {
             object? component = typeof(Ltx25Model).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(videoModel);
@@ -145,6 +146,7 @@ try
         var denoiserDiagnostics = new
         {
             optimized_cuda_attentions = (InspectDenoiser()?.OptimizedCudaAttentions ?? 0) - cudaAttentionsBefore,
+            optimized_cuda_head_gates = (InspectDenoiser()?.OptimizedCudaHeadGates ?? 0) - cudaHeadGatesBefore,
             cuda_attention_peak_workspace_bytes = cudaAttentionPeakWorkspace,
             cuda_io_before = cudaIoBefore,
             cuda_io_after = backend is BackendType.Cuda or BackendType.GgmlCuda ? InspectCudaIo() : null,

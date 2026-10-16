@@ -37,6 +37,8 @@
 #include "ggml_ops_internal.h"
 #include "ggml-alloc.h"
 #include "ggml_h3_weight_upload.h"
+#include "ggml_h3_token_rows.h"
+#include "ggml_h3_graph_inputs.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -854,7 +856,13 @@ struct TSGgmlMiniMaxH3DitForwardDesc
     float eps;
     float video_scale;       // -1
     float audio_scale;       // -d(sigma_audio)/d(sigma_video)
+    void* graph_arena;       // optional, caller-owned stable CUDA graph metadata
+    std::uint64_t graph_arena_bytes;
 };
+static_assert(sizeof(void*) != 8 || (sizeof(TSGgmlMiniMaxH3DitForwardDesc) == 544 &&
+    offsetof(TSGgmlMiniMaxH3DitForwardDesc, graph_arena) == 528 &&
+    offsetof(TSGgmlMiniMaxH3DitForwardDesc, graph_arena_bytes) == 536),
+    "MiniMax-H3 DiT descriptor must match the managed 64-bit ABI.");
 
 TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d)
 {
@@ -928,10 +936,28 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
             { set_last_error("MiniMaxH3DitForward: text_count outside the sequence."); return 0; }
         }
 
+        const char* backend_name = ggml_backend_name(g_backend);
+        const bool stable_cuda_graph = backend_name != nullptr && std::strncmp(backend_name, "CUDA", 4) == 0;
+        if ((d->graph_arena == nullptr) != (d->graph_arena_bytes == 0) ||
+            (d->graph_arena != nullptr && reinterpret_cast<std::uintptr_t>(d->graph_arena) % GGML_MEM_ALIGN != 0))
+        { set_last_error("MiniMaxH3DitForward: invalid graph metadata arena pointer/size or alignment."); return 0; }
         PooledContextHandle context;
-        if (!context.init(32ull * 1024 * 1024))
+        ContextHandle cuda_context(nullptr);
+        // CUDA graph keys include tensor addresses. The shared metadata pool
+        // rotates through eight arenas, so the managed DiT owns one stable arena
+        // for successive steps. Its instance lock covers this entire call and
+        // disposal. Native callers may omit it and retain the pooled behavior.
+        if (stable_cuda_graph && d->graph_arena != nullptr)
+        {
+            constexpr std::uint64_t arena_bytes = 32ull * 1024 * 1024;
+            if (d->graph_arena_bytes < arena_bytes)
+            { set_last_error("MiniMaxH3DitForward: graph metadata arena is too small."); return 0; }
+            cuda_context.value = ggml_init({ static_cast<std::size_t>(arena_bytes), d->graph_arena, true });
+        }
+        else context.init(32ull * 1024 * 1024);
+        ggml_context* ctx = stable_cuda_graph && d->graph_arena != nullptr ? cuda_context.value : context.value;
+        if (ctx == nullptr)
         { set_last_error("MiniMaxH3DitForward: ctx alloc failed."); return 0; }
-        ggml_context* ctx = context.value;
 
         ggml_backend_dev_t dev = ggml_backend_get_device(g_backend);
         struct HostBinding { ggml_tensor* t; void* data; std::size_t bytes; };
@@ -940,9 +966,13 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
             if (t == nullptr || data == nullptr) return;
             if (bytes >= 4096)
             {
-                ggml_backend_buffer_t buf = nullptr; void* addr = nullptr; bool needs = false;
-                if (try_get_cacheable_tensor_buffer(g_backend, dev, t, data, bytes, buf, addr, needs) &&
-                    ggml_backend_tensor_alloc(buf, t, addr) == GGML_STATUS_SUCCESS)
+                bool needs = false;
+                ggml_backend_buffer_t buf = nullptr; void* addr = nullptr;
+                const bool bound = stable_cuda_graph
+                    ? try_bind_cached_tensor(g_backend, dev, t, data, bytes, needs)
+                    : (try_get_cacheable_tensor_buffer(g_backend, dev, t, data, bytes, buf, addr, needs) &&
+                       ggml_backend_tensor_alloc(buf, t, addr) == GGML_STATUS_SUCCESS);
+                if (bound)
                 {
                     if (needs) uploads.push_back({ t, data, bytes });
                     return;
@@ -1078,11 +1108,8 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
         ggml_tensor* videoTok = allVideo;
         if (condCount > 0)
         {
-            condTok = ggml_cont(ctx, ggml_view_2d(ctx, allVideo, hidden, condCount,
-                                                  allVideo->nb[1], 0));
-            videoTok = ggml_cont(ctx, ggml_view_2d(ctx, allVideo, hidden, d->video_count,
-                                                   allVideo->nb[1],
-                                                   static_cast<std::size_t>(condCount) * allVideo->nb[1]));
+            condTok = h3_token_rows(ctx, allVideo, 0, condCount);
+            videoTok = h3_token_rows(ctx, allVideo, condCount, d->video_count);
         }
         // With a chunk list the conditioning run is rebuilt in the caller's order,
         // taking each chunk from whichever projection it named.
@@ -1099,16 +1126,14 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
                 {
                     if (condTok == nullptr || videoRow + ch.count > condCount)
                     { set_last_error("MiniMaxH3DitForward: conditioning video chunks overrun."); return 0; }
-                    part = ggml_cont(ctx, ggml_view_2d(ctx, condTok, hidden, ch.count,
-                        condTok->nb[1], static_cast<std::size_t>(videoRow) * condTok->nb[1]));
+                    part = h3_token_rows(ctx, condTok, videoRow, ch.count);
                     videoRow += ch.count;
                 }
                 else
                 {
                     if (condAudioTok == nullptr || audioRow + ch.count > d->condition_audio_count)
                     { set_last_error("MiniMaxH3DitForward: conditioning audio chunks overrun."); return 0; }
-                    part = ggml_cont(ctx, ggml_view_2d(ctx, condAudioTok, hidden, ch.count,
-                        condAudioTok->nb[1], static_cast<std::size_t>(audioRow) * condAudioTok->nb[1]));
+                    part = h3_token_rows(ctx, condAudioTok, audioRow, ch.count);
                     audioRow += ch.count;
                 }
                 rebuilt = rebuilt == nullptr ? part : ggml_concat(ctx, rebuilt, part, 1);
@@ -1138,8 +1163,7 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
                 const TSGH3DitSegment& sg = d->segments[i];
                 int n = sg.end - sg.start;
                 if (n <= 0) continue;
-                ggml_tensor* part = ggml_cont(ctx, ggml_view_2d(ctx, src, hidden, n, src->nb[1],
-                    static_cast<std::size_t>(sg.start) * src->nb[1]));
+                ggml_tensor* part = h3_token_rows(ctx, src, sg.start, n);
                 ggml_tensor* sh = modColumn(mods, sg.col + shiftIdx);
                 ggml_tensor* sc = modColumn(mods, sg.col + scaleIdx);
                 part = ggml_add(ctx, ggml_add(ctx, part, ggml_mul(ctx, part, sc)), sh);
@@ -1155,10 +1179,8 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
                 const TSGH3DitSegment& sg = d->segments[i];
                 int n = sg.end - sg.start;
                 if (n <= 0) continue;
-                ggml_tensor* b = ggml_cont(ctx, ggml_view_2d(ctx, base, hidden, n, base->nb[1],
-                    static_cast<std::size_t>(sg.start) * base->nb[1]));
-                ggml_tensor* u = ggml_cont(ctx, ggml_view_2d(ctx, upd, hidden, n, upd->nb[1],
-                    static_cast<std::size_t>(sg.start) * upd->nb[1]));
+                ggml_tensor* b = h3_token_rows(ctx, base, sg.start, n);
+                ggml_tensor* u = h3_token_rows(ctx, upd, sg.start, n);
                 ggml_tensor* g = modColumn(mods, sg.col + gateIdx);
                 ggml_tensor* part = ggml_add(ctx, b, ggml_mul(ctx, u, g));
                 out = out == nullptr ? part : ggml_concat(ctx, out, part, 1);
@@ -1200,8 +1222,7 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
         ggml_tensor* fnw = declVec(d->final_norm, hidden);
 
         auto finalSlice = [&](int start, int count, int col) {
-            ggml_tensor* part = ggml_cont(ctx, ggml_view_2d(ctx, x, hidden, count, x->nb[1],
-                static_cast<std::size_t>(start) * x->nb[1]));
+            ggml_tensor* part = h3_token_rows(ctx, x, start, count);
             part = ggml_mul(ctx, ggml_rms_norm(ctx, part, eps), fnw);
             ggml_tensor* sh = ggml_view_2d(ctx, fmods, hidden, 1, fmods->nb[1],
                 static_cast<std::size_t>(col) * fmods->nb[1]);
@@ -1220,7 +1241,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
         // The model emits velocities: video negated, audio scaled by
         // d(sigma_audio)/d(sigma_video) so one Euler step advances both streams.
         videoOut = ggml_scale(ctx, videoOut, d->video_scale);
-        audioOut = ggml_scale(ctx, audioOut, d->audio_scale);
+        // A changing SCALE op_params value otherwise resets CUDA graph warmup
+        // on every step. Apply that exact SCALE kernel in a tiny graph below.
+        if (!stable_cuda_graph) audioOut = ggml_scale(ctx, audioOut, d->audio_scale);
 
         ggml_tensor* vcopy = ggml_cpy(ctx, videoOut, voutT);
         ggml_tensor* acopy = ggml_cpy(ctx, audioOut, aoutT);
@@ -1230,12 +1253,12 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
         // re-scale are two more nodes per attention, and the budget is an
         // upper bound rather than a count.
         //
-        // 32 rather than 24 per SEGMENT because that is what the segment loops
-        // actually cost. modulate() emits, per segment, a view + cont of the
+        // Retain the conservative pre-elision 32-node budget per SEGMENT.
+        // Before contiguous row-copy elision, modulate() emitted a view + cont of the
         // slice, two modColumn views, a mul, two adds and (past the first) a
-        // concat = 8; gatedResidual() emits two view+cont pairs, one modColumn
+        // concat = 8; gatedResidual() emitted two view+cont pairs, one modColumn
         // view, a mul, an add and a concat = 8. A block runs two of each, so a
-        // layer spends 32 * nseg on modulation alone. At 24 the shortfall was
+        // layer spent 32 * nseg on modulation alone. At 24 the shortfall was
         // 8 * nseg - 24 per layer, hidden by the flat 4096 for as long as the
         // segment count stayed small: fl2va has about six segments, but Ref2VA
         // adds one or two per reference block plus one per vision span in the
@@ -1264,6 +1287,8 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
             if (buffer.value == nullptr)
             { set_last_error("MiniMaxH3DitForward: buffer alloc failed."); return 0; }
         }
+        ggml_cgraph* audio_scale_graph = stable_cuda_graph
+            ? h3_output_scale_graph(ctx, aoutT, d->audio_scale) : nullptr;
 
         host_read_barrier();
         H3WeightUpload weight_upload(g_backend, "minimax-h3/dit-forward");
@@ -1281,6 +1306,9 @@ TSG_EXPORT int TSGgml_MiniMaxH3DitForward(const TSGgmlMiniMaxH3DitForwardDesc* d
 
         if (h3_compute(g_backend, graph, "minimax-h3/dit-forward") != GGML_STATUS_SUCCESS)
         { set_last_error("MiniMaxH3DitForward: graph compute failed."); return 0; }
+        if (audio_scale_graph != nullptr &&
+            h3_compute(g_backend, audio_scale_graph, "minimax-h3/dit-audio-scale") != GGML_STATUS_SUCCESS)
+        { set_last_error("MiniMaxH3DitForward: audio scale graph compute failed."); return 0; }
         tsg::sync_backend(g_backend);
         ggml_backend_tensor_get(voutT, d->video_out, 0, ggml_nbytes(voutT));
         ggml_backend_tensor_get(aoutT, d->audio_out, 0, ggml_nbytes(aoutT));

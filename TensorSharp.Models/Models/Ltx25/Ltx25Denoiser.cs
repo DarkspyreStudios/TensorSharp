@@ -57,6 +57,7 @@ public sealed class Ltx25Denoiser : IDisposable
     private readonly CudaLtx25ProjectionSession _cudaProjection;
     private readonly CudaLtx25AttentionSession _cudaAttention;
     private readonly bool _forceCudaAttention;
+    private readonly bool _cudaFusedHeadGates;
     private Ltx25CudaFilePrefault _cudaPrefault;
     private readonly Dictionary<string, DirectLinear> _linears = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Tensor> _weights = new(StringComparer.Ordinal);
@@ -71,6 +72,7 @@ public sealed class Ltx25Denoiser : IDisposable
     public string OptimizedCudaModulePath => _cudaProjection?.ModulePath;
     public bool OptimizedCudaModuleAvailable => _cudaProjection?.IsAvailable == true;
     public long OptimizedCudaAttentions => _cudaAttention?.ExecutedAttentions ?? 0;
+    public long OptimizedCudaHeadGates => _cudaAttention?.ExecutedHeadGates ?? 0;
     public long CudaAttentionWorkspaceBytes => _cudaAttention?.ScoreCapacityBytes ?? 0;
     public long OptimizedCudaF16Projections => _cudaProjection?.ExecutedF16Projections ?? 0;
     public long OptimizedCudaF16Dequantizations => _cudaProjection?.ExecutedF16Dequantizations ?? 0;
@@ -129,6 +131,7 @@ public sealed class Ltx25Denoiser : IDisposable
                 _cudaProjection = new(cuda, Environment.GetEnvironmentVariable("TS_LTX25_CUDA_REQUIRE_TILE") == "1");
                 string attentionPolicy = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_ATTN");
                 _forceCudaAttention = attentionPolicy == "1";
+                _cudaFusedHeadGates = Environment.GetEnvironmentVariable("TS_LTX25_CUDA_FUSED_HEAD_GATE") != "0";
                 if (attentionPolicy != "0")
                     _cudaAttention = new(cuda);
             }
@@ -364,6 +367,8 @@ public sealed class Ltx25Denoiser : IDisposable
         if (keyRope != null) ApplyRope(k, keyRope);
         using var attention = Attend(name, q, k, value, heads, headDim);
         using var logits = Project(name + ".to_gate_logits", query);
+        if (_cudaFusedHeadGates && _cudaAttention?.TryApplyHeadGates(attention, logits, heads, headDim) == true)
+            return Project(name + ".to_out.0", attention);
         using var gates = Ops.Sigmoid(null, logits);
         Ops.Mul(gates, gates, 2f);
         using var headGates = gates.View(query.Sizes[0], heads, 1);

@@ -72,7 +72,7 @@ namespace TensorSharp.Models.MiniMaxH3
                         ? DirectLinear.FromMappedH3Dense(_ctx,mapped.Pointer,mapped.Type,inF,outF,mapped.Bytes,read(b))
                         : DirectLinear.FromFloats(_ctx,read(w),inF,outF,read(b));
                 }
-                else l = DirectLinear.FromFloats(_ctx, read(w), inF, outF, read(b));
+                else l = DirectLinear.FromFloats(_ctx, read(w), inF, outF, read(b), mlxDeviceOnly: _ctx.IsMlx);
                 _owned.Add(l);
                 return l;
             }
@@ -235,10 +235,7 @@ namespace TensorSharp.Models.MiniMaxH3
                     using (Tensor n2 = DirectOps.RmsNorm(_ctx, h, bw.Norm2, _eps))
                     using (Tensor gv = bw.W1.Forward(n2))         // [seq, 2*inner]
                     {
-                        using Tensor gate = Cols(gv, 0, _inner);
-                        using Tensor val = Cols(gv, _inner, _inner);
-                        using Tensor act = DirectOps.Silu(_ctx, gate);
-                        Ops.Mul(act, act, val);
+                        using Tensor act = MiniMaxH3DirectDiT.ActivateMlp(_ctx, gv, _inner, fuseAccelerated: _ctx.IsMlx);
                         using Tensor ff = bw.W2.Forward(act);
                         if (bw.Scale2 != null) DirectOps.MulColsRows(_ctx, ff, bw.Scale2);
                         Ops.Add(h, h, ff);

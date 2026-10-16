@@ -230,6 +230,7 @@ namespace TensorSharp.Cuda
             CudaQuantizedOps.ReleaseScratch(this);
             CudaQuantizedOps.ReleaseArena(this);
             pool.DrainAndFree();
+            CudaLtx25PromptOps.ReleaseForAllocator(this);
             Kernels?.Dispose();
             Blas.Dispose();
             Stream.Dispose();

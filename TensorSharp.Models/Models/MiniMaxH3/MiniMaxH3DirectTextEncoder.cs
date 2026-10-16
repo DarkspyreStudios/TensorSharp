@@ -13,6 +13,9 @@
 //   - Q and K are RMS-normalized per head before RoPE, not after.
 //   - the checkpoint has no final norm; the DiT consumes the raw last-layer state.
 using System;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 
 using TensorSharp;
 using TensorSharp.Cpu;
@@ -33,14 +36,17 @@ namespace TensorSharp.Models.MiniMaxH3
         private readonly DirectContext _ctx;
         private readonly MiniMaxH3TensorOps _tensorOps;
         private readonly MiniMaxH3TextEncoderConfig _cfg;
+        private readonly GgufFile _gguf; // borrowed; the text-encoder owner outlives this trunk
         private readonly LayerW[] _layers;
         private readonly System.Collections.Generic.List<DirectLinear> _owned = new();
         private bool _disposed;
+        private bool _prefaultAttempted;
 
         public MiniMaxH3DirectTextEncoder(GgufFile gguf, MiniMaxH3TextEncoderConfig config,
                                           IAllocator allocator)
         {
             _cfg = config;
+            _gguf = gguf;
             _ctx = new DirectContext(allocator);
             _tensorOps = new MiniMaxH3TensorOps(_ctx);
 
@@ -201,6 +207,12 @@ namespace TensorSharp.Models.MiniMaxH3
             float eps = _cfg.Eps;
             int nl = layerLimit > 0 ? Math.Min(layerLimit, _layers.Length) : _layers.Length;
 
+            if (_ctx.IsCuda && !_prefaultAttempted)
+            {
+                _prefaultAttempted = true;
+                PrefaultTextWeights(_gguf,nl);
+            }
+
             Tensor h = _ctx.FromFloats(embeddings, seq, hidden);
             try
             {
@@ -261,6 +273,49 @@ namespace TensorSharp.Models.MiniMaxH3
             _owned.Clear();
             _tensorOps.Dispose();
             _ctx.Dispose();
+        }
+
+        // CUDA's first projection uploads directly from the mapped pointer.
+        // Warming only the consumed matrix ranges keeps page faults out of
+        // those synchronous driver copies, without changing any device bytes.
+        // The GGUF helper bounds total warming to half the effective host RAM,
+        // skips already-resident Linux pages, and joins all readers before use.
+        internal static void PrefaultTextWeights(GgufFile file,int layers)
+        {
+            if (layers <= 0 || Environment.GetEnvironmentVariable("TS_H3_TEXT_PREFAULT") == "0") return;
+            bool timing=Environment.GetEnvironmentVariable("TS_H3_PHASE") == "1";
+            long started=timing ? Stopwatch.GetTimestamp() : 0;
+            try
+            {
+                // Unknown capacity must not turn optional warming into an
+                // unbounded read. GC reports the effective container limit.
+                if (GC.GetGCMemoryInfo().TotalAvailableMemoryBytes <= 0) return;
+                file.PrefaultFileCache(info => IsTextProjection(info.Name,layers),logProgress:false);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or OutOfMemoryException)
+            {
+                // Optional read-ahead may fail under storage/memory pressure;
+                // the original mapped uploads retain their strict validation.
+            }
+            finally
+            {
+                if (timing) Console.WriteLine($"  [h3] .. text weight prefault {Stopwatch.GetElapsedTime(started).TotalSeconds:F1}s");
+            }
+        }
+
+        private static bool IsTextProjection(string name,int layers)
+        {
+            const string prefix="model.layers.";
+            if (!name.StartsWith(prefix,StringComparison.Ordinal)) return false;
+            ReadOnlySpan<char> remaining=name.AsSpan(prefix.Length);
+            int separator=remaining.IndexOf('.');
+            if (separator <= 0 || !int.TryParse(remaining[..separator],NumberStyles.None,CultureInfo.InvariantCulture,out int layer) ||
+                layer >= layers) return false;
+            ReadOnlySpan<char> projection=remaining[(separator+1)..];
+            return projection.SequenceEqual("self_attn.q_proj.weight") || projection.SequenceEqual("self_attn.k_proj.weight") ||
+                projection.SequenceEqual("self_attn.v_proj.weight") || projection.SequenceEqual("self_attn.o_proj.weight") ||
+                projection.SequenceEqual("mlp.gate_proj.weight") || projection.SequenceEqual("mlp.up_proj.weight") ||
+                projection.SequenceEqual("mlp.down_proj.weight");
         }
     }
 }

@@ -109,6 +109,172 @@ public sealed class MiniMaxH3RefinerCacheTests : IDisposable
         Assert.Equal(expected.Audio, next.Audio);
     }
 
+    [Theory]
+    [InlineData("forward")]
+    [InlineData("release")]
+    [InlineData("dispose")]
+    public void DirectCallsDoNotWaitOnTheNativeArenaMonitor(string operation)
+    {
+        using var dit = new MiniMaxH3DiT(_path, BackendType.Cpu, _allocator);
+        object gate = typeof(MiniMaxH3DiT).GetField("_nativeGraphLock",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(dit)!;
+        var shape = new MiniMaxH3Shape
+        {
+            Width = 32, Height = 32, Frames = 1, Fps = 24,
+            LatentWidth = 2, LatentHeight = 2, LatentFrames = 1, AudioLatentFrames = 1,
+        };
+        Task pending;
+        bool completed;
+        // A backend worker must be able to finish a direct call while another
+        // thread owns this native-only monitor. Otherwise a synchronous MLX
+        // dispatch can form a lock/worker cycle. CPU exercises the same branch
+        // deterministically without requiring a GPU or timing worker queues.
+        lock (gate)
+        {
+            pending = Task.Run(() =>
+            {
+                switch (operation)
+                {
+                    case "forward":
+                        dit.Forward(new float[96], 1, new float[64], 2, Text(), 3,
+                            MiniMaxH3Layout.Build(3, shape, .75f), .75f);
+                        break;
+                    case "release": dit.ReleaseDeviceResidency(); break;
+                    case "dispose": dit.Dispose(); break;
+                }
+            });
+            completed = pending.Wait(TimeSpan.FromSeconds(5));
+        }
+        pending.GetAwaiter().GetResult();
+        Assert.True(completed, "Direct execution waited on the native graph arena monitor.");
+    }
+
+    [Fact]
+    public void NativeForwardStillWaitsOnItsArenaMonitor()
+    {
+        using var dit = new MiniMaxH3DiT(_path, BackendType.GgmlCuda, null);
+        object gate = typeof(MiniMaxH3DiT).GetField("_nativeGraphLock",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(dit)!;
+        using var started = new ManualResetEventSlim();
+        Task pending;
+        bool completed;
+        lock (gate)
+        {
+            pending = Task.Run(() =>
+            {
+                started.Set();
+                // Validation fails before any native allocation or GPU call.
+                Assert.Throws<ArgumentNullException>(() => dit.Forward(
+                    null, 0, null, 0, null, 0, null, .5f));
+            });
+            Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+            completed = pending.Wait(TimeSpan.FromMilliseconds(100));
+        }
+        pending.GetAwaiter().GetResult();
+        Assert.False(completed, "Native execution bypassed its graph arena monitor.");
+    }
+
+    [Fact]
+    public void RotaryTablesReuseEqualPositionsAcrossTimestepsWithoutAllocating()
+    {
+        using var dit = new MiniMaxH3DiT(_path, BackendType.Cpu, _allocator);
+        var shape = MiniMaxH3Geometry.Resolve(64, 64, 22, 24);
+        var firstLayout = MiniMaxH3Layout.Build(3, shape, .75f);
+        var nextLayout = MiniMaxH3Layout.Build(3, shape, .25f);
+        Assert.Equal(firstLayout.Positions, nextLayout.Positions);
+        var first = dit.GetRopeForForward(firstLayout.Positions);
+        var expected = dit.BuildRope(nextLayout.Positions);
+        Assert.Equal(expected.Cos, first.Cos);
+        Assert.Equal(expected.Sin, first.Sin);
+
+        // A new layout owns different arrays even when its packed positions are
+        // unchanged. The hit must also retain device-table cache identity.
+        var next = dit.GetRopeForForward(nextLayout.Positions);
+        Assert.Same(first.Cos, next.Cos);
+        Assert.Same(first.Sin, next.Sin);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int repeat = 0; repeat < 20; repeat++)
+            dit.GetRopeForForward(nextLayout.Positions);
+        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
+    }
+
+    [Fact]
+    public void RotaryPositionMutationLengthAndSignedZeroInvalidateTheSnapshot()
+    {
+        using var dit = new MiniMaxH3DiT(_path, BackendType.Cpu, _allocator);
+        float[] positions = [0, 0, 0, 1, .5f, 2, 2, 1, 3];
+        var first = dit.GetRopeForForward(positions);
+        positions[4] += 2;
+        var changed = dit.GetRopeForForward(positions);
+        Assert.NotSame(first.Cos, changed.Cos);
+        Assert.Equal(dit.BuildRope(positions).Cos, changed.Cos);
+        Assert.Equal(dit.BuildRope(positions).Sin, changed.Sin);
+
+        positions[0] = -0f;
+        var negativeZero = dit.GetRopeForForward(positions);
+        Assert.NotSame(changed.Sin, negativeZero.Sin);
+        Assert.Equal(dit.BuildRope(positions).Sin.Select(BitConverter.SingleToInt32Bits),
+            negativeZero.Sin.Select(BitConverter.SingleToInt32Bits));
+
+        float[] shorter = positions[..6];
+        var resized = dit.GetRopeForForward(shorter);
+        Assert.NotSame(negativeZero.Cos, resized.Cos);
+        Assert.Equal(dit.BuildRope(shorter).Cos, resized.Cos);
+        Assert.Equal(dit.BuildRope(shorter).Sin, resized.Sin);
+    }
+
+    [Fact]
+    public void PublicRotaryTablesCannotMutateForwardCache()
+    {
+        using var dit = new MiniMaxH3DiT(_path, BackendType.Cpu, _allocator);
+        float[] positions = [0, 0, 0, 1, .5f, 2];
+        var cached = dit.GetRopeForForward(positions);
+        var publicTables = dit.BuildRope(positions);
+        Assert.NotSame(cached.Cos, publicTables.Cos);
+        Assert.NotSame(cached.Sin, publicTables.Sin);
+        Array.Fill(publicTables.Cos, -123f);
+        Array.Fill(publicTables.Sin, 456f);
+        var next = dit.GetRopeForForward((float[])positions.Clone());
+        Assert.Same(cached.Cos, next.Cos);
+        Assert.Same(cached.Sin, next.Sin);
+        Assert.Equal(dit.BuildRope(positions).Cos, next.Cos);
+        Assert.Equal(dit.BuildRope(positions).Sin, next.Sin);
+    }
+
+    [Fact]
+    public async Task ConcurrentRotaryCacheReadersReceiveMatchingCompleteTables()
+    {
+        using var dit = new MiniMaxH3DiT(_path, BackendType.Cpu, _allocator);
+        float[][] positions = Enumerable.Range(0, 8).Select(caseIndex =>
+            Enumerable.Range(0, (caseIndex + 1) * 3).Select(i =>
+                i == 0 ? (caseIndex % 2 == 0 ? 0f : -0f) : (i + caseIndex * 7) * .17f).ToArray()).ToArray();
+        var expected = positions.Select(dit.BuildRope).ToArray();
+        using var start = new Barrier(4);
+        Task[] workers = Enumerable.Range(0, 4).Select(worker => Task.Factory.StartNew(() =>
+        {
+            Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(10)));
+            for (int iteration = 0; iteration < 4096; iteration++)
+            {
+                int index = (iteration + worker * 3) % positions.Length;
+                // Mix cache replacements and immediate hits while other callers
+                // publish different position values and table lengths.
+                for (int repeat = 0; repeat < 2; repeat++)
+                {
+                    var actual = dit.GetRopeForForward(positions[index]);
+                    Assert.NotNull(actual.Cos);
+                    Assert.NotNull(actual.Sin);
+                    Assert.True(System.Runtime.InteropServices.MemoryMarshal.AsBytes(actual.Cos.AsSpan())
+                        .SequenceEqual(System.Runtime.InteropServices.MemoryMarshal.AsBytes(expected[index].Cos.AsSpan())),
+                        "A concurrent cache hit returned cosine values for another position snapshot.");
+                    Assert.True(System.Runtime.InteropServices.MemoryMarshal.AsBytes(actual.Sin.AsSpan())
+                        .SequenceEqual(System.Runtime.InteropServices.MemoryMarshal.AsBytes(expected[index].Sin.AsSpan())),
+                        "A concurrent cache hit returned sine values for another position snapshot.");
+                }
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default)).ToArray();
+        await Task.WhenAll(workers);
+    }
+
     private static void WriteModel(string path)
     {
         const int hidden = 8, head = 8, inner = 16, ffn = 16, time = 4;

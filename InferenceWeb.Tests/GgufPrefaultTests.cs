@@ -2,6 +2,7 @@
 // Licensed under the BSD-3-Clause license in the repository root.
 using System.Text;
 using TensorSharp.Runtime;
+using TensorSharp.Models.MiniMaxH3;
 
 namespace InferenceWeb.Tests;
 
@@ -21,6 +22,8 @@ public sealed class GgufPrefaultTests : IDisposable
         Set("TS_GGUF_PREFAULT", "1");
         Set("TS_GGUF_PREFAULT_RESIDENT", "0");
         Set("TS_GGUF_PREFAULT_THREADS", "2");
+        Set("TS_H3_TEXT_PREFAULT", "1");
+        Set("TS_H3_PHASE", "0");
     }
 
     [Fact]
@@ -99,6 +102,55 @@ public sealed class GgufPrefaultTests : IDisposable
         Assert.Equal(3L * bytes, file.PrefaultReadBytes);
         Assert.True(file.ReadTensorData(file.Tensors["c"]).All(value => value == 20));
         Assert.True(file.ReadTensorData(file.Tensors["sparse"]).All(value => value == 19));
+    }
+
+    [Fact]
+    public void H3TextWarmupReadsOnlyConsumedProjectionsAndHonorsLayerLimit()
+    {
+        string[] projections=["self_attn.q_proj.weight","self_attn.k_proj.weight","self_attn.v_proj.weight",
+            "self_attn.o_proj.weight","mlp.gate_proj.weight","mlp.up_proj.weight","mlp.down_proj.weight"];
+        string[] names=projections.Select(p => "model.layers.0."+p).Concat([
+            "model.embed_tokens.weight","visual.blocks.0.attn.qkv.weight","model.layers.1.mlp.up_proj.weight",
+            "model.layers.-1.mlp.up_proj.weight","model.layers.0.unconsumed.weight","model.layers.0.input_layernorm.weight"
+        ]).ToArray();
+        using var file=new GgufFile(Write("h3-selected.gguf",false,0,names));
+        MiniMaxH3DirectTextEncoder.PrefaultTextWeights(file,1);
+        Assert.Equal(7L*TensorBytes,file.PrefaultReadBytes);
+        for (int i=0; i<names.Length; i++)
+            Assert.All(file.ReadTensorData(file.Tensors[names[i]]),value => Assert.Equal((byte)(17+i),value));
+    }
+
+    [Fact]
+    public void H3TextWarmupSupportsSplitWeightsAndOptOut()
+    {
+        string first=Write("h3-00001-of-00002.gguf",true,0,"model.layers.0.self_attn.q_proj.weight");
+        Write("h3-00002-of-00002.gguf",true,1,"model.layers.0.mlp.down_proj.weight","model.embed_tokens.weight");
+        using var file=new GgufFile(first);
+        Set("TS_H3_TEXT_PREFAULT","0");
+        MiniMaxH3DirectTextEncoder.PrefaultTextWeights(file,1);
+        Assert.Equal(0,file.PrefaultReadBytes);
+        Set("TS_H3_TEXT_PREFAULT","1");
+        MiniMaxH3DirectTextEncoder.PrefaultTextWeights(file,1);
+        Assert.Equal(2L*TensorBytes,file.PrefaultReadBytes);
+        Assert.All(file.ReadTensorData(file.Tensors["model.embed_tokens.weight"]),value => Assert.Equal((byte)19,value));
+    }
+
+    [Fact]
+    public void H3TextWarmupReportsOnlyWhenPhaseTimingIsRequested()
+    {
+        using var file=new GgufFile(Write("h3-logging.gguf",false,0,"model.layers.0.mlp.up_proj.weight"));
+        using var output=new StringWriter();
+        TextWriter original=Console.Out;
+        try
+        {
+            Console.SetOut(output);
+            MiniMaxH3DirectTextEncoder.PrefaultTextWeights(file,1);
+            Assert.Equal(string.Empty,output.ToString());
+            Set("TS_H3_PHASE","1");
+            MiniMaxH3DirectTextEncoder.PrefaultTextWeights(file,1);
+            Assert.Contains("[h3] .. text weight prefault",output.ToString());
+        }
+        finally { Console.SetOut(original); }
     }
 
     private string Write(string name, bool split, int shard, params string[] tensors)
