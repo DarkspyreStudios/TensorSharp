@@ -137,6 +137,181 @@ Additional ignored evidence uses the `artifacts/studio/delete-asset-` prefix:
 `core-tests.log`, `ui-tests.log`, `server-build.log`, `agent-build.log`, and
 `maccatalyst-build.log`.
 
+### Generation modes follow-up (2026-10-16)
+
+Studio requests now carry an explicit mode: `t2v`, `i2v`, `fl2v`, `keyframes` or
+`ref`. Each loaded checkpoint advertises the modes it runs, plus a reason for each
+family mode it cannot run. The same environment and unchanged ggml revision as
+above were used, built from branch `codex/video-studio` at `eb7d19a8` plus this
+change.
+
+| Check | Actual result and scope |
+|---|---|
+| Shared core tests | 106 passed, 0 failed, 0 skipped. Includes 36 new mode cases: each mode accepts exactly its inputs and refuses the others, legacy requests are inferred and keep their fingerprint, capability mode derivation, plan validation, and admission refusing an unsupported mode or a short reference clip before the adapter runs. Admission uses real FFmpeg/ffprobe and an adapter double. |
+| Model contract tests | 36 Studio/LTX capability cases passed. They cover modes and refusal reasons per checkpoint: H3 FL2VA/Ref2VA, LTX with/without the image encoder and the Ingredients adapter, and three Wan variants. They also check that each Studio mode reaches `MiniMaxH3ModeResolver` as the same mode chat sends, and reaches LTX as the intended frame guides or Ingredients sources. Metadata only; no weights load. The wider `Studio`/`Ltx25`/`MiniMaxH3`/`VideoGeneration` filter passed 578, failed 0 and skipped 80. The skips are existing fixture- or CUDA-gated tests (H3 oracle fixtures kept outside the repository, LTX CUDA kernels), not passes. |
+| Shared UI tests | 35 passed with a simulated DOM. They check that the mode list follows the checkpoint, disabled modes show their reason, each mode submits only its own inputs, choices persist across mode switches, required images are enforced, reference order is preserved, ref raises frames to 121, and old takes reopen in their inferred mode. They are not a browser or device test. |
+| TensorAgent focused suite | 176 passed, 0 skipped: Studio host routes, localization (all eight catalogs carry the new keys and placeholders), video turns, routes and LTX page tests. |
+
+Real generation through Studio's HTTP API, using `eng/studio/validate_modes.py`
+with synthetic stills (`testsrc2` first, `smptebars` last, `rgbtestsrc` guide,
+`testsrc` reference), seed 42 and audio off. Each take was fully decoded at the
+requested geometry, and its provenance recorded the requested mode. "Distance" is
+the mean absolute difference of 8×8 RGB thumbnails (0–255); lower means closer.
+
+| Host / checkpoint | Mode | Take | Result |
+|---|---|---|---|
+| WebUX Server, LTX-2.5 Distilled Q4_K_M, `mlx` | t2v | 512×512×17, 44 s | First frame unrelated to the stills (107 / 79) |
+| | i2v | 512×512×17, 79 s | First frame 42.6 from the first image vs 102.8 from the last |
+| | fl2v | 512×512×17, 86 s | First 42.6 vs 102.9; last frame 30.1 from the last image vs 112.6 |
+| | keyframes | 512×512×17, guide at frame 8, 83 s | Frame 8 is 4.6 from its guide vs 98.8 |
+| | ref | 512×512×121, one full-size Ingredients pass, 507 s | The server log shows a 1-image Ingredients reference sheet; the first frame is a new scene, not the reference |
+| WebUX Server, MiniMax-H3 FL2VA Q4_K, `ggml_metal`, 20 steps | ref refused | — | 400 `unsupported_mode` with the advertised Ref2VA reason; no job created |
+| | i2v | 640×384×22, 195 s (includes first checkpoint hash) | First 42.4 vs 102.2 |
+| | fl2v | 640×384×22, 235 s | First 42.2 vs 102.2; last 29.4 vs 111.2 |
+| | t2v | 640×384×22, 141 s | Unrelated to the stills |
+| TensorAgent `AgentAppHost` harness, MiniMax-H3 Ref2VA Q4_K, `ggml_metal`, 20 steps | i2v, fl2v refused | — | 400 `unsupported_mode` with the advertised FL2VA reason; no job created |
+| | ref | 640×384×22, 194 s | The model log shows 1 reference becoming 240 visual tokens. The reference test card appears printed on a waving flag in a new scene, as the prompt asked; it is not the first frame |
+| | t2v | 640×384×22, 142 s | Unrelated to the stills |
+
+Model SHA-256 values, as recorded in each take's provenance:
+LTX `0f51eb0d82b19bddbfb3b0371a65217844ea03750f27dd733528f22152e0e0d0`, H3 FL2VA
+`dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10`, H3 Ref2VA
+`2fa5840021cf6967843eaeefde9aaa277e540de02986d5ee3d5b0e6a7a8c9dec`.
+
+Limits of this evidence:
+- Pinned-frame checks are relative and use synthetic patterns. They show where a
+  frame lands, not perceptual or anatomical quality.
+- LTX ref used a test card, which cannot show identity transfer. The H3 ref take
+  shows appearance transfer for one synthetic image. Neither is a
+  character-consistency evaluation.
+- LTX ran at 512×512, which the user guide warns is weaker for faces and hands
+  than the 1024×1024 preset.
+- Wan has no local checkpoint here, so its modes have contract tests only.
+- The UI was exercised through simulated-DOM tests, not a browser or device, in
+  this follow-up.
+- Each mode ran once with one seed.
+
+Evidence (ignored): `artifacts/studio-modes/{ltx,h3-fl2va,h3-ref2va-agent}/`
+(stills, takes, `modes.json`), the server and harness logs beside them, and
+`artifacts/studio-modes/tests/`.
+
+```sh
+# One video model loaded in either host; repeat per checkpoint.
+python3 eng/studio/validate_modes.py --url http://127.0.0.1:8187 \
+  --width 512 --height 512 --frames 17 --output artifacts/studio-modes/ltx
+python3 eng/studio/validate_modes.py --connection artifacts/studio-modes/agent-root/connection.json \
+  --modes ref,t2v --output artifacts/studio-modes/h3-ref2va-agent
+```
+
+### Sampling-recipe follow-up for MiniMax-H3 Turbo (2026-10-17)
+
+Studio now binds each job to the loaded model's sampling recipe, so a MiniMax-H3
+FL2VA model with a LightX2V Turbo plug-in fixes the step count and refuses a shot
+planned for another recipe with 409 `sampling_recipe_conflict` (see
+[sampling recipes](video-studio.md#sampling-recipes)). The environment and the
+unchanged ggml revision are those above; the build is branch `codex/video-studio` at
+`eb7d19a8` plus the uncommitted Turbo change. Only automated tests ran.
+
+| Check | Actual result and scope |
+|---|---|
+| Shared core tests | `TensorSharp.Studio.Tests`: 123 passed, 0 failed, 0 skipped, with real FFmpeg/ffprobe. The 10 new recipe cases cover the fixed-step default and the binding after the fingerprint, an idempotent resubmit, native binding, the named fixed-steps refusal (a Turbo recipe and a step-distilled checkpoint), the 409 with no job created (3 cases), legacy serialization and the draft path. |
+| Adapter and host tests | `InferenceWeb.Tests` on the CPU lane, 15 classes: 626 passed, 0 failed, 0 skipped. The 16 new Studio Turbo cases cover the capability with and without a plug-in, the 3-argument `CreateCapability` still giving `native`, a contradicting `--video-steps` or a Ref2VA plug-in leaving the model unavailable, validation against the plug-in's recipe, and the provenance helpers. They use synthetic plug-in configs and CPU direct LoRA sets; no model weights load. |
+| TensorAgent focused suite | 203 passed, 0 skipped: localization (all eight catalogs carry the two new keys), Studio host routes, `AgentAppHost` and video turns. A later run of 11 classes after the TensorAgent change passed 664 with 0 skipped, including Studio's plug-in provider: capability queries do not log, and each clip logs once. |
+| Shared UI tests | `studio-ui.test.mjs`: 52 passed with a simulated DOM, 4 of them new (the recipe hint, the reopen note after a recipe change, steps from the model default, and a request that carries the model's recipe rather than the take's). Not a browser or device test. |
+| Mutation check | 18 deliberate mutations of the admission code, the adapter and the page each failed at least one test; all were reverted and the binaries rebuilt before the final runs. |
+
+Limits of this evidence:
+- No Turbo take was generated through Studio, in either host. The run path was
+  exercised only up to the bound-recipe check before generation.
+  A real Turbo take through Studio, with its provenance (plug-in identity, recipe,
+  sigma grid) checked on the finished clip, has not been run. The Turbo clips measured
+  in the [MiniMax-H3 card](models/minimax-h3.md#turbo-validation-status) came from the CLI.
+- The recipe hint and the reopen note were not checked in a browser or on a device.
+- Not counted: `webui-video-upload.test.mjs` failed 9 of 9 with
+  `currentArchitecture is not defined` in `TensorSharp.Server.Host/wwwroot/index.html`,
+  a page this change does not touch.
+
+### Job status detail follow-up (2026-10-17)
+
+The Jobs tab now shows each job's stage, denoising steps, elapsed time, time in the
+current stage and an estimate of the time left, with a per-stage breakdown once the job
+ends (see [portable projects and recovery](video-studio.md#portable-projects-and-recovery)). The build is branch
+`codex/video-studio` at `eb7d19a8` plus the uncommitted change. The change is managed
+code only; ggml and the native kernels are unchanged.
+
+| Check | Actual result and scope |
+|---|---|
+| Shared core tests | `TensorSharp.Studio.Tests`: 134 passed, 0 failed, 0 skipped, with real FFmpeg/ffprobe. 9 new estimator cases run on a fixed clock: the denoising step rate, a slow step, the first step alone, before denoising, after it, a previous run of the same settings, queued, ended and cancelling jobs, and a render. 2 new lifecycle cases drive the real worker with a test double: stages, steps and times while running, the breakdown after completion, the next run's whole-job estimate, cancellation, and the stage recorded after an abrupt restart. |
+| Adapter and host tests | `InferenceWeb.Tests`: 9,322 passed, 534 skipped, 2 failed. The 2 new adapter cases check that a job counts only finished steps (Wan names the running step), that the model's `done` becomes `encoding`, and that a heartbeat on a timer thread cannot throw. The 2 failures are in `NoAnswerPlaceholderTests`. They read `TensorSharp.Chat/WebUiChatService.cs`, which this change does not touch, and one of their anchors is already missing at `eb7d19a8`. |
+| TensorAgent focused suite | 214 passed, 0 skipped: localization (all eight catalogs carry the 51 new keys), Studio host routes, `AgentAppHost`, video turns and LoRA UI. |
+| Shared UI tests | `studio-ui.test.mjs`: 55 passed with a simulated DOM, 3 of them new: a running card, the estimate wordings, and queued, completed, failed and render cards with the tab count. |
+| Real generation, Server | Apple M5 Pro, macOS 27.0.1, `ggml_metal`, MiniMax-H3 FL2VA Q4_K, t2v 640×384, 22 frames, 4 steps, two identical requests through `/api/studio`, polled once a second. Run 1 (40 s, no history) reported `model-identity` (the checkpoint SHA-256), `text-encode`, `denoise` from the start of the loop, VAE tiles 1/6 to 6/6, `audio-decode`, `encoding` and `importing`. Its denoising estimate read 18 s, 11 s and 5 s after steps 1 to 3; decoding began 5 s after step 3. Run 2 (36 s) had a whole-job estimate from its first second: 15 s left after step 3, finishing 14.7 s later. Headless Chrome screenshots of the Jobs tab matched the cards above. |
+
+Limits of this evidence:
+- Only MiniMax-H3 ran for real, and only one short clip. Wan's immediate phase
+  reports and LTX's progress went through the adapter tests, not a model run.
+- The estimate before the first step uses the previous run's stages. When that run
+  included the one-time checkpoint hash, it over-estimates by the hash time (4 s here).
+- The page was checked in desktop Chrome only, not in the TensorAgent WebView or on a
+  device.
+
+Evidence (ignored): `artifacts/minimax-h3/turbo-wp6/` and
+`artifacts/minimax-h3/turbo-wp7/`.
+
+### Optional first/last frames and the Generate redesign (2026-10-17)
+
+First and last frames are now each optional: none is t2v, a first frame alone i2v,
+and a last frame, alone or with a first, fl2v (see [generation modes](video-studio.md#generation-modes)).
+The Generate tab, library, guide and Assistant were redesigned
+([make a take](video-studio.md#make-a-take), [the assistant](video-studio.md#the-assistant)).
+The build is branch `codex/video-studio` at `eb7d19a8` plus the uncommitted change. The
+change is managed code and the shared page; ggml and the native kernels are unchanged.
+
+| Check | Actual result and scope |
+|---|---|
+| Reference behaviour | Read, not run, at sglang `ed40c7fc66`, vllm-omni `43e507117`, stable-diffusion.cpp `d637cfb` and MiniMax-H3 `d21241f0` (model card and prompt guide). All take zero, one or two FL2VA keyframes, and none substitutes a blank image for a missing frame. sglang and vllm-omni place a lone last frame at the end of the timeline; MiniMax publishes no last-only quality data. |
+| Shared core tests | `TensorSharp.Studio.Tests`: 139 passed, 0 failed, with real FFmpeg/ffprobe. New: a last frame alone resolves to fl2v and is accepted; fl2v with only a first frame, or none, is refused; prompt-named takes (whole words and whole surrogate pairs, numbered after the highest take of the shot); job summaries carry the frame asset ids. |
+| Adapter, native and host tests | `InferenceWeb.Tests` Studio/LTX/MiniMax-H3/video/Wan/CLI/Web UI filter: 1,294 passed, 0 failed, 92 skipped. The skips are existing fixture- and CUDA-gated tests, not passes. New: H3 and LTX receive last-only Studio requests exactly as chat sends them; the canvas comes from a lone last frame (a 119×178 still gives 768×1152); LTX last-only is one guide at the final frame and LTX i2v needs a frame-0 image; a lone end keyframe is one H3 condition block at the end time; Wan refuses an end image; a T2V-only Wan no longer advertises image conditioning; H3 advertises its 4–15 s range. |
+| TensorAgent suite | 1,623 passed, 112 skipped, 2 failed. The 2 failures (`ResearchSkillTests`, `MarketDataSkillTests`) compare skill descriptions under `TensorAgent/skills`, which this change does not touch. The focused localization/Studio/route/video/LoRA filter: 296 passed. All eight `studio.json` catalogs have the same 458 keys; the seven non-English ones were translated for this change, including about 350 Studio strings per language that were still English. |
+| Shared UI tests | `studio-ui.test.mjs`: 77 passed with a simulated DOM, including picker import, Escape layering, keyframe edits surviving a redraw, planned shots, take reopening, model-refusal refresh and the Assistant tab. |
+| Code review | A five-dimension review with a verifier per dimension confirmed 45 findings and rejected 12; all 45 were fixed and most have a test above. |
+| Real generation, Server, MiniMax-H3 FL2VA Q4_K, `ggml_metal`, 20 steps, seed 42 | Last frame only, 640×384×22: last frame 29.2 from the last image vs 111.4 from the first; the log shows "FirstLastFrame: 1 keyframe(s) -> 240 conditioning tokens". First and last at the same seed: first 42.2 vs 102.2, last 29.4 vs 111.3, 2 keyframes, 480 tokens. Last only, 640×384×107 (4.5 s): last 29.3 vs 111.4. |
+| Real generation, Server, LTX-2.5 Distilled Q4_K_M, `mlx` | Last frame only, 512×512×17: last 29.9 vs 112.3; the log shows one temporal guide, "frame 16=1". First and last: first 42.6 vs 102.9, last 30.1 vs 112.6, guides at frames 0 and 16. |
+| Real generation, TensorAgent `AgentAppHost` harness, MiniMax-H3 FL2VA | Last frame only through TensorAgent's Studio routes: the same distances as the Server run at the same seed (29.2 vs 111.4), 1 keyframe, 240 tokens. |
+| Browser, Server (headless Chrome over CDP) | `eng/studio/validate_ui_browser.mjs` against the real hosts: the guide with no project; import through the page's file input; "As last frame" on a library photo opens Generate with the slot filled and focused; the summary reads "Ends on studio-last.png …"; the picker opens inline and Escape closes only it; the Assistant disables Send while a video model is loaded; at 390×844 the smallest button is 44 px. With `--submit` the form generated a last-only H3 take, named after its prompt and announced as ready. Checked on H3 and on LTX. |
+| Browser, Assistant | With Gemma-4-E4B Q8_0 loaded: the request "Trim the selected clip to its first 2 seconds and lower its volume to 25 percent" gave "Trim … to 2 s" and "volume 25%"; Apply made the 4.00 s clip 2.00 s as one undoable edit. A second run summarized "first 2 seconds" while its command trimmed to 1 s, and the change list showed "to 1 s". |
+| Browser, TensorAgent page | The harness's own page (TensorAgent `wwwroot`) with Studio in Simplified Chinese: guide, import, "作为尾帧" (As last frame) and Generate render translated. Messages that come from the host (unavailable-mode reasons, refusals) remain English. |
+
+Limits of this evidence:
+- The stills are synthetic. With a last photo unlike the described scene (a room
+  ending on colour bars), both models reach it by a cut or dissolve, at 0.9 s and at
+  4.5 s alike; the form says so. Last-only quality on real photos that the scene can
+  plausibly arrive at was not measured, and MiniMax publishes none.
+- Each case ran once with one seed. No Wan checkpoint exists here, so Wan's
+  refusal of an end image has contract tests only.
+- The TensorAgent Mac (Catalyst) and iOS apps were not run: they disable media
+  subprocesses, so Studio there reviews and edits projects but cannot import,
+  generate or export. The harness is the macOS .NET host.
+- Touch, VoiceOver and real devices were not tested. The phone layout was checked in
+  an emulated 390×844 viewport.
+
+Evidence (ignored): `artifacts/studio-optional-frames/` (stills, takes, `modes.json`,
+`ui.json`, screenshots and the host logs).
+
+```sh
+# A video model loaded in either host; fl2v-last is fl2v with an empty first frame.
+python3 eng/studio/validate_modes.py --url http://127.0.0.1:8187 --modes fl2v-last,fl2v \
+  --width 640 --height 384 --frames 22 --output artifacts/studio-optional-frames/h3-fl2va
+python3 eng/studio/validate_modes.py --connection artifacts/studio-optional-frames/agent-root/connection.json \
+  --modes fl2v-last --output artifacts/studio-optional-frames/h3-fl2va-agent
+# The real page in headless Chrome (no packages): the default flow, a take from the form,
+# the Assistant (a tool-capable chat model loaded), and TensorAgent's page.
+node eng/studio/validate_ui_browser.mjs --url http://127.0.0.1:8187 --output artifacts/studio-optional-frames/ui
+node eng/studio/validate_ui_browser.mjs --url http://127.0.0.1:8187 --submit --size 640x384 --output artifacts/studio-optional-frames/ui-submit
+node eng/studio/validate_ui_browser.mjs --url http://127.0.0.1:8187 --assistant --output artifacts/studio-optional-frames/assistant
+node eng/studio/validate_ui_browser.mjs --entry "<entryUrl from connection.json>" --screens-only --output artifacts/studio-optional-frames/agent-ui-zh
+```
+
 ## Feature and platform status
 
 | Capability | Implemented | Validation / limits |
@@ -155,7 +330,7 @@ Additional ignored evidence uses the `artifacts/studio/delete-asset-` prefix:
 | Generation/render jobs | Durable bounded queue, cancellation, restart interruption | Doubles for deterministic races; native MLX cancellation separately validated. Interrupted stages retry from the beginning. |
 | Import, thumbnails, waveforms | Async probe, bounded cached 320×180 thumbnail and 512 peaks | Real FFmpeg checks. These operations are cancellable request work, not durable queued jobs. |
 | Offline operation | No cloud account/upload path | Manual editing without model checked; native TensorAgent run with external networking denied. Installed local tools/models required. |
-| Responsive layouts/accessibility/localization | Shared page, semantic controls, keyboard editing, focus trap, localized principal labels | Desktop browser and mobile viewport; advanced/error text retains English fallback. Screen-reader and native touch validation outstanding. |
+| Responsive layouts/accessibility/localization | Shared page, semantic controls, keyboard editing scoped to the timeline, Escape layers, focus kept across redraws, one announcer, 44 px touch targets, all eight languages for the page's own text | Headless Chrome desktop and 390×844 emulation; TensorAgent's page in Simplified Chinese. Host-side messages remain English. Screen-reader and native touch validation outstanding. |
 | Windows/Linux desktop | Same managed implementation and executable discovery | Not built/run on Windows or Linux for this task. Encoder/runtime availability remains platform-specific. |
 | iOS/Android | Project-package review/edit UI and capability gating | No desktop subprocess import/export; mobile generation disabled by Studio host policy. No physical device or mobile native-media export validation. |
 | Explicit remote host | Uses the host serving the current interface | No automatic remote fallback, remote media upload or paid provider added. A separate TensorAgent remote Studio transport is deferred. |
@@ -167,11 +342,11 @@ the loaded checkpoint's capabilities, not just the family name.
 
 | Family | Exposed Studio operations | Validation in this task |
 |---|---|---|
-| Wan (2.1 / 2.2 variants) | T2V where permitted; first image for applicable I2V/TI2V checkpoints, 4n+1 temporal grid, variant sampling defaults | Adapter compiled and admission covered; no real Wan Studio inference. |
-| MiniMax-H3 partitions | T2V, first/last where partition permits, identity images only for reference partition, available audio output, 17n+5 frames at 24 fps | Adapter compiled; no real H3 inference. H3 model license has separate territory restrictions; no license changes or downloads authorized. |
-| LTX 2.5 Distilled | T2V, first/last, temporal image guides; identity images only with installed reference LoRA; optional audio output; 8n+1 frames and fixed distilled recipe | Real T2V/audio at 512×512×17 on MLX in both hosts. I2V, first/last, keyframes and identity references not generated through Studio in this run. |
+| Wan (2.1 / 2.2 variants) | t2v where permitted; i2v for TI2V and I2V-A14B checkpoints; a last frame (alone or with a first) and ref disabled with a reason, and an end image refused by the pipeline rather than dropped; 4n+1 temporal grid, variant sampling defaults | Capability/mode contract tests only; no local Wan checkpoint and no real Wan Studio inference. |
+| MiniMax-H3 partitions | Modes t2v/i2v/fl2v on FL2VA (fl2v with a last frame alone or with a first) and t2v/ref on Ref2VA (up to 9 reference images); the other partition's modes are disabled with a reason; available audio output; 17n+5 frames at 24 fps; with a Turbo plug-in on FL2VA, the plug-in's fixed steps and jobs bound to its sampling recipe | 2026-10-16: real FL2VA t2v/i2v/fl2v through the Server and Ref2VA t2v/ref through the TensorAgent harness on ggml_metal; see the generation modes follow-up. 2026-10-17: Turbo recipe binding by automated tests only; no Turbo take generated. 2026-10-17: last-frame-only FL2VA through the Server and the TensorAgent harness; see the optional frames follow-up. H3 model license has separate territory restrictions; no license changes or downloads authorized. |
+| LTX 2.5 Distilled | Modes t2v/i2v/fl2v/keyframes (fl2v with a last frame alone or with a first); ref (up to 16 images, at least 121 frames, one full-size pass) only with the installed Ingredients LoRA; optional audio output; 8n+1 frames and fixed distilled recipe | Real T2V/audio at 512×512×17 on MLX in both hosts (2026-10-15). 2026-10-16: all five modes through the Server on MLX; see the generation modes follow-up. 2026-10-17: last frame only on MLX; see the optional frames follow-up. |
 
-Audio input, video reference conditioning, arbitrary LoRA selection, native
+Audio/video reference inputs (H3 Ref2VA clips and soundtracks), arbitrary LoRA selection, native
 retake/extension and masked generative edits are not exposed by this Studio
 adapter. Existing model-specific APIs remain separate. Spatial/temporal grids,
 fixed steps/CFG, reference counts and incompatible options are rejected before

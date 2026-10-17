@@ -20,13 +20,14 @@ public sealed class StudioJobTests : IDisposable
     }
     sealed class BlockingAdapter : IStudioGenerationAdapter
     {
-        public int Calls; public int ValidationCalls; public bool Active; public StudioGenerationRequest? Validated;
+        public int Calls; public int ValidationCalls; public bool Active; public StudioGenerationRequest? Validated, Received, Generated;
+        public Action<StudioGenerationRequest>? OnValidate;
         public StudioModelCapability Capability = new() { ModelId = "fixture-test-double", Family = "fixture-family", Available = true, TextToVideo = true, MaxDimension = 1024 }; public TaskCompletionSource Started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<IReadOnlyList<StudioModelCapability>> GetCapabilitiesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<StudioModelCapability>>([Capability]);
-        public Task ValidateAsync(StudioGenerationRequest r, IReadOnlyDictionary<string, string> assets, CancellationToken ct) { ValidationCalls++; Validated = StudioJson.Clone(r); return Task.CompletedTask; }
+        public Task ValidateAsync(StudioGenerationRequest r, IReadOnlyDictionary<string, string> assets, CancellationToken ct) { ValidationCalls++; Received = StudioJson.Clone(r); OnValidate?.Invoke(r); Validated = StudioJson.Clone(r); return Task.CompletedTask; }
         public async Task<StudioGenerationResult> GenerateAsync(StudioGenerationRequest r, string directory, IReadOnlyDictionary<string, string> assets, IProgress<StudioProgress> progress, CancellationToken ct)
         {
-            Calls++; Active = true; Started.TrySetResult(); progress.Report(new("fixture-blocked", .25));
+            Calls++; Generated = StudioJson.Clone(r); Active = true; Started.TrySetResult(); progress.Report(new("fixture-blocked", .25));
             try { await Task.Delay(Timeout.Infinite, ct); throw new InvalidOperationException(); }
             finally { await Task.Delay(40); Active = false; }
         }
@@ -98,6 +99,53 @@ public sealed class StudioJobTests : IDisposable
         await service.CancelJobAsync(job.Id);
     }
 
+    static async Task<string> ImportStillAsync(StudioService service, string projectId, string root)
+    {
+        string png = Path.Combine(root, "still-" + StudioJson.NewId() + ".png");
+        using (var process = new System.Diagnostics.Process())
+        {
+            process.StartInfo = new("ffmpeg") { UseShellExecute = false, RedirectStandardError = true };
+            foreach (var arg in new[] { "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1", "-frames:v", "1", png }) process.StartInfo.ArgumentList.Add(arg);
+            process.Start(); string error = await process.StandardError.ReadToEndAsync(); await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, error);
+        }
+        await using var input = File.OpenRead(png);
+        return (await service.ImportAssetAsync(projectId, input, "first.png")).Assets.Last().Id;
+    }
+    [SkippableTheory]
+    [InlineData("i2v-filled")]
+    [InlineData("t2v")]
+    [InlineData("i2v-unfilled")]
+    public async Task FirstFrameCanvasModesLeaveAZeroSizeToTheAdapterAndQueueTheSizeItChose(string scenario)
+    {
+        // In a mode that keeps the first frame's framing, 0x0 asks the model to size the canvas from that image.
+        // Only its adapter can read the image, so admission must not substitute the default size first, and the
+        // queued job must carry the concrete size the adapter chose. Any other mode still gets the default.
+        var adapter = new BlockingAdapter();
+        adapter.Capability.ImageConditioning = true; adapter.Capability.SpatialMultiple = 32;
+        adapter.Capability.DefaultWidth = 640; adapter.Capability.DefaultHeight = 384;
+        adapter.Capability.ImageCanvasModes = [StudioGenerationModes.ImageToVideo];
+        if (scenario != "i2v-unfilled") adapter.OnValidate = r => { if (r.Width == 0 && r.Height == 0) { r.Width = 96; r.Height = 64; } };
+        await using var service = new StudioService(root, adapter); await RequireMediaAsync(service);
+        var project = await service.CreateProjectAsync();
+        var request = new StudioGenerationRequest { ProjectId = project.Id, ModelId = adapter.Capability.ModelId, Prompt = "The picture slowly comes alive.", FrameCount = 17 };
+        if (scenario != "t2v") { request.Mode = StudioGenerationModes.ImageToVideo; request.ConditioningAssetId = await ImportStillAsync(service, project.Id, root); }
+        if (scenario == "i2v-unfilled")
+        {
+            Assert.Equal("invalid_resolution", (await Assert.ThrowsAsync<StudioException>(() => service.StartGenerationAsync(request))).Code);
+            Assert.Empty(await service.ListJobsAsync(project.Id)); Assert.Equal(0, adapter.Calls);
+            return;
+        }
+        var job = await service.StartGenerationAsync(request);
+        var received = Assert.IsType<StudioGenerationRequest>(adapter.Received);
+        Assert.Equal(scenario == "t2v" ? (640, 384) : (0, 0), (received.Width, received.Height));
+        await adapter.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var generated = Assert.IsType<StudioGenerationRequest>(adapter.Generated);
+        Assert.Equal(scenario == "t2v" ? (640, 384) : (96, 64), (generated.Width, generated.Height));
+        Assert.Equal(job.Id, (await service.StartGenerationAsync(request)).Id); // the 0x0 request is still the same request
+        await service.CancelJobAsync(job.Id);
+    }
+
     [Fact]
     public async Task GenerationDraftCanDeferModelDefaultsUntilAdmission()
     {
@@ -153,7 +201,8 @@ public sealed class StudioJobTests : IDisposable
             case "guidance": r.TemporalConditions.Add(new(StudioJson.NewId(), 2)); break;
             case "audio": r.GenerateAudio = true; break;
         }
-        var expectedCode = field switch { "resolution" => "invalid_resolution", "frames" => "invalid_frame_count", _ => "unsupported_conditioning" };
+        // An image or temporal guide implies i2v/keyframes, which a text-only checkpoint does not run.
+        var expectedCode = field switch { "resolution" => "invalid_resolution", "frames" => "invalid_frame_count", "image" or "guidance" => "unsupported_mode", _ => "unsupported_conditioning" };
         Assert.Equal(expectedCode, (await Assert.ThrowsAsync<StudioException>(() => service.StartGenerationAsync(r))).Code); Assert.Equal(0, adapter.Calls); Assert.Empty(await service.ListJobsAsync(p.Id));
     }
     [SkippableFact] public async Task JobRequestIdentifierCannotBeReusedForDifferentParameters()

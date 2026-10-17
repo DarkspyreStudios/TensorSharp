@@ -121,6 +121,36 @@ public sealed class PackageAndDerivativeTests : IAsyncLifetime
         Assert.Equal(waveform.Peaks, importedWaveform.Peaks);
     }
 
+    [SkippableFact]
+    public async Task ARotatedPhotoIsRecordedAtTheSizeItIsShownAndGenerated()
+    {
+        // A phone photo is often stored on its side with EXIF Orientation 6. The video models decode it upright, and a
+        // canvas sized from the first frame is computed from the recorded size, so the asset must record the upright one.
+        Skip.IfNot(new StudioMediaFactAttribute().Skip == null, "Operator-installed ffmpeg and ffprobe are required for real media validation.");
+        var project = await service.CreateProjectAsync();
+        string stored = Path.Combine(root, "stored.jpg");
+        using (var process = new System.Diagnostics.Process())
+        {
+            process.StartInfo = new("ffmpeg") { UseShellExecute = false, RedirectStandardError = true };
+            foreach (var arg in new[] { "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=96x64:d=1", "-frames:v", "1", stored }) process.StartInfo.ArgumentList.Add(arg);
+            process.Start(); string error = await process.StandardError.ReadToEndAsync(); await process.WaitForExitAsync();
+            Assert.True(process.ExitCode == 0, error);
+        }
+        // APP1 Exif segment right after SOI: little-endian TIFF, IFD0 with one entry, Orientation (0x0112) = 6.
+        byte[] tiff = [0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        byte[] payload = [.. "Exif\0\0"u8, .. tiff];
+        int length = payload.Length + 2;
+        byte[] jpeg = await File.ReadAllBytesAsync(stored);
+        string rotated = Path.Combine(root, "rotated.jpg");
+        await File.WriteAllBytesAsync(rotated, [jpeg[0], jpeg[1], 0xFF, 0xE1, (byte)(length >> 8), (byte)length, .. payload, .. jpeg[2..]]);
+        await using (var input = File.OpenRead(stored)) project = await service.ImportAssetAsync(project.Id, input, "stored.jpg");
+        await using (var input = File.OpenRead(rotated)) project = await service.ImportAssetAsync(project.Id, input, "rotated.jpg");
+        var plain = project.Assets.Single(a => a.Name == "stored.jpg"); var turned = project.Assets.Single(a => a.Name == "rotated.jpg");
+        Assert.Equal((96, 64), (plain.Width, plain.Height));
+        Skip.If(turned.Width == 96, "This ffprobe reports no display matrix for EXIF orientation, so the stored size is kept, as before.");
+        Assert.Equal((64, 96), (turned.Width, turned.Height));
+    }
+
     [StudioMediaFact]
     public async Task ThumbnailsUseManagedAssetOwnershipAndCache()
     {

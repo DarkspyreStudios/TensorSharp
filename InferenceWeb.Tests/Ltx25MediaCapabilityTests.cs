@@ -4,6 +4,7 @@ using TensorSharp.Chat.Studio;
 using TensorSharp.Models.Ltx25;
 using TensorSharp.Models.Media;
 using TensorSharp.Models.QwenImage;
+using TensorSharp.Studio;
 
 namespace InferenceWeb.Tests;
 
@@ -71,6 +72,18 @@ public sealed class Ltx25MediaCapabilityTests
         Assert.True(capability.Available);
         Assert.True(capability.TextToVideo);
         Assert.True(capability.AudioOutput);
+
+        var modes = new List<string> { "t2v" };
+        if (temporalGuides) modes.AddRange(["i2v", "fl2v", "keyframes"]);
+        if (referenceLora) modes.Add("ref");
+        Assert.Equal(modes, capability.Modes);
+        // Ingredients is one full-size pass that needs a long clip; the others are two-stage.
+        Assert.Equal(referenceLora ? Ltx25ReferenceConditioning.MinimumFrames : null, capability.ReferenceMinFrames);
+        // Every LTX mode either runs or says why not, never both.
+        Assert.Empty(StudioGenerationModes.All.Except(capability.Modes).Except(capability.UnavailableModes.Keys));
+        Assert.Empty(capability.UnavailableModes.Keys.Intersect(capability.Modes));
+        if (!referenceLora) Assert.Contains("Ingredients IC-LoRA", capability.UnavailableModes["ref"]);
+        if (!temporalGuides) Assert.Contains("FFmpeg", capability.UnavailableModes["i2v"]);
     }
 
     private static Ltx25Model MetadataModel(bool referenceLora)

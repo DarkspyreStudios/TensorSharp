@@ -80,6 +80,18 @@ public sealed class Ltx25ImageConditioningTests
         Assert.Equal(16, Assert.Single(last).FrameIndex);
     }
 
+    [Fact]
+    public void FirstLastFramePinsTheLastFrameWithAnOptionalFirstFrame()
+    {
+        // Last only: one appended guide at the final pixel frame, nothing at frame zero.
+        var lastOnly = Ltx25ImageConditioning.Resolve(new() { Mode = "fl2v", EndImagePath = "end" }, 17);
+        var guide = Assert.Single(lastOnly);
+        Assert.Equal(16, guide.FrameIndex); Assert.Equal("end", guide.ImagePath); Assert.Equal(1f, guide.Strength);
+        var both = Ltx25ImageConditioning.Resolve(new() { Mode = "fl2v", ImagePath = "start", EndImagePath = "end" }, 17);
+        Assert.Equal(new[] { 0, 16 }, both.Select(image => image.FrameIndex));
+        Assert.Equal(0, Assert.Single(Ltx25ImageConditioning.Resolve(new() { Mode = "i2v", ImagePath = "start" }, 17)).FrameIndex);
+    }
+
     [Theory]
     [InlineData(-2, 1)]
     [InlineData(17, 1)]
@@ -103,6 +115,11 @@ public sealed class Ltx25ImageConditioningTests
             { Mode = "t2v", ImagePath = "a" }, 17));
         Assert.Throws<ArgumentException>(() => Ltx25ImageConditioning.Resolve(new()
             { Mode = "fl2v", ImagePath = "a" }, 17));
+        // i2v animates a first frame: an end image alone is not quietly turned into a last-frame guide.
+        Assert.Throws<ArgumentException>(() => Ltx25ImageConditioning.Resolve(new()
+            { Mode = "i2v", EndImagePath = "z" }, 17));
+        Assert.Throws<ArgumentException>(() => Ltx25ImageConditioning.Resolve(new()
+            { Mode = "fl2v", EndImagePath = "z", ImageConditions = [new() { ImagePath = "m", FrameIndex = 8 }] }, 17));
         Assert.Throws<ArgumentException>(() => Ltx25ImageConditioning.Resolve(new()
             { ReferenceImagePaths = Enumerable.Repeat("a", 17).ToArray() }, 17));
         Assert.Throws<NotSupportedException>(() => Ltx25GenerationSettings.Resolve(new()

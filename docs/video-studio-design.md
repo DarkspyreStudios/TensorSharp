@@ -168,6 +168,51 @@ inference on a mobile or incompletely configured desktop host only to fail while
 ingesting the result. Imported-media editing and project-package review remain
 available according to the independent host capabilities.
 
+Generation requests carry an explicit mode (`t2v`, `i2v`, `fl2v`, `keyframes` or
+`ref`). The mode defines what each image means. `StudioGenerationModes` checks that
+a request supplies exactly that mode's inputs. First and last frames are each
+optional: `fl2v` needs a last frame and takes a first frame too when one is given,
+while a first frame alone is `i2v`. This follows MiniMax-H3's FL2VA contract (zero,
+one or two keyframes; sglang's `fl2va` signatures `[0]`, `[-1]` and `[0, -1]`), and
+nothing stands in for a missing frame. The page derives the mode from two optional
+slots (none → `t2v`, first → `i2v`, last or both → `fl2v`). It runs for every client: the page,
+saved assistant plans and the HTTP API. Each capability derives its `modes` from
+the checkpoint's conditioning flags. The native adapter adds `unavailableModes`,
+which explain the family modes the loaded file or host cannot run. Admission
+refuses those modes with that same reason. The mode names are the native mode
+names, so `MiniMaxH3ModeResolver` and `Ltx25GenerationSettings` stay the final
+authority on each family's combination rules. A request saved without a mode is
+inferred from its inputs. Its serialized form omits the field, so idempotency
+fingerprints of earlier jobs do not change.
+
+A capability may also list `imageCanvasModes`, with the recipe that sizes them
+(`imageCanvasShortEdge`, `imageCanvasMaxPixels`, `imageCanvasMaxAspect`). In
+those modes a request with width and height both 0 takes its canvas from the
+first-frame image, or the last-frame image when there is no first: admission resolves the mode first, leaves 0×0 unfilled, and
+the native adapter replaces it with the size it reads from the decoded, upright
+image before the job is queued, so the job and the take record a concrete size.
+The fingerprint is still computed on 0×0, so a retry matches. MiniMax-H3 FL2VA
+lists i2v and fl2v, with MiniMax's 768p recipe, only on a host that pins no
+video size and follows the model recipe; those modes keep the first frame's
+framing, and at 640×384 a wide shot's faces do not survive the video VAE.
+
+A capability also carries `samplingRecipe` (default `native`) and
+`samplingRecipeName`. A step-distillation plug-in, today MiniMax-H3 FL2VA with a
+LightX2V Turbo plug-in, sets them from the model's `VideoSamplingContract` and fixes
+the capability's steps and guidance to the contract. Admission refuses a request
+that names another recipe (`sampling_recipe_conflict`, which `StudioHostBoundary`
+maps to 409) and a step count the recipe does not run, then binds
+`request.SamplingRecipe ??= capability.SamplingRecipe` after validation. The binding
+comes after the idempotency fingerprint, and the field is omitted from JSON when
+null, so earlier requests and their fingerprints are unchanged. The native adapter
+passes the bound recipe to `WebUiChatService.GenerateVideoAsync`, which applies the
+clip's plug-ins and re-checks the recipe under the model's GPU lock before the clip
+runs. In TensorAgent the adapter takes a plug-in provider: capability and validation
+queries plan the clip's plug-ins without logging, and the run
+applies the same saved choice the chat path uses. A host `--video-steps` that
+contradicts the recipe, or a plug-in on the Ref2VA checkpoint, leaves the model
+unavailable as a backstop; the server already refuses the former at startup.
+
 Media probing, thumbnails and waveforms are asynchronous, cancellable and bounded,
 but are not durable jobs. The default timeline is limited to 86,400 frames and
 renders to 120 combined clips/captions; imports/packages have a 2 GiB limit and

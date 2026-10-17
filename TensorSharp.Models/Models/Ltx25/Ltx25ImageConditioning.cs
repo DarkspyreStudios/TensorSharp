@@ -57,8 +57,13 @@ public static class Ltx25ImageConditioning
             throw new ArgumentException("Text-only mode cannot include images; use i2v, fl2v or keyframes.");
         if (images.Count == 0 && parameters.Mode is "i2v" or "fl2v" or "keyframes")
             throw new ArgumentException("The selected image generation mode requires images.");
-        if (parameters.Mode == "fl2v" && (images.Count != 2 || !positions.Contains(0) || !positions.Contains(frames - 1)))
-            throw new ArgumentException("fl2v requires a first-frame and a last-frame image.");
+        // i2v animates a first frame; an end image alone would otherwise become a last-frame guide unasked.
+        if (parameters.Mode == "i2v" && !positions.Contains(0))
+            throw new ArgumentException("i2v animates a first-frame image; to pin only the last frame use fl2v.");
+        // fl2v pins the last frame and optionally the first, as MiniMax-H3's fl2v does (sglang [-1] / [0,-1]).
+        if (parameters.Mode == "fl2v" && (images.Count is < 1 or > 2 || !positions.Contains(frames - 1)
+                                          || images.Count == 2 && !positions.Contains(0)))
+            throw new ArgumentException("fl2v pins a last-frame image, optionally with a first-frame image; use keyframes for other frames.");
         return images;
     }
 

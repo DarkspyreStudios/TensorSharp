@@ -37,6 +37,7 @@ namespace TensorSharp.Server.RequestParsers
                 Fps = options.DefaultVideoFps,
                 Width = options.DefaultVideoWidth,
                 Height = options.DefaultVideoHeight,
+                CanvasPolicy = options.VideoCanvasPolicy,
                 Steps = options.DefaultVideoSteps,
                 Mode = options.DefaultVideoMode,
             };

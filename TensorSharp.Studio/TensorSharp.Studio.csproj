@@ -5,4 +5,7 @@
     <Nullable>enable</Nullable>
     <Description>Shared local video studio project, command, job, and rendering services.</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TensorSharp.Studio.Tests" />
+  </ItemGroup>
 </Project>

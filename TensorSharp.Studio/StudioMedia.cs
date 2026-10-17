@@ -54,6 +54,9 @@ public sealed class StudioMedia(StudioOptions options)
         duration = Math.Max(duration, streams.Select(s => D(s, "duration")).DefaultIfEmpty().Max());
         var width = I(video, "width"); var height = I(video, "height");
         if (width > 16384 || height > 16384 || (long)width * height > 100_000_000) throw new StudioException("media_too_large", "Media dimensions exceed the decoder safety limit.");
+        // A phone photo is often stored on its side with an EXIF orientation. Record the size it is shown and
+        // generated at: the video models decode it upright, and a canvas sized from the first frame must agree.
+        if (image && await QuarterTurnAsync(path, ct)) (width, height) = (height, width);
         if (!image && (!double.IsFinite(duration) || duration <= 0 || duration > 24 * 60 * 60)) throw new StudioException("invalid_duration", "Media duration must be positive and no longer than 24 hours.");
         var rate = S(video, "r_frame_rate"); var average = S(video, "avg_frame_rate");
         return new StudioAsset
@@ -63,6 +66,24 @@ public sealed class StudioMedia(StudioOptions options)
             SourceFrameRate = average, VariableFrameRate = !image && rate != average,
             ContentType = ContentType(Path.GetExtension(path)), Bytes = new FileInfo(path).Length
         };
+    }
+
+    /// <summary>True when the image's display matrix (EXIF orientation 5-8, as ffprobe reports it per frame) turns it
+    /// a quarter turn. A probe that fails leaves the stored size, which is what the import recorded before.</summary>
+    async Task<bool> QuarterTurnAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            var json = await RunAsync(options.FfprobePath, ["-v", "error", "-protocol_whitelist", "file,pipe", "-format_whitelist", Formats,
+                "-select_streams", "v:0", "-read_intervals", "%+#1", "-show_entries", "frame_side_data=rotation", "-of", "json", path], null, ct, TimeSpan.FromSeconds(30));
+            using var doc = JsonDocument.Parse(json);
+            foreach (var frame in doc.RootElement.TryGetProperty("frames", out var frames) ? frames.EnumerateArray() : default)
+                foreach (var side in frame.TryGetProperty("side_data_list", out var list) ? list.EnumerateArray() : default)
+                    if (side.TryGetProperty("rotation", out var r) && r.TryGetDouble(out double degrees) && Math.Abs(Math.Round(degrees / 90)) % 2 == 1)
+                        return true;
+        }
+        catch (Exception e) when (e is not OperationCanceledException) { }
+        return false;
     }
 
     public static string ContentType(string extension) => extension.ToLowerInvariant() switch

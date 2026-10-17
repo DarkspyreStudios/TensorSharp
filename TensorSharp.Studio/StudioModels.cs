@@ -161,17 +161,30 @@ public sealed class StudioGenerationRequest
     public string ModelId { get; set; } = "";
     public string Prompt { get; set; } = "";
     public string? NegativePrompt { get; set; }
-    /// <summary>Zero uses the selected model's host-configured generation size.</summary>
+    /// <summary>Zero uses the selected model's host-configured generation size, except that width = height = 0 in one of
+    /// the model's <see cref="StudioModelCapability.ImageCanvasModes"/> sizes the canvas from the first-frame image, or
+    /// from the last-frame image when there is no first.</summary>
     public int Width { get; set; }
     public int Height { get; set; }
     public int FrameCount { get; set; }
     public int Fps { get; set; }
     public int Steps { get; set; }
     public float CfgScale { get; set; }
+    /// <summary>The <see cref="StudioModelCapability.SamplingRecipe"/> this shot was planned for. Null binds the model's
+    /// recipe at admission, after the request's fingerprint, so a resubmission stays idempotent; a request planned for
+    /// another recipe is refused (<c>sampling_recipe_conflict</c>), never resampled. Requests saved before recipes omit it.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SamplingRecipe { get; set; }
     public long Seed { get; set; } = -1;
     /// <summary>Null follows the model default; explicit false retains silent generation.</summary>
     public bool? GenerateAudio { get; set; }
+    /// <summary>t2v, i2v, fl2v, keyframes or ref (see <see cref="StudioGenerationModes"/>).
+    /// Null infers the mode from the supplied inputs, as requests saved before explicit modes did.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Mode { get; set; }
+    /// <summary>The pinned first frame (i2v, optionally fl2v and keyframes). Optional in fl2v.</summary>
     public string? ConditioningAssetId { get; set; }
+    /// <summary>The pinned last frame (fl2v, optionally keyframes). A last frame alone is fl2v.</summary>
     public string? EndConditioningAssetId { get; set; }
     public string? ShotId { get; set; }
     public List<StudioTemporalCondition> TemporalConditions { get; set; } = [];
@@ -202,13 +215,47 @@ public sealed class StudioModelCapability
     public bool TemporalGuidance { get; set; }
     public bool IdentityReferences { get; set; }
     public int MaxReferences { get; set; }
+    /// <summary>The generation modes this checkpoint runs, derived from the conditioning flags above.</summary>
+    public string[] Modes => StudioGenerationModes.For(this);
+    /// <summary>Modes of this model family that the loaded checkpoint or host cannot run, with the reason
+    /// (for example, MiniMax-H3 identity references need its separate Ref2VA checkpoint).</summary>
+    public Dictionary<string, string> UnavailableModes { get; set; } = [];
+    /// <summary>Minimum output frames for ref mode, when the reference workflow needs a longer clip.</summary>
+    public int? ReferenceMinFrames { get; set; }
     public int DefaultWidth { get; set; } = 512;
     public int DefaultHeight { get; set; } = 512;
+    /// <summary>Modes in which a request with width = height = 0 takes its canvas from its first-frame image
+    /// (the last-frame image when it has no first), by the model's own recipe, instead of from
+    /// <see cref="DefaultWidth"/>/<see cref="DefaultHeight"/>. These modes keep the image's framing, so the canvas sets
+    /// how many pixels its faces get. The host fills in the exact size before the job is queued.</summary>
+    public string[] ImageCanvasModes { get; set; } = [];
+    /// <summary>The recipe <see cref="ImageCanvasModes"/> follow, so a page can show the size before the host confirms it:
+    /// the image's aspect at this short edge, shrunk to <see cref="ImageCanvasMaxPixels"/> when larger, each side on the nearest
+    /// <see cref="SpatialMultiple"/> step (ties to even). Aspect ratios beyond 1:<see cref="ImageCanvasMaxAspect"/> or
+    /// <see cref="ImageCanvasMaxAspect"/>:1 need an explicit size. All zero when <see cref="ImageCanvasModes"/> is empty.</summary>
+    public int ImageCanvasShortEdge { get; set; }
+    public long ImageCanvasMaxPixels { get; set; }
+    public double ImageCanvasMaxAspect { get; set; }
+    /// <summary>The clip lengths, in seconds, the checkpoint's publisher trained and recommends (MiniMax-H3: 4–15 s);
+    /// null when it states none. A page can say when a take falls outside it: a much shorter take that ends on a photo
+    /// tends to cut or dissolve to it rather than move there. Never enforced.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? RecommendedMinSeconds { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? RecommendedMaxSeconds { get; set; }
     public int DefaultFps { get; set; } = 24;
     public bool DefaultGenerateAudio { get; set; }
     public int DefaultFrameCount { get; set; } = 17;
     public int DefaultSteps { get; set; } = 20;
     public int? FixedSteps { get; set; }
+    /// <summary>The id of a model's own built-in schedule (the host model's <c>VideoSamplingContract.NativeId</c>).</summary>
+    public const string NativeSamplingRecipe = "native";
+    /// <summary>The sampling recipe the model is bound to: <see cref="NativeSamplingRecipe"/>, or the id of a recipe that
+    /// fixes the steps, sigma grid, shift and sampler (a step-distillation plug-in's, for example
+    /// <c>minimax-h3-lora:minimax-h3-fl2v-turbo-8step</c>). Admission binds each job to it.</summary>
+    public string SamplingRecipe { get; set; } = NativeSamplingRecipe;
+    /// <summary>The recipe's display name; null for <see cref="NativeSamplingRecipe"/>.</summary>
+    public string? SamplingRecipeName { get; set; }
     public float DefaultCfgScale { get; set; } = 5;
     public float? FixedCfgScale { get; set; }
     public string[] DeferredCapabilities { get; set; } = [];
@@ -218,10 +265,30 @@ public sealed class StudioModelCapability
     public int? FixedFps { get; set; }
     public int MaxFrames { get; set; } = 257;
     public int MaxDimension { get; set; } = 2048;
+
+    /// <summary>Why a step count other than <see cref="FixedSteps"/> is refused, naming what fixes it.</summary>
+    public string FixedStepsRefusal() =>
+        $"This model samples exactly {FixedSteps} steps ({SamplingRecipeName ?? "fixed by the checkpoint"}); leave steps 0 for its default.";
+
+    /// <summary>Refuse a request planned for a recipe other than <see cref="SamplingRecipe"/>: its steps belong to
+    /// that recipe (code <c>sampling_recipe_conflict</c>, a 409). A request that names none is bound later.</summary>
+    public void RequireSamplingRecipe(StudioGenerationRequest request)
+    {
+        if (request.SamplingRecipe == null || request.SamplingRecipe == SamplingRecipe) return;
+        string planned = request.SamplingRecipe == NativeSamplingRecipe ? "the model's own schedule" : request.SamplingRecipe;
+        throw new StudioException("sampling_recipe_conflict", $"This shot was planned for {planned} but the loaded model now samples with " +
+            $"{SamplingRecipeName ?? "its own schedule"}. Refresh the model settings and review the steps.");
+    }
 }
 
 public sealed record StudioGenerationResult(string FilePath, string ModelVersion, Dictionary<string, string> EffectiveParameters);
-public sealed record StudioProgress(string Stage, double Fraction, string? Detail = null);
+public sealed record StudioProgress(string Stage, double Fraction, string? Detail = null)
+{
+    /// <summary>Denoising steps finished so far (never the step still running) and the steps planned; both 0 for a
+    /// stage that has no steps.</summary>
+    public int Step { get; init; }
+    public int TotalSteps { get; init; }
+}
 
 /// <summary>Host adapter must use its existing model registry/resource leases. Output must be inside outputDirectory.
 /// Cancellation must not return until inference and subprocesses have stopped using files or buffers.</summary>
@@ -248,6 +315,68 @@ public sealed class StudioJob
     public string? OutputFileName { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+    /// <summary>The worker's latest note on its stage, e.g. "cond pass" or "tile 3/12".</summary>
+    public string? Detail { get; set; }
+    /// <summary>Denoising steps finished and planned; both 0 for a job or stage without steps.</summary>
+    public int Step { get; set; }
+    public int TotalSteps { get; set; }
+    public DateTimeOffset? StartedAt { get; set; }
+    public DateTimeOffset? StageStartedAt { get; set; }
+    public DateTimeOffset? FinishedAt { get; set; }
+    /// <summary>The stages the job has left, in order, with how long each ran.</summary>
+    public List<StudioJobStage> Stages { get; set; } = [];
+    /// <summary>Clock-derived view, filled in on the copies Studio returns and never stored. Durations are computed on
+    /// the host, so a client with a skewed clock still shows the right elapsed and remaining time.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StudioJobTiming? Timing { get; set; }
+    /// <summary>What a generation job makes, from its request; null for a render.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public StudioJobSummary? Summary { get; set; }
+}
+
+public sealed record StudioJobStage(string Stage, double Seconds);
+
+public sealed class StudioJobTiming
+{
+    /// <summary>Seconds since the worker started the job, or its whole run once it has ended; null before it starts.</summary>
+    public double? ElapsedSeconds { get; set; }
+    /// <summary>Seconds in the current stage; null unless the job is running.</summary>
+    public double? StageElapsedSeconds { get; set; }
+    /// <summary>Seconds spent waiting in the queue: so far while queued, the whole wait once started.</summary>
+    public double QueuedSeconds { get; set; }
+    /// <summary>Jobs the worker runs before this one; null unless queued.</summary>
+    public int? JobsAhead { get; set; }
+    /// <summary>Estimated seconds still to run; null when nothing measured supports an estimate.</summary>
+    public double? RemainingSeconds { get; set; }
+    /// <summary><c>job</c> when <see cref="RemainingSeconds"/> runs to the finished take, <c>denoise</c> when it covers
+    /// only the denoising steps left because nothing has measured the decode that follows them.</summary>
+    public string? RemainingScope { get; set; }
+    /// <summary>How long the last completed run of the same model and settings took; the basis for every estimate
+    /// beyond the live step rate.</summary>
+    public double? PreviousRunSeconds { get; set; }
+}
+
+public sealed class StudioJobSummary
+{
+    public string ModelId { get; set; } = "";
+    public string Mode { get; set; } = "";
+    public string Prompt { get; set; } = "";
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public int FrameCount { get; set; }
+    public int Fps { get; set; }
+    public int Steps { get; set; }
+    /// <summary>The requested seed; -1 means the model draws one.</summary>
+    public long Seed { get; set; }
+    public bool? GenerateAudio { get; set; }
+    /// <summary>The photos the shot starts and ends on, when it pins them, so a page can say "Ends on beach.jpg".</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? FirstFrameAssetId { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? LastFrameAssetId { get; set; }
+    /// <summary>How many timed keyframes and identity references the shot uses.</summary>
+    public int GuideCount { get; set; }
+    public int ReferenceCount { get; set; }
 }
 
 public sealed class StudioOptions

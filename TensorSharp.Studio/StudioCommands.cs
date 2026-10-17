@@ -93,30 +93,37 @@ public static class StudioCommands
     static IEnumerable<StudioClip> Linked(StudioProject p, StudioClip clip, bool linked) => linked && !string.IsNullOrEmpty(clip.LinkGroup) ? p.Clips.Where(c => c.LinkGroup == clip.LinkGroup).ToArray() : [clip];
     static long Required(long? value, string field) => value ?? throw new StudioException("missing_parameter", $"{field} is required.");
 
+    /// <summary>Every command type the interpreter accepts, with the only fields each may carry besides ApplyToLinked.
+    /// It is the gate: a type missing here is refused even if ApplyOne has a case for it. Anything that describes the
+    /// command set to a client (the agent's studio_propose declaration) is drift-tested against it.</summary>
+    static readonly Dictionary<string, string[]> CommandFields = new(StringComparer.Ordinal)
+    {
+        ["addTrack"] = ["TrackId", "Name", "Kind"],
+        ["updateTrack"] = ["TrackId", "Name", "Volume", "Muted", "Visible"],
+        ["reorderTrack"] = ["TrackId", "Index"],
+        ["removeTrack"] = ["TrackId"],
+        ["insertClip"] = ["ClipId", "TrackId", "AssetId", "StartFrame", "SourceStartFrame", "DurationFrames", "Volume", "FadeInFrames", "FadeOutFrames", "AudioFadeOutFrames", "LinkGroup", "ShotId", "Fit"],
+        ["moveClip"] = ["ClipId", "TrackId", "StartFrame"],
+        ["trimClip"] = ["ClipId", "StartFrame", "SourceStartFrame", "DurationFrames"],
+        ["updateClip"] = ["ClipId", "Volume", "FadeInFrames", "FadeOutFrames", "AudioFadeOutFrames", "Fit", "LinkGroup", "ShotId"],
+        ["dissolve"] = ["ClipId", "OtherClipId"],
+        ["splitClip"] = ["ClipId", "AtFrame"],
+        ["duplicateClip"] = ["ClipId", "StartFrame"],
+        ["removeClip"] = ["ClipId"],
+        ["replaceAsset"] = ["ClipId", "AssetId"],
+        ["deleteAsset"] = ["AssetId", "RemoveTimelineClips"],
+        ["addCaption"] = ["CaptionId", "Text", "StartFrame", "DurationFrames"],
+        ["updateCaption"] = ["CaptionId", "Text", "StartFrame", "DurationFrames"],
+        ["removeCaption"] = ["CaptionId"],
+        ["settings"] = ["Name", "Width", "Height", "ConversationId"],
+    };
+
+    public static IReadOnlyCollection<string> CommandTypes => CommandFields.Keys;
+
     static void ValidateCommandFields(StudioCommand command)
     {
-        string[]? allowed = command.Type switch
-        {
-            "addTrack" => ["TrackId", "Name", "Kind"],
-            "updateTrack" => ["TrackId", "Name", "Volume", "Muted", "Visible"],
-            "reorderTrack" => ["TrackId", "Index"],
-            "removeTrack" => ["TrackId"],
-            "insertClip" => ["ClipId", "TrackId", "AssetId", "StartFrame", "SourceStartFrame", "DurationFrames", "Volume", "FadeInFrames", "FadeOutFrames", "AudioFadeOutFrames", "LinkGroup", "ShotId", "Fit"],
-            "moveClip" => ["ClipId", "TrackId", "StartFrame"],
-            "trimClip" => ["ClipId", "StartFrame", "SourceStartFrame", "DurationFrames"],
-            "updateClip" => ["ClipId", "Volume", "FadeInFrames", "FadeOutFrames", "AudioFadeOutFrames", "Fit", "LinkGroup", "ShotId"],
-            "dissolve" => ["ClipId", "OtherClipId"],
-            "splitClip" => ["ClipId", "AtFrame"],
-            "duplicateClip" => ["ClipId", "StartFrame"],
-            "removeClip" => ["ClipId"],
-            "replaceAsset" => ["ClipId", "AssetId"],
-            "deleteAsset" => ["AssetId", "RemoveTimelineClips"],
-            "addCaption" or "updateCaption" => ["CaptionId", "Text", "StartFrame", "DurationFrames"],
-            "removeCaption" => ["CaptionId"],
-            "settings" => ["Name", "Width", "Height", "ConversationId"],
-            _ => null
-        };
-        if (allowed is null) return; // ApplyOne reports the unsupported command itself.
+        if (command.Type is null || !CommandFields.TryGetValue(command.Type, out var allowed))
+            throw new StudioException("unsupported_command", $"Editing command '{command.Type}' is not supported."); // same refusal as ApplyOne's default
         foreach (var property in typeof(StudioCommand).GetProperties())
             if (property.Name is not ("Type" or "ApplyToLinked") && property.GetValue(command) != null && !allowed.Contains(property.Name, StringComparer.Ordinal))
                 throw new StudioException("unsupported_parameter", $"Parameter {property.Name} does not apply to {command.Type}; it would otherwise be ignored.");

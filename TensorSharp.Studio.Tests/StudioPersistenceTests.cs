@@ -43,6 +43,14 @@ public sealed class StudioPersistenceTests : IDisposable
         p = await service.ApplyProposalAsync(p.Id, fresh.Id, StudioJson.NewId()); Assert.Equal(3, p.Tracks.Count);
         p = await service.UndoAsync(p.Id, p.Revision, StudioJson.NewId()); Assert.Equal(2, p.Tracks.Count); Assert.Equal("Manual title", p.Name);
     }
+    [Fact] public async Task RemovingATrackIsOneUndoStepThatRestoresItsPlace()
+    {
+        await using var service = Service(); var p = await service.CreateProjectAsync(); var order = p.Tracks.Select(t => t.Id).ToArray();
+        p = await service.ApplyCommandsAsync(p.Id, 0, StudioJson.NewId(), [new() { Type = "removeTrack", TrackId = order[0] }]);
+        Assert.Equal(new[] { order[1] }, p.Tracks.Select(t => t.Id));
+        p = await service.UndoAsync(p.Id, p.Revision, StudioJson.NewId()); Assert.Equal(order, p.Tracks.Select(t => t.Id));
+        p = await service.UndoAsync(p.Id, p.Revision, StudioJson.NewId(), redo: true); Assert.Equal(new[] { order[1] }, p.Tracks.Select(t => t.Id));
+    }
     [Fact] public async Task SingleWriterAndPathIsolationAreEnforced()
     {
         await using var service = Service(); var p = await service.CreateProjectAsync();

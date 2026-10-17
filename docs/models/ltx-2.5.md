@@ -67,7 +67,9 @@ The experimental catalog tier is 48 GB. This is a conservative supported startin
 point, not a proven minimum or a promise for arbitrary duration/resolution.
 
 Image conditioning accepts a first frame, a last frame, both endpoints, or multiple
-images at explicit output pixel-frame positions. Ordered reference-image lists
+images at explicit output pixel-frame positions. `fl2v` pins the last frame and
+optionally the first; a last frame alone becomes one appended guide at the final
+frame (strength 1.0). `i2v` needs a frame-zero image and refuses an end image alone. Ordered reference-image lists
 become evenly spaced keyframes; one image anchors frame zero. These references
 control the timeline. Character/prop/location identity references use `Mode = "ref"` and the optional
 Ingredients IC-LoRA described below. Reference video/audio, retake/refinement,

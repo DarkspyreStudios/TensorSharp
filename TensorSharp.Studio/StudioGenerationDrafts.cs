@@ -37,6 +37,8 @@ public sealed partial class StudioService
                 throw new StudioException("invalid_draft", "Generation plans require a bounded prompt and short summary.");
             if (request.Width != 0 && request.Width is < 32 or > 2048 || request.Height != 0 && request.Height is < 32 or > 2048 || request.FrameCount is < 0 or > 257 || request.Steps is < 0 or > 100 || request.Fps is < 0 or > 240 || !float.IsFinite(request.CfgScale) || request.CfgScale is < 0 or > 30)
                 throw new StudioException("invalid_draft", "Suggested generation settings exceed Studio admission limits.");
+            // The mode must match its inputs now; whether a checkpoint runs it is checked when the plan starts.
+            _ = StudioGenerationModes.Resolve(request);
             // Assets are capabilities scoped to this project, even before a model can validate their exact combination.
             _ = ResolveConditioning(request, project);
             Directory.CreateDirectory(DraftDirectory(projectId));

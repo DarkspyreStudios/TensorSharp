@@ -44,7 +44,7 @@ internal static class StudioChatScope
                     projectId, expectedRevision, currentRevision = current.Revision,
                     stale = current.Revision != expectedRevision, selectedClipIds = selected,
                     current.Width, current.Height, current.FrameRate,
-                    tracks = current.Tracks.Take(32).Select(t => new { t.Id, name = Truncate(t.Name, 80), t.Kind, t.Muted, t.Visible, t.Volume }),
+                    tracks = current.Tracks.Take(32).Select(t => new { t.Id, name = Truncate(t.Name, 80), t.Kind, t.Muted, t.Visible, t.Volume, clipCount = current.Clips.Count(c => c.TrackId == t.Id) }),
                     clips = current.Clips.OrderByDescending(c => selected.Contains(c.Id)).ThenBy(c => c.StartFrame).Take(50)
                         .Select(c => new { c.Id, c.AssetId, c.TrackId, c.StartFrame, c.SourceStartFrame, c.DurationFrames, c.Volume, c.FadeInFrames, c.FadeOutFrames, c.AudioFadeOutFrames, c.LinkGroup, c.Fit }),
                     assets = current.Assets.OrderByDescending(a => current.Clips.Any(c => selected.Contains(c.Id) && c.AssetId == a.Id)).Take(40)

@@ -36,6 +36,28 @@ public class StudioCommandTests
         StudioCommands.Apply(p, [new() { Type = "removeClip", ClipId = selected }], new());
         Assert.Equal(2, p.Clips.Count); Assert.Single(p.Assets);
     }
+    [Fact] public void RemoveTrackDeletesOnlyItsOwnClipsAndKeepsLinkedPartnersCaptionsAndAssets()
+    {
+        var p = Project(); var group = StudioJson.NewId();
+        StudioCommands.Apply(p, [Insert(p, link: group), Insert(p, link: group, track: 1), Insert(p, track: 1),
+            new() { Type = "addCaption", StartFrame = 0, DurationFrames = 24, Text = "Hello" }], new());
+        var video = p.Tracks[0].Id; var audio = p.Tracks[1].Id; var picture = p.Clips[0].Id;
+        StudioCommands.Apply(p, [new() { Type = "removeTrack", TrackId = audio }], new());
+        Assert.Equal(video, Assert.Single(p.Tracks).Id);
+        var kept = Assert.Single(p.Clips); Assert.Equal(picture, kept.Id); Assert.Equal(group, kept.LinkGroup); // removeTrack never reaches across tracks
+        Assert.Single(p.Captions); Assert.Single(p.Assets);
+        Assert.Equal("track_not_found", Assert.Throws<StudioException>(() => StudioCommands.Apply(p, [new() { Type = "removeTrack", TrackId = audio }], new())).Code);
+        Assert.Equal("unsupported_parameter", Assert.Throws<StudioException>(() => StudioCommands.Apply(p, [new() { Type = "removeTrack", TrackId = video, Name = "Video" }], new())).Code);
+        StudioCommands.Apply(p, [new() { Type = "removeTrack", TrackId = video }], new());
+        Assert.Empty(p.Tracks); Assert.Empty(p.Clips); Assert.Single(p.Captions); Assert.Single(p.Assets);
+    }
+    [Fact] public void EveryAdvertisedCommandTypeReachesItsInterpreterCase()
+    {
+        Assert.Contains("removeTrack", StudioCommands.CommandTypes);
+        Assert.Equal("unsupported_command", Assert.Throws<StudioException>(() => StudioCommands.Apply(Project(), [new() { Type = "RemoveTrack", TrackId = StudioJson.NewId() }], new())).Code); // type names are exact
+        foreach (var type in StudioCommands.CommandTypes)
+            Assert.False(Record.Exception(() => StudioCommands.Apply(Project(), [new() { Type = type }], new())) is StudioException { Code: "unsupported_command" }, type);
+    }
     [Fact] public void LinkedEditingKeepsRelativeOffsetsAndAtomicServiceValidationPreventsInvalidRanges()
     {
         var p = Project(); var group = StudioJson.NewId(); var picture = Insert(p, link: group); var sound = Insert(p, link: group, track: 1);
