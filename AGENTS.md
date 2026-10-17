@@ -17,7 +17,7 @@
 
 # Darkspyre
 
-- Never build the native GGML, MLX or CUDA libraries unless Brandon asks for it in that task. This overrides the native build steps in DEVELOPMENT.md. Managed builds leave native compilation off; it only runs when `TensorSharpBuildGgmlNative`, `TensorSharpBuildMlxNative` or `TensorSharpBuildCudaNative` is set.
+- Never build the native GGML, MLX or CUDA libraries unless the user asks for it in that task. This overrides the native build steps in DEVELOPMENT.md. Managed builds leave native compilation off; it only runs when `TensorSharpBuildGgmlNative`, `TensorSharpBuildMlxNative` or `TensorSharpBuildCudaNative` is set.
 
 ## Operating-system boundaries
 
