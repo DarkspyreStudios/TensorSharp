@@ -1,0 +1,6 @@
+{
+  "defaultBuildProfile": "workspace",
+  "buildProfiles": [
+    { "name": "workspace", "testRunner": "vstest", "launcher": { "executable": "/bin/bash", "arguments": ["../agent-ds/scripts/workspace-env.sh", "$argv"] } }
+  ]
+}
